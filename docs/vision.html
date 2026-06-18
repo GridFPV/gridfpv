@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Vision</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Vision</h1>
+      <p class="doc-kind">Internal design doc · the north star</p>
+    </header>
+
+    <p class="lead">
+      GridFPV is free, open-source, all-in-one race management for FPV drone
+      racing — real-world racing and Velocidrone virtual racing as equals, in one
+      self-hostable app.
+    </p>
+
+    <div class="callout">
+      <p>
+        This document is the stable north star: what GridFPV is, why it exists, and
+        the principles we will not violate. It deliberately stays at the level of
+        intent. Architecture, the timer-adapter spec, the data model, and the phase
+        plan live in their own docs (see <em>Architecture</em>, <em>Timer Adapters</em>,
+        and <em>Roadmap</em> — coming soon). When this doc and an architecture
+        decision disagree, the principles here win until we deliberately change them.
+      </p>
+    </div>
+
+    <h2>1. What GridFPV is</h2>
+    <p>
+      GridFPV is <strong>FOSS, all-in-one race management for FPV drone racing</strong>.
+      It is not just a lap timer, and not just a bracket generator. It runs the
+      <strong><a href="event-pipeline.html">whole event pipeline</a></strong> end to end: pilot setup and registration,
+      qualifying, bracket generation, running heats live, results and standings,
+      streaming and overlays, and pushing results back to the leagues that need them.
+      One open application, self-hostable by any chapter, owning the entire race day.
+    </p>
+    <p>
+      Two kinds of racing are <strong>equal first-class citizens by design, not
+      bolt-ons</strong>: real-world (IRL) racing through physical timers, and
+      <strong>Velocidrone</strong> virtual racing. Most tools treat one as the real
+      product and the other as an adapter glued on the side. GridFPV is built from the
+      timing layer up so that a sim race and a physical race are the same kind of thing
+      to the engine.
+    </p>
+
+    <p>The product vision rests on four pillars:</p>
+
+    <div class="principle">
+      <p><span class="name">All-in-one &amp; FOSS.</span> One open, self-hostable app
+      for the entire event — no closed silo, no piecing together a timer here, a
+      bracket tool there, and a streaming setup somewhere else.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Velocidrone + IRL as equals.</span> A pluggable
+      timer-adapter layer makes simulator and physical timing genuinely
+      interchangeable. Velocidrone racing is a primary use case, not an afterthought —
+      it is the first adapter we build, precisely because treating it as first-class
+      forces the abstraction to be honest.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">First-class MultiGP integration.</span> Pushing event
+      results to MultiGP RaceSync — authenticating to a chapter and sending pilots,
+      heats, lap times, and placements — is non-negotiable for US chapter racing. It
+      is designed in from the start, not patched on later.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">A modern, user-friendly UI.</span> The open tools that
+      exist today are powerful but dated and clunky. A clean, approachable, modern
+      interface is a deliberate goal and a real differentiator — race directors and
+      pilots should enjoy using it.</p>
+    </div>
+
+    <h2>2. The thesis</h2>
+    <p>
+      The <strong>Director</strong> app is the product and the source of truth. It
+      runs a full race <strong>offline</strong>, owning the truth for the duration of
+      an event. The <strong>Cloud</strong> is <strong>optional</strong> — a sink for
+      long-term stats and a relay for racers who aren't on the local network. It is
+      never in the critical path of a live race; if it vanishes, races still run.
+    </p>
+    <p>
+      The connective idea is <strong>one protocol, two transports</strong>. The
+      Director's embedded server and the Cloud expose the same read/realtime contract,
+      so a racer's client is identical whether it's talking to a Director on the LAN or
+      to the Cloud from anywhere. We build the contract once and honor it on both ends.
+    </p>
+
+    <h2>3. Design principles</h2>
+    <p>These are load-bearing. Don't violate them without an explicit decision to do so.</p>
+
+    <div class="principle">
+      <p><span class="name">The Director is authoritative and offline-first.</span> A
+      race must run end to end with zero internet. The Director owns the truth during
+      an event.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">The Cloud is optional.</span> It is never required to run a
+      live race — only a stats sink and an off-LAN relay. Its absence degrades nothing
+      that matters on race day.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">One protocol, two transports.</span> The LAN server and the
+      Cloud expose the same read/realtime contract, so the racer client neither knows
+      nor cares which it's talking to.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Append-only truth.</span> Each event records raw timing as
+      an append-only log; everything analytical is <em>derived</em>. New metrics can be
+      recomputed retroactively, and a dropped sync simply resumes where it left off.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Timers are pluggable.</span> Every timing source is an
+      adapter behind one interface. Velocidrone is the first adapter, not a special
+      case — that's what keeps the abstraction honest.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Open data.</span> A pilot's data is theirs — exportable and
+      queryable through a public API. This is the core differentiator versus closed
+      platforms.</p>
+    </div>
+
+    <h2>4. Open data as the differentiator</h2>
+    <p>
+      A pilot's racing history belongs to the pilot. GridFPV keeps raw laps and exposes
+      them: a public read API, data export, and embeddable widgets that chapters can
+      build their own dashboards and ranking sites on top of. Because the truth is an
+      append-only log and everything analytical is derived, any metric — career
+      profiles, consistency scores, per-track personal bests, head-to-head records,
+      cross-event skill ratings, season standings — can be computed and recomputed over
+      the full history. The closed platforms treat your data as their moat; we treat
+      openness as ours.
+    </p>
+
+    <h2>5. Integrated streaming</h2>
+    <p>
+      Broadcast is part of running a modern race, and it is a stated goal — not an
+      accident we hope to reach. GridFPV aims for built-in streaming and overlays on par
+      with <strong>FPVTrackside</strong>: OBS control, video capture, RTMP-style inputs,
+      and broadcast-ready overlays (podium, leaderboards, brackets) driven directly by
+      live race state. Most open tools do timing <em>or</em> streaming well, rarely both;
+      doing both, openly, is the point.
+    </p>
+
+    <h2>6. Where GridFPV sits in the landscape</h2>
+    <p>
+      There are good tools in this space already. GridFPV isn't claiming they're bad —
+      it's filling a gap none of them fill together. An honest read of the field:
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Tool</th>
+          <th>Strengths</th>
+          <th>Where it leaves a gap</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Next</strong> (go-next.co)</td>
+          <td>Closed SaaS; modern UI, MultiGP integration, broad race-management features.</td>
+          <td>Closed and siloed; Velocidrone is bolted on; no integrated streaming; your data lives in their platform.</td>
+        </tr>
+        <tr>
+          <td><strong>LiveTime</strong></td>
+          <td>Strong, professional IRL race management; paired with LapRF gold-standard hardware.</td>
+          <td>Closed/commercial; no simulator focus.</td>
+        </tr>
+        <tr>
+          <td><strong>RotorHazard</strong></td>
+          <td>FOSS timing system + event front-end; MultiGP RaceSync plugin; LED/overlay integrations; excellent at IRL timing.</td>
+          <td>Built around physical timing — sim isn't first-class; the UX is dated.</td>
+        </tr>
+        <tr>
+          <td><strong>FPVTrackside</strong></td>
+          <td>Free, mostly open source; the streaming benchmark (OBS remote, RTMP-server input, capture/replay); supports LapRF and RotorHazard.</td>
+          <td>Velocidrone only via RTMP, not native; Windows/.NET desktop; UI shows its age.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p>
+        <strong>The gap, and our reason to exist:</strong> no existing tool is a
+        <strong>FOSS, all-in-one race manager</strong> that treats
+        <strong>Velocidrone and IRL racing as equals</strong>, with
+        <strong>first-class MultiGP integration</strong>, a <strong>path to integrated
+        streaming</strong>, and a <strong>modern UI</strong>. Each competitor covers a
+        slice; none covers the whole, openly. GridFPV is built to be that whole.
+      </p>
+    </div>
+
+    <h3>Table stakes we must match</h3>
+    <p>
+      Filling the gap doesn't excuse us from the basics. To be taken seriously, GridFPV
+      has to match what race directors already expect: a guided setup wizard; the common
+      bracket and qualifying formats (round robin, FIA-style single/double elimination);
+      automated advancement, seeding, rotation, and frequency management; championships
+      with automatic standings; live marshaling; and heat/channel push notifications.
+      We are honest that the incumbents lead on some of this polish today — closing that
+      gap, in the open, is the work.
+    </p>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

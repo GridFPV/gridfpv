@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Event Pipeline</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Event Pipeline</h1>
+      <p class="doc-kind">Internal design doc · what an event is and what each phase must do</p>
+    </header>
+
+    <p class="lead">
+      What it actually means to run an FPV race event in GridFPV — the phases an event
+      moves through, and the specific capabilities we want to hit at each one. The same
+      definition covers real-world (IRL) racing and Velocidrone virtual racing.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc defines the pipeline at the level of <strong>intent and
+        capability</strong> — the ideas we must hit. It deliberately leaves the data
+        model, the timer-adapter spec, protocol message shapes, and the Cloud warehouse
+        to their own docs (see <em>Architecture</em>, <em>Timer Adapters</em> —
+        coming soon). When this doc and the vision disagree, the
+        <a href="vision.html">Vision</a> wins.
+      </p>
+    </div>
+
+    <h2>Overview — the model</h2>
+    <p>
+      An event is not a straight line. It is a mostly-linear <strong>progression of
+      phases</strong> (some optional, some you can import instead of running), with a
+      <strong>recurring heat loop</strong> reused inside several phases, and a few
+      <strong>concerns that run throughout</strong>. The flow is circular at points:
+      inside the mains you run a heat, score it, advance, and run the next.
+    </p>
+
+    <p><strong>The phases:</strong></p>
+    <ol>
+      <li><strong>Setup &amp; Registration</strong> <span class="tag required">required</span> — stand up the event and its field.</li>
+      <li><strong>Practice</strong> <span class="tag optional">optional</span> — non-binding flying before anything counts.</li>
+      <li><strong>Qualifying</strong> <span class="tag optional">optional</span> — establish a ranking: run it live, <em>import</em> it (e.g. a Velocidrone leaderboard), or skip it.</li>
+      <li><strong>Brackets / Mains</strong> <span class="tag required">the racing</span> — seed from qualifying, generate the bracket, run it, advance to a winner.</li>
+      <li><strong>Championship / Season</strong> <span class="tag optional">optional</span> — aggregate results across many events.</li>
+    </ol>
+
+    <p>
+      <strong>The recurring heat loop</strong> — <code>schedule → stage → arm → race →
+      land → score → advance → next</code> — is the engine that runs inside Practice,
+      Qualifying, <em>and</em> Mains. It is reusable machinery, not a single phase; that
+      is why running heats shows up again and again below rather than as one step.
+    </p>
+
+    <p>
+      <strong>Concerns that run throughout</strong> — Results &amp; Standings,
+      Streaming/Broadcast, and External Sync (MultiGP) — are not phases either. They
+      accumulate and update continuously across the whole event. They are folded into the
+      phases below where relevant, and recapped at the end.
+    </p>
+
+    <h2>Phase 1 — Setup &amp; Registration</h2>
+    <p class="phase-meta"><span class="tag required">required</span> Stand up the event and assemble the field.</p>
+    <p>
+      Everything starts here: defining the event and getting pilots into it. A guided
+      <strong>setup wizard</strong> should make the common path effortless (it's table
+      stakes against the incumbents), while leaving every choice editable.
+    </p>
+    <h3>Define the event</h3>
+    <ul>
+      <li>Name, classes / categories (e.g. Mini, Micro, Wing — or a sim class), and the date.</li>
+      <li><strong>Format configuration</strong> — which phases are enabled (is there practice? qualifying or an import? what mains format?). The pipeline is configurable, not fixed.</li>
+      <li><strong>Track selection</strong> — a physical track layout for IRL, or a Velocidrone spec track (with its track id) for sim.</li>
+    </ul>
+    <h3>Assemble the field</h3>
+    <ul>
+      <li>Add pilots from the global pilot registry, or let them <strong>self-register</strong> via the racer app.</li>
+      <li><strong>Import a roster</strong> — from MultiGP RaceSync (chapter roster) or from a Velocidrone room / leaderboard.</li>
+      <li><strong>Check-in &amp; presence</strong> — mark who's actually here. Support <em>auto-presence</em>: pilots a timer or sim room currently sees can be activated automatically ("everyone in the room at 8 PM gets bracketed").</li>
+      <li><strong>Pilot-identity binding</strong> — bind each timer's local pilot reference (a node seat, a sim player name) to a GridFPV pilot, per the adapter model.</li>
+    </ul>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Declare the available frequency / seat pool here, and capture waivers and the safety briefing.</p>
+      <p><span class="label">Sim</span>Pick the spec track; no frequency pool, no waivers — registration is mostly roster + presence.</p>
+    </div>
+
+    <h2>Phase 2 — Practice</h2>
+    <p class="phase-meta"><span class="tag optional">optional</span> Non-binding flying before anything counts.</p>
+    <p>
+      Practice exists so pilots warm up, shake out gear, and get familiar with their seat
+      and frequency before results matter. It runs the heat loop, but nothing it produces
+      counts toward seeding.
+    </p>
+    <ul>
+      <li>Open / rolling "fly when ready" sessions — pilots cycle through without a fixed schedule.</li>
+      <li>Optional informal best-lap display so pilots can gauge themselves, clearly marked as non-binding.</li>
+      <li>Results are discarded from scoring (though raw laps can still be logged).</li>
+    </ul>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>A natural moment for per-pilot timer calibration — the system learns each pilot's signal so real races read cleanly.</p>
+      <p><span class="label">Sim</span>Free-fly / hot laps on the track; no calibration needed.</p>
+    </div>
+
+    <h2>Phase 3 — Qualifying</h2>
+    <p class="phase-meta"><span class="tag optional">optional · importable</span> Establish a ranking that seeds the mains.</p>
+    <p>
+      Qualifying produces an ordered ranking of the field — the <strong>seeding</strong>
+      that the mains are built from. Crucially, there are three ways to get that ranking,
+      and we treat them as equals:
+    </p>
+    <ul>
+      <li><strong>Run it live</strong> — fly qualifying heats through the heat loop.</li>
+      <li><strong>Import it</strong> — pull a ranking from outside. A Velocidrone leaderboard import is first-class here (fixed sim tracks make this natural); MultiGP results are another source.</li>
+      <li><strong>Skip it</strong> — seed from registration order or a manual seed, and go straight to the mains.</li>
+    </ul>
+    <h3>Formats (when run live)</h3>
+    <ul>
+      <li><strong>Timed</strong> — best single lap, or fastest N consecutive laps (commonly 2 or 3).</li>
+      <li><strong>Rounds-based</strong> — a fixed number of rounds, best result kept.</li>
+      <li><strong>Group / round-robin</strong> — pilots split into groups, ranked by combined finishing position.</li>
+      <li><strong>Rolling / ZippyQ</strong> — "fly when ready" queue with a pack limit, queue depth, and rest-between-rounds; the RD can add rounds on demand as pilots keep flying.</li>
+    </ul>
+    <p>
+      Whatever the format, qualifying aggregates each pilot's flights into a single
+      qualifying metric and position, which becomes the seed for Phase 4.
+    </p>
+    <div class="sim-note">
+      <p><span class="label">Sim</span>"Leaderboard bashing" — pilots grind a spec track and the leaderboard <em>is</em> the qualifying ranking; importing it should be one click.</p>
+    </div>
+
+    <h2>Phase 4 — Brackets / Mains</h2>
+    <p class="phase-meta"><span class="tag required">the racing</span> Seed, build the bracket, run it, crown a winner.</p>
+    <p>
+      This is the competition proper. It begins by turning the seeding into a structure,
+      then runs that structure to a result.
+    </p>
+    <h3>Seed &amp; generate the bracket</h3>
+    <p>
+      The mains <strong>start</strong> by seeding the field (from qualifying, an import,
+      or a manual order) and <strong>generating a bracket</strong> — the rounds and heats
+      pilots will fly. This generation step is what "seeding &amp; brackets" means: it's
+      the entry to the mains, not a separate phase.
+    </p>
+    <ul>
+      <li><strong>Formats</strong> (a pluggable registry of generators): round robin, single elimination, double elimination, multi-tier mains (A/B/C/D/E with top-N advancing up a tier), Chase-the-Ace finals, and MultiGP/FAI P9–P16 style brackets.</li>
+      <li><strong>Configuration</strong> — pilots per heat (4 / 6 / 8 / 10), how many seeds advance from each heat, and the finals format.</li>
+      <li><strong>Manual adjustment</strong> — re-seed or move pilots between heats before they fly.</li>
+    </ul>
+    <h3>Run &amp; advance (the loop)</h3>
+    <p>
+      Each heat runs the heat loop; results feed an <strong>advancement</strong> step that
+      generates the next heats per the format's rules — run → result → advance → run,
+      until a winner falls out. This is the circular heart of the pipeline.
+    </p>
+    <ul>
+      <li><strong>Live race control</strong> — staging countdown, arm, race, land; abort / restart; discard and re-run a heat.</li>
+    </ul>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Assign a frequency / channel per heat and avoid conflicts; marshaling with lap correction — add / remove laps, adjust enter/exit points, recover missed laps from signal history.</p>
+      <p><span class="label">Sim</span>No frequency management; heats can fire back-to-back; marshaling is lighter — mostly abort / restart.</p>
+    </div>
+
+    <h2>Phase 5 — Championship / Season</h2>
+    <p class="phase-meta"><span class="tag optional">optional · cross-event</span> Aggregate across many events.</p>
+    <p>
+      Beyond a single event, GridFPV should link events into a <strong>season</strong> and
+      compute standings across all of them: points systems, season leaderboards, and
+      qualification pathways (the equivalent of a Global Qualifier feeding a championship).
+    </p>
+    <p>
+      This phase leans on the optional Cloud — the analytics warehouse and season linking —
+      so it is intentionally light here and will get its own treatment alongside the Cloud
+      design (Architecture, coming soon). The single-event pipeline above stands on its own
+      without it.
+    </p>
+
+    <h2>Concerns that run throughout</h2>
+    <p>
+      These aren't phases — they accumulate and update continuously across the whole event.
+    </p>
+    <div class="principle">
+      <p><span class="name">Results &amp; Standings.</span> Every heat's result is captured
+      as it finishes; standings recompute continuously so live leaderboards, event
+      standings, and overlays are always current. Results are exportable at any point.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Streaming / Broadcast.</span> Overlays — staging, leaderboard,
+      split-screen, podium, results, brackets — are driven by whatever is live right now,
+      spanning qualifying through mains to the podium. Includes OBS control and a path to
+      capture / RTMP inputs.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">External Sync.</span> MultiGP RaceSync — roster import at setup,
+      and pushing results (pilots, heats, lap times, placements) during and after the event.
+      Plus open data export and the optional one-way push of the append-only log to the Cloud.</p>
+    </div>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

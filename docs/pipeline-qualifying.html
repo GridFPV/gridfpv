@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Pipeline: Qualifying</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Phase 3 — Qualifying</h1>
+      <p class="doc-kind">Pipeline deep dive · what this phase must do</p>
+    </header>
+
+    <p class="lead">
+      Turning flying into an order. Qualifying produces the ranking — the seeding — that the
+      mains are built from. You can run it live, import it, or skip it entirely.
+    </p>
+
+    <div class="callout">
+      <p>
+        This is a deep dive on one phase of the
+        <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
+        and surfaces the decisions and data each implies. It does not define the schema or
+        APIs; those belong to the Architecture doc (coming soon).
+      </p>
+    </div>
+
+    <h2>Role</h2>
+    <p class="phase-meta"><span class="tag optional">optional · importable</span> Class-scoped. Produce the seeding ranking for the mains.</p>
+    <p>
+      Qualifying is <strong>per class</strong> — each class qualifies on its own. Its single job
+      is to produce an ordered ranking of that class's field, the <strong>seeding</strong> that
+      <a href="event-pipeline.html">Brackets / Mains</a> consumes. It is optional: a class can run
+      qualifying live, import a ranking from elsewhere, or skip straight to the mains on a manual
+      seed.
+    </p>
+
+    <h2>Capabilities</h2>
+
+    <h3>Three ways to get a ranking</h3>
+    <ul>
+      <li><strong>Run it live</strong> — fly qualifying through the heat loop and score it.</li>
+      <li><strong>Import it</strong> — pull a ranking from outside. A Velocidrone leaderboard
+        import is first-class (fixed sim tracks make this natural); MultiGP results are another
+        source. The import maps directly to the qualifying ranking.</li>
+      <li><strong>Skip it</strong> — seed from registration order or a manual seed and go straight
+        to the mains.</li>
+    </ul>
+
+    <h3>Qualifying metric (when run live)</h3>
+    <p>How a pilot's flying becomes a rank. Two metrics, both configurable:</p>
+    <ul>
+      <li><strong>Fastest N consecutive laps</strong> — the sum of the best N back-to-back laps,
+        normally flown within a <strong>time limit</strong>. N is configurable and
+        <strong>defaults to 3</strong>; N = 1 is simply the single best lap. The time limit is
+        configurable, and the usual <em>last-lap rule</em> applies: if a pilot crosses the
+        start/finish before the limit expires, that lap completes and counts even though it ends
+        after the buzzer.</li>
+      <li><strong>Most laps in a fixed time</strong> — most laps within a set window, with total
+        time as the tiebreak.</li>
+    </ul>
+    <p>
+      Position-based group / round-robin ranking is a different philosophy and lives with the
+      <a href="event-pipeline.html">mains</a> as a bracket format — it is not a qualifying metric
+      here.
+    </p>
+
+    <h3>Organizing qualifying flights</h3>
+    <ul>
+      <li><strong>Solo / timed heats</strong> — pilots fly for time, alone or in small heats.</li>
+      <li><strong>Scheduled rounds</strong> — a fixed set of qualifying rounds.</li>
+      <li><strong>Rolling "fly when ready" queue</strong> — the <em>same</em> shared rolling-queue
+        engine practice uses, here in its scored form: pack limit, queue depth,
+        rest-between-rounds, and rounds added on demand; it assigns the next slot and
+        frequency/seat as the field flows.</li>
+    </ul>
+
+    <h3>Rounds</h3>
+    <ul>
+      <li>Rounds are an <strong>administrative / management construct</strong> — a way to organize
+        and schedule when pilots fly — not a scoring mechanism.</li>
+      <li>A pilot's rank <strong>always uses their best result across all rounds</strong>: the
+        fastest qualifying time for the fastest-N metric, or the most laps (total time as tiebreak)
+        for the laps metric. A bad round never counts against you.</li>
+      <li>Rounds can be added on demand as pilots keep flying.</li>
+    </ul>
+
+    <h3>Output → seeding</h3>
+    <p>
+      Each pilot's best result across all rounds sets their metric; the class is ranked; every
+      pilot gets a qualifying position. That ranking is the seed input the mains are generated from.
+    </p>
+
+    <h2>Sim vs IRL</h2>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Live qualifying assigns frequency/seat; timed and rolling
+      formats run on the timer.</p>
+      <p><span class="label">Sim</span>Leaderboard <strong>import</strong> is the natural path —
+      "leaderboard bashing" on fixed spec tracks — and should be one click; live qualifying is
+      still possible.</p>
+    </div>
+
+    <h2>Entities &amp; data implied</h2>
+    <p>What this phase needs to exist (conceptual — not a schema; the Architecture doc formalizes it):</p>
+    <dl class="entities">
+      <dt>Qualifying config (per class)</dt>
+      <dd>mode (run / import / skip); metric (type + N and time limit, or the time window); the last-lap rule; rounds (organizational only — rank always takes a pilot's best across all rounds).</dd>
+      <dt>Rolling queue</dt>
+      <dd>the shared rolling-queue engine in its binding/scored variant.</dd>
+      <dt>Qualifying run</dt>
+      <dd>a heat-loop run, scored (binding).</dd>
+      <dt>Qualifying result</dt>
+      <dd>per pilot per round: the metric value, plus the raw laps.</dd>
+      <dt>Qualifying ranking</dt>
+      <dd>derived — aggregated metric → qualifying position per class; the seed output for the mains.</dd>
+      <dt>Import source mapping</dt>
+      <dd>Velocidrone leaderboard / MultiGP results → ranking.</dd>
+    </dl>
+    <p>Reuses the <strong>frequency/seat pool</strong>, <strong>track</strong>, and <strong>roster</strong> from <a href="pipeline-setup.html">Setup</a>.</p>
+
+    <h2>Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">"Fastest N laps" definition.</span> Consecutive laps (the default,
+        MultiGP-standard) versus the best N individual (non-consecutive) laps — should both be
+        selectable?</li>
+      <li><span class="q">Tiebreakers.</span> Within a metric — fastest-N ties broken by the next
+        best lap; most-laps ties broken by total time.</li>
+      <li><span class="q">Holeshot handling.</span> Whether the holeshot / first partial lap is
+        excluded from the metric (consistent with how the engine treats it).</li>
+      <li><span class="q">Import + live interaction.</span> Can a class import a ranking and then
+        also fly (override / merge), or is it one or the other?</li>
+      <li><span class="q">Solo vs heats.</span> Supporting both solo time-trial and heat-based
+        timed qualifying, and how each is scheduled.</li>
+      <li><span class="q">Cross-class scheduling.</span> Multiple classes qualifying on one
+        timer/track during the day (cross-ref multi-class scheduling — decided in Mains).</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="event-pipeline.html">event pipeline</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

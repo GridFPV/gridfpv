@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Internal Design Docs</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Internal Design &amp; Developer Docs</h1>
+      <p class="doc-kind">Internal documentation — not user-facing, not hosted.</p>
+    </header>
+
+    <p class="lead">
+      The design and engineering record for GridFPV: the thinking behind the
+      project and the decisions that guide the build.
+    </p>
+
+    <div class="callout">
+      <p>
+        These docs are <strong>for us</strong> — the people building GridFPV.
+        They capture vision, architecture, and design rationale. They are written
+        in HTML and read locally in a browser; we do <strong>not</strong> host them.
+      </p>
+      <p>
+        User-facing documentation (guides for race directors, pilots, and
+        self-hosters) is a separate concern and will live in its own repository
+        later. Keep that material out of this repo.
+      </p>
+    </div>
+
+    <h2>Documents</h2>
+    <ul class="doc-list">
+      <li>
+        <div class="doc-title"><a href="vision.html">Vision</a></div>
+        <div class="doc-desc">
+          What GridFPV is and why it exists — the thesis, the design principles
+          we won't violate, and how we sit in the landscape. The north star.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="event-pipeline.html">Event Pipeline</a></div>
+        <div class="doc-desc">
+          What it means to run an event — the phases (setup, practice, qualifying,
+          mains, season), the recurring heat loop, and the capabilities we want to hit
+          at each one, for both IRL and Velocidrone racing.
+        </div>
+      </li>
+    </ul>
+
+    <h2>Pipeline deep dives</h2>
+    <ul class="doc-list">
+      <li>
+        <div class="doc-title"><a href="pipeline-setup.html">Setup &amp; Registration</a></div>
+        <div class="doc-desc">
+          Defining the event (classes, track, format) and assembling a checked-in roster —
+          intake paths, presence, and the data setup implies.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="pipeline-practice.html">Practice</a></div>
+        <div class="doc-desc">
+          Optional, event-wide, non-binding flying — rolling/scheduled/free-fly structures,
+          a hot-lap board, and the timer-calibration window.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="pipeline-qualifying.html">Qualifying</a></div>
+        <div class="doc-desc">
+          Establishing the seeding ranking — run live, import, or skip; metrics, the shared
+          rolling queue, and configurable round aggregation.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="pipeline-mains.html">Brackets / Mains</a></div>
+        <div class="doc-desc">
+          The competition proper — seed, generate the bracket, run and advance; win conditions,
+          live marshaling, multi-class scheduling.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="pipeline-season.html">Championship / Season</a></div>
+        <div class="doc-desc">
+          The cross-event layer — linking events into a season, configurable scoring, and the
+          Director-local / Cloud-aggregate split.
+        </div>
+      </li>
+    </ul>
+
+    <h2>Reference</h2>
+    <ul class="doc-list">
+      <li class="soon">
+        <div class="doc-title">Architecture <span class="badge">coming soon</span></div>
+        <div class="doc-desc">
+          System shape, components, data model, and the one-protocol/two-transports
+          contract. The deep technical record.
+        </div>
+      </li>
+      <li class="soon">
+        <div class="doc-title">Timer Adapters <span class="badge">coming soon</span></div>
+        <div class="doc-desc">
+          The adapter interface and event model — the foundational wall that makes
+          every timing source (Velocidrone, RotorHazard, LapRF, manual) look the same
+          to the engine.
+        </div>
+      </li>
+      <li class="soon">
+        <div class="doc-title">Testing Strategy <span class="badge">coming soon</span></div>
+        <div class="doc-desc">
+          How we keep race-timing logic correct: pure translators, golden cases,
+          recorded-session replay, and the hard guardrail — never test against a live timer.
+        </div>
+      </li>
+      <li class="soon">
+        <div class="doc-title">Roadmap <span class="badge">coming soon</span></div>
+        <div class="doc-desc">
+          The phase plan from foundations through the Director, Cloud, racer PWA,
+          and external integrations.
+        </div>
+      </li>
+    </ul>
+
+    <footer class="doc-footer">
+      <p>GridFPV internal design documentation.</p>
+    </footer>
+  </main>
+</body>
+</html>

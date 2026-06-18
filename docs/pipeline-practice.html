@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Pipeline: Practice</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Phase 2 — Practice</h1>
+      <p class="doc-kind">Pipeline deep dive · what this phase must do</p>
+    </header>
+
+    <p class="lead">
+      Flying time before anything counts. An optional, event-wide warm-up where pilots shake
+      out gear, get comfortable on their seat and frequency, and (on a real timer) let the
+      system calibrate to them — without a single result feeding the competition.
+    </p>
+
+    <div class="callout">
+      <p>
+        This is a deep dive on one phase of the
+        <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
+        and surfaces the decisions and data each implies. It does not define the schema or
+        APIs; those belong to the Architecture doc (coming soon).
+      </p>
+    </div>
+
+    <h2>Role</h2>
+    <p class="phase-meta"><span class="tag optional">optional</span> Event-wide, non-binding flying before the competition starts.</p>
+    <p>
+      Practice sits <strong>above the classes</strong> — it is open to everyone at the event,
+      not a per-class competition. Its job is to get pilots and equipment ready: warm up, verify
+      seat and frequency, and give the timer a chance to learn each pilot. Its output is
+      readiness plus an informal hot-lap board and logged practice laps — none of which ever
+      seed qualifying.
+    </p>
+
+    <h2>Capabilities</h2>
+
+    <h3>Organize the field</h3>
+    <p>Three modes; the race director picks what fits the session:</p>
+    <ul>
+      <li><strong>Rolling "fly when ready."</strong> Pilots join a queue and the system assigns
+        the next open slot and frequency/seat as it frees up, managing throughput so the field
+        keeps flowing. This is the same queue idea qualifying's ZippyQ uses — likely one shared
+        engine (see <em>Qualifying</em>, coming soon).</li>
+      <li><strong>Scheduled practice rounds.</strong> Fixed practice heats with assigned pilots
+        and frequencies — a mini-schedule for structured practice windows.</li>
+      <li><strong>Free-fly (manual).</strong> No structure; pilots self-coordinate. The Director
+        optionally still provides live timing and overlays. In this mode timing is keyed to the
+        <strong>frequency / node</strong>, not a specific pilot — anyone can hop on a channel and
+        get lap times without being bound to an identity. (Pilot binding is optional here; it's
+        what the structured modes add.)</li>
+    </ul>
+
+    <h3>Hot-lap board &amp; logging</h3>
+    <ul>
+      <li>A live, informal <strong>hot-lap board</strong> so pilots can gauge themselves — keyed by
+        pilot in the structured modes, or by <strong>frequency / node</strong> in free-fly
+        (optionally tagged by class). Every entry shows the <strong>fastest lap</strong>; the
+        <strong>recent laps (last ~5)</strong> are essential in free-fly — where a node has no
+        pilot identity, the running laps are how someone recognizes their own flying — and a nice
+        addition in the structured modes too, so a pilot can read pace lap by lap rather than just
+        their single best.</li>
+      <li>Raw laps are logged, but <strong>flagged practice and non-binding</strong> — practice
+        never feeds seeding. The board is feedback, not a result.</li>
+    </ul>
+
+    <h3>Warm-up &amp; the heat loop</h3>
+    <ul>
+      <li>Shake out gear; confirm the right seat and frequency before it counts.</li>
+      <li>Practice runs the same recurring heat loop as every other phase
+        (<code>schedule → stage → arm → race → land → score</code>), but scoring is
+        non-binding (see the <a href="event-pipeline.html">event pipeline</a> overview).</li>
+    </ul>
+
+    <h2>Sim vs IRL</h2>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Frequency/seat assignment applies in the rolling and
+      scheduled modes; practice is the natural <strong>timer-calibration</strong> window — the
+      timer learns each pilot's signal so real races read clean.</p>
+      <p><span class="label">Sim</span>Runs can fire back-to-back; free-fly is just hot laps on
+      the track; no frequency management and no calibration.</p>
+    </div>
+
+    <h2>Entities &amp; data implied</h2>
+    <p>What this phase needs to exist (conceptual — not a schema; the Architecture doc formalizes it):</p>
+    <dl class="entities">
+      <dt>Practice session (event-wide)</dt>
+      <dd>mode (rolling / scheduled / free-fly) and an enabled flag.</dd>
+      <dt>Practice queue (rolling mode)</dt>
+      <dd>entries of pilot, ready state, assigned slot/frequency, and throughput/rest — the same concept as qualifying's queue.</dd>
+      <dt>Practice run</dt>
+      <dd>a heat-loop run marked non-binding.</dd>
+      <dt>Practice lap record</dt>
+      <dd>raw laps, flagged practice; never linked to seeding.</dd>
+      <dt>Hot-lap board</dt>
+      <dd>per pilot (structured modes) or per frequency/node (free-fly): the recent laps (last ~5) and the fastest lap, with an optional class tag.</dd>
+    </dl>
+    <p>Reuses the <strong>frequency/seat pool</strong> and <strong>track</strong> defined in <a href="pipeline-setup.html">Setup</a>.</p>
+
+    <h2>Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Shared queue engine. <em>(decided)</em></span> One shared rolling-queue
+        engine across practice and <a href="pipeline-qualifying.html">qualifying</a> — built once;
+        practice runs it non-binding, qualifying adds binding scoring.</li>
+      <li><span class="q">Practice-lap persistence.</span> Are practice laps event-local and
+        discardable, or retained as career "practice" records? Open-data value versus noise.</li>
+      <li><span class="q">Hot-lap board scope.</span> One event-wide board, per-class boards, or
+        per-track.</li>
+      <li><span class="q">Presence feedback.</span> Does practice presence feed Setup's
+        auto-presence — i.e. a pilot who practiced is "here"?</li>
+      <li><span class="q">Frequency authority.</span> In practice, does the system assign channels
+        or do pilots self-select?</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="event-pipeline.html">event pipeline</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>
