@@ -243,6 +243,22 @@ ol.decisions > li::before {
 }
 ol.decisions .q { font-weight: 700; }
 
+/* --- Mermaid diagrams --------------------------------------------------- */
+
+/* Diagrams are authored as <pre class="mermaid"> and rendered to SVG by
+   assets/diagrams.js (vendored Mermaid, offline). Hide the raw source until
+   Mermaid stamps data-processed, so the text doesn't flash before render. */
+pre.mermaid {
+  margin: 1.75rem 0;
+  text-align: center;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+}
+pre.mermaid:not([data-processed]) { visibility: hidden; }
+pre.mermaid svg { max-width: 100%; height: auto; }
+
 /* --- Footer / meta ------------------------------------------------------ */
 
 .doc-footer {

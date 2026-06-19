@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Cloud &amp; Season</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Cloud &amp; Season</h1>
+      <p class="doc-kind">Internal design doc · the optional relay, warehouse, and cross-event layer · <strong>draft</strong></p>
+    </header>
+
+    <p class="lead">
+      The optional Cloud: an off-LAN relay for live events, a long-term warehouse for the
+      accumulated history, and the cross-event season / championship layer. Never
+      authoritative, never in the live critical path.
+    </p>
+
+    <div class="callout">
+      <p>
+        <strong>Early draft.</strong> This page captures scope and the open decisions routed
+        here from the <a href="architecture.html">Architecture</a> doc (see §8 and §9) and
+        the <a href="event-pipeline.html">Event Pipeline</a> (Phase 5), so they're tracked in
+        the right place. The design itself is not yet specified. When this doc and the
+        <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>Scope</h2>
+    <p>This doc will own:</p>
+    <ul>
+      <li>The <strong>one-way resumable push</strong> — how a Director streams its
+      append-only log to the Cloud, and resumes after a drop.</li>
+      <li>The <strong>warehouse</strong> — how many events' logs aggregate in Postgres, and
+      what is stored raw vs projected.</li>
+      <li>The <strong>two surfaces</strong> — the live relay (the same one-protocol PWA) and
+      the long-term portal (career, seasons, open-data, embeddable widgets), which scale
+      oppositely (see <a href="architecture.html">Architecture</a> §8).</li>
+      <li>The <strong>season / championship model</strong> — linking events, configurable
+      scoring, season standings, and qualification pathways (Event Pipeline, Phase 5).</li>
+      <li>The <strong>global pilot registry</strong> and reconciling a Director's local
+      pilots into stable cross-event identity on sync (Architecture §9).</li>
+    </ul>
+
+    <h2>Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">One-way push protocol.</span> Offset / acknowledgement mechanics,
+      batching, how a Director authenticates to the Cloud, and exactly-once vs at-least-once
+      semantics on resume. Builds on the append-only log's resumable-sync property
+      (Architecture §3).</li>
+      <li><span class="q">Warehouse schema &amp; storage strategy.</span> Whether the Cloud
+      stores raw logs, projections, or both; how events from many Directors and chapters are
+      partitioned; retention.</li>
+      <li><span class="q">Season / championship model.</span> How events link into a season,
+      the configurable scoring systems (points, drops, qualification pathways), and where
+      season standings are computed.</li>
+      <li><span class="q">Global pilot registry &amp; identity reconciliation.</span> How
+      local event pilots merge into a stable global identity on sync — claiming, dedupe, and
+      conflict handling — without ever blocking an offline race.</li>
+      <li><span class="q">Account model for off-LAN viewers.</span> What an account is, and
+      how it maps to the read authorization defined in the <a href="protocol.html">Protocol</a>
+      spec.</li>
+      <li><span class="q">Two-surface deployment.</span> Whether the live relay and the
+      long-term portal are separate virtual hosts (dynamic realtime vs heavily-cached /
+      mostly-static). Architecture calls this an ops decision, not an architectural one.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

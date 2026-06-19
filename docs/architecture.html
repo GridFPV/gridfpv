@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Architecture</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Architecture</h1>
+      <p class="doc-kind">Internal design doc · system shape, stack, and the one-protocol contract</p>
+    </header>
+
+    <p class="lead">
+      The technical shape of GridFPV: the components, the chosen technology stack and
+      why, the append-only spine that makes everything else derived, and the single
+      read/realtime contract that the Director and the Cloud both speak.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc decides <strong>system shape and stack</strong>. It deliberately defers
+        the things that earn their own docs: the adapter interface internals
+        (<a href="index.html">Timer Adapters</a>), the wire contract
+        (<a href="protocol.html">Protocol</a>), the Cloud warehouse and season model
+        (<a href="cloud.html">Cloud &amp; Season</a>), the broadcast subsystem
+        (<a href="streaming.html">Streaming</a>), correctness strategy
+        (<em>Testing Strategy</em>), and build sequencing (<em>Roadmap</em>). When this doc
+        and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. System shape</h2>
+    <p>
+      GridFPV is one authoritative application — the <strong>Director</strong> — plus an
+      <strong>optional Cloud</strong> and a set of <strong>web clients</strong>. The
+      Director owns the truth for the duration of an event and runs end to end with zero
+      internet. The Cloud is a relay and a long-term warehouse; it is never in the
+      critical path of a live race.
+    </p>
+
+    <pre class="mermaid">
+flowchart TB
+  timers["Timers&lt;br/&gt;Velocidrone · RotorHazard · LapRF · manual"]
+
+  subgraph Director["DIRECTOR · authoritative, offline-first"]
+    direction TB
+    adapters["Timer adapter layer&lt;br/&gt;one interface"]
+    engine["Race engine&lt;br/&gt;heat loop · advancement · bracket gens"]
+    log[("Append-only event log&lt;br/&gt;source of truth")]
+    proj["Projection engine&lt;br/&gt;standings · brackets · stats"]
+    server["Embedded server&lt;br/&gt;THE protocol · HTTP + WS"]
+    rd["RD console&lt;br/&gt;web UI in Tauri window"]
+  end
+
+  subgraph Cloud["CLOUD · optional · never in the live path"]
+    relay["Relay + warehouse + season&lt;br/&gt;SAME protocol"]
+  end
+
+  clients["Racer / spectator PWA&lt;br/&gt;OBS overlays"]
+
+  timers -->|raw input| adapters
+  adapters -->|canonical events| log
+  engine -->|race-state events| log
+  log -->|derive| proj
+  proj --> server
+  server <-->|same protocol| rd
+  server -->|LAN| clients
+  log -.->|one-way resumable push| relay
+  relay -->|off-LAN| clients
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class log sot;
+  style Cloud stroke-dasharray: 6 4;
+    </pre>
+
+    <p>The non-negotiable stances, restated as architecture:</p>
+    <div class="principle">
+      <p><span class="name">The Director is authoritative and offline-first.</span> It
+      embeds its own server and store; a full event runs with no external dependency.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">The Cloud is optional.</span> A relay for off-LAN viewers and
+      a warehouse for long-term stats. Its absence degrades nothing on race day.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">One protocol, two transports.</span> One read/realtime
+      contract. The Director serves it on the LAN; the Cloud serves the identical contract
+      off-LAN. Clients can't tell which they're talking to.</p>
+    </div>
+
+    <h2>2. Technology stack &amp; rationale</h2>
+    <p>
+      The stack is chosen to serve one hard requirement above all: a race director runs
+      <strong>a single self-contained binary, no installed dependencies, on Windows,
+      Linux, and macOS</strong>, and gets a friendly native window — not a "open your
+      browser and type an IP" experience.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Layer</th><th>Choice</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Director core</strong></td><td>Rust (Tokio async)</td><td>timer adapters, append-only log, projection engine, race engine</td></tr>
+        <tr><td><strong>Embedded server</strong></td><td>axum (HTTP + WebSocket)</td><td><em>the</em> protocol — serves RD console, racer PWA, overlays</td></tr>
+        <tr><td><strong>Store</strong></td><td>SQLite</td><td>append-only event log + derived projection tables; the file <em>is</em> the export</td></tr>
+        <tr><td><strong>Native shell</strong></td><td>Tauri</td><td>friendly cross-platform window; loads the RD console web UI</td></tr>
+        <tr><td><strong>Frontend</strong></td><td>TypeScript + web framework</td><td>RD console, racer PWA, OBS overlays — all clients of the protocol</td></tr>
+        <tr><td><strong>Shared types</strong></td><td>generated TS from Rust (e.g. ts-rs)</td><td>the contract defined once, consumed by both sides</td></tr>
+        <tr><td><strong>Cloud</strong></td><td>Rust (reuse server crate) + Postgres</td><td>optional relay + warehouse; identical contract</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Why these</h3>
+    <ul>
+      <li><strong>Tauri over Electron</strong> — Tauri uses the OS webview instead of
+      bundling a browser, yielding the small single-executable-style binary the
+      single-binary goal demands. Electron ships a large multi-file bundle and concedes
+      that goal.</li>
+      <li><strong>Rust core</strong> — physical timers (serial/USB) and a process that
+      <em>owns the truth offline for hours</em> reward Rust's reliability and mature async
+      + serial ecosystem. "It cannot crash mid-heat" is a feature when there is no cloud
+      to fall back to.</li>
+      <li><strong>One protocol becomes literal code reuse</strong> — the embedded server
+      is a Rust crate; the Cloud reuses the <em>same</em> crate behind a storage trait
+      (SQLite on the Director, Postgres in the Cloud). The contract is built once.</li>
+      <li><strong>The RD console is just a co-located web client.</strong> The Tauri
+      window loads the same web UI that talks to the same local API the racer PWA and
+      overlays use. The native window costs nothing architecturally — it honors
+      "one protocol" rather than bypassing it.</li>
+    </ul>
+
+    <div class="callout">
+      <p>
+        <strong>Considered and set aside:</strong> <em>Go + Wails</em> was the strong
+        runner-up (excellent single-binary story, gentler curve) — Rust wins on hardware
+        integration and race-day robustness. <em>Electron</em> is easiest for a JS-only
+        team but loses the single-binary/no-deps goal. The frontend framework
+        (React vs Svelte) is intentionally still open (see §11).
+      </p>
+    </div>
+
+    <h2>3. The append-only spine</h2>
+    <p>
+      Every event records raw timing as an <strong>append-only log</strong>. That log is
+      the single source of truth. Everything analytical — standings, leaderboards,
+      brackets, career stats — is a <strong>projection</strong> derived from it and can be
+      recomputed at any time.
+    </p>
+    <div class="principle">
+      <p><span class="name">Append-only truth.</span> Adapters and the race engine only
+      ever <em>append</em> canonical events. Projections never feed back into the log.</p>
+    </div>
+    <p>What this design buys, concretely:</p>
+    <ul>
+      <li><strong>Retroactive metrics.</strong> A new statistic (consistency score,
+      head-to-head record) is just a new projection over the existing history — no
+      migration of "truth," only a recompute.</li>
+      <li><strong>Resumable sync.</strong> The Cloud push is an offset into the log; a
+      dropped connection resumes from the last acknowledged offset. No reconciliation, no
+      conflict — the log is the order.</li>
+      <li><strong>Trivial export &amp; open data.</strong> The SQLite file is the whole
+      event. Export, replay, and the public read API all read the same log.</li>
+      <li><strong>Correctness by replay.</strong> A recorded session replays into the same
+      projections deterministically — the backbone of the testing strategy (its own doc).</li>
+      <li><strong>Crash recovery for free.</strong> If the Director restarts mid-event, it
+      reopens the log and rebuilds projections — the in-flight race resumes with nothing
+      lost. What's on disk is always the truth.</li>
+    </ul>
+
+    <h3>Corrections &amp; marshaling</h3>
+    <p>
+      Append-only does <strong>not</strong> mean the past can't be fixed — it means we never
+      mutate or delete an entry. A wrong timing event is corrected by <em>appending</em> a
+      correction that the projection layer folds in; the mistake and its correction both
+      remain in the log, in order. This works because the log holds two kinds of entry with
+      different semantics:
+    </p>
+    <dl class="entities">
+      <dt>Raw observations (from adapters)</dt>
+      <dd>What a timer actually reported — "node 3 saw a gate pass at t=12.345." Genuinely
+      immutable: the timer <em>did</em> report it, even if it was wrong. Adapters only ever
+      append these.</dd>
+      <dt>Adjudications / marshaling (from the RD or rules)</dt>
+      <dd>Decisions layered on top that reference raw events by id — void a phantom lap,
+      insert a recovered lap, adjust a lap boundary, apply a penalty, disqualify a pilot.
+      Also appended, never destructive.</dd>
+    </dl>
+    <p>
+      Current truth is the projection that folds raw observations and adjudications
+      together. Typical marshaling actions are simply appended events —
+      <code>DetectionVoided</code>, <code>LapInserted</code>, <code>LapAdjusted</code>,
+      <code>HeatVoided</code>, <code>PenaltyApplied</code>. A marshal who corrects wrongly
+      appends another event that supersedes the prior one (void the void); resolution is
+      last-writer-wins per target, by log order, and nothing is ever lost.
+    </p>
+    <div class="principle">
+      <p><span class="name">Why this fits racing.</span> Results are adversarial and
+      disputes are routine. An append-only log makes every correction auditable
+      (who, when, why), keeps Cloud sync a simple higher-offset append rather than a
+      reconciliation problem, and lets standings recompute deterministically after any
+      ruling.</p>
+    </div>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Marshaling is heavy — recover missed laps from signal
+      history, re-time enter/exit points, correct phantom laps from interference.</p>
+      <p><span class="label">Sim</span>Lighter — mostly abort / restart and
+      discard-and-re-run; the sim's own detection is clean.</p>
+    </div>
+
+    <h2>4. Conceptual data model</h2>
+    <p>
+      At the conceptual level — not table schemas, which belong to the docs that own each
+      area — the domain is three kinds of thing: the <strong>log</strong> (the only source
+      of truth), the <strong>configuration</strong> that frames an event, and the
+      <strong>projections</strong> derived by folding the log.
+    </p>
+    <dl class="entities">
+      <dt>Event</dt>
+      <dd>The top-level container: name, date, the enabled phases (the configurable
+      pipeline), and the classes it runs. Everything below belongs to an event.</dd>
+      <dt>Class / category</dt>
+      <dd>A field within an event (e.g. Mini, Micro, a sim class) with its own format and
+      bracket — phases run per class.</dd>
+      <dt>Track</dt>
+      <dd>The layout flown — a physical track for IRL, or a Velocidrone spec track
+      (with its track id) for sim.</dd>
+      <dt>Pilot &amp; entry</dt>
+      <dd>A <strong>pilot</strong> is a person, ideally a stable identity across events
+      (the global registry; see §9). An <strong>entry</strong> is a pilot's participation
+      in one event's class — check-in / presence, plus the binding from a timer's local
+      reference (a node seat, a sim player name) to the pilot.</dd>
+      <dt>Heat / round</dt>
+      <dd>Scheduling structures the race engine produces — who flies together, when, in
+      which round. Generated by the format and adjustable before they fly.</dd>
+      <dt>Timing &amp; race events <em>(the log)</em></dt>
+      <dd>The append-only entries: raw observations from adapters, race-state events from
+      the engine, and adjudications from marshaling (see §3). The only source of truth.</dd>
+      <dt>Projections</dt>
+      <dd>Everything derived — lap lists, heat results, the qualifying ranking / seed,
+      bracket state, event standings, and (in the Cloud) career and season stats.
+      Recomputable from the log at any time.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>The dividing line:</strong> if it's an observation or a decision, it's a
+        log entry; if it's an answer computed from those, it's a projection. Configuration
+        is captured in the log too, so the whole event — setup through results — is
+        reconstructible and exportable from one ordered history. Concrete schemas are
+        deferred to the docs that own each area.
+      </p>
+    </div>
+
+    <h3>Storage tiers</h3>
+    <p>
+      Physically this lands in three tiers. Each <strong>event</strong> is its own
+      append-only log — the SQLite file that "is the event," portable and replayable in
+      isolation. The Director also keeps a small <strong>catalog</strong> store spanning
+      events: the local pilot registry, app configuration, and the list of events it owns.
+      The <strong>Cloud</strong> is the third tier — many events' logs aggregated into the
+      warehouse. The per-event file stays the unit of truth and export; the catalog and
+      warehouse are conveniences layered around it.
+    </p>
+
+    <h2>5. Components</h2>
+    <dl class="entities">
+      <dt>Timer adapter layer</dt>
+      <dd>One interface in front of every timing source (Velocidrone first, then
+      RotorHazard, LapRF, manual). Adapters are pure translators: source-specific input in,
+      canonical timing events out. The interface internals are specified in
+      <em>Timer Adapters</em> (coming soon).</dd>
+
+      <dt>Race engine</dt>
+      <dd>The reusable heat loop (<code>schedule → stage → arm → race → land → score →
+      advance → next</code>), advancement rules, and a pluggable registry of bracket /
+      qualifying generators. It consumes canonical timing events and appends race-state
+      events. Its design — the generator registry, advancement, and multi-class
+      scheduling — is deferred to <em>Race Engine</em> (coming soon).</dd>
+
+      <dt>Append-only log + projection engine</dt>
+      <dd>The source of truth and the derivation layer. Projections are maintained
+      incrementally as events append, and are fully recomputable from the log on demand.</dd>
+
+      <dt>Embedded server</dt>
+      <dd>The axum HTTP + WebSocket service that <em>is</em> the protocol: reads of
+      projections, a realtime subscription to live changes, and authenticated write/control
+      endpoints for the RD. Bound to the LAN so other clients can reach it.</dd>
+
+      <dt>Web clients</dt>
+      <dd>The RD console (in the Tauri window), the racer/spectator PWA, and OBS overlays —
+      all the same kind of thing: a web client of the protocol. Only their transport and
+      their permissions differ.</dd>
+
+      <dt>Cloud (optional)</dt>
+      <dd>Consumes the one-way log push, serves the identical protocol to off-LAN viewers,
+      and aggregates many events' logs into the long-term warehouse.</dd>
+
+      <dt>External sync</dt>
+      <dd>MultiGP RaceSync (roster import, results push) and the open-data read API /
+      exports. Like the Cloud it needs internet and reads only derived projections, so it is
+      never in the live critical path.</dd>
+    </dl>
+
+    <h2>6. One protocol, two transports</h2>
+    <p>
+      There is exactly one read/realtime contract. A client opens it, fetches a snapshot
+      of the projections it cares about, then subscribes to a realtime stream of changes
+      over WebSocket. The same contract is served by the Director (on the LAN) and by the
+      Cloud (off-LAN) — a client is configured only with a base URL.
+    </p>
+    <div class="principle">
+      <p><span class="name">Contract defined once, in Rust.</span> The wire types live in
+      the server crate and are generated into TypeScript for the frontend, so the Director,
+      the Cloud, and every client share one definition that can't drift.</p>
+    </div>
+    <p>
+      Exact message shapes (snapshot format, the change-stream envelope, auth) are a
+      protocol spec of their own. The architectural commitments here are: <em>read +
+      realtime-subscribe</em>, <em>transport-agnostic clients</em>, and <em>one type
+      definition</em>.
+    </p>
+
+    <h2>7. Clients &amp; connectivity</h2>
+    <p>
+      The racer/spectator client is a <strong>PWA</strong> — the universal web client.
+      Native is deferred but kept cheap: the same web client can later be wrapped in a
+      Capacitor shell, exactly as the Director's UI is wrapped in Tauri. The web
+      protocol-client is the constant on both ends; native shells are optional
+      enhancements, not rewrites.
+    </p>
+    <p>How visibility actually plays out depends on venue connectivity:</p>
+    <ol>
+      <li><strong>Shared LAN, no internet</strong> — racers on the LAN reach the Director
+      directly: live, low-latency, zero internet. The Cloud is dark.</li>
+      <li><strong>Director has internet</strong> (venue wifi, or even a phone hotspot) —
+      the Director pushes the log to the Cloud, which relays the live event to anyone,
+      anywhere. <strong>This is the primary broad-visibility path</strong>, not the LAN.</li>
+      <li><strong>No internet, no shared LAN</strong> — only the RD's screen plus whoever
+      joins a local hotspot. The race still runs (the Director is authoritative offline);
+      visibility is simply limited.</li>
+    </ol>
+    <div class="callout">
+      <p>
+        <strong>The LAN PWA is intentionally degraded.</strong> A plain-HTTP LAN address
+        is not a browser "secure context," so service workers, install, and web push are
+        unavailable there — but live viewing over WebSocket works fine. Installability and
+        <strong>push notifications ride the Cloud transport</strong> (HTTPS, and APNs/FCM
+        need internet regardless). So LAN gives in-page live alerts; true push is a
+        Cloud-era feature. A future native client is the way to get LAN access
+        <em>and</em> real push together — another reason native stays on the roadmap.
+      </p>
+    </div>
+
+    <h2>8. The Cloud</h2>
+    <p>
+      The Cloud is optional and never authoritative. It receives the Director's one-way,
+      resumable log push and exposes two surfaces that share one component library:
+    </p>
+    <dl class="entities">
+      <dt>Live race surface</dt>
+      <dd>The same one-protocol PWA the Director serves — realtime, single-event,
+      latency-sensitive. Runs identically on either transport.</dd>
+      <dt>Long-term portal</dt>
+      <dd>Career profiles, season standings, open-data dashboards, embeddable widgets.
+      <strong>Cloud-only by nature</strong> — the Director only knows one event; this reads
+      the accumulated warehouse. Read-heavy and cacheable — the opposite scaling profile
+      from the live surface.</dd>
+    </dl>
+    <p>
+      Because the two surfaces scale oppositely, splitting them into separate virtual hosts
+      (a dynamic realtime host vs a heavily-cached, possibly mostly-static stats host) is a
+      reasonable deployment choice — left as an ops decision, not an architectural one.
+      Season/championship aggregation lives here too and will be detailed alongside the
+      Cloud warehouse design.
+    </p>
+
+    <h2>9. Security, trust &amp; identity</h2>
+    <p>
+      The trust model follows from offline-first: the Director is authoritative on the LAN,
+      and access splits into <strong>read</strong> and <strong>control</strong>.
+    </p>
+    <div class="principle">
+      <p><span class="name">Control is privileged; reads are open on the LAN.</span> Running
+      the race — race control, marshaling, configuration — requires the RD's authenticated
+      role. Watching it (racer PWA, overlays) is open, or lightly tokened, to anyone on the
+      LAN. Control authority never leaves the Director.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">The Cloud authenticates accounts but is never authoritative.</span>
+      Off-LAN viewers reach the Cloud with accounts, but the Cloud only ever serves the read
+      contract and relays — no race is controlled through it.</p>
+    </div>
+    <p>
+      <strong>Identity</strong> has two layers. Within an event, a timer's local reference
+      (a node seat, a sim player name) is <em>bound</em> to a pilot at registration. Across
+      events, pilots ideally share a stable <strong>global identity</strong> (the registry)
+      so career and season stats accrue to one person. Because the Director runs offline, it
+      can operate with purely local pilots and reconcile them to global identity later, on
+      sync — so identity never blocks a race.
+    </p>
+    <div class="callout">
+      <p>
+        Wire-level mechanics — how the RD role authenticates, token/session format, and how
+        read access is scoped on LAN vs Cloud — are the <a href="protocol.html">Protocol</a>
+        spec's job. The cross-event registry and the reconcile-on-sync rules belong to
+        <a href="cloud.html">Cloud &amp; Season</a>. This section fixes only the trust
+        boundaries.
+      </p>
+    </div>
+
+    <h2>10. Streaming &amp; broadcast</h2>
+    <p>
+      Integrated broadcast is a stated goal, and it splits into two halves — one we get for
+      free from the protocol, and one that is a genuine Director subsystem.
+    </p>
+    <div class="principle">
+      <p><span class="name">Overlays are just protocol clients.</span> Staging, leaderboard,
+      split-screen, podium, and bracket overlays are web pages driven by the same
+      read/realtime contract as every other client, loaded as OBS browser sources. They need
+      nothing special — live race state already flows to them.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Broadcast control is an optional Director subsystem.</span>
+      Driving OBS (scene switching via its websocket API, tied to live race state) and
+      handling video capture / RTMP-style inputs is active output the Director performs —
+      distinct from serving overlays. It consumes projections and reacts to race events, but
+      never sits in the timing critical path.</p>
+    </div>
+    <div class="callout">
+      <p>
+        The subsystem's design — the OBS control model, capture / RTMP handling, and the
+        overlay catalogue — is deferred to the <a href="streaming.html">Streaming</a> doc.
+        The architectural commitment here: <em>overlays are protocol clients</em>, and
+        <em>broadcast control is an optional consumer of live state, never a dependency of
+        timing.</em>
+      </p>
+    </div>
+
+    <h2>11. Deferred decisions &amp; where they're tracked</h2>
+    <p>
+      What this doc deliberately doesn't settle, recorded so nothing is silently assumed.
+    </p>
+    <h3>Recorded defaults (revisitable)</h3>
+    <ul>
+      <li><strong>Projection maintenance</strong> — incremental as events append, with full
+      recompute from the log always available.</li>
+      <li><strong>Realtime delivery</strong> — WebSocket (snapshot + change stream) is the
+      working default; SSE is the fallback to weigh in the Protocol spec.</li>
+    </ul>
+    <h3>Open — tracked in their own docs</h3>
+    <ol class="decisions">
+      <li><span class="q">Frontend framework — React vs Svelte.</span> Not load-bearing
+      (every framework consumes the same generated types); to be settled with the client
+      work.</li>
+      <li><span class="q">Adapter internals &amp; how "raw" the raw timing is.</span> The
+      canonical event model, per-source translation, and whether a lap is a re-derivable
+      projection of captured signal — <em>Timer Adapters</em> (coming soon).</li>
+      <li><span class="q">Protocol message shapes, realtime transport &amp; auth.</span>
+      Snapshot format, change envelope, WS-vs-SSE, and the RD's privileged write path —
+      <a href="protocol.html">Protocol</a>.</li>
+      <li><span class="q">Cloud warehouse, season model &amp; identity reconciliation.</span>
+      The aggregate store, season scoring, and merging local pilots into the global
+      registry — <a href="cloud.html">Cloud &amp; Season</a>.</li>
+      <li><span class="q">Streaming &amp; broadcast subsystem.</span> OBS control,
+      capture / RTMP handling, and the overlay catalogue — <a href="streaming.html">Streaming</a>.</li>
+      <li><span class="q">Time &amp; clock authority.</span> The authoritative clock
+      (monotonic for race timing vs wall-clock for logging) and how adapter timestamps —
+      sim time vs hardware time — map onto one timeline — <em>Timer Adapters</em>.</li>
+      <li><span class="q">Log &amp; schema versioning.</span> How the event-log format
+      evolves while keeping old events readable for long-term open data — paired with the
+      <a href="protocol.html">Protocol</a> contract versioning.</li>
+      <li><span class="q">Race engine design.</span> The pluggable generator registry,
+      advancement, and multi-class scheduling — <em>Race Engine</em> (coming soon).</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

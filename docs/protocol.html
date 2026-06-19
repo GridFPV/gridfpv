@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Protocol</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Protocol</h1>
+      <p class="doc-kind">Internal design doc · the one read/realtime contract · <strong>draft</strong></p>
+    </header>
+
+    <p class="lead">
+      The single read/realtime contract that every client speaks — served identically by
+      the Director on the LAN and by the Cloud off-LAN. "One protocol, two transports" made
+      concrete: message shapes, the realtime channel, auth, and versioning.
+    </p>
+
+    <div class="callout">
+      <p>
+        <strong>Early draft.</strong> This page captures scope and the open decisions routed
+        here from the <a href="architecture.html">Architecture</a> doc (see §6 and §9), so
+        they're tracked in the right place. The contract itself is not yet specified. When
+        this doc and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>Scope</h2>
+    <p>This doc will own:</p>
+    <ul>
+      <li>The <strong>snapshot</strong> read model — how a client fetches the current state
+      of the projections it cares about.</li>
+      <li>The <strong>realtime change stream</strong> — how live updates are pushed after
+      the snapshot.</li>
+      <li><strong>Subscription scoping</strong> — which projections / events a given client
+      subscribes to (a spectator vs an overlay vs the RD console).</li>
+      <li><strong>Auth &amp; authorization</strong> — the RD's privileged control path vs
+      open/lightly-tokened reads, and how scoping differs on LAN vs Cloud.</li>
+      <li><strong>Versioning &amp; evolution</strong> — keeping the contract stable as both
+      transports and every client evolve.</li>
+    </ul>
+    <p>
+      The wire types are defined once in the Rust server crate and generated into
+      TypeScript, so the Director, the Cloud, and all clients share one definition
+      (see <a href="architecture.html">Architecture</a> §6).
+    </p>
+
+    <h2>Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Realtime transport — WebSocket vs SSE.</span> Working default
+      (set in Architecture): WebSocket, snapshot + change stream. Decide whether a
+      read-only one-way fit (SSE) is simpler for spectators/overlays, or whether one
+      transport should serve all clients.</li>
+      <li><span class="q">Snapshot + change-stream envelope shape.</span> Full-state vs
+      delta updates, how a client resumes mid-stream, ordering/sequence guarantees, and how
+      the change stream relates to the underlying append-only log offsets.</li>
+      <li><span class="q">Auth mechanism.</span> How the RD role authenticates, token /
+      session format, and how read access is scoped on the LAN (open? lightly tokened?) vs
+      the Cloud (accounts). Trust boundaries are fixed in Architecture §9; the mechanics are
+      decided here.</li>
+      <li><span class="q">Subscription scoping &amp; filtering.</span> How a client narrows
+      to one class / heat / pilot, and pagination for large reads (full event history,
+      open-data queries).</li>
+      <li><span class="q">Contract versioning.</span> How the snapshot/stream are versioned
+      so an older PWA and a newer Director (or vice versa), and the Cloud relay, stay
+      compatible.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

@@ -92,11 +92,18 @@
 
     <h2>Reference</h2>
     <ul class="doc-list">
-      <li class="soon">
-        <div class="doc-title">Architecture <span class="badge">coming soon</span></div>
+      <li>
+        <div class="doc-title"><a href="architecture.html">Architecture</a></div>
         <div class="doc-desc">
-          System shape, components, data model, and the one-protocol/two-transports
-          contract. The deep technical record.
+          System shape, the technology stack and why, the append-only spine, and the
+          one-protocol/two-transports contract. The deep technical record.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="protocol.html">Protocol</a> <span class="badge">draft</span></div>
+        <div class="doc-desc">
+          The single read/realtime contract both transports speak — snapshot, change
+          stream, auth, versioning. Draft: scope + tracked open decisions.
         </div>
       </li>
       <li class="soon">
@@ -105,6 +112,27 @@
           The adapter interface and event model — the foundational wall that makes
           every timing source (Velocidrone, RotorHazard, LapRF, manual) look the same
           to the engine.
+        </div>
+      </li>
+      <li class="soon">
+        <div class="doc-title">Race Engine <span class="badge">coming soon</span></div>
+        <div class="doc-desc">
+          The heat loop, the pluggable bracket / qualifying generator registry,
+          advancement, and multi-class scheduling — the competition machinery.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="cloud.html">Cloud &amp; Season</a> <span class="badge">draft</span></div>
+        <div class="doc-desc">
+          The optional relay, long-term warehouse, and cross-event season layer. Draft:
+          scope + tracked open decisions.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="streaming.html">Streaming</a> <span class="badge">draft</span></div>
+        <div class="doc-desc">
+          The broadcast subsystem — overlays as protocol clients, plus OBS control and
+          capture/RTMP. Draft: scope + tracked open decisions.
         </div>
       </li>
       <li class="soon">
@@ -119,6 +147,17 @@
         <div class="doc-desc">
           The phase plan from foundations through the Director, Cloud, racer PWA,
           and external integrations.
+        </div>
+      </li>
+    </ul>
+
+    <h2>Meta</h2>
+    <ul class="doc-list">
+      <li>
+        <div class="doc-title"><a href="conventions.html">Doc Authoring Conventions</a></div>
+        <div class="doc-desc">
+          How these docs are built — the offline/self-contained rules, the shared
+          stylesheet components, and the vendored Mermaid diagram workflow.
         </div>
       </li>
     </ul>

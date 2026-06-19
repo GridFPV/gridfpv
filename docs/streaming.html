@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Streaming</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Streaming</h1>
+      <p class="doc-kind">Internal design doc · the broadcast subsystem · <strong>draft</strong></p>
+    </header>
+
+    <p class="lead">
+      Integrated broadcast: the overlays that visualize a live race, and the Director-side
+      subsystem that drives OBS and handles capture / RTMP inputs — on par with the
+      streaming benchmark, but open and driven directly by live race state.
+    </p>
+
+    <div class="callout">
+      <p>
+        <strong>Early draft.</strong> This page captures scope and the open decisions routed
+        here from the <a href="architecture.html">Architecture</a> doc (see §10), so they're
+        tracked in the right place. The subsystem itself is not yet specified. When this doc
+        and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>Scope</h2>
+    <p>The architecture fixes two commitments this doc builds on:</p>
+    <ul>
+      <li><strong>Overlays are protocol clients.</strong> Staging, leaderboard,
+      split-screen, podium, and bracket overlays are web pages driven by the same
+      read/realtime contract as every other client, loaded as OBS browser sources — no
+      special path.</li>
+      <li><strong>Broadcast control is an optional Director subsystem.</strong> Driving OBS
+      and handling capture / RTMP is active output the Director performs, reacting to live
+      state, but never in the timing critical path.</li>
+    </ul>
+    <p>This doc will own the design of:</p>
+    <ul>
+      <li>The <strong>OBS control model</strong> — connecting to OBS and mapping race
+      events to scene/source changes.</li>
+      <li><strong>Capture / RTMP handling</strong> — what video the Director ingests or
+      relays, vs. what it leaves to OBS.</li>
+      <li>The <strong>overlay catalogue</strong> — the set of overlays, their data needs,
+      theming, and chapter branding.</li>
+    </ul>
+
+    <h2>Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">OBS control model.</span> Use the obs-websocket API; decide which
+      transitions are automatic (driven by race-state events) vs. RD-manual, and how scene
+      mappings are configured.</li>
+      <li><span class="q">Capture / RTMP boundary.</span> Whether the Director ingests video
+      / accepts RTMP inputs itself, or strictly controls OBS and leaves all video to it —
+      the architectural line between GridFPV and the streaming stack.</li>
+      <li><span class="q">How overlays receive data.</span> Confirm overlays subscribe to
+      the protocol like any client (consistent with Architecture §6), rather than a bespoke
+      push — and how an overlay is told <em>which</em> race / class it is showing.</li>
+      <li><span class="q">Overlay catalogue &amp; theming.</span> The initial set of
+      overlays, customization, and chapter branding.</li>
+      <li><span class="q">Multi-class / multi-output.</span> Driving multiple scenes or
+      outputs when classes run concurrently.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>
