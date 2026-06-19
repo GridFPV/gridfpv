@@ -20,22 +20,31 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+// Every public type derives `ts_rs::TS` and exports into a repo-root `bindings/`
+// directory. ts-rs resolves each `export_to` path against `TS_RS_EXPORT_DIR`, which
+// `cargo xtask gen` pins to the workspace root — so the files always land in
+// `<repo>/bindings/`. Regenerated and drift-checked by `cargo xtask gen` (#4).
 
 /// Identifies the timing source / adapter that produced an event.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
 pub struct AdapterId(pub String);
 
 /// A source-local competitor handle: a node seat, a sim player name, a transponder
 /// id. Bound to a GridFPV pilot later by a *registration* action — never by the
 /// adapter (see Architecture §9). The adapter only reports the refs it sees.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
 pub struct CompetitorRef(pub String);
 
 /// A source's own race/heat identifier, where it exposes one.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
 pub struct SessionId(pub String);
 
 /// A timestamp in the **source's own clock**, stored as microseconds.
@@ -46,8 +55,12 @@ pub struct SessionId(pub String);
 /// microsecond count on their own timeline; the adapter maps that timeline onto the
 /// Director's session axis separately. Integer microseconds keep interval math exact
 /// and comparisons stable (no float-equality hazards in tests).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
+// serde flattens this to the bare `micros` integer (transparent). `#[ts(as = "i64")]`
+// mirrors that on the wire: `SourceTime` resolves to a plain `number` everywhere it
+// is referenced, exactly as it serialises.
+#[ts(export, export_to = "bindings/", as = "i64")]
 pub struct SourceTime {
     /// Microseconds on the source's clock.
     pub micros: i64,
@@ -69,8 +82,9 @@ impl SourceTime {
 /// Which gate a [`Pass`] crossed. The lap gate is index `0`; higher indices are
 /// splits for sources that report multiple gates (Velocidrone). Lap derivation
 /// counts lap-gate passes; splits are intermediate detail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
 pub struct GateIndex(pub u32);
 
 impl GateIndex {
@@ -95,14 +109,16 @@ impl Default for GateIndex {
 /// underneath, so this is `None` there — and signal-based lap recovery is simply
 /// unavailable for such adapters. Kept minimal for now; hardware adapters (v0.2)
 /// extend it.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct SignalContext {
     /// Peak RSSI at the crossing, if reported.
     pub rssi_peak: Option<f32>,
 }
 
 /// A gate crossing — the one observation everything else derives from.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct Pass {
     /// Which timing source produced this pass.
     pub adapter: AdapterId,
@@ -113,13 +129,16 @@ pub struct Pass {
     /// A source-provided monotonic sequence number, where one exists. Disambiguates
     /// passes that share a timestamp and survives clock adjustments; also the basis
     /// for reconnect deduplication.
+    // serde skips this when `None`; `#[ts(optional)]` mirrors that as `sequence?:`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub sequence: Option<u64>,
     /// The gate crossed; defaults to the lap gate.
     #[serde(default, skip_serializing_if = "GateIndex::is_lap_gate")]
     pub gate: GateIndex,
     /// Optional signal context (hardware only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub signal: Option<SignalContext>,
 }
 
@@ -128,7 +147,8 @@ pub struct Pass {
 /// Externally tagged (the default serde representation): each variant serialises as
 /// `{ "VariantName": { ..fields } }`, which maps cleanly to a discriminated union in
 /// the generated TypeScript (#4).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub enum Event {
     /// The source became available. Liveness only; never affects past truth.
     AdapterConnected { adapter: AdapterId },
