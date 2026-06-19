@@ -82,6 +82,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridfpv-adapters"
+version = "0.1.0"
+dependencies = [
+ "gridfpv-events",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gridfpv-app"
 version = "0.1.0"
 dependencies = [
