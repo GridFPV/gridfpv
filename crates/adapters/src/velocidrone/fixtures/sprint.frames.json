@@ -1,0 +1,21 @@
+[
+  { "pilotlist": [ { "uid": "u1", "name": "Ace" }, { "uid": "u2", "name": "Bee" } ] },
+
+  { "FinishGate": { "StartFinishGate": "true" } },
+
+  { "racestatus": { "raceAction": "start" } },
+
+  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 1, "time": 2.0, "gate": 1, "finished": "false" } } },
+  { "racedata": { "Bee": { "uid": "u2", "name": "Bee", "lap": 1, "time": 2.5, "gate": 1, "finished": "false" } } },
+
+  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 1, "time": 8.0, "gate": 2, "finished": "false" } } },
+
+  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 1, "time": 8.0, "gate": 2, "finished": "false" } } },
+
+  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 2, "time": 14.0, "gate": 1, "finished": "false" } } },
+  { "racedata": { "Bee": { "uid": "u2", "name": "Bee", "lap": 2, "time": 15.5, "gate": 1, "finished": "false" } } },
+
+  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 3, "time": 27.0, "gate": 1, "finished": "true" } } },
+
+  { "racestatus": { "raceAction": "race finished" } }
+]
