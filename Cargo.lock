@@ -88,6 +88,7 @@ dependencies = [
  "gridfpv-events",
  "gridfpv-projection",
  "gridfpv-storage",
+ "serde_json",
 ]
 
 [[package]]

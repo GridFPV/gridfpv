@@ -14,3 +14,6 @@ path = "src/main.rs"
 gridfpv-events.workspace = true
 gridfpv-storage.workspace = true
 gridfpv-projection.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

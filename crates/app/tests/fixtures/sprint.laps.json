@@ -1,0 +1,17 @@
+{
+  "competitors": [
+    {
+      "competitor": { "adapter": "sim", "competitor": "Ace" },
+      "laps": [
+        { "number": 1, "duration_micros": 30000000 },
+        { "number": 2, "duration_micros": 31000000 }
+      ]
+    },
+    {
+      "competitor": { "adapter": "sim", "competitor": "Bee" },
+      "laps": [
+        { "number": 1, "duration_micros": 33000000 }
+      ]
+    }
+  ]
+}

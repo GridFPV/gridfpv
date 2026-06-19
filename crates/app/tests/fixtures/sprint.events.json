@@ -1,0 +1,11 @@
+[
+  { "AdapterConnected": { "adapter": "sim" } },
+  { "CompetitorSeen": { "adapter": "sim", "competitor": "Ace" } },
+  { "CompetitorSeen": { "adapter": "sim", "competitor": "Bee" } },
+  { "Pass": { "adapter": "sim", "competitor": "Ace", "at": 0, "sequence": 0 } },
+  { "Pass": { "adapter": "sim", "competitor": "Bee", "at": 5000000, "sequence": 0 } },
+  { "Pass": { "adapter": "sim", "competitor": "Ace", "at": 15000000, "sequence": 100, "gate": 1 } },
+  { "Pass": { "adapter": "sim", "competitor": "Ace", "at": 30000000, "sequence": 1 } },
+  { "Pass": { "adapter": "sim", "competitor": "Bee", "at": 38000000, "sequence": 1 } },
+  { "Pass": { "adapter": "sim", "competitor": "Ace", "at": 61000000, "sequence": 2 } }
+]
