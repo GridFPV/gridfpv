@@ -24,7 +24,7 @@
       <p>
         This doc decides <strong>system shape and stack</strong>. It deliberately defers
         the things that earn their own docs: the adapter interface internals
-        (<a href="index.html">Timer Adapters</a>), the wire contract
+        (<a href="timer-adapters.html">Timer Adapters</a>), the wire contract
         (<a href="protocol.html">Protocol</a>), the Cloud warehouse and season model
         (<a href="cloud.html">Cloud &amp; Season</a>), the broadcast subsystem
         (<a href="streaming.html">Streaming</a>), correctness strategy
@@ -272,14 +272,14 @@ flowchart TB
       <dd>One interface in front of every timing source (Velocidrone first, then
       RotorHazard, LapRF, manual). Adapters are pure translators: source-specific input in,
       canonical timing events out. The interface internals are specified in
-      <em>Timer Adapters</em> (coming soon).</dd>
+      <a href="timer-adapters.html">Timer Adapters</a>.</dd>
 
       <dt>Race engine</dt>
       <dd>The reusable heat loop (<code>schedule → stage → arm → race → land → score →
       advance → next</code>), advancement rules, and a pluggable registry of bracket /
       qualifying generators. It consumes canonical timing events and appends race-state
       events. Its design — the generator registry, advancement, and multi-class
-      scheduling — is deferred to <em>Race Engine</em> (coming soon).</dd>
+      scheduling — is specified in <a href="race-engine.html">Race Engine</a>.</dd>
 
       <dt>Append-only log + projection engine</dt>
       <dd>The source of truth and the derivation layer. Projections are maintained
@@ -458,7 +458,7 @@ flowchart TB
       work.</li>
       <li><span class="q">Adapter internals &amp; how "raw" the raw timing is.</span> The
       canonical event model, per-source translation, and whether a lap is a re-derivable
-      projection of captured signal — <em>Timer Adapters</em> (coming soon).</li>
+      projection of captured signal — <a href="timer-adapters.html">Timer Adapters</a>.</li>
       <li><span class="q">Protocol message shapes, realtime transport &amp; auth.</span>
       Snapshot format, change envelope, WS-vs-SSE, and the RD's privileged write path —
       <a href="protocol.html">Protocol</a>.</li>
@@ -469,12 +469,12 @@ flowchart TB
       capture / RTMP handling, and the overlay catalogue — <a href="streaming.html">Streaming</a>.</li>
       <li><span class="q">Time &amp; clock authority.</span> The authoritative clock
       (monotonic for race timing vs wall-clock for logging) and how adapter timestamps —
-      sim time vs hardware time — map onto one timeline — <em>Timer Adapters</em>.</li>
+      sim time vs hardware time — map onto one timeline — <a href="timer-adapters.html">Timer Adapters</a>.</li>
       <li><span class="q">Log &amp; schema versioning.</span> How the event-log format
       evolves while keeping old events readable for long-term open data — paired with the
       <a href="protocol.html">Protocol</a> contract versioning.</li>
       <li><span class="q">Race engine design.</span> The pluggable generator registry,
-      advancement, and multi-class scheduling — <em>Race Engine</em> (coming soon).</li>
+      advancement, and multi-class scheduling — <a href="race-engine.html">Race Engine</a>.</li>
     </ol>
 
     <footer class="doc-footer">

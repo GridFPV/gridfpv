@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Race Engine</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Race Engine</h1>
+      <p class="doc-kind">Internal design doc · the heat loop, the format registry, and how a race is run</p>
+    </header>
+
+    <p class="lead">
+      The machinery that turns <em>canonical passes plus a format</em> into a run race. It
+      consumes the passes the adapters produce, runs the heat loop, derives laps and results
+      as projections, and advances per the format's rules until there's a result. The same
+      loop powers Practice, Qualifying, and Mains — only the format differs.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>heat loop</strong>, the <strong>format / generator
+        interface</strong>, and how heats are <strong>scored and advanced</strong>. It
+        defers the exact rules of each named format (MultiGP P9–P16, FAI, Chase-the-Ace,
+        ZippyQ specifics) to per-format specs written as they're built; here we define the
+        interface they plug into. It builds on canonical events from
+        <a href="timer-adapters.html">Timer Adapters</a> and the append-only spine from
+        <a href="architecture.html">Architecture</a> §3. When this doc and the
+        <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. Where it sits</h2>
+    <p>
+      The engine is the consumer between the timing layer and the projections. Passes arrive
+      as canonical observations; the engine runs heats and appends <strong>race-state
+      events</strong> (staged, armed, started, scored, advanced); laps, results, and
+      standings are <strong>projections</strong> derived from the whole log. The engine
+      holds race logic but never owns timing truth — it reacts to passes, it doesn't
+      generate them.
+    </p>
+
+    <pre class="mermaid">
+flowchart LR
+  passes["Canonical passes&lt;br/&gt;(from adapters)"] --> engine
+  subgraph engine["Race engine"]
+    loop["Heat loop"]
+    fmt["Format generator"]
+  end
+  engine -->|race-state events| log[("Append-only log")]
+  log -->|derive| proj["Projections&lt;br/&gt;laps · results · standings"]
+  fmt -->|next heats| loop
+  loop -->|results| fmt
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class log sot;
+    </pre>
+
+    <h2>2. The heat loop</h2>
+    <p>
+      One reusable state machine runs every heat, in every phase. Each transition is an
+      appended race-state event, so a heat's whole history — including an abort or a re-run —
+      is reconstructible from the log, and live race control is just commands that drive
+      these transitions.
+    </p>
+
+    <pre class="mermaid">
+stateDiagram-v2
+  [*] --> Scheduled
+  Scheduled --> Staged: stage
+  Staged --> Armed: arm
+  Armed --> Running: start
+  Running --> Landed: time elapsed / all landed
+  Landed --> Scored: score
+  Scored --> [*]: advance
+  Staged --> Scheduled: abort
+  Armed --> Staged: abort
+  Running --> Staged: abort / restart
+  Scored --> Scheduled: discard &amp; re-run
+    </pre>
+
+    <p>
+      Passes are consumed only while a heat is <em>Running</em> (and during a grace window
+      after — late crossings still count until the heat is scored). <em>Staging</em> is the
+      countdown; <em>arm</em> opens the gate to detections; <em>land</em> closes the race;
+      <em>score</em> finalizes the result; <em>advance</em> hands results to the format.
+      Abort, restart, and discard-and-re-run are first-class transitions, recorded like any
+      other.
+    </p>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Staging assigns frequencies/channels and avoids
+      conflicts; landing waits on marshals; re-runs are common.</p>
+      <p><span class="label">Sim</span>No frequency step; heats can fire back-to-back;
+      staging is a short countdown.</p>
+    </div>
+
+    <h2>3. The format / generator interface</h2>
+    <p>
+      Formats are a pluggable registry — the same idea as adapters, for competition
+      structure. There is <strong>one unified generator interface</strong>, and qualifying
+      formats and bracket formats are both implementations of it.
+    </p>
+    <div class="principle">
+      <p><span class="name">A format is a function of state, not a fixed schedule.</span>
+      Given the seeded field, its config, and the results of completed heats, a generator
+      does three things: <strong>emit the next heat(s)</strong>, or <strong>declare the
+      format complete</strong>, and at any point <strong>expose the current ranking</strong>.
+      That single contract drives the heat loop until a format finishes.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>The honesty-forcing case is ZippyQ / rolling.</strong> It is <em>not</em> a
+        precomputed bracket — the RD adds rounds on demand and pilots fly when ready. If the
+        interface handles "produce more heats dynamically from current state," then fixed
+        structures (round robin, single / double elimination, multi-tier A/B/C/D/E mains,
+        Chase-the-Ace, MultiGP/FAI P9–P16) are the easy case — a generator that happens to
+        emit a predetermined sequence. Designing against the dynamic format keeps the
+        abstraction honest, exactly as Velocidrone does for adapters.</p>
+    </div>
+    <p>
+      Qualifying and mains differ only in what their generators do internally: a qualifying
+      generator runs rounds and aggregates flights into a ranking; a bracket generator emits
+      heats and advances seeds toward a winner. Both <em>emit heats, consume results, and
+      expose an ordering</em> — so the heat loop, scheduling, and advancement machinery are
+      written once and shared.
+    </p>
+
+    <h2>4. Scoring &amp; lap derivation</h2>
+    <p>
+      Scoring is shared engine logic over the canonical passes, so every source is scored
+      identically. Passes become laps; laps and a win condition become a heat result.
+    </p>
+    <ul>
+      <li><strong>Laps from passes.</strong> The first pass is the holeshot / start; a lap
+      completes on each subsequent crossing of the lap gate (a full circuit of the gates /
+      splits where the track has them). Marshaling adjudications (void, insert, adjust) fold
+      in exactly as in <a href="architecture.html">Architecture</a> §3 — the lap list is a
+      projection.</li>
+      <li><strong>Win condition (per-heat / format config).</strong> Most laps in a time
+      window, first to N laps, or best single / consecutive lap (qualifying). The engine
+      applies the configured condition; ties break by a recorded rule.</li>
+    </ul>
+
+    <h2>5. Advancement &amp; scheduling</h2>
+    <p>
+      When a heat is scored, its result is handed to the format generator, which decides
+      what comes next — more heats (with seeds advancing per the configured "top-N advance"),
+      a move up a tier, a finals heat, or completion. This is the circular heart of the
+      mains: run → result → advance → run.
+    </p>
+    <p>
+      <strong>Multi-class scheduling.</strong> Several classes can be live at once, each with
+      its own format, sharing scarce resources — the timer and, for IRL, the frequency pool.
+      The engine interleaves heats across classes and serializes access to shared resources;
+      frequency allocation specifically is a contested ownership question (below).
+    </p>
+    <p>
+      <strong>Manual adjustments.</strong> Re-seeding, moving a pilot between heats before
+      they fly, and discard-and-re-run are RD actions appended as events the generator
+      respects on its next step — never edits to past truth.
+    </p>
+
+    <h2>6. Determinism &amp; replay</h2>
+    <div class="principle">
+      <p><span class="name">The engine is a pure function of the log.</span> Given the same
+      events, it produces the same heats, results, and standings — that's what lets
+      projections rebuild and recorded sessions replay (the testing backbone). Anything
+      non-deterministic — a random draw for seeding, a coin-flip tie-break — is resolved
+      once and its <em>outcome</em> recorded as an event, so replay never re-rolls it.</p>
+    </div>
+
+    <h2>7. Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Win-condition catalogue &amp; tie-breaks.</span> The exact set of
+      win conditions and the tie-break rules (and how each is recorded so replay is
+      deterministic).</li>
+      <li><span class="q">Start / holeshot &amp; lap model.</span> Gate-start vs staggered
+      start, how the first lap is defined, and how splits/sectors derive — ties to the
+      gate/split model in <a href="timer-adapters.html">Timer Adapters</a>.</li>
+      <li><span class="q">Frequency / channel allocation ownership.</span> Whether the
+      engine (it knows the heat) or the adapter (it knows the hardware) owns channel
+      assignment and conflict avoidance — shared with the Timer Adapters open decision.</li>
+      <li><span class="q">Live / partial ranking semantics.</span> How a generator exposes a
+      meaningful current ordering mid-format (partial standings, provisional seeds).</li>
+      <li><span class="q">Manual-adjustment operation set.</span> The full set of pre-fly RD
+      operations (re-seed, move, swap, byes, withdrawals) and how each is modelled as an
+      event.</li>
+      <li><span class="q">Per-format specs.</span> The concrete rules of each named format
+      (MultiGP P9–P16, FAI, double elimination, Chase-the-Ace, ZippyQ) — each its own spec,
+      written as it's built, validated against this interface.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

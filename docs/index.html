@@ -32,6 +32,15 @@
       </p>
     </div>
 
+    <div class="principle">
+      <p><span class="name">Authoritative, but living.</span> These docs are the current
+      plan of record — build against them, and treat their decisions as settled until
+      deliberately changed. They are <em>not</em> sacred: keep questioning the choices, and
+      when a better answer emerges or reality disagrees, update the document so it stays the
+      source of truth. Each doc records its open decisions for exactly this reason. A plan
+      we're afraid to revise stops being a useful plan.</p>
+    </div>
+
     <h2>Documents</h2>
     <ul class="doc-list">
       <li>
@@ -91,12 +100,34 @@
     </ul>
 
     <h2>Reference</h2>
+    <p>
+      Ordered the way the system is best understood and built: the map first, then the
+      Director's core data path top-to-bottom (timing in → engine → protocol out), then the
+      optional subsystems that hang off it, then how we keep it correct, and finally the
+      plan that sequences the work.
+    </p>
     <ul class="doc-list">
       <li>
         <div class="doc-title"><a href="architecture.html">Architecture</a></div>
         <div class="doc-desc">
           System shape, the technology stack and why, the append-only spine, and the
-          one-protocol/two-transports contract. The deep technical record.
+          one-protocol/two-transports contract. The deep technical record — start here.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="timer-adapters.html">Timer Adapters</a></div>
+        <div class="doc-desc">
+          The adapter interface and canonical event model — the foundational wall that makes
+          every timing source (Velocidrone, RotorHazard, LapRF, manual) look the same
+          to the engine. The vocabulary the whole log speaks.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="race-engine.html">Race Engine</a></div>
+        <div class="doc-desc">
+          The heat loop, the pluggable bracket / qualifying generator registry,
+          advancement, and multi-class scheduling — the competition machinery that
+          consumes canonical events.
         </div>
       </li>
       <li>
@@ -104,21 +135,6 @@
         <div class="doc-desc">
           The single read/realtime contract both transports speak — snapshot, change
           stream, auth, versioning. Draft: scope + tracked open decisions.
-        </div>
-      </li>
-      <li class="soon">
-        <div class="doc-title">Timer Adapters <span class="badge">coming soon</span></div>
-        <div class="doc-desc">
-          The adapter interface and event model — the foundational wall that makes
-          every timing source (Velocidrone, RotorHazard, LapRF, manual) look the same
-          to the engine.
-        </div>
-      </li>
-      <li class="soon">
-        <div class="doc-title">Race Engine <span class="badge">coming soon</span></div>
-        <div class="doc-desc">
-          The heat loop, the pluggable bracket / qualifying generator registry,
-          advancement, and multi-class scheduling — the competition machinery.
         </div>
       </li>
       <li>
@@ -146,7 +162,7 @@
         <div class="doc-title">Roadmap <span class="badge">coming soon</span></div>
         <div class="doc-desc">
           The phase plan from foundations through the Director, Cloud, racer PWA,
-          and external integrations.
+          and external integrations. Written last — it sequences everything above.
         </div>
       </li>
     </ul>
