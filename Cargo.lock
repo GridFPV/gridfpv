@@ -94,6 +94,7 @@ dependencies = [
 name = "gridfpv-app"
 version = "0.1.0"
 dependencies = [
+ "gridfpv-adapters",
  "gridfpv-events",
  "gridfpv-projection",
  "gridfpv-storage",
