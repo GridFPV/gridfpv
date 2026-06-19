@@ -457,9 +457,10 @@ flowchart TB
     </ul>
     <h3>Open — tracked in their own docs</h3>
     <ol class="decisions">
-      <li><span class="q">Frontend framework — React vs Svelte.</span> Not load-bearing
-      (every framework consumes the same generated types); recommended default and rationale
-      now in <a href="clients.html">Clients</a>, pending sign-off.</li>
+      <li><span class="resolved">Resolved — Frontend framework: Svelte.</span> Not load-bearing
+      (every framework consumes the same generated types); chosen for leanness and
+      realtime/overlay fit — rationale in <a href="clients.html">Clients</a> (React recorded as
+      the revisitable alternative).</li>
       <li><span class="q">Adapter internals &amp; how "raw" the raw timing is.</span> The
       canonical event model, per-source translation, and whether a lap is a re-derivable
       projection of captured signal — <a href="timer-adapters.html">Timer Adapters</a>.</li>

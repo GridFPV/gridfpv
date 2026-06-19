@@ -272,11 +272,13 @@ flowchart LR
         transcoding, compositing) is an enormous, latency-sensitive, platform-specific
         surface — exactly the kind of thing that could threaten "it cannot crash mid-heat"
         (Architecture §2) if it shared a process with timing. OBS already does it superbly and
-        every FPV broadcaster already runs it. So the strong recommended boundary is
-        <strong>control-only</strong>: GridFPV speaks obs-websocket and serves browser
-        sources, and no video bytes flow through the Director. Whether GridFPV ever ingests or
-        relays <em>any</em> video (e.g. a convenience RTMP relay) is left as an open decision
-        (§7) — but the default and the architectural preference is that it does not.
+        every FPV broadcaster already runs it. So the boundary is <strong>resolved as
+        control-only</strong>, and that is the critical-path rule: GridFPV speaks
+        obs-websocket and serves browser sources, and no video bytes flow through the Director.
+        A planned <em>future</em> direction does foresee GridFPV doing its own video capture —
+        an integrated "record while you race" mode (§7) — but only ever <strong>out of
+        process</strong>, never touching the timing critical path, and control-only holds
+        firmly for the foreseeable v1.
       </p>
     </div>
 
@@ -360,31 +362,46 @@ flowchart LR
       Still open: the exact scene-map schema, whether a dedicated broadcast-operator view is
       worth building separate from the RD console, and how much of the obs-websocket surface to
       use (scene switch only, vs also start/stop output, replay buffer, source toggles).
-      <strong>Recommendation:</strong> ship scene-switching first with a small fixed verb set
-      (set scene, start/stop stream, save replay buffer); expand only as real shows demand it.</li>
-      <li><span class="q">Capture / RTMP boundary.</span> Confirmed direction: control-only —
-      OBS owns all video, GridFPV serves overlays and drives OBS (§4). Still open: whether
-      GridFPV ever offers a convenience video path at all (e.g. a thin RTMP relay or a
-      "record this pilot's feed" trigger) or stays strictly control-plane.
-      <strong>Recommendation:</strong> stay strictly control-plane for v1; revisit only if a
-      concrete need appears that OBS genuinely can't cover, and even then keep any media work in
-      a separate process so it can never threaten timing.</li>
+      <strong>Resolved (as recommended):</strong> the obs-websocket verb set is
+      scene-switch + start/stop output + save-replay-buffer first; expand only as real shows
+      demand it. The exact scene-map schema and whether a dedicated broadcast-operator view is
+      worth building separate from the RD console remain open.</li>
+      <li><span class="q">Capture / RTMP boundary.</span> <strong>Resolved:</strong>
+      control-only is the critical-path rule — OBS owns all video; GridFPV speaks obs-websocket
+      and serves browser-source overlays; no video bytes flow through the Director (§4). This
+      holds firmly for the foreseeable v1.</li>
+      <li><span class="q">Future direction — integrated "record while you race" capture.</span>
+      A planned future capability, inspired by FPVTrackside: <strong>integrated video capture
+      with the timer and overlays built in</strong> — recording the race as it is timed —
+      done <em>more flexibly</em> than FPVTrackside (whose streaming the maintainer finds too
+      limited). This is a real future direction, not a vague maybe. Two hard constraints carry
+      over from the control-only rule: it must live <strong>out of process</strong> and must
+      <strong>never touch the timing critical path</strong> (§4). Until then, control-only
+      stays the firm rule.</li>
       <li><span class="q">Overlay binding &amp; the program pointer.</span> Confirmed:
       URL-carried explicit binding is the default; <code>follow=program</code> reads a published
-      broadcast-state projection (§2.1, §3.3). Still open: the exact query-param vocabulary and
-      whether the program pointer is one global value or one per output.</li>
-      <li><span class="q">Theme format &amp; custom overlays.</span> The concrete theme bundle
-      format (tokens, layout config, asset packaging), how chapter branding is stored with the
-      event, and how a community-authored overlay registers against the catalogue while staying
-      a pure protocol client. Pairs with the client/rendering details in
+      broadcast-state projection (§2.1, §3.3). <strong>Resolved (as recommended):</strong> adopt
+      a URL-carried overlay binding vocabulary plus a published "program pointer" projection.
+      Still open: the exact query-param vocabulary and whether the program pointer is one global
+      value or one per output.</li>
+      <li><span class="q">Theme format &amp; custom overlays.</span>
+      <strong>Resolved (as recommended):</strong> theme bundles are served by the Director —
+      offline, with no CDN dependency (§5.1). Still open: the concrete theme bundle format
+      (tokens, layout config, asset packaging), how chapter branding is stored with the event,
+      and how a community-authored overlay registers against the catalogue while staying a pure
+      protocol client. Pairs with the client/rendering details in
       <a href="clients.html">Clients</a>.</li>
-      <li><span class="q">Multi-output granularity.</span> How many concurrent OBS connections /
-      outputs to support, whether per-class is the right unit, and how scene maps are scoped
-      when classes and outputs multiply (§6).</li>
-      <li><span class="q">Off-LAN broadcast.</span> Whether the broadcast-control subsystem and
-      remote overlays are expected to operate against the Cloud transport (remote commentary /
-      remote producer), and any added latency or auth implications — ties to the Cloud relay in
-      <a href="cloud.html">Cloud &amp; Season</a> and the trust model in
+      <li><span class="q">Multi-output granularity.</span>
+      <strong>Resolved (as recommended):</strong> multi-output is handled by composition —
+      independently-bound overlays and one OBS connection per output, each with its own scene
+      map, with no new mechanism (§6). Still open: how many concurrent OBS connections / outputs
+      to support, whether per-class is the right unit, and how scene maps are scoped when classes
+      and outputs multiply.</li>
+      <li><span class="q">Off-LAN broadcast.</span> <strong>Resolved (as recommended):</strong>
+      remote overlays work over the Cloud transport (read-only, identical contract), but remote
+      broadcast <em>control</em> stays Director-local for now — driving OBS over the Cloud relay
+      is deferred. Still open when revisited: added latency and auth implications — ties to the
+      Cloud relay in <a href="cloud.html">Cloud &amp; Season</a> and the trust model in
       <a href="architecture.html">Architecture</a> §9.</li>
     </ol>
 

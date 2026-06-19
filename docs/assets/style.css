@@ -242,6 +242,8 @@ ol.decisions > li::before {
   color: var(--text-muted);
 }
 ol.decisions .q { font-weight: 700; }
+/* A resolved/accepted decision (vs an open .q). */
+ol.decisions .resolved { font-weight: 700; color: var(--gfpv-green-dark); }
 
 /* --- Mermaid diagrams --------------------------------------------------- */
 

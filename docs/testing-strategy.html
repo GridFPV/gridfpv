@@ -11,7 +11,7 @@
     <header class="masthead">
       <p class="brand">GridFPV</p>
       <h1>Testing Strategy</h1>
-      <p class="doc-kind">Internal design doc · how we keep race-timing logic correct without a live timer</p>
+      <p class="doc-kind">Internal design doc · how we keep race-timing logic correct without depending on a live external backend</p>
     </header>
 
     <p class="lead">
@@ -19,7 +19,10 @@
       is a property we can <em>replay</em>, not one we have to witness live: pure translators
       with golden cases, recorded sessions replayed into a deterministic engine, and
       projection fixtures that fold marshaling in. The one rule everything else serves —
-      <strong>we never test against a live timer.</strong>
+      <strong>no test depends on a live, shared, or production external backend</strong>
+      (the Velocidrone game servers above all); recorded-session replay is the deterministic
+      backbone. A self-hosted, disposable instance we fully control — dockerized RotorHazard —
+      is fair game for live integration tests, because we spin it up and tear it down ourselves.
     </p>
 
     <div class="callout">
@@ -38,13 +41,21 @@
 
     <h2>1. The hard guardrail</h2>
     <div class="principle">
-      <p><span class="name">We never test against a live timer.</span> No automated test —
-      unit, integration, or end-to-end — connects to a running Velocidrone build, an RH node,
-      or any physical hardware. Live sources are non-deterministic, slow, and unavailable in
-      CI; a suite that depends on one is a suite that flakes, can't run on a contributor's
-      laptop, and can't run at all without the gear in the room. Correctness instead comes
-      from <strong>recorded-session replay</strong> and <strong>golden cases</strong>: fixed
-      inputs captured once, checked into the repo, and replayed deterministically forever.</p>
+      <p><span class="name">No test depends on a live, shared, or production external
+      backend.</span> No automated test — unit, integration, or end-to-end — may depend on a
+      running <strong>Velocidrone game server</strong>, a shared/production RH deployment, or
+      any source we don't fully control. Those backends are non-deterministic, shared, and out
+      of our hands; a suite that leans on one flakes, can't run on a contributor's laptop, and
+      can't run at all without the gear in the room. Correctness instead rests on
+      <strong>recorded-session replay</strong> and <strong>golden cases</strong>: fixed inputs
+      captured once, checked into the repo, and replayed deterministically forever — the
+      hermetic backbone, and the <em>only</em> option for Velocidrone, which is fixtures-only.
+      What this rule does <em>not</em> ban is a source we own and dispose of ourselves: a
+      <strong>self-hosted, disposable instance</strong> — the
+      <a href="timer-adapters.html">dockerized RotorHazard</a> we spin up and tear down — may
+      back <strong>live integration tests, including in CI</strong>, because it is reproducible
+      and entirely under our control. Recorded replay stays the backbone; controlled-live RH is
+      an <em>added</em> integration level on top of it.</p>
     </div>
     <p>
       This is not a compromise we tolerate; it is the design working as intended. Because
@@ -57,11 +68,15 @@
     </p>
     <div class="callout">
       <p>
-        <strong>What "never live in CI" does not forbid:</strong> capturing fixtures from
-        real sources, and a human running a manual/integration check against the
-        <a href="timer-adapters.html">dockerized RotorHazard</a> or a live Velocidrone build
-        before a release. Those are deliberate, human-driven, off-CI activities (§5) — they
-        produce fixtures and confidence, never a gate that the automated suite depends on.
+        <strong>Where the line actually falls:</strong> the ban is on depending on a live
+        <em>shared or production</em> backend — the Velocidrone game servers above all, which
+        stay fixtures-only. It is <em>not</em> a blanket ban on live sources in CI. Live
+        integration tests against the <a href="timer-adapters.html">dockerized RotorHazard</a>
+        are permitted, CI included, because that instance is disposable and ours to control
+        (§5). Capturing fixtures from real sources, and a human sanity-checking the adapter
+        against a live Velocidrone build before a release, remain deliberate off-CI activities
+        that produce fixtures and confidence — never a gate the automated suite leans on a
+        third party for.
       </p>
     </div>
 
@@ -211,19 +226,21 @@ flowchart LR
 
     <h2>5. The dockerized RotorHazard's role</h2>
     <p>
-      The dockerized RH instance is a <strong>fixture factory and a manual-validation
-      bench</strong> — explicitly <em>not</em> a CI dependency. It exists so we can produce
-      realistic hardware-shaped fixtures and sanity-check the real adapter against a real (if
-      virtual) source, on a human's schedule.
+      The dockerized RH instance plays two roles: a <strong>fixture factory</strong> and a
+      permitted <strong>live integration-test source, CI included</strong>. Because we spin it
+      up and tear it down ourselves, it is reproducible and disposable — so unlike a shared or
+      production backend it can back automated tests directly. It lets us produce realistic
+      hardware-shaped fixtures <em>and</em> run live integration checks of the real adapter
+      against a real (if virtual) source.
     </p>
     <table>
       <thead>
         <tr><th>Use</th><th>In CI?</th><th>Why</th></tr>
       </thead>
       <tbody>
-        <tr><td>Capturing recorded fixtures</td><td>No — captured once, output is checked in</td><td>Turns a live session into a deterministic replay asset</td></tr>
-        <tr><td>Manual / integration validation before a release</td><td>No — human-driven, off-CI</td><td>Confidence that the live adapter still speaks the real protocol</td></tr>
-        <tr><td>Replaying the captured fixtures</td><td>Yes</td><td>The fixtures are deterministic; the container is gone by then</td></tr>
+        <tr><td>Capturing recorded fixtures</td><td>Not required in CI — captured once, output is checked in</td><td>Turns a session into a deterministic replay asset</td></tr>
+        <tr><td>Live integration tests against dockerized RH</td><td>May run in CI — it's controllable and reproducible</td><td>Spun up and torn down per run; exercises the real adapter against a real source we own</td></tr>
+        <tr><td>Replaying the captured fixtures</td><td>Yes</td><td>The fixtures are deterministic; no container needed</td></tr>
       </tbody>
     </table>
     <p>
@@ -231,8 +248,11 @@ flowchart LR
       <a href="timer-adapters.html">Velocidrone WebSocket message schema</a> is captured and
       where a human confirms the adapter against the real feed (Timer Adapters §9). Once
       captured, the schema and a sample session become fixtures, and the live build never
-      enters an automated run. <strong>The line is bright: live sources produce fixtures and
-      human confidence; only fixtures gate the build.</strong>
+      enters an automated run — Velocidrone stays <strong>fixtures-only</strong>.
+      <strong>The bright line is the backend, not liveness: no shared or production external
+      backend in tests (the Velocidrone game servers stay fixtures-only), while a self-hosted
+      disposable instance we own — dockerized RH — may back live integration tests, CI
+      included.</strong>
     </p>
 
     <h2>6. Testing the format generators</h2>
@@ -324,22 +344,32 @@ flowchart TB
       serialized and stored (raw source captures vs canonical-log JSON, inline vs sidecar for
       signal history), how large captures stay diff-reviewable, and how they version alongside
       the log/schema versioning open decision in <a href="architecture.html">Architecture</a>
-      §11.</li>
+      §11. <strong>Accepted:</strong> fixtures are stored as canonical-log JSON, with signal
+      history as a sidecar rather than inline, and versioned alongside the log/schema versioning.</li>
       <li><span class="q">Golden-update workflow.</span> The mechanism for regenerating golden
       outputs when behavior changes intentionally (an "accept new goldens" command), and the
-      review discipline that keeps an accidental change from being rubber-stamped.</li>
+      review discipline that keeps an accidental change from being rubber-stamped.
+      <strong>Accepted:</strong> an "accept goldens" command regenerates outputs, paired with a
+      mandatory diff review so no change is rubber-stamped.</li>
       <li><span class="q">Capture tooling.</span> How sessions are recorded from the dockerized
       RotorHazard and a live Velocidrone build (a tap in the adapter? a standalone recorder?),
-      and how a capture is annotated with its expected outcome.</li>
+      and how a capture is annotated with its expected outcome. <strong>Accepted:</strong> an
+      adapter-tap / standalone recorder captures sessions, and each capture carries an
+      expected-outcome annotation.</li>
       <li><span class="q">Property-based testing scope.</span> Whether to add generative /
       property tests over the projection layer (e.g. "marshaling never loses a raw observation,"
-      "incremental == recompute for any log") on top of the enumerated golden cases.</li>
+      "incremental == recompute for any log") on top of the enumerated golden cases.
+      <strong>Accepted:</strong> add property-based tests over the projection layer on top of
+      the enumerated golden cases.</li>
       <li><span class="q">Determinism enforcement.</span> How non-determinism is kept out of
       the engine in practice — banning wall-clock/RNG reads in the pure path, and asserting
-      byte-identical projections across repeated replays as a CI check.</li>
+      byte-identical projections across repeated replays as a CI check. <strong>Accepted:</strong>
+      no wall-clock or RNG reads in the pure path, enforced by byte-identical replays as a CI check.</li>
       <li><span class="q">Cross-version replay.</span> Whether old fixtures must replay
       cleanly against a newer engine/projection (a regression guarantee for the open-data
-      promise), and how that interacts with intentional scoring changes.</li>
+      promise), and how that interacts with intentional scoring changes. <strong>Accepted:</strong>
+      replay is byte-identical within a projection/contract version; an intentional change is a
+      new recorded version, with the old fixtures deliberately re-blessed.</li>
     </ol>
 
     <footer class="doc-footer">

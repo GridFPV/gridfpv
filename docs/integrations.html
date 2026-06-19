@@ -263,15 +263,29 @@ flowchart LR
       history, and a new metric is a new projection — not a migration. Openness is durable:
       what we expose can always be re-derived and re-served, including after corrections.</p>
     </div>
+    <div class="principle">
+      <p><span class="name">Open to any account-holder, not anonymous.</span> Open data is
+      <em>open</em> in the sense that any pilot or chapter can get the full, queryable,
+      exportable data and keep their own portable copy — not in the sense that Cloud reads are
+      unauthenticated. The <strong>Cloud</strong> open-data API and export require a
+      <strong>free account / account-anchored API key</strong> rather than anonymous access;
+      the gate is an account, not a paywall, and a pilot's data stays portable to them. The
+      <strong>Director</strong> still serves <strong>single-event</strong> open data openly on
+      the <strong>LAN</strong> — it is offline-first, where no Cloud account is even possible.
+      Public <strong>embeddable widgets</strong> are a <strong>per-chapter opt-in</strong>: a
+      chapter may choose to publish a public widget for its events.</p>
+    </div>
     <div class="callout">
       <p>
-        <strong>Where it lives:</strong> single-event open data can be served by the Director,
-        but the cross-event surface — career profiles, season standings, the dashboards
-        chapters embed — is <strong>Cloud-only by nature</strong>, because only the Cloud
-        warehouse holds the accumulated history (<a href="architecture.html">Architecture</a>
-        §8; <a href="cloud.html">Cloud &amp; Season</a>). The Cloud reuses the same Rust server
-        crate over Postgres, so the public read surface is one contract served from either
-        tier — the long-term portal is just its widest, most-cached deployment.
+        <strong>Where it lives:</strong> single-event open data can be served openly by the
+        Director on the LAN, but the cross-event surface — career profiles, season standings,
+        the dashboards chapters embed — is <strong>Cloud-only by nature</strong>, because only
+        the Cloud warehouse holds the accumulated history
+        (<a href="architecture.html">Architecture</a> §8; <a href="cloud.html">Cloud &amp;
+        Season</a>), and Cloud reads are account-gated (a free account, anchored to an API
+        key). The Cloud reuses the same Rust server crate over Postgres, so the public read
+        surface is one contract served from either tier — the long-term portal is just its
+        widest, most-cached deployment.
       </p>
     </div>
 
@@ -293,8 +307,10 @@ flowchart LR
       <p><span class="name">Cloud secrets are out of the FOSS repo.</span> Anything the
       optional Cloud needs — its own service credentials, deployment config, signing keys —
       lives with the Cloud deployment, not in the open-source repository. The FOSS Director
-      carries only the credentials an RD supplies for their own event (the chapter key), and
-      the public reuses no secret at all to read open data.</p>
+      carries only the credentials an RD supplies for their own event (the chapter key); the
+      Director's single-event open data is served openly on the LAN with no secret at all,
+      while Cloud open-data reads use the reader's own free account / account-anchored API key
+      rather than any secret of ours.</p>
     </div>
     <div class="callout">
       <p>
@@ -310,38 +326,47 @@ flowchart LR
     <ol class="decisions">
       <li><span class="q">Exact RaceSync API scope.</span> The specific endpoints, auth flow,
       and result payload shapes (heats, lap times, placements) GridFPV depends on, plus
-      incremental-vs-final push granularity and idempotency keys. <em>Recommendation:</em>
-      pin against the live RaceSync API when the integration is built, using RotorHazard's
-      RaceSync plugin as prior art; treat a sanctioned chapter event as the validation case
-      rather than mocking the API blind.</li>
+      incremental-vs-final push granularity and idempotency keys. <em>Accepted as
+      recommended:</em> pin the RaceSync API scope against the live API at build time, using
+      RotorHazard's RaceSync plugin as prior art; treat a sanctioned chapter event as the
+      validation case rather than mocking the API blind. Open refinement: the exact endpoint
+      list and payload shapes still get fixed when the integration is built.</li>
       <li><span class="q">Open-data API shape &amp; auth.</span> Whether the public read API
       is exactly the protocol's read contract or a thinner public projection of it; query /
-      pagination model for large historical and cross-event reads; rate-limiting; and whether
-      public reads are fully anonymous or lightly keyed. <em>Recommendation:</em> reuse the
-      one read contract (<a href="protocol.html">Protocol</a>) with public reads anonymous by
-      default, adding only pagination and caching for the cross-event scale; settle alongside
-      the Protocol auth/scoping decisions.</li>
+      pagination model for large historical and cross-event reads; and rate-limiting.
+      <em>Decided (auth):</em> Cloud open-data reads are <strong>account-gated</strong> — they
+      require a free account / account-anchored API key, not anonymous access — while the
+      Director serves single-event open data openly on the LAN; data stays open to any
+      account-holder and portable to the pilot. <em>Recommendation (shape):</em> reuse the one
+      read contract (<a href="protocol.html">Protocol</a>), adding only pagination and caching
+      for the cross-event scale; settle the remaining shape questions alongside the Protocol
+      auth/scoping decisions.</li>
       <li><span class="q">Widget embedding model.</span> How embeddable widgets are delivered
       and isolated — iframe vs web component vs script snippet — and how a chapter scopes a
-      widget to its events / pilots. <em>Recommendation:</em> favor a self-contained embed
-      (iframe or web component) that talks only to the public read API, so a chapter never
-      handles a credential to embed; decide with the long-term portal in
+      widget to its events / pilots. <em>Decided (publishing):</em> public widgets are a
+      <strong>per-chapter opt-in</strong> — a chapter chooses whether to publish a public
+      widget at all. <em>Recommendation (delivery):</em> favor a self-contained embed (iframe
+      or web component) that talks only to the public read API, so a chapter never handles a
+      credential to embed; decide the remaining delivery details with the long-term portal in
       <a href="cloud.html">Cloud &amp; Season</a>.</li>
       <li><span class="q">Credential storage mechanics.</span> Where the chapter API key is
       stored, encryption at rest, per-chapter scoping, and handling multiple chapter keys on
-      one Director. <em>Recommendation:</em> store in the Director catalog tier with at-rest
-      protection via the OS keystore where available, scoped per chapter; keep it strictly out
-      of the log and every export.</li>
+      one Director. <em>Accepted as recommended:</em> store the chapter API key in the
+      Director catalog tier with at-rest protection via the OS keystore, scoped per chapter,
+      and keep it strictly out of the log and every export. Open refinement: handling multiple
+      chapter keys on one Director and the keystore fallback where none is available.</li>
       <li><span class="q">Sync trigger &amp; queue policy.</span> What drives the results push
       (per-heat finalize, per-round, manual, periodic), how the outbound queue retries and
       surfaces failures to the RD, and how a re-push after a correction reconciles.
-      <em>Recommendation:</em> default to automatic per-round enqueue with a manual "push now"
-      and a visible, resumable queue — never a blocking, in-the-critical-path call.</li>
+      <em>Accepted as recommended:</em> automatic per-round enqueue plus a manual "push now"
+      and a visible, resumable queue — never a blocking, in-the-critical-path call. Open
+      refinement: retry backoff and exactly how failures surface to the RD.</li>
       <li><span class="q">Import provenance &amp; refresh.</span> Whether an imported roster /
       ranking records its source for re-import, and how a re-import reconciles with entries the
-      RD has since edited (added pilots, manual seed changes). <em>Recommendation:</em> tag
-      imported entries with their source and treat re-import as a merge that never clobbers
-      local RD edits.</li>
+      RD has since edited (added pilots, manual seed changes). <em>Accepted as recommended:</em>
+      tag imported entries with their source and re-import as a <strong>non-clobbering
+      merge</strong> that preserves local RD edits. Open refinement: the exact conflict rule
+      when a re-imported entry diverges from a hand-edited one.</li>
     </ol>
 
     <footer class="doc-footer">

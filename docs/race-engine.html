@@ -175,23 +175,27 @@ stateDiagram-v2
 
     <h2>7. Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">Win-condition catalogue &amp; tie-breaks.</span> The exact set of
-      win conditions and the tie-break rules (and how each is recorded so replay is
-      deterministic).</li>
-      <li><span class="q">Start / holeshot &amp; lap model.</span> Gate-start vs staggered
-      start, how the first lap is defined, and how splits/sectors derive — ties to the
-      gate/split model in <a href="timer-adapters.html">Timer Adapters</a>.</li>
-      <li><span class="q">Frequency / channel allocation ownership.</span> Whether the
-      engine (it knows the heat) or the adapter (it knows the hardware) owns channel
-      assignment and conflict avoidance — shared with the Timer Adapters open decision.</li>
-      <li><span class="q">Live / partial ranking semantics.</span> How a generator exposes a
-      meaningful current ordering mid-format (partial standings, provisional seeds).</li>
-      <li><span class="q">Manual-adjustment operation set.</span> The full set of pre-fly RD
-      operations (re-seed, move, swap, byes, withdrawals) and how each is modelled as an
-      event.</li>
+      <li><span class="resolved">Resolved — Win-condition catalogue &amp; tie-breaks.</span>
+      The catalogue is timed (most laps in a window), first-to-N laps, and best-single /
+      fastest-consecutive (qualifying). Ties break by earlier completion of the deciding lap
+      (timed) or next-best lap (qualifying), and tie-break outcomes are recorded so replay is
+      deterministic.</li>
+      <li><span class="resolved">Resolved — Start / holeshot &amp; lap model.</span> Start
+      type is configurable (gate-start vs staggered); the first crossing of the start/finish
+      gate after arming opens lap 1; splits derive per the gate model in
+      <a href="timer-adapters.html">Timer Adapters</a>.</li>
+      <li><span class="resolved">Resolved — Frequency / channel allocation ownership.</span>
+      The Race Engine allocates channels (it knows the heat / field); the adapter advertises
+      its capabilities and applies the tuning — shared with the Timer Adapters decision.</li>
+      <li><span class="resolved">Resolved — Live / partial ranking semantics.</span>
+      Generators always expose a provisional ranking; mid-heat position is by current lap,
+      then split.</li>
+      <li><span class="resolved">Resolved — Manual-adjustment operation set.</span> The
+      pre-fly RD operations are re-seed, move/swap a pilot between heats, add/withdraw, byes,
+      and discard-and-re-run — all modelled as appended events.</li>
       <li><span class="q">Per-format specs.</span> The concrete rules of each named format
       (MultiGP P9–P16, FAI, double elimination, Chase-the-Ace, ZippyQ) — each its own spec,
-      written as it's built, validated against this interface.</li>
+      written and validated against this interface as it's built.</li>
     </ol>
 
     <footer class="doc-footer">

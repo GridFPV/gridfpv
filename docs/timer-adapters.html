@@ -45,8 +45,10 @@
       <p><span class="name">Adapters are pure translators.</span> A source's input goes in;
       canonical events come out. Adapters hold no race logic, own no truth, and never block
       the engine — they translate and append. That purity is what makes them testable by
-      replaying recorded sessions (see Testing Strategy) and is the
-      <strong>hard guardrail: we never test against a live timer.</strong></p>
+      replaying recorded sessions, and underpins the testing guardrail: tests never depend
+      on a live, shared timing backend (the Velocidrone servers), though a self-hosted,
+      disposable instance like dockerized RotorHazard is fair game — see
+      <a href="testing-strategy.html">Testing Strategy</a>.</p>
     </div>
     <div class="principle">
       <p><span class="name">Observations in, derivations out.</span> Adapters emit raw
@@ -240,8 +242,11 @@ flowchart LR
       <dd>Socket.IO / RHAPI; pass events with per-node RSSI and EnterAt/ExitAt thresholds,
       plus RSSI history — the full-signal case, with calibration and signal-based recovery.
       Built in parallel with Velocidrone as the first real-world target; a <strong>dockerized
-      RotorHazard</strong> instance gives a controllable source for capturing recorded
-      sessions (which feed replay tests — never live-timer testing in CI).</dd>
+      RotorHazard</strong> is a self-hosted, disposable instance we fully control, so it both
+      feeds recorded fixtures <em>and</em> is allowed for live integration tests, including in
+      CI. The guardrail bans depending on a <strong>live, shared/production backend</strong>
+      (concretely the Velocidrone game servers, which stay fixtures-only) — not all live
+      timers.</dd>
       <dt>LapRF</dt>
       <dd>Binary protocol over serial/USB/TCP; <code>PassingRecord</code> (slot, RTC time,
       transponder id) and <code>RssiRecord</code> (RSSI min/max/mean) — passes with RSSI
@@ -255,22 +260,27 @@ flowchart LR
 
     <h2>9. Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">Signal-history capture &amp; storage.</span> When an adapter has
-      signal context, how much is persisted for recovery (peak/stats vs full RSSI history),
-      and where — inline in the log vs a sidecar referenced by the pass. Pairs with the
-      storage tiers in <a href="architecture.html">Architecture</a> §4.</li>
-      <li><span class="q">Multi-gate / split track model.</span> How rich the gate/split
-      model is (ordered splits per lap, sector times) and how the engine derives lap vs
-      split times from it.</li>
-      <li><span class="q">Calibration model.</span> How per-pilot enter/exit calibration is
-      represented and stored (adapter config vs log events) and how the Practice
-      calibration window feeds it.</li>
-      <li><span class="q">Reconnect / resume &amp; dedup.</span> Exact semantics when an
-      adapter drops mid-race — how sequence numbers / timestamps guarantee no double-counted
-      or lost passes on resume.</li>
-      <li><span class="q">Frequency / channel management ownership.</span> Whether
-      channel assignment and conflict avoidance live in the adapter (it knows the hardware)
-      or the race engine (it knows the heat) — for IRL sources only.</li>
+      <li><span class="resolved">Resolved — Signal-history storage.</span> Hardware sources
+      always store a <strong>per-pass signal summary</strong> (peak RSSI, enter/exit window)
+      inline in the log. In addition, a <strong>bounded RSSI window</strong> around each pass
+      is retained as an <strong>event-local sidecar</strong> — not pushed to the Cloud by
+      default — so a missed lap can be re-derived. Pairs with the storage tiers in
+      <a href="architecture.html">Architecture</a> §4.</li>
+      <li><span class="resolved">Resolved — Multi-gate / split track model.</span> A track is
+      modeled as ordered gates per lap; a <code>Pass</code> carries a gate index. A lap is a
+      start/finish-gate crossing and splits are sector times; the default is a single gate.</li>
+      <li><span class="resolved">Resolved — Calibration model.</span> Per-pilot enter/exit
+      calibration is represented as <strong>logged adapter config</strong>, fed by the
+      Practice calibration window. Hardware-only.</li>
+      <li><span class="resolved">Resolved — Reconnect / resume &amp; dedup.</span> Passes are
+      idempotent, keyed on (source, sequence#) — or (source, local-ref, source-timestamp)
+      where no sequence counter exists. On reconnect the adapter buffers and de-dups against
+      those keys, so a resume can't double-count or lose passes.</li>
+      <li><span class="resolved">Resolved — Frequency / channel management ownership.</span>
+      The <strong>race engine allocates</strong> channels — it knows the heat/field and avoids
+      conflicts — while the <strong>adapter advertises</strong> the hardware's channel
+      capabilities/constraints and <strong>applies</strong> the tuning. Shared with the Race
+      Engine; IRL sources only.</li>
       <li><span class="q">Velocidrone WebSocket message schema.</span> The exact message
       shapes to map, captured against a live build when the adapter is implemented (never in
       an automated test — see the guardrail).</li>

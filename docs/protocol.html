@@ -281,6 +281,12 @@ sequenceDiagram
       channel on the same connection — bidirectional by nature (commands up, acknowledgements
       and resulting state down), which is part of why the RD console wants WebSocket
       regardless of the spectator-transport decision.</p>
+      <p><em>Future:</em> the control path may serve <strong>one or more</strong> authenticated
+      RD-role clients on the LAN — the desktop RD console and/or a future <strong>mobile
+      RD-control surface</strong> the RD uses to run the race from their phone (e.g. start the
+      heat from their seat). It still requires the RD role (with stricter auth for a mobile
+      device) and, like all control, is <strong>Director-only and never exposed on the
+      Cloud</strong>.</p>
     </div>
     <div class="principle">
       <p><span class="name">The Cloud authenticates accounts but never controls.</span>
@@ -389,38 +395,49 @@ flowchart LR
 
     <h2>9. Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">Realtime transport — WebSocket only, or WebSocket + SSE fallback.</span>
+      <li><span class="q">RESOLVED — Realtime transport: WebSocket-only first.</span>
       WebSocket is the working default (Architecture §11) and the RD control path needs it
-      regardless. Decide whether read-only spectators/overlays also get an SSE path (simpler,
-      cache/proxy-friendly, native reconnect) or whether one transport serves everyone to
-      avoid a second code path. <em>Recommendation:</em> ship WebSocket-only first, keep the
-      envelope transport-neutral, and add SSE only if a real spectator/overlay need appears.</li>
-      <li><span class="q">Change-envelope schema — delta vs fresh-value, per projection.</span>
-      The exact envelope shape, which projections send fine-grained deltas vs a whole new
-      value, and how a marshaling re-fold is represented. <em>Recommendation:</em> deltas for
-      append-heavy projections (lap lists, live state), fresh-value for cheap or re-folded
-      ones (heat result, ranking after a correction).</li>
-      <li><span class="q">Resume window &amp; retention.</span> How far back the server retains
-      replayable envelopes before forcing a re-snapshot, and whether that window differs on the
-      Director (memory-bounded, one event) vs the Cloud (many events). Pairs with the storage
-      tiers in <a href="architecture.html">Architecture</a> §4.</li>
-      <li><span class="q">Auth mechanism &amp; token/session format.</span> The concrete RD
-      authentication, the on-wire credential (opaque token vs signed JWT vs cookie session),
-      and the optional LAN read join-token format. Trust boundaries are fixed in
-      <a href="architecture.html">Architecture</a> §9; only the mechanics are open here.</li>
-      <li><span class="q">Sequence-cursor representation.</span> Whether the public projection
-      sequence is a single monotonic integer per stream, or per-projection cursors a client
-      composes — and how it stays stable across a Director restart / projection recompute.</li>
-      <li><span class="q">Scope grammar &amp; pagination.</span> The exact addressing scheme
-      for scopes (URL shape, multi-scope subscribe), filter expressiveness, and the pagination
-      model for large historical / open-data reads.</li>
-      <li><span class="q">Contract version negotiation &amp; support band.</span> Where the
-      version is carried (header, connect message, URL), how many prior versions a server
-      keeps serving, and the exact "too old, please refresh" signal. Paired with log/schema
-      versioning in <a href="architecture.html">Architecture</a> §11.</li>
-      <li><span class="q">Error model.</span> A single shared error shape across HTTP reads,
-      the WS/SSE stream, and control acknowledgements — auth failure, unknown scope,
-      stale-cursor, version-mismatch — defined once in Rust like the rest of the contract.</li>
+      regardless, so the contract ships <strong>WebSocket-only</strong> for every client. The
+      change envelope stays transport-neutral, so an SSE read-only path can be added later
+      <em>only if</em> a real spectator/overlay need appears — not by default, to avoid a second
+      code path.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Change-envelope schema: delta vs fresh-value, per projection.</span>
+      The accepted approach is <strong>deltas for append-heavy projections</strong> (lap lists,
+      live state) and <strong>fresh-value for cheap or re-folded ones</strong> (heat result,
+      ranking after a correction), with a marshaling re-fold surfacing as a fresh-value envelope.
+      The exact envelope shapes are refined at implementation.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Resume window &amp; retention.</span>
+      The server retains a <strong>bounded window</strong> of replayable envelopes before forcing
+      a re-snapshot: the <strong>Director is memory-bounded</strong> (one event) and the
+      <strong>Cloud keeps a larger window</strong> (many events). Pairs with the storage tiers in
+      <a href="architecture.html">Architecture</a> §4. Exact window sizes are tuned at
+      implementation.</li>
+      <li><span class="q">RESOLVED — Auth credential format: opaque bearer tokens (+ optional signed join-token).</span>
+      RD and account auth use <strong>opaque bearer tokens</strong> backed by a server-side
+      session (easy to revoke), plus an optional <strong>lightweight signed join-token</strong>
+      (printed as a QR code, baked into the URL) granting read-only LAN access. Trust boundaries
+      are fixed in <a href="architecture.html">Architecture</a> §9. <em>Revisit JWT only if</em>
+      stateless Cloud scaling later demands it.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Sequence-cursor representation.</span>
+      The public projection sequence is a <strong>single monotonic integer per stream</strong>
+      (not per-projection cursors a client composes). How it stays stable across a Director
+      restart / projection recompute is settled at implementation.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Scope grammar &amp; pagination.</span>
+      The contract uses a <strong>scope grammar</strong> for addressing (with multi-scope
+      subscribe) and <strong>cursor-based pagination</strong> for large historical / open-data
+      reads. The exact addressing scheme, URL shapes, and filter expressiveness are refined at
+      implementation.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Contract version negotiation &amp; support band.</span>
+      The version is carried <strong>in the connect message</strong>; the server serves a
+      <strong>band of recent versions</strong> so an un-refreshed PWA keeps working, and emits an
+      explicit <strong>"too old, please refresh" signal</strong> when a client falls outside it.
+      Paired with log/schema versioning in <a href="architecture.html">Architecture</a> §11. The
+      exact support-band depth is set at implementation.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Error model.</span> The
+      contract uses a <strong>single shared error shape</strong> across HTTP reads, the WS stream,
+      and control acknowledgements — auth failure, unknown scope, stale-cursor, version-mismatch —
+      defined once in Rust like the rest of the contract. The exact fields are pinned at
+      implementation.</li>
     </ol>
 
     <footer class="doc-footer">
