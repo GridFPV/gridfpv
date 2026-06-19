@@ -8,3 +8,11 @@ rust-version.workspace = true
 
 [dependencies]
 gridfpv-events.workspace = true
+serde_json.workspace = true
+thiserror = "2"
+# `bundled` compiles SQLite from source, so no system libsqlite3 is needed
+# (a C compiler is required at build time). Keeps the build hermetic.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
