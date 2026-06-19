@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod clock;
 pub mod dedup;
+pub mod rotorhazard;
+pub mod velocidrone;
 
 /// One thing a timing source may or may not be able to do. The engine queries
 /// these to adapt its UI and marshaling instead of special-casing source kinds.
