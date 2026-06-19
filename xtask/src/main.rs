@@ -5,18 +5,39 @@
 //! never drift. Pure std + cargo, so it works the same on Windows/Linux/macOS.
 #![forbid(unsafe_code)]
 
+use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 /// Run a command, echoing it first; returns whether it succeeded.
 fn run(program: &str, args: &[&str]) -> bool {
+    run_env(program, args, &[])
+}
+
+/// Like [`run`], but with extra environment variables set for the child process.
+fn run_env(program: &str, args: &[&str], env: &[(&str, &Path)]) -> bool {
     println!("\n\x1b[1m$ {program} {}\x1b[0m", args.join(" "));
-    match Command::new(program).args(args).status() {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    match cmd.status() {
         Ok(status) => status.success(),
         Err(err) => {
             eprintln!("failed to launch `{program}`: {err}");
             false
         }
     }
+}
+
+/// The workspace root — the parent of this crate's manifest dir (`<root>/xtask`).
+/// Used to pin `TS_RS_EXPORT_DIR` and to run git from a known location so `bindings/`
+/// resolves to `<root>/bindings/` regardless of the invoking shell's cwd.
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask manifest dir always has a parent (the workspace root)")
+        .to_path_buf()
 }
 
 fn fmt() -> bool {
@@ -38,13 +59,77 @@ fn lint() -> bool {
 }
 
 fn test() -> bool {
-    run("cargo", &["test", "--all"])
+    // `cargo test --all` also runs ts-rs's generated export tests, which write the
+    // `.ts` files. Pin `TS_RS_EXPORT_DIR` to the workspace root so they land in the
+    // canonical `<root>/bindings/` (ts-rs's default base is the *crate's* dir, which
+    // would otherwise scatter a stray copy under `crates/events/`).
+    run_env(
+        "cargo",
+        &["test", "--all"],
+        &[("TS_RS_EXPORT_DIR", &workspace_root())],
+    )
 }
 
-/// Rust→TS generation drift check. Wired in #4; a no-op placeholder until then.
+/// Regenerate the Rust→TypeScript bindings (#4).
+///
+/// ts-rs exports its types from a generated `#[test]` per `#[ts(export)]` type, so
+/// "generation" is just running the events crate's export tests: each derived `TS`
+/// impl writes its `.ts` file. `TS_RS_EXPORT_DIR` pins the base directory to the
+/// workspace root, so every `export_to = "bindings/"` lands in `<root>/bindings/`.
+fn gen_bindings(root: &Path) -> bool {
+    run_env(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "gridfpv-events",
+            "--quiet",
+            "export_bindings",
+        ],
+        &[("TS_RS_EXPORT_DIR", root)],
+    )
+}
+
+/// `cargo xtask gen` — regenerate the bindings in place.
 fn generate() -> bool {
-    println!("\ngen: Rust→TS generation not wired yet (#4) — skipping");
+    let root = workspace_root();
+    if !gen_bindings(&root) {
+        eprintln!("gen: failed to export TypeScript bindings");
+        return false;
+    }
+    println!("gen: TypeScript bindings written to bindings/");
     true
+}
+
+/// Drift check for `ci`: regenerate, then fail if the checked-in `bindings/` differ
+/// from what the current Rust types produce. Keeps `bindings/*.ts` honest without a
+/// human remembering to rerun the generator.
+///
+/// `git add --intent-to-add` first so a *newly added* binding (an untracked file)
+/// shows up in `git diff` rather than being silently ignored; the check then catches
+/// added, modified, and deleted bindings alike.
+fn gen_check() -> bool {
+    let root = workspace_root();
+    if !gen_bindings(&root) {
+        eprintln!("gen: failed to export TypeScript bindings");
+        return false;
+    }
+    let root_str = root.to_str().expect("workspace root path is valid UTF-8");
+    run(
+        "git",
+        &["-C", root_str, "add", "--intent-to-add", "bindings/"],
+    );
+    let clean = run(
+        "git",
+        &["-C", root_str, "diff", "--exit-code", "--", "bindings/"],
+    );
+    if !clean {
+        eprintln!(
+            "\n\x1b[31mgen drift: bindings/ is out of date with the Rust types.\x1b[0m\n\
+             Run `cargo xtask gen` and commit the updated bindings/*.ts files."
+        );
+    }
+    clean
 }
 
 fn main() {
@@ -54,7 +139,7 @@ fn main() {
         "lint" | "clippy" => lint(),
         "test" => test(),
         "gen" => generate(),
-        "ci" => fmt() && lint() && test() && generate(),
+        "ci" => fmt() && lint() && test() && gen_check(),
         other => {
             eprintln!("unknown task: {other}");
             eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen]");

@@ -8,6 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 serde.workspace = true
+# Rust→TypeScript type export (#4). Kept local to this crate (not the workspace
+# Cargo.toml) so the bindings work stays confined to the event model.
+ts-rs = "12"
 
 [dev-dependencies]
 serde_json.workspace = true
