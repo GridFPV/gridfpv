@@ -1,0 +1,16 @@
+[package]
+name = "gridfpv-events"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+# Rust→TypeScript type export (#4). Kept local to this crate (not the workspace
+# Cargo.toml) so the bindings work stays confined to the event model.
+ts-rs = "12"
+
+[dev-dependencies]
+serde_json.workspace = true
