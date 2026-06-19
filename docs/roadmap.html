@@ -61,14 +61,15 @@ flowchart LR
   v01["v0.1&lt;br/&gt;Walking skeleton"] --> v02["v0.2&lt;br/&gt;First adapters"]
   v02 --> v03["v0.3&lt;br/&gt;Race engine"]
   v03 --> v04["v0.4&lt;br/&gt;Director + RD console"]
-  v04 --> v05["v0.5&lt;br/&gt;PWA + overlays"]
-  v05 --> v06["v0.6&lt;br/&gt;Cloud"]
-  v06 --> v07["v0.7&lt;br/&gt;Integrations + broadcast"]
+  v04 --> v05["v0.5&lt;br/&gt;Racer/spectator PWA"]
+  v05 --> v06["v0.6&lt;br/&gt;Streaming / broadcast"]
+  v06 --> v07["v0.7&lt;br/&gt;Cloud"]
+  v07 --> v08["v0.8&lt;br/&gt;Integrations"]
 
   test["Testing / replay · docs · CI + single-binary packaging — run across every phase"]
   test -.-> v01
   test -.-> v04
-  test -.-> v07
+  test -.-> v08
 
   classDef live fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
   class v04 live
@@ -109,15 +110,22 @@ flowchart LR
     </ul>
     <p><strong>Done when:</strong> a complete event runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
 
-    <h3>v0.5 — Racer/spectator PWA + overlays</h3>
-    <p><strong>Goal:</strong> everyone else can watch. (<a href="clients.html">Clients</a>, <a href="streaming.html">Streaming</a>)</p>
+    <h3>v0.5 — Racer/spectator PWA</h3>
+    <p><strong>Goal:</strong> racers and spectators can follow along on their phones. (<a href="clients.html">Clients</a>)</p>
     <ul>
       <li>The <strong>racer/spectator PWA</strong> (snapshot+subscribe, scoped views, LAN-degraded, install/offline where the secure context allows); QR/join-token onboarding.</li>
-      <li><strong>OBS overlays</strong> (leaderboard, staging, podium, bracket) as read-only protocol clients.</li>
     </ul>
-    <p><strong>Done when:</strong> racers on the LAN see live standings on their phones and overlays render in OBS from live state.</p>
+    <p><strong>Done when:</strong> racers on the LAN see their next heat and live standings on their phones.</p>
 
-    <h3>v0.6 — Cloud</h3>
+    <h3>v0.6 — Streaming / broadcast</h3>
+    <p><strong>Goal:</strong> stream a race — overlays and OBS direction — entirely on the LAN, no Cloud required. (<a href="streaming.html">Streaming</a>, <a href="clients.html">Clients</a>)</p>
+    <ul>
+      <li><strong>OBS overlays</strong> (leaderboard, staging, podium, bracket) as read-only protocol clients, with theming.</li>
+      <li><strong>Broadcast control</strong> — obs-websocket scene maps driven by race-state, with automatic / armed / manual transition modes; the control-only capture boundary (OBS owns video).</li>
+    </ul>
+    <p><strong>Done when:</strong> overlays render in OBS from live state and scene switches follow the heat loop — all driven by a Director on the LAN with no Cloud.</p>
+
+    <h3>v0.7 — Cloud</h3>
     <p><strong>Goal:</strong> off-LAN reach and longevity. (<a href="cloud.html">Cloud &amp; Season</a>)</p>
     <ul>
       <li><strong>One-way resumable push</strong> (Director → Cloud); Postgres warehouse via the same server crate + storage trait.</li>
@@ -125,13 +133,13 @@ flowchart LR
     </ul>
     <p><strong>Done when:</strong> a Director with internet relays a live event to off-LAN viewers, a season aggregates across events, and a self-hosted Cloud deploy is documented.</p>
 
-    <h3>v0.7 — Integrations + broadcast control</h3>
-    <p><strong>Goal:</strong> connect to the ecosystem. (<a href="integrations.html">External Integrations</a>, <a href="streaming.html">Streaming</a>)</p>
+    <h3>v0.8 — Integrations</h3>
+    <p><strong>Goal:</strong> connect to the ecosystem. (<a href="integrations.html">External Integrations</a>)</p>
     <ul>
-      <li><strong>MultiGP RaceSync</strong> (roster import, queued/resumable results push); <strong>open-data API</strong> + export + embeddable widgets.</li>
-      <li><strong>OBS broadcast control</strong> (obs-websocket, scene maps, transition modes); credential handling.</li>
+      <li><strong>MultiGP RaceSync</strong> (roster import, queued/resumable results push); credential handling.</li>
+      <li><strong>Open-data API</strong> + export + embeddable widgets — the cross-event surface leans on the Cloud warehouse from v0.7.</li>
     </ul>
-    <p><strong>Done when:</strong> roster import + results push work against a chapter, the open-data API serves, and broadcast control drives OBS scenes from race-state.</p>
+    <p><strong>Done when:</strong> roster import + results push work against a chapter, and the open-data API + widgets serve.</p>
 
     <h2>3. Cross-cutting workstreams</h2>
     <p>These run across every phase rather than living in one:</p>
@@ -179,7 +187,7 @@ flowchart LR
       <li><strong>Finalize</strong> this roadmap (review &amp; sign-off).</li>
       <li><strong>Merge</strong> <code>planning</code> → <code>devel</code> (which promotes to <code>main</code> on releases).</li>
       <li><strong>Add the GitLab MCP</strong> integration.</li>
-      <li><strong>Instantiate</strong> the plan: create the label set and the project board; create the milestones (v0.1 … v0.7) with dates; create one <strong>tracking issue per feature</strong> and seed its child issues.</li>
+      <li><strong>Instantiate</strong> the plan: create the label set and the project board; create the milestones (v0.1 … v0.8) in sequence; create one <strong>tracking issue per feature</strong> and seed its child issues.</li>
     </ol>
     <p>
       <strong>Seeding depth:</strong> break <strong>v0.1</strong> down fully into issues now, create the
