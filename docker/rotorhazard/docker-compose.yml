@@ -1,0 +1,25 @@
+# Dockerized RotorHazard — a self-hosted, disposable instance we fully control,
+# for capturing fixtures and (later) live integration tests (#25).
+#
+# RotorHazard boots with 8 simulated (mock) nodes; `simulate_lap` over Socket.IO
+# generates real pass/lap records. The container is the only "live timer" our
+# tests are allowed to depend on (the banned dependency is shared/production
+# backends like the Velocidrone game servers — see docs/testing-strategy.html).
+#
+#   docker compose -f docker/rotorhazard/docker-compose.yml up -d
+#   python docker/rotorhazard/capture_frames.py   # drives a race, dumps frames
+#   docker compose -f docker/rotorhazard/docker-compose.yml down
+services:
+  rotorhazard:
+    image: cruwaller/rotorhazard:latest
+    container_name: gridfpv-rh
+    ports:
+      - "5000:5000"   # HTTP + Socket.IO
+    # Mock nodes are the default when no hardware is attached; no extra config
+    # needed. The server logs "Server is using simulated (mock) nodes".
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/',timeout=5).status==200 else 1)"]
+      interval: 10s
+      timeout: 8s
+      retries: 6
+      start_period: 20s

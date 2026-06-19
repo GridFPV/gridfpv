@@ -1,0 +1,158 @@
+{
+  "_source": "Captured from cruwaller/rotorhazard:latest (mock nodes) via simulate_lap, 2026-06. Ground truth for the RotorHazard adapter (#23/#25).",
+  "race_status": [
+    {
+      "race_status": 3,
+      "race_format_id": 1,
+      "race_heat_id": 0,
+      "race_class_id": null,
+      "unlimited_time": 0,
+      "race_time_sec": 120,
+      "staging_tones": 0,
+      "hide_stage_timer": true,
+      "pi_starts_at_s": 0,
+      "pi_staging_at_s": 0
+    },
+    {
+      "race_status": 1,
+      "race_format_id": 1,
+      "race_heat_id": 0,
+      "race_class_id": null,
+      "unlimited_time": 0,
+      "race_time_sec": 120,
+      "staging_tones": 0,
+      "hide_stage_timer": true,
+      "pi_starts_at_s": 465387.486060193,
+      "pi_staging_at_s": 465384.615060193
+    },
+    {
+      "race_status": 2,
+      "race_format_id": 1,
+      "race_heat_id": 0,
+      "race_class_id": null,
+      "unlimited_time": 0,
+      "race_time_sec": 120,
+      "staging_tones": 0,
+      "hide_stage_timer": true,
+      "pi_starts_at_s": 465387.486060193,
+      "pi_staging_at_s": 465384.615060193
+    }
+  ],
+  "pass_record": [
+    {
+      "node": 0,
+      "frequency": 5658,
+      "timestamp": 1781909632912.0264
+    },
+    {
+      "node": 1,
+      "frequency": 5695,
+      "timestamp": 1781909636112.932
+    },
+    {
+      "node": 0,
+      "frequency": 5658,
+      "timestamp": 1781909638113.2498
+    },
+    {
+      "node": 0,
+      "frequency": 5658,
+      "timestamp": 1781909640714.415
+    }
+  ],
+  "node_data_last": {
+    "node_peak_rssi": [
+      0,
+      0,
+      0
+    ],
+    "node_nadir_rssi": [
+      0,
+      0,
+      0
+    ],
+    "pass_peak_rssi": [
+      0,
+      0,
+      0
+    ],
+    "pass_nadir_rssi": [
+      0,
+      0,
+      0
+    ],
+    "debug_pass_count": [
+      1,
+      0,
+      0
+    ]
+  },
+  "current_laps_final": {
+    "current": {
+      "node_index": [
+        {
+          "laps": [
+            {
+              "lap_index": 0,
+              "lap_number": 0,
+              "lap_raw": 2215.2961200335994,
+              "lap_time": "0:02.215",
+              "lap_time_stamp": 2215.2961200335994,
+              "splits": [],
+              "late_lap": false
+            },
+            {
+              "lap_index": 1,
+              "lap_number": 1,
+              "lap_raw": 5201.223340991419,
+              "lap_time": "0:05.201",
+              "lap_time_stamp": 7416.519461025018,
+              "splits": [],
+              "late_lap": false
+            },
+            {
+              "lap_index": 2,
+              "lap_number": 2,
+              "lap_raw": 2601.165377011057,
+              "lap_time": "0:02.601",
+              "lap_time_stamp": 10017.684838036075,
+              "splits": [],
+              "late_lap": false
+            }
+          ],
+          "fastest_lap_index": 2,
+          "pilot": null,
+          "finished_flag": null,
+          "consecutive_start": null,
+          "consecutive_laps": null
+        },
+        {
+          "laps": [
+            {
+              "lap_index": 0,
+              "lap_number": 0,
+              "lap_raw": 5416.2016219925135,
+              "lap_time": "0:05.416",
+              "lap_time_stamp": 5416.2016219925135,
+              "splits": [],
+              "late_lap": false
+            }
+          ],
+          "fastest_lap_index": null,
+          "pilot": null,
+          "finished_flag": null,
+          "consecutive_start": null,
+          "consecutive_laps": null
+        },
+        {
+          "laps": [],
+          "fastest_lap_index": null,
+          "pilot": null,
+          "finished_flag": null,
+          "consecutive_start": null,
+          "consecutive_laps": null
+        }
+      ]
+    }
+  }
+}
