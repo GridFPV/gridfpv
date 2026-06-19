@@ -1,17 +1,118 @@
 [
-  { "event": "race_status", "race_status": 3, "race_heat_id": 7 },
+  { "event": "race_status", "race_status": 3, "race_heat_id": 0 },
+  { "event": "race_status", "race_status": 1, "race_heat_id": 0 },
 
-  { "event": "seat", "node_index": 0, "pilot_callsign": "Ace" },
-  { "event": "seat", "node_index": 1, "pilot_callsign": "Bee" },
+  { "event": "pass_record", "node": 0, "frequency": 5658, "timestamp": 1781909632912.0264 },
+  { "event": "node_data", "pass_peak_rssi": [0, 0, 0], "node_peak_rssi": [0, 0, 0], "pass_nadir_rssi": [0, 0, 0], "node_nadir_rssi": [0, 0, 0], "debug_pass_count": [1, 0, 0] },
+  {
+    "event": "current_laps",
+    "current": {
+      "node_index": [
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 2215.2961200335994, "lap_time": "0:02.215", "lap_time_stamp": 2215.2961200335994, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        { "laps": [], "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null },
+        { "laps": [], "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null }
+      ]
+    }
+  },
 
-  { "event": "race_status", "race_status": 1, "race_heat_id": 7 },
+  { "event": "pass_record", "node": 1, "frequency": 5695, "timestamp": 1781909636112.932 },
+  { "event": "node_data", "pass_peak_rssi": [0, 0, 0], "node_peak_rssi": [0, 0, 0], "pass_nadir_rssi": [0, 0, 0], "node_nadir_rssi": [0, 0, 0], "debug_pass_count": [1, 1, 0] },
+  {
+    "event": "current_laps",
+    "current": {
+      "node_index": [
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 2215.2961200335994, "lap_time": "0:02.215", "lap_time_stamp": 2215.2961200335994, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 5416.2016219925135, "lap_time": "0:05.416", "lap_time_stamp": 5416.2016219925135, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        { "laps": [], "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null }
+      ]
+    }
+  },
 
-  { "event": "lap", "node_index": 0, "lap_number": 0, "lap_time_stamp": 4200, "lap_time": 4200, "source": "realtime", "peak_rssi": 142.0, "deleted": false },
-  { "event": "lap", "node_index": 1, "lap_number": 0, "lap_time_stamp": 4500, "lap_time": 4500, "source": "realtime", "peak_rssi": 138.0, "deleted": false },
+  { "event": "pass_record", "node": 0, "frequency": 5658, "timestamp": 1781909638113.2498 },
+  { "event": "node_data", "pass_peak_rssi": [0, 0, 0], "node_peak_rssi": [0, 0, 0], "pass_nadir_rssi": [0, 0, 0], "node_nadir_rssi": [0, 0, 0], "debug_pass_count": [2, 1, 0] },
+  {
+    "event": "current_laps",
+    "current": {
+      "node_index": [
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 2215.2961200335994, "lap_time": "0:02.215", "lap_time_stamp": 2215.2961200335994, "splits": [], "late_lap": false },
+            { "lap_index": 1, "lap_number": 1, "lap_raw": 5201.223340991419, "lap_time": "0:05.201", "lap_time_stamp": 7416.519461025018, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": 1, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 5416.2016219925135, "lap_time": "0:05.416", "lap_time_stamp": 5416.2016219925135, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        { "laps": [], "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null }
+      ]
+    }
+  },
 
-  { "event": "lap", "node_index": 0, "lap_number": 1, "lap_time_stamp": 28350, "lap_time": 24150, "source": "realtime", "peak_rssi": 150.0, "deleted": false },
+  {
+    "event": "current_laps",
+    "current": {
+      "node_index": [
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 2215.2961200335994, "lap_time": "0:02.215", "lap_time_stamp": 2215.2961200335994, "splits": [], "late_lap": false },
+            { "lap_index": 1, "lap_number": 1, "lap_raw": 5201.223340991419, "lap_time": "0:05.201", "lap_time_stamp": 7416.519461025018, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": 1, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 5416.2016219925135, "lap_time": "0:05.416", "lap_time_stamp": 5416.2016219925135, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        { "laps": [], "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null }
+      ]
+    }
+  },
 
-  { "event": "lap", "node_index": 0, "lap_number": 2, "lap_time_stamp": 99999, "lap_time": 71649, "source": "realtime", "peak_rssi": 90.0, "deleted": true },
+  { "event": "pass_record", "node": 0, "frequency": 5658, "timestamp": 1781909640714.415 },
+  { "event": "node_data", "pass_peak_rssi": [0, 0, 0], "node_peak_rssi": [0, 0, 0], "pass_nadir_rssi": [0, 0, 0], "node_nadir_rssi": [0, 0, 0], "debug_pass_count": [3, 1, 0] },
+  {
+    "event": "current_laps",
+    "current": {
+      "node_index": [
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 2215.2961200335994, "lap_time": "0:02.215", "lap_time_stamp": 2215.2961200335994, "splits": [], "late_lap": false },
+            { "lap_index": 1, "lap_number": 1, "lap_raw": 5201.223340991419, "lap_time": "0:05.201", "lap_time_stamp": 7416.519461025018, "splits": [], "late_lap": false },
+            { "lap_index": 2, "lap_number": 2, "lap_raw": 2601.165377011057, "lap_time": "0:02.601", "lap_time_stamp": 10017.684838036075, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": 2, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        {
+          "laps": [
+            { "lap_index": 0, "lap_number": 0, "lap_raw": 5416.2016219925135, "lap_time": "0:05.416", "lap_time_stamp": 5416.2016219925135, "splits": [], "late_lap": false }
+          ],
+          "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null
+        },
+        { "laps": [], "fastest_lap_index": null, "pilot": null, "finished_flag": null, "consecutive_start": null, "consecutive_laps": null }
+      ]
+    }
+  },
 
-  { "event": "race_status", "race_status": 2, "race_heat_id": 7 }
+  { "event": "race_status", "race_status": 2, "race_heat_id": 0 }
 ]
