@@ -8,4 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 gridfpv-events.workspace = true
-gridfpv-storage.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
