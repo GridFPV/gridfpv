@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Roadmap</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Roadmap</h1>
+      <p class="doc-kind">Internal design doc · the phased build plan, and how it lives in GitLab (free tier)</p>
+    </header>
+
+    <p class="lead">
+      The sequence we build in, and how that sequence is tracked. Written last, on purpose —
+      it orders the now-settled design into release-versioned phases, each a shippable step,
+      and maps cleanly onto the GitLab <strong>free-tier</strong> planning features so the plan
+      can become real milestones and issues without paid add-ons.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>phase plan</strong> and the <strong>GitLab planning model</strong>.
+        It sequences the work the other docs specify — it does not redefine their designs; each
+        phase links to the doc that owns its detail. It is a <strong>living plan</strong>
+        (<a href="index.html">authoritative but revisable</a>): phases and scope will shift as we
+        learn. When this doc and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. How the plan is shaped</h2>
+    <div class="principle">
+      <p><span class="name">Walking skeleton first.</span> The earliest phase drives a thin
+      vertical slice through the whole spine — events append to the log, projections derive,
+      a read comes out — before any breadth. We prove the architecture end to end while it's
+      cheap to change.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Every phase ships something usable.</span> Phases are
+      release-versioned (v0.1, v0.2, …); each milestone is a real, demonstrable increment, not
+      an internal checkpoint. Scope flexes to protect that.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Real timing in early; control later.</span> Adapters land before the
+      full engine and UI, so we can ingest a real RotorHazard event and derive results
+      ("shadow mode") long before GridFPV runs a race as the primary system.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Correctness by replay from day one.</span> The replay test harness
+      and golden cases arrive with the first adapters, not bolted on later — the
+      <a href="testing-strategy.html">testing strategy</a> is a phase input, not an afterthought.</p>
+    </div>
+
+    <h2>2. The phases</h2>
+
+    <pre class="mermaid">
+flowchart LR
+  v01["v0.1&lt;br/&gt;Walking skeleton"] --> v02["v0.2&lt;br/&gt;First adapters"]
+  v02 --> v03["v0.3&lt;br/&gt;Race engine"]
+  v03 --> v04["v0.4&lt;br/&gt;Director + RD console"]
+  v04 --> v05["v0.5&lt;br/&gt;PWA + overlays"]
+  v05 --> v06["v0.6&lt;br/&gt;Cloud"]
+  v06 --> v07["v0.7&lt;br/&gt;Integrations + broadcast"]
+
+  test["Testing / replay · docs · CI + single-binary packaging — run across every phase"]
+  test -.-> v01
+  test -.-> v04
+  test -.-> v07
+
+  classDef live fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class v04 live
+    </pre>
+    <p class="phase-meta">v0.4 (highlighted) is the first build that can run a real event end to end.</p>
+
+    <h3>v0.1 — Walking skeleton</h3>
+    <p><strong>Goal:</strong> prove the append-only spine end to end with the simplest possible pieces.</p>
+    <ul>
+      <li>Rust workspace + crate layout; the storage trait; <strong>SQLite append-only log</strong>.</li>
+      <li>The <strong>canonical event model</strong> as Rust types (<a href="timer-adapters.html">Timer Adapters</a>) + Rust→TS generation wired.</li>
+      <li>A synthetic/manual source appending <code>Pass</code> events; the projection engine deriving a lap list; a minimal read.</li>
+    </ul>
+    <p><strong>Done when:</strong> a synthetic session appends events and yields a correct, recomputable lap list; the replay-harness scaffold exists.</p>
+
+    <h3>v0.2 — First adapters + replay harness</h3>
+    <p><strong>Goal:</strong> real timing in, with the test discipline. (<a href="timer-adapters.html">Timer Adapters</a>, <a href="testing-strategy.html">Testing</a>)</p>
+    <ul>
+      <li><strong>RotorHazard adapter</strong> (Socket.IO → canonical events, signal context) and <strong>Velocidrone adapter</strong> (WebSocket → passes + splits), behind the capability model.</li>
+      <li>Clock alignment + reconnect/dedup; <strong>recorded-session replay harness</strong> + golden cases; dockerized RH for fixtures and live integration tests.</li>
+    </ul>
+    <p><strong>Done when:</strong> recorded RH and Velocidrone sessions replay to correct projections, and a live integration test against dockerized RH passes. <em>Shadow mode becomes possible here.</em></p>
+
+    <h3>v0.3 — Race engine</h3>
+    <p><strong>Goal:</strong> turn passes + a format into a run race. (<a href="race-engine.html">Race Engine</a>)</p>
+    <ul>
+      <li>The logged <strong>heat-loop state machine</strong>; scoring/lap-derivation + win conditions; marshaling adjudications.</li>
+      <li>The unified <strong>format/generator interface</strong> + first formats (timed qualifying, single-elim; ZippyQ as the honesty check); advancement; multi-class + engine-side frequency allocation.</li>
+    </ul>
+    <p><strong>Done when:</strong> a full event (qualifying → bracket → winner) runs from a recorded source with correct results and marshaling; generators are table-tested.</p>
+
+    <h3>v0.4 — Director server + RD console</h3>
+    <p><strong>Goal:</strong> a person can run a real event end to end. (<a href="protocol.html">Protocol</a>, <a href="clients.html">Clients</a>)</p>
+    <ul>
+      <li>Embedded <strong>axum protocol server</strong> (snapshot + WS stream, scoping, bearer + LAN join-token auth).</li>
+      <li><strong>Svelte</strong> frontend foundation + shared component library + generated types; the <strong>RD console</strong> (setup wizard, registration, live race control, marshaling, results).</li>
+      <li><strong>Tauri</strong> shell + single-binary packaging for Windows/Linux/macOS.</li>
+    </ul>
+    <p><strong>Done when:</strong> a complete event runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
+
+    <h3>v0.5 — Racer/spectator PWA + overlays</h3>
+    <p><strong>Goal:</strong> everyone else can watch. (<a href="clients.html">Clients</a>, <a href="streaming.html">Streaming</a>)</p>
+    <ul>
+      <li>The <strong>racer/spectator PWA</strong> (snapshot+subscribe, scoped views, LAN-degraded, install/offline where the secure context allows); QR/join-token onboarding.</li>
+      <li><strong>OBS overlays</strong> (leaderboard, staging, podium, bracket) as read-only protocol clients.</li>
+    </ul>
+    <p><strong>Done when:</strong> racers on the LAN see live standings on their phones and overlays render in OBS from live state.</p>
+
+    <h3>v0.6 — Cloud</h3>
+    <p><strong>Goal:</strong> off-LAN reach and longevity. (<a href="cloud.html">Cloud &amp; Season</a>)</p>
+    <ul>
+      <li><strong>One-way resumable push</strong> (Director → Cloud); Postgres warehouse via the same server crate + storage trait.</li>
+      <li><strong>Accounts</strong> + free-account-gated reads; the live relay (same PWA off-LAN) + web push; long-term portal basics (career, standings); the <strong>season</strong> model.</li>
+    </ul>
+    <p><strong>Done when:</strong> a Director with internet relays a live event to off-LAN viewers, a season aggregates across events, and a self-hosted Cloud deploy is documented.</p>
+
+    <h3>v0.7 — Integrations + broadcast control</h3>
+    <p><strong>Goal:</strong> connect to the ecosystem. (<a href="integrations.html">External Integrations</a>, <a href="streaming.html">Streaming</a>)</p>
+    <ul>
+      <li><strong>MultiGP RaceSync</strong> (roster import, queued/resumable results push); <strong>open-data API</strong> + export + embeddable widgets.</li>
+      <li><strong>OBS broadcast control</strong> (obs-websocket, scene maps, transition modes); credential handling.</li>
+    </ul>
+    <p><strong>Done when:</strong> roster import + results push work against a chapter, the open-data API serves, and broadcast control drives OBS scenes from race-state.</p>
+
+    <h2>3. Cross-cutting workstreams</h2>
+    <p>These run across every phase rather than living in one:</p>
+    <dl class="entities">
+      <dt>Testing &amp; replay</dt>
+      <dd>Golden cases and recorded-session replay land with v0.2 and grow with every feature (<a href="testing-strategy.html">Testing</a>).</dd>
+      <dt>Build &amp; packaging</dt>
+      <dd>The single-binary, cross-platform, offline build (Tauri bundle, vendored assets, Rust→TS generation) is maintained from v0.1 onward.</dd>
+      <dt>Documentation</dt>
+      <dd>These internal docs stay current as the living plan; user-facing docs begin around v0.4 in their own repo.</dd>
+    </dl>
+
+    <h2>4. The GitLab planning model (free tier)</h2>
+    <p>
+      GitLab puts Epics, the Roadmap timeline view, and Iterations behind paid tiers, so the
+      plan is built from the free-tier primitives and emulates the rest. We use a
+      <strong>single project</strong>.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Plan concept</th><th>Free-tier mechanism</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Phase / release</strong></td><td><strong>Milestone</strong> (release-versioned, e.g. "v0.2 — First adapters") with start/due dates. The milestone list + dates is our timeline.</td></tr>
+        <tr><td><strong>Epic / feature</strong></td><td>A <strong>tracking issue</strong> whose description holds a <strong>task checklist of child issues</strong> (<code>- [ ] #123</code>); GitLab shows % progress.</td></tr>
+        <tr><td><strong>Work item</strong></td><td>An <strong>issue</strong>, assigned to its milestone + labels, listed under a tracking issue.</td></tr>
+        <tr><td><strong>Type / area</strong></td><td><strong>Labels</strong> by convention: <code>type/feature</code>, <code>type/chore</code>, <code>type/bug</code>; <code>area/adapters</code>, <code>area/engine</code>, <code>area/protocol</code>, <code>area/clients</code>, <code>area/cloud</code>, <code>area/streaming</code>, <code>area/integrations</code>. (Scoped-label exclusivity is paid; these are plain prefixes.)</td></tr>
+        <tr><td><strong>Workflow / status</strong></td><td>A single project <strong>issue board</strong> with columns Open → Doing → Review → Done (board lists by status label).</td></tr>
+        <tr><td><strong>Dependencies</strong></td><td><strong>"Relates to"</strong> links (blocking/blocked-by links are paid); express ordering in the tracking issue.</td></tr>
+        <tr><td><strong>Timeline narrative</strong></td><td>This doc (and optionally a Wiki page) — the Roadmap timeline view is paid.</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <p>
+        <strong>What we deliberately don't rely on:</strong> Epics, the Roadmap view, Iterations,
+        scoped-label enforcement, group-level multi-boards, and blocking links — all paid. The
+        tracking-issue + milestone + label-convention model covers the same ground on free tier,
+        and this doc remains the source of truth either way.
+      </p>
+    </div>
+
+    <h2>5. From plan to GitLab</h2>
+    <p>The agreed sequence once this roadmap is finalized:</p>
+    <ol>
+      <li><strong>Finalize</strong> this roadmap (review &amp; sign-off).</li>
+      <li><strong>Merge</strong> <code>planning</code> → <code>devel</code> (which promotes to <code>main</code> on releases).</li>
+      <li><strong>Add the GitLab MCP</strong> integration.</li>
+      <li><strong>Instantiate</strong> the plan: create the label set and the project board; create the milestones (v0.1 … v0.7) with dates; create one <strong>tracking issue per feature</strong> and seed its child issues.</li>
+    </ol>
+    <p>
+      <strong>Seeding depth:</strong> break <strong>v0.1</strong> down fully into issues now, create the
+      tracking issues for all phases as placeholders, and detail later phases just-in-time — so the
+      board reflects what's actionable without pretending we've planned the far future to the task level.
+    </p>
+
+    <h2>6. Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="resolved">Resolved — License: AGPL-3.0 (+ optional commercial dual-license).</span>
+      FOSS with network-use copyleft — anyone offering it as a hosted service must release their
+      modifications, which protects the hosted-SaaS model while staying true FOSS; as copyright
+      holder we can offer a commercial license later (a contributor CLA/DCO keeps that open).
+      Applied early (at/around v0.1) as the FOSS foundation.</li>
+      <li><span class="resolved">Resolved — Branch flow.</span> <code>planning</code> merges into
+      <code>devel</code>; <code>devel</code> promotes to <code>main</code> on releases (main stays
+      release-stable).</li>
+      <li><span class="resolved">Resolved — Milestone dates.</span> Sequence-only for now — order
+      the milestones without calendar commitments; attach target dates once a real cadence emerges.</li>
+      <li><span class="q">Per-format milestone placement.</span> Which bracket/qualifying formats
+      land in v0.3 vs later (each per-format spec, <a href="race-engine.html">Race Engine</a> §7).</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>
