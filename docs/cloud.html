@@ -11,62 +11,409 @@
     <header class="masthead">
       <p class="brand">GridFPV</p>
       <h1>Cloud &amp; Season</h1>
-      <p class="doc-kind">Internal design doc · the optional relay, warehouse, and cross-event layer · <strong>draft</strong></p>
+      <p class="doc-kind">Internal design doc · the optional relay, the warehouse, and the cross-event season layer</p>
     </header>
 
     <p class="lead">
-      The optional Cloud: an off-LAN relay for live events, a long-term warehouse for the
-      accumulated history, and the cross-event season / championship layer. Never
-      authoritative, never in the live critical path.
+      The optional Cloud: an off-LAN <strong>relay</strong> for live events, a long-term
+      <strong>warehouse</strong> for the accumulated history, and the cross-event
+      <strong>season / championship</strong> layer. It receives a one-way, resumable push of
+      each Director's append-only log and serves the <em>same</em> protocol off-LAN. It is
+      never authoritative over a live race and never sits in the timing critical path.
     </p>
 
     <div class="callout">
       <p>
-        <strong>Early draft.</strong> This page captures scope and the open decisions routed
-        here from the <a href="architecture.html">Architecture</a> doc (see §8 and §9) and
-        the <a href="event-pipeline.html">Event Pipeline</a> (Phase 5), so they're tracked in
-        the right place. The design itself is not yet specified. When this doc and the
+        This doc owns the <strong>Director&nbsp;→&nbsp;Cloud push</strong>, the
+        <strong>warehouse</strong> (aggregating many events' logs), the <strong>two Cloud
+        surfaces</strong> and their component library, the <strong>season model</strong>, the
+        <strong>global pilot registry / identity reconciliation</strong>, and the
+        <strong>off-LAN viewer account model</strong>. It builds on the append-only spine and
+        resumable sync from <a href="architecture.html">Architecture</a> §3, the Cloud shape
+        in §8, and the trust boundaries in §9; it deepens the season phase from
+        <a href="event-pipeline.html">Event Pipeline</a> Phase 5 and
+        <a href="pipeline-season.html">Pipeline: Season</a>. Wire-level message shapes and the
+        read-authorization contract belong to the <a href="protocol.html">Protocol</a> spec;
+        we reference them rather than redefine them. Harder specifics are parked as
+        <a href="#open">Open decisions</a>. When this doc and the
         <a href="vision.html">Vision</a> disagree, the Vision wins.
       </p>
     </div>
 
-    <h2>Scope</h2>
-    <p>This doc will own:</p>
-    <ul>
-      <li>The <strong>one-way resumable push</strong> — how a Director streams its
-      append-only log to the Cloud, and resumes after a drop.</li>
-      <li>The <strong>warehouse</strong> — how many events' logs aggregate in Postgres, and
-      what is stored raw vs projected.</li>
-      <li>The <strong>two surfaces</strong> — the live relay (the same one-protocol PWA) and
-      the long-term portal (career, seasons, open-data, embeddable widgets), which scale
-      oppositely (see <a href="architecture.html">Architecture</a> §8).</li>
-      <li>The <strong>season / championship model</strong> — linking events, configurable
-      scoring, season standings, and qualification pathways (Event Pipeline, Phase 5).</li>
-      <li>The <strong>global pilot registry</strong> and reconciling a Director's local
-      pilots into stable cross-event identity on sync (Architecture §9).</li>
-    </ul>
+    <h2>1. What the Cloud is — and is not</h2>
+    <p>
+      The Cloud is the optional second transport for the one protocol. Everything it serves
+      is derived from logs the Directors produced; it adds reach and longevity, never
+      authority.
+    </p>
+    <div class="principle">
+      <p><span class="name">Never authoritative over a live race; never in the live path.</span>
+      Truth for an event is the Director's append-only log. The Cloud only ever
+      <em>receives</em> that log and serves read/realtime projections from it. If the Cloud is
+      down, slow, or absent, every race still runs and is still recorded — nothing on race day
+      depends on it.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Same server crate, different storage trait.</span> The Cloud reuses
+      the <em>same</em> Rust (Tokio + axum) server crate the Director embeds. The only swap is
+      the storage implementation behind a trait — SQLite per-event on the Director, Postgres in
+      the Cloud (<a href="architecture.html">Architecture</a> §2). The read/realtime contract
+      is therefore literally the same code on both transports, so clients can't tell which
+      they're talking to.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Authoritative only for what only it can see.</span> The Cloud is the
+      authoritative <em>aggregate</em> for cross-chapter projections — global career stats and
+      multi-chapter season standings — because no single Director has the other chapters' logs.
+      That authority is over <em>derived projections</em> assembled from many events' logs, not
+      over any event's truth (see §5, §6). A Director remains authoritative for its own events
+      and can compute a fully-local season over them with no internet.</p>
+    </div>
 
-    <h2>Open decisions</h2>
+    <pre class="mermaid">
+flowchart LR
+  subgraph Directors["Directors · authoritative, offline-first"]
+    d1[("Event log A&lt;br/&gt;SQLite")]
+    d2[("Event log B&lt;br/&gt;SQLite")]
+  end
+
+  subgraph Cloud["CLOUD · optional · never in the live path"]
+    ingest["Ingest&lt;br/&gt;resumable log push"]
+    wh[("Warehouse&lt;br/&gt;Postgres · raw log + projections")]
+    relay["Live relay&lt;br/&gt;THE protocol"]
+    portal["Long-term portal&lt;br/&gt;career · season · open data"]
+  end
+
+  viewers["Off-LAN viewers&lt;br/&gt;PWA · widgets · open-data API"]
+
+  d1 -.->|one-way resumable push| ingest
+  d2 -.->|one-way resumable push| ingest
+  ingest --> wh
+  wh -->|derive| relay
+  wh -->|derive| portal
+  relay -->|off-LAN, same protocol| viewers
+  portal -->|read-heavy, cacheable| viewers
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class d1,d2 sot;
+  style Cloud stroke-dasharray: 6 4;
+    </pre>
+
+    <h2>2. The one-way resumable push</h2>
+    <p>
+      A Director with internet ships its append-only log to the Cloud as it grows. The design
+      falls straight out of the spine: the log is an ordered, append-only sequence, so syncing
+      it is <strong>streaming an offset forward</strong>, never reconciling divergent state.
+    </p>
+    <div class="principle">
+      <p><span class="name">Sync is an offset, not a merge.</span> Each event log entry has a
+      monotonic, gap-free <strong>offset</strong> within its event. The Director streams
+      entries from the last offset the Cloud acknowledged; the Cloud appends them in order and
+      acknowledges the highest offset it has durably stored. There is no conflict resolution
+      because the flow is one-way and the order is fixed by the log (Architecture §3).</p>
+    </div>
+
+    <h3>The loop</h3>
+    <ol>
+      <li><strong>Authenticate &amp; identify the stream.</strong> The Director opens a session
+      to the Cloud (see <em>authentication</em> below) and names the stream it is pushing — an
+      <code>(event id)</code>, globally unique, minted by the Director when the event is
+      created.</li>
+      <li><strong>Ask for the resume point.</strong> The Cloud replies with the highest
+      contiguous offset it has durably stored for that event (<code>0</code> for a new event).</li>
+      <li><strong>Stream batches forward.</strong> The Director sends entries from that offset
+      in contiguous <strong>batches</strong> (offset-ordered, bounded by count or bytes), and
+      keeps streaming as the live log grows.</li>
+      <li><strong>Acknowledge durably.</strong> The Cloud appends a batch, then acknowledges the
+      new high-water offset only <em>after</em> it is committed to Postgres. The Director
+      advances its "last acked" cursor.</li>
+      <li><strong>Resume after a drop.</strong> On reconnect, go back to step&nbsp;2. Because the
+      Cloud reports its durable high-water mark, the Director simply re-streams from there.</li>
+    </ol>
+
+    <pre class="mermaid">
+sequenceDiagram
+  participant D as Director (log owner)
+  participant C as Cloud (warehouse)
+  D-&gt;&gt;C: open session (auth + event id)
+  C--&gt;&gt;D: resume from offset N
+  D-&gt;&gt;C: batch [N..N+k]
+  C--&gt;&gt;D: ack N+k (durably stored)
+  D-&gt;&gt;C: batch [N+k+1..]
+  Note over D,C: connection drops
+  D-&gt;&gt;C: reopen + ask resume point
+  C--&gt;&gt;D: resume from offset N+k
+  D-&gt;&gt;C: re-stream from N+k+1
+    </pre>
+
+    <h3>Delivery semantics</h3>
+    <div class="principle">
+      <p><span class="name">At-least-once on the wire; exactly-once in effect.</span> A drop
+      between "Cloud committed" and "Director saw the ack" causes the Director to re-send an
+      already-stored batch on resume. That is fine: because every entry carries its log offset
+      and the Cloud stores the log keyed by <code>(event id, offset)</code>, a replayed entry
+      is an idempotent upsert — same offset, same bytes, no duplicate. So the transport is
+      at-least-once, but the warehouse is exactly-once by construction. This is the same
+      dedup-by-offset property that makes adapter reconnects safe
+      (<a href="timer-adapters.html">Timer Adapters</a> §5), one tier up.</p>
+    </div>
+    <p>
+      Two invariants make that hold: entries are <strong>immutable once written</strong> (the
+      append-only rule — corrections are new higher-offset entries, never edits, per
+      Architecture §3), and the Cloud only ever advances a <strong>contiguous</strong>
+      high-water mark, so a gap can never be acknowledged. A mismatch between a re-sent entry
+      and the stored entry at the same offset is therefore impossible in normal operation and
+      is treated as corruption to surface, not to merge.
+    </p>
+
+    <h3>How a Director authenticates to the Cloud</h3>
+    <p>
+      Pushing is a <strong>write into the warehouse</strong> and so is privileged — distinct
+      from the open/lightly-tokened reads on the LAN (Architecture §9). A Director holds a
+      Cloud credential, obtained once when its operator links the Director to a Cloud
+      account / chapter, and presents it to open a push session. The credential authorizes
+      <em>which streams this Director may push</em> (its own events, scoped to its chapter), so
+      one Director can't write into another's history. Exact credential format, rotation, and
+      the linking handshake are the <a href="protocol.html">Protocol</a> spec's job; the
+      commitment here is: <em>push is authenticated, scoped to the pusher's own events, and
+      one-way.</em>
+    </p>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>The push commonly rides venue wifi or even a phone
+      hotspot mid-event — so it must tolerate flaky, intermittent links and resume cleanly. It
+      is the <em>primary</em> broad-visibility path, not the LAN (Architecture §7).</p>
+      <p><span class="label">Sim</span>The Director usually already has internet, so the push is
+      typically continuous and live — a sim league's whole audience watches through the Cloud
+      relay.</p>
+    </div>
+
+    <h2>3. The warehouse</h2>
+    <p>
+      Where the Director keeps one SQLite file per event (the file <em>is</em> the event), the
+      Cloud aggregates many events' logs — across classes, chapters, and Directors — into one
+      Postgres store. It is the third storage tier from Architecture §4.
+    </p>
+
+    <h3>Raw log vs projections</h3>
+    <div class="principle">
+      <p><span class="name">Store the raw log; treat projections as a derived cache.</span> The
+      warehouse persists the append-only log entries as the durable, authoritative-for-the-Cloud
+      record, exactly as received. Projections — heat results, event standings, career stats,
+      season tables — are computed from those logs and stored as <em>materialized projections</em>
+      for fast reads, but they are always recomputable and never the source of truth. This is the
+      spine's central promise (Architecture §3): a new career metric is a new projection over
+      existing history, not a migration.</p>
+    </div>
+    <p>
+      Keeping the raw log is what lets the Cloud serve open data honestly, recompute after a
+      late marshaling correction syncs up, and add metrics retroactively — the same guarantees
+      the Director has, at warehouse scale. The projection layer is the <em>same projection
+      engine code</em> the Director runs, fed from the Postgres-backed storage trait.
+    </p>
+
+    <h3>Aggregating, partitioning, retention</h3>
+    <dl class="entities">
+      <dt>Aggregation boundary</dt>
+      <dd>The natural unit is still the <strong>event</strong>: its log is stored as a contiguous
+      offset-ordered sequence keyed by <code>(event id, offset)</code>. Cross-event projections
+      (career, season) fold over many such sequences. Events roll up to <strong>chapters</strong>
+      (and to a global scope) for the portal's aggregate views.</dd>
+      <dt>Partitioning</dt>
+      <dd>Per-event logs are append-heavy and grow without bound across a chapter's history, so
+      the raw-log table is the obvious partition target — by event, and/or by time. Recommended
+      default: <strong>partition the raw log by event</strong> (each event self-contained, easy
+      to detach/archive), with time-range sub-partitioning available for very large or long-lived
+      chapters. Projection tables are comparatively small and queried by pilot / class / season,
+      so they index rather than partition.</dd>
+      <dt>Retention</dt>
+      <dd>Two tiers with different policies. <strong>Raw logs</strong> are the long-term
+      open-data asset and are kept indefinitely by default; cold/archived events can be detached
+      to cheaper storage while staying replayable. <strong>Live-relay state</strong> (the hot,
+      realtime projections for an in-progress event) is ephemeral — it exists to serve the live
+      surface and can be evicted once the event concludes, since it is rebuildable from the log.
+      Heavy <strong>signal-context</strong> attachments (RSSI history, IRL only) are the bulk of
+      the bytes and may warrant their own retention/sidecar policy — tied to the open decision in
+      <a href="timer-adapters.html">Timer Adapters</a> §9.</dd>
+    </dl>
+
+    <h2>4. The two surfaces, one component library</h2>
+    <p>
+      The Cloud exposes two surfaces (Architecture §8) that share one component library but have
+      <strong>opposite scaling profiles</strong>.
+    </p>
+    <dl class="entities">
+      <dt>The live relay</dt>
+      <dd>The <em>same</em> one-protocol PWA the Director serves on the LAN — realtime,
+      single-event, latency-sensitive, written once and run on either transport. It reads the
+      hot projections for an in-progress event and pushes change frames over WebSocket. Scales
+      with concurrent viewers of <em>live</em> events; favors fan-out, low latency, and
+      sticky/realtime connections.</dd>
+      <dt>The long-term portal</dt>
+      <dd>Career profiles, season / championship standings, open-data dashboards, and embeddable
+      widgets — <strong>Cloud-only by nature</strong>, because the Director only knows one event
+      and this reads the accumulated warehouse. Read-heavy, highly cacheable, mostly slow-moving
+      content; scales with total catalog size and crawler / embed traffic, not live fan-out.</dd>
+    </dl>
+    <div class="principle">
+      <p><span class="name">One component library, two scaling shapes.</span> The frontend
+      building blocks (leaderboard, bracket, pilot card, lap table) are shared so a career page
+      and a live overlay look and behave like one product. What differs is the <em>serving</em>
+      profile: the relay is dynamic realtime; the portal is cache-friendly read.</p>
+    </div>
+    <p>
+      Because they scale oppositely, splitting them into <strong>separate virtual hosts</strong>
+      (a dynamic realtime host vs a heavily-cached, possibly near-static stats host) is a
+      reasonable deployment choice — but an <em>optional ops decision, not an architectural
+      one</em> (Architecture §8). Both are the same server crate over the same warehouse; the
+      split is about cache and scaling policy, not about two codebases.
+    </p>
+
+    <h2>5. The season / championship model</h2>
+    <p>
+      A season links several independently-run events into a championship and computes standings
+      across them, <strong>per class</strong> (<a href="pipeline-season.html">Pipeline: Season</a>).
+      Events are run independently and need not know about a season while they run — the season
+      references them and folds their results afterward, so seasons never touch the live path.
+    </p>
+    <dl class="entities">
+      <dt>Season</dt>
+      <dd>Name; scope (per class, possibly per discipline); the set of <strong>member events</strong>
+      by reference; the scoring config (scheme + tiebreakers + drops); qualification rules.</dd>
+      <dt>Scoring config</dt>
+      <dd>Configurable with presets: finishing-position points per event, best-N-of-M
+      (<strong>drop your worst events</strong>), or cumulative total; configurable tiebreakers;
+      optionally participation / attendance points and minimum-events thresholds.</dd>
+      <dt>Qualification pathway</dt>
+      <dd>Cutoffs / thresholds that promote pilots from a season into a championship — the
+      Global-Qualifier&nbsp;→&nbsp;championship analog — modeled lightly here.</dd>
+      <dt>Season standing <em>(projection)</em></dt>
+      <dd>Per pilot per class: aggregated points, events counted (after drops), rank. Derived,
+      recomputable, never authored.</dd>
+    </dl>
+    <div class="principle">
+      <p><span class="name">Standings are a projection — computed where the logs are.</span> A
+      <strong>Director</strong> computes a season over <em>its own</em> events, fully offline — a
+      self-hoster runs a local league with no internet. The <strong>Cloud</strong> computes the
+      cross-chapter / global season because only it holds the other chapters' logs; it is the
+      authoritative aggregate for those broader standings. Both run the same projection logic;
+      they differ only in which logs they can see.</p>
+    </div>
+    <div class="sim-note">
+      <p><span class="label">Both</span>Scoring is identical — points are points. Sim leagues and
+      IRL chapters aggregate the same way; whether a season is per-discipline or may mix sim and
+      IRL is a configuration choice (open decision).</p>
+    </div>
+
+    <h2>6. Global pilot registry &amp; identity reconciliation</h2>
+    <p>
+      Career and season stats only mean something if they accrue to <em>one person</em> across
+      events. The Cloud holds a <strong>global pilot registry</strong> of stable cross-event
+      identities; the Director runs with purely <strong>local pilots</strong> and reconciles them
+      to global identity on sync. This is the cross-event half of identity from Architecture §9.
+    </p>
+    <div class="principle">
+      <p><span class="name">Identity never blocks an offline race.</span> Registration binds a
+      timer's local reference (node seat, sim player name) to a <em>local</em> pilot — that's all
+      a race needs. Mapping a local pilot to a global identity happens <strong>on sync, after the
+      fact</strong>. A venue with no internet runs entirely on local pilots and reconciles later;
+      nothing about global identity is on the race-day critical path.</p>
+    </div>
+    <p>Reconciliation is a three-step problem, handled when a Director's log reaches the Cloud:</p>
+    <dl class="entities">
+      <dt>Claim</dt>
+      <dd>A pilot (or the RD on their behalf) asserts that a local pilot in event X
+      <em>is</em> a given global identity — e.g. via a self-registered account, a MultiGP id, or
+      an RD confirmation. A confident claim links the local pilot to the global registry entry.</dd>
+      <dt>Dedupe</dt>
+      <dd>Suggest likely matches for unclaimed local pilots — same display name, same external id
+      (MultiGP / sim handle), recurring across a chapter's events. Surface candidates for
+      confirmation; never auto-merge silently across people, since a wrong merge corrupts career
+      stats.</dd>
+      <dt>Conflict</dt>
+      <dd>When evidence disagrees (two locals claim one identity; one local matches two globals),
+      route to a human (the pilot or chapter admin) to resolve. Because identity is a projection
+      over the logs plus a mapping table, a resolved or reversed merge just recomputes the
+      affected career / season projections — nothing in the underlying logs changes.</dd>
+    </dl>
+    <div class="principle">
+      <p><span class="name">Mapping is data, not log mutation.</span> The global identity for a
+      local pilot lives in a registry mapping the Cloud owns, not by rewriting any event's log.
+      That keeps each event's log self-contained and replayable, and makes any reconciliation
+      reversible by recompute — consistent with append-only truth.</p>
+    </div>
+
+    <h2>7. Account model for off-LAN viewers</h2>
+    <p>
+      On the LAN, reads are open or lightly tokened to anyone present (Architecture §9). Off-LAN,
+      the Cloud authenticates <strong>accounts</strong> — but only ever to gate <em>reads</em>;
+      no race is ever controlled through the Cloud.
+    </p>
+    <div class="principle">
+      <p><span class="name">Accounts gate reads; control never leaves the Director.</span> A Cloud
+      account identifies an off-LAN viewer and maps to the read authorization the
+      <a href="protocol.html">Protocol</a> spec defines. The privileged <em>control</em> role
+      (race control, marshaling, configuration) exists only on the Director and is never granted
+      by a Cloud account.</p>
+    </div>
+    <p>Accounts serve a few concrete needs beyond plain viewing:</p>
+    <ul>
+      <li><strong>Reach &amp; visibility scoping</strong> — most live and historical data is
+      public/open-data, but some chapters may want private or pre-publication events visible only
+      to linked accounts. The account maps onto the protocol's read-authorization scopes.</li>
+      <li><strong>Pilot self-claim</strong> — an account is how a pilot claims their global
+      identity (§6) and owns their career profile.</li>
+      <li><strong>True push notifications</strong> — installability and web push ride the Cloud's
+      HTTPS transport (Architecture §7), so an account is the natural subscription anchor for
+      "your heat is up" alerts.</li>
+      <li><strong>Director linking</strong> — an operator account is what a Director links to in
+      order to obtain its push credential (§2).</li>
+    </ul>
+    <p>
+      Anonymous public read stays first-class: the open-data API, embeddable widgets, and public
+      live relay work with no account at all. Accounts add claim, scoping, and push on top — they
+      never become a wall in front of open data.
+    </p>
+
+    <h2 id="open">8. Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">One-way push protocol.</span> Offset / acknowledgement mechanics,
-      batching, how a Director authenticates to the Cloud, and exactly-once vs at-least-once
-      semantics on resume. Builds on the append-only log's resumable-sync property
-      (Architecture §3).</li>
-      <li><span class="q">Warehouse schema &amp; storage strategy.</span> Whether the Cloud
-      stores raw logs, projections, or both; how events from many Directors and chapters are
-      partitioned; retention.</li>
-      <li><span class="q">Season / championship model.</span> How events link into a season,
-      the configurable scoring systems (points, drops, qualification pathways), and where
-      season standings are computed.</li>
-      <li><span class="q">Global pilot registry &amp; identity reconciliation.</span> How
-      local event pilots merge into a stable global identity on sync — claiming, dedupe, and
-      conflict handling — without ever blocking an offline race.</li>
-      <li><span class="q">Account model for off-LAN viewers.</span> What an account is, and
-      how it maps to the read authorization defined in the <a href="protocol.html">Protocol</a>
-      spec.</li>
-      <li><span class="q">Two-surface deployment.</span> Whether the live relay and the
-      long-term portal are separate virtual hosts (dynamic realtime vs heavily-cached /
-      mostly-static). Architecture calls this an ops decision, not an architectural one.</li>
+      <li><span class="q">Push transport &amp; batch shape.</span> Whether the push reuses the
+      protocol's WebSocket framing or a dedicated streaming endpoint; batch sizing (count vs
+      bytes vs time), backpressure, and how aggressively to push mid-event on a flaky hotspot.
+      Recommendation: reuse the WebSocket transport with offset-acked batches; tune batch size to
+      the link.</li>
+      <li><span class="q">Push-credential mechanics.</span> Credential format, rotation, and the
+      Director-to-Cloud linking handshake (shared with the <a href="protocol.html">Protocol</a>
+      auth design). Recommendation: per-Director scoped credential issued at link time, scoped to
+      the operator's chapter.</li>
+      <li><span class="q">Global offset / event-id scheme.</span> How event ids are minted so they
+      are globally unique without coordination (the Director is offline at creation), and whether
+      offsets are per-event only or also lifted to a per-chapter global sequence in the warehouse.
+      Recommendation: UUID-style event ids minted by the Director; keep offsets per-event.</li>
+      <li><span class="q">Warehouse partitioning &amp; retention specifics.</span> Partition by
+      event vs time vs both; the archive/detach policy for cold events; and a distinct
+      retention/sidecar policy for heavy IRL signal-context (ties to
+      <a href="timer-adapters.html">Timer Adapters</a> §9).</li>
+      <li><span class="q">Projection materialization in Postgres.</span> Which projections are
+      materialized vs computed on read; incremental maintenance vs scheduled recompute; and how
+      the shared projection engine is parameterized for the warehouse's larger scale.</li>
+      <li><span class="q">Two-surface deployment.</span> Whether the live relay and the long-term
+      portal are separate virtual hosts (dynamic realtime vs heavily-cached / near-static).
+      Architecture §8 calls this an ops decision, not an architectural one.</li>
+      <li><span class="q">Season scope &amp; Director↔Cloud reconciliation.</span> Strictly per
+      class or can a season span classes / mix sim and IRL; and when both the Director and the
+      Cloud compute a season, how the local view and the authoritative Cloud aggregate are
+      presented together (carried from <a href="pipeline-season.html">Pipeline: Season</a>).</li>
+      <li><span class="q">Qualification &amp; participation modeling.</span> How much
+      championship-qualification logic to build in versus leave to the league; attendance /
+      participation points and minimum-events thresholds.</li>
+      <li><span class="q">Identity-reconciliation policy.</span> The confidence thresholds for
+      auto-suggesting merges, what evidence counts as a confident claim (MultiGP id, verified
+      account, RD confirmation), and the conflict-resolution authority (pilot vs chapter admin
+      vs Cloud).</li>
+      <li><span class="q">Account model &amp; read scoping.</span> What an account is, how it maps
+      onto the protocol's read-authorization scopes, and whether any chapter data is private /
+      pre-publication vs the open-data default (shared with the
+      <a href="protocol.html">Protocol</a> spec).</li>
     </ol>
 
     <footer class="doc-footer">
@@ -75,5 +422,7 @@
       </p>
     </footer>
   </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
 </body>
 </html>

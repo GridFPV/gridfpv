@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Clients</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Clients</h1>
+      <p class="doc-kind">Internal design doc · the web clients of the one protocol — surfaces, framework, and shared frontend</p>
+    </header>
+
+    <p class="lead">
+      Everything that renders GridFPV is a <strong>web client of the one protocol</strong>:
+      the RD console in the Tauri window, the racer/spectator PWA, and the OBS overlays. They
+      differ only in <em>permissions</em>, <em>transport</em>, and <em>what they emphasize</em> —
+      not in how they talk to the Director. This doc settles the frontend stack those surfaces
+      share and how they stay in lockstep with the Rust contract.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>client surfaces</strong>, the <strong>frontend framework</strong>
+        choice, the <strong>shared component library</strong>, the generated-types story, and
+        <strong>PWA mechanics</strong> (install, offline shell, push, the LAN secure-context
+        degradation). It builds on the contract in <a href="architecture.html">Architecture</a>
+        (§6 one protocol, §7 clients &amp; connectivity) and defers what other docs own: the
+        wire shapes and auth to <a href="protocol.html">Protocol</a>; the broadcast subsystem —
+        driving OBS, capture/RTMP, the overlay catalogue — to <a href="streaming.html">Streaming</a>
+        (here we cover only the overlay <em>client</em>: rendering and data); the Cloud transport,
+        accounts, and push delivery infrastructure to <a href="cloud.html">Cloud &amp; Season</a>.
+        The framework choice is a <strong>recorded default, revisitable</strong>, and is also
+        listed in Open decisions for review. When this doc and the
+        <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. Three surfaces, one client</h2>
+    <p>
+      Architecture §5 already says it: the RD console, the racer/spectator PWA, and the OBS
+      overlays are "all the same kind of thing — a web client of the protocol. Only their
+      transport and their permissions differ." This doc takes that seriously: there is one
+      frontend codebase, one component library, and one set of generated types. A surface is a
+      <em>profile</em> over that shared base — a different entry point, a different default
+      permission posture, a different density — not a different application.
+    </p>
+
+    <pre class="mermaid">
+flowchart TB
+  subgraph shared["Shared frontend · one codebase"]
+    types["Generated TS types&lt;br/&gt;from Rust contract"]
+    client["Protocol client&lt;br/&gt;snapshot + WS subscribe"]
+    ui["Component library&lt;br/&gt;leaderboard · bracket · clock"]
+  end
+
+  rd["RD console&lt;br/&gt;control · dense · authenticated&lt;br/&gt;in Tauri window"]
+  pwa["Racer / spectator PWA&lt;br/&gt;read · installable · push"]
+  ovl["OBS overlays&lt;br/&gt;read-only · lean · browser source"]
+
+  types --> client --> ui
+  ui --> rd
+  ui --> pwa
+  ui --> ovl
+
+  director[("Director · LAN&lt;br/&gt;THE protocol")]
+  cloud[("Cloud · off-LAN&lt;br/&gt;SAME protocol")]
+
+  rd <-->|control + read| director
+  pwa -->|read/realtime| director
+  pwa -->|read/realtime + push| cloud
+  ovl -->|read/realtime| director
+    </pre>
+
+    <div class="principle">
+      <p><span class="name">One codebase, profiled three ways.</span> The surfaces are
+      configurations of a single frontend — shared types, shared protocol client, shared
+      components — not three apps. A bug fixed in the leaderboard fixes it everywhere; the
+      contract can't drift between surfaces because there is only one client.</p>
+    </div>
+
+    <h3>The RD console — control-oriented, dense, authenticated</h3>
+    <p>
+      The race director's cockpit, loaded inside the <strong>Tauri window</strong> (Architecture
+      §2). It is the only surface that exercises the protocol's privileged write/control path —
+      arming heats, marshaling, configuring the pipeline — so it authenticates with the RD role
+      (Architecture §9; mechanics in <a href="protocol.html">Protocol</a>). It is information-dense
+      and keyboard-friendly: a working tool for someone running a live event, not a viewer.
+    </p>
+    <div class="callout">
+      <p>
+        The console is "just a co-located web client" (Architecture §2): it loads over the
+        Tauri webview but talks to the same local <code>axum</code> server, over the same
+        protocol, as everyone else. The Tauri shell buys a friendly native window and OS
+        integration (file dialogs for export, single-binary packaging) — it does
+        <strong>not</strong> buy a private back channel. Control authority is a protocol role,
+        not a shell privilege.
+      </p>
+    </div>
+
+    <h3>The racer/spectator PWA — read-oriented, installable, push</h3>
+    <p>
+      The universal viewer (Architecture §7): the racer checking their next heat and standings,
+      the spectator following the event. Read/realtime only — it never controls a race. It is a
+      <strong>Progressive Web App</strong> so it can install to a phone home screen, keep an
+      offline shell, and receive web push — though, crucially, only over the Cloud (HTTPS)
+      transport (§4). It is the same web client that a future Capacitor wrap turns into a native
+      app (§6).
+    </p>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>At a field with no internet, racers join the Director's
+      LAN and get live in-page updates over WebSocket — but no install and no true push (the LAN
+      address isn't a secure context; §4).</p>
+      <p><span class="label">Sim</span>An online Velocidrone event is typically Cloud-reachable,
+      so the same PWA installs and pushes normally — the sim case naturally lands on the HTTPS
+      transport where full PWA features are available.</p>
+    </div>
+
+    <h3>OBS overlays — read-only, lean, browser sources</h3>
+    <p>
+      Overlays are the broadcast-facing surface: staging, leaderboard, split-screen, podium, and
+      bracket graphics loaded as <strong>OBS browser sources</strong>. They are protocol clients
+      like any other (Architecture §10) — read-only, subscribing to the same realtime stream and
+      rendering it. Their distinct needs are about <em>rendering</em>: transparent backgrounds,
+      stable layout at a fixed canvas size, no chrome, and lean payloads so a machine already
+      encoding video isn't taxed by the overlay.
+    </p>
+    <div class="callout">
+      <p>
+        <strong>Scope line with Streaming.</strong> This doc covers only the overlay
+        <em>client</em> — how an overlay page subscribes, renders, and is told which race/class
+        it shows. The broadcast <em>subsystem</em> — driving OBS scene switches, capture/RTMP
+        handling, and the overlay catalogue/theming — belongs to
+        <a href="streaming.html">Streaming</a>. Overlays sharing the component library (the same
+        leaderboard component the PWA uses, restyled for broadcast) is the seam between the two
+        docs.
+      </p>
+    </div>
+
+    <table>
+      <thead>
+        <tr><th>Surface</th><th>Direction</th><th>Auth</th><th>Transport</th><th>Shell</th><th>Emphasis</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>RD console</td><td>read + <strong>control</strong></td><td>RD role</td><td>LAN (local)</td><td>Tauri</td><td>dense, keyboard, working tool</td></tr>
+        <tr><td>Racer / spectator PWA</td><td>read</td><td>open / light token (LAN) · account (Cloud)</td><td>LAN <em>or</em> Cloud</td><td>browser → future Capacitor</td><td>approachable, mobile-first, installable</td></tr>
+        <tr><td>OBS overlay</td><td>read-only</td><td>open / light token</td><td>LAN <em>or</em> Cloud</td><td>OBS browser source</td><td>transparent, fixed canvas, lean</td></tr>
+      </tbody>
+    </table>
+
+    <h2>2. Frontend framework — the decision</h2>
+    <p>
+      Architecture §11 parks this as "not load-bearing — every framework consumes the same
+      generated types, to be settled with the client work." This is the client work, so we settle
+      it: a <strong>recorded default</strong> with a clear rationale, explicitly revisitable, and
+      mirrored into Open decisions for the maintainer's sign-off.
+    </p>
+
+    <h3>What's actually being weighed</h3>
+    <table>
+      <thead>
+        <tr><th>Factor</th><th>React</th><th>Svelte</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>FOSS contributor pool</td><td><strong>Largest</strong> — most front-end devs know it</td><td>Smaller, but growing and well-liked</td></tr>
+        <tr><td>Ecosystem / off-the-shelf parts</td><td><strong>Vast</strong> (component kits, tables, charts)</td><td>Solid and sufficient; fewer choices</td></tr>
+        <tr><td>Bundle size / leanness</td><td>Heavier runtime</td><td><strong>Compiles away</strong>; small bundles</td></tr>
+        <tr><td>Realtime / overlay fit</td><td>Fine; manual care re: re-renders</td><td><strong>Fine-grained reactivity</strong> suits a constant change stream; lean overlays</td></tr>
+        <tr><td>DX for a non-frontend specialist</td><td>More concepts (hooks, memoization, render rules)</td><td><strong>Closer to plain HTML/CSS/JS</strong>; less ceremony</td></tr>
+        <tr><td>Generated-types fit (ts-rs)</td><td>First-class TS</td><td>First-class TS</td></tr>
+        <tr><td>Hiring/onboarding a new maintainer later</td><td><strong>Easiest</strong> — ubiquitous</td><td>Plausible; smaller talent pool</td></tr>
+      </tbody>
+    </table>
+
+    <div class="principle">
+      <p><span class="name">Recommended default: React.</span> For a FOSS project that wants
+      contributors, the framework most front-end developers already know lowers the single
+      biggest barrier to outside help, and its ecosystem means fewer wheels reinvented (tables,
+      charts, drag-and-drop heat editing). The contract is the same generated TypeScript either
+      way, so the realtime/overlay work is comfortably within React's reach with ordinary care.
+      The decisive factor for a FOSS project is the <em>contributor and ecosystem pool</em>, and
+      that points to React.</p>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>The honest counter-case — Svelte.</strong> The maintainer is a systems
+        programmer (C/C++/Rust), not a frontend specialist, and the rest of the stack prizes
+        leanness and a small footprint (Tauri over Electron for exactly this reason,
+        Architecture §2). Svelte rewards that instinct: less framework ceremony, a syntax close
+        to plain HTML/CSS/JS, fine-grained reactivity that maps naturally onto a constant
+        realtime change-stream, and tiny bundles that suit lean OBS overlays and the LAN PWA. If
+        the project stays small and maintainer-driven rather than contributor-driven, Svelte is
+        the better fit — which is precisely why this stays revisitable, not locked.
+      </p>
+    </div>
+
+    <div class="principle">
+      <p><span class="name">Why it's safe to defer/revisit.</span> The contract is defined once
+      in Rust and generated to TypeScript (Architecture §6); the protocol client is a thin
+      transport-plus-subscribe layer; only the component library and surface entry points are
+      framework-specific. Switching frameworks would mean re-authoring the UI layer, but
+      <em>not</em> the contract, the transport behavior, or the Director — so the cost is bounded
+      and known. We record React as the default and proceed; the decision is reversible at known
+      cost, not a one-way door.</p>
+    </div>
+
+    <h2>3. Shared component library &amp; generated types</h2>
+    <p>
+      Two artifacts keep the three surfaces coherent: the <strong>generated types</strong> that
+      define what the data <em>is</em>, and the <strong>component library</strong> that defines
+      how it <em>looks</em>.
+    </p>
+    <dl class="entities">
+      <dt>Generated protocol types</dt>
+      <dd>The wire types live in the Rust server crate and are generated to TypeScript (e.g.
+      <code>ts-rs</code>) as a build step, per Architecture §6. Every surface imports the
+      <em>same</em> generated types; a contract change in Rust ripples to a compile error in the
+      frontend rather than a silent runtime drift. This is the mechanism that makes "one
+      protocol" real on the client side. Generation cadence and CI checks are a
+      <a href="protocol.html">Protocol</a>-adjacent concern; the commitment here is that the
+      frontend never hand-writes a wire type.</dd>
+      <dt>Protocol client</dt>
+      <dd>A thin, framework-agnostic layer: connect to a base URL, fetch a projection snapshot,
+      subscribe to the WebSocket change stream, and expose typed state. It is configured only
+      with a base URL, so it cannot tell LAN from Cloud (Architecture §6) — the same client code
+      backs all three surfaces on both transports.</dd>
+      <dt>Component library</dt>
+      <dd>The reusable race-domain widgets — leaderboard, bracket tree, heat sheet, race clock,
+      pilot card, standings table — built once and themed per surface. The PWA renders the
+      leaderboard mobile-friendly; the overlay renders it transparent on a broadcast canvas; the
+      console renders it dense beside controls. One component, three presentations.</dd>
+      <dt>Surface profiles</dt>
+      <dd>Each surface is an entry point that assembles components with its own permission
+      posture and density. The console adds the control/marshaling components gated behind the RD
+      role; the PWA and overlays omit them entirely (they never reach the privileged path).</dd>
+    </dl>
+    <div class="principle">
+      <p><span class="name">The contract is generated, never transcribed.</span> Wire types come
+      from Rust; the frontend consumes them. The component library is the only place UI lives, so
+      every surface shows the same data the same way unless it deliberately chooses otherwise.</p>
+    </div>
+
+    <h2>4. PWA mechanics</h2>
+    <p>
+      The racer/spectator surface is a PWA so it can feel like an installed app where the
+      platform allows it. Three mechanics, and one hard constraint inherited from Architecture §7.
+    </p>
+    <dl class="entities">
+      <dt>Install</dt>
+      <dd>A web app manifest (name, icons, theme, display mode) lets the PWA install to a phone
+      home screen or desktop. Install requires a <strong>secure context</strong> (HTTPS), so it
+      is a <strong>Cloud-transport feature</strong>.</dd>
+      <dt>Offline shell</dt>
+      <dd>A service worker caches the app shell — markup, styles, scripts, the component library —
+      so the UI loads instantly and survives flaky connectivity, with live data still arriving
+      over WebSocket when connected. Service workers <strong>also require a secure context</strong>,
+      so the cached shell is a Cloud-transport feature too. (The Director already serves the live
+      app fine over LAN; this is about the installed/cached experience, not live viewing.)</dd>
+      <dt>Web push</dt>
+      <dd>"You're on deck," "your heat results are in," "the event resumed." Web push needs a
+      service worker (secure context) <em>and</em> internet to reach APNs/FCM, so it rides the
+      <strong>Cloud transport, HTTPS only</strong>. Push delivery infrastructure (subscriptions,
+      vendor relays) belongs to <a href="cloud.html">Cloud &amp; Season</a>; this surface
+      registers for and renders the notifications.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>The LAN PWA is intentionally degraded (Architecture §7).</strong> A plain-HTTP
+        LAN address is not a browser secure context, so service workers, install, and web push
+        are <strong>unavailable on LAN</strong> — full stop. What still works on LAN is the part
+        that matters live: opening the page and getting realtime updates over WebSocket, plus
+        in-page alerts. <strong>Install, offline shell, and true push ride the Cloud transport
+        (HTTPS).</strong> The same PWA code degrades gracefully — it feature-detects the secure
+        context and simply doesn't offer install/push on LAN — so there is no separate "LAN
+        build." A future native client (§6) is the path to LAN access <em>and</em> real push
+        together.
+      </p>
+    </div>
+
+    <pre class="mermaid">
+flowchart LR
+  pwa["Racer / spectator PWA&lt;br/&gt;same code on both transports"]
+
+  subgraph lan["LAN transport · plain HTTP"]
+    live1["Live view over WebSocket&lt;br/&gt;in-page alerts"]
+    deg["No install&lt;br/&gt;No offline shell&lt;br/&gt;No web push"]
+  end
+
+  subgraph cloud["Cloud transport · HTTPS · secure context"]
+    live2["Live view over WebSocket"]
+    full["Install&lt;br/&gt;Offline shell (service worker)&lt;br/&gt;Web push (APNs/FCM)"]
+  end
+
+  pwa --> lan
+  pwa --> cloud
+    </pre>
+
+    <h2>5. Design system &amp; UX</h2>
+    <p>
+      A modern, approachable UI for non-technical race directors is a stated
+      <a href="vision.html">Vision</a> pillar and a differentiator against tools that feel like
+      configuration panels. That ambition lives here.
+    </p>
+    <div class="principle">
+      <p><span class="name">Friendly to a non-technical RD.</span> The person running an event
+      may be a club volunteer, not an engineer. The console favors plain language, sane defaults,
+      progressive disclosure (advanced settings tucked away), and confidence-building feedback —
+      clear current state, obvious next action, reversible mistakes (which the append-only log
+      makes literally true; Architecture §3). Density serves the expert without punishing the
+      newcomer.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">One design system, three contexts.</span> A shared token set —
+      colors, type scale, spacing, the brand palette already used in these docs — themes all
+      three surfaces. The console is a dense desktop tool; the PWA is a calm mobile reader; the
+      overlays are high-contrast, glanceable broadcast graphics. Same vocabulary, tuned per
+      context, so the project reads as one product.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Accessibility and responsiveness are baseline, not polish.</strong> The PWA must
+        work one-handed on a phone in daylight at a field; overlays must stay legible over video;
+        the console must be keyboard-driveable for speed. The concrete design system — the token
+        set, component states, the chosen component primitives (a headless kit vs. bespoke) — is
+        deferred to design work and flagged in Open decisions, because it depends partly on the
+        framework choice in §2.
+      </p>
+    </div>
+
+    <h2>6. Native deferral via Capacitor</h2>
+    <p>
+      Native apps are deferred but kept cheap, by deliberate symmetry with the Director
+      (Architecture §7). The Director's RD console is a web UI wrapped in <strong>Tauri</strong>;
+      the racer/spectator PWA can later be wrapped in <strong>Capacitor</strong> to ship a native
+      app to the app stores. In both cases the <em>web protocol-client is the constant</em>, and
+      the native shell is an optional enhancement, not a rewrite.
+    </p>
+    <div class="principle">
+      <p><span class="name">The web client is the constant on both ends.</span> Tauri wraps the
+      console; Capacitor would wrap the PWA. Neither shell forks the application — they package
+      the same web client and add native capabilities (notably real push and LAN access together,
+      the thing the LAN PWA can't have; §4). Native stays on the roadmap precisely because it
+      cleanly resolves the secure-context degradation.</p>
+    </div>
+    <p>
+      Because the PWA is already structured as install-aware and feature-detecting, the Capacitor
+      wrap is incremental: reuse the build, swap web push for native push where the shell provides
+      it, and gain LAN reachability without losing notifications. No native work is required to
+      ship — it is a later, low-cost enhancement.
+    </p>
+
+    <h2>7. Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Frontend framework — React vs Svelte. <strong>Recommended default:
+      React</strong>, for the FOSS contributor pool and ecosystem.</span> The standing
+      counter-case is Svelte (leanness, realtime/overlay fit, gentler DX for a systems-programmer
+      maintainer, tiny bundles). Recorded as the default and revisitable; flagged here for the
+      maintainer's explicit sign-off before client work hardens. (Tracked from
+      <a href="architecture.html">Architecture</a> §11.)</li>
+      <li><span class="q">Design-system specifics.</span> The token set, component states, and
+      whether the component library is built on a headless primitive kit or bespoke — depends
+      partly on the framework choice and on design work not yet done.</li>
+      <li><span class="q">Component-library packaging.</span> Whether the shared components are a
+      standalone internal package consumed by all three surface entry points, or co-located in a
+      monorepo with per-surface builds.</li>
+      <li><span class="q">Overlay client conventions.</span> The render contract for OBS browser
+      sources (fixed canvas sizing, transparency, how an overlay is told which race/class it
+      shows) — coordinated with <a href="streaming.html">Streaming</a>, which owns the catalogue
+      and theming.</li>
+      <li><span class="q">LAN read access posture.</span> Whether LAN reads are fully open or
+      lightly tokened, and how the PWA acquires that token — pairs with the auth model in
+      <a href="protocol.html">Protocol</a> and the trust boundaries in
+      <a href="architecture.html">Architecture</a> §9.</li>
+      <li><span class="q">Native push details.</span> When the Capacitor wrap lands, how native
+      push registration maps onto the Cloud push infrastructure — paired with
+      <a href="cloud.html">Cloud &amp; Season</a>.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

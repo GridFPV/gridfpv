@@ -11,60 +11,381 @@
     <header class="masthead">
       <p class="brand">GridFPV</p>
       <h1>Streaming</h1>
-      <p class="doc-kind">Internal design doc · the broadcast subsystem · <strong>draft</strong></p>
+      <p class="doc-kind">Internal design doc · the broadcast subsystem — overlays, OBS control, and the capture boundary</p>
     </header>
 
     <p class="lead">
-      Integrated broadcast: the overlays that visualize a live race, and the Director-side
-      subsystem that drives OBS and handles capture / RTMP inputs — on par with the
-      streaming benchmark, but open and driven directly by live race state.
+      Integrated broadcast, built the same way as everything else: overlays are ordinary
+      clients of the one protocol, and the thing that drives OBS is an <em>optional</em>
+      Director subsystem that consumes race-state — never a dependency of timing. This doc
+      owns the broadcast side: how overlays are told what to show, how race-state events map
+      to scene switches, and exactly where GridFPV stops and the streaming stack begins.
     </p>
 
     <div class="callout">
       <p>
-        <strong>Early draft.</strong> This page captures scope and the open decisions routed
-        here from the <a href="architecture.html">Architecture</a> doc (see §10), so they're
-        tracked in the right place. The subsystem itself is not yet specified. When this doc
-        and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+        This doc owns the <strong>broadcast subsystem</strong>: overlays <em>as broadcast
+        surfaces</em>, the <strong>OBS control model</strong>, the <strong>capture / RTMP
+        boundary</strong>, and the <strong>overlay catalogue &amp; theming</strong>. The
+        <em>client/rendering</em> side of overlays — how a web page subscribes to the
+        protocol, renders projections, and reconnects — is a client surface like any other
+        and is owned by <a href="clients.html">Clients</a>; this doc cross-links there rather
+        than re-specifying it. Live capture cards, encoding, RTMP ingest, and the stream
+        itself are <strong>out of scope</strong> — they belong to OBS and the streaming
+        platform, by design (§4). It builds on <a href="architecture.html">Architecture</a>
+        §10 (Streaming &amp; broadcast) and §6 (one protocol), and the race-state events from
+        <a href="race-engine.html">Race Engine</a> §2. When this doc and the
+        <a href="vision.html">Vision</a> disagree, the Vision wins.
       </p>
     </div>
 
-    <h2>Scope</h2>
-    <p>The architecture fixes two commitments this doc builds on:</p>
-    <ul>
-      <li><strong>Overlays are protocol clients.</strong> Staging, leaderboard,
-      split-screen, podium, and bracket overlays are web pages driven by the same
-      read/realtime contract as every other client, loaded as OBS browser sources — no
-      special path.</li>
-      <li><strong>Broadcast control is an optional Director subsystem.</strong> Driving OBS
-      and handling capture / RTMP is active output the Director performs, reacting to live
-      state, but never in the timing critical path.</li>
-    </ul>
-    <p>This doc will own the design of:</p>
-    <ul>
-      <li>The <strong>OBS control model</strong> — connecting to OBS and mapping race
-      events to scene/source changes.</li>
-      <li><strong>Capture / RTMP handling</strong> — what video the Director ingests or
-      relays, vs. what it leaves to OBS.</li>
-      <li>The <strong>overlay catalogue</strong> — the set of overlays, their data needs,
-      theming, and chapter branding.</li>
-    </ul>
+    <h2>1. The principle</h2>
+    <p>
+      Integrated streaming is a stated Vision goal, but it earns its keep only if it never
+      compromises the thing the Director exists to do — run a race correctly, offline. So the
+      whole subsystem is built around one hard line.
+    </p>
+    <div class="principle">
+      <p><span class="name">Broadcast is never in the timing critical path.</span> Overlays
+      and OBS control are <em>readers</em> of live state. If OBS is closed, the overlay
+      browser crashes, or the broadcast operator unplugs everything, the race runs exactly as
+      it would have. Timing, scoring, and advancement do not know or care that anyone is
+      streaming.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Two halves, drawn from Architecture §10.</span> One half we get
+      for free: <strong>overlays are protocol clients</strong> — live race state already
+      flows to them, no special path. The other half is a genuine subsystem:
+      <strong>broadcast control</strong>, which actively drives OBS in reaction to race-state
+      events. The free half needs no new infrastructure; the active half is optional and
+      isolated.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Same contract, nothing bespoke.</span> Overlays subscribe to the
+      same read/realtime contract as the RD console and the racer PWA (Architecture §6).
+      There is no overlay-only push channel, no privileged firehose — an overlay is a
+      read-only client that happens to render full-screen on a transparent background. That is
+      what lets a community theme its own overlays without touching the Director.</p>
+    </div>
 
-    <h2>Open decisions</h2>
+    <pre class="mermaid">
+flowchart LR
+  log[("Append-only log&lt;br/&gt;source of truth")]
+  proj["Projections + race-state&lt;br/&gt;(standings · heat state · bracket)"]
+  server["Embedded server&lt;br/&gt;THE protocol · HTTP + WS"]
+
+  log -->|derive| proj --> server
+
+  subgraph free["Free half · pure protocol clients"]
+    ov["Overlay pages&lt;br/&gt;(OBS browser sources)"]
+  end
+  subgraph active["Active half · optional Director subsystem"]
+    bc["Broadcast control&lt;br/&gt;race-state &#8594; scene/source"]
+  end
+
+  server -->|read + subscribe| ov
+  server -->|read + subscribe| bc
+  bc -->|obs-websocket| obs["OBS&lt;br/&gt;scenes · sources · output"]
+  ov -.->|rendered as browser source| obs
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class log sot;
+  style active stroke-dasharray: 6 4;
+    </pre>
+
+    <h2>2. Overlays as protocol clients</h2>
+    <p>
+      An overlay is a web page — staging grid, leaderboard, split-screen lower-thirds, podium,
+      bracket tree — served by the same embedded server that serves every other client, and
+      loaded into OBS as a <strong>browser source</strong>. It opens the protocol, fetches a
+      snapshot of the projections it needs, subscribes to the realtime change stream, and
+      paints. The rendering, reconnect, and snapshot-then-subscribe mechanics are identical to
+      any client and are specified in <a href="clients.html">Clients</a>; what matters
+      <em>here</em> is the broadcast framing around them.
+    </p>
+
+    <h3>2.1 How an overlay is told what to show</h3>
+    <p>
+      A leaderboard browser source needs to know <em>which</em> race and <em>which</em> class
+      it is showing — and when several classes run concurrently (§6), two leaderboard sources
+      in different OBS scenes must show different classes. Because an overlay is a plain web
+      client, the answer is a plain web answer: <strong>the target is carried in the
+      URL</strong>.
+    </p>
+    <dl class="entities">
+      <dt>Explicit binding</dt>
+      <dd>The browser-source URL names exactly what to show, e.g.
+      <code>/overlay/leaderboard?class=mini&amp;heat=current</code>. The overlay subscribes to
+      that class's projection and renders it. Two scenes, two URLs, two classes — no
+      coordination needed. This is the unambiguous default for multi-output.</dd>
+      <dt>Follow-the-program</dt>
+      <dd>The URL asks for "whatever is on air," e.g.
+      <code>/overlay/leaderboard?follow=program</code>. The overlay tracks the
+      currently-featured race/class (a small piece of broadcast state the server publishes,
+      §3.3) and re-binds itself as the program changes — convenient for a single-class event
+      or a manually-operated single-output show.</dd>
+      <dt>Selector overlays</dt>
+      <dd>Some overlays (a full bracket tree, an event schedule) are inherently
+      event-scoped rather than heat-scoped and only need the event id; they render the same
+      regardless of which heat is live.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>Why URL-carried binding, not a control message:</strong> it keeps overlays
+        stateless and trivially reproducible — paste the URL into OBS and it works, on any
+        machine on the LAN, with no setup handshake. It also means a broadcast operator can
+        hand-author scenes without GridFPV knowing those scenes exist. The "follow-the-program"
+        mode is the only place an overlay reads broadcast state, and even then it is reading a
+        published projection, not receiving a private push.
+      </p>
+    </div>
+
+    <h3>2.2 Where overlays run</h3>
+    <p>
+      Overlays are browser sources, so they obey the same transport rules as any client
+      (Architecture §6): on the LAN they hit the Director directly; off-LAN (a remote
+      commentator's OBS) they hit the Cloud relay with the identical contract. The broadcast
+      machine does not have to be the Director machine — it just needs to reach one of the two
+      transports.
+    </p>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>The broadcast PC is usually a second machine fed by
+      capture cards and VTX receivers; overlays point at the Director over the venue LAN.</p>
+      <p><span class="label">Sim</span>Everything can live on one box — Velocidrone, the
+      Director, OBS, and the overlays — so overlays often point at <code>localhost</code>, and
+      the sim's own clean video is the program feed rather than a capture card.</p>
+    </div>
+
+    <h2>3. Broadcast control — the optional subsystem</h2>
+    <p>
+      Broadcast control is the active half: a Director subsystem that connects to OBS and
+      <strong>switches scenes and sources in reaction to race-state events</strong>, so the
+      stream follows the race without a human riding the switcher. It is optional, isolated,
+      and — to restate the guardrail — it consumes projections and race-state and never feeds
+      anything back toward timing.
+    </p>
+
+    <h3>3.1 How it connects</h3>
+    <p>
+      The subsystem is a client of <strong>obs-websocket</strong> (the standard OBS Studio
+      WebSocket API). The RD configures a host, port, and password; the Director connects as a
+      controller. This is a deliberately conventional integration — obs-websocket is the de
+      facto standard control surface for OBS, and using it means GridFPV drives any OBS the
+      operator already runs rather than shipping its own switcher.
+    </p>
+    <div class="principle">
+      <p><span class="name">Broadcast control reads race-state, drives OBS.</span> Internally
+      it is the mirror image of a timer adapter: where an adapter translates a source's input
+      <em>into</em> canonical events, broadcast control translates race-state events
+      <em>out</em> into OBS commands. It owns no truth and appends nothing to the log — it is a
+      pure consumer.</p>
+    </div>
+
+    <h3>3.2 Mapping race-state to scenes</h3>
+    <p>
+      The heat loop already appends the events broadcast wants (Race Engine §2):
+      <code>staged</code>, <code>armed</code>, <code>started</code> (running),
+      <code>landed</code>, <code>scored</code>, <code>advance</code>. A <strong>scene
+      map</strong> associates phases of that lifecycle with OBS scenes; as race-state changes,
+      the subsystem requests the mapped scene.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Race-state event</th><th>Typical broadcast intent</th><th>Default mapping</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>staged</code></td><td>field is on the line; show who's up</td><td>Staging / grid scene</td></tr>
+        <tr><td><code>armed</code></td><td>countdown imminent</td><td>(hold staging, arm lower-third)</td></tr>
+        <tr><td><code>started</code> (running)</td><td>race is live</td><td>Race / split-screen scene</td></tr>
+        <tr><td><code>landed</code></td><td>flying done, result pending</td><td>(hold race, results lower-third)</td></tr>
+        <tr><td><code>scored</code></td><td>result is final</td><td>Results / replay scene</td></tr>
+        <tr><td><code>advance</code></td><td>moving to next heat / podium</td><td>Bracket or podium scene</td></tr>
+      </tbody>
+    </table>
+    <p>
+      The map is data, not code: a per-event (overridable per-class) table of
+      <em>phase &rarr; scene name</em>, edited in the RD console and stored as event
+      configuration in the log (Architecture §4) so the broadcast setup travels with the
+      event and is reproducible. Scene <em>names</em> are the operator's; GridFPV references
+      them by name and reports clearly when a mapped scene is missing in OBS rather than
+      guessing.
+    </p>
+
+    <h3>3.3 Automatic vs RD-manual transitions</h3>
+    <p>
+      Not every cut should be automatic — a producer often wants to linger on a crash, cut to
+      a pit interview, or roll a replay before advancing. So transitions come in three modes,
+      chosen per mapping:
+    </p>
+    <dl class="entities">
+      <dt>Automatic</dt>
+      <dd>The race-state event triggers the scene switch directly. Good for the predictable
+      backbone (staged &rarr; race &rarr; results) and for unattended sim streams.</dd>
+      <dt>Armed / one-touch</dt>
+      <dd>The event <em>arms</em> the next scene and surfaces a prompt in the RD console (or a
+      broadcast-operator view); a human confirms the cut. The race never waits on the
+      confirmation — it has already advanced; only the picture is held.</dd>
+      <dt>Manual</dt>
+      <dd>GridFPV makes no automatic switch; the operator drives OBS as usual. The subsystem
+      can still feed overlays and publish "what's on air" for follow-the-program overlays.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>The program pointer.</strong> Whatever drives the cut, the subsystem maintains
+        and publishes a small piece of broadcast state — the currently-featured race/class —
+        as an ordinary projection on the protocol. That is what <code>follow=program</code>
+        overlays (§2.1) read, and it is the one bit of broadcast state worth making first-class.
+        It is derived from race-state plus operator action; it is not authoritative over
+        anything and is recomputable/disposable.
+      </p>
+    </div>
+
+    <h2>4. The capture / RTMP boundary</h2>
+    <p>
+      This is the most important line in the doc: where GridFPV ends and the streaming stack
+      begins. The Vision wants integrated streaming, but "integrated" means
+      <em>orchestrated</em>, not <em>reimplemented</em>.
+    </p>
+    <div class="principle">
+      <p><span class="name">OBS owns video; GridFPV owns data and direction.</span> Capture
+      cards, VTX receivers, webcams, encoding, RTMP/SRT ingest, recording, and the outbound
+      stream to YouTube/Twitch are <strong>OBS's job</strong>. GridFPV contributes the data
+      layer (overlays) and the direction layer (scene switching by race-state). It does not
+      become a video pipeline.</p>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Concern</th><th>Owner</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Capture cards / VTX receivers / webcams</td><td>OBS</td><td>configured as OBS sources; GridFPV never touches the hardware</td></tr>
+        <tr><td>Video encoding &amp; the outbound stream (RTMP/SRT to platform)</td><td>OBS</td><td>GridFPV may <em>start/stop</em> the output via obs-websocket, but does not encode or push pixels</td></tr>
+        <tr><td>Scene / source composition</td><td>OBS (authored) + GridFPV (switched)</td><td>operator builds scenes; GridFPV selects among them by race-state</td></tr>
+        <tr><td>Overlays (data graphics)</td><td>GridFPV</td><td>served as browser sources; pure protocol clients</td></tr>
+        <tr><td>Scene-switch direction</td><td>GridFPV (broadcast control)</td><td>optional; obs-websocket; never in timing path</td></tr>
+        <tr><td>Recording / replay buffer</td><td>OBS</td><td>GridFPV may trigger the OBS replay buffer on a scoring event; it does not store video</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <p>
+        <strong>Why not ingest video ourselves?</strong> A Rust media pipeline (RTMP server,
+        transcoding, compositing) is an enormous, latency-sensitive, platform-specific
+        surface — exactly the kind of thing that could threaten "it cannot crash mid-heat"
+        (Architecture §2) if it shared a process with timing. OBS already does it superbly and
+        every FPV broadcaster already runs it. So the strong recommended boundary is
+        <strong>control-only</strong>: GridFPV speaks obs-websocket and serves browser
+        sources, and no video bytes flow through the Director. Whether GridFPV ever ingests or
+        relays <em>any</em> video (e.g. a convenience RTMP relay) is left as an open decision
+        (§7) — but the default and the architectural preference is that it does not.
+      </p>
+    </div>
+
+    <h2>5. Overlay catalogue &amp; theming</h2>
+    <p>
+      The initial catalogue covers the standard race-broadcast surfaces. Each is just a
+      protocol client reading specific projections; the broadcast-relevant note is what each
+      needs to be <em>told</em> (its binding, §2.1) and which race-state it reacts to.
+    </p>
+    <dl class="entities">
+      <dt>Staging grid</dt>
+      <dd>Who is up, channels/seats, and the countdown. Heat-bound; reacts to
+      <code>staged</code>/<code>armed</code>.</dd>
+      <dt>Leaderboard</dt>
+      <dd>Live standings or in-heat positions and lap counts for one class. Heat- or
+      class-bound; the workhorse, driven by the live standings projection.</dd>
+      <dt>Split-screen / lower-thirds</dt>
+      <dd>Per-pilot name, position, last/best lap as compact strips composited over flight
+      video. Heat-bound; reacts to <code>running</code> passes.</dd>
+      <dt>Podium / results</dt>
+      <dd>Final placings for a heat or a completed format. Heat- or event-bound; reacts to
+      <code>scored</code>/<code>advance</code>.</dd>
+      <dt>Bracket</dt>
+      <dd>The mains tree with seeds advancing, or a qualifying ranking. Event/class-bound;
+      reacts to <code>advance</code> and updated standings.</dd>
+    </dl>
+    <p>Each gets a fuller spec as it is built; the list confirms the protocol exposes what they need.</p>
+
+    <h3>5.1 Theming &amp; chapter branding</h3>
+    <div class="principle">
+      <p><span class="name">Theming is presentation, never data.</span> Overlays render from
+      the protocol's projections; a theme changes colors, fonts, logos, and layout — not the
+      numbers. So a chapter can fully re-skin (or replace) overlays without forking the
+      Director, because the data contract is stable and separate from the look.</p>
+    </div>
+    <p>
+      A <strong>theme</strong> is a named bundle — palette, typography, logo/wordmark, sponsor
+      slots, and per-overlay layout choices — applied to the catalogue. Chapter branding is a
+      theme plus event-level assets (the chapter logo, the event title card) carried as event
+      configuration so the right branding loads with the event. Because overlays must work
+      offline over the LAN like every other client, theme assets are <strong>served by the
+      Director</strong> (vendored with the event), with no CDN dependency — consistent with the
+      offline-first stance. The exact theme format and how custom community overlays register
+      against the catalogue is an open decision (§7).
+    </p>
+
+    <h2>6. Multi-class / multi-output</h2>
+    <p>
+      Several classes can be live at once (Race Engine §5 interleaves heats across classes),
+      and a serious broadcast may run more than one output — a main program plus a
+      class-specific feed, or per-class recordings. The design handles this without any new
+      mechanism, purely by composition.
+    </p>
+    <ul>
+      <li><strong>Per-class overlays</strong> are just explicitly-bound overlays (§2.1): a
+      browser source per class with <code>class=…</code> in its URL. Two leaderboards for two
+      classes are two URLs in two scenes — nothing coordinates them.</li>
+      <li><strong>Per-class scene maps</strong> let each class's race-state drive its own scene
+      set (§3.2), so concurrent classes don't fight over one scene. The default map is
+      per-event; a class override is the multi-class case.</li>
+      <li><strong>Multiple outputs</strong> are an OBS concern (multiple outputs / multiple OBS
+      instances / canvas outputs), consistent with the §4 boundary. GridFPV can drive more
+      than one OBS connection — one per output — each with its own scene map; it does not
+      multiplex video itself.</li>
+    </ul>
+    <div class="callout">
+      <p>
+        <strong>The honesty test:</strong> two sim classes running back-to-back on one box,
+        each with its own leaderboard and its own scene, on a single OBS — and the same model
+        scaling up to two physical classes on two OBS instances on two machines. Because every
+        piece is an independently-bound client or an independent OBS connection, concurrency is
+        configuration, not a special code path. How many concurrent OBS connections / outputs
+        to support, and whether per-class is the right granularity, is parked in §7.
+      </p>
+    </div>
+
+    <h2>7. Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">OBS control model.</span> Use the obs-websocket API; decide which
-      transitions are automatic (driven by race-state events) vs. RD-manual, and how scene
-      mappings are configured.</li>
-      <li><span class="q">Capture / RTMP boundary.</span> Whether the Director ingests video
-      / accepts RTMP inputs itself, or strictly controls OBS and leaves all video to it —
-      the architectural line between GridFPV and the streaming stack.</li>
-      <li><span class="q">How overlays receive data.</span> Confirm overlays subscribe to
-      the protocol like any client (consistent with Architecture §6), rather than a bespoke
-      push — and how an overlay is told <em>which</em> race / class it is showing.</li>
-      <li><span class="q">Overlay catalogue &amp; theming.</span> The initial set of
-      overlays, customization, and chapter branding.</li>
-      <li><span class="q">Multi-class / multi-output.</span> Driving multiple scenes or
-      outputs when classes run concurrently.</li>
+      <li><span class="q">OBS control model — automatic vs manual surface.</span> Confirmed:
+      drive OBS via obs-websocket, with a per-mapping automatic / armed / manual mode (§3.3).
+      Still open: the exact scene-map schema, whether a dedicated broadcast-operator view is
+      worth building separate from the RD console, and how much of the obs-websocket surface to
+      use (scene switch only, vs also start/stop output, replay buffer, source toggles).
+      <strong>Recommendation:</strong> ship scene-switching first with a small fixed verb set
+      (set scene, start/stop stream, save replay buffer); expand only as real shows demand it.</li>
+      <li><span class="q">Capture / RTMP boundary.</span> Confirmed direction: control-only —
+      OBS owns all video, GridFPV serves overlays and drives OBS (§4). Still open: whether
+      GridFPV ever offers a convenience video path at all (e.g. a thin RTMP relay or a
+      "record this pilot's feed" trigger) or stays strictly control-plane.
+      <strong>Recommendation:</strong> stay strictly control-plane for v1; revisit only if a
+      concrete need appears that OBS genuinely can't cover, and even then keep any media work in
+      a separate process so it can never threaten timing.</li>
+      <li><span class="q">Overlay binding &amp; the program pointer.</span> Confirmed:
+      URL-carried explicit binding is the default; <code>follow=program</code> reads a published
+      broadcast-state projection (§2.1, §3.3). Still open: the exact query-param vocabulary and
+      whether the program pointer is one global value or one per output.</li>
+      <li><span class="q">Theme format &amp; custom overlays.</span> The concrete theme bundle
+      format (tokens, layout config, asset packaging), how chapter branding is stored with the
+      event, and how a community-authored overlay registers against the catalogue while staying
+      a pure protocol client. Pairs with the client/rendering details in
+      <a href="clients.html">Clients</a>.</li>
+      <li><span class="q">Multi-output granularity.</span> How many concurrent OBS connections /
+      outputs to support, whether per-class is the right unit, and how scene maps are scoped
+      when classes and outputs multiply (§6).</li>
+      <li><span class="q">Off-LAN broadcast.</span> Whether the broadcast-control subsystem and
+      remote overlays are expected to operate against the Cloud transport (remote commentary /
+      remote producer), and any added latency or auth implications — ties to the Cloud relay in
+      <a href="cloud.html">Cloud &amp; Season</a> and the trust model in
+      <a href="architecture.html">Architecture</a> §9.</li>
     </ol>
 
     <footer class="doc-footer">
@@ -73,5 +394,7 @@
       </p>
     </footer>
   </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
 </body>
 </html>

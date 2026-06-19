@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Testing Strategy</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Testing Strategy</h1>
+      <p class="doc-kind">Internal design doc · how we keep race-timing logic correct without a live timer</p>
+    </header>
+
+    <p class="lead">
+      How GridFPV earns trust in its results. The whole system is built so that correctness
+      is a property we can <em>replay</em>, not one we have to witness live: pure translators
+      with golden cases, recorded sessions replayed into a deterministic engine, and
+      projection fixtures that fold marshaling in. The one rule everything else serves —
+      <strong>we never test against a live timer.</strong>
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>correctness strategy</strong>: the guardrail, the test
+        levels, the fixture formats, and what each layer must prove. It defers the concrete
+        win-condition and tie-break catalogue to <a href="race-engine.html">Race Engine</a>
+        §7, the exact canonical-event and signal-context shapes to
+        <a href="timer-adapters.html">Timer Adapters</a>, and the wire-contract shapes to
+        <a href="protocol.html">Protocol</a> — this doc tests against those interfaces, it
+        doesn't define them. CI selection, build sequencing, and coverage gates belong to the
+        <em>Roadmap</em>. When this doc and the <a href="vision.html">Vision</a> disagree, the
+        Vision wins.
+      </p>
+    </div>
+
+    <h2>1. The hard guardrail</h2>
+    <div class="principle">
+      <p><span class="name">We never test against a live timer.</span> No automated test —
+      unit, integration, or end-to-end — connects to a running Velocidrone build, an RH node,
+      or any physical hardware. Live sources are non-deterministic, slow, and unavailable in
+      CI; a suite that depends on one is a suite that flakes, can't run on a contributor's
+      laptop, and can't run at all without the gear in the room. Correctness instead comes
+      from <strong>recorded-session replay</strong> and <strong>golden cases</strong>: fixed
+      inputs captured once, checked into the repo, and replayed deterministically forever.</p>
+    </div>
+    <p>
+      This is not a compromise we tolerate; it is the design working as intended. Because
+      adapters are <a href="timer-adapters.html">pure translators</a> and the
+      <a href="race-engine.html">engine is a pure function of the log</a>
+      (<a href="race-engine.html">Race Engine</a> §6), every behavior we care about is a
+      pure function of recorded bytes. There is nothing about a <em>live</em> timer that a
+      faithfully recorded session doesn't capture — so recording it once and replaying it is
+      strictly better than re-flying it, and it is repeatable.
+    </p>
+    <div class="callout">
+      <p>
+        <strong>What "never live in CI" does not forbid:</strong> capturing fixtures from
+        real sources, and a human running a manual/integration check against the
+        <a href="timer-adapters.html">dockerized RotorHazard</a> or a live Velocidrone build
+        before a release. Those are deliberate, human-driven, off-CI activities (§5) — they
+        produce fixtures and confidence, never a gate that the automated suite depends on.
+      </p>
+    </div>
+
+    <h2>2. Adapters — golden cases over pure translators</h2>
+    <p>
+      An adapter's entire job is: source input in, canonical events out, no race logic
+      (<a href="timer-adapters.html">Timer Adapters</a> §1). That is exactly the signature of
+      a pure function, so it is tested exactly that way — a <strong>golden case</strong> is a
+      recorded source-input fixture paired with the canonical events it must produce.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Given (fixture)</th><th>Adapter</th><th>Assert (golden output)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A recorded Velocidrone WebSocket message stream</td><td>Velocidrone</td><td>The exact ordered <code>Pass</code> / lifecycle / <code>CompetitorSeen</code> events, with split indices and source timestamps</td></tr>
+        <tr><td>A recorded RotorHazard Socket.IO frame log</td><td>RotorHazard</td><td>Passes with per-node signal context attached, calibration/lifecycle events</td></tr>
+        <tr><td>A recorded LapRF binary serial capture</td><td>LapRF</td><td>Passes from <code>PassingRecord</code> + RSSI stats, device-clock timestamps</td></tr>
+        <tr><td>A scripted sequence of manual UI entries</td><td>Manual</td><td>Passes with wall-clock timestamps, no signal/calibration</td></tr>
+      </tbody>
+    </table>
+    <p>
+      The fixture is the raw source bytes/frames as they actually arrived; the expectation is
+      the canonical event list serialized via the same generated wire types the rest of the
+      system uses (§7). A change to an adapter that alters its output is then a visible diff
+      against the golden file — reviewed deliberately, not discovered in production. Because
+      adapters emit <em>observations, not derivations</em>, these tests assert passes and
+      lifecycle only — never laps, results, or standings, which are the engine's job.
+    </p>
+    <div class="principle">
+      <p><span class="name">A golden case pins a translation, not an interpretation.</span>
+      Adapter goldens prove "these source bytes mean exactly these canonical observations."
+      They must stay free of any notion of a lap or a winner — if a lap concept leaks into an
+      adapter test, race logic has leaked into the adapter, and the test has caught a design
+      bug.</p>
+    </div>
+    <p>
+      Two adapter properties get focused cases beyond happy-path translation:
+      <strong>clocks</strong> (a fixture spanning a source-clock-to-session-timeline offset,
+      asserting intervals are computed from source time — <a href="timer-adapters.html">Timer
+      Adapters</a> §4) and <strong>reconnect/dedup</strong> (a fixture that replays a
+      mid-session drop and reconnect, asserting no pass is double-counted or lost via the
+      source's sequence numbers).
+    </p>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Fixtures carry signal context (RSSI, enter/exit
+      windows); goldens cover signal-rich passes and the calibration events a hardware adapter
+      emits.</p>
+      <p><span class="label">Sim</span>Fixtures are pass-only and exact; goldens prove the
+      model degrades cleanly to a source with nothing underneath the crossing.</p>
+    </div>
+
+    <h2>3. Recorded-session replay</h2>
+    <p>
+      The backbone, called out as "correctness by replay" in
+      <a href="architecture.html">Architecture</a> §3. We capture real sessions once, store
+      them as fixtures, and replay them through the real pipeline — asserting the projections
+      come out identical every time. This is what the append-only spine and engine determinism
+      buy us: <strong>same events in, same heats/results/standings out</strong>
+      (<a href="race-engine.html">Race Engine</a> §6).
+    </p>
+    <p>
+      A captured session is just an ordered log of canonical events (the same atoms the live
+      system appends). Replaying it means feeding that log to the engine and projection layer
+      and comparing the derived output to a stored expectation. Nothing live is involved; the
+      timer's role ended the moment the fixture was recorded.
+    </p>
+
+    <pre class="mermaid">
+flowchart LR
+  src["Live source&lt;br/&gt;(dockerized RH · recorded VD feed)"] -->|capture once| fix[("Fixture&lt;br/&gt;recorded canonical log")]
+  fix -->|replay| eng["Engine + projections&lt;br/&gt;(deterministic)"]
+  eng --> out["Derived projections&lt;br/&gt;laps · results · standings"]
+  out -->|compare| gold[("Expected output&lt;br/&gt;golden")]
+  gold -->|same in → same out| assert{{"assert equal"}}
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class fix sot;
+    </pre>
+
+    <p>Two capture sources feed replay, and they are deliberately different in character:</p>
+    <dl class="entities">
+      <dt>Dockerized RotorHazard</dt>
+      <dd>A controllable hardware-shaped source. We script or hand-run a session against it
+      and record the Socket.IO traffic the adapter would have seen — yielding signal-rich,
+      real-world-shaped fixtures (per-node RSSI, enter/exit, calibration) without any
+      physical gear (<a href="timer-adapters.html">Timer Adapters</a> §8).</dd>
+      <dt>Recorded Velocidrone WebSocket feed</dt>
+      <dd>A capture of an actual sim session's WebSocket messages — passes, splits, lap
+      totals, holeshot/spread — taken once against a live build and replayed forever. This is
+      how we exercise the sim path with no game running in CI.</dd>
+    </dl>
+    <p>
+      Fixtures live at two layers, and both are valuable. A <strong>raw source-input
+      fixture</strong> (recorded bytes/frames) replays through the adapter <em>and</em> the
+      engine, exercising the whole path; a <strong>canonical-log fixture</strong> (already
+      translated) replays through the engine alone, isolating engine/projection behavior from
+      adapter translation. Adapter golden cases (§2) reuse the raw fixtures; pure engine and
+      projection cases (§4) use canonical-log fixtures, often hand-authored rather than
+      captured.
+    </p>
+
+    <h2>4. Projection golden cases</h2>
+    <p>
+      Everything analytical is a projection over the log
+      (<a href="architecture.html">Architecture</a> §3), so each derivation stage gets its own
+      golden cases: a canonical-log fixture in, the expected projection out. The chain runs
+      <strong>passes → laps → heat results → ranking/standings</strong>, and each link is
+      tested both end-to-end (full replay, §3) and in isolation with small hand-authored logs
+      that target one rule.
+    </p>
+    <ul>
+      <li><strong>Passes → laps.</strong> A pass stream (holeshot + crossings, optionally with
+      splits) folds into a lap list — the first pass is the start, each subsequent lap-gate
+      crossing completes a lap (<a href="race-engine.html">Race Engine</a> §4).</li>
+      <li><strong>Laps → heat result.</strong> A lap list plus a configured win condition
+      (most laps in a window, first to N, best consecutive) yields a finishing order, with
+      ties broken by the recorded rule.</li>
+      <li><strong>Results → ranking / standings.</strong> Completed heat results fold into a
+      qualifying ranking or event standings.</li>
+    </ul>
+    <div class="principle">
+      <p><span class="name">Marshaling is tested as folding, never as mutation.</span> The
+      decisive projection cases append adjudication events to a raw-observation log and assert
+      the projection reflects the correction — because corrections are appended events, not
+      edits (<a href="architecture.html">Architecture</a> §3). A fixture for each:
+      <code>DetectionVoided</code> drops a phantom lap; <code>LapInserted</code> recovers a
+      missed one; <code>LapAdjusted</code> moves a boundary; <code>PenaltyApplied</code> /
+      <code>HeatVoided</code> reshape the result. The raw observations stay byte-identical
+      across these cases — only the appended adjudications differ — which is itself the
+      assertion that nothing in the past was touched.</p>
+    </div>
+    <p>
+      A "void the void" case (a correction that supersedes a prior correction) pins the
+      last-writer-wins-per-target resolution from <a href="architecture.html">Architecture</a>
+      §3. And a <strong>recompute-equivalence</strong> case proves the incremental projection
+      (maintained as events append) and a full recompute-from-scratch over the same log
+      produce identical output — the property that makes crash recovery and retroactive
+      metrics safe.
+    </p>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Marshaling fixtures are heavy: signal-based lap
+      recovery, re-timed enter/exit, phantom-lap voids from interference.</p>
+      <p><span class="label">Sim</span>Marshaling fixtures are light: mostly heat-void and
+      discard-and-re-run; the captured detection is already exact.</p>
+    </div>
+
+    <h2>5. The dockerized RotorHazard's role</h2>
+    <p>
+      The dockerized RH instance is a <strong>fixture factory and a manual-validation
+      bench</strong> — explicitly <em>not</em> a CI dependency. It exists so we can produce
+      realistic hardware-shaped fixtures and sanity-check the real adapter against a real (if
+      virtual) source, on a human's schedule.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Use</th><th>In CI?</th><th>Why</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Capturing recorded fixtures</td><td>No — captured once, output is checked in</td><td>Turns a live session into a deterministic replay asset</td></tr>
+        <tr><td>Manual / integration validation before a release</td><td>No — human-driven, off-CI</td><td>Confidence that the live adapter still speaks the real protocol</td></tr>
+        <tr><td>Replaying the captured fixtures</td><td>Yes</td><td>The fixtures are deterministic; the container is gone by then</td></tr>
+      </tbody>
+    </table>
+    <p>
+      The same applies to a live Velocidrone build: it is where the
+      <a href="timer-adapters.html">Velocidrone WebSocket message schema</a> is captured and
+      where a human confirms the adapter against the real feed (Timer Adapters §9). Once
+      captured, the schema and a sample session become fixtures, and the live build never
+      enters an automated run. <strong>The line is bright: live sources produce fixtures and
+      human confidence; only fixtures gate the build.</strong>
+    </p>
+
+    <h2>6. Testing the format generators</h2>
+    <p>
+      Format / qualifying generators are a pure function of state too
+      (<a href="race-engine.html">Race Engine</a> §3): given the seeded field, config, and the
+      results of completed heats, a generator emits the next heat(s), declares completion, or
+      exposes the current ranking. That makes them ideal for <strong>table-driven</strong>
+      tests — a table of (seeded field + config + completed results) → expected (next heats /
+      advancement / final ranking).
+    </p>
+    <ul>
+      <li><strong>Advancement.</strong> Given a round's results and a "top-N advance" config,
+      assert exactly who moves up, who is eliminated, and the seeds of the next heats.</li>
+      <li><strong>Completion &amp; final ranking.</strong> Given the last results, assert the
+      generator declares the format complete and exposes the correct final ordering.</li>
+      <li><strong>The dynamic case.</strong> ZippyQ / rolling is the honesty-forcing format
+      (<a href="race-engine.html">Race Engine</a> §3) — a table that adds rounds on demand and
+      asserts the generator produces sensible next heats from current state, never a
+      precomputed schedule.</li>
+      <li><strong>Recorded outcomes.</strong> Any randomness (a seeding draw, a coin-flip
+      tie-break) is supplied as a recorded-outcome event in the fixture, so the table is
+      deterministic and replay never re-rolls it (Race Engine §6).</li>
+    </ul>
+    <p>
+      These tests need no log replay and no timer at all — they exercise the generator
+      contract directly. As each named per-format spec is written (MultiGP P9–P16, FAI, double
+      elimination, Chase-the-Ace), it arrives with its own table of cases validated against
+      this same interface.
+    </p>
+
+    <h2>7. Test levels</h2>
+    <p>
+      The levels mirror the Director's data path — translate in, derive, serve out — and each
+      proves a different claim. Nothing above unit level touches a live source; replay is the
+      seam.
+    </p>
+    <dl class="entities">
+      <dt>Unit</dt>
+      <dd>Pure functions in isolation: adapter <strong>translators</strong> (golden cases,
+      §2), the <strong>derivation</strong> stages (passes→laps→results→standings, §4), and the
+      format <strong>generators</strong> (table-driven, §6). Fast, hermetic, the bulk of the
+      suite.</dd>
+      <dt>Integration — replay</dt>
+      <dd>A recorded session (raw or canonical) replayed through the assembled adapter →
+      log → engine → projection pipeline, asserting the derived projections (§3). Proves the
+      pieces compose and that determinism holds end-to-end over the spine.</dd>
+      <dt>End-to-end — shadow against recorded events</dt>
+      <dd>Replay a full captured event's log against the running Director (store, projection
+      maintenance, server) and assert the projections served over the protocol match the
+      golden output — a "shadow" run of a real event with the live source removed. Exercises
+      incremental maintenance, recompute-equivalence, and crash-recovery (reopen the log
+      mid-replay, rebuild, continue) as the spine promises.</dd>
+      <dt>Protocol / contract</dt>
+      <dd>Because the wire types are generated from Rust into TypeScript
+      (<a href="architecture.html">Architecture</a> §6, <a href="protocol.html">Protocol</a>),
+      the generated types <em>are</em> a contract test: the build fails if Rust and TS drift.
+      Beyond generation, fixtures of serialized snapshot/change-stream messages are decoded by
+      a TS client to prove both ends agree on the shapes — and the same generated types
+      serialize the canonical-event fixtures used everywhere above, so one definition keeps
+      fixtures, engine, and clients in lockstep.</dd>
+    </dl>
+
+    <pre class="mermaid">
+flowchart TB
+  subgraph unit["Unit · pure, hermetic"]
+    t["Translators&lt;br/&gt;(adapter goldens)"]
+    d["Derivation&lt;br/&gt;(passes→laps→results)"]
+    g["Generators&lt;br/&gt;(table-driven)"]
+  end
+  subgraph repl["Integration · replay"]
+    i["Recorded session → engine&lt;br/&gt;assert projections"]
+  end
+  subgraph e2e["End-to-end · shadow"]
+    s["Replay full event log → running Director&lt;br/&gt;assert served projections"]
+  end
+  subgraph contract["Protocol · contract"]
+    c["Rust→TS generated types&lt;br/&gt;+ message fixtures"]
+  end
+
+  unit --> repl --> e2e
+  contract -.->|one type definition| unit
+  contract -.-> e2e
+    </pre>
+
+    <h2>8. Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Fixture format &amp; storage.</span> How recorded sessions are
+      serialized and stored (raw source captures vs canonical-log JSON, inline vs sidecar for
+      signal history), how large captures stay diff-reviewable, and how they version alongside
+      the log/schema versioning open decision in <a href="architecture.html">Architecture</a>
+      §11.</li>
+      <li><span class="q">Golden-update workflow.</span> The mechanism for regenerating golden
+      outputs when behavior changes intentionally (an "accept new goldens" command), and the
+      review discipline that keeps an accidental change from being rubber-stamped.</li>
+      <li><span class="q">Capture tooling.</span> How sessions are recorded from the dockerized
+      RotorHazard and a live Velocidrone build (a tap in the adapter? a standalone recorder?),
+      and how a capture is annotated with its expected outcome.</li>
+      <li><span class="q">Property-based testing scope.</span> Whether to add generative /
+      property tests over the projection layer (e.g. "marshaling never loses a raw observation,"
+      "incremental == recompute for any log") on top of the enumerated golden cases.</li>
+      <li><span class="q">Determinism enforcement.</span> How non-determinism is kept out of
+      the engine in practice — banning wall-clock/RNG reads in the pure path, and asserting
+      byte-identical projections across repeated replays as a CI check.</li>
+      <li><span class="q">Cross-version replay.</span> Whether old fixtures must replay
+      cleanly against a newer engine/projection (a regression guarantee for the open-data
+      promise), and how that interacts with intentional scoring changes.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

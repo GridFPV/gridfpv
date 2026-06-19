@@ -102,9 +102,9 @@
     <h2>Reference</h2>
     <p>
       Ordered the way the system is best understood and built: the map first, then the
-      Director's core data path top-to-bottom (timing in → engine → protocol out), then the
-      optional subsystems that hang off it, then how we keep it correct, and finally the
-      plan that sequences the work.
+      Director's core data path (timing in → engine → protocol out) and the clients that
+      consume it, then the optional subsystems that hang off it, then how we keep it
+      correct, and finally the plan that sequences the work.
     </p>
     <ul class="doc-list">
       <li>
@@ -131,28 +131,42 @@
         </div>
       </li>
       <li>
-        <div class="doc-title"><a href="protocol.html">Protocol</a> <span class="badge">draft</span></div>
+        <div class="doc-title"><a href="protocol.html">Protocol</a></div>
         <div class="doc-desc">
           The single read/realtime contract both transports speak — snapshot, change
-          stream, auth, versioning. Draft: scope + tracked open decisions.
+          stream, subscription scoping, auth, and versioning.
         </div>
       </li>
       <li>
-        <div class="doc-title"><a href="cloud.html">Cloud &amp; Season</a> <span class="badge">draft</span></div>
+        <div class="doc-title"><a href="clients.html">Clients</a></div>
         <div class="doc-desc">
-          The optional relay, long-term warehouse, and cross-event season layer. Draft:
-          scope + tracked open decisions.
+          The web client surfaces — RD console, racer/spectator PWA, and OBS overlays —
+          the frontend framework choice, the shared component library, and PWA mechanics.
         </div>
       </li>
       <li>
-        <div class="doc-title"><a href="streaming.html">Streaming</a> <span class="badge">draft</span></div>
+        <div class="doc-title"><a href="cloud.html">Cloud &amp; Season</a></div>
+        <div class="doc-desc">
+          The optional relay, long-term warehouse, and cross-event season layer —
+          resumable push, the warehouse, season scoring, and identity reconciliation.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="streaming.html">Streaming</a></div>
         <div class="doc-desc">
           The broadcast subsystem — overlays as protocol clients, plus OBS control and
-          capture/RTMP. Draft: scope + tracked open decisions.
+          the capture/RTMP boundary.
         </div>
       </li>
-      <li class="soon">
-        <div class="doc-title">Testing Strategy <span class="badge">coming soon</span></div>
+      <li>
+        <div class="doc-title"><a href="integrations.html">External Integrations</a></div>
+        <div class="doc-desc">
+          MultiGP RaceSync (roster import, results push) and open data — the public
+          read API, export, and embeddable widgets. The pilot owns their data.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="testing-strategy.html">Testing Strategy</a></div>
         <div class="doc-desc">
           How we keep race-timing logic correct: pure translators, golden cases,
           recorded-session replay, and the hard guardrail — never test against a live timer.

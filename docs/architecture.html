@@ -26,9 +26,12 @@
         the things that earn their own docs: the adapter interface internals
         (<a href="timer-adapters.html">Timer Adapters</a>), the wire contract
         (<a href="protocol.html">Protocol</a>), the Cloud warehouse and season model
-        (<a href="cloud.html">Cloud &amp; Season</a>), the broadcast subsystem
-        (<a href="streaming.html">Streaming</a>), correctness strategy
-        (<em>Testing Strategy</em>), and build sequencing (<em>Roadmap</em>). When this doc
+        (<a href="cloud.html">Cloud &amp; Season</a>), the client surfaces
+        (<a href="clients.html">Clients</a>), the broadcast subsystem
+        (<a href="streaming.html">Streaming</a>), external integrations
+        (<a href="integrations.html">External Integrations</a>), correctness strategy
+        (<a href="testing-strategy.html">Testing Strategy</a>), and build sequencing
+        (<em>Roadmap</em>). When this doc
         and the <a href="vision.html">Vision</a> disagree, the Vision wins.
       </p>
     </div>
@@ -166,7 +169,7 @@ flowchart TB
       <li><strong>Trivial export &amp; open data.</strong> The SQLite file is the whole
       event. Export, replay, and the public read API all read the same log.</li>
       <li><strong>Correctness by replay.</strong> A recorded session replays into the same
-      projections deterministically — the backbone of the testing strategy (its own doc).</li>
+      projections deterministically — the backbone of the <a href="testing-strategy.html">testing strategy</a>.</li>
       <li><strong>Crash recovery for free.</strong> If the Director restarts mid-event, it
       reopens the log and rebuilds projections — the in-flight race resumes with nothing
       lost. What's on disk is always the truth.</li>
@@ -301,8 +304,9 @@ flowchart TB
 
       <dt>External sync</dt>
       <dd>MultiGP RaceSync (roster import, results push) and the open-data read API /
-      exports. Like the Cloud it needs internet and reads only derived projections, so it is
-      never in the live critical path.</dd>
+      exports — see <a href="integrations.html">External Integrations</a>. Like the Cloud it
+      needs internet and reads only derived projections, so it is never in the live critical
+      path.</dd>
     </dl>
 
     <h2>6. One protocol, two transports</h2>
@@ -454,8 +458,8 @@ flowchart TB
     <h3>Open — tracked in their own docs</h3>
     <ol class="decisions">
       <li><span class="q">Frontend framework — React vs Svelte.</span> Not load-bearing
-      (every framework consumes the same generated types); to be settled with the client
-      work.</li>
+      (every framework consumes the same generated types); recommended default and rationale
+      now in <a href="clients.html">Clients</a>, pending sign-off.</li>
       <li><span class="q">Adapter internals &amp; how "raw" the raw timing is.</span> The
       canonical event model, per-source translation, and whether a lap is a re-derivable
       projection of captured signal — <a href="timer-adapters.html">Timer Adapters</a>.</li>
