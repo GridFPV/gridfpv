@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/events",
+    "crates/storage",
+    "crates/projection",
+    "crates/app",
+    "xtask",
+]
+
+# Shared metadata + dependency versions for every crate in the spine.
+# Crates inherit these with `field.workspace = true` so versions are set once.
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://gitlab.com/gridfpv/gridfpv"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Internal crates (path deps; versioned together).
+gridfpv-events = { path = "crates/events" }
+gridfpv-storage = { path = "crates/storage" }
+gridfpv-projection = { path = "crates/projection" }

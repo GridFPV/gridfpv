@@ -1,0 +1,18 @@
+# GridFPV CI — runs the SAME check suite as local dev: `cargo xtask ci`.
+# Keep this file thin. All check logic lives in xtask/ (issue #18) so the
+# pipeline and a developer's machine can never run different checks.
+stages:
+  - check
+
+ci:
+  stage: check
+  image: rust:latest
+  before_script:
+    - rustup component add rustfmt clippy
+  script:
+    - cargo xtask ci
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - target/

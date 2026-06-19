@@ -1,0 +1,4 @@
+# `cargo xtask <task>` → runs the workspace task runner (see xtask/ and issue #18).
+# All CI logic lives in xtask so local dev and GitLab CI run the identical checks.
+[alias]
+xtask = "run --quiet --package xtask --"
