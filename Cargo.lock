@@ -104,7 +104,8 @@ name = "gridfpv-projection"
 version = "0.1.0"
 dependencies = [
  "gridfpv-events",
- "gridfpv-storage",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
