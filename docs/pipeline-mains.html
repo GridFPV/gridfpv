@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Pipeline: Brackets / Mains</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Phase 4 — Brackets / Mains</h1>
+      <p class="doc-kind">Pipeline deep dive · what this phase must do</p>
+    </header>
+
+    <p class="lead">
+      The competition proper. Take the seeding, build a bracket, fly it heat by heat, and advance
+      to a winner. This is the circular heart of the pipeline — run, score, advance, run again.
+    </p>
+
+    <div class="callout">
+      <p>
+        This is a deep dive on one phase of the
+        <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
+        and surfaces the decisions and data each implies. It does not define the schema or
+        APIs; those belong to the Architecture doc (coming soon).
+      </p>
+    </div>
+
+    <h2>Role</h2>
+    <p class="phase-meta"><span class="tag required">the racing</span> Class-scoped. Seed, build the bracket, run it, crown a winner.</p>
+    <p>
+      Mains is where the racing happens, <strong>per class</strong>. It begins by turning the
+      seeding into a structure and runs that structure to a result. Its output is the final
+      placements for the class, which feed results, standings, and the MultiGP push.
+    </p>
+
+    <h2>Capabilities</h2>
+
+    <h3>Seed &amp; generate the bracket</h3>
+    <p>
+      The mains <strong>start</strong> by seeding the field — from the
+      <a href="pipeline-qualifying.html">qualifying</a> ranking, or a manual / imported /
+      registration order — and then <strong>generating a bracket</strong>: the rounds and heats
+      pilots will fly. Generation is the entry to the mains, not a separate phase.
+    </p>
+    <ul>
+      <li><strong>Bracket formats</strong> — a pluggable registry of generators: round robin,
+        single elimination, double elimination, multi-tier mains (A/B/C/D/E with top-N advancing up
+        a tier), Chase-the-Ace finals, and MultiGP/FAI P9–P16 style brackets.</li>
+      <li><strong>Leaderboard formats</strong> — e.g. the <strong>MultiGP Global Qualifier
+        (GQ)</strong>: not an elimination bracket but a ranked leaderboard. Each pilot flies a fixed
+        number of <strong>packs</strong> (battery runs / attempts; default 10) and is ranked by
+        their best <a href="pipeline-qualifying.html">fastest 3 consecutive laps</a> across those
+        packs. There is no seeding bracket and no round-to-round advancement — the leaderboard is
+        the result. GQ events typically <strong>skip qualifying</strong> (the GQ <em>is</em> the
+        ranking) and pair with practice.</li>
+      <li><strong>Configuration</strong> — pilots per heat (4 / 6 / 8 / 10), how many seeds advance
+        from each heat, and the finals format.</li>
+      <li><strong>Manual adjustment</strong> — re-seed or move pilots between heats before they
+        fly.</li>
+    </ul>
+
+    <h3>Win condition &amp; scoring</h3>
+    <ul>
+      <li>Configurable per heat/round: <strong>first to X laps (default)</strong>, or a
+        <strong>time limit</strong> (most laps wins, with the
+        <a href="pipeline-qualifying.html">last-lap rule</a> and total time as the tiebreak).</li>
+      <li>Advancement is determined by <strong>top-N finishing positions</strong> per the
+        generator's rules.</li>
+      <li>Leaderboard formats (e.g. GQ) instead score each pack by the
+        <a href="pipeline-qualifying.html">fastest-N-consecutive</a> metric and rank by each pilot's
+        best across all their packs — no heat placement, no advancement.</li>
+    </ul>
+
+    <h3>Run &amp; advance (the loop)</h3>
+    <p>
+      Each heat runs the heat loop; its result feeds an <strong>advancement</strong> step that
+      generates the next heats — run → result → advance → run, until a winner falls out.
+    </p>
+    <ul>
+      <li><strong>Advancement modes (a spectrum)</strong> — <em>fully manual</em> (the RD builds
+        each round) ↔ <em>auto-generate from results, RD confirms</em> (review before it runs, to
+        handle re-flies and disputes) ↔ <em>fully auto</em> (the same flow with the confirm step
+        auto-accepted). The RD can always adjust.</li>
+      <li><strong>Live race control</strong> — staging countdown, arm, race, land; abort / restart;
+        discard and re-run a heat.</li>
+    </ul>
+
+    <h3>Marshaling &amp; live correction</h3>
+    <ul>
+      <li>(IRL) lap correction — add / remove laps, adjust enter/exit points, recover missed laps
+        from signal history.</li>
+      <li>Corrections <strong>live-update</strong> everything downstream — results, standings, and
+        any already-generated advancement recompute immediately. Truth is the raw lap log;
+        placements and brackets are derived from it, so a marshaling edit ripples through without a
+        manual rebuild.</li>
+    </ul>
+
+    <h3>Multi-class scheduling</h3>
+    <ul>
+      <li><strong>Sequential by class (default)</strong> — run one class's mains start to finish,
+        then the next.</li>
+      <li><strong>Unified heat queue (option)</strong> — all heats across classes in one queue the
+        RD orders and can rearrange, so classes interleave however the RD wants.</li>
+    </ul>
+
+    <h3>Frequency / channel assignment</h3>
+    <ul>
+      <li>(IRL) assign a frequency / channel per heat, avoiding conflicts across the pilots flying
+        together.</li>
+    </ul>
+
+    <h2>Sim vs IRL</h2>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Frequency/seat assigned per heat; marshaling and lap
+      correction; conflict avoidance across the heat.</p>
+      <p><span class="label">Sim</span>Heats run back-to-back; no frequency management; marshaling
+      is lighter (mostly abort/restart); results come authoritative from the sim.</p>
+    </div>
+
+    <h2>Entities &amp; data implied</h2>
+    <p>What this phase needs to exist (conceptual — not a schema; the Architecture doc formalizes it):</p>
+    <dl class="entities">
+      <dt>Bracket / generator config (per class)</dt>
+      <dd>generator type, pilots-per-heat, seeds-advance, finals format, and — for pack-based leaderboard formats like GQ — the pack count and scoring metric.</dd>
+      <dt>Round → Heat → Heat slot</dt>
+      <dd>a slot is a pilot assignment with a seed rank; heats group into rounds.</dd>
+      <dt>Heat win condition</dt>
+      <dd>first-to-X or time-limit, plus its value (lap target or duration).</dd>
+      <dt>Heat result</dt>
+      <dd>per pilot: finishing position, laps, time — advancement is derived from it.</dd>
+      <dt>Advancement rule</dt>
+      <dd>top-N, plus the mode (manual / confirm / auto).</dd>
+      <dt>Marshaling edit</dt>
+      <dd>a lap correction that triggers a live recompute of results, standings, and advancement.</dd>
+      <dt>Heat queue (multi-class)</dt>
+      <dd>sequential by class (default) or a unified, RD-ordered queue.</dd>
+    </dl>
+    <p>Reuses the <strong>seeding</strong> from <a href="pipeline-qualifying.html">Qualifying</a>, the <strong>frequency/seat pool</strong> and <strong>track</strong> from <a href="pipeline-setup.html">Setup</a>, and the shared heat loop.</p>
+
+    <h2>Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Multi-class default.</span> Confirm sequential-by-class as the default
+        versus auto-interleave across classes.</li>
+      <li><span class="q">Marshaling cascade depth.</span> If an earlier result changes after later
+        rounds have already run, how far do corrections re-open completed rounds?</li>
+      <li><span class="q">Re-fly / disputes.</span> How disputed or re-flown heats are handled
+        within advancement.</li>
+      <li><span class="q">Finals specifics.</span> Chase-the-Ace ("first to 2 wins") and the
+        grand-final bracket reset in double-elimination.</li>
+      <li><span class="q">Frequency assignment.</span> Automated channel assignment versus manual
+        per heat.</li>
+      <li><span class="q">Seeds-advance vs tiers.</span> How seeds-advance interplays with
+        multi-tier "top-N advance up a tier".</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="event-pipeline.html">event pipeline</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Timer Adapters</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Timer Adapters</h1>
+      <p class="doc-kind">Internal design doc · the canonical event model and the one timing interface</p>
+    </header>
+
+    <p class="lead">
+      The foundational wall. Every live timing source — Velocidrone, RotorHazard, LapRF,
+      manual entry — sits behind one interface and is translated into the same small set of
+      <strong>canonical events</strong>. This is the vocabulary the whole append-only log
+      speaks, so getting it honest matters more than anything downstream.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>canonical event model</strong> and the <strong>adapter
+        interface</strong> for <em>live</em> timing sources. Leaderboard / results imports
+        (a Velocidrone leaderboard, MultiGP results) are deliberately <strong>out of
+        scope</strong> — they produce a ranking, not live observations, and belong to
+        Qualifying / External Sync. When this doc and the
+        <a href="architecture.html">Architecture</a> doc disagree on shape, follow
+        Architecture (§3 the spine, §9 identity); when either disagrees with the
+        <a href="vision.html">Vision</a>, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. The principle</h2>
+    <div class="principle">
+      <p><span class="name">Timers are pluggable; Velocidrone and RotorHazard are the first
+      two, built in parallel.</span> Designing against the simulator keeps the abstraction
+      honest — if the model only fits hardware, it's wrong — while RotorHazard is the first
+      real-world target. Every source is an adapter behind one interface.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Adapters are pure translators.</span> A source's input goes in;
+      canonical events come out. Adapters hold no race logic, own no truth, and never block
+      the engine — they translate and append. That purity is what makes them testable by
+      replaying recorded sessions, and underpins the testing guardrail: tests never depend
+      on a live, shared timing backend (the Velocidrone servers), though a self-hosted,
+      disposable instance like dockerized RotorHazard is fair game — see
+      <a href="testing-strategy.html">Testing Strategy</a>.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Observations in, derivations out.</span> Adapters emit raw
+      <em>observations</em> (a gate was crossed). They do <strong>not</strong> emit laps,
+      results, or standings — those are projections the race engine derives (see
+      <a href="architecture.html">Architecture</a> §3). A "lap" is two consecutive passes,
+      computed downstream, identically for every source.</p>
+    </div>
+
+    <h2>2. The canonical event model</h2>
+    <p>
+      Adapters append a small, source-agnostic set of events to the log. Everything a source
+      can tell us reduces to these:
+    </p>
+    <dl class="entities">
+      <dt>AdapterConnected / AdapterDisconnected</dt>
+      <dd>The source became available or went away. Liveness for the RD; never affects past
+      truth.</dd>
+      <dt>SessionStarted / SessionEnded</dt>
+      <dd>The source's own race/heat lifecycle, <em>where it exposes one</em> (Velocidrone
+      race start/finish; RotorHazard race start/stop). Optional — declared by capability.</dd>
+      <dt>CompetitorSeen</dt>
+      <dd>A source-local competitor reference appeared (a node seat went active, a sim
+      player joined the room). Feeds auto-presence and the binding step — but the binding
+      itself is a registration action, not an adapter event (Architecture §9).</dd>
+      <dt>Pass <em>(the atom)</em></dt>
+      <dd>A gate crossing — the one observation everything else derives from. Fields below.</dd>
+    </dl>
+    <p>A <strong>Pass</strong> carries:</p>
+    <ul>
+      <li><strong>source / adapter id</strong> — which timing source produced it.</li>
+      <li><strong>local competitor ref</strong> — the source's own handle (node seat, sim
+      player name, transponder id), later bound to a GridFPV pilot.</li>
+      <li><strong>source timestamp</strong> — in the source's own clock (see §4), plus a
+      monotonic sequence number where the source provides one.</li>
+      <li><strong>gate / split index</strong> — optional; defaults to the lap gate. Present
+      for sources that report multiple gates or splits (Velocidrone).</li>
+      <li><strong>signal context</strong> — optional; RSSI peak / stats, enter-exit window,
+      or a reference to captured signal history. Present only where the source has it (§3).</li>
+    </ul>
+
+    <pre class="mermaid">
+flowchart LR
+  subgraph sources["Live timing sources"]
+    v["Velocidrone&lt;br/&gt;WebSocket"]
+    rh["RotorHazard&lt;br/&gt;Socket.IO"]
+    lr["LapRF&lt;br/&gt;binary serial"]
+    man["Manual&lt;br/&gt;UI entry"]
+  end
+  subgraph layer["Timer adapter layer · pure translators"]
+    va["adapter"]
+    rha["adapter"]
+    lra["adapter"]
+    mana["adapter"]
+  end
+  canon{{"Canonical events&lt;br/&gt;Pass · lifecycle · competitor-seen"}}
+  log[("Append-only log&lt;br/&gt;raw observations")]
+  eng["Race engine&lt;br/&gt;derives laps · results"]
+
+  v --> va --> canon
+  rh --> rha --> canon
+  lr --> lra --> canon
+  man --> mana --> canon
+  canon --> log
+  log -->|derive| eng
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class log sot;
+    </pre>
+
+    <h2>3. Granularity &amp; signal context</h2>
+    <p>
+      Sources differ sharply in how much they reveal beneath a pass, and the model must be
+      honest about that rather than assume the richest case.
+    </p>
+    <div class="principle">
+      <p><span class="name">The pass is the universal atom; signal context is optional.</span>
+      A simulator reports an exact crossing with nothing underneath — there is no RSSI, no
+      threshold, nothing to re-derive. Hardware reports a crossing <em>plus</em> the signal
+      that produced it. The canonical Pass therefore treats signal context as an optional
+      attachment, never a requirement.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Consequence:</strong> "recover a missed lap from signal history" is a
+        <strong>hardware-only</strong> capability — it's meaningful for RotorHazard/LapRF
+        and impossible (and unnecessary) for a sim, whose detection is already exact. The
+        model accommodates both without special-casing: marshaling that re-derives from
+        signal is simply unavailable on adapters that declare no signal capability (§5).
+      </p>
+    </div>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Pass + RSSI/threshold context; laps can be recovered
+      or re-timed from captured signal.</p>
+      <p><span class="label">Sim</span>Pass only, exact; nothing to recover — a missed lap
+      means the game didn't report a crossing, full stop.</p>
+    </div>
+
+    <h2>4. Clocks &amp; time</h2>
+    <p>
+      Every source stamps in its own clock — game-engine time (Velocidrone), server time
+      (RotorHazard), device RTC (LapRF), wall clock (manual). The model keeps these straight
+      rather than flattening them on arrival.
+    </p>
+    <div class="principle">
+      <p><span class="name">Source time is authoritative for intervals; arrival time is
+      metadata.</span> Lap and split durations are computed from the source's own
+      timestamps, which are internally consistent and immune to network jitter. The
+      Director also records each event's arrival time — but only for ordering and liveness,
+      never for timing math.</p>
+    </div>
+    <p>
+      At session start an adapter captures an <strong>offset</strong> mapping its source
+      clock onto the Director's session timeline, so events from different sources (and the
+      Director's own clock) can be ordered and displayed on one axis. Where a source exposes
+      a monotonic sequence counter, the adapter carries it through — it disambiguates passes
+      that share a timestamp and survives clock adjustments.
+    </p>
+
+    <h2>5. The adapter interface &amp; capabilities</h2>
+    <p>
+      An adapter does three things: <strong>connect</strong> to its source, <strong>translate</strong>
+      source input into canonical events, and <strong>declare what it can do</strong>. The
+      last point is how IRL/sim divergence stays out of the engine: instead of the engine
+      asking "is this a sim?", it asks the adapter "do you support calibration / signal /
+      frequency management?" and adapts the UI and marshaling accordingly.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Capability</th><th>Velocidrone</th><th>RotorHazard</th><th>LapRF</th><th>Manual</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Live passes</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (entered)</td></tr>
+        <tr><td>Gates / splits</td><td>✓</td><td>~ (single)</td><td>~ (single)</td><td>✗</td></tr>
+        <tr><td>Signal context (RSSI)</td><td>✗</td><td>✓</td><td>✓ (stats)</td><td>✗</td></tr>
+        <tr><td>Calibration (enter/exit)</td><td>✗</td><td>✓</td><td>~</td><td>✗</td></tr>
+        <tr><td>Signal-based lap recovery</td><td>✗</td><td>✓</td><td>~</td><td>✗</td></tr>
+        <tr><td>Frequency / channel mgmt</td><td>✗</td><td>✓</td><td>✓</td><td>~</td></tr>
+        <tr><td>Source race lifecycle</td><td>✓</td><td>✓</td><td>~</td><td>✗</td></tr>
+      </tbody>
+    </table>
+    <p>
+      An adapter never owns truth and never blocks: it appends observations and the Director
+      proceeds. A source that drops mid-race reconnects and resumes appending; deduplication
+      relies on source sequence numbers / timestamps so a reconnect can't double-count a pass.
+    </p>
+
+    <h2>6. Identity binding</h2>
+    <p>
+      Each source speaks in its own local references — a node seat, a sim player name, a
+      transponder id. Binding those to a GridFPV pilot is a registration action (Architecture
+      §9), not something the adapter decides; the adapter only <em>reports</em> the local
+      refs it sees (<code>CompetitorSeen</code>), which drives auto-presence ("everyone in
+      the room at 8 PM gets bracketed") and gives the RD the list to bind against.
+    </p>
+
+    <h2>7. Velocidrone — the first adapter</h2>
+    <p>
+      Built first, on purpose. Velocidrone exposes a <strong>WebSocket</strong> feed
+      (opt-in: Options → Main Settings → Websocket Communication → Yes) carrying gate passes,
+      lap splits, lap times, race totals, and holeshot/spread straight from the game engine.
+      Mapping it to the canonical model:
+    </p>
+    <dl class="entities">
+      <dt>Passes &amp; splits</dt>
+      <dd>Each gate crossing becomes a <code>Pass</code> with its split/gate index. The lap
+      times and totals the game also reports are treated as <em>advisory</em> — the engine
+      derives laps from the pass stream so every source is scored identically, and the
+      provided totals are a cross-check.</dd>
+      <dt>Clock</dt>
+      <dd>Game-engine time is the source timestamp; intervals come from it directly.</dd>
+      <dt>Identity</dt>
+      <dd>The sim player name is the local ref reported via <code>CompetitorSeen</code>.</dd>
+      <dt>Capabilities</dt>
+      <dd>Live passes ✓, splits ✓, source lifecycle ✓; signal ✗, calibration ✗, frequency
+      ✗. No special-casing — the adapter simply declares this, and the UI hides calibration
+      and signal marshaling for it.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>Why this keeps us honest:</strong> Velocidrone has no RSSI, no thresholds,
+        no frequencies, and a clock that isn't ours. If the canonical model handles it
+        cleanly as a first-class source — and it does — then hardware, which is a superset,
+        fits without strain.
+      </p>
+    </div>
+
+    <h2>8. Other sources (sketch)</h2>
+    <dl class="entities">
+      <dt>RotorHazard</dt>
+      <dd>Socket.IO / RHAPI; pass events with per-node RSSI and EnterAt/ExitAt thresholds,
+      plus RSSI history — the full-signal case, with calibration and signal-based recovery.
+      Built in parallel with Velocidrone as the first real-world target; a <strong>dockerized
+      RotorHazard</strong> is a self-hosted, disposable instance we fully control, so it both
+      feeds recorded fixtures <em>and</em> is allowed for live integration tests, including in
+      CI. The guardrail bans depending on a <strong>live, shared/production backend</strong>
+      (concretely the Velocidrone game servers, which stay fixtures-only) — not all live
+      timers.</dd>
+      <dt>LapRF</dt>
+      <dd>Binary protocol over serial/USB/TCP; <code>PassingRecord</code> (slot, RTC time,
+      transponder id) and <code>RssiRecord</code> (RSSI min/max/mean) — passes with RSSI
+      stats and a device clock.</dd>
+      <dt>Manual</dt>
+      <dd>The RD enters laps directly; the universal fallback. Passes with wall-clock
+      timestamps, no signal, no calibration — proves the model degrades gracefully to the
+      simplest possible source.</dd>
+    </dl>
+    <p>Each gets a full treatment when it's built; the sketches confirm the model fits them.</p>
+
+    <h2>9. Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="resolved">Resolved — Signal-history storage.</span> Hardware sources
+      always store a <strong>per-pass signal summary</strong> (peak RSSI, enter/exit window)
+      inline in the log. In addition, a <strong>bounded RSSI window</strong> around each pass
+      is retained as an <strong>event-local sidecar</strong> — not pushed to the Cloud by
+      default — so a missed lap can be re-derived. Pairs with the storage tiers in
+      <a href="architecture.html">Architecture</a> §4.</li>
+      <li><span class="resolved">Resolved — Multi-gate / split track model.</span> A track is
+      modeled as ordered gates per lap; a <code>Pass</code> carries a gate index. A lap is a
+      start/finish-gate crossing and splits are sector times; the default is a single gate.</li>
+      <li><span class="resolved">Resolved — Calibration model.</span> Per-pilot enter/exit
+      calibration is represented as <strong>logged adapter config</strong>, fed by the
+      Practice calibration window. Hardware-only.</li>
+      <li><span class="resolved">Resolved — Reconnect / resume &amp; dedup.</span> Passes are
+      idempotent, keyed on (source, sequence#) — or (source, local-ref, source-timestamp)
+      where no sequence counter exists. On reconnect the adapter buffers and de-dups against
+      those keys, so a resume can't double-count or lose passes.</li>
+      <li><span class="resolved">Resolved — Frequency / channel management ownership.</span>
+      The <strong>race engine allocates</strong> channels — it knows the heat/field and avoids
+      conflicts — while the <strong>adapter advertises</strong> the hardware's channel
+      capabilities/constraints and <strong>applies</strong> the tuning. Shared with the Race
+      Engine; IRL sources only.</li>
+      <li><span class="q">Velocidrone WebSocket message schema.</span> The exact message
+      shapes to map, captured against a live build when the adapter is implemented (never in
+      an automated test — see the guardrail).</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

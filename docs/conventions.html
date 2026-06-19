@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Doc Authoring Conventions</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Doc Authoring Conventions</h1>
+      <p class="doc-kind">Internal · how we write these design docs</p>
+    </header>
+
+    <p class="lead">
+      How the internal design docs are built — so every doc looks and behaves the same.
+      These docs are hand-written HTML, read locally in a browser, and must render
+      <strong>offline over <code>file://</code></strong> with no CDN and no build step.
+    </p>
+
+    <h2>The rules</h2>
+    <div class="principle">
+      <p><span class="name">Self-contained &amp; offline.</span> No web fonts, no CDN, no
+      external requests. Everything a doc needs is vendored under <code>assets/</code> and
+      must work from a bare checkout opened as a file.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">One shared stylesheet.</span> Every doc links
+      <code>assets/style.css</code> and uses its components — don't add per-page
+      <code>&lt;style&gt;</code> blocks. Add reusable styling to the shared sheet instead.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">House components.</span> Reuse the existing building blocks:
+      <code>.masthead</code>, <code>.lead</code>, <code>.callout</code>,
+      <code>.principle</code> (with a <code>.name</code> span), <code>.sim-note</code>
+      (with a <code>.label</code> span) for IRL/sim divergences, <code>.tag</code>
+      (<code>.required</code>/<code>.optional</code>), <code>dl.entities</code> for data
+      models, and <code>ol.decisions</code> for open questions.</p>
+    </div>
+
+    <h2>Diagrams — Mermaid</h2>
+    <p>
+      Architecture and flow diagrams use <a href="https://mermaid.js.org">Mermaid</a>,
+      rendered client-side from text. The Mermaid build is <strong>vendored</strong> at
+      <code>assets/vendor/mermaid.min.js</code> (the classic-script build that exposes a
+      <code>window.mermaid</code> global — the ES-module build will <em>not</em> load over
+      <code>file://</code> in Chrome). <code>assets/diagrams.js</code> initializes it with a
+      theme matched to the brand palette and renders every <code>&lt;pre class="mermaid"&gt;</code>
+      block on the page.
+    </p>
+
+    <h3>How to add a diagram</h3>
+    <p>Author the diagram as a Mermaid code block:</p>
+    <pre class="mermaid">
+flowchart LR
+  a["Source"] -->|canonical events| b[("Append-only log")]
+  b -->|derive| c["Projection"]
+  c --> d["Client"]
+    </pre>
+    <p>…which is written in the page as:</p>
+    <div class="callout">
+      <p style="font-family: var(--font-mono); font-size: 0.85rem; white-space: pre-wrap; margin: 0;">&lt;pre class="mermaid"&gt;
+flowchart LR
+  a["Source"] --&gt;|canonical events| b[("Append-only log")]
+  b --&gt;|derive| c["Projection"]
+  c --&gt; d["Client"]
+&lt;/pre&gt;</p>
+    </div>
+    <p>Then include the two scripts at the very end of <code>&lt;body&gt;</code>, in this order:</p>
+    <div class="callout">
+      <p style="font-family: var(--font-mono); font-size: 0.85rem; white-space: pre-wrap; margin: 0;">&lt;script src="assets/vendor/mermaid.min.js"&gt;&lt;/script&gt;
+&lt;script src="assets/diagrams.js"&gt;&lt;/script&gt;</p>
+    </div>
+
+    <h3>Gotchas</h3>
+    <ul>
+      <li>For a line break inside a node label, write <code>&amp;lt;br/&amp;gt;</code> in
+      the HTML source (HTML-escaped), so Mermaid receives the literal <code>&lt;br/&gt;</code>
+      as text rather than the browser consuming it as a real element.</li>
+      <li>The raw source is hidden until Mermaid stamps <code>data-processed</code> on the
+      block — so a diagram that fails to render shows nothing rather than raw text. If a
+      diagram is blank, check the console for a Mermaid parse error.</li>
+      <li>Keep diagrams as <em>text</em> — never paste an exported image. The whole point
+      is diffable, editable, offline-rendered diagrams.</li>
+    </ul>
+
+    <div class="callout">
+      <p>
+        <strong>Updating Mermaid:</strong> re-vendor by downloading the classic build
+        (e.g. <code>mermaid@&lt;version&gt;/dist/mermaid.min.js</code>) over
+        <code>assets/vendor/mermaid.min.js</code> and confirm it still ends with a
+        <code>globalThis["mermaid"] = …</code> assignment (i.e. it's the global-exposing
+        build, not the ESM one).
+      </p>
+    </div>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

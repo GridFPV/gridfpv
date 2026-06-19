@@ -1,0 +1,273 @@
+/* GridFPV — shared stylesheet for internal design/developer docs.
+   Self-contained: no web fonts, no CDN. Must render offline over file://. */
+
+:root {
+  /* Brand + theme tokens (light "document" theme). */
+  --gfpv-green: #43b301;        /* brand accent */
+  --gfpv-green-dark: #357f06;
+  --accent: #1f6feb;            /* links / interactive accents */
+
+  --bg: #ffffff;
+  --surface: #f6f8fa;           /* callouts, table headers, code blocks */
+  --surface-2: #eef1f4;
+  --border: #d8dee4;
+  --text: #1c2025;
+  --text-muted: #5b6671;
+
+  --radius: 8px;
+  --content-width: 760px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 1.65;
+}
+
+/* Centered reading column. */
+.page {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 3rem 1.25rem 4rem;
+}
+
+/* --- Masthead ------------------------------------------------------------ */
+
+.masthead {
+  border-bottom: 3px solid var(--gfpv-green);
+  padding-bottom: 0.85rem;
+  margin-bottom: 2.25rem;
+}
+.masthead .brand {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gfpv-green-dark);
+  margin: 0 0 0.35rem;
+}
+.masthead .doc-kind {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 0.4rem 0 0;
+}
+
+/* --- Typography --------------------------------------------------------- */
+
+h1, h2, h3 { line-height: 1.25; font-weight: 700; }
+h1 { font-size: 2.1rem; margin: 0 0 0.75rem; }
+h2 {
+  font-size: 1.45rem;
+  margin: 2.6rem 0 0.85rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+}
+h3 { font-size: 1.12rem; margin: 1.7rem 0 0.5rem; }
+
+p { margin: 0.85rem 0; }
+
+.lead {
+  font-size: 1.18rem;
+  color: var(--text-muted);
+  margin: 0 0 1.5rem;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+ul, ol { margin: 0.85rem 0; padding-left: 1.5rem; }
+li { margin: 0.4rem 0; }
+
+strong { font-weight: 700; }
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+/* --- Tables ------------------------------------------------------------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.25rem 0;
+  font-size: 0.95rem;
+}
+th, td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+}
+th { background: var(--surface); font-weight: 700; }
+tbody tr:nth-child(even) { background: var(--surface-2); }
+
+/* --- Callout / aside ---------------------------------------------------- */
+
+.callout {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--gfpv-green);
+  border-radius: var(--radius);
+  padding: 0.9rem 1.1rem;
+  margin: 1.25rem 0;
+}
+.callout p:first-child { margin-top: 0; }
+.callout p:last-child { margin-bottom: 0; }
+
+/* A principle: a named, emphasized rule. */
+.principle { margin: 1.1rem 0; }
+.principle .name {
+  font-weight: 700;
+  color: var(--gfpv-green-dark);
+}
+
+/* --- Doc index (table of contents on landing page) ---------------------- */
+
+.doc-list { list-style: none; padding: 0; margin: 1.25rem 0; }
+.doc-list li {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1.1rem;
+  margin: 0.6rem 0;
+  background: var(--bg);
+}
+.doc-list .doc-title { font-weight: 700; font-size: 1.05rem; }
+.doc-list .doc-desc { color: var(--text-muted); font-size: 0.95rem; margin-top: 0.2rem; }
+.doc-list li.soon { background: var(--surface); border-style: dashed; }
+.badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.1em 0.6em;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+/* --- Phases (event-pipeline doc) ---------------------------------------- */
+
+/* Meta line under a phase heading: optional/required + one-line role. */
+.phase-meta {
+  margin: -0.4rem 0 0.9rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+.tag {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 0.1em 0.6em;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+}
+.tag.required { color: #fff; background: var(--gfpv-green-dark); }
+.tag.optional { color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border); }
+
+/* A light inline aside for sim/IRL divergences — not a full callout. */
+.sim-note {
+  margin: 0.85rem 0;
+  padding: 0.5rem 0.85rem;
+  border-left: 3px solid var(--border);
+  background: var(--surface);
+  border-radius: 0 4px 4px 0;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+}
+.sim-note .label {
+  font-weight: 700;
+  color: var(--text);
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  margin-right: 0.4rem;
+}
+
+/* --- Entities (definition list) ----------------------------------------- */
+
+dl.entities { margin: 1.1rem 0; }
+dl.entities dt {
+  font-weight: 700;
+  color: var(--gfpv-green-dark);
+  margin-top: 0.9rem;
+}
+dl.entities dd {
+  margin: 0.15rem 0 0;
+  padding-left: 1rem;
+  border-left: 2px solid var(--border);
+  color: var(--text);
+}
+
+/* --- Open decisions list ------------------------------------------------ */
+
+ol.decisions { margin: 1.1rem 0; padding-left: 0; list-style: none; counter-reset: dec; }
+ol.decisions > li {
+  counter-increment: dec;
+  position: relative;
+  padding: 0.6rem 0.9rem 0.6rem 2.4rem;
+  margin: 0.55rem 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+ol.decisions > li::before {
+  content: counter(dec);
+  position: absolute;
+  left: 0.7rem;
+  top: 0.6rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+ol.decisions .q { font-weight: 700; }
+/* A resolved/accepted decision (vs an open .q). */
+ol.decisions .resolved { font-weight: 700; color: var(--gfpv-green-dark); }
+
+/* --- Mermaid diagrams --------------------------------------------------- */
+
+/* Diagrams are authored as <pre class="mermaid"> and rendered to SVG by
+   assets/diagrams.js (vendored Mermaid, offline). Hide the raw source until
+   Mermaid stamps data-processed, so the text doesn't flash before render. */
+pre.mermaid {
+  margin: 1.75rem 0;
+  text-align: center;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+}
+pre.mermaid:not([data-processed]) { visibility: hidden; }
+pre.mermaid svg { max-width: 100%; height: auto; }
+
+/* --- Footer / meta ------------------------------------------------------ */
+
+.doc-footer {
+  margin-top: 3.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.doc-footer a { color: var(--text-muted); text-decoration: underline; }

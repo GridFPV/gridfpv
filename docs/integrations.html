@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — External Integrations</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>External Integrations</h1>
+      <p class="doc-kind">Internal design doc · the outside world — MultiGP, imports, open data, secrets</p>
+    </header>
+
+    <p class="lead">
+      Everything that crosses the boundary between GridFPV and another system: MultiGP
+      RaceSync (roster in, results out), the leaderboard / roster <strong>imports</strong>
+      that seed an event, the <strong>open-data</strong> surfaces a pilot's data flows out
+      through, and the credentials all of that needs. Every one of these is
+      internet-dependent, reads <em>derived projections</em> rather than raw timing truth,
+      and lives <strong>outside the live critical path</strong> of a race.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>external boundary</strong>: the RaceSync integration, the
+        ingestion path for imports, the open-data read API / export / widgets, and
+        Director-side credential handling. It defers the wire contract these surfaces reuse
+        (<a href="protocol.html">Protocol</a>), the warehouse and the long-term portal that
+        hosts the public dashboards (<a href="cloud.html">Cloud &amp; Season</a>), the
+        canonical timing model imports deliberately bypass (<a href="timer-adapters.html">Timer
+        Adapters</a>), and where imports plug into setup and qualifying
+        (<a href="event-pipeline.html">Event Pipeline</a>). Cloud-specific secrets and
+        deployment config are <strong>out of the FOSS repo</strong> entirely. When this doc
+        and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. The shared shape of integrations</h2>
+    <p>
+      MultiGP sync, leaderboard imports, and the open-data API look like different features,
+      but architecturally they are the same kind of thing: a translator that sits between an
+      external system and GridFPV's internal truth, on the network side of the wall. Three
+      stances apply to all of them, and they follow directly from the Architecture
+      (<a href="architecture.html">Architecture</a> §5, External sync).
+    </p>
+    <div class="principle">
+      <p><span class="name">Never in the live critical path.</span> A race runs end to end
+      with zero internet. Every integration here is allowed to be slow, retried, queued, or
+      entirely absent without degrading anything that happens on the timing floor. If
+      MultiGP is unreachable, the heat still fires; the push simply waits.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Reads projections, never raw truth.</span> What flows
+      <em>out</em> — results to RaceSync, rows from the open-data API — is read from the
+      derived <em>projections</em> (heat results, the qualifying ranking, standings, career
+      stats), not from the append-only log directly. The log is the source of truth;
+      integrations consume the answers computed from it. Because any projection is
+      recomputable, a re-push or a re-query always reflects current truth, including after
+      a marshaling correction.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Internet-dependent and bidirectional, but asymmetric.</span>
+      Outbound (results push, open-data serving) and inbound (roster / leaderboard import)
+      are both gated on connectivity, but they touch GridFPV differently: imports
+      <em>ingest</em> into event configuration, results / open-data <em>read</em> from
+      projections. Neither ever writes the timing log.</p>
+    </div>
+
+    <pre class="mermaid">
+flowchart LR
+  subgraph ext["External systems · internet"]
+    mgp["MultiGP RaceSync"]
+    velo["Velocidrone&lt;br/&gt;leaderboard / room"]
+    pub["Public consumers&lt;br/&gt;chapter sites · widgets · scripts"]
+  end
+
+  subgraph director["DIRECTOR / CLOUD · projections, not the log"]
+    cfg["Event config&lt;br/&gt;roster · seed ranking"]
+    proj["Projections&lt;br/&gt;results · standings · career"]
+    log[("Append-only log&lt;br/&gt;source of truth")]
+  end
+
+  log -->|derive| proj
+  mgp -->|roster import · ingestion| cfg
+  velo -->|leaderboard import · ingestion| cfg
+  proj -->|results push| mgp
+  proj -->|read API · export · widgets| pub
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class log sot;
+    </pre>
+
+    <h2>2. MultiGP RaceSync</h2>
+    <p>
+      First-class RaceSync integration is a non-negotiable Vision pillar for US chapter
+      racing (<a href="vision.html">Vision</a> §1). It has two halves — pulling a chapter's
+      roster in at setup, and pushing the event's results back out — bracketing a chapter
+      registration to the official record without retyping anything.
+    </p>
+
+    <h3>Chapter authentication</h3>
+    <p>
+      RaceSync is organized around <strong>chapters</strong>. To act on a chapter's behalf —
+      read its roster, push its results — the Director authenticates with a chapter-scoped
+      <strong>API key</strong> the RD supplies once and GridFPV stores locally (see §5).
+      Authentication is a setup-time, internet-dependent step; it is never required to run a
+      race, only to sync with MultiGP.
+    </p>
+    <div class="principle">
+      <p><span class="name">Authenticate the chapter, not the pilot.</span> The credential
+      authorizes GridFPV to operate on one chapter's events and roster. Individual pilots are
+      identified within that chapter (e.g. by their MultiGP pilot id), but the trust boundary
+      is the chapter key the RD holds — consistent with the Director being the authoritative
+      operator of the event.</p>
+    </div>
+
+    <h3>Roster import at setup</h3>
+    <p>
+      At Setup &amp; Registration (<a href="event-pipeline.html">Event Pipeline</a>, Phase 1)
+      the RD can pull the chapter roster from RaceSync to assemble the field without manual
+      entry. This is an <strong>import / ingestion</strong>, covered in §3 — it produces
+      GridFPV entries and a pilot-id mapping, not live passes. The same mapping is what
+      lets the results push later address pilots by their MultiGP identity.
+    </p>
+
+    <h3>Pushing results — during and after the event</h3>
+    <p>
+      The headline capability: send <strong>pilots, heats, lap times, and placements</strong>
+      back to RaceSync so the chapter's official record matches what was flown. Because the
+      push reads projections, it can run incrementally <em>during</em> the event (each heat /
+      round as it finalizes) and as a final reconciling push <em>after</em>, and it never
+      blocks the race that produces the data.
+    </p>
+    <div class="principle">
+      <p><span class="name">The push is a queued, resumable projection mirror.</span> Pushes
+      are enqueued as projections finalize and drained whenever the internet is up; a drop
+      pauses the queue and resumes it, no race-day intervention. Because projections are
+      recomputable and the target is addressed idempotently (this heat, this pilot, this
+      round), a re-push after a correction overwrites rather than duplicates — the same
+      property the Cloud's resumable log push relies on (<a href="architecture.html">Architecture</a>
+      §3), applied to a results mirror instead of the raw log.</p>
+    </div>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>The mainline case — a sanctioned MultiGP chapter race
+      pushing official results, lap times, and bracket placements to RaceSync.</p>
+      <p><span class="label">Sim</span>RaceSync push is generally not applicable to a pure
+      Velocidrone event; where a chapter runs sim racing under its banner the same mechanism
+      applies, but the common sim integration is the <em>leaderboard import</em> (§3), not the
+      push.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Reuse over reinvention:</strong> RotorHazard's RaceSync plugin is prior art
+        for the same conversation with MultiGP. The exact RaceSync API surface we depend on —
+        endpoints, auth flow, and the result payload shapes for heats / laps / placements —
+        is captured as an Open decision (§6) and pinned against the live API when the
+        integration is built, the same discipline the adapter docs apply to external schemas.
+      </p>
+    </div>
+
+    <h2>3. Imports are ingestion — not timer adapters</h2>
+    <p>
+      Two imports matter today: the <strong>MultiGP chapter roster</strong> (at setup) and
+      the <strong>Velocidrone leaderboard</strong> (for qualifying seeding). Both bring data
+      <em>in</em> from outside, and both deliberately live <strong>here / with qualifying</strong>
+      — not in the timer-adapter layer.
+    </p>
+    <div class="principle">
+      <p><span class="name">Imports produce rosters and rankings, not live passes.</span> A
+      timing adapter emits the canonical <code>Pass</code> — a live observation that the
+      engine derives laps from. An import emits no observations at all: a roster import yields
+      <em>entries</em>, a leaderboard import yields a <em>seed ranking</em>. They populate
+      configuration and projections, never the timing log. That is precisely why
+      <a href="timer-adapters.html">Timer Adapters</a> declares leaderboard / results imports
+      <strong>out of scope</strong> — the adapter layer is live timing sources only.</p>
+    </div>
+
+    <h3>The MultiGP chapter roster (setup ingestion)</h3>
+    <p>
+      Pulls the chapter's pilots from RaceSync and turns them into event entries, carrying
+      each pilot's MultiGP id so the later results push (§2) and any cross-event identity
+      reconciliation (<a href="cloud.html">Cloud &amp; Season</a>) can address the right
+      person. It feeds the same registration machinery as adding pilots by hand or letting
+      them self-register — it is just a faster way to assemble the field.
+    </p>
+
+    <h3>The Velocidrone leaderboard (qualifying ingestion)</h3>
+    <p>
+      In sim racing the leaderboard for a spec track <em>is</em> the qualifying ranking —
+      "leaderboard bashing" (<a href="event-pipeline.html">Event Pipeline</a>, Phase 3).
+      Importing it produces the ordered seed that the mains build from, treated as an equal
+      to running qualifying live or skipping it. It is a ranking, full stop: no per-pass
+      timing, no signal context, nothing the adapter model would carry.
+    </p>
+    <div class="sim-note">
+      <p><span class="label">Sim</span>One-click leaderboard import is the intended path —
+      pilots grind a track, the leaderboard becomes the seed.</p>
+      <p><span class="label">IRL</span>The roster import is the common case; a results-derived
+      ranking (e.g. seeding from prior MultiGP results) is the IRL analogue of importing a
+      ranking rather than flying qualifying.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Why the split matters:</strong> keeping imports out of the adapter layer keeps
+        that layer's one job honest — translate <em>live</em> sources into canonical
+        observations and nothing else (<a href="timer-adapters.html">Timer Adapters</a> §1).
+        Ingestion is a different shape of data with a different destination (config /
+        rankings), so it earns a different home: here for the network mechanics, with
+        Qualifying / Setup for where it plugs into the pipeline.
+      </p>
+    </div>
+
+    <dl class="entities">
+      <dt>Roster import</dt>
+      <dd>External source (MultiGP chapter, Velocidrone room) → a set of event
+      <strong>entries</strong> plus a local-ref / external-id mapping. Setup-time. Feeds
+      registration, not the log.</dd>
+      <dt>Ranking import</dt>
+      <dd>External leaderboard / results → an ordered <strong>seed ranking</strong> for the
+      mains. Qualifying-time. A projection input, not live passes.</dd>
+      <dt>Results push (outbound)</dt>
+      <dd>The inverse direction — GridFPV projections → RaceSync. Covered in §2; listed here
+      to complete the boundary's data flows.</dd>
+    </dl>
+
+    <h2>4. Open data</h2>
+    <p>
+      Open data is the core differentiator versus closed platforms: a pilot's racing history
+      belongs to the pilot, and GridFPV exposes it rather than hoarding it
+      (<a href="vision.html">Vision</a> §4). Three surfaces, all reads of projections over the
+      truth in the append-only log.
+    </p>
+    <dl class="entities">
+      <dt>Public read API</dt>
+      <dd>A queryable HTTP surface over derived projections — event results, standings, and
+      (in the Cloud) career profiles, head-to-head records, per-track personal bests, season
+      standings. Read-only; it never exposes a control or write path.</dd>
+      <dt>Data export</dt>
+      <dd>A pilot or chapter takes its data out wholesale. The per-event SQLite file already
+      <em>is</em> the export (<a href="architecture.html">Architecture</a> §3) — the unit of
+      truth, portable and replayable; the open-data surface adds friendlier projected
+      exports (e.g. results / laps as structured rows) on top.</dd>
+      <dt>Embeddable widgets</dt>
+      <dd>Drop-in components a chapter can put on its own site — live leaderboards, standings,
+      pilot cards — reading the same public projections so chapters build their own
+      dashboards and ranking sites on GridFPV's open data.</dd>
+    </dl>
+
+    <div class="principle">
+      <p><span class="name">Open data is the read contract, pointed at the public.</span> The
+      public API is the same kind of thing as the racer/spectator read surface — a read of
+      projections — so it reuses the one read/realtime contract rather than inventing a second
+      one (<a href="protocol.html">Protocol</a>). The differences are reach (public, internet)
+      and shape (large historical / cross-event queries, pagination, caching), not a separate
+      protocol. The contract is built once and honored here too.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Recomputable means trustworthy.</span> Because every public metric
+      is a projection over an append-only log, any figure can be recomputed over the full
+      history, and a new metric is a new projection — not a migration. Openness is durable:
+      what we expose can always be re-derived and re-served, including after corrections.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Open to any account-holder, not anonymous.</span> Open data is
+      <em>open</em> in the sense that any pilot or chapter can get the full, queryable,
+      exportable data and keep their own portable copy — not in the sense that Cloud reads are
+      unauthenticated. The <strong>Cloud</strong> open-data API and export require a
+      <strong>free account / account-anchored API key</strong> rather than anonymous access;
+      the gate is an account, not a paywall, and a pilot's data stays portable to them. The
+      <strong>Director</strong> still serves <strong>single-event</strong> open data openly on
+      the <strong>LAN</strong> — it is offline-first, where no Cloud account is even possible.
+      Public <strong>embeddable widgets</strong> are a <strong>per-chapter opt-in</strong>: a
+      chapter may choose to publish a public widget for its events.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Where it lives:</strong> single-event open data can be served openly by the
+        Director on the LAN, but the cross-event surface — career profiles, season standings,
+        the dashboards chapters embed — is <strong>Cloud-only by nature</strong>, because only
+        the Cloud warehouse holds the accumulated history
+        (<a href="architecture.html">Architecture</a> §8; <a href="cloud.html">Cloud &amp;
+        Season</a>), and Cloud reads are account-gated (a free account, anchored to an API
+        key). The Cloud reuses the same Rust server crate over Postgres, so the public read
+        surface is one contract served from either tier — the long-term portal is just its
+        widest, most-cached deployment.
+      </p>
+    </div>
+
+    <h2>5. Credential &amp; secret handling</h2>
+    <p>
+      External services need credentials — most concretely the MultiGP <strong>chapter API
+      key</strong>. These are Director-side, internet-dependent, and held only to talk to the
+      outside; they are never needed to run a race.
+    </p>
+    <div class="principle">
+      <p><span class="name">Secrets are Director-side and off the wire contract.</span> A
+      chapter API key is stored with the Director's local configuration (the catalog tier,
+      <a href="architecture.html">Architecture</a> §4), used only by the outbound integration
+      code, and never placed in the append-only log, a projection, the read contract, or any
+      export. The log stays a clean, shareable record of the race; a secret never leaks into
+      open data.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Cloud secrets are out of the FOSS repo.</span> Anything the
+      optional Cloud needs — its own service credentials, deployment config, signing keys —
+      lives with the Cloud deployment, not in the open-source repository. The FOSS Director
+      carries only the credentials an RD supplies for their own event (the chapter key); the
+      Director's single-event open data is served openly on the LAN with no secret at all,
+      while Cloud open-data reads use the reader's own free account / account-anchored API key
+      rather than any secret of ours.</p>
+    </div>
+    <div class="callout">
+      <p>
+        The concrete mechanics — how a key is entered, where it is stored on disk, whether it
+        is encrypted at rest or scoped per chapter, and how multiple chapter keys coexist —
+        are an Open decision (§6). The fixed commitment here is the boundary: secrets are
+        Director-local, used only for outbound sync, and never enter the log, projections, the
+        read contract, or any export.
+      </p>
+    </div>
+
+    <h2>6. Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Exact RaceSync API scope.</span> The specific endpoints, auth flow,
+      and result payload shapes (heats, lap times, placements) GridFPV depends on, plus
+      incremental-vs-final push granularity and idempotency keys. <em>Accepted as
+      recommended:</em> pin the RaceSync API scope against the live API at build time, using
+      RotorHazard's RaceSync plugin as prior art; treat a sanctioned chapter event as the
+      validation case rather than mocking the API blind. Open refinement: the exact endpoint
+      list and payload shapes still get fixed when the integration is built.</li>
+      <li><span class="q">Open-data API shape &amp; auth.</span> Whether the public read API
+      is exactly the protocol's read contract or a thinner public projection of it; query /
+      pagination model for large historical and cross-event reads; and rate-limiting.
+      <em>Decided (auth):</em> Cloud open-data reads are <strong>account-gated</strong> — they
+      require a free account / account-anchored API key, not anonymous access — while the
+      Director serves single-event open data openly on the LAN; data stays open to any
+      account-holder and portable to the pilot. <em>Recommendation (shape):</em> reuse the one
+      read contract (<a href="protocol.html">Protocol</a>), adding only pagination and caching
+      for the cross-event scale; settle the remaining shape questions alongside the Protocol
+      auth/scoping decisions.</li>
+      <li><span class="q">Widget embedding model.</span> How embeddable widgets are delivered
+      and isolated — iframe vs web component vs script snippet — and how a chapter scopes a
+      widget to its events / pilots. <em>Decided (publishing):</em> public widgets are a
+      <strong>per-chapter opt-in</strong> — a chapter chooses whether to publish a public
+      widget at all. <em>Recommendation (delivery):</em> favor a self-contained embed (iframe
+      or web component) that talks only to the public read API, so a chapter never handles a
+      credential to embed; decide the remaining delivery details with the long-term portal in
+      <a href="cloud.html">Cloud &amp; Season</a>.</li>
+      <li><span class="q">Credential storage mechanics.</span> Where the chapter API key is
+      stored, encryption at rest, per-chapter scoping, and handling multiple chapter keys on
+      one Director. <em>Accepted as recommended:</em> store the chapter API key in the
+      Director catalog tier with at-rest protection via the OS keystore, scoped per chapter,
+      and keep it strictly out of the log and every export. Open refinement: handling multiple
+      chapter keys on one Director and the keystore fallback where none is available.</li>
+      <li><span class="q">Sync trigger &amp; queue policy.</span> What drives the results push
+      (per-heat finalize, per-round, manual, periodic), how the outbound queue retries and
+      surfaces failures to the RD, and how a re-push after a correction reconciles.
+      <em>Accepted as recommended:</em> automatic per-round enqueue plus a manual "push now"
+      and a visible, resumable queue — never a blocking, in-the-critical-path call. Open
+      refinement: retry backoff and exactly how failures surface to the RD.</li>
+      <li><span class="q">Import provenance &amp; refresh.</span> Whether an imported roster /
+      ranking records its source for re-import, and how a re-import reconciles with entries the
+      RD has since edited (added pilots, manual seed changes). <em>Accepted as recommended:</em>
+      tag imported entries with their source and re-import as a <strong>non-clobbering
+      merge</strong> that preserves local RD edits. Open refinement: the exact conflict rule
+      when a re-imported entry diverges from a hand-edited one.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

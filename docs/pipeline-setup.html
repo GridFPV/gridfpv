@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Pipeline: Setup &amp; Registration</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Phase 1 — Setup &amp; Registration</h1>
+      <p class="doc-kind">Pipeline deep dive · what this phase must do</p>
+    </header>
+
+    <p class="lead">
+      Standing up an event and assembling the field that will fly it. The first phase, and
+      the one every later phase depends on — it defines the competition and produces a
+      checked-in roster.
+    </p>
+
+    <div class="callout">
+      <p>
+        This is a deep dive on one phase of the
+        <a href="event-pipeline.html">event pipeline</a>. It describes intent and
+        capability — the things we want to hit — and surfaces the decisions and data each
+        capability implies. It does not define the schema or APIs; those belong to the
+        Architecture doc (coming soon).
+      </p>
+    </div>
+
+    <h2>Role</h2>
+    <p class="phase-meta"><span class="tag required">required</span> First phase. Define the event; assemble and check in the field.</p>
+    <p>
+      Setup &amp; Registration turns "we're running a race" into a concrete, ready-to-fly
+      event: a named event with one or more <strong>classes</strong>, a track, a chosen
+      <strong>format</strong> (which later phases run), and a <strong>roster</strong> of
+      pilots who are actually present. Its output is what Practice, Qualifying, and Mains all
+      consume.
+    </p>
+
+    <h2>Capabilities</h2>
+
+    <h3>Define the event</h3>
+    <ul>
+      <li><strong>Identity</strong> — name and date.</li>
+      <li><strong>Classes / categories.</strong> An event runs <strong>one or more classes</strong>,
+        and each class is a <em>self-contained competition</em> — its own roster subset,
+        qualifying, bracket, and results. The predefined set is drawn from MultiGP:
+        <em>Spec, Pro Spec, Freedom Spec, Street League, Open, Tiny Whoop, Tiny Trainer</em>,
+        plus a <strong>Custom/Other</strong> free-text class. A class is a
+        <strong>categorization</strong>; GridFPV does not enforce equipment/hardware specs —
+        those rules live with the league, not the app.</li>
+      <li><strong>Track selection.</strong> A physical track layout (IRL) or a Velocidrone spec
+        track and its track id (sim).</li>
+      <li><strong>Format configuration.</strong> Which phases this event runs — practice on/off,
+        qualifying mode (<em>run live</em> / <em>import</em> / <em>skip</em>), and the mains
+        format. The pipeline is configurable per event, not fixed.</li>
+      <li><strong>Guided setup wizard.</strong> Make the common path effortless (a table stake
+        against the incumbents) while leaving every choice editable afterward.</li>
+    </ul>
+
+    <h3>Assemble the field — intake</h3>
+    <p>Registration is mapping pilots into an event-class roster. Four intake paths, all first-class:</p>
+    <ul>
+      <li><strong>RD manual entry</strong> — the race director adds and edits pilots directly. The
+        always-available baseline.</li>
+      <li><strong>Self-registration (racer PWA)</strong> — pilots register themselves from their
+        phone on the LAN against the Director (e.g. scan a QR, enter a callsign). Reduces RD load.</li>
+      <li><strong>MultiGP RaceSync import</strong> — pull a chapter's roster (pilots and their
+        MultiGP ids) from RaceSync. First-class league integration.</li>
+      <li><strong>Velocidrone / CSV import</strong> — import from a Velocidrone room roster or a
+        leaderboard CSV; the leaderboard variant also seeds qualifying.</li>
+    </ul>
+
+    <h3>Check-in &amp; presence</h3>
+    <ul>
+      <li><strong>Check-in</strong> — mark who is actually here, per class. A pilot on the roster
+        is not necessarily present.</li>
+      <li><strong>Auto-presence</strong> — pilots a timer or sim room currently sees can be
+        activated automatically. This powers the "everyone in the room at 8 PM gets bracketed"
+        flow and relies on the adapter presence capability.</li>
+      <li><strong>Manual activate / prune</strong> — the RD can always override presence by hand.</li>
+    </ul>
+
+    <h3>Pilot-identity binding</h3>
+    <ul>
+      <li>Bind each timing source's local pilot reference — a node/seat index, a sim player name, a
+        transponder id — to a GridFPV pilot, so live timing data lands on the right pilot.</li>
+      <li>The global pilot carries the external ids it's known by (Velocidrone uid, MultiGP id,
+        callsign), which is what makes the four intake paths reconcile to one pilot.</li>
+    </ul>
+
+    <h2>Sim vs IRL</h2>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Declare the frequency / seat pool; assign transponders or
+      timer seats; capture waivers and the safety briefing.</p>
+      <p><span class="label">Sim</span>Select the Velocidrone spec track; no frequency pool and no
+      waivers; intake and presence come from the Velocidrone room.</p>
+    </div>
+
+    <h2>Entities &amp; data implied</h2>
+    <p>
+      What this phase needs to exist (conceptual — named with key attributes, not a schema; the
+      Architecture doc will formalize it):
+    </p>
+    <dl class="entities">
+      <dt>Event</dt>
+      <dd>name, date, format-config (which phases are enabled, qualifying mode, mains format), and one or more Classes.</dd>
+      <dt>Class</dt>
+      <dd>class type (predefined enum + custom); scopes its own roster, qualifying, bracket, and results; references a track.</dd>
+      <dt>Pilot (global registry)</dt>
+      <dd>callsign, name, and the external ids it's known by (Velocidrone uid, MultiGP id, …).</dd>
+      <dt>Roster entry (pilot ↔ event-class)</dt>
+      <dd>presence / check-in flag, seed inputs (qualifying position / metric), and the per-source identity binding (pilot_ref).</dd>
+      <dt>Track</dt>
+      <dd>a physical layout reference (IRL) or a Velocidrone spec track + id (sim).</dd>
+      <dt>Frequency / seat pool</dt>
+      <dd>(IRL) the channels or timer seats available to assign during heats.</dd>
+    </dl>
+
+    <h2>Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Pilot-identity model.</span> One global Pilot carrying multiple external
+        ids, or per-source identities? How do we dedupe / merge a pilot who arrives via Velocidrone,
+        MultiGP, and manual entry?</li>
+      <li><span class="q">Track scope.</span> Is the track set per event or per class? Multi-class
+        events sometimes share a track and sometimes don't.</li>
+      <li><span class="q">Self-registration trust.</span> Do self-registered pilots need RD
+        approval before they're on the roster? How does a racer's device pair with and trust a
+        Director on the LAN? (Links to the mDNS pairing decision.)</li>
+      <li><span class="q">Class semantics.</span> Label-only (proposed) versus storing — or even
+        enforcing — equipment specs per class.</li>
+      <li><span class="q">MultiGP import.</span> Does roster import require connectivity at setup
+        time, and where does MultiGP identity get reconciled against existing pilots?</li>
+      <li><span class="q">Multi-class scheduling. <em>(decided)</em></span> How parallel class
+        competitions share one timer/track is settled in
+        <a href="pipeline-mains.html">Mains</a>: sequential by class by default, with a unified
+        RD-ordered heat queue as an option.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="event-pipeline.html">event pipeline</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Protocol</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Protocol</h1>
+      <p class="doc-kind">Internal design doc · the one read/realtime contract every client speaks</p>
+    </header>
+
+    <p class="lead">
+      The single read/realtime contract. A client opens it, fetches a <strong>snapshot</strong>
+      of the projections it cares about, then subscribes to a <strong>realtime change
+      stream</strong>. The Director serves it on the LAN and the Cloud serves the identical
+      contract off-LAN — a client knows only a base URL and can't tell which it's talking to.
+      This doc makes "one protocol, two transports" concrete.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>read model</strong> (snapshot), the <strong>realtime
+        change stream</strong>, <strong>subscription scoping</strong>, <strong>auth &amp;
+        authorization</strong>, and <strong>contract versioning</strong>. It deliberately
+        does <strong>not</strong> redefine the projections themselves — those belong to the
+        engines that derive them (<a href="race-engine.html">Race Engine</a>,
+        <a href="cloud.html">Cloud &amp; Season</a>) — nor the timing vocabulary
+        (<a href="timer-adapters.html">Timer Adapters</a>). It defers the cross-event registry
+        and account model to <a href="cloud.html">Cloud &amp; Season</a>, and the overlay
+        catalogue to <a href="streaming.html">Streaming</a>. Trust boundaries are fixed in
+        <a href="architecture.html">Architecture</a> §9; the wire mechanics are decided here.
+        Final calls on WS-vs-SSE, exact message schemas, and the token/session format are
+        left in <strong>Open decisions</strong>. When this doc and the
+        <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. What the protocol serves — projections, not the log</h2>
+    <p>
+      The append-only log is the single source of truth, but it is <strong>never</strong> the
+      wire format. Clients read <strong>projections</strong> — the answers derived by folding
+      the log (<a href="architecture.html">Architecture</a> §3) — plus <strong>live
+      race-state</strong>. The raw event log is an internal concern of the Director and the
+      Cloud warehouse; it is exposed only through bulk export / open-data endpoints, not
+      through the realtime contract.
+    </p>
+    <div class="principle">
+      <p><span class="name">The protocol is a read interface over projections.</span> The
+      Pass atom, the canonical timing events, and the race-state events that drive the heat
+      loop are <em>inputs</em> the Director folds. Clients receive the folded result — a lap
+      list, a heat result, a ranking — never the unfolded observations and adjudications
+      behind it.</p>
+    </div>
+    <p>The projections the contract serves, each its own addressable resource:</p>
+    <dl class="entities">
+      <dt>Live race-state</dt>
+      <dd>The current heat and its loop state (<code>Scheduled → Staged → Armed → Running →
+      Landed → Scored</code>, see <a href="race-engine.html">Race Engine</a> §2), the active
+      pilots and their live lap/split progress, the running order, and the on-deck heat. The
+      latency-sensitive core every overlay and spectator watches.</dd>
+      <dt>Lap lists</dt>
+      <dd>Per-pilot, per-heat laps and splits, already folding marshaling adjudications (void,
+      insert, adjust). What the engine derives, not what the timer reported.</dd>
+      <dt>Heat results</dt>
+      <dd>The scored outcome of a heat — finishing order, lap counts, the applied win
+      condition and tie-breaks.</dd>
+      <dt>Qualifying ranking / seed</dt>
+      <dd>The aggregated ordering a qualifying format exposes, including the provisional /
+      partial ranking mid-format and the final seed handed to the mains.</dd>
+      <dt>Bracket state</dt>
+      <dd>The mains structure — heats, seeds, advancement, the path toward a winner — as the
+      bracket generator currently sees it.</dd>
+      <dt>Standings</dt>
+      <dd>Event standings derived across a class's phases. (Career and season standings are
+      the same shape but Cloud-only by nature — see
+      <a href="cloud.html">Cloud &amp; Season</a>.)</dd>
+      <dt>Event &amp; schedule</dt>
+      <dd>The framing config a client needs to make sense of the rest: the event, its classes,
+      tracks, heats/rounds, and the pilot/entry roster.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>The dividing line restated for the wire:</strong> if it's an observation or a
+        decision, it lives in the log and the client never sees it directly; if it's an answer
+        computed from those, it's a projection and the protocol serves it. This keeps the wire
+        contract stable while the log vocabulary and projection internals evolve underneath.
+      </p>
+    </div>
+
+    <h2>2. The snapshot read model</h2>
+    <p>
+      A client begins by fetching a <strong>snapshot</strong>: the current materialized state
+      of exactly the projections it cares about, over plain HTTP <code>GET</code>. The
+      snapshot is self-contained and immediately renderable — a spectator who loads the page
+      sees the full current standings before a single live update arrives.
+    </p>
+    <div class="principle">
+      <p><span class="name">Snapshot first, then subscribe.</span> Every client follows the
+      same two-step handshake: read a snapshot of its scope, then attach the realtime stream
+      to keep it current. The snapshot carries the <strong>sequence cursor</strong> the client
+      uses to start the stream exactly where the snapshot ended (§3) — so nothing is missed
+      and nothing is double-applied in the gap between the two calls.</p>
+    </div>
+    <p>Snapshot reads are:</p>
+    <ul>
+      <li><strong>Scoped</strong> — addressed by resource and filter (a class, a heat, a
+      pilot; see §4), so a phone fetches one heat, not the whole event.</li>
+      <li><strong>Cacheable where they're stable</strong> — a scored heat result or a finished
+      event is immutable-until-marshaled and carries cache validators; live race-state is
+      not cached. This is what lets the Cloud's long-term portal scale read-heavy and the live
+      surface stay dynamic (<a href="architecture.html">Architecture</a> §8).</li>
+      <li><strong>Paginated for large reads</strong> — full event history, multi-event
+      open-data queries, and warehouse browsing page through results; live single-event scopes
+      are small enough to return whole.</li>
+    </ul>
+    <p>
+      Because the Director and the Cloud reuse the same server crate behind a storage trait
+      (<a href="architecture.html">Architecture</a> §2), a snapshot computed from SQLite on
+      the LAN and from Postgres in the Cloud is the same shape — the client cannot tell them
+      apart.
+    </p>
+
+    <h2>3. The realtime change stream</h2>
+    <p>
+      After the snapshot, the client opens a <strong>WebSocket</strong> and receives a stream
+      of <strong>change envelopes</strong> that advance its projections. WebSocket is the
+      working default carried over from <a href="architecture.html">Architecture</a> §11;
+      SSE is noted below as a read-only fallback.
+    </p>
+    <div class="principle">
+      <p><span class="name">Snapshot + incremental changes.</span> The stream sends deltas,
+      not repeated full state — a new lap, a heat-state transition, a re-scored result. Each
+      envelope names the projection it touches and carries a monotonically increasing
+      <strong>sequence number</strong>. The client applies envelopes in order to keep its
+      local copy identical to the server's, and the server may collapse a burst into a single
+      "this projection changed, here's its new value" envelope when a delta would be larger or
+      ambiguous (e.g. after a marshaling correction that re-folds a whole lap list).</p>
+    </div>
+
+    <h3>Sequence, ordering &amp; resume</h3>
+    <p>
+      The stream carries a <strong>projection sequence number</strong> — a per-stream counter
+      that increases by one per envelope. It is <em>not</em> the raw log offset: the log is an
+      internal source of truth (§1), and one log append can fan out into several projection
+      changes (or none a client subscribes to). The protocol commits to the projection
+      sequence as its public ordering; the log offset stays a private implementation detail
+      the Director and Cloud use for their own resumable sync
+      (<a href="architecture.html">Architecture</a> §3).
+    </p>
+    <div class="principle">
+      <p><span class="name">Resume by cursor, fall back to re-snapshot.</span> The snapshot
+      hands the client a starting sequence cursor; every envelope advances it. On a dropped
+      connection the client reconnects and presents its last-applied cursor. If the server can
+      still serve the gap, it replays the missed envelopes and the client is seamlessly
+      current. If the gap is too old to replay (beyond the retained window), the server tells
+      the client to re-snapshot — fetch a fresh snapshot and resume the stream from its new
+      cursor. Re-snapshot is always correct because projections are recomputable; the stream
+      is an optimization, never the source of truth.</p>
+    </div>
+    <p>
+      Ordering guarantees, stated plainly:
+    </p>
+    <ul>
+      <li><strong>Total order per stream.</strong> Within one subscription, envelopes arrive
+      in strictly increasing sequence; a client that applies them in order converges to the
+      server's state.</li>
+      <li><strong>No gaps without notice.</strong> A client detecting a sequence jump it can't
+      bridge must re-snapshot rather than render a hole.</li>
+      <li><strong>Idempotent application.</strong> Re-delivering an envelope the client already
+      applied (after a flaky reconnect) is a no-op, keyed by sequence — so resume can safely
+      overlap.</li>
+      <li><strong>At-least-once, deduplicated.</strong> The transport may redeliver; the
+      sequence makes that harmless. The protocol does not promise exactly-once delivery, only
+      exactly-once <em>effect</em>.</li>
+    </ul>
+
+    <pre class="mermaid">
+sequenceDiagram
+  participant C as Client (PWA / overlay)
+  participant S as Server (Director or Cloud)
+  C->>S: GET snapshot (scoped)
+  S-->>C: state + cursor seq=N
+  C->>S: WS subscribe (scope, from seq=N)
+  S-->>C: change envelope seq=N+1
+  S-->>C: change envelope seq=N+2
+  Note over C,S: connection drops
+  C->>S: WS reconnect (from seq=N+2)
+  alt gap within retained window
+    S-->>C: replay seq=N+3 … current
+  else gap too old
+    S-->>C: re-snapshot required
+    C->>S: GET snapshot (scoped)
+    S-->>C: state + cursor seq=M
+  end
+    </pre>
+
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Marshaling re-folds happen mid-event (recovered laps,
+      penalties, DQs); a corrected lap list arrives as a fresh-value envelope, and clients
+      that had it open update in place.</p>
+      <p><span class="label">Sim</span>Far fewer re-folds — mostly discard-and-re-run, which
+      surfaces as a heat-state transition rather than a lap-list rewrite.</p>
+    </div>
+
+    <h3>SSE as a read-only fallback</h3>
+    <p>
+      Spectators and overlays are pure readers — they never send anything up the socket. For
+      them a one-way <strong>Server-Sent Events</strong> stream would carry the same change
+      envelopes over plain HTTP, with the browser's built-in <code>Last-Event-ID</code>
+      reconnect mapping naturally onto the sequence cursor. The cost is a second code path and
+      a separate story for the RD console, which genuinely needs a bidirectional channel for
+      control (§5). Whether SSE earns its keep as a read-only fallback, or whether one
+      WebSocket transport should serve every client, is an Open decision — but the envelope
+      shape is designed to be transport-neutral so either can carry it.
+    </p>
+
+    <h2>4. Subscription scoping</h2>
+    <p>
+      A subscription is a <strong>scope</strong> plus a starting cursor. Scope is how a client
+      asks for exactly the projections it needs — both to keep payloads small and to bound
+      what a given client is allowed to see and how often it changes.
+    </p>
+    <dl class="entities">
+      <dt>Event scope</dt>
+      <dd>Everything for one event — the broad default for the Cloud live surface and the
+      "whole venue screen."</dd>
+      <dt>Class scope</dt>
+      <dd>One class's phases, schedule, and standings — a class running in parallel with
+      others (<a href="race-engine.html">Race Engine</a> §5).</dd>
+      <dt>Heat scope</dt>
+      <dd>One heat's live race-state and lap lists — the tightest, lowest-latency scope, ideal
+      for a phone watching the current heat or a leaderboard overlay.</dd>
+      <dt>Pilot scope</dt>
+      <dd>One pilot across the event — a racer following their own laps, results, and next
+      heat.</dd>
+    </dl>
+    <p>
+      Scopes compose (a pilot within a class) and a client may hold several at once over one
+      connection. The three client kinds differ in scope <em>and</em> permission:
+    </p>
+    <table>
+      <thead>
+        <tr><th>Client</th><th>Typical scope</th><th>Reads</th><th>Control / write</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Spectator PWA</strong></td><td>event / class / pilot</td><td>projections + live state</td><td>none</td></tr>
+        <tr><td><strong>Overlay (OBS source)</strong></td><td>heat / class, narrow</td><td>live race-state, low-latency</td><td>none</td></tr>
+        <tr><td><strong>RD console</strong></td><td>whole event</td><td>everything, incl. richer detail</td><td>full control path (§5)</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Overlays and spectators are read-only and look identical on the wire to the read half of
+      the RD console — only the RD console additionally holds the privileged control channel.
+      This is exactly the architecture's claim that overlays and the racer PWA are "the same
+      kind of thing, differing only in transport and permission"
+      (<a href="architecture.html">Architecture</a> §5, §10).
+    </p>
+
+    <h2>5. Auth &amp; authorization</h2>
+    <p>
+      Access splits into <strong>read</strong> and <strong>control</strong>, following the
+      trust boundaries fixed in <a href="architecture.html">Architecture</a> §9. This doc
+      decides only the wire mechanics.
+    </p>
+    <div class="principle">
+      <p><span class="name">Reads are open (or lightly tokened) on the LAN.</span> Anyone on
+      the venue LAN can fetch snapshots and subscribe to the read stream — that's the point of
+      a local spectator/overlay experience with no internet. An optional lightweight join
+      token (printed as a QR code, baked into the URL) can gate casual access to the event
+      without standing up accounts; it grants read scope only and never confers control.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Control is authenticated and Director-local.</span> Race control,
+      marshaling, and configuration require the RD's authenticated role and run only against
+      the Director. The control path is a distinct, privileged set of endpoints / a privileged
+      channel on the same connection — bidirectional by nature (commands up, acknowledgements
+      and resulting state down), which is part of why the RD console wants WebSocket
+      regardless of the spectator-transport decision.</p>
+      <p><em>Future:</em> the control path may serve <strong>one or more</strong> authenticated
+      RD-role clients on the LAN — the desktop RD console and/or a future <strong>mobile
+      RD-control surface</strong> the RD uses to run the race from their phone (e.g. start the
+      heat from their seat). It still requires the RD role (with stricter auth for a mobile
+      device) and, like all control, is <strong>Director-only and never exposed on the
+      Cloud</strong>.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">The Cloud authenticates accounts but never controls.</span>
+      Off-LAN viewers reach the Cloud with accounts; the Cloud serves the identical read
+      contract and relays. <strong>It exposes no control path at all</strong> — control
+      authority never leaves the Director (<a href="architecture.html">Architecture</a> §9).
+      An RD does not run a race "through the Cloud"; the Cloud only ever reflects what the
+      Director already decided.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Same read contract, different gate.</strong> The read half of the protocol is
+        byte-identical on both transports; only what stands in front of it differs — open /
+        join-token on the LAN, account auth on the Cloud. Because the storage trait makes the
+        server crate identical on both sides, "authorize this read" is a thin policy layer,
+        not a fork of the contract. The exact token/session format (opaque token, signed JWT,
+        cookie session) is deliberately left open below.
+      </p>
+    </div>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>The control path is exercised constantly — staging,
+      frequency assignment, marshaling rulings, re-runs — all from the authenticated RD
+      console.</p>
+      <p><span class="label">Sim</span>Same control path, lighter use — mostly start/abort and
+      discard-and-re-run; no frequency or signal marshaling.</p>
+    </div>
+
+    <h2>6. The contract defined once, in Rust</h2>
+    <p>
+      The wire types — snapshot bodies, the change envelope, scope and subscription requests,
+      control commands and their acknowledgements, error shapes — are defined <strong>once, as
+      Rust types</strong> in the server crate, and generated into TypeScript (e.g. ts-rs) for
+      the frontend (<a href="architecture.html">Architecture</a> §2, §6).
+    </p>
+    <div class="principle">
+      <p><span class="name">One definition, no drift.</span> The Director, the Cloud relay,
+      and every client — RD console, spectator PWA, overlays — consume the same generated
+      types. There is no second hand-maintained schema to fall out of sync, and a breaking
+      change to a wire type is a compile error on the Rust side and a type error on the TS side
+      before it is ever a runtime bug.</p>
+    </div>
+    <p>
+      The same crate reuse that gives the Cloud the identical contract
+      (<a href="architecture.html">Architecture</a> §2) gives type generation for free: the
+      types are a property of the shared crate, not of either deployment. Type generation runs
+      as a build step that emits the TS module the frontend imports; keeping it offline and
+      reproducible is part of the build story (deferred to the Roadmap).
+    </p>
+
+    <h2>7. Versioning &amp; evolution</h2>
+    <p>
+      Three independently-updated parties must stay compatible: an older PWA a spectator hasn't
+      refreshed, a newer Director the RD just upgraded, and a Cloud relay on its own deploy
+      cadence. The contract is built to evolve without lockstep upgrades.
+    </p>
+    <div class="principle">
+      <p><span class="name">Additive by default; breaking changes are explicit.</span> New
+      projections, new fields, and new envelope kinds are added so that an older client safely
+      ignores what it doesn't understand and a newer client treats absent fields as absent. A
+      genuinely breaking change (a removed field, a changed meaning) requires a new contract
+      version, never a silent reinterpretation.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">The contract version is negotiated, not assumed.</span> A client
+      announces the contract version it was built against at connect time; the server states
+      the version(s) it serves. A server supports a band of recent versions so an un-refreshed
+      PWA keeps working; when a client is too old to be served, it gets a clear "please
+      refresh" signal rather than malformed data. The negotiated version is independent of the
+      transport (LAN or Cloud) and of the underlying log/schema version.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Three version axes, kept distinct.</strong> (1) The <em>contract version</em>
+        — the wire shapes, owned here. (2) The <em>log / schema version</em> — how the
+        append-only event format evolves while keeping old events readable for long-term open
+        data (<a href="architecture.html">Architecture</a> §11). (3) The <em>projection
+        version</em> — the internal derivation logic, which can change freely as long as the
+        contract output is unchanged, because projections are recomputable. The protocol pins
+        only axis 1; it must stay decoupled from 2 and 3 so the Director can recompute and
+        re-derive without forcing a client upgrade.</p>
+    </div>
+
+    <h2>8. End-to-end shape</h2>
+    <p>
+      Putting it together: the Director folds the log into projections and serves them through
+      the one contract on the LAN; the Cloud reflects the same contract off-LAN from the
+      warehouse; every client does snapshot-then-subscribe and can't tell the two apart.
+    </p>
+
+    <pre class="mermaid">
+flowchart LR
+  log[("Append-only log&lt;br/&gt;source of truth")] -->|fold| proj["Projections&lt;br/&gt;laps · results · ranking · standings"]
+  proj --> contract{{"THE protocol&lt;br/&gt;snapshot + change stream"}}
+  contract -->|LAN · open / join-token| lan["Spectator PWA · overlays · RD console"]
+  log -.->|one-way resumable push| cloud[("Cloud warehouse")]
+  cloud -->|fold| proj2["Projections (identical shape)"]
+  proj2 --> contract2{{"THE protocol&lt;br/&gt;(same contract)"}}
+  contract2 -->|off-LAN · accounts| off["Off-LAN viewers"]
+  rd["RD control path&lt;br/&gt;authenticated · Director-only"] --> log
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class log sot;
+  style cloud stroke-dasharray: 6 4;
+  style contract2 stroke-dasharray: 6 4;
+    </pre>
+
+    <h2>9. Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">RESOLVED — Realtime transport: WebSocket-only first.</span>
+      WebSocket is the working default (Architecture §11) and the RD control path needs it
+      regardless, so the contract ships <strong>WebSocket-only</strong> for every client. The
+      change envelope stays transport-neutral, so an SSE read-only path can be added later
+      <em>only if</em> a real spectator/overlay need appears — not by default, to avoid a second
+      code path.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Change-envelope schema: delta vs fresh-value, per projection.</span>
+      The accepted approach is <strong>deltas for append-heavy projections</strong> (lap lists,
+      live state) and <strong>fresh-value for cheap or re-folded ones</strong> (heat result,
+      ranking after a correction), with a marshaling re-fold surfacing as a fresh-value envelope.
+      The exact envelope shapes are refined at implementation.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Resume window &amp; retention.</span>
+      The server retains a <strong>bounded window</strong> of replayable envelopes before forcing
+      a re-snapshot: the <strong>Director is memory-bounded</strong> (one event) and the
+      <strong>Cloud keeps a larger window</strong> (many events). Pairs with the storage tiers in
+      <a href="architecture.html">Architecture</a> §4. Exact window sizes are tuned at
+      implementation.</li>
+      <li><span class="q">RESOLVED — Auth credential format: opaque bearer tokens (+ optional signed join-token).</span>
+      RD and account auth use <strong>opaque bearer tokens</strong> backed by a server-side
+      session (easy to revoke), plus an optional <strong>lightweight signed join-token</strong>
+      (printed as a QR code, baked into the URL) granting read-only LAN access. Trust boundaries
+      are fixed in <a href="architecture.html">Architecture</a> §9. <em>Revisit JWT only if</em>
+      stateless Cloud scaling later demands it.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Sequence-cursor representation.</span>
+      The public projection sequence is a <strong>single monotonic integer per stream</strong>
+      (not per-projection cursors a client composes). How it stays stable across a Director
+      restart / projection recompute is settled at implementation.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Scope grammar &amp; pagination.</span>
+      The contract uses a <strong>scope grammar</strong> for addressing (with multi-scope
+      subscribe) and <strong>cursor-based pagination</strong> for large historical / open-data
+      reads. The exact addressing scheme, URL shapes, and filter expressiveness are refined at
+      implementation.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Contract version negotiation &amp; support band.</span>
+      The version is carried <strong>in the connect message</strong>; the server serves a
+      <strong>band of recent versions</strong> so an un-refreshed PWA keeps working, and emits an
+      explicit <strong>"too old, please refresh" signal</strong> when a client falls outside it.
+      Paired with log/schema versioning in <a href="architecture.html">Architecture</a> §11. The
+      exact support-band depth is set at implementation.</li>
+      <li><span class="q">RESOLVED (accepted as working design) — Error model.</span> The
+      contract uses a <strong>single shared error shape</strong> across HTTP reads, the WS stream,
+      and control acknowledgements — auth failure, unknown scope, stale-cursor, version-mismatch —
+      defined once in Rust like the rest of the contract. The exact fields are pinned at
+      implementation.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

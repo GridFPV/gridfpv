@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Pipeline: Championship / Season</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Phase 5 — Championship / Season</h1>
+      <p class="doc-kind">Pipeline deep dive · what this phase must do</p>
+    </header>
+
+    <p class="lead">
+      Beyond a single event. Link events into a season and compute standings across all of them —
+      the cross-event layer that turns individual races into a championship.
+    </p>
+
+    <div class="callout">
+      <p>
+        This is a deep dive on one phase of the
+        <a href="event-pipeline.html">event pipeline</a>, kept lighter than the others: it is
+        optional and cross-event, and it leans on the optional Cloud. The single-event pipeline
+        stands on its own without any of this. Warehouse and Cloud details live in the
+        Architecture doc (coming soon).
+      </p>
+    </div>
+
+    <h2>Role</h2>
+    <p class="phase-meta"><span class="tag optional">optional · cross-event</span> Per class. Aggregate results across many events into season standings.</p>
+    <p>
+      A season links several independently-run events and computes standings across them, <strong>per
+      class</strong>. Its output is the season/championship leaderboard and any qualification
+      pathways. Nothing here is required to run a race — it sits on top of completed events.
+    </p>
+
+    <h2>Capabilities</h2>
+
+    <h3>Link events into a season</h3>
+    <ul>
+      <li>A season groups multiple events by reference. Events are created and run independently;
+        they don't need to know about a season while they run — the season pulls their results
+        afterward.</li>
+    </ul>
+
+    <h3>Scoring</h3>
+    <ul>
+      <li><strong>Configurable, with presets</strong> — finishing-position points per event,
+        best-N-of-M (drop your worst events), or cumulative total, with configurable tiebreakers.</li>
+      <li>Standings are computed <strong>per class</strong>, consistent with classes being
+        self-contained competitions.</li>
+    </ul>
+
+    <h3>Standings &amp; qualification</h3>
+    <ul>
+      <li>A season leaderboard per class, updated as member events complete.</li>
+      <li>Qualification pathways / cutoffs — a Global-Qualifier → championship analog — modeled
+        lightly here (how much to build vs leave to the league is an open decision).</li>
+    </ul>
+
+    <h3>Where it's computed</h3>
+    <ul>
+      <li>The <strong>Director</strong> can compute a season across <em>its own</em> events fully
+        offline — a self-hoster can run a local season with no internet.</li>
+      <li>The <strong>Cloud</strong> aggregates across all events and chapters and is authoritative
+        for broader, cross-chapter / global standings. Consistent with the offline-first Director
+        and the optional Cloud.</li>
+    </ul>
+
+    <h3>Open data</h3>
+    <ul>
+      <li>Season standings are exportable, available through the public API, and embeddable — ties
+        to the open-data <a href="vision.html">vision</a> and the Cloud warehouse.</li>
+    </ul>
+
+    <h2>Sim vs IRL</h2>
+    <div class="sim-note">
+      <p><span class="label">Both</span>Scoring works identically — points are points. Sim leagues
+      and IRL chapters aggregate the same way; whether a season is per-discipline or can mix sim and
+      IRL is a configuration choice (see open decisions).</p>
+    </div>
+
+    <h2>Entities &amp; data implied</h2>
+    <p>What this phase needs to exist (conceptual — not a schema; the Architecture doc formalizes it):</p>
+    <dl class="entities">
+      <dt>Season</dt>
+      <dd>name, member events, scope (per class), scoring config (scheme + tiebreakers), qualification rules.</dd>
+      <dt>Season standing (derived)</dt>
+      <dd>per pilot per class: aggregated points, events counted, rank.</dd>
+      <dt>Event result contribution</dt>
+      <dd>each event's per-pilot result, feeding the season aggregation.</dd>
+    </dl>
+    <p>Computed on the <strong>Director</strong> (its local events) and the <strong>Cloud</strong> (the authoritative aggregate); leans on the Cloud warehouse, where raw laps are retained and metrics are derived.</p>
+
+    <h2>Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="q">Season scope.</span> Strictly per class, or can a season span classes /
+        mix sim and IRL?</li>
+      <li><span class="q">Director ↔ Cloud reconciliation.</span> When both compute a season, how do
+        the Director's local view and the authoritative Cloud aggregate merge?</li>
+      <li><span class="q">Qualification modeling.</span> How much championship-qualification logic
+        to build versus leave to the league.</li>
+      <li><span class="q">Participation points.</span> Attendance / participation points and
+        minimum-events thresholds.</li>
+      <li><span class="q">Cross-chapter identity.</span> The same pilot across chapters (ties to the
+        <a href="pipeline-setup.html">Setup</a> identity decision).</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="event-pipeline.html">event pipeline</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>
