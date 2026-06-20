@@ -5,33 +5,28 @@
 //! live stream into correct laps — the "real timing in" half of v0.2's done-when.
 //!
 //! Gated behind the `live` feature AND `#[ignore]`, so it never runs in the
-//! default `cargo test` or the shared CI pipeline. It's a **local** class —
-//! the one-command runner brings up dockerized RH, runs this, and tears it down:
+//! default `cargo test` or the shared CI pipeline. It's a **local** class that
+//! manages its own disposable RotorHazard container (Docker required). Run via:
 //!
 //! ```sh
 //! cargo xtask live
-//! ```
-//!
-//! Or manually against an already-running container:
-//!
-//! ```sh
-//! docker compose -f docker/rotorhazard/docker-compose.yml up -d --wait
+//! # or just this test:
 //! cargo test -p gridfpv-adapters --features live --test rh_live -- --ignored --nocapture
 //! ```
-//!
-//! `RH_URL` overrides the server (defaults to `http://localhost:5000`).
 #![cfg(feature = "live")]
+
+mod common;
 
 use std::time::{Duration, Instant};
 
+use common::RhContainer;
 use gridfpv_adapters::rotorhazard::RotorHazardAdapter;
 use gridfpv_adapters::rotorhazard::transport::RotorHazardConnection;
 use gridfpv_events::Event;
 use gridfpv_projection::lap_list;
 
-fn rh_url() -> String {
-    std::env::var("RH_URL").unwrap_or_else(|_| "http://localhost:5000".to_string())
-}
+/// Port for this test's disposable RotorHazard (distinct from rh_signal's).
+const PORT: u16 = 5030;
 
 fn event_kind(e: &Event) -> &'static str {
     match e {
@@ -68,7 +63,9 @@ fn wait_until(
 #[test]
 #[ignore = "requires a running dockerized RotorHazard (docker/rotorhazard/)"]
 fn live_rotorhazard_race_translates_to_laps() {
-    let conn = RotorHazardConnection::connect(&rh_url(), RotorHazardAdapter::new())
+    // Disposable RotorHazard with mock nodes (no CSVs); driven via `simulate_lap`.
+    let rh = RhContainer::start(PORT, "0.5", &[]);
+    let conn = RotorHazardConnection::connect(rh.url(), RotorHazardAdapter::new())
         .expect("connect to RotorHazard");
 
     let mut events: Vec<Event> = Vec::new();

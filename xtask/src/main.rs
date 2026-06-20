@@ -131,47 +131,37 @@ fn gen_check() -> bool {
 /// `cargo xtask live` — the local-only integration test class.
 ///
 /// Container-dependent tests don't belong in the shared CI pipeline (flaky,
-/// resource-limited). This brings up dockerized RotorHazard, waits for it to be
-/// healthy, runs the `live`-gated `#[ignore]`d integration test against it, and
-/// tears the container down again. Requires Docker. Run it locally (or on a
-/// Docker-capable self-hosted runner).
+/// resource-limited). These run the `live` feature: the WebSocket mock-server test
+/// (no container) and the dockerized-RotorHazard tests (`rh_live` via `simulate_lap`
+/// and `rh_signal` via emulated `mock_data` RSSI streams). Each container test spins
+/// up and tears down its own disposable RotorHazard, so no external state is needed —
+/// just Docker. `--include-ignored` runs the `#[ignore]`d container tests too.
 fn live() -> bool {
-    let root = workspace_root();
-    let compose = root.join("docker/rotorhazard/docker-compose.yml");
-    let compose = compose.to_str().expect("compose path is valid UTF-8");
-    let compose_args = ["compose", "-f", compose];
-
-    // Bring RotorHazard up and block until its healthcheck passes.
-    let up: Vec<&str> = compose_args
-        .iter()
-        .copied()
-        .chain(["up", "-d", "--wait"])
-        .collect();
-    if !run("docker", &up) {
-        eprintln!("live: failed to start RotorHazard (is Docker running?)");
-        return false;
-    }
-
-    let ok = run(
-        "cargo",
-        &[
+    // Run each target sequentially so at most one RotorHazard container exists at a
+    // time (cargo runs separate test binaries in parallel otherwise).
+    let target = |name: &str, ignored: bool| {
+        let mut args = vec![
             "test",
             "-p",
             "gridfpv-adapters",
             "--features",
             "live",
             "--test",
-            "rh_live",
+            name,
             "--",
-            "--ignored",
             "--nocapture",
-        ],
-    );
-
-    // Always tear down, regardless of the test result.
-    let down: Vec<&str> = compose_args.iter().copied().chain(["down"]).collect();
-    run("docker", &down);
-    ok
+        ];
+        if ignored {
+            args.push("--ignored");
+        }
+        run("cargo", &args)
+    };
+    // No container needed (in-process mock WS server).
+    let ws = target("velocidrone_ws", false);
+    // Each spins up + tears down its own disposable RotorHazard.
+    let live_rh = target("rh_live", true);
+    let signal = target("rh_signal", true);
+    ws && live_rh && signal
 }
 
 fn main() {
