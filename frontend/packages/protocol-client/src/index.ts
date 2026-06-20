@@ -18,6 +18,11 @@ export {
   createEvent,
   getActiveEvent,
   setActiveEvent,
+  listTimers,
+  createTimer,
+  updateTimer,
+  deleteTimer,
+  setEventTimers,
   PRACTICE_EVENT_ID
 } from './client.js';
 export type {

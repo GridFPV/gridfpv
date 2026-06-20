@@ -461,4 +461,118 @@ describe('events lifecycle helpers (#72)', () => {
     expect(meta.date).toBe('2026-06-20');
     expect(meta.location).toBe('Main field');
   });
+
+  // ── #73: application-level timers + per-event selection ───────────────────────
+
+  it('listTimers GETs /timers and returns the Timer list', async () => {
+    const calls: string[] = [];
+    const fetch: FetchLike = async (input) => {
+      calls.push(String(input));
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => [
+          {
+            id: 'mock',
+            name: 'Mock',
+            kind: { Mock: { laps: 5, lap_ms: 2500 } },
+            status: 'Ready'
+          }
+        ]
+      } as unknown as Response;
+    };
+    const { listTimers } = await import('./client.js');
+    const timers = await listTimers('http://director.local:8080/', { fetch });
+    expect(calls[0]).toBe('http://director.local:8080/timers');
+    expect(timers[0].id).toBe('mock');
+  });
+
+  it('createTimer POSTs the request to /timers with the RD token and returns the new Timer', async () => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => ({
+          id: 'field-rh-ab12',
+          name: 'Field RH',
+          kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
+          status: 'Configured'
+        })
+      } as unknown as Response;
+    };
+    const { createTimer } = await import('./client.js');
+    const timer = await createTimer(
+      'http://director.local:8080',
+      { name: 'Field RH', kind: { Rotorhazard: { url: 'http://rh.local:5000' } } },
+      'rd-tok',
+      { fetch }
+    );
+    expect(seen[0].url).toBe('http://director.local:8080/timers');
+    expect(seen[0].init?.method).toBe('POST');
+    expect((seen[0].init?.headers as Record<string, string>).Authorization).toBe('Bearer rd-tok');
+    expect(timer.id).toBe('field-rh-ab12');
+  });
+
+  it('updateTimer PUTs to /timers/{id} and deleteTimer DELETEs it', async () => {
+    const seen: { url: string; method?: string }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), method: init?.method });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => ({
+          id: 'mock',
+          name: 'Mock',
+          kind: { Mock: { laps: 9, lap_ms: 100 } },
+          status: 'Ready'
+        })
+      } as unknown as Response;
+    };
+    const { updateTimer, deleteTimer } = await import('./client.js');
+    const updated = await updateTimer(
+      'http://director.local:8080',
+      'mock',
+      { kind: { Mock: { laps: 9, lap_ms: 100 } } },
+      'rd-tok',
+      { fetch }
+    );
+    expect(seen[0].url).toBe('http://director.local:8080/timers/mock');
+    expect(seen[0].method).toBe('PUT');
+    expect(updated.kind).toEqual({ Mock: { laps: 9, lap_ms: 100 } });
+
+    await deleteTimer('http://director.local:8080', 'race-rh-xy99', 'rd-tok', { fetch });
+    expect(seen[1].url).toBe('http://director.local:8080/timers/race-rh-xy99');
+    expect(seen[1].method).toBe('DELETE');
+  });
+
+  it('setEventTimers PUTs the ids to /events/{id}/timers and returns the updated EventMeta', async () => {
+    const seen: { url: string; body?: unknown }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => ({
+          id: 'evt-a',
+          name: 'Friday Series',
+          created_at: 1,
+          persistent: true,
+          timers: ['mock', 'field-rh-ab12']
+        })
+      } as unknown as Response;
+    };
+    const { setEventTimers } = await import('./client.js');
+    const meta = await setEventTimers(
+      'http://director.local:8080',
+      'evt-a',
+      ['mock', 'field-rh-ab12'],
+      'rd-tok',
+      { fetch }
+    );
+    expect(seen[0].url).toBe('http://director.local:8080/events/evt-a/timers');
+    expect(seen[0].body).toEqual({ ids: ['mock', 'field-rh-ab12'] });
+    expect(meta.timers).toEqual(['mock', 'field-rh-ab12']);
+  });
 });

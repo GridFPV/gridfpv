@@ -54,6 +54,7 @@ use gridfpv_events::{
 use gridfpv_server::app::AppState;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::scope::EventId;
+use gridfpv_server::timers::{TimerKind, TimerRegistry};
 use gridfpv_storage::Offset;
 use tokio::task::JoinHandle;
 
@@ -288,48 +289,36 @@ impl SourceConfig {
             ),
         }
     }
-
-    /// Materialise the boxed [`LapSource`] the bridge drives.
-    fn into_source(self) -> Arc<dyn LapSource> {
-        match self {
-            SourceConfig::Sim(sim) => Arc::new(sim),
-        }
-    }
-}
-
-/// Spawn the control→source bridge as a background task, returning its [`JoinHandle`].
-///
-/// The task polls the log tail (see the module docs) until `state`'s log handle is dropped
-/// at shutdown; the Director spawns it alongside `axum::serve` and lets it run for the
-/// process lifetime. `adapter` is the [`AdapterId`] emitted passes carry.
-pub fn spawn_bridge(state: AppState, source: SourceConfig, adapter: AdapterId) -> JoinHandle<()> {
-    let source = source.into_source();
-    tokio::spawn(async move {
-        run_bridge(state, source, adapter).await;
-    })
 }
 
 /// How often the registry-aware spawner polls for newly-created events to attach a bridge to.
 pub const REGISTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Spawn a **per-event** control→source bridge across the whole [`EventRegistry`] (issue #72).
+/// Spawn a **per-event** control→source bridge across the whole [`EventRegistry`] (issue #72/#73).
 ///
-/// With events now first-class containers, each event has its **own** log, so the sim source
-/// is per-event: the Director runs one [`run_bridge`] per event, feeding sim passes into THAT
-/// event's log when a heat goes `Running` *there*. This spawner seeds a bridge for every event
-/// present at startup (the built-in Practice + any already-loaded persistent events) and polls
-/// the registry on [`REGISTRY_POLL_INTERVAL`] to attach a bridge to any event *created at
-/// runtime* (`POST /events`). So Practice and any created event can run a sim race
-/// independently and concurrently.
+/// With events now first-class containers, each event has its **own** log, so the source is
+/// per-event: the Director runs one [`run_bridge`] per event, feeding passes into THAT event's
+/// log when a heat goes `Running` *there*. Which source(s) run is now the **event's selected
+/// timers** (issue #73), not a single global env source: each bridge reads its event's
+/// [`EventMeta::timers`](gridfpv_server::events::EventMeta::timers) selection live (resolving each
+/// id through the app-level [`TimerRegistry`]) when a heat starts. A selected **Mock** timer runs
+/// the synthetic emission with *that timer's* `laps`/`lap_ms`; a selected **RotorHazard** timer is
+/// a no-op stub (2b / #65 connects it). The built-in Mock's config comes from the env
+/// defaults seeded into the timer registry.
+///
+/// This spawner seeds a bridge for every event present at startup (Practice + any already-loaded
+/// persistent events) and polls the registry on [`REGISTRY_POLL_INTERVAL`] to attach a bridge to
+/// any event *created at runtime* (`POST /events`). So every event can run independently and
+/// concurrently. The `SourceConfig` argument is retained for the startup banner only.
 ///
 /// Returns the spawner's [`JoinHandle`]; the per-event bridge tasks it spawns run for the
 /// process lifetime (each ends when its event's log handle is dropped at shutdown).
 pub fn spawn_registry_bridge(
     registry: EventRegistry,
-    source: SourceConfig,
+    _source: SourceConfig,
     adapter: AdapterId,
 ) -> JoinHandle<()> {
-    let source = source.into_source();
+    let timers = registry.timers();
     tokio::spawn(async move {
         // The set of events that already have a bridge, so each event is attached exactly once.
         let mut attached: HashSet<EventId> = HashSet::new();
@@ -339,12 +328,14 @@ pub fn spawn_registry_bridge(
                 if attached.contains(&meta.id) {
                     continue;
                 }
-                // Resolve the event's own AppState/log and spawn its bridge.
+                // Resolve the event's own AppState/log and spawn its selection-aware bridge.
                 if let Some(state) = registry.resolve(&meta.id) {
-                    let source = Arc::clone(&source);
+                    let registry = registry.clone();
+                    let timers = timers.clone();
                     let adapter = adapter.clone();
+                    let event_id = meta.id.clone();
                     tokio::spawn(async move {
-                        run_bridge(state, source, adapter).await;
+                        run_bridge(state, registry, timers, event_id, adapter).await;
                     });
                     attached.insert(meta.id);
                 }
@@ -354,12 +345,21 @@ pub fn spawn_registry_bridge(
     })
 }
 
-/// The bridge loop: poll the log tail, drive the source on `Running`, cancel on
-/// `Finished`/`Aborted`/`Scored`/`Restarted` (or a newer heat going `Running`).
+/// The bridge loop: poll the log tail, drive the event's **selected timers** on `Running`, cancel
+/// on `Finished`/`Aborted`/`Scored`/`Restarted` (or a newer heat going `Running`).
 ///
-/// Exposed (crate-internal) so the test harness can run it directly against an in-memory
-/// [`AppState`] and assert on the appended passes.
-pub(crate) async fn run_bridge(state: AppState, source: Arc<dyn LapSource>, adapter: AdapterId) {
+/// On a `Running` transition the bridge reads the event's current
+/// [`EventMeta::timers`](gridfpv_server::events::EventMeta::timers) selection from `registry`,
+/// resolves each id through `timers`, and builds the [`LapSource`] for it (a Sim timer's
+/// `laps`/`lap_ms`; a RotorHazard timer is skipped as a no-op stub). Exposed (crate-internal) so
+/// the test harness can run it directly against an in-memory [`AppState`].
+pub(crate) async fn run_bridge(
+    state: AppState,
+    registry: EventRegistry,
+    timers: TimerRegistry,
+    event_id: EventId,
+    adapter: AdapterId,
+) {
     let mut cursor: Offset = 0;
     // The in-flight heat task, if a heat is currently emitting. At most one at a time.
     let mut active: Option<ActiveHeat> = None;
@@ -371,7 +371,7 @@ pub(crate) async fn run_bridge(state: AppState, source: Arc<dyn LapSource>, adap
         // Reap a finished/cancelled source task so a heat that ran to the end clears the
         // slot (without it, a re-Start of the same heat would be ignored).
         if let Some(running) = &active {
-            if running.handle.is_finished() {
+            if running.is_finished() {
                 active = None;
             }
         }
@@ -391,17 +391,63 @@ pub(crate) async fn run_bridge(state: AppState, source: Arc<dyn LapSource>, adap
             // passes, registrations, …) need no action — the lineup is looked up from the
             // log when the heat goes Running.
             if let Event::HeatStateChanged { heat, transition } = event {
-                handle_transition(&state, &source, &adapter, &mut active, heat, transition);
+                handle_transition(
+                    &state,
+                    &registry,
+                    &timers,
+                    &event_id,
+                    &adapter,
+                    &mut active,
+                    heat,
+                    transition,
+                );
             }
         }
     }
 }
 
-/// React to a heat-loop transition: start emitting on `Running`, stop on a terminal /
-/// off-ramp transition for the heat that is currently emitting.
+/// Resolve the event's selected timers into the [`LapSource`]s to run for this heat (issue #73).
+///
+/// Reads the event's current `timers` selection from `registry`, looks each id up in the app-level
+/// `timers` registry, and maps each **Mock** timer to a [`SimSource`] with that timer's
+/// `laps`/`lap_ms`. A selected **RotorHazard** timer is skipped (a no-op stub for 2b / #65); an id
+/// that no longer resolves (a since-deleted timer) is skipped too. Returns the sources to drive
+/// concurrently for the running heat — empty when the event selects no usable timer.
+fn selected_sources(
+    registry: &EventRegistry,
+    timers: &TimerRegistry,
+    event_id: &EventId,
+) -> Vec<Arc<dyn LapSource>> {
+    let Some(selection) = registry.timers_of(event_id) else {
+        return Vec::new();
+    };
+    let mut sources: Vec<Arc<dyn LapSource>> = Vec::new();
+    for id in selection {
+        let Some(timer) = timers.get(&id) else {
+            continue;
+        };
+        match timer.kind {
+            TimerKind::Mock { laps, lap_ms } => {
+                sources.push(Arc::new(SimSource::new(
+                    laps,
+                    Duration::from_millis(lap_ms),
+                )));
+            }
+            // RotorHazard is a reserved no-op stub in this slice (2b / #65 connects it).
+            TimerKind::Rotorhazard { .. } => {}
+        }
+    }
+    sources
+}
+
+/// React to a heat-loop transition: start emitting from the event's selected timers on `Running`,
+/// stop on a terminal / off-ramp transition for the heat that is currently emitting.
+#[allow(clippy::too_many_arguments)]
 fn handle_transition(
     state: &AppState,
-    source: &Arc<dyn LapSource>,
+    registry: &EventRegistry,
+    timers: &TimerRegistry,
+    event_id: &EventId,
     adapter: &AdapterId,
     active: &mut Option<ActiveHeat>,
     heat: HeatId,
@@ -412,7 +458,7 @@ fn handle_transition(
             // A different heat taking the timer cancels the previous one (only one heat
             // emits at a time). Re-running the *same* heat also restarts cleanly.
             if let Some(running) = active.take() {
-                running.handle.abort();
+                running.abort();
             }
             let Some(lineup) = lineup_of(state, &heat) else {
                 // No HeatScheduled for this heat (or the log read failed): nothing to emit.
@@ -421,18 +467,26 @@ fn handle_transition(
             if lineup.is_empty() {
                 return;
             }
-            let sink = PassSink::new(state.clone(), adapter.clone());
-            let run = HeatRun {
-                heat: heat.clone(),
-                lineup,
-            };
-            let source = Arc::clone(source);
-            let handle = tokio::spawn(async move {
-                if let Err(e) = source.run_heat(run, sink).await {
-                    eprintln!("gridfpv: sim source stopped: {e}");
-                }
-            });
-            *active = Some(ActiveHeat { heat, handle });
+            // Resolve the event's selected timers to the source(s) to run. With no usable timer
+            // selected (e.g. only a RotorHazard stub, or nothing) the heat emits nothing.
+            let sources = selected_sources(registry, timers, event_id);
+            let mut handles = Vec::with_capacity(sources.len());
+            for source in sources {
+                let sink = PassSink::new(state.clone(), adapter.clone());
+                let run = HeatRun {
+                    heat: heat.clone(),
+                    lineup: lineup.clone(),
+                };
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = source.run_heat(run, sink).await {
+                        eprintln!("gridfpv: timer source stopped: {e}");
+                    }
+                }));
+            }
+            if handles.is_empty() {
+                return;
+            }
+            *active = Some(ActiveHeat { heat, handles });
         }
         // Any transition that takes the heat off `Running` stops its emission. The bridge
         // only emits while `Running`, mirroring `consumes_pass` (race-engine §2).
@@ -445,7 +499,7 @@ fn handle_transition(
             if let Some(running) = active.as_ref() {
                 if running.heat == heat {
                     if let Some(running) = active.take() {
-                        running.handle.abort();
+                        running.abort();
                     }
                 }
             }
@@ -455,10 +509,25 @@ fn handle_transition(
     }
 }
 
-/// A heat currently emitting passes: which heat, and the task driving its source.
+/// A heat currently emitting passes: which heat, and the task(s) driving its selected timer
+/// source(s) (issue #73 — an event may select several timers running concurrently).
 struct ActiveHeat {
     heat: HeatId,
-    handle: JoinHandle<()>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl ActiveHeat {
+    /// Whether every source task has finished — the slot can be reaped.
+    fn is_finished(&self) -> bool {
+        self.handles.iter().all(|h| h.is_finished())
+    }
+
+    /// Cancel every in-flight source task (a heat going off `Running`, or superseded).
+    fn abort(&self) {
+        for h in &self.handles {
+            h.abort();
+        }
+    }
 }
 
 /// Read the log tail from `cursor`, returning `(offset, event)` pairs. A thin wrapper over
@@ -501,28 +570,49 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
     use gridfpv_server::live_state::live_state;
-    use gridfpv_storage::InMemoryLog;
+    use gridfpv_server::timers::{MOCK_TIMER_ID, TimerId, TimerKind, UpdateTimerRequest};
     use tokio::time::{Instant, sleep, timeout};
 
-    /// Build an `AppState` over a fresh in-memory log.
-    fn fresh_state() -> AppState {
-        AppState::new(InMemoryLog::new())
+    /// The Practice event id every bridge test drives (its in-memory log + default `["mock"]`
+    /// selection).
+    fn practice() -> EventId {
+        EventId(PRACTICE_EVENT_ID.to_string())
     }
 
-    /// A fast sim source so the whole heat runs in a few ms (no seconds-long sleeps): a 1ms
-    /// lap pace. The bridge polls at [`POLL_INTERVAL`], which dominates start-up latency, so
-    /// we keep total laps small.
-    fn fast_source(laps: u32) -> Arc<dyn LapSource> {
-        Arc::new(SimSource::new(laps, Duration::from_millis(1)))
+    /// Build a fresh registry and retune its built-in **Mock** to a fast pace (`lap_ms`) and
+    /// the wanted `laps`, so the whole heat runs in a few ms. Practice defaults to selecting the
+    /// Mock, so the bridge over Practice drives this retuned source. The bridge polls at
+    /// [`POLL_INTERVAL`], which dominates start-up latency, so tests keep total laps small.
+    fn fast_registry(laps: u32, lap_ms: u64) -> EventRegistry {
+        let registry = EventRegistry::new(None).unwrap();
+        registry
+            .timers()
+            .update(
+                &TimerId(MOCK_TIMER_ID.to_string()),
+                &UpdateTimerRequest {
+                    name: None,
+                    kind: Some(TimerKind::Mock { laps, lap_ms }),
+                },
+            )
+            .unwrap();
+        registry
     }
 
-    /// Drive the bridge in the background over `state`, returning its abort handle. Uses a
-    /// fast source so emission completes quickly.
-    fn spawn_test_bridge(state: AppState, laps: u32) -> JoinHandle<()> {
-        let source = fast_source(laps);
+    /// Spawn the selection-aware bridge for `registry`'s Practice event, returning the bridge
+    /// handle and Practice's `AppState` (the same log the bridge polls), so a test appends the
+    /// schedule/transition events the bridge reacts to.
+    fn spawn_bridge_for(registry: &EventRegistry) -> (JoinHandle<()>, AppState) {
+        let state = registry.resolve(&practice()).unwrap();
+        let timers = registry.timers();
         let adapter = AdapterId(SIM_ADAPTER.to_string());
-        tokio::spawn(async move { run_bridge(state, source, adapter).await })
+        let reg = registry.clone();
+        let bridge_state = state.clone();
+        let handle = tokio::spawn(async move {
+            run_bridge(bridge_state, reg, timers, practice(), adapter).await
+        });
+        (handle, state)
     }
 
     fn read_all_events(state: &AppState) -> Vec<Event> {
@@ -569,9 +659,9 @@ mod tests {
 
     #[tokio::test]
     async fn running_heat_emits_laps_for_every_lineup_member() {
-        let state = fresh_state();
         let laps = 3u32;
-        let bridge = spawn_test_bridge(state.clone(), laps);
+        let registry = fast_registry(laps, 1);
+        let (bridge, state) = spawn_bridge_for(&registry);
 
         // Schedule a heat and drive it to Running via the (shared) log — exactly what the
         // control path appends.
@@ -630,15 +720,10 @@ mod tests {
 
     #[tokio::test]
     async fn finished_transition_stops_emission() {
-        let state = fresh_state();
         // Many laps at a slightly slower pace so the heat is still mid-emission when we
         // Finish it — proving the Finish actually cancels in-flight emission.
-        let source: Arc<dyn LapSource> = Arc::new(SimSource::new(50, Duration::from_millis(3)));
-        let adapter = AdapterId(SIM_ADAPTER.to_string());
-        let bridge = {
-            let state = state.clone();
-            tokio::spawn(async move { run_bridge(state, source, adapter).await })
-        };
+        let registry = fast_registry(50, 3);
+        let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = HeatId("q-1".into());
         state
@@ -696,8 +781,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_newer_running_heat_supersedes_the_previous_one() {
-        let state = fresh_state();
-        let bridge = spawn_test_bridge(state.clone(), 40);
+        let registry = fast_registry(40, 1);
+        let (bridge, state) = spawn_bridge_for(&registry);
 
         // Heat 1 starts running.
         state
@@ -751,6 +836,98 @@ mod tests {
         })
         .await;
 
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn an_event_selecting_only_rotorhazard_emits_nothing() {
+        // RotorHazard is a reserved no-op stub in this slice (#73): an event whose ONLY selected
+        // timer is RotorHazard must emit no synthetic passes when its heat runs.
+        use gridfpv_server::timers::CreateTimerRequest;
+        let registry = EventRegistry::new(None).unwrap();
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+            })
+            .unwrap();
+        // Select only the RotorHazard timer for Practice.
+        registry.set_timers(&practice(), vec![rh.id]).unwrap();
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        let heat = HeatId("q-1".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: vec![CompetitorRef("A".into())],
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat,
+                    transition: HeatTransition::Running,
+                },
+                None,
+            )
+            .unwrap();
+
+        // Wait past several poll/lap cycles; no passes should ever land (RH is a stub).
+        sleep(POLL_INTERVAL * 4).await;
+        assert_eq!(count_passes(&read_all_events(&state)), 0);
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn an_event_drives_its_selected_sim_timers_config() {
+        // An event selecting a CREATED fast Sim timer (not the built-in) runs the synthetic
+        // emission with THAT timer's laps — proving the bridge reads the per-event selection and
+        // the selected timer's own config (#73).
+        use gridfpv_server::timers::CreateTimerRequest;
+        let registry = EventRegistry::new(None).unwrap();
+        let timer = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Fast Sim".into(),
+                kind: TimerKind::Mock { laps: 2, lap_ms: 1 },
+            })
+            .unwrap();
+        registry.set_timers(&practice(), vec![timer.id]).unwrap();
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        let heat = HeatId("q-1".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: vec![CompetitorRef("A".into())],
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat,
+                    transition: HeatTransition::Running,
+                },
+                None,
+            )
+            .unwrap();
+
+        // 1 pilot, 2 laps + holeshot = 3 passes — the selected timer's laps, not the env default.
+        wait_until(&state, Duration::from_secs(5), |events| {
+            count_passes(events) >= 3
+        })
+        .await;
+        sleep(POLL_INTERVAL * 3).await;
+        assert_eq!(count_passes(&read_all_events(&state)), 3);
         bridge.abort();
     }
 

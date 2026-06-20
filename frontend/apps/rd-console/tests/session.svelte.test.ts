@@ -4,8 +4,20 @@ import type { CommandAck, EventMeta } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
 import { liveRunning, okAck, failAck } from './fixtures.js';
 
-const PRACTICE: EventMeta = { id: 'practice', name: 'Practice', created_at: 0, persistent: false };
-const EVENT_A: EventMeta = { id: 'evt-a', name: 'Friday Series', created_at: 1, persistent: true };
+const PRACTICE: EventMeta = {
+  id: 'practice',
+  name: 'Practice',
+  created_at: 0,
+  persistent: false,
+  timers: ['mock']
+};
+const EVENT_A: EventMeta = {
+  id: 'evt-a',
+  name: 'Friday Series',
+  created_at: 1,
+  persistent: true,
+  timers: ['mock']
+};
 
 /** A mock ProtocolClient that lets a test push state into the session. */
 function mockConnect(initial: ProtocolState) {

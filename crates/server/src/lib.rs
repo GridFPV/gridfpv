@@ -66,6 +66,7 @@ pub mod live_state;
 pub mod scope;
 pub mod snapshot;
 pub mod stream;
+pub mod timers;
 pub mod ws;
 
 use serde::{Deserialize, Serialize};

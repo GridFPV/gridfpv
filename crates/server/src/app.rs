@@ -78,7 +78,7 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use gridfpv_engine::scoring::{WinCondition, score_events};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{LapList, lap_list_marshaled, registrations};
@@ -96,6 +96,9 @@ use crate::live_state::live_state;
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
 use crate::stream::Cursor;
+use crate::timers::{
+    CreateTimerRequest, SetEventTimersRequest, Timer, TimerId, UpdateTimerRequest,
+};
 
 /// The object-safe slice of [`EventLog`] the protocol transport needs: read the whole
 /// log, read its tail, append, and report its length.
@@ -289,6 +292,13 @@ pub fn router(registry: EventRegistry) -> Router {
         // The Director's active event (issue #90): an open read so any client resumes into the
         // selected event on connect/reload, and an RD-gated write to set it.
         .route("/active-event", get(get_active_event).put(set_active_event))
+        // Application-level timers (issue #73): the persisted registry the RD configures once and
+        // each event selects from. `GET /timers` is an open read (Mock first); create/edit/
+        // delete are RD-gated. `DELETE` rejects the built-in Mock.
+        .route("/timers", get(list_timers).post(create_timer))
+        .route("/timers/{timer_id}", put(update_timer).delete(delete_timer))
+        // Per-event timer **selection** (issue #73): RD-gated; each id must name a known timer.
+        .route("/events/{event_id}/timers", put(set_event_timers))
         // Per-event read/realtime surface — `{event_id}` resolves to that event's log.
         .route(
             "/events/{event_id}/snapshot/event/{event}",
@@ -391,6 +401,98 @@ async fn set_active_event(
     Ok(Json(meta))
 }
 
+/// `GET /timers` — list every configured timer, **Mock first** (issue #73).
+///
+/// An **open read** (no token): a client renders the timer picker / per-event selection without a
+/// credential, mirroring `GET /events`.
+async fn list_timers(State(registry): State<EventRegistry>) -> Json<Vec<Timer>> {
+    Json(registry.timers().list())
+}
+
+/// `POST /timers` — create a timer from a [`CreateTimerRequest`], RD-gated (issue #73).
+///
+/// [`ControlAuth`] runs first (open in full-trust by default). The id is auto-generated
+/// server-side (a name slug + suffix); the new [`Timer`] is returned and the registry persisted.
+async fn create_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Json(body): Json<CreateTimerRequest>,
+) -> Result<Json<Timer>, ProtocolError> {
+    let timer = registry
+        .timers()
+        .create(&body)
+        .map_err(|e| ProtocolError::new(ErrorCode::Internal, e.to_string()))?;
+    Ok(Json(timer))
+}
+
+/// `PUT /timers/{timer_id}` — edit a timer's name/config, RD-gated (issue #73).
+///
+/// The built-in Mock may be retuned but not removed (that is `DELETE`'s concern). An unknown
+/// id is a typed 404 (`UnknownScope`). On success the updated [`Timer`] is returned and the
+/// registry persisted.
+async fn update_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+    Json(body): Json<UpdateTimerRequest>,
+) -> Result<Json<Timer>, ProtocolError> {
+    let timer = registry
+        .timers()
+        .update(&timer_id, &body)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(timer))
+}
+
+/// `DELETE /timers/{timer_id}` — remove a timer, RD-gated (issue #73).
+///
+/// The built-in **Mock cannot be deleted** (it is always present) — attempting to is a
+/// `BadRequest`; an unknown id is a 404 (`UnknownScope`). On success an empty 200 is returned and
+/// the registry persisted.
+async fn delete_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<StatusCode, ProtocolError> {
+    // The protected-Mock delete is a client error (BadRequest); a genuinely unknown id is a
+    // 404. Distinguish by whether the timer exists at all.
+    registry.timers().delete(&timer_id).map_err(|e| {
+        let code = if registry.timers().exists(&timer_id) {
+            ErrorCode::BadRequest
+        } else {
+            ErrorCode::UnknownScope
+        };
+        ProtocolError::new(code, e.to_string())
+    })?;
+    Ok(StatusCode::OK)
+}
+
+/// `PUT /events/{event_id}/timers` — set an event's **selected timers**, RD-gated (issue #73).
+///
+/// [`ControlAuth`] runs first. The event must exist (else a typed 404) and **each** id in the body
+/// must name a known timer in the registry (else a 404 naming the bad id) — so an event can never
+/// reference a deleted/unknown timer. On success the updated [`EventMeta`] is returned.
+async fn set_event_timers(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<SetEventTimersRequest>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    // Validate every selected timer exists before recording the selection.
+    let timers = registry.timers();
+    for id in &body.ids {
+        if !timers.exists(id) {
+            return Err(ProtocolError::new(
+                ErrorCode::UnknownScope,
+                format!("no timer with id {:?}", id.0),
+            ));
+        }
+    }
+    let meta = registry
+        .set_timers(&event_id, body.ids)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
 /// `POST /events/{event_id}/auth/join-token` — mint a fresh **read-only** join token
 /// (protocol.html §5, §9.4) — issue #63, now event-rooted.
 ///
@@ -424,10 +526,11 @@ pub fn is_api_path(path: &str) -> bool {
     // `/events` is the one API tree that matters now; the bare `/snapshot|/stream|/control|/auth`
     // prefixes are kept so a *legacy* (pre-#72) mistyped call still 404s as a typed API error
     // rather than falling through to the SPA shell.
-    const API_PREFIXES: [&str; 7] = [
+    const API_PREFIXES: [&str; 8] = [
         "/health",
         "/events",
         "/active-event",
+        "/timers",
         "/snapshot",
         "/stream",
         "/control",
@@ -1356,5 +1459,195 @@ mod tests {
         let (status, body) = post_join_token(registry, None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.is_some_and(|b| !b.token.is_empty()));
+    }
+
+    // --- #73: the application-level timer registry + per-event selection ----------------
+
+    use crate::timers::{
+        CreateTimerRequest, SetEventTimersRequest, Timer, TimerKind, UpdateTimerRequest,
+    };
+
+    /// `GET /timers` → status + parsed `Timer[]`.
+    async fn get_timers(registry: EventRegistry) -> (StatusCode, Vec<Timer>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .uri("/timers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Vec<Timer>>(&bytes).unwrap_or_default();
+        (status, body)
+    }
+
+    /// `POST /timers` with a JSON body + optional token → status + raw bytes.
+    async fn post_timer(
+        registry: EventRegistry,
+        body: &CreateTimerRequest,
+        token: Option<&str>,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/timers")
+            .header("Content-Type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("Authorization", format!("Bearer {t}"));
+        }
+        let json = serde_json::to_string(body).unwrap();
+        let response = router(registry)
+            .oneshot(builder.body(Body::from(json)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn timers_list_has_the_mock_first_and_is_open() {
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, timers) = get_timers(registry).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(timers.first().unwrap().id.0, "mock");
+        assert!(matches!(timers[0].kind, TimerKind::Mock { .. }));
+    }
+
+    #[tokio::test]
+    async fn post_timer_creates_and_lists_it() {
+        let (registry, _state, _) = state_with(vec![]);
+        let body = CreateTimerRequest {
+            name: "Field RH".into(),
+            kind: TimerKind::Rotorhazard {
+                url: "http://rh.local:5000".into(),
+            },
+        };
+        let (status, raw) = post_timer(registry.clone(), &body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let created: Timer = serde_json::from_slice(&raw).unwrap();
+        assert!(created.id.0.starts_with("field-rh-"));
+
+        let (_, timers) = get_timers(registry).await;
+        assert!(timers.iter().any(|t| t.id == created.id));
+    }
+
+    #[tokio::test]
+    async fn post_timer_requires_an_rd_token_once_configured() {
+        let (registry, state, _) = state_with(vec![]);
+        let _rd = state.tokens().issue_rd_token();
+        let body = CreateTimerRequest {
+            name: "Gated".into(),
+            kind: TimerKind::Mock {
+                laps: 1,
+                lap_ms: 50,
+            },
+        };
+        let (status, _) = post_timer(registry, &body, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_the_builtin_mock() {
+        let (registry, _state, _) = state_with(vec![]);
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/timers/mock")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Protected delete is a client error, not a 404.
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn put_event_timers_validates_and_sets_the_selection() {
+        let (registry, _state, _) = state_with(vec![]);
+        // Create a real timer to select.
+        let body = CreateTimerRequest {
+            name: "Extra Sim".into(),
+            kind: TimerKind::Mock {
+                laps: 1,
+                lap_ms: 50,
+            },
+        };
+        let (_, raw) = post_timer(registry.clone(), &body, None).await;
+        let extra: Timer = serde_json::from_slice(&raw).unwrap();
+
+        // Selecting a known timer succeeds and is reflected on the event meta.
+        let req = SetEventTimersRequest {
+            ids: vec![extra.id.clone()],
+        };
+        let response = router(registry.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/events/practice/timers")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let meta: EventMeta = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(meta.timers, vec![extra.id]);
+
+        // Selecting an UNKNOWN timer → 404 UnknownScope.
+        let bad = SetEventTimersRequest {
+            ids: vec![crate::timers::TimerId("no-such-timer".into())],
+        };
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/events/practice/timers")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&bad).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_timer_retunes_the_mock() {
+        let (registry, _state, _) = state_with(vec![]);
+        let body = UpdateTimerRequest {
+            name: None,
+            kind: Some(TimerKind::Mock {
+                laps: 9,
+                lap_ms: 100,
+            }),
+        };
+        let response = router(registry.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/timers/mock")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, timers) = get_timers(registry).await;
+        let sim = timers.iter().find(|t| t.id.0 == "mock").unwrap();
+        assert_eq!(
+            sim.kind,
+            TimerKind::Mock {
+                laps: 9,
+                lap_ms: 100
+            }
+        );
     }
 }
