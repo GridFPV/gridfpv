@@ -246,12 +246,7 @@
       <summary>Add details (optional)</summary>
       <div class="details-grid">
         <Field label="Date">
-          <Input
-            bind:value={newDate}
-            placeholder="e.g. 2026-06-20"
-            aria-label="Event date"
-            autocomplete="off"
-          />
+          <Input type="date" bind:value={newDate} aria-label="Event date" />
         </Field>
         <Field label="Location">
           <Input
