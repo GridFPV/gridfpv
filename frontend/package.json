@@ -1,0 +1,35 @@
+{
+  "name": "@gridfpv/frontend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "GridFPV web frontend monorepo — one codebase, profiled three ways (RD console, spectator PWA, OBS overlays).",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "workspaces": [
+    "packages/types",
+    "packages/protocol-client",
+    "packages/components",
+    "apps/rd-console"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "dev:rd-console": "npm run dev --workspace @gridfpv/rd-console"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-svelte": "^2.46.1",
+    "globals": "^15.14.0",
+    "prettier": "^3.4.2",
+    "prettier-plugin-svelte": "^3.3.2",
+    "svelte": "^5.16.0",
+    "svelte-check": "^4.1.1",
+    "svelte-eslint-parser": "^0.43.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1"
+  }
+}

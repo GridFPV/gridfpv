@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "baseUrl": ".",
+    "paths": {
+      // The generated ts-rs bindings live at the repo root. The `@bindings/*`
+      // alias is the one place that knows their physical location, so apps and
+      // packages only ever import from `@gridfpv/types`. When real bindings
+      // exist, src/generated.ts re-exports from here.
+      "@bindings/*": ["../../../bindings/*"]
+    }
+  },
+  "include": ["src"]
+}

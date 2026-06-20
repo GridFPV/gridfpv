@@ -1,0 +1,5 @@
+dist
+build
+node_modules
+.svelte-kit
+packages/types/vendor
