@@ -160,7 +160,11 @@ flowchart LR
       <dt>Build &amp; packaging</dt>
       <dd>The single-binary, cross-platform, offline build (Tauri bundle, vendored assets, Rust→TS generation) is maintained from v0.1 onward.</dd>
       <dt>Documentation</dt>
-      <dd>These internal docs stay current as the living plan; user-facing docs begin around v0.4 in their own repo.</dd>
+      <dd>These internal docs stay current as the living plan; user-facing docs begin around v0.4 in their own repo.
+      Every milestone is <strong>bookended by docs</strong>: <strong>read the owning docs before</strong> breaking the
+      milestone into issues (so the build follows the design), and run a <strong>doc-reconciliation pass after</strong>,
+      before merging — fixing drift, resolving now-validated open decisions, and recording new conventions. Doc updates
+      are part of the milestone's definition-of-done and ride along in the same milestone MR.</dd>
     </dl>
 
     <h2>4. The GitLab planning model (free tier)</h2>
