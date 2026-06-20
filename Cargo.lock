@@ -387,6 +387,7 @@ version = "0.1.0"
 dependencies = [
  "gridfpv-events",
  "gridfpv-projection",
+ "gridfpv-testkit",
  "rust_socketio",
  "serde",
  "serde_json",

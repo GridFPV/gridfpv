@@ -15,15 +15,13 @@
 //! ```
 #![cfg(feature = "live")]
 
-mod common;
-
 use std::time::{Duration, Instant};
 
-use common::RhContainer;
 use gridfpv_adapters::rotorhazard::RotorHazardAdapter;
 use gridfpv_adapters::rotorhazard::transport::RotorHazardConnection;
 use gridfpv_events::Event;
 use gridfpv_projection::lap_list;
+use gridfpv_testkit::RhContainer;
 
 /// Port for this test's disposable RotorHazard (distinct from rh_signal's).
 const PORT: u16 = 5030;
@@ -36,6 +34,13 @@ fn event_kind(e: &Event) -> &'static str {
         Event::SessionEnded { .. } => "SessionEnded",
         Event::CompetitorSeen { .. } => "CompetitorSeen",
         Event::Pass(_) => "Pass",
+        Event::HeatScheduled { .. } => "HeatScheduled",
+        Event::HeatStateChanged { .. } => "HeatStateChanged",
+        Event::DetectionVoided { .. } => "DetectionVoided",
+        Event::LapInserted { .. } => "LapInserted",
+        Event::LapAdjusted { .. } => "LapAdjusted",
+        Event::HeatVoided { .. } => "HeatVoided",
+        Event::PenaltyApplied { .. } => "PenaltyApplied",
     }
 }
 
