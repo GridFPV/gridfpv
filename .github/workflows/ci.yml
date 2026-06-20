@@ -1,0 +1,61 @@
+name: CI
+
+# Core, deterministic checks — the same suite local dev runs, now including the
+# frontend + contract suite (which the GitLab pipeline never ran). The heavier
+# browser e2e and the dockerized-RotorHazard live suite are gated separately
+# (see heavy.yml) per the runner-cost policy.
+on:
+  push:
+    branches: [main, devel, "milestone/**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust — cargo xtask ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # fmt --check && clippy -D warnings && test --all && ts-rs bindings drift-check
+      - run: cargo xtask ci
+
+  frontend:
+    name: Frontend — build/check/lint/test/contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install deps
+        run: npm ci
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+      - name: Type-check
+        run: npm run check
+        working-directory: frontend
+      - name: Lint
+        run: npm run lint
+        working-directory: frontend
+      - name: Unit tests
+        run: npm test
+        working-directory: frontend
+      # The contract suite boots the real Director, so build it first.
+      - name: Build Director
+        run: cargo build -p gridfpv-app
+      - name: Contract suite (strict client↔server wire checks)
+        run: npm run contract
+        working-directory: frontend
