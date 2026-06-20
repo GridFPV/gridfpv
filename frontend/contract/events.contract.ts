@@ -21,7 +21,7 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Command, EventMeta } from '@gridfpv/types';
+import type { Command, EventMeta, Timer } from '@gridfpv/types';
 
 import { type Director } from '../test-harness/director.ts';
 import { eventRoot, startContractDirector } from './harness.ts';
@@ -202,5 +202,118 @@ describe('seam 9b: the Director active event (#90)', () => {
     // And switching it to Practice re-points the Director (last write wins).
     expect((await putActive('practice', TOKEN)).status).toBe(200);
     expect((await getActive()).event?.id).toBe('practice');
+  });
+});
+
+/**
+ * Issue #73: timers are **application-level configuration** — a persisted registry the RD
+ * configures once, and each event selects which timers to use.
+ *
+ * guards:
+ *  - `GET /timers` is an **open read** → `Timer[]` with the built-in **Simulator** first.
+ *  - `POST /timers` is **RD-gated** (no/bad token → 401), auto-generates an id, returns the
+ *    new `Timer`, which then appears in the listing.
+ *  - `PUT /events/{id}/timers` is **RD-gated**, validates each id names a known timer (unknown →
+ *    404 `UnknownScope`), and on success records the selection on the event's `EventMeta.timers`.
+ */
+describe('seam 10: application-level timers + per-event selection (#73)', () => {
+  /** `GET /timers` → the parsed `Timer[]` (asserting a 200, open read). */
+  async function listTimers(): Promise<Timer[]> {
+    const res = await fetch(`${director.baseUrl}/timers`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as Timer[];
+  }
+
+  /** `POST /timers` with an optional bearer token → raw status + parsed body. */
+  async function createTimer(
+    body: unknown,
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${director.baseUrl}/timers`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** `PUT /events/{id}/timers` with `{ ids }` + optional token → raw status + parsed body. */
+  async function setEventTimers(
+    eventId: string,
+    ids: string[],
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/timers`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ ids })
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  it('GET /timers lists the built-in Simulator first (open read)', async () => {
+    const timers = await listTimers();
+    expect(timers.length).toBeGreaterThanOrEqual(1);
+    expect(timers[0].id).toBe('sim');
+    expect(timers[0].name).toBe('Simulator');
+    expect('Sim' in timers[0].kind).toBe(true);
+  });
+
+  it('POST /timers requires the RD token — no/bad token → 401', async () => {
+    const body = { name: 'No Auth', kind: { Sim: { laps: 1, lap_ms: 50 } } };
+    expect((await createTimer(body)).status).toBe(401);
+    expect((await createTimer(body, 'not-a-real-token')).status).toBe(401);
+  });
+
+  it('POST /timers creates a timer and it appears in the listing', async () => {
+    const created = (
+      await createTimer(
+        { name: 'Field RH', kind: { Rotorhazard: { url: 'http://rh.local:5000' } } },
+        TOKEN
+      )
+    ).body as Timer;
+    expect(created.id).toMatch(/^field-rh-/);
+    expect(created.status).toBe('Configured');
+
+    const ids = (await listTimers()).map((t) => t.id);
+    expect(ids[0]).toBe('sim');
+    expect(ids).toContain(created.id);
+  });
+
+  it('PUT /events/{id}/timers validates ids and records the selection', async () => {
+    // Create a real timer, then select it for a fresh event.
+    const timer = (
+      await createTimer({ name: 'Extra Sim', kind: { Sim: { laps: 1, lap_ms: 50 } } }, TOKEN)
+    ).body as Timer;
+    const event = (await createEvent('Timers Event', TOKEN)).body as EventMeta;
+
+    // Selecting a known timer succeeds and the event meta reflects it.
+    const ok = await setEventTimers(event.id, [timer.id], TOKEN);
+    expect(ok.status).toBe(200);
+    expect((ok.body as EventMeta).timers).toEqual([timer.id]);
+
+    // Selecting an UNKNOWN timer → 404 UnknownScope.
+    const bad = await setEventTimers(event.id, ['no-such-timer'], TOKEN);
+    expect(bad.status).toBe(404);
+    expect((bad.body as { code?: string }).code).toBe('UnknownScope');
+
+    // RD-gated: no token → 401.
+    expect((await setEventTimers(event.id, [timer.id])).status).toBe(401);
   });
 });

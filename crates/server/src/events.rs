@@ -40,6 +40,7 @@ use gridfpv_storage::{InMemoryLog, SqliteLog};
 use crate::app::AppState;
 use crate::auth::TokenStore;
 use crate::scope::EventId;
+use crate::timers::{SIM_TIMER_ID, TimerId, TimerRegistry};
 
 /// The reserved id of the always-present built-in **Practice** event.
 ///
@@ -95,6 +96,14 @@ pub struct EventMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub organizer: Option<String>,
+    /// The application-level timers this event **selects** (issue #73) — the per-event reference
+    /// into the app-level [`TimerRegistry`](crate::timers::TimerRegistry). Additive
+    /// (`#[serde(default)]`) so an event persisted before #73 reads back with an empty list; new
+    /// events and Practice default to `["sim"]` (the built-in Simulator) so they work out of the
+    /// box. The per-event source bridge runs the selected Sim timers; a selected RotorHazard is a
+    /// reserved no-op stub (2b / #65).
+    #[serde(default)]
+    pub timers: Vec<TimerId>,
 }
 
 /// The wire shape of `GET /active-event` — the **Director's currently-active event**, or
@@ -180,6 +189,11 @@ struct Registry {
     events: BTreeMap<EventId, RegisteredEvent>,
     /// The one Director-wide auth authority, shared into every per-event [`AppState`].
     tokens: TokenStore,
+    /// The Director-wide application-level **timer registry** (issue #73). Like the token store,
+    /// it is one app-level authority the per-event selection ([`EventMeta::timers`]) references;
+    /// it lives here so the single router state ([`EventRegistry`]) exposes it to the Timers API
+    /// handlers without a second axum state type. Cloning shares the one registry.
+    timers: TimerRegistry,
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
@@ -202,6 +216,13 @@ impl EventRegistry {
         let tokens = TokenStore::new();
         let mut events = BTreeMap::new();
 
+        // Build the Director-wide application-level timer registry (issue #73): the built-in
+        // Simulator (drawing its `laps`/`lap_ms` from the env defaults) plus any timers persisted
+        // to `<data_dir>/timers.json`. Shares the same data dir as the events.
+        let (sim_laps, sim_lap_ms) = sim_defaults();
+        let timers = TimerRegistry::new(data_dir.clone(), sim_laps, sim_lap_ms)
+            .map_err(|e| RegistryError(format!("could not build timer registry: {e}")))?;
+
         // Seed Practice: an in-memory (non-persistent) log, sharing the one token store.
         let practice_id = EventId(PRACTICE_EVENT_ID.to_string());
         let practice_state = AppState::with_tokens(InMemoryLog::new(), tokens.clone());
@@ -217,6 +238,7 @@ impl EventRegistry {
                     location: None,
                     description: None,
                     organizer: None,
+                    timers: default_timer_selection(),
                 },
                 state: practice_state,
             },
@@ -241,10 +263,18 @@ impl EventRegistry {
             inner: Arc::new(RwLock::new(Registry {
                 events,
                 tokens,
+                timers,
                 data_dir,
                 active_event,
             })),
         })
+    }
+
+    /// The Director-wide application-level **timer registry** (issue #73) — the app-level
+    /// authority the Timers API mutates and the per-event source bridge resolves selected timers
+    /// through. Cloning shares the one registry.
+    pub fn timers(&self) -> TimerRegistry {
+        self.read().timers.clone()
     }
 
     /// The Director's currently-active event's [`EventMeta`] (issue #90), or `None` when no
@@ -277,6 +307,31 @@ impl EventRegistry {
                 .map_err(|e| RegistryError(format!("could not persist active event: {e}")))?;
         }
         Ok(meta)
+    }
+
+    /// Set an event's **selected timers** (issue #73), returning its updated [`EventMeta`].
+    ///
+    /// Validates the event exists (else a [`RegistryError`] the caller maps to a typed 404). The
+    /// caller is responsible for validating each id names a known timer (the timer registry is a
+    /// separate authority); this just records the selection on the event's meta. The selection is
+    /// in-memory on the [`EventMeta`] (the event's own log/SQLite file holds its facts, not its
+    /// config) — the source bridge reads it live when a heat goes Running.
+    pub fn set_timers(&self, id: &EventId, ids: Vec<TimerId>) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+        event.meta.timers = ids;
+        Ok(event.meta.clone())
+    }
+
+    /// An event's currently-**selected timer ids** (issue #73), or `None` if no such event.
+    ///
+    /// The per-event source bridge reads this live when a heat goes Running to decide which
+    /// timers to drive (resolving each id through the [`TimerRegistry`]).
+    pub fn timers_of(&self, id: &EventId) -> Option<Vec<TimerId>> {
+        self.read().events.get(id).map(|e| e.meta.timers.clone())
     }
 
     /// The shared [`TokenStore`] — the Director mints/pins its RD token through this so the
@@ -362,6 +417,7 @@ impl EventRegistry {
             location: normalize_optional(&request.location),
             description: normalize_optional(&request.description),
             organizer: normalize_optional(&request.organizer),
+            timers: default_timer_selection(),
         };
         reg.events.insert(
             id,
@@ -421,6 +477,29 @@ impl std::fmt::Display for RegistryError {
 }
 
 impl std::error::Error for RegistryError {}
+
+/// The default per-event timer selection (issue #73): just the built-in **Simulator**
+/// ([`SIM_TIMER_ID`]). New events and Practice select it so they run a sim race out of the box.
+fn default_timer_selection() -> Vec<TimerId> {
+    vec![TimerId(SIM_TIMER_ID.to_string())]
+}
+
+/// The built-in Simulator timer's default `laps`/`lap_ms` (issue #73), read from the same env
+/// knobs the sim source uses (`GRIDFPV_SIM_LAPS` / `GRIDFPV_SIM_LAP_MS`), falling back to the
+/// canonical defaults (5 laps @ 2500ms) when unset/unparseable — so the Simulator timer's config
+/// matches the env-driven sim exactly. Kept here (not in the app crate) to avoid a dependency
+/// cycle; the values mirror `gridfpv_app::source::DEFAULT_SIM_LAPS`/`DEFAULT_SIM_LAP_MS`.
+fn sim_defaults() -> (u32, u64) {
+    let laps = std::env::var("GRIDFPV_SIM_LAPS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(5);
+    let lap_ms = std::env::var("GRIDFPV_SIM_LAP_MS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(2500);
+    (laps, lap_ms)
+}
 
 /// Current wall-clock time in milliseconds since the Unix epoch (creation timestamps).
 fn now_millis() -> i64 {

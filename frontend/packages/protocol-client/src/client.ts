@@ -21,6 +21,7 @@ import type {
   ActiveEvent,
   ChangeEnvelope,
   CreateEventRequest,
+  CreateTimerRequest,
   Cursor,
   EventId,
   EventMeta,
@@ -28,7 +29,10 @@ import type {
   ProtocolError,
   Scope,
   Snapshot,
-  SubscribeRequest
+  SubscribeRequest,
+  Timer,
+  TimerId,
+  UpdateTimerRequest
 } from '@gridfpv/types';
 
 /** Minimal `fetch` surface this client needs (injectable for tests / Node). */
@@ -287,6 +291,130 @@ export async function setActiveEvent(
     body: JSON.stringify({ id })
   });
   if (!resp.ok) throw new Error(`PUT /active-event failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta;
+}
+
+/**
+ * List every configured timer (`GET /timers`) — issue #73. Timers are **application-level
+ * configuration**: the RD configures them once (a persisted registry) and each event selects
+ * which to use. Reads are open on the LAN (no token needed; an optional token is sent when
+ * present). Resolves to the {@link Timer}s (the built-in **Simulator** first), or rejects on a
+ * transport/HTTP failure.
+ */
+export async function listTimers(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<Timer[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers`, { headers });
+  if (!resp.ok) throw new Error(`GET /timers failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Timer[];
+}
+
+/**
+ * Create a timer (`POST /timers`) — issue #73. RD-gated (full-trust by default: an open Director
+ * accepts it tokenless; a gated one answers **401/403** and the caller obtains a token and
+ * retries). The body carries the display `name` plus the {@link CreateTimerRequest['kind']} config
+ * (a `Sim` or a reserved `Rotorhazard`); the id is auto-generated server-side. Resolves to the new
+ * {@link Timer}, or rejects on a non-2xx / transport failure (the HTTP status is in the message).
+ */
+export async function createTimer(
+  baseUrl: string,
+  request: CreateTimerRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) throw new Error(`POST /timers failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Timer;
+}
+
+/**
+ * Edit a timer (`PUT /timers/{id}`) — issue #73. RD-gated. The body's fields are all optional
+ * (a partial edit of `name` and/or `kind`); the built-in Simulator may be retuned but not deleted.
+ * An unknown id answers **404**. Resolves to the updated {@link Timer}, or rejects on a non-2xx /
+ * transport failure.
+ */
+export async function updateTimer(
+  baseUrl: string,
+  id: TimerId,
+  request: UpdateTimerRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) throw new Error(`PUT /timers/${id} failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Timer;
+}
+
+/**
+ * Delete a timer (`DELETE /timers/{id}`) — issue #73. RD-gated. The built-in **Simulator cannot be
+ * deleted** (a **400**); an unknown id answers **404**. Resolves once the delete succeeds, or
+ * rejects on a non-2xx / transport failure (the HTTP status is in the message for branching).
+ */
+export async function deleteTimer(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers
+  });
+  if (!resp.ok) throw new Error(`DELETE /timers/${id} failed: HTTP ${resp.status}`);
+}
+
+/**
+ * Set an event's **selected timers** (`PUT /events/{id}/timers`) — issue #73. The per-event
+ * reference into the app-level timer registry: an event selects which timers it uses. RD-gated;
+ * the server validates the event exists and that **each** id names a known timer (else **404**).
+ * Resolves to the updated event {@link EventMeta}, or rejects on a non-2xx / transport failure.
+ */
+export async function setEventTimers(
+  baseUrl: string,
+  eventId: EventId,
+  ids: TimerId[],
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/timers`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ ids })
+  });
+  if (!resp.ok) throw new Error(`PUT /events/${eventId}/timers failed: HTTP ${resp.status}`);
   return (await resp.json()) as EventMeta;
 }
 

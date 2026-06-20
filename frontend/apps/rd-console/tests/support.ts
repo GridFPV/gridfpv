@@ -13,7 +13,8 @@ const PRACTICE: EventMeta = {
   id: 'practice',
   name: 'Practice',
   created_at: 0,
-  persistent: false
+  persistent: false,
+  timers: ['sim']
 };
 
 export interface TestSession {
