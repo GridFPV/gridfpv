@@ -205,26 +205,6 @@
         </div>
       </Card>
     {:else}
-      {#if practice}
-        <section class="practice-wrap" aria-label="Practice">
-          <button
-            type="button"
-            class="event-row practice"
-            onclick={() => enter(practice)}
-            title="No setup — just fly. Nothing here is saved."
-          >
-            <span class="event-icon practice-icon" aria-hidden="true">▶</span>
-            <span class="event-main">
-              <span class="event-name">{practice.name}</span>
-            </span>
-            {#if practice.id === activeEventId}
-              <span class="active-pill"><Badge tone="success" dot>Active</Badge></span>
-            {/if}
-            <span class="event-go" aria-hidden="true">→</span>
-          </button>
-        </section>
-      {/if}
-
       <section class="created" aria-label="Events">
         <h2 class="section-title">Your events</h2>
         {#if others.length === 0}
@@ -253,6 +233,27 @@
           </ul>
         {/if}
       </section>
+
+      {#if practice}
+        <section class="practice-wrap" aria-label="Practice">
+          <h2 class="section-title">Practice</h2>
+          <button
+            type="button"
+            class="event-row practice"
+            onclick={() => enter(practice)}
+            title="No setup — just fly. Nothing here is saved."
+          >
+            <span class="event-icon practice-icon" aria-hidden="true">▶</span>
+            <span class="event-main">
+              <span class="event-name">{practice.name}</span>
+            </span>
+            {#if practice.id === activeEventId}
+              <span class="active-pill"><Badge tone="success" dot>Active</Badge></span>
+            {/if}
+            <span class="event-go" aria-hidden="true">→</span>
+          </button>
+        </section>
+      {/if}
     {/if}
   </div>
 </div>
