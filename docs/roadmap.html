@@ -54,13 +54,35 @@
       <a href="testing-strategy.html">testing strategy</a> is a phase input, not an afterthought.</p>
     </div>
 
+    <div class="callout">
+      <p>
+        <strong>How we build (v0.4+): vertical slices over horizontal layers.</strong> Through
+        v0.3 we built the spine in horizontal layers — all of the engine, then the protocol
+        server, then the console shell — and that horizontal <strong>foundation</strong>
+        (engine, server, console, contract-suite/observability) is now <strong>done</strong>.
+        A hands-on UI review made the lesson plain: stacking more horizontal layers leaves nothing
+        a director can actually <em>use</em> until the very end. So from v0.4 onward we build the
+        workflow through that foundation <strong>one feature at a time</strong> — each slice goes
+        <strong>backend → API → UI</strong> and genuinely <em>works</em> end to end before the next
+        begins. The root realization: the missing backbone is the <strong>Event</strong>
+        aggregate — you are always inside an event, and an event owns its timers, pilots, heats,
+        format, and results.
+      </p>
+      <p>
+        Two rules ride along. <strong>Design is foundation-first:</strong> the design system
+        (tokens, components, app shell) is its own first slice, and every later slice inherits it
+        rather than reinventing UI. And <strong>entities carry auto-generated unique IDs</strong> —
+        names, callsigns, and channels are human-facing <em>display</em>, never the identity.
+      </p>
+    </div>
+
     <h2>2. The phases</h2>
 
     <pre class="mermaid">
 flowchart LR
   v01["v0.1&lt;br/&gt;Walking skeleton"] --> v02["v0.2&lt;br/&gt;First adapters"]
   v02 --> v03["v0.3&lt;br/&gt;Race engine"]
-  v03 --> v04["v0.4&lt;br/&gt;Director + RD console"]
+  v03 --> v04["v0.4&lt;br/&gt;Direct a single race (RD console)"]
   v04 --> v05["v0.5&lt;br/&gt;Racer/spectator PWA"]
   v05 --> v06["v0.6&lt;br/&gt;Streaming / broadcast"]
   v06 --> v07["v0.7&lt;br/&gt;Cloud"]
@@ -74,16 +96,25 @@ flowchart LR
   classDef live fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
   class v04 live
     </pre>
-    <p class="phase-meta">v0.4 (highlighted) is the first build that can run a real event end to end.</p>
+    <p class="phase-meta">v0.4 (highlighted) is the first build that can run a real event end to end — and, after a hands-on UI review, the first we build as <strong>vertical feature slices</strong> rather than horizontal layers (see §1).</p>
 
     <div class="callout">
       <p>
-        <strong>Status (2026-06):</strong> <strong>v0.1</strong> (walking skeleton) and
-        <strong>v0.2</strong> (first adapters + replay harness) are <strong>complete and
-        merged</strong> — the SQLite append-only log, projection engine, Rust→TS generation,
-        RotorHazard + Velocidrone adapters, recorded-session replay golden tests, and live +
-        emulated-signal dockerized-RH tests are all in the tree. As designed, v0.2 already
-        ingests a live (dockerized) source — "shadow mode." Next: <strong>v0.3 — Race engine</strong>.
+        <strong>Status (2026-06):</strong> <strong>v0.1</strong> (walking skeleton),
+        <strong>v0.2</strong> (first adapters + replay harness), and <strong>v0.3</strong>
+        (race engine) are <strong>complete and merged</strong> — the SQLite append-only log,
+        projection engine, Rust→TS generation, RotorHazard + Velocidrone adapters,
+        recorded-session replay golden tests, live + emulated-signal dockerized-RH tests, the
+        heat-loop state machine, scoring/marshaling, and the six format generators are all in
+        the tree. As designed, v0.2 already ingests a live (dockerized) source — "shadow mode."
+      </p>
+      <p>
+        The <strong>v0.4 foundation</strong> is also built: the embedded axum
+        <strong>protocol server</strong> (snapshot + WS stream, scoping, auth), the
+        <strong>Svelte console</strong> shell + generated types, and the
+        <strong>contract-suite / observability</strong> backbone. After a hands-on UI review,
+        the remaining v0.4 work — actually <em>directing</em> a race from the console — is being
+        rebuilt as <strong>vertical feature slices</strong> (see §1 and the v0.4 section below).
       </p>
     </div>
 
@@ -112,14 +143,42 @@ flowchart LR
     </ul>
     <p><strong>Done when:</strong> a full event (qualifying → bracket → winner) runs from a recorded source with correct results and marshaling; generators are table-tested.</p>
 
-    <h3>v0.4 — Director server + RD console</h3>
-    <p><strong>Goal:</strong> a person can run a real event end to end. (<a href="protocol.html">Protocol</a>, <a href="clients.html">Clients</a>)</p>
+    <h3>v0.4 — Direct a single race (RD console) — vertical slices</h3>
+    <p><strong>Goal:</strong> a person can run a real event end to end from the RD console. (<a href="protocol.html">Protocol</a>, <a href="clients.html">Clients</a>)</p>
+    <p>
+      The horizontal foundation — embedded <strong>axum protocol server</strong> (snapshot + WS
+      stream, scoping, bearer + LAN join-token auth), the <strong>Svelte</strong> console shell +
+      shared component library + generated types, and the contract-suite/observability backbone —
+      is <strong>built</strong>. The remaining work is the director workflow itself, delivered as
+      <strong>vertical slices</strong> (each <strong>backend → API → UI</strong>, working before the
+      next):
+    </p>
     <ul>
-      <li>Embedded <strong>axum protocol server</strong> (snapshot + WS stream, scoping, bearer + LAN join-token auth).</li>
-      <li><strong>Svelte</strong> frontend foundation + shared component library + generated types; the <strong>RD console</strong> (setup wizard, registration, live race control, marshaling, results).</li>
-      <li><strong>Tauri</strong> shell + single-binary packaging for Windows/Linux/macOS.</li>
+      <li><strong>Slice 0 — Design system foundation.</strong> Tokens, component library, and app
+      shell, built first so every later slice inherits a consistent UI.</li>
+      <li><strong>Slice 1 — Events &amp; workspace.</strong> The <strong>Event</strong> aggregate
+      itself: an always-present, non-persistent <em>Practice</em> event; a startup / event-picker
+      flow; you cannot act outside an event; and auth / connect to the served origin.</li>
+      <li><strong>Slice 2 — Timer configuration.</strong> Per-event timing source — Sim,
+      RotorHazard URL, or future sources — chosen and validated inside the event.</li>
+      <li><strong>Slice 3 — Pilot registration.</strong> Event-scoped pilots with auto-generated
+      IDs plus callsign / channel, and a working Registration UI.</li>
+      <li><strong>Slice 4 — Heat building.</strong> Build heats from the registered roster — select
+      pilots, assign channels.</li>
+      <li><strong>Slice 5 — Run a heat (live).</strong> Run a heat from the console with a
+      server-authoritative race clock.</li>
+      <li><strong>Slice 6 — Marshaling &amp; results.</strong> Void / insert / adjust laps and apply
+      penalties, with adjustments and penalties shown in the results UI.</li>
+      <li><strong>Slice 7 — Multi-heat formats.</strong> Select a format and drive its progress —
+      the six generators already exist from v0.3.</li>
     </ul>
-    <p><strong>Done when:</strong> a complete event runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
+    <p>Packaging follows alongside: a <strong>Tauri</strong> shell + single-binary build for Windows/Linux/macOS.</p>
+    <p><strong>Done when:</strong> a complete event — registration → heats → live races → marshaling → results, across a multi-heat format — runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
+
+    <p class="phase-meta">
+      v0.5 and beyond stay as the later milestones — they begin once a single race, and a full
+      multi-heat event, is genuinely directable from the console (v0.4 complete).
+    </p>
 
     <h3>v0.5 — Racer/spectator PWA</h3>
     <p><strong>Goal:</strong> racers and spectators can follow along on their phones. (<a href="clients.html">Clients</a>)</p>
