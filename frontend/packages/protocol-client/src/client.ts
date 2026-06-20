@@ -18,6 +18,7 @@
  */
 
 import type {
+  ActiveEvent,
   ChangeEnvelope,
   CreateEventRequest,
   Cursor,
@@ -238,6 +239,54 @@ export async function createEvent(
     body: JSON.stringify(body)
   });
   if (!resp.ok) throw new Error(`POST /events failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta;
+}
+
+/**
+ * Read the Director's **active event** (`GET /active-event`) — issue #90. The active event is
+ * Director (server-side) state: there is exactly one Race Director on one event, so every client
+ * resolves this on connect/reload to resume into the selected event (the returned `event` is its
+ * full {@link EventMeta}) or fall back to the picker (`event` is `null`). An open read — no token
+ * needed. Resolves to the {@link ActiveEvent} body, or rejects on a transport/HTTP failure.
+ */
+export async function getActiveEvent(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<ActiveEvent> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/active-event`, { headers });
+  if (!resp.ok) throw new Error(`GET /active-event failed: HTTP ${resp.status}`);
+  return (await resp.json()) as ActiveEvent;
+}
+
+/**
+ * Set the Director's **active event** (`PUT /active-event`) — issue #90. RD-gated like every
+ * other control write (full-trust by default: an open Director accepts it tokenless; a gated one
+ * answers **401/403** and the caller obtains a token and retries). The body carries the event
+ * `id`; the server validates it names a known event (else **404**) and persists the selection so
+ * it survives a Director restart. Resolves to the now-active event's {@link EventMeta}, or rejects
+ * on a non-2xx / transport failure (the HTTP status is in the error message for branching).
+ */
+export async function setActiveEvent(
+  baseUrl: string,
+  id: EventId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/active-event`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ id })
+  });
+  if (!resp.ok) throw new Error(`PUT /active-event failed: HTTP ${resp.status}`);
   return (await resp.json()) as EventMeta;
 }
 

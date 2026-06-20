@@ -25,6 +25,7 @@
  * This list is kept in lockstep with `bindings/` (one line per `bindings/*.ts`).
  */
 
+export type * from '@bindings/ActiveEvent';
 export type * from '@bindings/AdapterId';
 export type * from '@bindings/Change';
 export type * from '@bindings/ChangeEnvelope';
@@ -67,6 +68,7 @@ export type * from '@bindings/RankEntry';
 export type * from '@bindings/Scope';
 export type * from '@bindings/ServerHello';
 export type * from '@bindings/SessionId';
+export type * from '@bindings/SetActiveEventRequest';
 export type * from '@bindings/SignalContext';
 export type * from '@bindings/Snapshot';
 export type * from '@bindings/SourceTime';

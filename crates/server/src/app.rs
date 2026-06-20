@@ -89,7 +89,9 @@ use tokio::sync::Notify;
 use crate::auth::{JoinTokenResponse, TokenStore};
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
-use crate::events::{CreateEventRequest, EventMeta, EventRegistry};
+use crate::events::{
+    ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, SetActiveEventRequest,
+};
 use crate::live_state::live_state;
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
@@ -284,6 +286,9 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/health", get(|| async { "ok" }))
         // Events lifecycle (issue #72): list (Practice first) and RD-gated create.
         .route("/events", get(list_events).post(create_event))
+        // The Director's active event (issue #90): an open read so any client resumes into the
+        // selected event on connect/reload, and an RD-gated write to set it.
+        .route("/active-event", get(get_active_event).put(set_active_event))
         // Per-event read/realtime surface — `{event_id}` resolves to that event's log.
         .route(
             "/events/{event_id}/snapshot/event/{event}",
@@ -356,6 +361,36 @@ async fn create_event(
     Ok(Json(meta))
 }
 
+/// `GET /active-event` — the Director's currently-active event, or `null` (issue #90).
+///
+/// An **open read** (no token): every client — RD console, pilot view, read-only spectator —
+/// reads this on connect/reload to resume into the selected event (or fall to the picker when
+/// `null`). The active event is Director state, not per-client browser state, so a reload /
+/// reconnect / app-restart resumes into the same event all clients are on.
+async fn get_active_event(State(registry): State<EventRegistry>) -> Json<ActiveEvent> {
+    Json(ActiveEvent {
+        event: registry.active(),
+    })
+}
+
+/// `PUT /active-event` — set the Director's active event, RD-gated (issue #90).
+///
+/// [`ControlAuth`] runs first (the same gate as every other control write): only an
+/// authenticated RD may change which event the Director is on (open in full-trust by default).
+/// The body's `id` must name a known event, else a typed 404 (`UnknownScope`). On success the
+/// active event is persisted server-side (surviving a Director restart) and its [`EventMeta`]
+/// is returned.
+async fn set_active_event(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Json(body): Json<SetActiveEventRequest>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    let meta = registry
+        .set_active(&body.id)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
 /// `POST /events/{event_id}/auth/join-token` — mint a fresh **read-only** join token
 /// (protocol.html §5, §9.4) — issue #63, now event-rooted.
 ///
@@ -389,9 +424,10 @@ pub fn is_api_path(path: &str) -> bool {
     // `/events` is the one API tree that matters now; the bare `/snapshot|/stream|/control|/auth`
     // prefixes are kept so a *legacy* (pre-#72) mistyped call still 404s as a typed API error
     // rather than falling through to the SPA shell.
-    const API_PREFIXES: [&str; 6] = [
+    const API_PREFIXES: [&str; 7] = [
         "/health",
         "/events",
+        "/active-event",
         "/snapshot",
         "/stream",
         "/control",
@@ -1149,6 +1185,92 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let err: ProtocolError = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(err.code, ErrorCode::UnknownScope);
+    }
+
+    // --- #90: the Director's active event over HTTP -------------------------------------
+
+    /// `GET /active-event` → status + parsed `ActiveEvent`.
+    async fn get_active(registry: EventRegistry) -> (StatusCode, Option<ActiveEvent>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .uri("/active-event")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<ActiveEvent>(&bytes).ok();
+        (status, body)
+    }
+
+    /// `PUT /active-event` with `{ id }` and an optional bearer token → status + parsed body.
+    async fn put_active(
+        registry: EventRegistry,
+        id: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut builder = Request::builder()
+            .method("PUT")
+            .uri("/active-event")
+            .header("Content-Type", "application/json");
+        if let Some(token) = token {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        let json = serde_json::to_string(&SetActiveEventRequest {
+            id: EventId(id.to_string()),
+        })
+        .unwrap();
+        let response = router(registry)
+            .oneshot(builder.body(Body::from(json)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn active_event_is_none_until_set_then_resumes() {
+        let (registry, _state, _) = state_with(recorded_heat());
+
+        // A fresh Director has no active event → the picker.
+        let (status, body) = get_active(registry.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.expect("an ActiveEvent body").event.is_none());
+
+        // Setting it (open Director — no token needed) returns Practice's meta…
+        let (status, raw) = put_active(registry.clone(), PRACTICE_EVENT_ID, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let meta: EventMeta = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(meta.id.0, PRACTICE_EVENT_ID);
+
+        // …and now the open read resumes into it.
+        let (_, body) = get_active(registry).await;
+        assert_eq!(
+            body.unwrap().event.map(|m| m.id.0),
+            Some(PRACTICE_EVENT_ID.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_an_unknown_active_event_is_404() {
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, raw) = put_active(registry, "no-such-event", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let err: ProtocolError = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(err.code, ErrorCode::UnknownScope);
+    }
+
+    #[tokio::test]
+    async fn setting_the_active_event_requires_an_rd_token_once_configured() {
+        let (registry, state, _) = state_with(recorded_heat());
+        // Configure a control credential so the full-trust default closes.
+        let _rd = state.tokens().issue_rd_token();
+        let (status, _) = put_active(registry, PRACTICE_EVENT_ID, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     // --- #63: minting a read-only join token over HTTP ----------------------------------

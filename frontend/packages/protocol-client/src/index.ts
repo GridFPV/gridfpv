@@ -12,7 +12,14 @@
  * `@gridfpv/types`; this package hand-writes no wire shape of its own.
  */
 
-export { connect, listEvents, createEvent, PRACTICE_EVENT_ID } from './client.js';
+export {
+  connect,
+  listEvents,
+  createEvent,
+  getActiveEvent,
+  setActiveEvent,
+  PRACTICE_EVENT_ID
+} from './client.js';
 export type {
   ConnectOptions,
   ProtocolClient,

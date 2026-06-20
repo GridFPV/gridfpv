@@ -36,7 +36,14 @@
  * bridge its `onState` callback into a `$state` field here.
  */
 
-import { connect, listEvents, createEvent, PRACTICE_EVENT_ID } from '@gridfpv/protocol-client';
+import {
+  connect,
+  listEvents,
+  createEvent,
+  getActiveEvent,
+  setActiveEvent,
+  PRACTICE_EVENT_ID
+} from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
@@ -122,6 +129,13 @@ export class Session {
    * under it; leaving returns here.
    */
   currentEvent = $state.raw<EventMeta | undefined>(undefined);
+  /**
+   * Whether the session is still **resolving the Director's active event** (#90) — the brief
+   * window on load before we know whether to show the workspace (an active event is set) or the
+   * picker (none). The shell shows a loading state while this is `true`; it flips to `false`
+   * once {@link resolveActiveEvent} settles (success or failure).
+   */
+  resolvingActiveEvent = $state(true);
   /** The base URL both seams target — the Director's origin. */
   baseUrl = $state(defaultBaseUrl());
   /** Whether an RD token is currently held (drives the settings/gear state). */
@@ -158,12 +172,16 @@ export class Session {
   #controlFactory: typeof createControlClient;
   #listEventsImpl: typeof listEvents;
   #createEventImpl: typeof createEvent;
+  #getActiveEventImpl: typeof getActiveEvent;
+  #setActiveEventImpl: typeof setActiveEvent;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
     controlFactory?: typeof createControlClient;
     listEventsImpl?: typeof listEvents;
     createEventImpl?: typeof createEvent;
+    getActiveEventImpl?: typeof getActiveEvent;
+    setActiveEventImpl?: typeof setActiveEvent;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -171,6 +189,8 @@ export class Session {
     this.#controlFactory = opts?.controlFactory ?? createControlClient;
     this.#listEventsImpl = opts?.listEventsImpl ?? listEvents;
     this.#createEventImpl = opts?.createEventImpl ?? createEvent;
+    this.#getActiveEventImpl = opts?.getActiveEventImpl ?? getActiveEvent;
+    this.#setActiveEventImpl = opts?.setActiveEventImpl ?? setActiveEvent;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -222,9 +242,61 @@ export class Session {
   }
 
   /**
+   * Resolve the Director's **active event** on load/connect (issue #90) and either resume into
+   * it or fall back to the picker. The active event is server-side Director state — there is one
+   * RD on one event — so a reload/reconnect/app-restart reads it (`GET /active-event`) and enters
+   * the same event every client is on, instead of dropping to the picker.
+   *
+   * - active set → {@link selectEvent} resumes the workspace (the live read stream reconnects).
+   * - active `null`, or the read fails (Director unreachable) → stay at the picker.
+   *
+   * Always clears {@link resolvingActiveEvent} when it settles, so the shell can leave its
+   * loading state whichever way it resolves.
+   */
+  async resolveActiveEvent(): Promise<void> {
+    this.resolvingActiveEvent = true;
+    try {
+      const { event } = await this.#getActiveEventImpl(this.baseUrl, { token: this.#token });
+      if (event) this.selectEvent(event);
+    } catch {
+      // The Director is unreachable / errored — leave the picker to surface it (it re-lists
+      // events and shows its own error). The active event simply stays unresolved.
+    } finally {
+      this.resolvingActiveEvent = false;
+    }
+  }
+
+  /**
+   * Choose an event from the picker (issue #90): persist it as the Director's **active event**
+   * (`PUT /active-event`, RD-gated, full-trust first) so every client — and this console after a
+   * reload — resumes into it, then enter it. Returns the event on success, or `undefined` if a
+   * gated Director's token prompt was cancelled; on a non-auth failure the set still throws.
+   *
+   * If setting the active event fails for **auth** (a token-gated Director) the lazy prompt
+   * fires once and the set is retried — mirroring {@link createEventAndEnter}. We still
+   * {@link selectEvent} locally even if the *persist* could not be completed in the no-provider
+   * edge case, so the RD is never blocked from entering an event they picked.
+   */
+  async chooseEvent(meta: EventMeta): Promise<EventMeta | undefined> {
+    try {
+      await this.#setActiveEventImpl(this.baseUrl, meta.id, this.#token);
+    } catch (e) {
+      if (this.#token || !isAuthFailure(e)) throw e;
+      if (!(await this.#promptForToken())) return undefined;
+      await this.#setActiveEventImpl(this.baseUrl, meta.id, this.#token);
+    }
+    this.selectEvent(meta);
+    return meta;
+  }
+
+  /**
    * Enter an event (#72): root both seams under `/events/{id}/…` and open the live read
    * stream (open, no token). The control client is built with whatever token is held;
    * if none, the first privileged {@link send} will lazily obtain one.
+   *
+   * This is the pure **enter** primitive — it does NOT persist the selection. The picker
+   * persists via {@link chooseEvent} (`PUT /active-event`); {@link resolveActiveEvent} calls
+   * this directly to *resume* into the already-persisted active event without re-writing it.
    */
   selectEvent(meta: EventMeta, scope?: Scope): void {
     this.leaveEvent();
@@ -266,7 +338,13 @@ export class Session {
     });
   }
 
-  /** Leave the current event and return to the picker; tears the read seam down. */
+  /**
+   * "Switch event" — return to the picker (a **client-side** view change) and tear the read seam
+   * down, **without clearing the Director's active event** (issue #90). Leaving the server's
+   * active event set means a reload mid-switch resumes into the current event, and other clients
+   * (pilot/read views) are not disrupted by one RD browsing the picker; choosing a new event
+   * (`PUT /active-event` via {@link chooseEvent}) is what actually re-points the Director.
+   */
   leaveEvent(): void {
     this.#unsub?.();
     this.#unsub = undefined;
@@ -308,6 +386,7 @@ export class Session {
   ): Promise<EventMeta | undefined> {
     try {
       const meta = await this.#createEventImpl(this.baseUrl, name, this.#token, { fields });
+      await this.#persistActive(meta.id);
       this.selectEvent(meta);
       return meta;
     } catch (e) {
@@ -316,8 +395,23 @@ export class Session {
       // Open Director would have succeeded; a 401/403 means control is gated — prompt once.
       if (!(await this.#promptForToken())) return undefined;
       const meta = await this.#createEventImpl(this.baseUrl, name, this.#token, { fields });
+      await this.#persistActive(meta.id);
       this.selectEvent(meta);
       return meta;
+    }
+  }
+
+  /**
+   * Persist `id` as the Director's active event (issue #90), best-effort: the create/choose has
+   * already obtained any needed token, so this set should succeed. A failure here is swallowed —
+   * the RD still enters the event locally; the worst case is a reload that drops to the picker,
+   * not a broken session.
+   */
+  async #persistActive(id: EventMeta['id']): Promise<void> {
+    try {
+      await this.#setActiveEventImpl(this.baseUrl, id, this.#token);
+    } catch {
+      /* leave the active event unset; entering locally still works */
     }
   }
 

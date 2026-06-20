@@ -34,6 +34,14 @@
   let tokenDialog = $state<TokenDialog>();
   session.setTokenProvider(() => tokenDialog?.request() ?? Promise.resolve(undefined));
 
+  // Resume into the Director's active event on load (#90): the active event is server-side
+  // state, so a reload/reconnect/app-restart reads `GET /active-event` and re-enters the same
+  // event instead of dropping to the picker. While this resolves we show a brief loading state;
+  // it then settles into the workspace (active set) or the picker (none / unreachable).
+  $effect(() => {
+    void session.resolveActiveEvent();
+  });
+
   type ScreenId = 'setup' | 'registration' | 'live' | 'marshaling' | 'results';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
     { id: 'setup', label: 'Setup', key: '1', icon: 'M4 6h16M4 12h16M4 18h10' },
@@ -101,7 +109,16 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-{#if !session.currentEvent}
+{#if session.resolvingActiveEvent && !session.currentEvent}
+  <!-- Resolving the Director's active event (#90): a brief loading state before we know
+       whether to resume into the workspace or show the picker. -->
+  <div class="gridfpv-root gridfpv-dense">
+    <div class="resume-loading" role="status">
+      <span class="resume-spinner" aria-hidden="true"></span>
+      <span>Resuming…</span>
+    </div>
+  </div>
+{:else if !session.currentEvent}
   <div class="gridfpv-root gridfpv-dense">
     <EventPicker {session} />
   </div>
@@ -246,6 +263,36 @@
 <ToastHost />
 
 <style>
+  /* The active-event resume loading state (#90). */
+  .resume-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--gf-space-3);
+    min-height: 100vh;
+    color: var(--gf-text-muted);
+    font-family: var(--gf-font-family);
+    font-size: var(--gf-font-size-sm);
+  }
+  .resume-spinner {
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    border: 2px solid var(--gf-border);
+    border-top-color: var(--gf-accent);
+    animation: resume-spin 0.7s linear infinite;
+  }
+  @keyframes resume-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .resume-spinner {
+      animation-duration: 2s;
+    }
+  }
+
   .app {
     display: grid;
     grid-template-columns: 15rem 1fr;
