@@ -1,24 +1,42 @@
 <script lang="ts">
-  // Placeholder race clock. Renders elapsed milliseconds as M:SS.mmm.
-  // A real implementation will tick off the protocol's authoritative time.
-  let { elapsedMs = 0 }: { elapsedMs?: number } = $props();
+  import { formatClock } from './format.js';
 
-  let label = $derived.by(() => {
-    const totalMs = Math.max(0, Math.floor(elapsedMs));
-    const minutes = Math.floor(totalMs / 60000);
-    const seconds = Math.floor((totalMs % 60000) / 1000);
-    const millis = totalMs % 1000;
-    return `${minutes}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
-  });
+  /**
+   * RaceClock — pure presentational elapsed/remaining display.
+   *
+   * Takes a time in milliseconds and renders it as `M:SS.mmm`. It does not tick
+   * on its own (no timers, no protocol dependency); the caller feeds it the
+   * authoritative time so the same component serves a live overlay and a static
+   * results readout. Pass `remainingMs` instead of `elapsedMs` for a countdown;
+   * if both are given, `remainingMs` wins.
+   */
+  let {
+    elapsedMs = 0,
+    remainingMs,
+    /** Accessible label prefix announced with the value. */
+    label = 'Race time'
+  }: { elapsedMs?: number; remainingMs?: number; label?: string } = $props();
+
+  let ms = $derived(remainingMs ?? elapsedMs);
+  let mode = $derived(remainingMs !== undefined ? 'remaining' : 'elapsed');
+  let display = $derived(formatClock(ms));
 </script>
 
-<span class="gridfpv-race-clock">{label}</span>
+<time class="gridfpv-race-clock" data-mode={mode} role="timer" aria-label={`${label}: ${display}`}
+  >{display}</time
+>
 
 <style>
   .gridfpv-race-clock {
-    font:
-      600 16px/1 ui-monospace,
-      monospace;
+    display: inline-block;
+    color: var(--gf-color-text);
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-xl);
+    font-weight: var(--gf-font-weight-bold);
     font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .gridfpv-race-clock[data-mode='remaining'] {
+    color: var(--gf-color-warn);
   }
 </style>

@@ -1,51 +1,56 @@
 <script lang="ts">
-  import type { HeatResult } from '@gridfpv/types';
-  import { formatMetric, medalFor } from './format.js';
+  import type { RankEntry } from '@gridfpv/types';
+  import { medalFor } from './format.js';
 
   /**
-   * Leaderboard — the scored standing of a single heat.
+   * StandingsTable — a generator's overall ranking across an event/class.
    *
-   * Source type: `HeatResult` (`places: Placement[]`), best position first with
-   * ties sharing a position. Each row shows finishing position, competitor, the
-   * laps that counted, and the condition-specific deciding metric.
+   * Source type: `RankEntry[]` (1-based, tie-aware positions, best first). Unlike
+   * a single-heat `Leaderboard`, this is the rolled-up standing, so it shows just
+   * position + competitor; surfaces add their own context columns later.
    */
   let {
-    result,
-    /** Optional column heading for the deciding metric (e.g. "Best lap"). */
-    metricLabel = 'Metric'
-  }: { result: HeatResult; metricLabel?: string } = $props();
+    entries,
+    /** Optional table caption (e.g. "Open class — overall"). */
+    caption
+  }: { entries: RankEntry[]; caption?: string } = $props();
 </script>
 
-<table class="gridfpv-leaderboard" aria-label="Heat leaderboard">
+<table class="gridfpv-standings" aria-label={caption ?? 'Overall standings'}>
+  {#if caption}
+    <caption>{caption}</caption>
+  {/if}
   <thead>
     <tr>
       <th scope="col" class="pos">Pos</th>
       <th scope="col" class="pilot">Pilot</th>
-      <th scope="col" class="laps">Laps</th>
-      <th scope="col" class="metric">{metricLabel}</th>
     </tr>
   </thead>
   <tbody>
-    {#each result.places as place (place.competitor.adapter + '/' + place.competitor.competitor)}
-      {@const medal = medalFor(place.position)}
+    {#each entries as entry (entry.competitor)}
+      {@const medal = medalFor(entry.position)}
       <tr class:medal={medal !== null} data-medal={medal}>
-        <td class="pos"><span class="badge">{place.position}</span></td>
-        <td class="pilot">{place.competitor.competitor}</td>
-        <td class="laps">{place.laps}</td>
-        <td class="metric">{formatMetric(place.metric)}</td>
+        <td class="pos"><span class="badge">{entry.position}</span></td>
+        <td class="pilot">{entry.competitor}</td>
       </tr>
     {/each}
   </tbody>
 </table>
 
 <style>
-  .gridfpv-leaderboard {
+  .gridfpv-standings {
     border-collapse: collapse;
     width: 100%;
     color: var(--gf-color-text);
     background: var(--gf-color-surface);
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
+  }
+  caption {
+    text-align: left;
+    padding: var(--gf-space-2) var(--gf-space-3);
+    color: var(--gf-color-text-muted);
+    font-weight: var(--gf-font-weight-medium);
   }
   th,
   td {
@@ -65,12 +70,6 @@
   }
   .pos {
     width: 2.5em;
-  }
-  .laps,
-  .metric {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    font-family: var(--gf-font-mono);
   }
   .badge {
     display: inline-flex;

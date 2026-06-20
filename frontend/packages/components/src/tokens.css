@@ -1,0 +1,101 @@
+/**
+ * GridFPV design tokens — one token set, three contexts (docs/clients.html §5).
+ *
+ * Every component styles itself only through these CSS custom properties, so a
+ * surface re-themes the whole library by overriding tokens on a wrapping element
+ * (or `:root`) — no per-component CSS overrides. The defaults below are the
+ * "RD console" baseline (readable on a light surface); the `.gridfpv-overlay`
+ * and `.gridfpv-dense` context classes below re-point the same tokens for the
+ * OBS overlay (transparent, large, high-contrast) and dense-table contexts.
+ *
+ * Token groups:
+ *   --gf-color-*   palette (surface, text, accent, position medals, state)
+ *   --gf-space-*   spacing scale (4px base)
+ *   --gf-font-*    type family + size scale + weights
+ *   --gf-radius-*  corner radii
+ *
+ * Import this once per surface (e.g. in an app's entry CSS):
+ *   import '@gridfpv/components/tokens.css';
+ */
+
+:where(.gridfpv-root),
+:root {
+  /* ── Palette ─────────────────────────────────────────────────────────── */
+  --gf-color-surface: #ffffff;
+  --gf-color-surface-alt: #f4f5f7;
+  --gf-color-border: #d9dce1;
+  --gf-color-text: #1a1d21;
+  --gf-color-text-muted: #6b7280;
+  --gf-color-accent: #2563eb;
+  --gf-color-accent-contrast: #ffffff;
+
+  /* Position / medal colors, used by leaderboards + standings. */
+  --gf-color-gold: #d4af37;
+  --gf-color-silver: #9aa0a6;
+  --gf-color-bronze: #b06a2c;
+
+  /* State colors (live phase, win/leader, penalty/DQ). */
+  --gf-color-live: #16a34a;
+  --gf-color-leader: #2563eb;
+  --gf-color-warn: #b45309;
+  --gf-color-danger: #dc2626;
+
+  /* ── Spacing scale (4px base) ────────────────────────────────────────── */
+  --gf-space-1: 0.25rem;
+  --gf-space-2: 0.5rem;
+  --gf-space-3: 0.75rem;
+  --gf-space-4: 1rem;
+  --gf-space-6: 1.5rem;
+  --gf-space-8: 2rem;
+
+  /* ── Typography ──────────────────────────────────────────────────────── */
+  --gf-font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --gf-font-mono: ui-monospace, 'SF Mono', 'Roboto Mono', monospace;
+
+  --gf-font-size-xs: 0.75rem;
+  --gf-font-size-sm: 0.875rem;
+  --gf-font-size-md: 1rem;
+  --gf-font-size-lg: 1.25rem;
+  --gf-font-size-xl: 1.75rem;
+  --gf-font-size-2xl: 2.5rem;
+
+  --gf-font-weight-normal: 400;
+  --gf-font-weight-medium: 600;
+  --gf-font-weight-bold: 700;
+
+  /* ── Radii ───────────────────────────────────────────────────────────── */
+  --gf-radius-sm: 4px;
+  --gf-radius-md: 8px;
+}
+
+/**
+ * Overlay context: transparent background, oversized + high-contrast text for a
+ * broadcast keyer. Apply `class="gridfpv-overlay"` on a wrapping element.
+ */
+:where(.gridfpv-overlay) {
+  --gf-color-surface: transparent;
+  --gf-color-surface-alt: rgba(0, 0, 0, 0.35);
+  --gf-color-border: rgba(255, 255, 255, 0.25);
+  --gf-color-text: #ffffff;
+  --gf-color-text-muted: rgba(255, 255, 255, 0.7);
+  --gf-color-accent: #38bdf8;
+
+  --gf-font-size-sm: 1rem;
+  --gf-font-size-md: 1.25rem;
+  --gf-font-size-lg: 1.75rem;
+  --gf-font-size-xl: 2.5rem;
+  --gf-font-size-2xl: 3.5rem;
+}
+
+/**
+ * Dense context: tighter spacing + smaller type for the data-dense RD console
+ * tables. Apply `class="gridfpv-dense"` on a wrapping element.
+ */
+:where(.gridfpv-dense) {
+  --gf-space-2: 0.375rem;
+  --gf-space-3: 0.5rem;
+  --gf-space-4: 0.625rem;
+
+  --gf-font-size-sm: 0.8125rem;
+  --gf-font-size-md: 0.875rem;
+}
