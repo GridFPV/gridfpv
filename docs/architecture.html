@@ -321,6 +321,19 @@ flowchart TB
       the server crate and are generated into TypeScript for the frontend, so the Director,
       the Cloud, and every client share one definition that can't drift.</p>
     </div>
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4):</strong> the <code>gridfpv-server</code> crate owns the protocol
+        wire types (snapshot/stream/control/error/version), generated to TS in <code>bindings/</code>
+        alongside the event model — one definition the Director, Cloud, and every client share.
+        Wire types are generated from Rust with ts-rs across the crates that own contract types —
+        <code>gridfpv-events</code>, <code>gridfpv-projection</code>, <code>gridfpv-engine</code>,
+        and <code>gridfpv-server</code> (the protocol contract) — exported to repo-root
+        <code>bindings/</code>. The protocol contract version is a single monotonic
+        <code>u32</code> (<code>CONTRACT_VERSION</code>), bumped only on a breaking wire change;
+        additive changes an older client can ignore do not bump it.
+      </p>
+    </div>
     <p>
       Exact message shapes (snapshot format, the change-stream envelope, auth) are a
       protocol spec of their own. The architectural commitments here are: <em>read +

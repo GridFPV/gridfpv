@@ -60,7 +60,7 @@
     <dl class="entities">
       <dt>Live race-state</dt>
       <dd>The current heat and its loop state (<code>Scheduled → Staged → Armed → Running →
-      Landed → Scored</code>, see <a href="race-engine.html">Race Engine</a> §2), the active
+      Finished → Scored</code>, see <a href="race-engine.html">Race Engine</a> §2), the active
       pilots and their live lap/split progress, the running order, and the on-deck heat. The
       latency-sensitive core every overlay and spectator watches.</dd>
       <dt>Lap lists</dt>
@@ -89,6 +89,16 @@
         decision, it lives in the log and the client never sees it directly; if it's an answer
         computed from those, it's a projection and the protocol serves it. This keeps the wire
         contract stable while the log vocabulary and projection internals evolve underneath.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Deferred in v0.4.</strong> Several inputs the contract is designed around are not
+        yet wired: the registration-binding event (#60),
+        the event-setup commands (#61), and the <code>LiveRaceState</code> race-start clock plus
+        per-gate splits (#62) are still to come. And the <strong>Tauri shell + 3-OS single-binary
+        packaging are not yet built (#57/#58)</strong> — v0.4 ships the RD console as a web app
+        served by the Director, not as a native window.
       </p>
     </div>
 
@@ -125,6 +135,25 @@
       apart.
     </p>
 
+    <h3>Endpoint surface (as built, v0.4)</h3>
+    <p>
+      The concrete HTTP/WS surface the Director serves today, behind the storage trait:
+    </p>
+    <table>
+      <thead>
+        <tr><th>Endpoint</th><th>What it serves</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>GET /health</code></td><td>liveness</td></tr>
+        <tr><td><code>GET /snapshot/event/{event}</code></td><td>event snapshot</td></tr>
+        <tr><td><code>GET /snapshot/class/{event}/{class}</code></td><td>class snapshot</td></tr>
+        <tr><td><code>GET /snapshot/heat/{heat}</code> (+ <code>?projection=live|laps|result</code>)</td><td>heat snapshot</td></tr>
+        <tr><td><code>GET /snapshot/pilot/{event}/{pilot}</code></td><td>pilot snapshot</td></tr>
+        <tr><td><code>GET /stream</code></td><td>WS change stream (<code>SubscribeRequest</code> → <code>StreamMessage</code>)</td></tr>
+        <tr><td><code>GET /control</code> (WS) and <code>POST /control</code> (one-shot)</td><td>RD-bearer-gated; <code>Command</code> → <code>CommandAck</code></td></tr>
+      </tbody>
+    </table>
+
     <h2>3. The realtime change stream</h2>
     <p>
       After the snapshot, the client opens a <strong>WebSocket</strong> and receives a stream
@@ -140,6 +169,10 @@
       local copy identical to the server's, and the server may collapse a burst into a single
       "this projection changed, here's its new value" envelope when a delta would be larger or
       ambiguous (e.g. after a marshaling correction that re-folds a whole lap list).</p>
+      <p>As built (v0.4) every envelope is a fresh-value carrying the projection's complete new
+      state (<code>ProjectionBody</code>); the incremental delta encodings are wired in the type
+      system (<code>Change::Delta</code>) but deferred, so the stream is correct-but-chatty until
+      they land.</p>
     </div>
 
     <h3>Sequence, ordering &amp; resume</h3>
@@ -240,8 +273,10 @@ sequenceDiagram
       heat.</dd>
     </dl>
     <p>
-      Scopes compose (a pilot within a class) and a client may hold several at once over one
-      connection. The three client kinds differ in scope <em>and</em> permission:
+      Scopes are designed to compose (a pilot within a class) and a client will eventually hold
+      several over one connection; as built (v0.4) a subscription addresses exactly one of the
+      four resources (event / class / heat / pilot). The three client kinds differ in scope
+      <em>and</em> permission:
     </p>
     <table>
       <thead>
@@ -400,44 +435,57 @@ flowchart LR
       regardless, so the contract ships <strong>WebSocket-only</strong> for every client. The
       change envelope stays transport-neutral, so an SSE read-only path can be added later
       <em>only if</em> a real spectator/overlay need appears — not by default, to avoid a second
-      code path.</li>
+      code path. <strong>As built (v0.4):</strong> WS-only, no SSE — <code>/stream</code> for
+      reads and <code>/control</code> for the RD path.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Change-envelope schema: delta vs fresh-value, per projection.</span>
       The accepted approach is <strong>deltas for append-heavy projections</strong> (lap lists,
       live state) and <strong>fresh-value for cheap or re-folded ones</strong> (heat result,
       ranking after a correction), with a marshaling re-fold surfacing as a fresh-value envelope.
-      The exact envelope shapes are refined at implementation.</li>
+      The exact envelope shapes are refined at implementation. <strong>As built (v0.4):</strong>
+      the delta-vs-fresh split is wired in the type system but all envelopes are
+      <code>FreshValue</code> today; the delta encodings are deferred.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Resume window &amp; retention.</span>
       The server retains a <strong>bounded window</strong> of replayable envelopes before forcing
       a re-snapshot: the <strong>Director is memory-bounded</strong> (one event) and the
       <strong>Cloud keeps a larger window</strong> (many events). Pairs with the storage tiers in
       <a href="architecture.html">Architecture</a> §4. Exact window sizes are tuned at
-      implementation.</li>
+      implementation. <strong>As built (v0.4):</strong> the retained window is 256 log offsets;
+      an older cursor gets a <code>ReSnapshotRequired</code> / <code>StaleCursor</code> response.</li>
       <li><span class="q">RESOLVED — Auth credential format: opaque bearer tokens (+ optional signed join-token).</span>
       RD and account auth use <strong>opaque bearer tokens</strong> backed by a server-side
       session (easy to revoke), plus an optional <strong>lightweight signed join-token</strong>
       (printed as a QR code, baked into the URL) granting read-only LAN access. Trust boundaries
       are fixed in <a href="architecture.html">Architecture</a> §9. <em>Revisit JWT only if</em>
-      stateless Cloud scaling later demands it.</li>
+      stateless Cloud scaling later demands it. <strong>As built (v0.4):</strong> opaque 256-bit
+      bearer tokens in an in-memory revocable <code>TokenStore</code>, with roles <code>Rd</code>
+      and <code>ReadOnly</code> — reads are open, control is RD-gated, and the read-only join-token
+      grants read scope only.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Sequence-cursor representation.</span>
       The public projection sequence is a <strong>single monotonic integer per stream</strong>
       (not per-projection cursors a client composes). How it stays stable across a Director
-      restart / projection recompute is settled at implementation.</li>
+      restart / projection recompute is settled at implementation. <strong>As built (v0.4):</strong>
+      a per-stream <code>u64</code> <code>Cursor</code> counting from 1, distinct from the log
+      offset.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Scope grammar &amp; pagination.</span>
       The contract uses a <strong>scope grammar</strong> for addressing (with multi-scope
       subscribe) and <strong>cursor-based pagination</strong> for large historical / open-data
       reads. The exact addressing scheme, URL shapes, and filter expressiveness are refined at
-      implementation.</li>
+      implementation. <strong>As built (v0.4):</strong> concrete REST scope addressing with one
+      scope per subscribe; the richer scope grammar and pagination are deferred.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Contract version negotiation &amp; support band.</span>
       The version is carried <strong>in the connect message</strong>; the server serves a
       <strong>band of recent versions</strong> so an un-refreshed PWA keeps working, and emits an
       explicit <strong>"too old, please refresh" signal</strong> when a client falls outside it.
       Paired with log/schema versioning in <a href="architecture.html">Architecture</a> §11. The
-      exact support-band depth is set at implementation.</li>
+      exact support-band depth is set at implementation. <strong>As built (v0.4):</strong> a
+      <code>ContractVersion</code> on the WS subscribe, a support band of <code>1..=1</code>, and
+      a <code>VersionMismatch</code> refresh signal.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Error model.</span> The
       contract uses a <strong>single shared error shape</strong> across HTTP reads, the WS stream,
       and control acknowledgements — auth failure, unknown scope, stale-cursor, version-mismatch —
       defined once in Rust like the rest of the contract. The exact fields are pinned at
-      implementation.</li>
+      implementation. <strong>As built (v0.4):</strong> a single <code>ProtocolError{code,
+      message}</code> with six <code>ErrorCode</code> variants spanning HTTP, WS, and control.</li>
     </ol>
 
     <footer class="doc-footer">
