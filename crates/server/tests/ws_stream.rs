@@ -108,6 +108,8 @@ async fn streams_ordered_envelopes_from_a_fresh_subscribe() {
         &SubscribeRequest {
             scope: event_scope(),
             from: None,
+            contract_version: None,
+            token: None,
         },
     )
     .await;
@@ -170,6 +172,8 @@ async fn resume_from_a_mid_cursor_replays_only_the_tail() {
         &SubscribeRequest {
             scope: event_scope(),
             from: Some(Cursor::new(2)),
+            contract_version: None,
+            token: None,
         },
     )
     .await;
@@ -207,6 +211,8 @@ async fn too_old_cursor_requires_re_snapshot() {
         &SubscribeRequest {
             scope: event_scope(),
             from: Some(Cursor::new(1)),
+            contract_version: None,
+            token: None,
         },
     )
     .await;
@@ -231,6 +237,8 @@ async fn unchanged_fold_emits_no_envelope() {
         &SubscribeRequest {
             scope: event_scope(),
             from: None,
+            contract_version: None,
+            token: None,
         },
     )
     .await;

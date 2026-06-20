@@ -57,6 +57,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod auth;
 pub mod control;
 pub mod control_handler;
 pub mod error;
@@ -96,6 +97,24 @@ impl ContractVersion {
 /// The contract version this server build speaks. The first wire contract is `1`.
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(1);
 
+/// The **oldest** contract version this server still serves (protocol.html §7, §9.7) —
+/// the bottom of the supported band `MIN_SUPPORTED_CONTRACT_VERSION..=CONTRACT_VERSION`.
+///
+/// A client whose [`Hello::contract_version`] is below this is "too old, please refresh";
+/// one above [`CONTRACT_VERSION`] is "too new". Both fall outside the band and get the
+/// refresh signal (a [`ServerHello`] with `compatible = false`, or a
+/// [`VersionMismatch`](error::ErrorCode::VersionMismatch) error on a path that cannot
+/// carry a `ServerHello`). At the first contract the band is the single version `1..=1`;
+/// it widens as the server keeps serving older clients across additive changes (§7).
+pub const MIN_SUPPORTED_CONTRACT_VERSION: ContractVersion = ContractVersion::new(1);
+
+/// Whether `client` falls within this server's supported contract band
+/// (protocol.html §7): `MIN_SUPPORTED_CONTRACT_VERSION..=CONTRACT_VERSION`, inclusive.
+/// `false` is the "too old / too new, please refresh" condition.
+pub fn is_supported_contract_version(client: ContractVersion) -> bool {
+    MIN_SUPPORTED_CONTRACT_VERSION <= client && client <= CONTRACT_VERSION
+}
+
 /// The client's **connect message** (protocol.html §7): announced before anything
 /// else, it carries the [`ContractVersion`] the client was built against so the
 /// server can decide whether it can serve it.
@@ -130,6 +149,37 @@ pub struct ServerHello {
     pub compatible: bool,
 }
 
+impl ServerHello {
+    /// The server's reply for a client announcing `client` (protocol.html §7): this
+    /// build's supported band `[MIN_SUPPORTED_CONTRACT_VERSION, CONTRACT_VERSION]` with
+    /// `compatible` set by [`is_supported_contract_version`]. The single place the band is
+    /// turned into a handshake reply, so every transport (a future `Hello` exchange, the
+    /// WS subscribe) reports the same range.
+    pub fn for_client(client: ContractVersion) -> Self {
+        Self {
+            min_contract_version: MIN_SUPPORTED_CONTRACT_VERSION,
+            max_contract_version: CONTRACT_VERSION,
+            compatible: is_supported_contract_version(client),
+        }
+    }
+
+    /// The "too old / too new, please refresh" error for an out-of-band `client`
+    /// (protocol.html §7, §9.8) — the [`VersionMismatch`](error::ErrorCode::VersionMismatch)
+    /// form of the refresh signal for a path that cannot carry a `ServerHello` (the WS
+    /// subscribe close frame, a control hello). The message names the served band so the
+    /// client knows whether to upgrade or downgrade.
+    pub fn refresh_error(client: ContractVersion) -> error::ProtocolError {
+        error::ProtocolError::new(
+            error::ErrorCode::VersionMismatch,
+            format!(
+                "contract version {} is outside this server's supported band {}..={} — \
+                 please refresh the client",
+                client.version, MIN_SUPPORTED_CONTRACT_VERSION.version, CONTRACT_VERSION.version,
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +202,37 @@ mod tests {
         let json = serde_json::to_string(&hello).unwrap();
         let back: Hello = serde_json::from_str(&json).unwrap();
         assert_eq!(hello, back);
+    }
+
+    #[test]
+    fn in_band_version_is_supported() {
+        assert!(is_supported_contract_version(CONTRACT_VERSION));
+        assert!(is_supported_contract_version(
+            MIN_SUPPORTED_CONTRACT_VERSION
+        ));
+        let reply = ServerHello::for_client(CONTRACT_VERSION);
+        assert!(reply.compatible);
+        assert_eq!(reply.min_contract_version, MIN_SUPPORTED_CONTRACT_VERSION);
+        assert_eq!(reply.max_contract_version, CONTRACT_VERSION);
+    }
+
+    #[test]
+    fn out_of_band_version_gets_the_refresh_signal() {
+        // Too new (above the band).
+        let too_new = ContractVersion::new(CONTRACT_VERSION.version + 1);
+        assert!(!is_supported_contract_version(too_new));
+        assert!(!ServerHello::for_client(too_new).compatible);
+        assert_eq!(
+            ServerHello::refresh_error(too_new).code,
+            error::ErrorCode::VersionMismatch
+        );
+
+        // Too old (below the band), when one exists.
+        if MIN_SUPPORTED_CONTRACT_VERSION.version > 0 {
+            let too_old = ContractVersion::new(MIN_SUPPORTED_CONTRACT_VERSION.version - 1);
+            assert!(!is_supported_contract_version(too_old));
+            assert!(!ServerHello::for_client(too_old).compatible);
+        }
     }
 
     #[test]
