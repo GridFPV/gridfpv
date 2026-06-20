@@ -85,6 +85,7 @@ use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
 use serde::Deserialize;
 use tokio::sync::Notify;
 
+use crate::auth::TokenStore;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::live_state::live_state;
 use crate::scope::{ClassId, EventId, PilotId};
@@ -161,6 +162,12 @@ pub struct AppState {
     log: SharedLog,
     /// Woken on every append so caught-up change streams re-read the log tail.
     appended: Arc<Notify>,
+    /// The auth authority (#44): opaque bearer/join tokens → role-bearing sessions. Shared
+    /// (it is internally `Arc`'d) so every handler — and the [`ControlAuth`] extractor —
+    /// consults the same sessions; control reads it through [`AppState::tokens`].
+    ///
+    /// [`ControlAuth`]: crate::control_handler::ControlAuth
+    tokens: TokenStore,
 }
 
 impl AppState {
@@ -171,6 +178,7 @@ impl AppState {
         Self {
             log: Arc::new(Mutex::new(log)),
             appended: Arc::new(Notify::new()),
+            tokens: TokenStore::new(),
         }
     }
 
@@ -180,7 +188,17 @@ impl AppState {
         Self {
             log,
             appended: Arc::new(Notify::new()),
+            tokens: TokenStore::new(),
         }
+    }
+
+    /// The shared auth token store (#44), for minting/revoking tokens out of band (the RD
+    /// console issues itself an RD token; an operator issues a join-token QR) and for the
+    /// [`ControlAuth`] extractor to authenticate a control caller.
+    ///
+    /// [`ControlAuth`]: crate::control_handler::ControlAuth
+    pub fn tokens(&self) -> &TokenStore {
+        &self.tokens
     }
 
     /// The shared log handle, for tasks that tail or append outside the router.

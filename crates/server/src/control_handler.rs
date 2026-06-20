@@ -91,19 +91,21 @@ use crate::app::AppState;
 use crate::control::{Command, CommandAck};
 use crate::error::{ErrorCode, ProtocolError};
 
-/// The **auth seam** for the privileged control path (protocol.html §5), left for #44.
+/// The **auth chokepoint** for the privileged control path (protocol.html §5, §9.4) — #44.
 ///
-/// An axum extractor every control route demands *before* its handler runs. Today its
-/// extraction is infallible — it admits every caller, exactly as the read paths do
-/// pre-#44 — so the control path is reachable for this issue's write-path work without
-/// auth being implemented here.
+/// An axum extractor every control route demands *before* its handler runs: it reads the
+/// caller's `Authorization: Bearer <token>` and requires a token resolving to a
+/// **control-authorized** ([`Role::Rd`](crate::auth::Role::Rd)) session in the shared
+/// [`TokenStore`](crate::auth::TokenStore). A valid RD token yields the marker; anything
+/// else — no header, a read-only/join token, an unknown or revoked token — is rejected
+/// with [`ErrorCode::Unauthorized`] (HTTP 401 / a failed ack). The whole policy lives in
+/// [`TokenStore::authenticate_control`](crate::auth::TokenStore::authenticate_control);
+/// this extractor is just where it is applied.
 ///
-/// #44 makes this the single chokepoint: it replaces the permissive
-/// [`from_request_parts`](FromRequestParts::from_request_parts) below with a real RD-role
-/// check (read the bearer token / session, verify the control role, reject an unprivileged
-/// caller with [`ErrorCode::Unauthorized`]). Because every control route already lists
-/// `ControlAuth` as its first extractor, that change gates `POST /control` and the
-/// `GET /control` upgrade at once **without editing a single handler body**.
+/// Because every control route lists `ControlAuth` as its first extractor, this gates
+/// `POST /control` and the `GET /control` upgrade at once **without touching a single
+/// handler body** — the seam #45 left. Reads, by contrast, stay open on the LAN (§5; see
+/// [`crate::auth`]).
 #[derive(Debug, Clone, Copy)]
 pub struct ControlAuth {
     // A private field so `ControlAuth` can only be minted by the extractor (the auth
@@ -111,16 +113,17 @@ pub struct ControlAuth {
     _private: (),
 }
 
-impl<S> FromRequestParts<S> for ControlAuth
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<AppState> for ControlAuth {
     type Rejection = ProtocolError;
 
-    async fn from_request_parts(_parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // #44: read the RD credential from `_parts` (Authorization header / session) and
-        // return `Err(ProtocolError::new(ErrorCode::Unauthorized, …))` for an unprivileged
-        // caller. For now control is open, matching the unauthenticated read paths.
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        // Read the bearer token (if any) and require a control-authorized RD session;
+        // every non-RD case maps to `ErrorCode::Unauthorized` inside the store.
+        let token = crate::auth::bearer_token(parts);
+        state.tokens().authenticate_control(token.as_deref())?;
         Ok(ControlAuth { _private: () })
     }
 }

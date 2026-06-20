@@ -21,6 +21,11 @@ ts-rs = "12"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "net"] }
 
+# Auth (#44): opaque bearer + read-only join tokens are random, unguessable strings.
+# `getrandom` draws them straight from the OS CSPRNG — minimal, std-ish, no key
+# management. Real signed/HMAC join tokens are a later concern (see `auth` module docs).
+getrandom = "0.3"
+
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` drives the snapshot router in integration tests with no
 # real network or Docker; `http-body-util` collects the response body to assert on it.

@@ -211,7 +211,8 @@ pub async fn stream_handler(ws: WebSocketUpgrade, State(state): State<AppState>)
 /// Reads the one [`SubscribeRequest`], then runs the replay-then-tail loop until the client
 /// disconnects, the cursor is stale, or a send fails.
 async fn run_stream(mut socket: WebSocket, state: AppState) {
-    // 1. The client's single subscribe frame.
+    // 1. The client's single subscribe frame — it doubles as the connect message (§7),
+    //    carrying the contract version and an optional read token.
     let request = match recv_subscribe(&mut socket).await {
         Ok(req) => req,
         Err(err) => {
@@ -219,6 +220,28 @@ async fn run_stream(mut socket: WebSocket, state: AppState) {
             return;
         }
     };
+
+    // 1a. Contract-version negotiation (#46, protocol.html §7, §9.7). The client states the
+    //     version it was built against; if it falls outside the server's supported band we
+    //     send the "too old / too new, please refresh" signal and close before streaming.
+    //     An absent version means "unspecified" — treated as this build's own version.
+    let client_version = request.contract_version.unwrap_or(crate::CONTRACT_VERSION);
+    if !crate::is_supported_contract_version(client_version) {
+        close_with(
+            &mut socket,
+            crate::ServerHello::refresh_error(client_version),
+        )
+        .await;
+        return;
+    }
+
+    // 1b. Read auth (#44, protocol.html §5). Reads are open on the LAN, so an absent token
+    //     is fine; a *present* token must be valid (a stale join-token is rejected rather
+    //     than silently downgraded to anonymous).
+    if let Err(err) = state.tokens().authenticate_read(request.token.as_deref()) {
+        close_with(&mut socket, err).await;
+        return;
+    }
 
     let projection = ScopeProjection::of(&request.scope);
     // The resume cursor is a log offset (see the module docs); `None` / 0 means "from the
@@ -419,9 +442,19 @@ async fn send_message(socket: &mut WebSocket, message: &StreamMessage) -> Result
         .map_err(|_| ())
 }
 
-/// Close the socket carrying a [`ProtocolError`] in the close frame body (best-effort).
+/// Send a [`ProtocolError`] to the client, then close the socket (best-effort).
+///
+/// The full JSON error rides in a **text frame** (not the close frame): a WebSocket close
+/// reason is a control frame capped at 123 bytes, which a descriptive error — a
+/// version-mismatch naming the served band, a stale-cursor naming the window — readily
+/// exceeds (`ControlFrameTooBig`). So the typed error is sent as data the client parses,
+/// and the close frame carries only the short `POLICY` code and the error's machine code as
+/// a tiny, always-in-bounds reason. The client reads the error frame, then sees the close.
 async fn close_with(socket: &mut WebSocket, err: ProtocolError) {
-    let reason = serde_json::to_string(&err).unwrap_or_else(|_| err.message.clone());
+    let json = serde_json::to_string(&err).unwrap_or_else(|_| err.message.clone());
+    let _ = socket.send(Message::Text(json.into())).await;
+    // A short, fixed reason that can never exceed the 123-byte control-frame limit.
+    let reason = format!("{:?}", err.code);
     let _ = socket
         .send(Message::Close(Some(axum::extract::ws::CloseFrame {
             code: axum::extract::ws::close_code::POLICY,

@@ -93,6 +93,14 @@ pub enum Scope {
 /// cursor, fall back to re-snapshot"). If the gap is too old to replay the server
 /// answers with a [`StaleCursor`](crate::error::ErrorCode::StaleCursor) error and the
 /// client re-snapshots.
+/// The subscribe frame doubles as the **connect message** for the WS read path
+/// (protocol.html §7): it carries the client's [`ContractVersion`](crate::ContractVersion)
+/// (`contract_version`) so the server can negotiate the contract band before streaming,
+/// and an optional read **token** (`token`) — a bearer or read-only join-token — so a
+/// gated deployment can authenticate the read on the same frame. Both are optional and
+/// default-absent so an existing fresh subscribe (just a `scope`) is unchanged on the
+/// wire; a missing `contract_version` is treated as this build's [`CONTRACT_VERSION`]
+/// (the legacy/unspecified client), and a missing `token` is an anonymous LAN read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SubscribeRequest {
@@ -102,6 +110,20 @@ pub struct SubscribeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub from: Option<crate::stream::Cursor>,
+    /// The contract version the client was built against (protocol.html §7). Checked
+    /// against the server's supported band before the stream starts; out of band gets the
+    /// "please refresh" [`VersionMismatch`](crate::error::ErrorCode::VersionMismatch)
+    /// signal. Absent means "unspecified" — treated as the server's own
+    /// [`CONTRACT_VERSION`](crate::CONTRACT_VERSION).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub contract_version: Option<crate::ContractVersion>,
+    /// An optional read credential (protocol.html §5): a bearer or read-only join-token.
+    /// Reads are open on the LAN, so this is omitted by an anonymous viewer; when present
+    /// it must be valid (an unknown/revoked token is rejected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub token: Option<String>,
 }
 
 #[cfg(test)]
@@ -141,12 +163,15 @@ mod tests {
                 heat: HeatId("q-1".into()),
             },
             from: None,
+            contract_version: None,
+            token: None,
         };
         let json = serde_json::to_string(&fresh).unwrap();
-        // A fresh subscribe omits `from` entirely (skip_serializing_if).
+        // A fresh subscribe omits `from`, `contract_version`, and `token` entirely
+        // (skip_serializing_if), so it is byte-identical to the pre-#46 shape.
         assert!(
-            !json.contains("from"),
-            "fresh subscribe omits cursor: {json}"
+            !json.contains("from") && !json.contains("contract_version") && !json.contains("token"),
+            "fresh subscribe omits optional fields: {json}"
         );
         let back: SubscribeRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(fresh, back);
@@ -156,6 +181,8 @@ mod tests {
                 event: EventId("spring-cup".into()),
             },
             from: Some(Cursor::new(42)),
+            contract_version: Some(crate::CONTRACT_VERSION),
+            token: Some("read-token".into()),
         };
         let json = serde_json::to_string(&resume).unwrap();
         let back: SubscribeRequest = serde_json::from_str(&json).unwrap();
