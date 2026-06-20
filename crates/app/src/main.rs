@@ -15,7 +15,9 @@
 #![forbid(unsafe_code)]
 
 use gridfpv_app::director::{AssetStatus, Config, asset_status, build_app};
+use gridfpv_app::source::{SIM_ADAPTER, SourceConfig, spawn_bridge};
 use gridfpv_app::{SyntheticPilot, append_and_project, render_lap_list, synthetic_session};
+use gridfpv_events::AdapterId;
 use gridfpv_server::app::AppState;
 use gridfpv_storage::SqliteLog;
 
@@ -52,11 +54,19 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // *this* run of the process.
     let rd_token = state.tokens().issue_rd_token();
 
+    // Resolve the built-in lap source (default `sim`) and spawn the control→source bridge
+    // alongside the server: it shares this same `AppState`/log, watches for heats driven to
+    // `Running` through the control path, and appends synthetic laps for them in real time
+    // (see [`gridfpv_app::source`]). It runs until the process exits.
+    let source = SourceConfig::from_env();
+    let source_desc = source.describe();
+    let _bridge = spawn_bridge(state.clone(), source, AdapterId(SIM_ADAPTER.to_string()));
+
     let app = build_app(state, &config.assets);
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     let bound = listener.local_addr()?;
-    print_startup(&config, bound, &rd_token);
+    print_startup(&config, bound, &rd_token, &source_desc);
 
     // Serve until Ctrl-C; the protocol API + the RD console SPA are live on `bound`.
     axum::serve(listener, app)
@@ -69,7 +79,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Print the Director's login details on startup: the URL, the RD token (so the RD can
 /// authenticate the control path), the log backing, and the asset-dir status.
-fn print_startup(config: &Config, bound: std::net::SocketAddr, rd_token: &str) {
+fn print_startup(config: &Config, bound: std::net::SocketAddr, rd_token: &str, source_desc: &str) {
     // For the console URL prefer a loopback-friendly host when bound to all interfaces.
     let url_host = if bound.ip().is_unspecified() {
         format!("127.0.0.1:{}", bound.port())
@@ -88,6 +98,11 @@ fn print_startup(config: &Config, bound: std::net::SocketAddr, rd_token: &str) {
             println!("  event log    : in-memory sqlite (non-durable — set GRIDFPV_DB to persist)")
         }
     }
+    println!("  lap source   : {source_desc}");
+    println!(
+        "    (drive a heat to Running via the control path to see synthetic laps; set \
+         GRIDFPV_SOURCE / GRIDFPV_SIM_LAPS / GRIDFPV_SIM_LAP_MS to tune)"
+    );
     let assets = config.assets.display();
     match asset_status(&config.assets) {
         AssetStatus::Built => println!("  RD console   : serving SPA from {assets}"),
