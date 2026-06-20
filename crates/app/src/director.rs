@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use gridfpv_server::app::{AppState, router, smart_fallback};
+use gridfpv_server::app::{router, smart_fallback};
+use gridfpv_server::events::EventRegistry;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
@@ -39,9 +40,11 @@ pub const DEFAULT_ADDR: &str = "0.0.0.0:8080";
 pub struct Config {
     /// The socket address to bind (`GRIDFPV_ADDR`, default [`DEFAULT_ADDR`]).
     pub addr: SocketAddr,
-    /// Where the durable event log lives (`GRIDFPV_DB`): `None` ⇒ an in-memory SQLite log
-    /// (nothing persisted; fresh every start), `Some(path)` ⇒ open/create a file log there.
-    pub db: Option<PathBuf>,
+    /// Where **persistent events' SQLite files** live (`GRIDFPV_DATA_DIR`) — one file per
+    /// created event (issue #72). `None` ⇒ no data dir configured: the built-in Practice
+    /// event is always in-memory, and any *created* event falls back to an in-memory log
+    /// (non-durable, fresh every start). `Some(dir)` ⇒ created events persist there.
+    pub data_dir: Option<PathBuf>,
     /// The directory of the built RD console SPA to serve (`GRIDFPV_ASSETS`); defaults to
     /// the repo's `frontend/apps/rd-console/dist`. May not exist — the server still serves
     /// the API and logs a warning (see [`build_app`]).
@@ -52,7 +55,11 @@ impl Config {
     /// Read the Director config from the environment, applying defaults.
     ///
     /// - `GRIDFPV_ADDR` — listen address (default `0.0.0.0:8080`).
-    /// - `GRIDFPV_DB` — SQLite log path; unset ⇒ in-memory (non-durable).
+    /// - `GRIDFPV_DATA_DIR` — directory for persistent events' SQLite files (one per created
+    ///   event, #72); unset ⇒ created events are in-memory (non-durable). The deprecated
+    ///   `GRIDFPV_DB` (a single flat log path) is read as a *fallback* — its parent directory
+    ///   is used as the data dir — so an old config still persists *somewhere*, though the
+    ///   single-flat-log model it named is gone.
     /// - `GRIDFPV_ASSETS` — RD console `dist/` directory; unset ⇒ the repo's
     ///   `frontend/apps/rd-console/dist`, resolved relative to the workspace root.
     pub fn from_env() -> Result<Self, String> {
@@ -65,9 +72,16 @@ impl Config {
                 .expect("DEFAULT_ADDR is a valid address"),
         };
 
-        let db = match std::env::var("GRIDFPV_DB") {
+        let data_dir = match std::env::var("GRIDFPV_DATA_DIR") {
             Ok(value) if !value.trim().is_empty() => Some(PathBuf::from(value)),
-            _ => None,
+            _ => match std::env::var("GRIDFPV_DB") {
+                // Back-compat: a `GRIDFPV_DB=<file>` resolves its parent dir as the data dir.
+                Ok(value) if !value.trim().is_empty() => PathBuf::from(value)
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .filter(|p| !p.as_os_str().is_empty()),
+                _ => None,
+            },
         };
 
         let assets = match std::env::var("GRIDFPV_ASSETS") {
@@ -75,7 +89,11 @@ impl Config {
             _ => default_assets_dir(),
         };
 
-        Ok(Self { addr, db, assets })
+        Ok(Self {
+            addr,
+            data_dir,
+            assets,
+        })
     }
 }
 
@@ -112,7 +130,7 @@ pub fn default_assets_dir() -> PathBuf {
 /// without a prior `npm run build`); requests for `/` then yield a 404 from `ServeDir`
 /// while the API stays fully functional. Callers should warn when the dir is missing
 /// ([`build_app`] does not log — [`crate::director::asset_status`] reports it for `main`).
-pub fn build_app(state: AppState, assets: &Path) -> Router {
+pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
     // SPA serving: serve files out of `assets`. Any path that does not match a real file
     // (a client-side route like `/heats/q-1/live`) falls back to the SPA shell
     // `index.html` so deep links resolve to the app, not a 404. The fallback is an axum
@@ -122,7 +140,7 @@ pub fn build_app(state: AppState, assets: &Path) -> Router {
     let index_html = assets.join("index.html");
     let serve_dir = ServeDir::new(assets).fallback(spa_fallback(index_html));
 
-    router(state)
+    router(registry)
         // Anything the protocol router does not handle falls through to `smart_fallback`:
         // a mistyped API path → a typed `ProtocolError` 404 (#64), any other path → the SPA.
         .fallback_service(smart_fallback(serve_dir))

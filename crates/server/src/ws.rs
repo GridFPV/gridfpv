@@ -74,16 +74,17 @@
 //! that preference per envelope so #59 can swap the encoding in without reshaping the
 //! stream or its sequencing.
 
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::extract::{Path, State};
+use axum::response::{IntoResponse, Response};
 use gridfpv_events::{CompetitorRef, Event};
 use gridfpv_projection::{LapList, lap_list_marshaled};
 
-use crate::app::{AppState, heat_window};
+use crate::app::{AppState, heat_window, resolve_event};
 use crate::error::{ErrorCode, ProtocolError};
+use crate::events::EventRegistry;
 use crate::live_state::live_state;
-use crate::scope::Scope;
+use crate::scope::{EventId, Scope};
 use crate::snapshot::{ProjectionBody, ProjectionKind};
 use crate::stream::{Change, ChangeEnvelope, Cursor, StreamMessage};
 
@@ -198,11 +199,23 @@ impl ScopeProjection {
     }
 }
 
-/// `GET /stream` — upgrade to the change-stream WebSocket (protocol.html §3, §9.1).
+/// `GET /events/{event_id}/stream` — upgrade to the change-stream WebSocket
+/// (protocol.html §3, §9.1), scoped to one event's log (issue #72).
 ///
-/// The handler upgrades the connection and hands it to [`run_stream`]; auth (#44) and
-/// control command handling (#45) layer on separately — this is the read stream only.
-pub async fn stream_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+/// The handler resolves `event_id` to that event's [`AppState`] through the
+/// [`EventRegistry`] (an unknown id → a typed 404 *before* the upgrade), then upgrades the
+/// connection and hands it to [`run_stream`] against THAT log; auth (#44) and control
+/// command handling (#45) layer on separately — this is the read stream only.
+pub async fn stream_handler(
+    ws: WebSocketUpgrade,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Response {
+    let state = match resolve_event(&registry, &event_id) {
+        Ok(state) => state,
+        // An unknown event id can't open a stream — reject the upgrade with the typed 404.
+        Err(err) => return err.into_response(),
+    };
     ws.on_upgrade(move |socket| run_stream(socket, state))
 }
 
