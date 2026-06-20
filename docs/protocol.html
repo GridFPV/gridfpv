@@ -151,8 +151,15 @@
         <tr><td><code>GET /snapshot/pilot/{event}/{pilot}</code></td><td>pilot snapshot</td></tr>
         <tr><td><code>GET /stream</code></td><td>WS change stream (<code>SubscribeRequest</code> → <code>StreamMessage</code>)</td></tr>
         <tr><td><code>GET /control</code> (WS) and <code>POST /control</code> (one-shot)</td><td>RD-bearer-gated; <code>Command</code> → <code>CommandAck</code></td></tr>
+        <tr><td><code>POST /auth/join-token</code></td><td>RD-gated; mints a read-only <code>JoinTokenResponse { token }</code> — the QR/URL spectator capability (§5)</td></tr>
       </tbody>
     </table>
+    <p>
+      <strong>Unknown API routes</strong> under <code>/snapshot</code>, <code>/stream</code>,
+      <code>/control</code>, <code>/auth</code>, and <code>/health</code> return a typed
+      <code>ProtocolError</code> 404 — not the SPA shell — so a contract miss surfaces as a
+      structured error rather than an HTML page a client can't parse.
+    </p>
 
     <h2>3. The realtime change stream</h2>
     <p>
@@ -211,6 +218,20 @@
       sequence makes that harmless. The protocol does not promise exactly-once delivery, only
       exactly-once <em>effect</em>.</li>
     </ul>
+
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4) the contract is enforced, not just described.</strong> The
+        read / realtime / control contract is covered by a <strong>strict contract suite</strong>
+        — the real protocol client plus raw HTTP/WS, both run against the real Director — asserting
+        the path-scoped snapshot routes (§4), the externally-tagged <code>StreamMessage</code>
+        stream frames (§3), the per-stream <code>sequence</code>-vs-snapshot <code>cursor</code>
+        distinction (§9.5), the control path (headers + auth + acks, §5), and that the wire carries
+        plain <code>number</code>s (§9). It exists because <strong>five integration-seam bugs</strong>
+        — all contract drift that had hidden behind mocks, where each side tested its own assumption
+        of the contract rather than the contract itself — motivated pinning the real wire behaviour.
+      </p>
+    </div>
 
     <pre class="mermaid">
 sequenceDiagram
@@ -370,6 +391,18 @@ sequenceDiagram
       as a build step that emits the TS module the frontend imports; keeping it offline and
       reproducible is part of the build story (deferred to the Roadmap).
     </p>
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4): every transferred integer is a plain <code>number</code>.</strong>
+        Microsecond times / durations (<code>i64</code>) and cursors / sequences / log-offsets
+        (<code>u64</code>) all render to TypeScript as a plain <code>number</code>, not a
+        <code>bigint</code>. These values are bounded far below
+        <code>Number.MAX_SAFE_INTEGER</code> (≈9e15) in our domain, so a JS <code>number</code>
+        round-trips them exactly, and serde already serialises them as JSON numbers — so the type
+        matches the wire. A genuinely full-range <code>u64</code> (e.g. a random id) would instead
+        be carried as a <code>string</code>; we have none today.
+      </p>
+    </div>
 
     <h2>7. Versioning &amp; evolution</h2>
     <p>
