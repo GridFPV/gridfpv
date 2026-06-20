@@ -3,11 +3,14 @@
  * observability harness; entry reshaped for the event-picker landing, #72 Slice 1b).
  *
  * This is the deliverable proof: a person opens the RD console, lands on the **event
- * picker**, enters **Practice**, defines a heat with named pilots, runs it (providing the
- * RD token when the lazy prompt fires on the first control action), **watches the live laps
- * climb in the rendered DOM**, finishes + scores, and reads results with the pilots and
- * their lap counts — every step a real click/input in headless chromium, every command on
- * the real control path, every lap from the real built-in sim source. Nothing is mocked.
+ * picker**, enters **Practice**, defines a heat with named pilots, runs it, **watches the live
+ * laps climb in the rendered DOM**, finishes + scores, and reads results with the pilots and
+ * their lap counts — every step a real click/input in headless chromium, every command on the
+ * real control path, every lap from the real built-in sim source. Nothing is mocked.
+ *
+ * The Director is booted with **no token configured**, so control is **open** (full-trust by
+ * default, #72 Slice 1b): the run goes picker → Practice → build heat → control with **no token
+ * step** — the lazy prompt never fires. (The token-gated path is a separate, optional concern.)
  *
  * The lap-counts-climbing assertion is the load-bearing one: it polls the per-pilot lap
  * numbers rendered in the HeatSheet and asserts they increase over a couple of seconds —
@@ -21,7 +24,6 @@
  * console, page errors, WS frames, and the Director's server log — together.
  */
 import { expect, test } from './observability.js';
-import { RD_TOKEN } from '../playwright.config.js';
 
 const PILOTS = ['Ace', 'Bee', 'Cee'];
 const HEAT_ID = 'q-1';
@@ -56,14 +58,11 @@ test('RD drives a full basic sim race through the console UI', async ({ page }) 
     await newHeat.getByLabel(`Pilot ${i + 1} name`).fill(PILOTS[i]);
   }
 
-  // ── Schedule it: this is the first control action, so the lazy RD-token prompt fires ──
+  // ── Schedule it: the Director is open (no token configured), so this control action goes
+  //    straight through — NO token prompt appears (full-trust by default, #72) ──────────────
   await newHeat.getByRole('button', { name: 'Schedule heat' }).click();
-  // Provide the known RD token in the lazy prompt; once entered, the action proceeds and
-  // the token is reused for every subsequent control action this session.
-  const tokenPrompt = page.getByRole('form', { name: 'Control token' });
-  await expect(tokenPrompt).toBeVisible();
-  await tokenPrompt.getByLabel('Control token').fill(RD_TOKEN);
-  await page.getByRole('button', { name: 'Use token' }).click();
+  // The lazy token prompt must NOT appear against an open Director.
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
 
   // The heat lands on the timer: current heat + the lineup show, phase Scheduled.
   await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID);
