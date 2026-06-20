@@ -182,10 +182,6 @@
     </header>
 
     <h1 class="title">Choose an event</h1>
-    <p class="lede">
-      An event is the container for everything you do. Pick <strong>Practice</strong> to jump straight
-      in, open one you've created, or start a new event.
-    </p>
 
     {#if loadState.kind === 'loading'}
       <div class="state-msg" role="status">
@@ -357,16 +353,6 @@
     margin: var(--gf-space-4) 0 0;
     font-size: var(--gf-font-size-2xl);
     letter-spacing: var(--gf-tracking-tight);
-  }
-  .lede {
-    margin: 0;
-    color: var(--gf-text-muted);
-    font-size: var(--gf-font-size-sm);
-    max-width: 40ch;
-  }
-  .lede strong {
-    color: var(--gf-text);
-    font-weight: var(--gf-font-weight-semibold);
   }
 
   .state-msg {
