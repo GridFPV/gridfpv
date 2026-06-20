@@ -19,7 +19,8 @@
     "format": "prettier --write .",
     "dev:rd-console": "npm run dev --workspace @gridfpv/rd-console",
     "e2e": "playwright test",
-    "e2e:install": "playwright install chromium"
+    "e2e:install": "playwright install chromium",
+    "observe": "tsx test-harness/observe.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
@@ -33,6 +34,7 @@
     "svelte": "^5.16.0",
     "svelte-check": "^4.1.1",
     "svelte-eslint-parser": "^0.43.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.1"
   }
