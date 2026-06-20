@@ -35,15 +35,14 @@
 //! A heat's log may carry marshaling adjudications ([`gridfpv_events::Event::DetectionVoided`],
 //! [`gridfpv_events::Event::LapInserted`], [`gridfpv_events::Event::LapAdjusted`]). The
 //! raw passes are never mutated (architecture.html §3); instead [`score_marshaled`]
-//! builds the **corrected view** of the lap-gate passes — exactly as
-//! [`gridfpv_projection::lap_list_marshaled`] does — and scores *that*, so an
+//! scores the **corrected view** of the lap-gate passes built by
+//! [`gridfpv_projection::corrected_passes`] — the single home of the void/insert/adjust
+//! fold that [`gridfpv_projection::lap_list_marshaled`] also folds through (#39) — so an
 //! adjudication in any heat flows straight through into the qualifying ranking and the
 //! bracket via the same scorer the un-marshaled path uses.
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
-
-use gridfpv_events::{Event, Pass, SourceTime};
+use gridfpv_events::{Event, SourceTime};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -157,12 +156,17 @@ pub fn run_event(
 ///
 /// Scoring proper ([`score`]) consumes raw lap-gate [`Pass`]es; marshaling corrections
 /// are appended events that must be folded into a *corrected view* of those passes
-/// before scoring — never by mutating the raw passes (architecture.html §3). This builds
-/// that corrected pass stream exactly as [`gridfpv_projection::lap_list_marshaled`] does
-/// — voiding voided detections, inserting recovered laps, re-timing adjusted ones, with
-/// the same last-writer-wins-by-offset and "void the void" resolution — and then scores
-/// it. A log with no adjudications produces the raw pass stream unchanged, so this agrees
-/// with [`crate::scoring::score_events`] byte-for-byte on a clean log.
+/// before scoring — never by mutating the raw passes (architecture.html §3).
+///
+/// The void/insert/adjust fold lives in **one** place — [`gridfpv_projection::corrected_passes`]
+/// — and this scorer simply consumes its output (#39): rather than re-implement the same
+/// last-writer-wins-by-offset / "void the void" resolution here, we hand the log's
+/// positional `(offset, event)` pairs to the projection's fold (the storage layer assigns
+/// these same dense append offsets) and score the corrected pass stream it returns. A log
+/// with no adjudications yields the raw pass stream unchanged, so this agrees with
+/// [`crate::scoring::score_events`] byte-for-byte on a clean log, and stays in lock-step
+/// with [`gridfpv_projection::lap_list_marshaled`] by construction (both fold via the
+/// single source of truth).
 ///
 /// `race_start` is the shared race clock for [`WinCondition::Timed`] (ignored by the
 /// qualifying / first-to-N conditions), matching [`score`].
@@ -171,149 +175,23 @@ pub fn score_marshaled(
     condition: WinCondition,
     race_start: SourceTime,
 ) -> HeatResult {
-    score(&corrected_passes(events), condition, race_start)
-}
-
-/// Build the **corrected** lap-gate pass stream from a heat log: apply every marshaling
-/// adjudication by the offset it targets, leaving raw passes untouched, and return the
-/// surviving passes (synthetic inserts included) as a fresh `Vec<Pass>`.
-///
-/// This mirrors [`gridfpv_projection::lap_list_marshaled`]'s fold so the scorer and the
-/// lap projection agree on the corrected view; rather than duplicate every rule here it
-/// resolves the same three adjudications keyed on the target's positional offset:
-///
-/// - [`Event::DetectionVoided`] drops the target pass / ruling from the view,
-/// - [`Event::LapInserted`] adds a synthetic lap-gate pass,
-/// - [`Event::LapAdjusted`] re-times the target pass,
-///
-/// with last-writer-wins by offset and the "void the void" / "void the adjust" cases
-/// resolved exactly as the projection does. The returned passes carry absolute
-/// [`SourceTime`]s (a re-time moves a pass; an insert slots in at its `at`) so the
-/// timed/first-to-N conditions still see real completion times.
-fn corrected_passes(events: &[Event]) -> Vec<Pass> {
-    // An entry the fold can target by its append offset: a raw pass, a synthetic insert,
-    // or a ruling against another offset.
-    enum Entry<'a> {
-        RawPass(&'a Pass),
-        Inserted(Pass),
-        Adjusted { target: u64, at: SourceTime },
-        Voided { target: u64 },
-    }
-
-    // First pass: index every fold-relevant event by its positional offset (the storage
-    // layer assigns these same dense offsets, so positional indexing mirrors the log).
-    let mut entries: BTreeMap<u64, Entry<'_>> = BTreeMap::new();
-    for (offset, event) in events.iter().enumerate() {
-        let offset = offset as u64;
-        match event {
-            Event::Pass(pass) if pass.gate.is_lap_gate() => {
-                entries.insert(offset, Entry::RawPass(pass));
-            }
-            Event::LapInserted {
-                adapter,
-                competitor,
-                at,
-            } => {
-                entries.insert(
-                    offset,
-                    Entry::Inserted(Pass {
-                        adapter: adapter.clone(),
-                        competitor: competitor.clone(),
-                        at: *at,
-                        // A synthetic pass carries no source sequence; ordered by `at`.
-                        sequence: None,
-                        gate: gridfpv_events::GateIndex::LAP,
-                        signal: None,
-                    }),
-                );
-            }
-            Event::LapAdjusted { target, at } => {
-                entries.insert(
-                    offset,
-                    Entry::Adjusted {
-                        target: target.0,
-                        at: *at,
-                    },
-                );
-            }
-            Event::DetectionVoided { target } => {
-                entries.insert(offset, Entry::Voided { target: target.0 });
-            }
-            // Splits, lifecycle, heat transitions, and heat/result-level rulings never
-            // touch the lap-gate pass view.
-            _ => {}
-        }
-    }
-
-    // Resolve rulings in offset order (BTreeMap iterates ascending), last writer winning.
-    // `voided[off]` drops an offset from the view; `retime[off]` overrides a pass's `at`.
-    let mut voided: BTreeMap<u64, bool> = BTreeMap::new();
-    let mut retime: BTreeMap<u64, SourceTime> = BTreeMap::new();
-    for entry in entries.values() {
-        match entry {
-            Entry::RawPass(_) | Entry::Inserted(_) => {}
-            Entry::Adjusted { target, at } => {
-                // An adjust is the newest ruling on its target: un-void and re-time it.
-                voided.insert(*target, false);
-                retime.insert(*target, *at);
-            }
-            Entry::Voided { target } => match entries.get(target) {
-                // Voiding an adjust cancels its re-time (target reverts to its raw `at`).
-                Some(Entry::Adjusted {
-                    target: inner_target,
-                    ..
-                }) => {
-                    retime.remove(inner_target);
-                }
-                // Voiding a void resurrects the originally-voided target.
-                Some(Entry::Voided {
-                    target: inner_target,
-                }) => {
-                    voided.insert(*inner_target, false);
-                }
-                // Voiding a raw or inserted pass simply drops it.
-                _ => {
-                    voided.insert(*target, true);
-                }
-            },
-        }
-    }
-
-    // Emit the surviving passes (raw + inserted) with any re-time applied, in offset
-    // order; the scorer re-groups and re-orders them by competitor itself.
-    let mut out: Vec<Pass> = Vec::new();
-    for (offset, entry) in entries.iter() {
-        if voided.get(offset).copied().unwrap_or(false) {
-            continue;
-        }
-        match entry {
-            Entry::RawPass(pass) => {
-                let mut p = (*pass).clone();
-                if let Some(at) = retime.get(offset) {
-                    p.at = *at;
-                }
-                out.push(p);
-            }
-            Entry::Inserted(pass) => {
-                let mut p = pass.clone();
-                if let Some(at) = retime.get(offset) {
-                    p.at = *at;
-                }
-                out.push(p);
-            }
-            Entry::Adjusted { .. } | Entry::Voided { .. } => {}
-        }
-    }
-    out
+    // The single home of the marshaling fold is `gridfpv_projection::corrected_passes`;
+    // tag each event with its positional append offset and fold there, then score the
+    // corrected lap-gate passes it returns. The scorer re-groups/re-orders by competitor.
+    let corrected =
+        gridfpv_projection::corrected_passes(events.iter().enumerate().map(|(i, e)| (i as u64, e)));
+    score(&corrected, condition, race_start)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::scoring::{Metric, score_events};
     use crate::single_elim::SingleElim;
     use crate::timed_qual::{QualMetric, TimedQualifying};
-    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex, LogRef};
+    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex, LogRef, Pass};
 
     const ADAPTER: &str = "vd";
 
