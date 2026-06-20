@@ -10,8 +10,19 @@ rust-version.workspace = true
 gridfpv-events.workspace = true
 gridfpv-projection.workspace = true
 gridfpv-engine.workspace = true
+gridfpv-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ts-rs = "12"
 
+# The snapshot HTTP transport (#42). The WS change stream (#43) and the control path
+# (#45) build on the same axum `Router` and `AppState` defined in `app.rs`.
+axum = "0.8"
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "net"] }
+
 [dev-dependencies]
+# `tower::ServiceExt::oneshot` drives the router in integration tests with no real
+# network or Docker; `http-body-util` collects the response body to assert on it.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

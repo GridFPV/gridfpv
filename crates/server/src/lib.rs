@@ -3,14 +3,15 @@
 //! by the Cloud). The wire types are defined here once and generated to TypeScript
 //! (ts-rs), so clients never hand-write a wire type. See docs/protocol.html.
 //!
-//! # What this crate is (and is not), as of #40
+//! # What this crate is, as of #41 / #42
 //!
-//! This is the **wire-type surface only** — the Rust types that *are* the protocol
-//! (protocol.html §6: "the contract defined once, in Rust"). There is **no transport
-//! here yet**: the axum HTTP/WS server (snapshot endpoint #42, change stream #43,
-//! auth #44, control #45) is built on top of these types in later issues. Defining
-//! the types first means every one of those issues — and the frontend protocol
-//! client (#49) — builds against a single generated contract that already exists.
+//! The wire-type surface — the Rust types that *are* the protocol (protocol.html §6:
+//! "the contract defined once, in Rust") — plus the **read transport** over them: the
+//! live race-state projection ([`live_state`], #41) and the axum snapshot endpoints
+//! ([`app`], #42). The change stream (#43), auth (#44), and control endpoints (#45)
+//! build on the same [`app::AppState`] and [`app::router`]. Defining the types first
+//! means every one of those issues — and the frontend protocol client (#49) — builds
+//! against a single generated contract that already exists.
 //!
 //! Every public wire type derives [`serde`] (its JSON encoding *is* the wire format)
 //! and [`ts_rs::TS`] with `#[ts(export, export_to = "bindings/")]`, exactly mirroring
@@ -42,17 +43,20 @@
 //!   (a single appended lap, a heat-state transition, …) are pinned when the change
 //!   stream lands (#43). The *structure* — per-projection, delta-vs-fresh — is fixed
 //!   here, which is what later issues need.
-//! - **Scope addressing grammar.** [`Scope`](scope::Scope) enumerates the four
-//!   addressable resources (event/class/heat/pilot, §4); the full filter/grammar and
-//!   URL shapes (§9.6) are refined when the snapshot endpoint lands (#42).
-//! - **`LiveRaceState`** ([`snapshot::LiveRaceState`]) is a real-but-minimal
-//!   placeholder; #41 fills in live lap/split progress, running order, and on-deck.
+//! - **Scope addressing grammar.** [`app::router`] pins a concrete REST addressing over
+//!   the four resources (event/class/heat/pilot, §4); the richer filter grammar (§9.6),
+//!   and the log-level *class* filter (the log carries no class tag yet), are refined in
+//!   the doc-reconciliation pass and when the schedule model grows class tags.
+//! - **Split-level live progress.** [`live_state::LiveRaceState`] carries lap-count and
+//!   last-lap progress; per-gate split progress is a later refinement.
 //! - **Auth tokens / sessions.** The credential format (§9.4) is a #44 concern; no
 //!   token types live here yet.
 #![forbid(unsafe_code)]
 
+pub mod app;
 pub mod control;
 pub mod error;
+pub mod live_state;
 pub mod scope;
 pub mod snapshot;
 pub mod stream;

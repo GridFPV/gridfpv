@@ -120,6 +120,7 @@ mod tests {
             change: Change::FreshValue(ProjectionBody::LiveRaceState(LiveRaceState {
                 current_heat: Some(HeatId("q-1".into())),
                 phase: HeatPhase::Running,
+                ..Default::default()
             })),
         };
         let json = serde_json::to_string(&env).unwrap();

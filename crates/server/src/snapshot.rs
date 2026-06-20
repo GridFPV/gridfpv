@@ -29,32 +29,15 @@
 use gridfpv_engine::event::EventOutcome;
 use gridfpv_engine::format::RankEntry;
 use gridfpv_engine::scoring::HeatResult;
-use gridfpv_events::HeatId;
 use gridfpv_projection::LapList;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::stream::Cursor;
 
-/// The current **live race-state** projection (protocol.html §1) — the latency-sensitive
-/// core every overlay and spectator watches: the current heat and its loop state, the
-/// active pilots' live lap/split progress, the running order, and the on-deck heat.
-///
-/// **#41 placeholder.** This is intentionally minimal-but-real: it carries the current
-/// heat id and a coarse [`HeatPhase`] so the contract, the snapshot body, and the
-/// change envelope are all wired end to end *now*. #41 fleshes it out with per-pilot
-/// live progress, the running order, and the on-deck heat. Keeping the type real (not a
-/// unit stub) means #41 extends fields additively (§7) without reshaping the envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub struct LiveRaceState {
-    /// The heat currently on the timer, if any (`None` between heats).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub current_heat: Option<HeatId>,
-    /// The current heat's loop phase (protocol.html §1, race-engine.html §2).
-    pub phase: HeatPhase,
-}
+// The live race-state projection (#41) lives in [`crate::live_state`]; it is re-exported
+// here so `ProjectionBody::LiveRaceState` keeps naming a snapshot-module type.
+pub use crate::live_state::{LiveRaceState, PilotProgress};
 
 /// The heat-loop phase the live state reports (protocol.html §1: `Scheduled → Staged →
 /// Armed → Running → Landed → Scored`).
@@ -163,8 +146,9 @@ mod tests {
 
     fn sample_live() -> ProjectionBody {
         ProjectionBody::LiveRaceState(LiveRaceState {
-            current_heat: Some(HeatId("q-1".into())),
+            current_heat: Some(gridfpv_events::HeatId("q-1".into())),
             phase: HeatPhase::Running,
+            ..Default::default()
         })
     }
 
