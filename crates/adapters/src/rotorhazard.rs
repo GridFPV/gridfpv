@@ -87,6 +87,12 @@ use serde::{Deserialize, Serialize};
 use crate::dedup::Deduplicator;
 use crate::{Adapter, Capabilities};
 
+/// Live Socket.IO transport (feature `live`): connects to a running RotorHazard,
+/// decodes its socket events into [`Raw`], and feeds this adapter. See
+/// `tests/rh_live.rs` and `docker/rotorhazard/`.
+#[cfg(feature = "live")]
+pub mod transport;
+
 /// The integer `race_status` values RotorHazard reports on its `race_status` socket
 /// message — mirrors `RaceStatus` in upstream `RHRace.py`.
 mod race_status {

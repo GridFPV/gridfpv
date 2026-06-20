@@ -45,16 +45,12 @@ fn fmt() -> bool {
 }
 
 fn lint() -> bool {
+    // Default features only: the optional `live` feature pulls a network stack
+    // (rust_socketio -> openssl) and needs a running RotorHazard, so it is linted
+    // + tested in the dedicated `rh-live` CI job, not the core check suite.
     run(
         "cargo",
-        &[
-            "clippy",
-            "--all-targets",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ],
+        &["clippy", "--all-targets", "--", "-D", "warnings"],
     )
 }
 

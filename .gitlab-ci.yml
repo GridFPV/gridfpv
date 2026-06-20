@@ -3,6 +3,7 @@
 # pipeline and a developer's machine can never run different checks.
 stages:
   - check
+  - live
 
 ci:
   stage: check
@@ -13,6 +14,35 @@ ci:
     - cargo xtask ci
   cache:
     key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - target/
+
+# Live integration test against dockerized RotorHazard (#25). Separate from the
+# core suite: it needs the RH service + a network stack (rust_socketio -> openssl)
+# and only runs the `live`-gated, #[ignore]'d test.
+rh-live:
+  stage: live
+  image: rust:latest
+  services:
+    - name: cruwaller/rotorhazard:latest
+      alias: rotorhazard
+  variables:
+    RH_URL: "http://rotorhazard:5000"
+  before_script:
+    - apt-get update && apt-get install -y pkg-config libssl-dev
+    - rustup component add clippy
+    # Wait for the RotorHazard service to accept connections.
+    - |
+      for i in $(seq 1 30); do
+        if curl -sf -o /dev/null --max-time 3 "$RH_URL/"; then echo "RH up"; break; fi
+        echo "waiting for RotorHazard ($i)"; sleep 3
+      done
+  script:
+    - cargo clippy --features live --all-targets -- -D warnings
+    - cargo test -p gridfpv-adapters --features live --test rh_live -- --ignored --nocapture
+  cache:
+    key: "$CI_COMMIT_REF_SLUG-live"
     paths:
       - .cargo/registry/
       - target/
