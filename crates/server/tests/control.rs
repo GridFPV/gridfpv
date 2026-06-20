@@ -235,8 +235,8 @@ async fn control_ws_acks_each_command_and_rejects_illegal() {
     // rejected command): the next legal command (Finish) acks ok.
     let ack = send_command(&mut control, &Command::Finish { heat: heat() }).await;
     assert!(ack.ok, "finish after running should ack ok: {ack:?}");
-    // The `Finished` transition lands in the `Landed` live-state phase.
-    assert_eq!(next_phase(&mut stream).await, HeatPhase::Landed);
+    // The `Finished` transition enters the `Finished` live-state phase.
+    assert_eq!(next_phase(&mut stream).await, HeatPhase::Finished);
 }
 
 /// A malformed control frame is answered with a failed ack, not a dropped socket: the next

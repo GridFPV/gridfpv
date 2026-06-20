@@ -179,7 +179,7 @@ fn phase_of(state: HeatState) -> HeatPhase {
         HeatState::Staged => HeatPhase::Staged,
         HeatState::Armed => HeatPhase::Armed,
         HeatState::Running => HeatPhase::Running,
-        HeatState::Finished => HeatPhase::Landed,
+        HeatState::Finished => HeatPhase::Finished,
         HeatState::Scored => HeatPhase::Scored,
     }
 }
@@ -313,12 +313,12 @@ mod tests {
 
     #[test]
     fn phase_tracks_the_heat_loop_through_scored() {
-        // Scheduled → Staged → Armed → Running → Finished(Landed) → Scored.
+        // Scheduled → Staged → Armed → Running → Finished → Scored.
         let steps = [
             (HeatTransition::Staged, HeatPhase::Staged),
             (HeatTransition::Armed, HeatPhase::Armed),
             (HeatTransition::Running, HeatPhase::Running),
-            (HeatTransition::Finished, HeatPhase::Landed),
+            (HeatTransition::Finished, HeatPhase::Finished),
             (HeatTransition::Scored, HeatPhase::Scored),
         ];
         let mut events = vec![scheduled("q-1", &["A", "B"])];

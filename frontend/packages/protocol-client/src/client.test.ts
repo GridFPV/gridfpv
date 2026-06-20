@@ -228,9 +228,9 @@ describe('ProtocolClient', () => {
     expect(req.from).toBe(5);
 
     // The stream continues converged from 6.
-    sockets[1].emit(envelope(6n, 'Landed'));
+    sockets[1].emit(envelope(6n, 'Finished'));
     expect(client.getState().cursor).toBe(6n);
-    expect(phaseOf(client.getState().body)).toBe('Landed');
+    expect(phaseOf(client.getState().body)).toBe('Finished');
 
     client.close();
   });

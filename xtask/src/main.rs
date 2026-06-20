@@ -171,6 +171,8 @@ fn live() -> bool {
     let zippyq_live = target("gridfpv-engine", "zippyq_live", true);
     let multiclass_live = target("gridfpv-engine", "multiclass_live", true);
     let full_event_live = target("gridfpv-engine", "full_event_live", true);
+    // The protocol server's mock-RH e2e: full event → server log → protocol client (#47).
+    let server_e2e = target("gridfpv-server", "full_event_live", true);
     ws && live_rh
         && signal
         && heat_live
@@ -182,6 +184,7 @@ fn live() -> bool {
         && zippyq_live
         && multiclass_live
         && full_event_live
+        && server_e2e
 }
 
 fn main() {
