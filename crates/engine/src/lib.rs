@@ -9,6 +9,7 @@
 
 pub mod format;
 pub mod heat;
+pub mod schedule;
 pub mod scoring;
 
 // Concrete formats on the `format::Generator` interface (#33/#34/#35).
