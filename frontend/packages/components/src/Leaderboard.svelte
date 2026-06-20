@@ -1,16 +1,19 @@
 <script lang="ts">
-  import type { RaceSnapshot } from '@gridfpv/types';
+  import type { HeatResult } from '@gridfpv/types';
 
   // Placeholder leaderboard. The real widget (positions, splits, deltas) is
   // built out in later issues; this exists so the library builds and to show the
   // shape: one component consuming the generated protocol types, themed per
   // surface (console dense, PWA mobile, overlay transparent).
-  let { snapshot }: { snapshot: RaceSnapshot } = $props();
+  let { result }: { result: HeatResult } = $props();
 </script>
 
 <ol class="gridfpv-leaderboard">
-  {#each snapshot.pilots as pilotId, i (pilotId)}
-    <li><span class="pos">{i + 1}</span><span class="pilot">{pilotId}</span></li>
+  {#each result.places as place (place.competitor.competitor)}
+    <li>
+      <span class="pos">{place.position}</span>
+      <span class="pilot">{place.competitor.competitor}</span>
+    </li>
   {/each}
 </ol>
 
