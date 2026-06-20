@@ -19,7 +19,10 @@
 
 import type {
   ChangeEnvelope,
+  CreateEventRequest,
   Cursor,
+  EventId,
+  EventMeta,
   ProjectionBody,
   ProtocolError,
   Scope,
@@ -78,6 +81,13 @@ export interface ConnectOptions {
    * is configured with the base URL *only*, so it cannot tell LAN from Cloud.
    */
   baseUrl: string;
+  /**
+   * The **event** this connection's scope lives in (issue #72). Every read/realtime surface
+   * is rooted under `/events/{eventId}/…`, so the client targets one event's own log. Defaults
+   * to the built-in `practice` event when omitted, so an un-migrated caller still connects to
+   * a working event.
+   */
+  eventId?: EventId;
   /** The resource this connection is scoped to (protocol.html §4). */
   scope: Scope;
   /** Optional bearer token (sent as `Authorization: Bearer …` and on the WS URL). */
@@ -154,23 +164,76 @@ function toWebSocketBase(baseUrl: string): string {
 
 const trimSlash = (s: string): string => (s.endsWith('/') ? s.slice(0, -1) : s);
 
+/** The event-root prefix every per-event surface lives under (issue #72): `/events/{id}`. */
+function eventRoot(eventId: string): string {
+  return `/events/${encodeURIComponent(eventId)}`;
+}
+
 /**
- * Build the snapshot path for a scope. The server addresses snapshots by PATH
- * (`/snapshot/event/{id}`, `/snapshot/heat/{id}`, `/snapshot/class/{event}/{class}`,
- * `/snapshot/pilot/{event}/{pilot}` — protocol.html §4 endpoint surface), NOT a
- * `?scope=` query, so the client maps the scope to that path.
+ * Build the snapshot path for a scope **within an event** (issue #72). The server addresses
+ * snapshots by PATH, now rooted under the event: `/events/{eventId}/snapshot/event/{id}`,
+ * `…/snapshot/heat/{id}`, `…/snapshot/class/{event}/{class}`, `…/snapshot/pilot/{event}/{pilot}`
+ * (protocol.html §4 endpoint surface), NOT a `?scope=` query — so the client maps the scope to
+ * that path under the resolved event.
  */
-function snapshotPath(scope: Scope): string {
-  if ('Event' in scope) return `/snapshot/event/${encodeURIComponent(scope.Event.event)}`;
-  if ('Heat' in scope) return `/snapshot/heat/${encodeURIComponent(scope.Heat.heat)}`;
+function snapshotPath(eventId: string, scope: Scope): string {
+  const root = `${eventRoot(eventId)}/snapshot`;
+  if ('Event' in scope) return `${root}/event/${encodeURIComponent(scope.Event.event)}`;
+  if ('Heat' in scope) return `${root}/heat/${encodeURIComponent(scope.Heat.heat)}`;
   if ('Class' in scope) {
-    return `/snapshot/class/${encodeURIComponent(scope.Class.event)}/${encodeURIComponent(
+    return `${root}/class/${encodeURIComponent(scope.Class.event)}/${encodeURIComponent(
       scope.Class.class
     )}`;
   }
-  return `/snapshot/pilot/${encodeURIComponent(scope.Pilot.event)}/${encodeURIComponent(
+  return `${root}/pilot/${encodeURIComponent(scope.Pilot.event)}/${encodeURIComponent(
     scope.Pilot.pilot
   )}`;
+}
+
+/** The built-in Practice event id — the default the client connects to when none is given. */
+export const PRACTICE_EVENT_ID = 'practice';
+
+/**
+ * List every event the server knows (`GET /events`) — issue #72. Reads are open on the LAN,
+ * so no token is needed; an optional token is sent when present. Resolves to the events'
+ * {@link EventMeta} (Practice first), or rejects on a transport/HTTP failure.
+ */
+export async function listEvents(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<EventMeta[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events`, { headers });
+  if (!resp.ok) throw new Error(`GET /events failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta[];
+}
+
+/**
+ * Create a new event (`POST /events`) — issue #72. RD-gated: a valid RD `token` is required
+ * (the id is auto-generated server-side; the body carries only the display `name`). Resolves
+ * to the new event's {@link EventMeta}, or rejects on a non-2xx / transport failure.
+ */
+export async function createEvent(
+  baseUrl: string,
+  name: string,
+  token: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const body: CreateEventRequest = { name };
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) throw new Error(`POST /events failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta;
 }
 
 /**
@@ -193,6 +256,8 @@ export function connect(options: ConnectOptions): ProtocolClient {
   const wsBase = trimSlash(toWebSocketBase(options.baseUrl));
   const scope = options.scope;
   const token = options.token;
+  // The event this connection is rooted under (issue #72); defaults to Practice.
+  const eventId = options.eventId ?? PRACTICE_EVENT_ID;
 
   // ── Mutable connection state ───────────────────────────────────────────────
   let body: ProjectionBody | undefined;
@@ -240,7 +305,7 @@ export function connect(options: ConnectOptions): ProtocolClient {
     if (token) headers.Authorization = `Bearer ${token}`;
     let resp: Response;
     try {
-      resp = await fetchImpl(`${baseUrl}${snapshotPath(scope)}`, { headers });
+      resp = await fetchImpl(`${baseUrl}${snapshotPath(eventId, scope)}`, { headers });
     } catch (e) {
       if (gen !== generation || closed) return false;
       fail({ code: 'Internal', message: `snapshot fetch failed: ${String(e)}` });
@@ -306,7 +371,10 @@ export function connect(options: ConnectOptions): ProtocolClient {
     // reset our tracker to accept it from the top.
     streamSeq = 0;
     setStatus('subscribing');
-    const url = token ? `${wsBase}/stream?token=${encodeURIComponent(token)}` : `${wsBase}/stream`;
+    const streamPath = `${eventRoot(eventId)}/stream`;
+    const url = token
+      ? `${wsBase}${streamPath}?token=${encodeURIComponent(token)}`
+      : `${wsBase}${streamPath}`;
     let socket: WebSocketLike;
     try {
       socket = wsFactory(url);

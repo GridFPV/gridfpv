@@ -20,6 +20,18 @@ import {
 
 import type { Command } from '@gridfpv/types';
 
+/**
+ * The built-in **Practice** event id every per-event contract route is rooted under (issue
+ * #72). Events are first-class containers now — `/events/{eventId}/snapshot|stream|control|…`
+ * — and Practice is the always-present in-memory event the contract suite drives against.
+ */
+export const PRACTICE_EVENT_ID = 'practice';
+
+/** The `/events/practice` route root the per-event contract paths hang off. */
+export function eventRoot(baseUrl: string, eventId: string = PRACTICE_EVENT_ID): string {
+  return `${baseUrl}/events/${encodeURIComponent(eventId)}`;
+}
+
 /** A fresh empty dir to point `GRIDFPV_ASSETS` at, so the SPA fallback is a deterministic 404. */
 export function emptyAssetsDir(): string {
   return mkdtempSync(join(tmpdir(), 'gridfpv-no-assets-'));
@@ -58,7 +70,8 @@ export async function postControl(
   const headers: Record<string, string> = {};
   if (contentType) headers['Content-Type'] = 'application/json';
   if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${baseUrl}/control`, {
+  // Control is rooted under the Practice event (#72): `/events/practice/control`.
+  const res = await fetch(`${eventRoot(baseUrl)}/control`, {
     method: 'POST',
     headers,
     body: JSON.stringify(command)

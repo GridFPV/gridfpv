@@ -12,8 +12,7 @@ use std::path::{Path, PathBuf};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use gridfpv_app::director::{AssetStatus, asset_status, build_app, default_assets_dir};
-use gridfpv_server::app::AppState;
-use gridfpv_storage::InMemoryLog;
+use gridfpv_server::events::EventRegistry;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -30,8 +29,8 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 /// `GET <uri>` against the Director router over an empty in-memory log.
 async fn get(assets: &Path, uri: &str) -> (StatusCode, String) {
-    let state = AppState::new(InMemoryLog::new());
-    let app = build_app(state, assets);
+    let registry = EventRegistry::new(None).unwrap();
+    let app = build_app(registry, assets);
     let response = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
@@ -54,7 +53,7 @@ async fn health_endpoint_is_served() {
 async fn snapshot_endpoint_returns_ok() {
     let assets = std::env::temp_dir().join("gridfpv-director-no-assets");
     // The event scope folds the whole (empty) log into idle live state — a 200 either way.
-    let (status, _body) = get(&assets, "/snapshot/event/spring-cup").await;
+    let (status, _body) = get(&assets, "/events/practice/snapshot/event/spring-cup").await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -106,13 +105,13 @@ async fn cors_preflight_is_permissive() {
     let dir = temp_dir("cors");
     std::fs::write(dir.join("index.html"), "<title>shell</title>").unwrap();
 
-    let state = AppState::new(InMemoryLog::new());
-    let app = build_app(state, &dir);
+    let registry = EventRegistry::new(None).unwrap();
+    let app = build_app(registry, &dir);
     let response = app
         .oneshot(
             Request::builder()
                 .method("OPTIONS")
-                .uri("/snapshot/event/spring-cup")
+                .uri("/events/practice/snapshot/event/spring-cup")
                 .header("Origin", "http://tauri.localhost")
                 .header("Access-Control-Request-Method", "GET")
                 .body(Body::empty())

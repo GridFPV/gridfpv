@@ -17,8 +17,9 @@ function mockFetch(impl: FetchLike) {
 }
 
 describe('createControlClient', () => {
-  it('POSTs the JSON-serialized Command to {baseUrl}/control with the bearer token', async () => {
+  it('POSTs the JSON-serialized Command to {baseUrl}/events/{eventId}/control with the bearer token', async () => {
     const fetch = mockFetch(async () => jsonResponse(okAck));
+    // No explicit eventId → the control path is rooted under the default Practice event (#72).
     const client = createControlClient('http://d.local:8080/', 'tok-123', { fetch });
     const cmd: Command = { Stage: { heat: 'heat-1' } };
 
@@ -27,7 +28,7 @@ describe('createControlClient', () => {
     expect(ack).toEqual(okAck);
     expect(fetch).toHaveBeenCalledOnce();
     const [url, init] = fetch.mock.calls[0];
-    expect(url).toBe('http://d.local:8080/control');
+    expect(url).toBe('http://d.local:8080/events/practice/control');
     expect(init?.method).toBe('POST');
     const headers = init?.headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer tok-123');

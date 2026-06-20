@@ -15,10 +15,10 @@
 #![forbid(unsafe_code)]
 
 use gridfpv_app::director::{AssetStatus, Config, asset_status, build_app};
-use gridfpv_app::source::{SIM_ADAPTER, SourceConfig, spawn_bridge};
+use gridfpv_app::source::{SIM_ADAPTER, SourceConfig, spawn_registry_bridge};
 use gridfpv_app::{SyntheticPilot, append_and_project, render_lap_list, synthetic_session};
 use gridfpv_events::AdapterId;
-use gridfpv_server::app::AppState;
+use gridfpv_server::events::EventRegistry;
 use gridfpv_storage::SqliteLog;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,37 +38,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
 
-    // Open the event log: a file-backed SQLite log when `GRIDFPV_DB` is a path, else an
-    // in-memory one (non-durable, fresh each start). Either way it is the one append-only
-    // log every protocol path shares.
-    let state = match &config.db {
-        Some(path) => {
-            let log = SqliteLog::open(path)?;
-            AppState::new(log)
-        }
-        None => AppState::new(SqliteLog::open_in_memory()?),
-    };
+    // Build the event registry — events are first-class containers (#72), each with its own
+    // log. The built-in **Practice** event (in-memory, non-persistent) is always present;
+    // events created via `POST /events` get a SQLite file under the configured data dir.
+    let registry = EventRegistry::new(config.data_dir.clone())?;
 
     // Mint (or pin) the RD's control token up front and print it with the URL so the RD
-    // console (or the Tauri app) can log straight in. The store is in-memory, so this is the
-    // token for *this* run of the process. If `GRIDFPV_RD_TOKEN` is set to a non-blank value
-    // it is registered as the RD token verbatim — a *known* credential so an automated client
-    // (the Playwright e2e, the Tauri app under test) can log in deterministically; otherwise a
-    // fresh random token is minted.
+    // console (or the Tauri app) can log straight in. The store is Director-wide (shared
+    // across every event), so one token controls all events. If `GRIDFPV_RD_TOKEN` is set to
+    // a non-blank value it is registered verbatim — a *known* credential so an automated
+    // client (the Playwright e2e, the Tauri app under test) can log in deterministically;
+    // otherwise a fresh random token is minted.
+    let tokens = registry.tokens();
     let rd_token = match std::env::var("GRIDFPV_RD_TOKEN") {
-        Ok(value) if state.tokens().register_rd_token(&value) => value,
-        _ => state.tokens().issue_rd_token(),
+        Ok(value) if tokens.register_rd_token(&value) => value,
+        _ => tokens.issue_rd_token(),
     };
 
-    // Resolve the built-in lap source (default `sim`) and spawn the control→source bridge
-    // alongside the server: it shares this same `AppState`/log, watches for heats driven to
-    // `Running` through the control path, and appends synthetic laps for them in real time
-    // (see [`gridfpv_app::source`]). It runs until the process exits.
+    // Resolve the built-in lap source (default `sim`) and spawn the **per-event**
+    // control→source bridge over the registry: each event (Practice + any created event) gets
+    // its own bridge feeding sim passes into ITS own log when a heat goes `Running` there. It
+    // runs until the process exits (see [`gridfpv_app::source::spawn_registry_bridge`]).
     let source = SourceConfig::from_env();
     let source_desc = source.describe();
-    let _bridge = spawn_bridge(state.clone(), source, AdapterId(SIM_ADAPTER.to_string()));
+    let _bridge =
+        spawn_registry_bridge(registry.clone(), source, AdapterId(SIM_ADAPTER.to_string()));
 
-    let app = build_app(state, &config.assets);
+    let app = build_app(registry, &config.assets);
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     let bound = listener.local_addr()?;
@@ -98,11 +94,15 @@ fn print_startup(config: &Config, bound: std::net::SocketAddr, rd_token: &str, s
     println!("  console URL  : http://{url_host}/");
     println!("  RD token     : {rd_token}");
     println!("    (use as `Authorization: Bearer {rd_token}` on the control path)");
-    match &config.db {
-        Some(path) => println!("  event log    : sqlite file {}", path.display()),
-        None => {
-            println!("  event log    : in-memory sqlite (non-durable — set GRIDFPV_DB to persist)")
-        }
+    match &config.data_dir {
+        Some(dir) => println!(
+            "  events       : Practice (in-memory) + created events persist under {}",
+            dir.display()
+        ),
+        None => println!(
+            "  events       : Practice (in-memory); created events in-memory \
+             (non-durable — set GRIDFPV_DATA_DIR to persist)"
+        ),
     }
     println!("  lap source   : {source_desc}");
     println!(

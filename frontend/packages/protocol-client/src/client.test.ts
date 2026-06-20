@@ -340,4 +340,92 @@ describe('ProtocolClient', () => {
     client.close();
     expect(client.getState().status).toBe('closed');
   });
+
+  // ── Event-rooted surface (issue #72) ─────────────────────────────────────────
+
+  it('roots the snapshot + stream URLs under the default Practice event', async () => {
+    const { fetch, calls } = mockFetch([{ cursor: 3, body: liveState('Scheduled') }]);
+    const { factory, sockets } = mockWsFactory();
+
+    const client = connect({
+      baseUrl: 'http://director.local:8080',
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
+    await flush();
+
+    // No eventId given → both the snapshot and the WS are rooted under `/events/practice`.
+    expect(calls[0]).toBe('http://director.local:8080/events/practice/snapshot/heat/heat-1');
+    expect(sockets[0].url).toBe('ws://director.local:8080/events/practice/stream');
+
+    client.close();
+  });
+
+  it('roots the URLs under an explicit eventId when given', async () => {
+    const { fetch, calls } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
+    const { factory, sockets } = mockWsFactory();
+
+    const client = connect({
+      baseUrl: 'http://director.local:8080',
+      eventId: 'spring-cup-2026-ab12',
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
+    await flush();
+
+    expect(calls[0]).toBe(
+      'http://director.local:8080/events/spring-cup-2026-ab12/snapshot/heat/heat-1'
+    );
+    expect(sockets[0].url).toBe('ws://director.local:8080/events/spring-cup-2026-ab12/stream');
+
+    client.close();
+  });
+});
+
+describe('events lifecycle helpers (#72)', () => {
+  it('listEvents GETs /events and returns the EventMeta list', async () => {
+    const calls: string[] = [];
+    const fetch: FetchLike = async (input) => {
+      calls.push(String(input));
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => [
+          { id: 'practice', name: 'Practice', created_at: 1, persistent: false }
+        ]
+      } as unknown as Response;
+    };
+    const { listEvents } = await import('./client.js');
+    const events = await listEvents('http://director.local:8080/', { fetch });
+    expect(calls[0]).toBe('http://director.local:8080/events');
+    expect(events[0].id).toBe('practice');
+  });
+
+  it('createEvent POSTs the name to /events with the RD token and returns the new EventMeta', async () => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => ({
+          id: 'race-night-xy99',
+          name: 'Race Night',
+          created_at: 2,
+          persistent: true
+        })
+      } as unknown as Response;
+    };
+    const { createEvent } = await import('./client.js');
+    const meta = await createEvent('http://director.local:8080', 'Race Night', 'rd-tok', { fetch });
+    expect(seen[0].url).toBe('http://director.local:8080/events');
+    expect(seen[0].init?.method).toBe('POST');
+    const headers = seen[0].init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer rd-tok');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({ name: 'Race Night' });
+    expect(meta.id).toBe('race-night-xy99');
+    expect(meta.persistent).toBe(true);
+  });
 });

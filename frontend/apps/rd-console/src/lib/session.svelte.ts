@@ -31,6 +31,14 @@ import type {
 
 const STORAGE_KEY = 'gridfpv.rd.session';
 
+/**
+ * The built-in **Practice** event id the console connects to by default (issue #72). Events
+ * are now first-class containers — every read/realtime/control surface is rooted under one.
+ * The full startup/event-picker UI is a follow-up PR; until then the console defaults to the
+ * always-present Practice event so the whole stack works end to end.
+ */
+const PRACTICE_EVENT_ID = 'practice';
+
 interface StoredSession {
   baseUrl: string;
   token: string;
@@ -93,6 +101,8 @@ export class Session {
 
   // Non-reactive internals.
   #token: string | undefined;
+  /** The event every surface is rooted under (#72); defaults to the built-in Practice event. */
+  #eventId: string = PRACTICE_EVENT_ID;
   #client: ProtocolClient | undefined;
   #control: ControlClient | undefined;
   #unsub: (() => void) | undefined;
@@ -122,14 +132,21 @@ export class Session {
     this.#token = token;
     this.baseUrl = baseUrl;
     this.authenticated = true;
-    this.#control = this.#controlFactory(baseUrl, token);
+    // Control is rooted under the current event (#72) — default Practice.
+    this.#control = this.#controlFactory(baseUrl, token, { eventId: this.#eventId });
     persist({ baseUrl, token });
 
-    // Default to the whole event; a real event id is filled by the setup wizard, but
-    // the console connects optimistically so connection status is visible at login.
-    const liveScope: Scope = scope ?? { Event: { event: 'event' } };
+    // Default to the whole (Practice) event so the console has a live view from login. The
+    // event id is the built-in Practice event (#72); the startup/event-picker UI that lets
+    // the RD choose another event is a follow-up PR.
+    const liveScope: Scope = scope ?? { Event: { event: this.#eventId } };
     this.connectionStatus = 'connecting';
-    this.#client = this.#connectImpl({ baseUrl, scope: liveScope, token });
+    this.#client = this.#connectImpl({
+      baseUrl,
+      eventId: this.#eventId,
+      scope: liveScope,
+      token
+    });
     this.#unsub = this.#client.onState((state) => {
       this.protocolState = state;
       this.connectionStatus = state.status;
@@ -143,7 +160,12 @@ export class Session {
     this.#unsub?.();
     this.#client?.close();
     this.connectionStatus = 'connecting';
-    this.#client = this.#connectImpl({ baseUrl: this.baseUrl, scope, token: this.#token });
+    this.#client = this.#connectImpl({
+      baseUrl: this.baseUrl,
+      eventId: this.#eventId,
+      scope,
+      token: this.#token
+    });
     this.#unsub = this.#client.onState((state) => {
       this.protocolState = state;
       this.connectionStatus = state.status;
@@ -203,7 +225,9 @@ export class Session {
     if (this.#token) headers.Authorization = `Bearer ${this.#token}`;
     try {
       const resp = await globalThis.fetch(
-        `${base}/snapshot/heat/${encodeURIComponent(heat)}?projection=result`,
+        `${base}/events/${encodeURIComponent(this.#eventId)}/snapshot/heat/${encodeURIComponent(
+          heat
+        )}?projection=result`,
         { headers }
       );
       if (!resp.ok) return undefined;

@@ -89,6 +89,7 @@ use tokio::sync::Notify;
 use crate::auth::{JoinTokenResponse, TokenStore};
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
+use crate::events::{CreateEventRequest, EventMeta, EventRegistry};
 use crate::live_state::live_state;
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
@@ -194,6 +195,19 @@ impl AppState {
         }
     }
 
+    /// Build the state from a concrete log backend while **sharing** an existing
+    /// [`TokenStore`] — used by the [`EventRegistry`](crate::events::EventRegistry) so every
+    /// per-event [`AppState`] consults the one auth authority (an RD token authenticates
+    /// control on any event; a join token reads any event). Each event keeps its **own** log
+    /// and its own append-notify, but the token store is one Director-wide gate.
+    pub fn with_tokens(log: impl EventLog + Send + 'static, tokens: TokenStore) -> Self {
+        Self {
+            log: Arc::new(Mutex::new(log)),
+            appended: Arc::new(Notify::new()),
+            tokens,
+        }
+    }
+
     /// The shared auth token store (#44), for minting/revoking tokens out of band (the RD
     /// console issues itself an RD token; an operator issues a join-token QR) and for the
     /// [`ControlAuth`] extractor to authenticate a control caller.
@@ -255,46 +269,106 @@ impl AppState {
     }
 }
 
-/// Build the snapshot [`Router`] (protocol.html §2, §4) over the shared [`AppState`].
+/// Build the **event-rooted** protocol [`Router`] over the [`EventRegistry`] (issue #72).
 ///
-/// The four scope addressing schemes (see the module docs) plus a liveness `GET /health`.
-/// The WS stream (#43), auth middleware (#44), and control routes (#45) layer onto this
-/// same router and state.
-pub fn router(state: AppState) -> Router {
+/// Every read/realtime/control surface is rooted under its event — `/events/{eventId}/…` —
+/// and the handler resolves `eventId` to that event's [`AppState`] (its own log) via the
+/// registry before serving (mirroring the within-event scope filtering: heat window, pilot,
+/// etc.). The events lifecycle API (`GET /events`, `POST /events`) and a liveness
+/// `GET /health` sit at the root. An unknown `eventId` is a typed [`ProtocolError`] 404
+/// (`UnknownScope`), the same shape a wrong route gets (#64).
+pub fn router(registry: EventRegistry) -> Router {
+    // The per-event surface, rooted under `/events/{event_id}`. Each handler resolves the
+    // event id to its own `AppState`/log through the registry.
     let read = Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/snapshot/event/{event}", get(snapshot_event))
-        .route("/snapshot/class/{event}/{class}", get(snapshot_class))
-        .route("/snapshot/heat/{heat}", get(snapshot_heat))
-        .route("/snapshot/pilot/{event}/{pilot}", get(snapshot_pilot))
-        .route("/stream", get(crate::ws::stream_handler))
-        // RD-gated mint of a read-only join token (#63): an authenticated RD trades its RD
-        // token for a fresh spectator (read-only) token to share (e.g. a venue QR).
-        .route("/auth/join-token", post(mint_join_token));
-    // The privileged RD control surface (§5) is composed on separately so #44 can wrap
-    // just these routes in its auth layer.
+        // Events lifecycle (issue #72): list (Practice first) and RD-gated create.
+        .route("/events", get(list_events).post(create_event))
+        // Per-event read/realtime surface — `{event_id}` resolves to that event's log.
+        .route(
+            "/events/{event_id}/snapshot/event/{event}",
+            get(snapshot_event),
+        )
+        .route(
+            "/events/{event_id}/snapshot/class/{event}/{class}",
+            get(snapshot_class),
+        )
+        .route(
+            "/events/{event_id}/snapshot/heat/{heat}",
+            get(snapshot_heat),
+        )
+        .route(
+            "/events/{event_id}/snapshot/pilot/{event}/{pilot}",
+            get(snapshot_pilot),
+        )
+        .route("/events/{event_id}/stream", get(crate::ws::stream_handler))
+        // RD-gated mint of a read-only join token (#63), now per-event.
+        .route("/events/{event_id}/auth/join-token", post(mint_join_token));
+    // The privileged RD control surface (§5) is composed on separately so its auth layer
+    // wraps just `/events/{event_id}/control`.
     crate::control_handler::control_routes(read)
         // Any path under a known API tree that matched no route above is a typed 404
         // (#64), not the SPA shell — see [`api_fallback`] / [`smart_fallback`].
         .fallback(api_fallback)
-        .with_state(state)
+        .with_state(registry)
 }
 
-/// `POST /auth/join-token` — mint a fresh **read-only** join token (protocol.html §5,
-/// §9.4) — issue #63.
+/// Resolve an [`EventId`] to its [`AppState`] through the registry, or a typed 404.
 ///
-/// [`ControlAuth`] runs first: only an authenticated **RD** (a valid `Authorization:
-/// Bearer <RD token>`) may mint one; any other caller — no token, a read-only/join token,
-/// an unknown or revoked token — is [`ErrorCode::Unauthorized`] → HTTP 401 (the extractor
-/// rejects before the handler body runs). On success a brand-new read-only token is issued
-/// from the shared [`TokenStore`] and returned as a [`JoinTokenResponse`]; the spectator
-/// who later presents it authenticates LAN reads but is rejected on control.
+/// The single resolution point every per-event handler funnels through: an unknown event id
+/// is an [`ErrorCode::UnknownScope`] [`ProtocolError`] (HTTP 404), mirroring an unknown heat
+/// / pilot, so a client reads one uniform shape whether the *event* or a *scope within it*
+/// is missing.
+pub fn resolve_event(registry: &EventRegistry, id: &EventId) -> Result<AppState, ProtocolError> {
+    registry.resolve(id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", id.0),
+        )
+    })
+}
+
+/// `GET /events` — list every event's [`EventMeta`], Practice first (issue #72).
+///
+/// Reads are open on the LAN (§5), so listing events needs no token — a spectator can see
+/// which events exist before scoping into one.
+async fn list_events(State(registry): State<EventRegistry>) -> Json<Vec<EventMeta>> {
+    Json(registry.list())
+}
+
+/// `POST /events` — create a new event from a display `name`, RD-gated (issue #72).
+///
+/// [`ControlAuth`] runs first: only an authenticated **RD** may create an event. The id is
+/// **auto-generated** (a slug of the name + a short random suffix) — names are display-only,
+/// ids are never user-entered. The event gets its own SQLite-backed log under the configured
+/// data dir (or an in-memory log when none is configured) and the freshly-created
+/// [`EventMeta`] is returned.
+async fn create_event(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Json(body): Json<CreateEventRequest>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    let meta = registry
+        .create(&body.name)
+        .map_err(|e| ProtocolError::new(ErrorCode::Internal, e.to_string()))?;
+    Ok(Json(meta))
+}
+
+/// `POST /events/{event_id}/auth/join-token` — mint a fresh **read-only** join token
+/// (protocol.html §5, §9.4) — issue #63, now event-rooted.
+///
+/// [`ControlAuth`] runs first: only an authenticated **RD** may mint one. The token store is
+/// Director-wide (shared across events), so the minted token reads any event; the path is
+/// rooted under an event for a uniform surface and a typed 404 on an unknown event id. On
+/// success a brand-new read-only token is returned as a [`JoinTokenResponse`].
 async fn mint_join_token(
     _auth: ControlAuth,
-    State(state): State<AppState>,
-) -> Json<JoinTokenResponse> {
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Json<JoinTokenResponse>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
     let token = state.tokens().issue_join_token();
-    Json(JoinTokenResponse { token })
+    Ok(Json(JoinTokenResponse { token }))
 }
 
 /// Whether a request path addresses a known protocol **API tree** (#64).
@@ -309,7 +383,18 @@ async fn mint_join_token(
 /// A path matches when it equals a prefix exactly or continues with `/` (so `/snapshotxyz`
 /// is *not* an API path, but `/snapshot`, `/snapshot/`, and `/snapshot/zzz` all are).
 pub fn is_api_path(path: &str) -> bool {
-    const API_PREFIXES: [&str; 5] = ["/health", "/snapshot", "/stream", "/control", "/auth"];
+    // The event-rooted surface (#72) puts snapshot/stream/control/auth *under* `/events`, so
+    // `/events` is the one API tree that matters now; the bare `/snapshot|/stream|/control|/auth`
+    // prefixes are kept so a *legacy* (pre-#72) mistyped call still 404s as a typed API error
+    // rather than falling through to the SPA shell.
+    const API_PREFIXES: [&str; 6] = [
+        "/health",
+        "/events",
+        "/snapshot",
+        "/stream",
+        "/control",
+        "/auth",
+    ];
     API_PREFIXES.iter().any(|prefix| {
         path == *prefix
             || path
@@ -407,11 +492,18 @@ struct HeatQuery {
     projection: HeatProjection,
 }
 
-/// `GET /snapshot/event/{event}` — the whole event's live race-state (§4 event scope).
+/// `GET /events/{event_id}/snapshot/event/{event}` — the whole event's live race-state
+/// (§4 event scope), served against the resolved event's own log (issue #72).
+///
+/// `event_id` resolves to that event's [`AppState`] via the registry (an unknown id → a
+/// typed 404). The trailing `{event}` is the §4 scope address within the event; with the
+/// log now genuinely per-event, the event-scope body folds **that event's** log — no more
+/// whole-log passthrough.
 async fn snapshot_event(
-    State(state): State<AppState>,
-    Path(_event): Path<EventId>,
+    State(registry): State<EventRegistry>,
+    Path((event_id, _event)): Path<(EventId, EventId)>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
     let (events, cursor) = state.read()?;
     Ok(Json(Snapshot {
         cursor,
@@ -425,9 +517,10 @@ async fn snapshot_event(
 /// the module docs); this serves the whole-event live state under the class address so the
 /// scope is reachable now and tightens later without an addressing change.
 async fn snapshot_class(
-    State(state): State<AppState>,
-    Path((_event, _class)): Path<(EventId, ClassId)>,
+    State(registry): State<EventRegistry>,
+    Path((event_id, _event, _class)): Path<(EventId, EventId, ClassId)>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
     let (events, cursor) = state.read()?;
     Ok(Json(Snapshot {
         cursor,
@@ -441,10 +534,11 @@ async fn snapshot_class(
 /// its [`LapList`]; `?projection=result` its scored [`HeatResult`]. The log is filtered to
 /// the heat's window so the body is heat-local.
 async fn snapshot_heat(
-    State(state): State<AppState>,
-    Path(heat): Path<HeatId>,
+    State(registry): State<EventRegistry>,
+    Path((event_id, heat)): Path<(EventId, HeatId)>,
     Query(query): Query<HeatQuery>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
     let (events, cursor) = state.read()?;
 
     // The heat must exist in the log (a `HeatScheduled` for this id), else UnknownScope.
@@ -500,9 +594,10 @@ async fn snapshot_heat(
 /// bindings yet, it falls back to the legacy behaviour of treating the `pilot` id as a bare
 /// [`CompetitorRef`], so an un-registered setup still resolves a pilot by their source ref.
 async fn snapshot_pilot(
-    State(state): State<AppState>,
-    Path((_event, pilot)): Path<(EventId, PilotId)>,
+    State(registry): State<EventRegistry>,
+    Path((event_id, _event, pilot)): Path<(EventId, EventId, PilotId)>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
     let (events, cursor) = state.read()?;
 
     // The source competitors bound to this pilot (by the registration fold). When the log
@@ -607,7 +702,6 @@ mod tests {
     use super::*;
     use gridfpv_events::{AdapterId, GateIndex, HeatTransition, Pass};
     use gridfpv_projection::CompetitorKey;
-    use gridfpv_storage::InMemoryLog;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -659,17 +753,28 @@ mod tests {
         ]
     }
 
-    fn state_with(events: Vec<Event>) -> (AppState, u64) {
-        let mut log = InMemoryLog::default();
+    use crate::events::{EventRegistry, PRACTICE_EVENT_ID};
+
+    // The per-event route prefix the tests drive is `/events/practice` — the always-present
+    // in-memory Practice event (#72); every snapshot/control/auth path is rooted under it.
+
+    /// Build a registry whose **Practice** event log already holds `events`, returning the
+    /// registry (the router state), the Practice [`AppState`] (for token minting in tests),
+    /// and the log length. Practice is in-memory, so the seed is just appends to its log.
+    fn state_with(events: Vec<Event>) -> (EventRegistry, AppState, u64) {
+        let registry = EventRegistry::new(None).unwrap();
+        let state = registry
+            .resolve(&EventId(PRACTICE_EVENT_ID.into()))
+            .expect("Practice is always present");
         for e in &events {
-            EventLog::append(&mut log, e.clone(), None).unwrap();
+            state.append(e.clone(), None).unwrap();
         }
         let len = events.len() as u64;
-        (AppState::new(log), len)
+        (registry, state, len)
     }
 
-    async fn get_snapshot(state: AppState, uri: &str) -> (StatusCode, Option<Snapshot>) {
-        let response = router(state)
+    async fn get_snapshot(registry: EventRegistry, uri: &str) -> (StatusCode, Option<Snapshot>) {
+        let response = router(registry)
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -681,8 +786,9 @@ mod tests {
 
     #[tokio::test]
     async fn event_scope_returns_live_state_and_cursor() {
-        let (state, len) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(state, "/snapshot/event/spring-cup").await;
+        let (registry, _state, len) = state_with(recorded_heat());
+        let (status, snap) =
+            get_snapshot(registry, "/events/practice/snapshot/event/spring-cup").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         // The cursor is the log length at read time — the resume point.
@@ -704,8 +810,8 @@ mod tests {
 
     #[tokio::test]
     async fn heat_scope_default_is_live_state() {
-        let (state, len) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(state, "/snapshot/heat/q-1").await;
+        let (registry, _state, len) = state_with(recorded_heat());
+        let (status, snap) = get_snapshot(registry, "/events/practice/snapshot/heat/q-1").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(len));
@@ -714,8 +820,12 @@ mod tests {
 
     #[tokio::test]
     async fn heat_scope_laps_projection_returns_lap_list() {
-        let (state, _) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(state, "/snapshot/heat/q-1?projection=laps").await;
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/heat/q-1?projection=laps",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::LapList(laps) => {
@@ -733,8 +843,12 @@ mod tests {
 
     #[tokio::test]
     async fn heat_scope_result_projection_returns_heat_result() {
-        let (state, _) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(state, "/snapshot/heat/q-1?projection=result").await;
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/heat/q-1?projection=result",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::HeatResult(result) => {
@@ -747,11 +861,11 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_heat_is_not_found() {
-        let (state, _) = state_with(recorded_heat());
-        let response = router(state)
+        let (registry, _state, _) = state_with(recorded_heat());
+        let response = router(registry)
             .oneshot(
                 Request::builder()
-                    .uri("/snapshot/heat/does-not-exist")
+                    .uri("/events/practice/snapshot/heat/does-not-exist")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -765,8 +879,9 @@ mod tests {
 
     #[tokio::test]
     async fn pilot_scope_filters_to_the_pilot_laps() {
-        let (state, len) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(state, "/snapshot/pilot/spring-cup/A").await;
+        let (registry, _state, len) = state_with(recorded_heat());
+        let (status, snap) =
+            get_snapshot(registry, "/events/practice/snapshot/pilot/spring-cup/A").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(len));
@@ -794,8 +909,12 @@ mod tests {
             competitor: CompetitorRef("A".into()),
             pilot: gridfpv_events::PilotId("acroace".into()),
         });
-        let (state, _) = state_with(events);
-        let (status, snap) = get_snapshot(state, "/snapshot/pilot/spring-cup/acroace").await;
+        let (registry, _state, _) = state_with(events);
+        let (status, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/pilot/spring-cup/acroace",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::LapList(laps) => {
@@ -812,11 +931,11 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_pilot_is_not_found() {
-        let (state, _) = state_with(recorded_heat());
-        let response = router(state)
+        let (registry, _state, _) = state_with(recorded_heat());
+        let response = router(registry)
             .oneshot(
                 Request::builder()
-                    .uri("/snapshot/pilot/spring-cup/nobody")
+                    .uri("/events/practice/snapshot/pilot/spring-cup/nobody")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -827,8 +946,9 @@ mod tests {
 
     #[tokio::test]
     async fn class_scope_is_reachable() {
-        let (state, len) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(state, "/snapshot/class/spring-cup/open").await;
+        let (registry, _state, len) = state_with(recorded_heat());
+        let (status, snap) =
+            get_snapshot(registry, "/events/practice/snapshot/class/spring-cup/open").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(len));
@@ -837,8 +957,9 @@ mod tests {
 
     #[tokio::test]
     async fn empty_log_event_scope_is_idle_with_zero_cursor() {
-        let (state, _) = state_with(vec![]);
-        let (status, snap) = get_snapshot(state, "/snapshot/event/spring-cup").await;
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, snap) =
+            get_snapshot(registry, "/events/practice/snapshot/event/spring-cup").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(0));
@@ -874,9 +995,13 @@ mod tests {
             pass("B", 13_000_000, 2),
             pass("B", 15_000_000, 3), // q-2: B two laps
         ];
-        let (state, _) = state_with(events);
+        let (registry, _state, _) = state_with(events);
 
-        let (_, snap) = get_snapshot(state.clone(), "/snapshot/heat/q-1?projection=laps").await;
+        let (_, snap) = get_snapshot(
+            registry.clone(),
+            "/events/practice/snapshot/heat/q-1?projection=laps",
+        )
+        .await;
         match snap.unwrap().body {
             ProjectionBody::LapList(laps) => {
                 // Only A appears in q-1's window.
@@ -889,7 +1014,11 @@ mod tests {
             other => panic!("expected lap list, got {other:?}"),
         }
 
-        let (_, snap) = get_snapshot(state, "/snapshot/heat/q-2?projection=laps").await;
+        let (_, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/heat/q-2?projection=laps",
+        )
+        .await;
         match snap.unwrap().body {
             ProjectionBody::LapList(laps) => {
                 assert_eq!(laps.competitors.len(), 1);
@@ -907,8 +1036,8 @@ mod tests {
 
     /// Drive a request against the bare protocol `router` (no SPA composed) and return the
     /// status plus the parsed [`ProtocolError`] body, if the body is one.
-    async fn get_raw(state: AppState, uri: &str) -> (StatusCode, Option<ProtocolError>) {
-        let response = router(state)
+    async fn get_raw(registry: EventRegistry, uri: &str) -> (StatusCode, Option<ProtocolError>) {
+        let response = router(registry)
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -948,8 +1077,8 @@ mod tests {
     #[tokio::test]
     async fn unknown_snapshot_route_is_typed_404_not_spa() {
         // A wrong /snapshot/... shape (an extra/garbage segment) matched no route → typed 404.
-        let (state, _) = state_with(recorded_heat());
-        let (status, err) = get_raw(state, "/snapshot/zzz/nope/extra").await;
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, err) = get_raw(registry, "/snapshot/zzz/nope/extra").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(
             err.expect("a ProtocolError body").code,
@@ -959,8 +1088,8 @@ mod tests {
 
     #[tokio::test]
     async fn bogus_control_path_is_typed_404() {
-        let (state, _) = state_with(recorded_heat());
-        let (status, err) = get_raw(state, "/control/bogus").await;
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, err) = get_raw(registry, "/control/bogus").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(
             err.expect("a ProtocolError body").code,
@@ -970,8 +1099,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_real_route_still_works_alongside_the_api_fallback() {
-        let (state, _) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(state, "/snapshot/heat/q-1").await;
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, snap) = get_snapshot(registry, "/events/practice/snapshot/heat/q-1").await;
         assert_eq!(status, StatusCode::OK);
         assert!(matches!(
             snap.unwrap().body,
@@ -1024,14 +1153,16 @@ mod tests {
 
     /// `POST /auth/join-token` with an optional bearer token; returns status + parsed body.
     async fn post_join_token(
-        state: AppState,
+        registry: EventRegistry,
         token: Option<&str>,
     ) -> (StatusCode, Option<JoinTokenResponse>) {
-        let mut builder = Request::builder().method("POST").uri("/auth/join-token");
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/events/practice/auth/join-token");
         if let Some(token) = token {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
-        let response = router(state)
+        let response = router(registry)
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -1045,11 +1176,11 @@ mod tests {
     async fn rd_token_mints_a_join_token_that_reads_but_cannot_control() {
         use crate::auth::Role;
 
-        let (state, _) = state_with(recorded_heat());
+        let (registry, state, _) = state_with(recorded_heat());
         let rd = state.tokens().issue_rd_token();
 
         // An RD mints a fresh read-only join token over HTTP.
-        let (status, body) = post_join_token(state.clone(), Some(&rd)).await;
+        let (status, body) = post_join_token(registry.clone(), Some(&rd)).await;
         assert_eq!(status, StatusCode::OK);
         let join = body.expect("a JoinTokenResponse body").token;
         assert!(!join.is_empty());
@@ -1074,19 +1205,19 @@ mod tests {
 
     #[tokio::test]
     async fn minting_a_join_token_requires_an_rd_token() {
-        let (state, _) = state_with(recorded_heat());
+        let (registry, state, _) = state_with(recorded_heat());
 
         // No token → 401.
-        let (status, _) = post_join_token(state.clone(), None).await;
+        let (status, _) = post_join_token(registry.clone(), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         // A read-only/join token → 401 (it may not mint another).
         let join = state.tokens().issue_join_token();
-        let (status, _) = post_join_token(state.clone(), Some(&join)).await;
+        let (status, _) = post_join_token(registry.clone(), Some(&join)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         // An unknown token → 401.
-        let (status, _) = post_join_token(state, Some("not-a-real-token")).await;
+        let (status, _) = post_join_token(registry, Some("not-a-real-token")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

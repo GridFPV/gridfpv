@@ -44,6 +44,7 @@
 //! most one heat emits at a time (a single in-flight task), which is plenty for a Director
 //! driving one timer.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +52,8 @@ use gridfpv_events::{
     AdapterId, CompetitorRef, Event, GateIndex, HeatId, HeatTransition, Pass, SourceTime,
 };
 use gridfpv_server::app::AppState;
+use gridfpv_server::events::EventRegistry;
+use gridfpv_server::scope::EventId;
 use gridfpv_storage::Offset;
 use tokio::task::JoinHandle;
 
@@ -303,6 +306,51 @@ pub fn spawn_bridge(state: AppState, source: SourceConfig, adapter: AdapterId) -
     let source = source.into_source();
     tokio::spawn(async move {
         run_bridge(state, source, adapter).await;
+    })
+}
+
+/// How often the registry-aware spawner polls for newly-created events to attach a bridge to.
+pub const REGISTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Spawn a **per-event** control→source bridge across the whole [`EventRegistry`] (issue #72).
+///
+/// With events now first-class containers, each event has its **own** log, so the sim source
+/// is per-event: the Director runs one [`run_bridge`] per event, feeding sim passes into THAT
+/// event's log when a heat goes `Running` *there*. This spawner seeds a bridge for every event
+/// present at startup (the built-in Practice + any already-loaded persistent events) and polls
+/// the registry on [`REGISTRY_POLL_INTERVAL`] to attach a bridge to any event *created at
+/// runtime* (`POST /events`). So Practice and any created event can run a sim race
+/// independently and concurrently.
+///
+/// Returns the spawner's [`JoinHandle`]; the per-event bridge tasks it spawns run for the
+/// process lifetime (each ends when its event's log handle is dropped at shutdown).
+pub fn spawn_registry_bridge(
+    registry: EventRegistry,
+    source: SourceConfig,
+    adapter: AdapterId,
+) -> JoinHandle<()> {
+    let source = source.into_source();
+    tokio::spawn(async move {
+        // The set of events that already have a bridge, so each event is attached exactly once.
+        let mut attached: HashSet<EventId> = HashSet::new();
+        let mut ticker = tokio::time::interval(REGISTRY_POLL_INTERVAL);
+        loop {
+            for meta in registry.list() {
+                if attached.contains(&meta.id) {
+                    continue;
+                }
+                // Resolve the event's own AppState/log and spawn its bridge.
+                if let Some(state) = registry.resolve(&meta.id) {
+                    let source = Arc::clone(&source);
+                    let adapter = adapter.clone();
+                    tokio::spawn(async move {
+                        run_bridge(state, source, adapter).await;
+                    });
+                    attached.insert(meta.id);
+                }
+            }
+            ticker.tick().await;
+        }
     })
 }
 

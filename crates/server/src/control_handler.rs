@@ -79,7 +79,7 @@
 
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::response::Response;
 use axum::routing::get;
@@ -87,9 +87,11 @@ use axum::{Router, routing::MethodRouter};
 use gridfpv_engine::heat::{self, HeatCommand};
 use gridfpv_events::{Event, HeatId, LogRef};
 
-use crate::app::AppState;
+use crate::app::{AppState, resolve_event};
 use crate::control::{Command, CommandAck};
 use crate::error::{ErrorCode, ProtocolError};
+use crate::events::EventRegistry;
+use crate::scope::EventId;
 
 /// The **auth chokepoint** for the privileged control path (protocol.html §5, §9.4) — #44.
 ///
@@ -113,17 +115,20 @@ pub struct ControlAuth {
     _private: (),
 }
 
-impl FromRequestParts<AppState> for ControlAuth {
+impl FromRequestParts<EventRegistry> for ControlAuth {
     type Rejection = ProtocolError;
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &AppState,
+        registry: &EventRegistry,
     ) -> Result<Self, Self::Rejection> {
-        // Read the bearer token (if any) and require a control-authorized RD session;
-        // every non-RD case maps to `ErrorCode::Unauthorized` inside the store.
+        // Read the bearer token (if any) and require a control-authorized RD session; every
+        // non-RD case maps to `ErrorCode::Unauthorized` inside the store. The token store is
+        // Director-wide (shared across events via the registry), so one RD token authorizes
+        // control on every event — control is gated by *role*, the event is resolved per
+        // handler from the path.
         let token = crate::auth::bearer_token(parts);
-        state.tokens().authenticate_control(token.as_deref())?;
+        registry.tokens().authenticate_control(token.as_deref())?;
         Ok(ControlAuth { _private: () })
     }
 }
@@ -133,12 +138,12 @@ impl FromRequestParts<AppState> for ControlAuth {
 /// Adds `GET /control` (the bidirectional control WebSocket) and `POST /control` (the
 /// one-shot request/reply). Kept separate from [`crate::app::router`] so the control
 /// surface is composed explicitly and #44 can wrap *just* these routes in its auth layer.
-pub fn control_routes(router: Router<AppState>) -> Router<AppState> {
-    router.route("/control", control_method_router())
+pub fn control_routes(router: Router<EventRegistry>) -> Router<EventRegistry> {
+    router.route("/events/{event_id}/control", control_method_router())
 }
 
-/// `GET /control` (WS upgrade) + `POST /control` (one-shot) on the one path.
-fn control_method_router() -> MethodRouter<AppState> {
+/// `GET /events/{event_id}/control` (WS upgrade) + `POST …/control` (one-shot) on the one path.
+fn control_method_router() -> MethodRouter<EventRegistry> {
     get(control_ws).post(control_post)
 }
 
@@ -153,10 +158,14 @@ fn control_method_router() -> MethodRouter<AppState> {
 /// shared [`ProtocolError`]).
 async fn control_post(
     _auth: ControlAuth,
-    State(state): State<AppState>,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
     Json(command): Json<Command>,
-) -> Json<CommandAck> {
-    Json(apply_command(&state, command))
+) -> Result<Json<CommandAck>, ProtocolError> {
+    // Resolve the event first (an unknown id → typed 404) so the command applies to THAT
+    // event's log only — commands never cross event boundaries.
+    let state = resolve_event(&registry, &event_id)?;
+    Ok(Json(apply_command(&state, command)))
 }
 
 /// `GET /control` — upgrade to the bidirectional control WebSocket (protocol.html §5).
@@ -166,9 +175,13 @@ async fn control_post(
 async fn control_ws(
     _auth: ControlAuth,
     ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
-    ws.on_upgrade(move |socket| run_control(socket, state))
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Response, ProtocolError> {
+    // Resolve the event before the upgrade so every command on this socket drives THAT
+    // event's log (an unknown id → typed 404 before upgrading).
+    let state = resolve_event(&registry, &event_id)?;
+    Ok(ws.on_upgrade(move |socket| run_control(socket, state)))
 }
 
 /// Drive one control socket: read [`Command`] frames, write a [`CommandAck`] per command

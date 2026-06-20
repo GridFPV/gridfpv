@@ -19,10 +19,10 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition};
 use gridfpv_server::app::{AppState, router};
+use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
 use gridfpv_server::scope::{EventId, Scope, SubscribeRequest};
 use gridfpv_server::snapshot::{HeatPhase, ProjectionBody};
 use gridfpv_server::stream::{Change, Cursor, StreamMessage};
-use gridfpv_storage::InMemoryLog;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
@@ -31,14 +31,24 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Serve `router(state)` on an ephemeral port; return the `ws://…/stream` URL and the
 /// server task's join handle (dropped at test end, which aborts the task).
-async fn serve(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
+async fn serve(registry: EventRegistry) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = router(state);
+    let app = router(registry);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (format!("ws://{addr}/stream"), handle)
+    (format!("ws://{addr}/events/practice/stream"), handle)
+}
+
+/// A fresh registry plus its in-memory **Practice** [`AppState`] — the change-stream tests
+/// append through Practice's log and subscribe under `/events/practice/stream` (issue #72).
+fn practice_registry() -> (EventRegistry, AppState) {
+    let registry = EventRegistry::new(None).unwrap();
+    let state = registry
+        .resolve(&EventId(PRACTICE_EVENT_ID.into()))
+        .expect("Practice is always present");
+    (registry, state)
 }
 
 /// Connect to the stream endpoint and send a subscribe frame.
@@ -100,8 +110,8 @@ fn event_scope() -> Scope {
 /// gap-free envelopes whose final state matches the server's fold.
 #[tokio::test]
 async fn streams_ordered_envelopes_from_a_fresh_subscribe() {
-    let state = AppState::new(InMemoryLog::default());
-    let (url, _server) = serve(state.clone()).await;
+    let (registry, state) = practice_registry();
+    let (url, _server) = serve(registry.clone()).await;
 
     let mut ws = subscribe(
         &url,
@@ -151,8 +161,8 @@ async fn streams_ordered_envelopes_from_a_fresh_subscribe() {
 /// at 1.
 #[tokio::test]
 async fn resume_from_a_mid_cursor_replays_only_the_tail() {
-    let state = AppState::new(InMemoryLog::default());
-    let (url, _server) = serve(state.clone()).await;
+    let (registry, state) = practice_registry();
+    let (url, _server) = serve(registry.clone()).await;
 
     // Pre-load three events (offsets 0,1,2 → log length 3).
     state
@@ -196,8 +206,8 @@ async fn resume_from_a_mid_cursor_replays_only_the_tail() {
 /// signal instead of a replay (protocol.html §3, §9.3).
 #[tokio::test]
 async fn too_old_cursor_requires_re_snapshot() {
-    let state = AppState::new(InMemoryLog::default());
-    let (url, _server) = serve(state.clone()).await;
+    let (registry, state) = practice_registry();
+    let (url, _server) = serve(registry.clone()).await;
 
     // Push the log tail well past the retained window so a low cursor is out of range.
     let tail = gridfpv_server::ws::RETAINED_WINDOW + 50;
@@ -229,8 +239,8 @@ async fn too_old_cursor_requires_re_snapshot() {
 /// one envelope per *change*, keeping the per-stream sequence a faithful change count).
 #[tokio::test]
 async fn unchanged_fold_emits_no_envelope() {
-    let state = AppState::new(InMemoryLog::default());
-    let (url, _server) = serve(state.clone()).await;
+    let (registry, state) = practice_registry();
+    let (url, _server) = serve(registry.clone()).await;
 
     let mut ws = subscribe(
         &url,
@@ -267,8 +277,8 @@ async fn unchanged_fold_emits_no_envelope() {
 /// A malformed first frame closes the socket with a BadRequest close (no panic, no hang).
 #[tokio::test]
 async fn malformed_subscribe_closes_the_socket() {
-    let state = AppState::new(InMemoryLog::default());
-    let (url, _server) = serve(state).await;
+    let (registry, _state) = practice_registry();
+    let (url, _server) = serve(registry).await;
 
     let (mut ws, _) = connect_async(&url).await.unwrap();
     ws.send(Message::text("not a subscribe request"))
