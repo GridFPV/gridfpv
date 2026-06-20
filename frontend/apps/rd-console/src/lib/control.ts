@@ -27,11 +27,10 @@
  * `@gridfpv/types`, so only the transport seam below moves — every screen builds a
  * typed `Command` and calls `sendCommand`, agnostic to how it ships.
  *
- * `Command` carries `bigint` fields (`SourceTime`, `LogRef`, `Penalty.TimeAdded`).
- * `JSON.stringify` cannot serialize a `bigint`, so {@link stringifyCommand} renders
- * them as JSON numbers — matching serde's u64/i64 default and the read client's
- * `stringifyWire`. (A deployment needing full-u64 precision would serialize as
- * strings on both sides; this mirrors that decision when #45 makes it.)
+ * `Command`'s numeric fields (`SourceTime`, `LogRef`, `Penalty.TimeAdded`) are plain
+ * `number`s — bounded far below 2^53 in our domain and rendered as JSON numbers, which
+ * is exactly serde's u64/i64 default. {@link stringifyCommand} is a plain
+ * `JSON.stringify`; the legacy bigint replacer is kept as a defensive no-op.
  */
 
 import type { Command, CommandAck, ProtocolError } from '@gridfpv/types';
@@ -54,8 +53,8 @@ export interface ControlClient {
 const trimSlash = (s: string): string => (s.endsWith('/') ? s.slice(0, -1) : s);
 
 /**
- * `JSON.stringify` for a `Command`, rendering `bigint` fields as JSON numbers
- * (serde's default for u64/i64). See the module note on full-u64 precision.
+ * `JSON.stringify` for a `Command`. Its numeric fields are plain `number`s, so this is
+ * a straight serialize; the bigint replacer is a defensive no-op for any stray value.
  */
 export function stringifyCommand(command: Command): string {
   return JSON.stringify(command, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));

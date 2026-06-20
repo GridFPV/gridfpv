@@ -66,7 +66,7 @@ export function defaultWinCondition(format: RaceFormat): WinCondition {
   switch (format) {
     case 'timed-qual':
       // A 2-minute timed window (µs).
-      return { Timed: { window_micros: 120_000_000n } };
+      return { Timed: { window_micros: 120_000_000 } };
     case 'single-elim':
       // First to 3 laps decides a bracket heat.
       return { FirstToLaps: { n: 3 } };

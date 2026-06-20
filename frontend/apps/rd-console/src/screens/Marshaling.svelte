@@ -52,10 +52,10 @@
   let target = $state(0);
   let adjustAt = $state(0);
   async function doVoidDetection() {
-    await session.send(voidDetectionCommand(BigInt(Math.trunc(target))));
+    await session.send(voidDetectionCommand(Math.trunc(target)));
   }
   async function doAdjust() {
-    await session.send(adjustLapCommand(BigInt(Math.trunc(target)), secondsToSourceTime(adjustAt)));
+    await session.send(adjustLapCommand(Math.trunc(target), secondsToSourceTime(adjustAt)));
   }
 
   // ── Penalty form ──

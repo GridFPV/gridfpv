@@ -23,7 +23,7 @@ describe('bracketFromOutcome', () => {
 
 describe('toExportJson', () => {
   it('serializes typed projection data with bigints as numbers', () => {
-    const json = toExportJson({ at: 1_000_000n });
+    const json = toExportJson({ at: 1_000_000 });
     expect(JSON.parse(json)).toEqual({ at: 1_000_000 });
   });
 });

@@ -26,7 +26,7 @@ at: SourceTime,
  * passes that share a timestamp and survives clock adjustments; also the basis
  * for reconnect deduplication.
  */
-sequence?: bigint, 
+sequence?: number, 
 /**
  * The gate crossed; defaults to the lap gate.
  */

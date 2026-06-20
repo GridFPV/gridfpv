@@ -5,4 +5,4 @@
  * marshaling adjudications target (e.g. "void *this* pass"). The offset is assigned
  * by the storage layer when the target event was appended.
  */
-export type LogRef = bigint;
+export type LogRef = number;

@@ -58,6 +58,8 @@ pub enum WinCondition {
     /// of the last counted lap (whoever banked their final lap first).
     Timed {
         /// Window length in microseconds, measured from the race start.
+        /// Renders as a plain TS `number` (bounded far below 2^53).
+        #[ts(type = "number")]
         window_micros: i64,
     },
     /// **First to N laps.** Rank by who completed lap `n` earliest. Competitors who
@@ -114,10 +116,10 @@ pub enum Metric {
     /// competitor never reached `n`.
     ReachedAt(Option<SourceTime>),
     /// [`WinCondition::BestLap`]: fastest lap duration (µs), or `None` if no lap.
-    BestLapMicros(Option<i64>),
+    BestLapMicros(#[ts(type = "number | null")] Option<i64>),
     /// [`WinCondition::BestConsecutive`]: smallest sum (µs) of `n` consecutive laps,
     /// or `None` if fewer than `n` laps were completed.
-    BestConsecutiveMicros(Option<i64>),
+    BestConsecutiveMicros(#[ts(type = "number | null")] Option<i64>),
 }
 
 /// The scored heat: every competitor's [`Placement`], best position first.

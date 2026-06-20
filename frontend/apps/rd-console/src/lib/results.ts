@@ -72,7 +72,8 @@ function roundNameFor(size: number, count: number): string {
   return `Round of ${size * 2}`;
 }
 
-/** Serialize a value to pretty JSON, rendering `bigint` as a JSON number. */
+/** Serialize a value to pretty JSON; the bigint replacer is a defensive no-op now
+ * that wire numerics are plain `number`s. */
 export function toExportJson(value: unknown): string {
   return JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? Number(v) : v), 2);
 }

@@ -16,8 +16,8 @@ export const liveRunning: LiveRaceState = {
   phase: 'Running',
   active_pilots: ['ALICE', 'BOB', 'CARMEN'],
   progress: [
-    { competitor: 'ALICE', laps_completed: 3, last_lap_micros: 41_000_000n },
-    { competitor: 'BOB', laps_completed: 2, last_lap_micros: 43_000_000n },
+    { competitor: 'ALICE', laps_completed: 3, last_lap_micros: 41_000_000 },
+    { competitor: 'BOB', laps_completed: 2, last_lap_micros: 43_000_000 },
     { competitor: 'CARMEN', laps_completed: 2, last_lap_micros: undefined }
   ],
   running_order: ['ALICE', 'BOB', 'CARMEN'],
@@ -30,13 +30,13 @@ export const heatResult: HeatResult = {
       competitor: { adapter: 'rh-1', competitor: 'ALICE' },
       position: 1,
       laps: 3,
-      metric: { BestLapMicros: 41_250_000n }
+      metric: { BestLapMicros: 41_250_000 }
     },
     {
       competitor: { adapter: 'rh-1', competitor: 'BOB' },
       position: 2,
       laps: 3,
-      metric: { BestLapMicros: 42_100_000n }
+      metric: { BestLapMicros: 42_100_000 }
     }
   ]
 };
@@ -52,13 +52,13 @@ export const lapList: LapList = {
     {
       competitor: { adapter: 'rh-1', competitor: 'ALICE' },
       laps: [
-        { number: 1, duration_micros: 41_000_000n },
-        { number: 2, duration_micros: 40_500_000n }
+        { number: 1, duration_micros: 41_000_000 },
+        { number: 2, duration_micros: 40_500_000 }
       ]
     },
     {
       competitor: { adapter: 'rh-1', competitor: 'BOB' },
-      laps: [{ number: 1, duration_micros: 43_000_000n }]
+      laps: [{ number: 1, duration_micros: 43_000_000 }]
     }
   ]
 };
@@ -80,13 +80,13 @@ export const eventOutcome: EventOutcome = {
             competitor: { adapter: 'rh-1', competitor: 'ALICE' },
             position: 1,
             laps: 3,
-            metric: { BestLapMicros: 41_000_000n }
+            metric: { BestLapMicros: 41_000_000 }
           },
           {
             competitor: { adapter: 'rh-1', competitor: 'DANA' },
             position: 2,
             laps: 3,
-            metric: { BestLapMicros: 45_000_000n }
+            metric: { BestLapMicros: 45_000_000 }
           }
         ]
       }
@@ -99,13 +99,13 @@ export const eventOutcome: EventOutcome = {
             competitor: { adapter: 'rh-1', competitor: 'BOB' },
             position: 1,
             laps: 3,
-            metric: { BestLapMicros: 42_000_000n }
+            metric: { BestLapMicros: 42_000_000 }
           },
           {
             competitor: { adapter: 'rh-1', competitor: 'CARMEN' },
             position: 2,
             laps: 3,
-            metric: { BestLapMicros: 46_000_000n }
+            metric: { BestLapMicros: 46_000_000 }
           }
         ]
       }
@@ -118,13 +118,13 @@ export const eventOutcome: EventOutcome = {
             competitor: { adapter: 'rh-1', competitor: 'ALICE' },
             position: 1,
             laps: 3,
-            metric: { BestLapMicros: 40_000_000n }
+            metric: { BestLapMicros: 40_000_000 }
           },
           {
             competitor: { adapter: 'rh-1', competitor: 'BOB' },
             position: 2,
             laps: 3,
-            metric: { BestLapMicros: 41_500_000n }
+            metric: { BestLapMicros: 41_500_000 }
           }
         ]
       }

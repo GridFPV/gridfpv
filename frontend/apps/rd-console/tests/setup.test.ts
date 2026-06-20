@@ -17,7 +17,7 @@ describe('setup config', () => {
   });
 
   it('picks a sensible default win condition per format', () => {
-    expect(defaultWinCondition('timed-qual')).toEqual({ Timed: { window_micros: 120_000_000n } });
+    expect(defaultWinCondition('timed-qual')).toEqual({ Timed: { window_micros: 120_000_000 } });
     expect(defaultWinCondition('single-elim')).toEqual({ FirstToLaps: { n: 3 } });
     expect(defaultWinCondition('zippyq')).toEqual({ BestConsecutive: { n: 3 } });
   });
