@@ -24,6 +24,13 @@
  * the shell) lets {@link send}/{@link createEventAndEnter} prompt for the token only when
  * a privileged action actually needs one.
  *
+ * **Full-trust by default (#72, Slice 1b):** privileged actions are sent **without** a token
+ * first. Only if the Director responds **401/403** (i.e. it has a token configured and is
+ * gating control) does the lazy {@link TokenDialog} open; the entered token is then reused for
+ * the rest of the session and the action is retried. Against an open (unconfigured) Director —
+ * the local-trust posture — there is therefore **no prompt ever**. (The proper loopback-trust +
+ * remote-passphrase split is tracked separately as #80 and is not built here.)
+ *
  * Everything reactive is Svelte 5 runes so screens read `session.connectionStatus`,
  * `session.liveState`, etc. directly. The protocol client is framework-agnostic, so we
  * bridge its `onState` callback into a `$state` field here.
@@ -36,6 +43,7 @@ import type { ControlClient } from './control.js';
 import type {
   Command,
   CommandAck,
+  CreateEventRequest,
   EventMeta,
   HeatId,
   HeatResult,
@@ -45,6 +53,30 @@ import type {
 } from '@gridfpv/types';
 
 const TOKEN_STORAGE_KEY = 'gridfpv.rd.token';
+
+/** The optional descriptive fields a create-event dialog may supply alongside the name. */
+export type CreateEventFields = Omit<CreateEventRequest, 'name'>;
+
+/**
+ * Whether a failed {@link CommandAck} is an **auth** rejection (the Director is gating
+ * control). These are the only acks that warrant the lazy token prompt; everything else
+ * (a bad transition, a transport error) is surfaced as-is.
+ */
+function isAuthAck(ack: CommandAck): boolean {
+  // The Director rejects an unauthenticated control caller with `Unauthorized` (HTTP 401);
+  // that is the one ack that means "control is gated — a token is needed".
+  return ack.error?.code === 'Unauthorized';
+}
+
+/**
+ * Whether a thrown error from `createEvent` is an HTTP **401/403** — i.e. the Director is
+ * gating event creation. `createEvent` rejects with an `Error` whose message carries the HTTP
+ * status (`POST /events failed: HTTP 401`), so we match on that.
+ */
+function isAuthFailure(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /\b(401|403)\b/.test(msg);
+}
 
 /**
  * Asks the RD for a control token. Returns the entered token, or `undefined` if the
@@ -250,12 +282,11 @@ export class Session {
   }
 
   /**
-   * Ensure a token is held, prompting for one lazily if not. Returns `true` once a token
-   * is present, `false` if the RD cancelled the prompt. The control client is rebuilt to
-   * carry a freshly-obtained token.
+   * Prompt for a token via the lazy provider and hold it. Returns `true` once a token was
+   * entered, `false` if there is no provider or the RD cancelled. The control client is
+   * rebuilt (via {@link setToken}) to carry the freshly-obtained token.
    */
-  async #ensureToken(): Promise<boolean> {
-    if (this.#token) return true;
+  async #promptForToken(): Promise<boolean> {
     if (!this.#tokenProvider) return false;
     const entered = await this.#tokenProvider();
     if (!entered?.trim()) return false;
@@ -264,22 +295,41 @@ export class Session {
   }
 
   /**
-   * Create a persistent event by name (`POST /events`, RD-gated) and enter it. Obtains
-   * the RD token lazily if none is held. Returns the new {@link EventMeta}, or throws on
-   * a transport/HTTP failure, or `undefined` if the RD cancelled the token prompt.
+   * Create a persistent event by name (`POST /events`) and enter it.
+   *
+   * Full-trust first (#72, Slice 1b): the create is attempted **without** a token; only if the
+   * Director rejects it for **auth** (it has a token configured) does the lazy prompt fire, and
+   * the create is retried once with the entered token. Returns the new {@link EventMeta}, throws
+   * on a non-auth transport/HTTP failure, or resolves `undefined` if the RD cancelled the prompt.
    */
-  async createEventAndEnter(name: string): Promise<EventMeta | undefined> {
-    if (!(await this.#ensureToken()) || !this.#token) return undefined;
-    const meta = await this.#createEventImpl(this.baseUrl, name, this.#token);
-    this.selectEvent(meta);
-    return meta;
+  async createEventAndEnter(
+    name: string,
+    fields?: CreateEventFields
+  ): Promise<EventMeta | undefined> {
+    try {
+      const meta = await this.#createEventImpl(this.baseUrl, name, this.#token, { fields });
+      this.selectEvent(meta);
+      return meta;
+    } catch (e) {
+      // A held token that still failed for auth, or a non-auth failure, is a real error.
+      if (this.#token || !isAuthFailure(e)) throw e;
+      // Open Director would have succeeded; a 401/403 means control is gated — prompt once.
+      if (!(await this.#promptForToken())) return undefined;
+      const meta = await this.#createEventImpl(this.baseUrl, name, this.#token, { fields });
+      this.selectEvent(meta);
+      return meta;
+    }
   }
 
   /**
    * Send a privileged command through the control client, recording any error for the UI.
-   * Obtains the RD token lazily first (issue #72): a control action is the moment auth is
-   * actually needed, so if no token is held the shell's token prompt fires; cancelling
-   * yields an `Unauthorized` ack. Returns the raw `CommandAck` so callers branch on success.
+   *
+   * Full-trust first (issue #72, Slice 1b): the command is sent **without** prompting. Against
+   * an open (unconfigured) Director it just succeeds — no prompt ever. Only if the Director
+   * **rejects it for auth** (`Unauthorized`/`Forbidden` — it has a token configured) and no
+   * token is held yet does the lazy prompt fire; on a token, the command is **retried once**
+   * and the token reused for the rest of the session. Cancelling the prompt leaves the original
+   * `Unauthorized` ack. Returns the raw `CommandAck` so callers branch on success.
    */
   async send(command: Command): Promise<CommandAck> {
     if (!this.#control) {
@@ -290,17 +340,13 @@ export class Session {
       this.lastCommandError = ack.error;
       return ack;
     }
-    // Lazy auth: only reach for the token (and its async prompt) when none is held — a
-    // held token sends immediately, keeping the common path a single await.
-    if (!this.#token && !(await this.#ensureToken())) {
-      const ack: CommandAck = {
-        ok: false,
-        error: { code: 'Unauthorized', message: 'A control token is required for this action.' }
-      };
-      this.lastCommandError = ack.error;
-      return ack;
+    let ack = await this.#control.sendCommand(command);
+    // Only an *auth* rejection with no token yet triggers the lazy prompt + one retry; any
+    // other failure (a bad transition, a transport error) is surfaced as-is.
+    if (!ack.ok && !this.#token && isAuthAck(ack) && (await this.#promptForToken())) {
+      // setToken rebuilt #control with the token; resend on the new client.
+      ack = (await this.#control?.sendCommand(command)) ?? ack;
     }
-    const ack = await this.#control.sendCommand(command);
     this.lastCommandError = ack.ok ? undefined : ack.error;
     return ack;
   }

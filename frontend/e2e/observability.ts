@@ -82,8 +82,12 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     // this fixture has none, so the pattern is empty.
     // eslint-disable-next-line no-empty-pattern
     async ({}, use) => {
+      // Boot with NO token configured (`token: false`): control is open (full-trust by
+      // default, #72 Slice 1b), so the console drives the whole race with no token step —
+      // the lazy prompt never fires. (A token-gated path can be covered by a focused spec
+      // that passes an explicit `token`.)
       const director = await startDirector({
-        token: 'test-rd-token',
+        token: false,
         assets: dist,
         simLaps: SIM_LAPS,
         simLapMs: SIM_LAP_MS

@@ -23,9 +23,9 @@ describe('setup config', () => {
   });
 
   it('validates a complete config as ready', () => {
+    // The event id/name is no longer part of the wizard config (#72, Slice 1b A1) — the
+    // console is already inside an event; the wizard only needs a track + at least one class.
     const c: EventConfig = {
-      eventId: 'spring',
-      eventName: 'Spring Cup',
       track: 'Main field',
       classes: [defaultClass('open', 'Open', 'timed-qual')]
     };
@@ -34,8 +34,8 @@ describe('setup config', () => {
   });
 
   it('flags each missing piece', () => {
-    const problems = validateConfig({ eventId: '', eventName: '', track: '', classes: [] });
-    expect(problems).toContain('Event needs a name.');
+    const problems = validateConfig({ track: '', classes: [] });
+    expect(problems).toContain('Track needs a name.');
     expect(problems).toContain('Add at least one class.');
   });
 

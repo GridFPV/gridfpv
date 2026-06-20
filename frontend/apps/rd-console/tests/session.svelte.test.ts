@@ -75,7 +75,9 @@ describe('Session', () => {
     });
   });
 
-  it('send prompts for the token lazily the first time, then reuses it', async () => {
+  it('send goes through with NO prompt against an open Director (full-trust)', async () => {
+    // An open (unconfigured) Director accepts the command tokenless, so the lazy prompt
+    // must never fire — this is the no-prompt-ever path (#72, Slice 1b).
     const { connect } = mockConnect(connecting);
     const sendCommand = vi.fn(async (): Promise<CommandAck> => okAck);
     const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
@@ -84,22 +86,53 @@ describe('Session', () => {
     const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
     session.setTokenProvider(tokenProvider);
     session.selectEvent(PRACTICE);
+
+    const ack = await session.send({ Stage: { heat: 'heat-1' } });
+    expect(ack.ok).toBe(true);
+    expect(tokenProvider).not.toHaveBeenCalled();
     expect(session.hasToken).toBe(false);
+    expect(sendCommand).toHaveBeenCalledWith({ Stage: { heat: 'heat-1' } });
+  });
+
+  it('send prompts on a 401 ack, then retries with the entered token and reuses it', async () => {
+    // A token-gated Director answers Unauthorized; the lazy prompt fires once, the command
+    // is retried with the entered token, and the token is reused for the next send.
+    const { connect } = mockConnect(connecting);
+    const unauthorized: CommandAck = {
+      ok: false,
+      error: { code: 'Unauthorized', message: 'gated' }
+    };
+    let calls = 0;
+    const sendCommand = vi.fn(async (): Promise<CommandAck> => {
+      calls += 1;
+      // Reject until a token is held (the factory is re-invoked with the token on retry).
+      return calls === 1 ? unauthorized : okAck;
+    });
+    const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+
+    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    session.setTokenProvider(tokenProvider);
+    session.selectEvent(PRACTICE);
 
     const ack = await session.send({ Stage: { heat: 'heat-1' } });
     expect(ack.ok).toBe(true);
     expect(tokenProvider).toHaveBeenCalledOnce();
     expect(session.hasToken).toBe(true);
-    expect(sendCommand).toHaveBeenCalledWith({ Stage: { heat: 'heat-1' } });
+    expect(sendCommand).toHaveBeenCalledTimes(2); // initial reject + retry
 
-    // Second send reuses the held token — no second prompt.
+    // A subsequent send reuses the held token — no second prompt.
     await session.send({ Arm: { heat: 'heat-1' } });
     expect(tokenProvider).toHaveBeenCalledOnce();
   });
 
-  it('send returns Unauthorized when the RD cancels the token prompt', async () => {
+  it('send surfaces the Unauthorized ack when the RD cancels the token prompt', async () => {
     const { connect } = mockConnect(connecting);
-    const sendCommand = vi.fn(async (): Promise<CommandAck> => okAck);
+    const unauthorized: CommandAck = {
+      ok: false,
+      error: { code: 'Unauthorized', message: 'gated' }
+    };
+    const sendCommand = vi.fn(async (): Promise<CommandAck> => unauthorized);
     const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
     const tokenProvider = vi.fn(async () => undefined); // cancelled
 
@@ -110,7 +143,8 @@ describe('Session', () => {
     const ack = await session.send({ Stage: { heat: 'heat-1' } });
     expect(ack.ok).toBe(false);
     expect(ack.error?.code).toBe('Unauthorized');
-    expect(sendCommand).not.toHaveBeenCalled();
+    expect(tokenProvider).toHaveBeenCalledOnce();
+    expect(session.hasToken).toBe(false);
   });
 
   it('send routes a Command and records control errors when a token is held', async () => {
@@ -155,9 +189,69 @@ describe('Session', () => {
     session.setToken('tok');
 
     const meta = await session.createEventAndEnter('Friday Series');
-    expect(createEventImpl).toHaveBeenCalledWith(session.baseUrl, 'Friday Series', 'tok');
+    expect(createEventImpl).toHaveBeenCalledWith(session.baseUrl, 'Friday Series', 'tok', {
+      fields: undefined
+    });
     expect(meta?.id).toBe('evt-a');
     expect(session.currentEvent?.id).toBe('evt-a');
+  });
+
+  it('createEventAndEnter creates tokenless against an open Director (no prompt)', async () => {
+    const { connect } = mockConnect(connecting);
+    const controlFactory = vi.fn(() => ({
+      baseUrl: 'http://d.local',
+      sendCommand: vi.fn(async () => okAck)
+    }));
+    const createEventImpl = vi.fn(async () => EVENT_A);
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+
+    const session = new Session({
+      connectImpl: connect,
+      controlFactory,
+      createEventImpl,
+      autoRestore: false
+    });
+    session.setTokenProvider(tokenProvider);
+
+    const meta = await session.createEventAndEnter('Friday Series', {
+      date: '2026-06-20',
+      location: 'Main field'
+    });
+    // Sent with no token and the optional fields forwarded; no prompt against an open Director.
+    expect(createEventImpl).toHaveBeenCalledWith(session.baseUrl, 'Friday Series', undefined, {
+      fields: { date: '2026-06-20', location: 'Main field' }
+    });
+    expect(tokenProvider).not.toHaveBeenCalled();
+    expect(meta?.id).toBe('evt-a');
+  });
+
+  it('createEventAndEnter prompts + retries when the Director gates create with a 401', async () => {
+    const { connect } = mockConnect(connecting);
+    const controlFactory = vi.fn(() => ({
+      baseUrl: 'http://d.local',
+      sendCommand: vi.fn(async () => okAck)
+    }));
+    let calls = 0;
+    const createEventImpl = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('POST /events failed: HTTP 401');
+      return EVENT_A;
+    });
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+
+    const session = new Session({
+      connectImpl: connect,
+      controlFactory,
+      createEventImpl,
+      autoRestore: false
+    });
+    session.setTokenProvider(tokenProvider);
+
+    const meta = await session.createEventAndEnter('Friday Series');
+    expect(tokenProvider).toHaveBeenCalledOnce();
+    expect(createEventImpl).toHaveBeenCalledTimes(2);
+    expect(session.hasToken).toBe(true);
+    expect(meta?.id).toBe('evt-a');
   });
 
   it('leaveEvent tears the read client down and returns to the picker', () => {

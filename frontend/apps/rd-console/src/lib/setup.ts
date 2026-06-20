@@ -18,14 +18,7 @@
  * though the event/class/track steps are local-only.
  */
 
-import type {
-  ClassId,
-  Command,
-  CompetitorRef,
-  EventId,
-  HeatId,
-  WinCondition
-} from '@gridfpv/types';
+import type { ClassId, Command, CompetitorRef, HeatId, WinCondition } from '@gridfpv/types';
 
 /** The race format a class runs under (roadmap v0.4: timed-qual / single-elim / zippyq). */
 export type RaceFormat = 'timed-qual' | 'single-elim' | 'zippyq';
@@ -49,12 +42,15 @@ export interface ClassConfig {
   winCondition: WinCondition;
 }
 
-/** The whole event configuration the wizard produces. */
+/**
+ * The whole event configuration the wizard produces.
+ *
+ * The event itself (id + name) is **no longer part of the wizard** (#72, Slice 1b A1): the
+ * console is always already inside an event, so the wizard configures that event's classes /
+ * track / format and never asks for the event again — the id/name are owned by the
+ * {@link EventMeta} the session holds, not collected here.
+ */
 export interface EventConfig {
-  /** Event id (a stable handle the RD names). */
-  eventId: EventId;
-  /** Human event name. */
-  eventName: string;
   /** Track / venue name (free text until a track model exists on the wire). */
   track: string;
   /** The classes configured for the event (at least one). */
@@ -78,7 +74,7 @@ export function defaultWinCondition(format: RaceFormat): WinCondition {
 
 /** An empty config to seed the wizard. */
 export function emptyConfig(): EventConfig {
-  return { eventId: '', eventName: '', track: '', classes: [] };
+  return { track: '', classes: [] };
 }
 
 /** Build a default class config for `format`. */
@@ -92,8 +88,6 @@ export function defaultClass(id: ClassId, name: string, format: RaceFormat): Cla
  */
 export function validateConfig(config: EventConfig): string[] {
   const problems: string[] = [];
-  if (!config.eventName.trim()) problems.push('Event needs a name.');
-  if (!config.eventId.trim()) problems.push('Event needs an id.');
   if (!config.track.trim()) problems.push('Track needs a name.');
   if (config.classes.length === 0) problems.push('Add at least one class.');
   config.classes.forEach((c, i) => {

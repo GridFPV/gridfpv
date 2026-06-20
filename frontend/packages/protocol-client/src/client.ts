@@ -211,25 +211,30 @@ export async function listEvents(
 }
 
 /**
- * Create a new event (`POST /events`) — issue #72. RD-gated: a valid RD `token` is required
- * (the id is auto-generated server-side; the body carries only the display `name`). Resolves
- * to the new event's {@link EventMeta}, or rejects on a non-2xx / transport failure.
+ * Create a new event (`POST /events`) — issue #72. Control is **full-trust by default**
+ * (#72, Slice 1b): the `token` is **optional** — an open (unconfigured) Director accepts the
+ * create with no credential; a token-gated Director answers **401/403** and the caller obtains
+ * a token lazily and retries. The body carries the display `name` plus any optional descriptive
+ * `fields` (`date`/`location`/`description`/`organizer`); the id is auto-generated server-side.
+ * Resolves to the new event's {@link EventMeta}, or rejects on a non-2xx / transport failure
+ * (the HTTP status is in the error message so the caller can branch on 401/403).
  */
 export async function createEvent(
   baseUrl: string,
   name: string,
-  token: string,
-  options: { fetch?: FetchLike } = {}
+  token?: string,
+  options: { fetch?: FetchLike; fields?: Omit<CreateEventRequest, 'name'> } = {}
 ): Promise<EventMeta> {
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const body: CreateEventRequest = { name };
+  const body: CreateEventRequest = { name, ...(options.fields ?? {}) };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/events`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      Authorization: `Bearer ${token}`
-    },
+    headers,
     body: JSON.stringify(body)
   });
   if (!resp.ok) throw new Error(`POST /events failed: HTTP ${resp.status}`);

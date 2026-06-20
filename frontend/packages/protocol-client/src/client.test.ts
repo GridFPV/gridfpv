@@ -428,4 +428,37 @@ describe('events lifecycle helpers (#72)', () => {
     expect(meta.id).toBe('race-night-xy99');
     expect(meta.persistent).toBe(true);
   });
+
+  it('createEvent omits Authorization when no token is given (full-trust open Director) and forwards optional fields', async () => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => ({
+          id: 'spring-cup-ab12',
+          name: 'Spring Cup',
+          created_at: 3,
+          persistent: true,
+          date: '2026-06-20',
+          location: 'Main field'
+        })
+      } as unknown as Response;
+    };
+    const { createEvent } = await import('./client.js');
+    const meta = await createEvent('http://director.local:8080', 'Spring Cup', undefined, {
+      fetch,
+      fields: { date: '2026-06-20', location: 'Main field' }
+    });
+    const headers = seen[0].init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({
+      name: 'Spring Cup',
+      date: '2026-06-20',
+      location: 'Main field'
+    });
+    expect(meta.date).toBe('2026-06-20');
+    expect(meta.location).toBe('Main field');
+  });
 });

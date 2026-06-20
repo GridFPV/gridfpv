@@ -28,4 +28,23 @@ created_at: number,
  * Whether the event's log is durable (a SQLite file) or ephemeral (the in-memory
  * Practice log, `false`).
  */
-persistent: boolean, };
+persistent: boolean, 
+/**
+ * Optional **display date** of the event, as a free-form string (e.g. `"2026-06-20"` or
+ * `"Sat 20 Jun"`). A string, not an epoch — it is a *human label the RD types*, shown
+ * verbatim on the picker and (later) the context header; the authoritative machine
+ * timestamp is [`created_at`](Self::created_at). Omitted from the wire when unset.
+ */
+date?: string, 
+/**
+ * Optional venue / location label (e.g. `"Main field"`). Omitted from the wire when unset.
+ */
+location?: string, 
+/**
+ * Optional free-text description / notes for the event. Omitted from the wire when unset.
+ */
+description?: string, 
+/**
+ * Optional organizer name (the running club / person). Omitted from the wire when unset.
+ */
+organizer?: string, };

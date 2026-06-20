@@ -32,8 +32,15 @@ export const DIRECTOR_BIN = resolve(repoRoot, 'target', 'debug', 'gridfpv');
 export interface StartDirectorOptions {
   /** Port to bind. Default: an ephemeral free port picked by the OS. */
   port?: number;
-  /** The known RD control token to pin (`GRIDFPV_RD_TOKEN`). Default: a fresh per-call token. */
-  token?: string;
+  /**
+   * The known RD control token to pin (`GRIDFPV_RD_TOKEN`). Default: a fresh per-call token.
+   *
+   * Pass **`false`** to start the Director with **no token configured** — `GRIDFPV_RD_TOKEN`
+   * is left unset, so the control path is **open** (full-trust by default, #72 Slice 1b). The
+   * returned handle's `token` is then the empty string. This is the posture the no-token e2e
+   * exercises (picker → Practice → build heat → control with no token step).
+   */
+  token?: string | false;
   /** Built RD console `dist/` dir to serve as the SPA (`GRIDFPV_ASSETS`). Default: unset (API only). */
   assets?: string;
   /** Number of sim laps per heat (`GRIDFPV_SIM_LAPS`). Default: `4`. */
@@ -93,6 +100,10 @@ export async function startDirector(opts: StartDirectorOptions = {}): Promise<Di
     build = true,
     readyTimeoutMs = 30_000
   } = opts;
+  // `token: false` means "configure no token" — leave GRIDFPV_RD_TOKEN unset so control is
+  // open (full-trust, #72). The handle's `token` is then the empty string.
+  const tokenEnv: Record<string, string> = token === false ? {} : { GRIDFPV_RD_TOKEN: token };
+  const handleToken = token === false ? '' : token;
 
   // Build the binary on demand so a fresh checkout / CI just works.
   if (build && !existsSync(DIRECTOR_BIN)) {
@@ -124,7 +135,7 @@ export async function startDirector(opts: StartDirectorOptions = {}): Promise<Di
     env: {
       ...process.env,
       GRIDFPV_ADDR: `127.0.0.1:${port}`,
-      GRIDFPV_RD_TOKEN: token,
+      ...tokenEnv,
       GRIDFPV_SIM_LAPS: String(simLaps),
       GRIDFPV_SIM_LAP_MS: String(simLapMs),
       ...(assets ? { GRIDFPV_ASSETS: assets } : {}),
@@ -180,5 +191,5 @@ export async function startDirector(opts: StartDirectorOptions = {}): Promise<Di
     await sleep(150);
   }
 
-  return { baseUrl, token, readLogs, stop };
+  return { baseUrl, token: handleToken, readLogs, stop };
 }
