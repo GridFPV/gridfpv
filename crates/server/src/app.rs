@@ -336,20 +336,22 @@ async fn list_events(State(registry): State<EventRegistry>) -> Json<Vec<EventMet
     Json(registry.list())
 }
 
-/// `POST /events` — create a new event from a display `name`, RD-gated (issue #72).
+/// `POST /events` — create a new event from a [`CreateEventRequest`], RD-gated (issue #72).
 ///
-/// [`ControlAuth`] runs first: only an authenticated **RD** may create an event. The id is
-/// **auto-generated** (a slug of the name + a short random suffix) — names are display-only,
-/// ids are never user-entered. The event gets its own SQLite-backed log under the configured
-/// data dir (or an in-memory log when none is configured) and the freshly-created
-/// [`EventMeta`] is returned.
+/// [`ControlAuth`] runs first: only an authenticated **RD** may create an event (and with
+/// full-trust by default the control gate is open until a token is configured — #72 Slice 1b).
+/// The id is **auto-generated** (a slug of the name + a short random suffix) — names are
+/// display-only, ids are never user-entered. The request's optional descriptive fields
+/// (`date`/`location`/`description`/`organizer`) are stored on the new event's meta. The event
+/// gets its own SQLite-backed log under the configured data dir (or an in-memory log when none
+/// is configured) and the freshly-created [`EventMeta`] is returned.
 async fn create_event(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
     Json(body): Json<CreateEventRequest>,
 ) -> Result<Json<EventMeta>, ProtocolError> {
     let meta = registry
-        .create(&body.name)
+        .create(&body)
         .map_err(|e| ProtocolError::new(ErrorCode::Internal, e.to_string()))?;
     Ok(Json(meta))
 }
@@ -1204,10 +1206,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minting_a_join_token_requires_an_rd_token() {
+    async fn minting_a_join_token_requires_an_rd_token_once_one_is_configured() {
         let (registry, state, _) = state_with(recorded_heat());
+        // Configure a control credential so the full-trust default closes (#72, Slice 1b):
+        // without this, control is open and a no-token mint would succeed.
+        let _rd = state.tokens().issue_rd_token();
 
-        // No token → 401.
+        // No token → 401 (control is now gated).
         let (status, _) = post_join_token(registry.clone(), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -1219,5 +1224,15 @@ mod tests {
         // An unknown token → 401.
         let (status, _) = post_join_token(registry, Some("not-a-real-token")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn minting_a_join_token_is_open_when_no_rd_token_is_configured() {
+        // Full-trust default (#72, Slice 1b): an unconfigured Director has no control
+        // credential, so a no-token caller may mint a join token (control is open).
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, body) = post_join_token(registry, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.is_some_and(|b| !b.token.is_empty()));
     }
 }

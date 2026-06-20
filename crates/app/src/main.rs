@@ -43,16 +43,17 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // events created via `POST /events` get a SQLite file under the configured data dir.
     let registry = EventRegistry::new(config.data_dir.clone())?;
 
-    // Mint (or pin) the RD's control token up front and print it with the URL so the RD
-    // console (or the Tauri app) can log straight in. The store is Director-wide (shared
-    // across every event), so one token controls all events. If `GRIDFPV_RD_TOKEN` is set to
-    // a non-blank value it is registered verbatim — a *known* credential so an automated
-    // client (the Playwright e2e, the Tauri app under test) can log in deterministically;
-    // otherwise a fresh random token is minted.
+    // Control auth is **full-trust (open) by default** (issue #72, Slice 1b): the control
+    // path requires no credential unless one is *configured*. So we only register an RD token
+    // when `GRIDFPV_RD_TOKEN` is set to a non-blank value — a *known* credential so an
+    // automated/remote client (the Tauri app, a token-gated deployment) can log in
+    // deterministically; with the env unset the Director registers **no** token and control is
+    // open (safe on loopback / a trusted LAN). The proper loopback-trust + remote-passphrase
+    // split for production is tracked separately as #80.
     let tokens = registry.tokens();
     let rd_token = match std::env::var("GRIDFPV_RD_TOKEN") {
-        Ok(value) if tokens.register_rd_token(&value) => value,
-        _ => tokens.issue_rd_token(),
+        Ok(value) if tokens.register_rd_token(&value) => Some(value),
+        _ => None,
     };
 
     // Resolve the built-in lap source (default `sim`) and spawn the **per-event**
@@ -68,7 +69,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     let bound = listener.local_addr()?;
-    print_startup(&config, bound, &rd_token, &source_desc);
+    print_startup(&config, bound, rd_token.as_deref(), &source_desc);
 
     // Serve until Ctrl-C; the protocol API + the RD console SPA are live on `bound`.
     axum::serve(listener, app)
@@ -80,8 +81,15 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Print the Director's login details on startup: the URL, the RD token (so the RD can
-/// authenticate the control path), the log backing, and the asset-dir status.
-fn print_startup(config: &Config, bound: std::net::SocketAddr, rd_token: &str, source_desc: &str) {
+/// authenticate the control path), the log backing, and the asset-dir status. With no token
+/// configured (`rd_token` is `None`) the control path is **open** (full-trust by default,
+/// #72) — print that instead of a token.
+fn print_startup(
+    config: &Config,
+    bound: std::net::SocketAddr,
+    rd_token: Option<&str>,
+    source_desc: &str,
+) {
     // For the console URL prefer a loopback-friendly host when bound to all interfaces.
     let url_host = if bound.ip().is_unspecified() {
         format!("127.0.0.1:{}", bound.port())
@@ -92,8 +100,19 @@ fn print_startup(config: &Config, bound: std::net::SocketAddr, rd_token: &str, s
     println!("GridFPV Director {} — serving", env!("CARGO_PKG_VERSION"));
     println!("  listening on : http://{bound}");
     println!("  console URL  : http://{url_host}/");
-    println!("  RD token     : {rd_token}");
-    println!("    (use as `Authorization: Bearer {rd_token}` on the control path)");
+    match rd_token {
+        Some(rd_token) => {
+            println!("  RD token     : {rd_token}");
+            println!("    (use as `Authorization: Bearer {rd_token}` on the control path)");
+        }
+        None => {
+            println!("  RD token     : (none — control is OPEN, full-trust)");
+            println!(
+                "    (no GRIDFPV_RD_TOKEN configured: the control path requires no credential — \
+                 safe on loopback / a trusted LAN; set GRIDFPV_RD_TOKEN to gate control)"
+            );
+        }
+    }
     match &config.data_dir {
         Some(dir) => println!(
             "  events       : Practice (in-memory) + created events persist under {}",

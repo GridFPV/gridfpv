@@ -189,31 +189,71 @@ impl TokenStore {
             .cloned()
     }
 
-    /// Authenticate a control caller: a token resolving to a **control-authorized**
-    /// session ([`Role::can_control`]) succeeds; anything else — `None` token, an unknown
-    /// or revoked token, or a read-only/join token — is [`ErrorCode::Unauthorized`].
+    /// Whether **any control credential is configured** — i.e. at least one registered
+    /// session may drive control ([`Role::can_control`]).
+    ///
+    /// This is the switch behind the **full-trust (open-by-default) control posture**
+    /// (issue #72, Slice 1b): the Director only registers an RD token when one is
+    /// *configured* (a `GRIDFPV_RD_TOKEN` env, or an RD minting one), so an unconfigured
+    /// Director has **no** control credential and [`authenticate_control`](Self::authenticate_control)
+    /// admits an anonymous caller. The moment a token is configured, control is gated again.
+    ///
+    /// Read-only/join tokens do **not** count — they can never control, so issuing a venue
+    /// QR never accidentally locks the control path.
+    ///
+    /// This is the **dev/local-trust** posture (safe on loopback / a trusted LAN). The proper
+    /// loopback-trust + remote-passphrase split (open on `127.0.0.1`, gated for a remote
+    /// binding) is tracked separately as #80 and is **not** built here.
+    pub fn has_control_credential(&self) -> bool {
+        self.sessions
+            .read()
+            .expect("token store lock poisoned")
+            .values()
+            .any(|s| s.role.can_control())
+    }
+
+    /// Authenticate a control caller (issue #72, Slice 1b — full-trust by default).
+    ///
+    /// Policy, in order:
+    /// - **No control credential configured** ([`has_control_credential`](Self::has_control_credential)
+    ///   is `false`) ⇒ control is **open**: an anonymous (no-token) caller is admitted
+    ///   ([`Role::Rd`]). This is the local-trust posture for an unconfigured Director.
+    /// - **A token is present** ⇒ it is always validated, even on an otherwise-open Director:
+    ///   a present-but-unknown/revoked token, or a read-only/join token, is rejected. (So a
+    ///   stale token never silently succeeds.)
+    /// - **A control credential IS configured** and **no token** is presented ⇒ rejected.
+    ///   This preserves the original gated behaviour the moment a token is configured.
     ///
     /// This is the whole control policy in one place; [`ControlAuth`] is the only caller
-    /// (see [`crate::control_handler`]).
+    /// (see [`crate::control_handler`]). The loopback/remote split is #80 (not built here).
     ///
     /// [`ControlAuth`]: crate::control_handler::ControlAuth
     pub fn authenticate_control(&self, token: Option<&str>) -> Result<Session, ProtocolError> {
-        let token = token.ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::Unauthorized,
-                "control requires an Authorization: Bearer <RD token> header",
-            )
-        })?;
-        match self.session(token) {
-            Some(session) if session.role.can_control() => Ok(session),
-            Some(_) => Err(ProtocolError::new(
-                ErrorCode::Unauthorized,
-                "this token is read-only and may not drive control",
-            )),
-            None => Err(ProtocolError::new(
-                ErrorCode::Unauthorized,
-                "unknown or revoked control token",
-            )),
+        match token {
+            // A present token is always validated, on an open or gated Director alike.
+            Some(token) => match self.session(token) {
+                Some(session) if session.role.can_control() => Ok(session),
+                Some(_) => Err(ProtocolError::new(
+                    ErrorCode::Unauthorized,
+                    "this token is read-only and may not drive control",
+                )),
+                None => Err(ProtocolError::new(
+                    ErrorCode::Unauthorized,
+                    "unknown or revoked control token",
+                )),
+            },
+            // No token: open when nothing is configured (full trust), else gated.
+            None => {
+                if self.has_control_credential() {
+                    Err(ProtocolError::new(
+                        ErrorCode::Unauthorized,
+                        "control requires an Authorization: Bearer <RD token> header",
+                    ))
+                } else {
+                    // Full-trust: no credential configured, so an anonymous caller controls.
+                    Ok(Session { role: Role::Rd })
+                }
+            }
         }
     }
 
@@ -337,13 +377,55 @@ mod tests {
     }
 
     #[test]
-    fn no_token_is_rejected_on_control_but_allowed_on_read() {
+    fn no_token_is_open_on_control_when_nothing_configured_and_always_open_on_read() {
+        // Full-trust (#72, Slice 1b): an unconfigured store has no control credential, so a
+        // no-token control caller is admitted as an RD; reads are open regardless.
         let store = TokenStore::new();
+        assert!(!store.has_control_credential());
+        let session = store.authenticate_control(None).unwrap();
+        assert_eq!(session.role, Role::Rd);
+        assert!(store.authenticate_read(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn no_token_is_rejected_on_control_once_a_control_token_is_configured() {
+        // The moment an RD token is configured the open posture closes: a no-token control
+        // caller is rejected, but the configured token still works.
+        let store = TokenStore::new();
+        let token = store.issue_rd_token();
+        assert!(store.has_control_credential());
         assert_eq!(
             store.authenticate_control(None).unwrap_err().code,
             ErrorCode::Unauthorized
         );
-        assert!(store.authenticate_read(None).unwrap().is_none());
+        assert!(store.authenticate_control(Some(&token)).is_ok());
+    }
+
+    #[test]
+    fn a_join_token_alone_does_not_configure_control_so_control_stays_open() {
+        // A read-only join token can never control, so issuing one (a venue QR) must not
+        // accidentally lock the open control path.
+        let store = TokenStore::new();
+        let _join = store.issue_join_token();
+        assert!(!store.has_control_credential());
+        assert!(store.authenticate_control(None).is_ok());
+    }
+
+    #[test]
+    fn a_present_but_invalid_token_is_rejected_even_on_an_open_director() {
+        // Even with nothing configured (open), a *presented* token must be valid — a stale
+        // token never silently succeeds.
+        let store = TokenStore::new();
+        assert_eq!(
+            store.authenticate_control(Some("stale")).unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        // A read-only token presented on control is still rejected, open or not.
+        let join = store.issue_join_token();
+        assert_eq!(
+            store.authenticate_control(Some(&join)).unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
     }
 
     #[test]
