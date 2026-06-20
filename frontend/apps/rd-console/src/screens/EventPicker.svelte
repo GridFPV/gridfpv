@@ -12,9 +12,9 @@
    * for the RD token (handled by the session's token provider). The Director address is the
    * page's own origin — there is no address to type.
    */
-  import { Button, Card, Badge, Dialog, Field, Input, toast } from '@gridfpv/components';
+  import { Button, Card, Dialog, Field, Input, toast } from '@gridfpv/components';
   import type { EventMeta } from '@gridfpv/types';
-  import type { Session } from '../lib/session.svelte.js';
+  import type { Session, CreateEventFields } from '../lib/session.svelte.js';
   import { PRACTICE_EVENT_ID } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -26,9 +26,15 @@
 
   let loadState = $state<LoadState>({ kind: 'loading' });
 
-  // The "new event" dialog.
+  // The "new event" dialog. Name-only is the one-click default (#72, Slice 1b C); the
+  // optional descriptive fields live behind a collapsible "Add details" section.
   let newOpen = $state(false);
   let newName = $state('');
+  let newDate = $state('');
+  let newLocation = $state('');
+  let newDescription = $state('');
+  let newOrganizer = $state('');
+  let detailsOpen = $state(false);
   let creating = $state(false);
   let newError = $state<string | undefined>(undefined);
 
@@ -70,14 +76,41 @@
     }
   }
 
+  /**
+   * The subtle row subtitle: show the RD-supplied **date** and **location** where present
+   * (#72, Slice 1b C), falling back to the created date. The full context header is #85.
+   */
+  function rowSubtitle(ev: EventMeta): string {
+    const parts: string[] = [];
+    if (ev.date?.trim()) parts.push(ev.date.trim());
+    if (ev.location?.trim()) parts.push(ev.location.trim());
+    if (parts.length > 0) return parts.join(' · ');
+    return `Created ${formatDate(ev.created_at)}`;
+  }
+
   function enter(meta: EventMeta) {
     session.selectEvent(meta);
   }
 
   function openNew() {
     newName = '';
+    newDate = '';
+    newLocation = '';
+    newDescription = '';
+    newOrganizer = '';
+    detailsOpen = false;
     newError = undefined;
     newOpen = true;
+  }
+
+  /** Collect the optional detail fields, omitting blanks (server normalizes too). */
+  function detailFields(): CreateEventFields | undefined {
+    const fields: CreateEventFields = {};
+    if (newDate.trim()) fields.date = newDate.trim();
+    if (newLocation.trim()) fields.location = newLocation.trim();
+    if (newDescription.trim()) fields.description = newDescription.trim();
+    if (newOrganizer.trim()) fields.organizer = newOrganizer.trim();
+    return Object.keys(fields).length > 0 ? fields : undefined;
   }
 
   async function submitNew(e: Event) {
@@ -87,7 +120,7 @@
     creating = true;
     newError = undefined;
     try {
-      const meta = await session.createEventAndEnter(name);
+      const meta = await session.createEventAndEnter(name, detailFields());
       if (!meta) {
         // The RD cancelled the lazy token prompt — keep the dialog open, hint why.
         newError = 'A control token is required to create an event.';
@@ -150,13 +183,16 @@
     {:else}
       {#if practice}
         <section class="practice-wrap" aria-label="Practice">
-          <button type="button" class="event-row practice" onclick={() => enter(practice)}>
+          <button
+            type="button"
+            class="event-row practice"
+            onclick={() => enter(practice)}
+            title="No setup — just fly. Nothing here is saved."
+          >
             <span class="event-icon practice-icon" aria-hidden="true">▶</span>
             <span class="event-main">
               <span class="event-name">{practice.name}</span>
-              <span class="event-sub">No setup — just fly. Nothing here is saved.</span>
             </span>
-            <Badge tone="info" variant="soft">Practice</Badge>
             <span class="event-go" aria-hidden="true">→</span>
           </button>
         </section>
@@ -178,11 +214,8 @@
                   <span class="event-icon" aria-hidden="true">●</span>
                   <span class="event-main">
                     <span class="event-name">{ev.name}</span>
-                    <span class="event-sub">Created {formatDate(ev.created_at)}</span>
+                    <span class="event-sub">{rowSubtitle(ev)}</span>
                   </span>
-                  <Badge tone={ev.persistent ? 'accent' : 'neutral'} variant="soft">
-                    {ev.persistent ? 'Persistent' : 'Ephemeral'}
-                  </Badge>
                   <span class="event-go" aria-hidden="true">→</span>
                 </button>
               </li>
@@ -207,6 +240,45 @@
     <p class="new-hint">
       A persistent event keeps its heats, registration, and results. The id is generated for you.
     </p>
+
+    <!-- Optional details behind a collapsible section — name-only stays one-click (#72 C). -->
+    <details class="details" bind:open={detailsOpen}>
+      <summary>Add details (optional)</summary>
+      <div class="details-grid">
+        <Field label="Date">
+          <Input
+            bind:value={newDate}
+            placeholder="e.g. 2026-06-20"
+            aria-label="Event date"
+            autocomplete="off"
+          />
+        </Field>
+        <Field label="Location">
+          <Input
+            bind:value={newLocation}
+            placeholder="e.g. Main field"
+            aria-label="Event location"
+            autocomplete="off"
+          />
+        </Field>
+        <Field label="Organizer">
+          <Input
+            bind:value={newOrganizer}
+            placeholder="e.g. City FPV Club"
+            aria-label="Event organizer"
+            autocomplete="off"
+          />
+        </Field>
+        <Field label="Description">
+          <Input
+            bind:value={newDescription}
+            placeholder="A short note about the event"
+            aria-label="Event description"
+            autocomplete="off"
+          />
+        </Field>
+      </div>
+    </details>
   </form>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (newOpen = false)} disabled={creating}>Cancel</Button>
@@ -451,5 +523,26 @@
     margin: 0;
     font-size: var(--gf-font-size-xs);
     color: var(--gf-text-muted);
+  }
+  .details {
+    border-top: 1px solid var(--gf-border-subtle);
+    padding-top: var(--gf-space-3);
+  }
+  .details > summary {
+    cursor: pointer;
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-medium);
+    color: var(--gf-text-secondary);
+    list-style: revert;
+    user-select: none;
+  }
+  .details > summary:hover {
+    color: var(--gf-text);
+  }
+  .details-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+    margin-top: var(--gf-space-3);
   }
 </style>

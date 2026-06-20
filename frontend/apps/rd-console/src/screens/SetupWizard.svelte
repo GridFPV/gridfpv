@@ -21,8 +21,13 @@
 
   let {
     config = $bindable(),
+    eventName = '',
     oncommit = undefined
-  }: { config: EventConfig; oncommit?: (config: EventConfig) => void } = $props();
+  }: {
+    config: EventConfig;
+    eventName?: string;
+    oncommit?: (config: EventConfig) => void;
+  } = $props();
 
   const steps = ['Event', 'Classes', 'Track', 'Format', 'Review'] as const;
   let step = $state(0);
@@ -96,10 +101,12 @@
   <div class="panel">
     {#if step === 0}
       <h3>Event</h3>
-      <label
-        >Name <input type="text" bind:value={config.eventName} placeholder="Spring Cup" /></label
-      >
-      <label>Id <input type="text" bind:value={config.eventId} placeholder="spring-cup" /></label>
+      <!-- The console is already inside an event (#72), so the wizard never asks for the
+           event again — it just shows which one you're configuring (Slice 1b A1). -->
+      <p class="current-event">
+        Configuring <strong>{eventName || 'this event'}</strong>.
+      </p>
+      <p class="muted">Set up the classes, track, and format for this event below.</p>
     {:else if step === 1}
       <h3>Classes</h3>
       {#if config.classes.length === 0}
@@ -167,7 +174,7 @@
       <h3>Review</h3>
       <dl class="review">
         <dt>Event</dt>
-        <dd>{config.eventName} <code>({config.eventId})</code></dd>
+        <dd>{eventName || 'this event'}</dd>
         <dt>Track</dt>
         <dd>{config.track}</dd>
         <dt>Classes</dt>
@@ -319,13 +326,18 @@
     margin: var(--gf-space-1) 0 var(--gf-space-3);
     font-size: var(--gf-font-size-sm);
   }
-  .review code {
-    color: var(--gf-text-muted);
-    font-family: var(--gf-font-mono);
-  }
   .muted {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
+  }
+  .current-event {
+    margin: 0;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+  }
+  .current-event strong {
+    color: var(--gf-text);
+    font-weight: var(--gf-font-weight-semibold);
   }
   .problems {
     color: var(--gf-danger);

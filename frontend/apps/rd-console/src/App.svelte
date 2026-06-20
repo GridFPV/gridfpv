@@ -52,11 +52,10 @@
   // The setup wizard's config lives at the shell so it survives screen switches.
   let config = $state<EventConfig>(emptyConfig());
 
-  function onSetupCommit(committed: EventConfig) {
-    // Re-scope the live read client to the configured event once it's known.
-    if (committed.eventId.trim()) {
-      session.resubscribe({ Event: { event: committed.eventId.trim() } });
-    }
+  function onSetupCommit() {
+    // The console is already inside an event (#72) — the live read client was scoped to it on
+    // entry — so committing the wizard just advances to registration; there is no separate
+    // event to re-scope to (the redundant event field was removed, #72 Slice 1b A1).
     active = 'registration';
   }
 
@@ -169,9 +168,13 @@
     <div class="main-col">
       <header class="topbar">
         <div class="crumbs">
-          <button type="button" class="event-switch" onclick={leaveToPicker} title="Switch event">
-            <span class="event-name" title={eventName}>{eventName}</span>
-            <span class="event-caret" aria-hidden="true">⌄</span>
+          <button
+            type="button"
+            class="event-home"
+            onclick={() => (active = 'live')}
+            title={`${eventName} — go to live control`}
+          >
+            <span class="event-name">{eventName}</span>
           </button>
           <span class="sep" aria-hidden="true">/</span>
           <h1 class="screen-title">{activeScreen?.label}</h1>
@@ -204,7 +207,11 @@
 
       <main class="content">
         {#if active === 'setup'}
-          <SetupWizard bind:config oncommit={onSetupCommit} />
+          <SetupWizard
+            bind:config
+            eventName={session.currentEvent?.name ?? ''}
+            oncommit={onSetupCommit}
+          />
         {:else if active === 'registration'}
           <Registration {session} />
         {:else if active === 'live'}
@@ -449,10 +456,9 @@
     gap: var(--gf-space-3);
     min-width: 0;
   }
-  .event-switch {
+  .event-home {
     display: inline-flex;
     align-items: center;
-    gap: var(--gf-space-1);
     max-width: 16rem;
     padding: var(--gf-space-1) var(--gf-space-2);
     margin-left: calc(-1 * var(--gf-space-2));
@@ -468,7 +474,7 @@
       background var(--gf-motion-fast) var(--gf-ease-out),
       color var(--gf-motion-fast) var(--gf-ease-out);
   }
-  .event-switch:hover {
+  .event-home:hover {
     background: var(--gf-elevated);
     border-color: var(--gf-border);
     color: var(--gf-text);
@@ -478,11 +484,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-weight: var(--gf-font-weight-semibold);
-  }
-  .event-caret {
-    color: var(--gf-text-faint);
-    font-size: var(--gf-font-size-sm);
-    flex-shrink: 0;
   }
   .sep {
     color: var(--gf-text-faint);
