@@ -160,10 +160,7 @@ describe('seam 9b: the Director active event (#90)', () => {
   }
 
   /** `PUT /active-event` with `{ id }` and an optional bearer token → raw status + parsed body. */
-  async function putActive(
-    id: string,
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
+  async function putActive(id: string, token?: string): Promise<{ status: number; body: unknown }> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token !== undefined) headers.Authorization = `Bearer ${token}`;
     const res = await fetch(`${director.baseUrl}/active-event`, {
