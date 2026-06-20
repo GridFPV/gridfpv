@@ -202,7 +202,13 @@ export function connect(options: ConnectOptions): ProtocolClient {
 
   // ── Mutable connection state ───────────────────────────────────────────────
   let body: ProjectionBody | undefined;
+  // The snapshot `cursor` is a log offset (protocol.html §2) used ONLY as the `from:`
+  // resume point — it is not the stream's ordering counter.
   let cursor: Cursor | undefined;
+  // The per-stream `sequence` axis (protocol.html §3/§9.5): starts at 1 on each
+  // subscription, distinct from `cursor`. Reset to 0 on every (re)subscribe so the
+  // first envelope is accepted whatever the snapshot cursor's value.
+  let streamSeq: Cursor = 0n;
   let status: ConnectionStatus = 'connecting';
   let lastError: ProtocolError | undefined;
 
@@ -273,30 +279,38 @@ export function connect(options: ConnectOptions): ProtocolClient {
   // (missed envelopes → caller must re-snapshot).
   function applyEnvelope(env: ChangeEnvelope): 'applied' | 'duplicate' | 'gap' {
     const seq = env.sequence;
-    if (cursor !== undefined) {
-      // Idempotent, keyed by sequence: anything at or below the cursor is a no-op.
-      if (seq <= cursor) return 'duplicate';
-      // The stream is contiguous: the next envelope must be exactly cursor + 1.
-      if (seq !== cursor + 1n) return 'gap';
+    // Order + dedup against the per-stream `sequence` axis — NOT the snapshot
+    // `cursor` (a log offset). The two are distinct monotonic counters
+    // (protocol.html §3/§9.5); conflating them drops the early stream as bogus
+    // "duplicates" and freezes the live view. `streamSeq === 0` means this is the
+    // first envelope of a fresh subscription, so accept it whatever its value.
+    if (streamSeq !== 0n) {
+      // Idempotent, keyed by sequence: anything at or below the last applied is a no-op.
+      if (seq <= streamSeq) return 'duplicate';
+      // The stream is contiguous: the next envelope must be exactly +1.
+      if (seq !== streamSeq + 1n) return 'gap';
     }
     const change = env.change;
     if ('FreshValue' in change) {
       body = change.FreshValue;
     } else {
       // Delta. The per-projection delta encodings are deferred (#43): the wire
-      // type carries an opaque payload today. We advance the cursor so ordering
-      // and resume stay correct; once #43 pins the typed deltas, fold them into
-      // `body` here per ProjectionKind. Until then a delta cannot mutate `body`,
-      // and a re-snapshot (always correct, §3) reconciles any drift.
+      // type carries an opaque payload today. We advance the sequence so ordering
+      // and gap-detection stay correct; once #43 pins the typed deltas, fold them
+      // into `body` here per ProjectionKind. Until then a delta cannot mutate
+      // `body`, and a re-snapshot (always correct, §3) reconciles any drift.
       void change.Delta;
     }
-    cursor = seq;
+    streamSeq = seq;
     return 'applied';
   }
 
   // ── WebSocket subscribe + stream (protocol.html §3) ─────────────────────────
   function openSocket(gen: number): void {
     if (gen !== generation || closed) return;
+    // A fresh subscription: the server restarts the per-stream sequence at 1, so
+    // reset our tracker to accept it from the top.
+    streamSeq = 0n;
     setStatus('subscribing');
     const url = token ? `${wsBase}/stream?token=${encodeURIComponent(token)}` : `${wsBase}/stream`;
     let socket: WebSocketLike;
