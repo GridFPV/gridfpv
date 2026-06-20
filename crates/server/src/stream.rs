@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::error::ProtocolError;
 use crate::snapshot::{ProjectionBody, ProjectionKind};
 
 /// The public **projection sequence number** (protocol.html §3, §9.5): a single
@@ -95,6 +96,29 @@ pub struct ChangeEnvelope {
     pub change: Change,
 }
 
+/// A frame the server sends down the change-stream WebSocket (protocol.html §3).
+///
+/// Almost every frame is a [`ChangeEnvelope`]; the one exception is the distinguished
+/// **re-snapshot-required** signal the server sends when a client resumes from a cursor
+/// older than the bounded retained window (§3 "fall back to re-snapshot"). Modelling
+/// both as one externally-tagged enum means a client reads a single message type off the
+/// socket and branches on the tag, rather than guessing whether a frame is data or a
+/// control signal.
+///
+/// Externally tagged, mapping to a TS discriminated union.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum StreamMessage {
+    /// One ordered, sequenced projection change to apply (the common case).
+    Change(ChangeEnvelope),
+    /// The resume cursor the client presented is older than the server's retained
+    /// window: the gap cannot be replayed, so the client must fetch a fresh snapshot and
+    /// resubscribe from its new cursor (protocol.html §3). The carried
+    /// [`ProtocolError`] always has [`ErrorCode::StaleCursor`](crate::error::ErrorCode::StaleCursor).
+    /// This is the terminal frame of the stream — no envelopes follow it.
+    ReSnapshotRequired(ProtocolError),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +163,31 @@ mod tests {
         let json = serde_json::to_string(&env).unwrap();
         let back: ChangeEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(env, back);
+    }
+
+    #[test]
+    fn stream_message_variants_round_trip() {
+        use crate::error::{ErrorCode, ProtocolError};
+
+        let change = StreamMessage::Change(ChangeEnvelope {
+            sequence: Cursor::new(1),
+            projection: ProjectionKind::LiveRaceState,
+            change: Change::FreshValue(ProjectionBody::LiveRaceState(LiveRaceState::default())),
+        });
+        let json = serde_json::to_string(&change).unwrap();
+        assert_eq!(
+            serde_json::from_str::<StreamMessage>(&json).unwrap(),
+            change
+        );
+
+        let resnap = StreamMessage::ReSnapshotRequired(ProtocolError::new(
+            ErrorCode::StaleCursor,
+            "cursor 3 is below the retained window (oldest replayable offset 8)",
+        ));
+        let json = serde_json::to_string(&resnap).unwrap();
+        assert_eq!(
+            serde_json::from_str::<StreamMessage>(&json).unwrap(),
+            resnap
+        );
     }
 }

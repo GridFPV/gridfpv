@@ -15,14 +15,19 @@ serde.workspace = true
 serde_json.workspace = true
 ts-rs = "12"
 
-# The snapshot HTTP transport (#42). The WS change stream (#43) and the control path
-# (#45) build on the same axum `Router` and `AppState` defined in `app.rs`.
-axum = "0.8"
+# The snapshot HTTP transport (#42) and the WS change stream (#43) build on the same
+# axum `Router` and `AppState` defined in `app.rs`; the control path (#45) reuses
+# `AppState::append`. `ws` enables axum's WebSocket upgrade extractor.
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "net"] }
 
 [dev-dependencies]
-# `tower::ServiceExt::oneshot` drives the router in integration tests with no real
-# network or Docker; `http-body-util` collects the response body to assert on it.
+# `tower::ServiceExt::oneshot` drives the snapshot router in integration tests with no
+# real network or Docker; `http-body-util` collects the response body to assert on it.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# The WS change-stream integration tests (#43) spin the router on an ephemeral localhost
+# port via `axum::serve` and connect with a real WebSocket client (no Docker).
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

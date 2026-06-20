@@ -83,6 +83,7 @@ use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{LapList, lap_list_marshaled};
 use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
 use serde::Deserialize;
+use tokio::sync::Notify;
 
 use crate::error::{ErrorCode, ProtocolError};
 use crate::live_state::live_state;
@@ -142,10 +143,24 @@ pub type SharedLog = Arc<Mutex<dyn EventSource + Send>>;
 ///
 /// Holds the [`SharedLog`] — the single source of truth the snapshot reads fold, the WS
 /// stream (#43) tails, and the control path (#45) appends through. Cloning an `AppState`
-/// clones the `Arc`, so all handlers and future tasks share one log.
+/// clones the `Arc`s, so all handlers and tasks share one log and one append signal.
+///
+/// # Append notification (the stream wakeup, #43)
+///
+/// The change stream is a long-lived task that, after replaying the log tail, must wake
+/// the *instant* a new event is appended so it can fold and push the next envelope. A
+/// [`tokio::sync::Notify`] is the wakeup: every [`append`](AppState::append) appends to
+/// the log and then `notify_waiters()`. A stream that has caught up to the log tail waits
+/// on `notified()`; the next append wakes it and it reads the new tail. `Notify` (rather
+/// than a `broadcast` channel) carries no payload — the event itself is read back from
+/// the log, the one source of truth — so a slow stream can never lag a bounded channel
+/// and miss an event; it always re-reads from where it left off. The control path (#45)
+/// drives the very same [`append`](AppState::append) so its writes wake every stream.
 #[derive(Clone)]
 pub struct AppState {
     log: SharedLog,
+    /// Woken on every append so caught-up change streams re-read the log tail.
+    appended: Arc<Notify>,
 }
 
 impl AppState {
@@ -155,13 +170,17 @@ impl AppState {
     pub fn new(log: impl EventLog + Send + 'static) -> Self {
         Self {
             log: Arc::new(Mutex::new(log)),
+            appended: Arc::new(Notify::new()),
         }
     }
 
     /// Build the state from an already-shared log handle — for when the WS stream (#43)
     /// or control path (#45) needs to share the *same* `Arc<Mutex<…>>` with the router.
     pub fn from_shared(log: SharedLog) -> Self {
-        Self { log }
+        Self {
+            log,
+            appended: Arc::new(Notify::new()),
+        }
     }
 
     /// The shared log handle, for tasks that tail or append outside the router.
@@ -169,10 +188,38 @@ impl AppState {
         Arc::clone(&self.log)
     }
 
+    /// Append an event to the log **and wake every subscribed change stream**
+    /// (protocol.html §3) — the one write path the control endpoint (#45) reuses.
+    ///
+    /// Locks the log, appends through [`EventSource::append`] (assigning the next dense
+    /// [`Offset`]), unlocks, then `notify_waiters()` so any stream parked on the log tail
+    /// wakes and folds the new event into its scope. Returns the assigned offset.
+    ///
+    /// The notify happens *after* the lock is released and the append has committed, so a
+    /// woken stream is guaranteed to see the new event when it re-reads the tail (no woken
+    /// stream can observe a torn or not-yet-committed write).
+    pub fn append(&self, event: Event, recorded_at: Option<i64>) -> Result<Offset, ProtocolError> {
+        let offset = {
+            let mut log = self.log.lock().map_err(|_| {
+                ProtocolError::new(ErrorCode::Internal, "the event log lock was poisoned")
+            })?;
+            log.append(event, recorded_at)
+                .map_err(|e| ProtocolError::new(ErrorCode::Internal, e.to_string()))?
+        };
+        self.appended.notify_waiters();
+        Ok(offset)
+    }
+
+    /// A handle to the append-notification primitive, for the change-stream task to park
+    /// on between log reads (see the type docs).
+    pub(crate) fn appended(&self) -> Arc<Notify> {
+        Arc::clone(&self.appended)
+    }
+
     /// Read the whole log into a `Vec<Event>` plus the resume [`Cursor`] (the log length
     /// at read time). A single lock spans the read so the events and the cursor are
     /// consistent with one another.
-    fn read(&self) -> Result<(Vec<Event>, Cursor), ProtocolError> {
+    pub(crate) fn read(&self) -> Result<(Vec<Event>, Cursor), ProtocolError> {
         let log = self.log.lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Internal, "the event log lock was poisoned")
         })?;
@@ -200,6 +247,7 @@ pub fn router(state: AppState) -> Router {
         .route("/snapshot/class/{event}/{class}", get(snapshot_class))
         .route("/snapshot/heat/{heat}", get(snapshot_heat))
         .route("/snapshot/pilot/{event}/{pilot}", get(snapshot_pilot))
+        .route("/stream", get(crate::ws::stream_handler))
         .with_state(state)
 }
 
@@ -341,7 +389,7 @@ async fn snapshot_pilot(
 }
 
 /// The `at` of an event if it is a lap-gate pass, for deriving a heat's race start.
-fn first_pass_at(event: &Event) -> Option<SourceTime> {
+pub(crate) fn first_pass_at(event: &Event) -> Option<SourceTime> {
     match event {
         Event::Pass(p) if p.gate.is_lap_gate() => Some(p.at),
         _ => None,
@@ -357,7 +405,7 @@ fn first_pass_at(event: &Event) -> Option<SourceTime> {
 /// heat's. Passes carry no heat id (they are raw observations), so attribution is by
 /// position in the log relative to heat-loop events — the same ordering the engine uses to
 /// decide which heat consumes a pass (race-engine.html §2).
-fn heat_window(events: &[Event], heat: &HeatId) -> Vec<Event> {
+pub(crate) fn heat_window(events: &[Event], heat: &HeatId) -> Vec<Event> {
     let mut window = Vec::new();
     // `active` tracks whether the cursor is currently inside this heat's span: it opens on
     // a heat-loop event for `heat` and closes on a heat-loop event for a *different* heat.
