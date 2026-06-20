@@ -526,15 +526,36 @@ CREATE TABLE event_log (
       and access splits into <strong>read</strong> and <strong>control</strong>.
     </p>
     <div class="principle">
-      <p><span class="name">Control is privileged; reads are open on the LAN.</span> Running
-      the race — race control, marshaling, configuration — requires the RD's authenticated
-      role. Watching it (racer PWA, overlays) is open, or lightly tokened, to anyone on the
-      LAN. Control authority never leaves the Director.</p>
+      <p><span class="name">Loopback is trusted; remote control is opt-in.</span> Running the
+      race — race control, marshaling, configuration — is the RD's privileged capability. On the
+      Director's own machine it needs <strong>no auth at all</strong>: a loopback request is the
+      operator at the keyboard by definition, so the RD console gets full control with no login.
+      Reaching control from anywhere else (the RD's phone over the LAN) is <strong>opt-in, off by
+      default, gated by an RD-set passphrase</strong>. Either way control authority stays
+      Director-only and LAN-only — it never reaches the Cloud.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Reads are a first-class tier; open on the LAN.</span> Watching the
+      race — the pilot apps, spectator PWA, overlays — is a scoped read capability every such
+      client uses, open (or lightly join-token-gated) to anyone on the LAN. A pilot app shows
+      that pilot's own schedule and laps; reads never confer control.</p>
     </div>
     <div class="principle">
       <p><span class="name">The Cloud authenticates accounts but is never authoritative.</span>
       Off-LAN viewers reach the Cloud with accounts, but the Cloud only ever serves the read
       contract and relays — no race is controlled through it.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Cloud TLS is mandatory and non-negotiable.</strong> Anything the Cloud serves or
+        receives over the public internet — account auth, the read snapshot and change stream, the
+        Director&rarr;Cloud log push — travels over <strong>HTTPS / WSS end-to-end, with zero
+        unencrypted traffic over the internet, ever</strong>. This is a hard, enforced requirement
+        of the architecture, not a recommendation. On the trusted LAN plain HTTP is acceptable now;
+        the v0.5 PWA / remote-control path requires a TLS plan (self-signed or challenge-response)
+        so the passphrase never crosses untrusted WiFi in clear (mechanics in
+        <a href="protocol.html">Protocol</a> §5).
+      </p>
     </div>
     <p>
       <strong>Identity</strong> has two layers. Within an event, a timer's local reference
@@ -546,9 +567,10 @@ CREATE TABLE event_log (
     </p>
     <div class="callout">
       <p>
-        Wire-level mechanics — how the RD role authenticates, token/session format, and how
-        read access is scoped on LAN vs Cloud — are the <a href="protocol.html">Protocol</a>
-        spec's job. The cross-event registry and the reconcile-on-sync rules belong to
+        Wire-level mechanics — the loopback source-IP check and remote-control passphrase, the
+        token/session format, and how read access is scoped on LAN vs Cloud — are the
+        <a href="protocol.html">Protocol</a> spec's job. The cross-event registry and the
+        reconcile-on-sync rules belong to
         <a href="cloud.html">Cloud &amp; Season</a>. This section fixes only the trust
         boundaries.
       </p>

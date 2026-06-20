@@ -373,10 +373,25 @@ sequenceDiagram
     </div>
     <div class="principle">
       <p><span class="name">Accounts gate reads; control never leaves the Director.</span> A Cloud
-      account identifies an off-LAN viewer and maps to the read authorization the
-      <a href="protocol.html">Protocol</a> spec defines. The privileged <em>control</em> role
-      (race control, marshaling, configuration) exists only on the Director and is never granted
-      by a Cloud account.</p>
+      account identifies an off-LAN viewer and maps to the protocol's first-class scoped
+      <strong>read tier</strong> — the same tier the LAN's open / join-token reads use
+      (<a href="protocol.html">Protocol</a> §5). The privileged <em>control</em> role (race control,
+      marshaling, configuration) exists only on the Director and is never granted by a Cloud
+      account.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Mandatory TLS — zero unencrypted traffic over the internet, ever.</strong>
+        Everything the Cloud serves or receives over the public internet — account auth, the read
+        snapshot and change stream, and the Director&rarr;Cloud log push (§2) — travels over
+        <strong>HTTPS / WSS end-to-end, always</strong>. There is no plain-HTTP Cloud mode and no
+        exception for convenience on a public address. This is a <strong>hard, non-negotiable
+        requirement enforced in the architecture</strong>, not a recommendation
+        (<a href="architecture.html">Architecture</a> §9; mechanics in
+        <a href="protocol.html">Protocol</a> §5). It contrasts with the trusted LAN, where plain
+        HTTP is acceptable because the network is trusted and loopback control carries no
+        credential at all.
+      </p>
     </div>
     <p>Accounts serve a few concrete needs beyond plain viewing:</p>
     <ul>
