@@ -9,6 +9,9 @@ rust-version.workspace = true
 [dependencies]
 gridfpv-events.workspace = true
 serde.workspace = true
+# Rust→TypeScript type export (#4, #40): the lap projection is a served snapshot
+# body, so its public output types generate TS bindings alongside the event model.
+ts-rs = "12"
 
 [dev-dependencies]
 serde_json.workspace = true

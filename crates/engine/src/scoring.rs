@@ -41,10 +41,13 @@
 
 use gridfpv_events::{Event, Pass, SourceTime};
 use gridfpv_projection::CompetitorKey;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// How a heat is won — the configured per-heat / per-format scoring rule
 /// (race-engine.html §4, §7.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub enum WinCondition {
     /// **Most laps in a time window.** A shared race clock runs from `race_start`
     /// for `window_micros`. A lap counts only if its completing pass falls
@@ -86,7 +89,8 @@ pub enum WinCondition {
 /// laps that counted under the win condition (for [`WinCondition::Timed`] that is
 /// the number inside the window, not the raw laps flown). `metric` carries the
 /// condition-specific deciding value for display / debugging.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct Placement {
     /// Which source-local competitor this placement is for.
     pub competitor: CompetitorKey,
@@ -100,7 +104,8 @@ pub struct Placement {
 
 /// The condition-specific value a [`Placement`] was ranked on, kept for display and
 /// for tests to assert against exact numbers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub enum Metric {
     /// [`WinCondition::Timed`]: completion time (µs, source clock) of the last
     /// counted lap, or `None` if no lap counted.
@@ -120,7 +125,8 @@ pub enum Metric {
 /// Ties share a `position` (see [`Placement::position`]). The order within a tie
 /// group is still deterministic — competitors are ordered by [`CompetitorKey`] as
 /// the final, total tie-break — but their `position` numbers are equal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct HeatResult {
     /// Placements in finishing order (ties adjacent, sharing a position).
     pub places: Vec<Placement>,

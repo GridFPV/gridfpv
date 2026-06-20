@@ -48,6 +48,8 @@
 use std::collections::BTreeMap;
 
 use gridfpv_events::{CompetitorRef, HeatId};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::scoring::HeatResult;
 
@@ -80,7 +82,8 @@ impl HeatPlan {
 /// scored heats (produced by [`crate::scoring::score`]) and never raw passes. The
 /// `heat` id ties the result back to the [`HeatPlan`] that produced it, so a
 /// generator that emitted several heats can tell which result is which.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct CompletedHeat {
     /// Which planned heat this result is for.
     pub heat: HeatId,
@@ -119,7 +122,8 @@ pub enum GeneratorStep {
 /// and the next distinct entry skips past them (1, 2, 2, 4). Entries are returned in
 /// ranking order (best first), with a total, deterministic tie-break so the order is
 /// stable across runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct RankEntry {
     /// The competitor this entry ranks.
     pub competitor: CompetitorRef,

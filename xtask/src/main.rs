@@ -66,22 +66,21 @@ fn test() -> bool {
     )
 }
 
-/// Regenerate the Rust→TypeScript bindings (#4).
+/// Regenerate the Rust→TypeScript bindings (#4, #40).
 ///
 /// ts-rs exports its types from a generated `#[test]` per `#[ts(export)]` type, so
-/// "generation" is just running the events crate's export tests: each derived `TS`
-/// impl writes its `.ts` file. `TS_RS_EXPORT_DIR` pins the base directory to the
-/// workspace root, so every `export_to = "bindings/"` lands in `<root>/bindings/`.
+/// "generation" is just running the export tests of every crate that derives `TS`:
+/// each derived impl writes its `.ts` file. The wire contract now spans four crates —
+/// the event model (`gridfpv-events`), the served lap projection (`gridfpv-projection`),
+/// the heat results / rankings / event outcome (`gridfpv-engine`), and the protocol
+/// wire types themselves (`gridfpv-server`) — so we run the `export_bindings` filter
+/// across the whole workspace. `TS_RS_EXPORT_DIR` pins the base directory to the
+/// workspace root, so every `export_to = "bindings/"` lands in `<root>/bindings/`
+/// regardless of which crate the type lives in.
 fn gen_bindings(root: &Path) -> bool {
     run_env(
         "cargo",
-        &[
-            "test",
-            "--package",
-            "gridfpv-events",
-            "--quiet",
-            "export_bindings",
-        ],
+        &["test", "--workspace", "--quiet", "export_bindings"],
         &[("TS_RS_EXPORT_DIR", root)],
     )
 }

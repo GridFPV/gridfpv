@@ -413,7 +413,9 @@ dependencies = [
  "gridfpv-events",
  "gridfpv-projection",
  "gridfpv-testkit",
+ "serde",
  "serde_json",
+ "ts-rs",
 ]
 
 [[package]]
@@ -432,6 +434,7 @@ dependencies = [
  "gridfpv-events",
  "serde",
  "serde_json",
+ "ts-rs",
 ]
 
 [[package]]
