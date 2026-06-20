@@ -167,6 +167,13 @@ flowchart LR
       a monotonic sequence counter, the adapter carries it through — it disambiguates passes
       that share a timestamp and survives clock adjustments.
     </p>
+    <p>
+      This is realized as a per-source <code>ClockAlignment</code> captured at the session
+      anchor (mapping <em>source → session</em> time onto a shared <code>SessionTime</code>
+      axis), used strictly for ordering/display — intervals always use the source clock. Passes
+      are ordered by a single rule — present <code>sequence</code> first, then source timestamp —
+      shared with the lap projection, so the whole system orders passes identically.
+    </p>
 
     <h2>5. The adapter interface &amp; capabilities</h2>
     <p>
@@ -210,7 +217,13 @@ flowchart LR
       Built first, on purpose. Velocidrone exposes a <strong>WebSocket</strong> feed
       (opt-in: Options → Main Settings → Websocket Communication → Yes) carrying gate passes,
       lap splits, lap times, race totals, and holeshot/spread straight from the game engine.
-      Mapping it to the canonical model:
+      Concretely (validated against two open-source consumers — the <code>rh-velocidrone</code>
+      plugin and <code>VelocidroneWebSocketConsumer</code>) it is a <strong>raw WebSocket</strong>
+      — not Socket.IO — at <code>ws://&lt;host&gt;:60003/velocidrone</code>, carrying one-key JSON
+      frames: <code>racestatus</code> (lifecycle), <code>racedata</code> (a per-crossing
+      telemetry snapshot keyed by player name, whose <code>time</code> is cumulative game-engine
+      <strong>seconds</strong>), and <code>pilotlist</code> (roster), plus an empty-string
+      keep-alive ping. Mapping it to the canonical model:
     </p>
     <dl class="entities">
       <dt>Passes &amp; splits</dt>
@@ -219,7 +232,10 @@ flowchart LR
       derives laps from the pass stream so every source is scored identically, and the
       provided totals are a cross-check.</dd>
       <dt>Clock</dt>
-      <dd>Game-engine time is the source timestamp; intervals come from it directly.</dd>
+      <dd>Game-engine time is the source timestamp; intervals come from it directly. Velocidrone
+      exposes no monotonic sequence counter, so its passes carry none and dedup falls back to
+      <code>(source, player, source-timestamp)</code> — safe because <code>time</code> is unique
+      per crossing.</dd>
       <dt>Identity</dt>
       <dd>The sim player name is the local ref reported via <code>CompetitorSeen</code>.</dd>
       <dt>Capabilities</dt>
@@ -239,14 +255,25 @@ flowchart LR
     <h2>8. Other sources (sketch)</h2>
     <dl class="entities">
       <dt>RotorHazard</dt>
-      <dd>Socket.IO / RHAPI; pass events with per-node RSSI and EnterAt/ExitAt thresholds,
-      plus RSSI history — the full-signal case, with calibration and signal-based recovery.
-      Built in parallel with Velocidrone as the first real-world target; a <strong>dockerized
-      RotorHazard</strong> is a self-hosted, disposable instance we fully control, so it both
-      feeds recorded fixtures <em>and</em> is allowed for live integration tests, including in
-      CI. The guardrail bans depending on a <strong>live, shared/production backend</strong>
-      (concretely the Velocidrone game servers, which stay fixtures-only) — not all live
-      timers.</dd>
+      <dd>Socket.IO / RHAPI; the full-signal case, with calibration and signal-based recovery.
+      Validated against a live dockerized RotorHazard with 8 mock nodes (see
+      <code>docker/rotorhazard/</code>). The authoritative pass source is <code>current_laps</code>
+      — a <strong>full snapshot</strong> re-sent on every update
+      (<code>{current:{node_index:[{laps:[{lap_number, lap_raw, lap_time, lap_time_stamp, …}]}]}}</code>,
+      outer array index = node index, <code>lap_time_stamp</code> in cumulative ms since race
+      start) — which the adapter diffs per node, emitting a <code>Pass</code> only for genuinely
+      new laps. Per-pass RSSI comes from <code>node_data.pass_peak_rssi[]</code> (not the lap
+      record) and annotates the pass's signal context. A <code>pass_record {node, frequency,
+      timestamp}</code> fires per crossing but is an <strong>advisory cross-check only</strong> —
+      its epoch-ms timestamp is a different clock from the race-relative <code>lap_time_stamp</code>,
+      so no pass is minted from it. <code>race_status</code> is an integer
+      (<code>3=staging, 1=racing, 2=done, 0=ready</code>); the transitions into racing/done are
+      the session start/end edges, and the per-node <code>lap_number</code> is carried as the pass
+      sequence and anchors dedup. Built in parallel with Velocidrone as the first real-world
+      target; the dockerized RH both feeds recorded fixtures <em>and</em> is allowed for live
+      integration tests (a <strong>local</strong> class — Docker required). The guardrail bans
+      depending on a <strong>live, shared/production backend</strong> (concretely the Velocidrone
+      game servers, which stay fixtures-only) — not all live timers.</dd>
       <dt>LapRF</dt>
       <dd>Binary protocol over serial/USB/TCP; <code>PassingRecord</code> (slot, RTC time,
       transponder id) and <code>RssiRecord</code> (RSSI min/max/mean) — passes with RSSI
@@ -265,7 +292,9 @@ flowchart LR
       inline in the log. In addition, a <strong>bounded RSSI window</strong> around each pass
       is retained as an <strong>event-local sidecar</strong> — not pushed to the Cloud by
       default — so a missed lap can be re-derived. Pairs with the storage tiers in
-      <a href="architecture.html">Architecture</a> §4.</li>
+      <a href="architecture.html">Architecture</a> §4. <em>Implemented today: a per-pass
+      <code>rssi_peak</code>; the enter/exit window and bounded-RSSI sidecar arrive with the
+      hardware-signal extension.</em></li>
       <li><span class="resolved">Resolved — Multi-gate / split track model.</span> A track is
       modeled as ordered gates per lap; a <code>Pass</code> carries a gate index. A lap is a
       start/finish-gate crossing and splits are sector times; the default is a single gate.</li>
@@ -281,9 +310,13 @@ flowchart LR
       conflicts — while the <strong>adapter advertises</strong> the hardware's channel
       capabilities/constraints and <strong>applies</strong> the tuning. Shared with the Race
       Engine; IRL sources only.</li>
-      <li><span class="q">Velocidrone WebSocket message schema.</span> The exact message
-      shapes to map, captured against a live build when the adapter is implemented (never in
-      an automated test — see the guardrail).</li>
+      <li><span class="resolved">Resolved — Velocidrone WebSocket message schema.</span>
+      Reconstructed and implemented from two independent open-source consumers (the
+      <code>rh-velocidrone</code> plugin and <code>VelocidroneWebSocketConsumer</code>); a raw
+      WebSocket at <code>ws://&lt;host&gt;:60003/velocidrone</code> carrying one-key
+      <code>racestatus</code> / <code>racedata</code> / <code>pilotlist</code> frames (see §7).
+      Lower-confidence items still pending a live capture: the full <code>raceAction</code> string
+      set and the exact split-gate numbering.</li>
     </ol>
 
     <footer class="doc-footer">

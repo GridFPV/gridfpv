@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Code &amp; Repo Conventions</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Code &amp; Repo Conventions</h1>
+      <p class="doc-kind">Internal · how the Rust workspace is organized and the conventions every crate follows</p>
+    </header>
+
+    <p class="lead">
+      The implementation conventions that hold across the codebase — the companion to
+      <a href="conventions.html">Doc Authoring Conventions</a>. Recorded as they were established
+      through v0.1–v0.2 so new crates and contributors stay consistent.
+    </p>
+
+    <h2>1. Workspace &amp; crates</h2>
+    <div class="principle">
+      <p><span class="name">A Cargo workspace of <code>gridfpv-*</code> crates.</span>
+      The spine lives under <code>crates/</code>: <code>events</code> (the canonical event model),
+      <code>storage</code> (the append-only log + SQLite), <code>projection</code>,
+      <code>adapters</code> (timer adapters), and <code>app</code> (which builds the single
+      <code>gridfpv</code> binary). <code>xtask/</code> is a non-published
+      (<code>publish = false</code>) helper crate. Internal dependencies are path deps declared
+      once in <code>[workspace.dependencies]</code> and inherited with
+      <code>name.workspace = true</code>.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Edition &amp; metadata set once.</span> Rust <strong>edition 2024</strong>,
+      MSRV <strong>1.85</strong>, <code>resolver = "3"</code>. Edition, MSRV, license
+      (<code>AGPL-3.0-or-later</code>) and repository are set in <code>[workspace.package]</code>
+      and inherited per-crate via <code>field.workspace = true</code>.</p>
+    </div>
+
+    <h2>2. Checks — one source of truth</h2>
+    <div class="principle">
+      <p><span class="name"><code>cargo xtask</code> defines every check.</span> Local and CI
+      run the identical suite: <code>cargo xtask ci</code> = <code>fmt --check</code> &amp;&amp;
+      <code>clippy --all-targets -D warnings</code> &amp;&amp; <code>test --all</code> &amp;&amp;
+      the Rust→TS bindings drift-check. The GitLab pipeline is thin — it only calls
+      <code>cargo xtask ci</code>. Never put check logic in <code>.gitlab-ci.yml</code>; add it
+      to <code>xtask</code> so local and CI can't drift.</p>
+    </div>
+
+    <h2>3. Generated wire types</h2>
+    <div class="principle">
+      <p><span class="name">Rust→TypeScript via ts-rs, drift-gated.</span> Wire types are
+      generated from Rust with <a href="https://github.com/Aleph-Alpha/ts-rs">ts-rs</a>, derived
+      only on the canonical event model in <code>gridfpv-events</code>, exported to repo-root
+      <code>bindings/</code>. <code>cargo xtask gen</code> regenerates; <code>cargo xtask ci</code>
+      fails if the checked-in <code>bindings/*.ts</code> drift from the Rust types. Commit
+      regenerated bindings with the Rust change.</p>
+    </div>
+
+    <h2>4. Safety &amp; the data model</h2>
+    <div class="principle">
+      <p><span class="name">No unsafe.</span> Every crate begins with
+      <code>#![forbid(unsafe_code)]</code>; the spine carries no <code>unsafe</code>.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Integer-microsecond source time.</span> Time is carried as
+      <code>SourceTime</code> — <strong>integer microseconds on the source's own clock</strong>
+      (<code>i64</code>). Interval math uses no floats, so comparisons are stable and tests are
+      byte-deterministic. It is serde-<code>transparent</code> / <code>ts(as = "i64")</code>, a
+      bare <code>number</code> on the wire.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Externally-tagged events; observations only.</span> The canonical
+      <code>Event</code> enum is externally tagged (<code>{"Variant": {…}}</code>), mapping to a
+      TypeScript discriminated union. Adapters emit <em>raw observations</em> only (no laps or
+      results); optional detail (<code>sequence</code>, <code>gate</code>, <code>signal</code>)
+      is <code>skip_serializing_if</code>-omitted at its default to keep the common case compact.</p>
+    </div>
+
+    <h2>5. Live &amp; container tests</h2>
+    <div class="principle">
+      <p><span class="name">Network/Docker tests sit behind a <code>live</code> feature.</span>
+      The real network transports (Socket.IO for RotorHazard, WebSocket for Velocidrone) and the
+      container-backed tests are gated by an optional <code>live</code> Cargo feature, off by
+      default — so the core suite stays dependency-light and hermetic and runs everywhere. The
+      shared pipeline runs default-feature checks only; <code>cargo xtask live</code> runs the
+      <code>live</code> tests (mock-WS + dockerized-RotorHazard) locally. See
+      <a href="testing-strategy.html">Testing Strategy</a> §5.</p>
+    </div>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

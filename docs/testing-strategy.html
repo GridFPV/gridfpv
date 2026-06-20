@@ -384,22 +384,22 @@ flowchart TB
 
     <h2>8. Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">Fixture format &amp; storage.</span> How recorded sessions are
-      serialized and stored (raw source captures vs canonical-log JSON, inline vs sidecar for
-      signal history), how large captures stay diff-reviewable, and how they version alongside
-      the log/schema versioning open decision in <a href="architecture.html">Architecture</a>
-      §11. <strong>Accepted:</strong> fixtures are stored as canonical-log JSON, with signal
-      history as a sidecar rather than inline, and versioned alongside the log/schema versioning.</li>
+      <li><span class="resolved">Resolved — Fixture format &amp; storage.</span> Fixtures are
+      stored as JSON and checked in alongside the code: per-adapter source/canonical fixtures
+      under <code>crates/adapters/src/*/fixtures/</code> and replay fixtures (events + golden lap
+      lists) under <code>crates/app/tests/fixtures/</code>, versioned with the schema. Signal
+      history stays a sidecar rather than inline (the sidecar format lands with the
+      hardware-signal extension; today's fixtures carry the inline <code>rssi_peak</code>).</li>
       <li><span class="q">Golden-update workflow.</span> The mechanism for regenerating golden
       outputs when behavior changes intentionally (an "accept new goldens" command), and the
       review discipline that keeps an accidental change from being rubber-stamped.
       <strong>Accepted:</strong> an "accept goldens" command regenerates outputs, paired with a
       mandatory diff review so no change is rubber-stamped.</li>
-      <li><span class="q">Capture tooling.</span> How sessions are recorded from the dockerized
-      RotorHazard and a live Velocidrone build (a tap in the adapter? a standalone recorder?),
-      and how a capture is annotated with its expected outcome. <strong>Accepted:</strong> an
-      adapter-tap / standalone recorder captures sessions, and each capture carries an
-      expected-outcome annotation.</li>
+      <li><span class="resolved">Resolved — Capture tooling.</span> A standalone recorder
+      (<code>docker/rotorhazard/capture_frames.py</code>) drives the dockerized RH over Socket.IO
+      and dumps its frames to JSON; that produced the checked-in ground-truth capture. The
+      emulated-signal harness (§5.1) goes further — generated <code>mock_data</code> RSSI streams
+      drive RH's real pipeline. A live Velocidrone build stays fixtures-only (no automated run).</li>
       <li><span class="q">Property-based testing scope.</span> Whether to add generative /
       property tests over the projection layer (e.g. "marshaling never loses a raw observation,"
       "incremental == recompute for any log") on top of the enumerated golden cases.
