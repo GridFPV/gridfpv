@@ -22,9 +22,14 @@ export function formatClock(ms: number): string {
  * Format a lap/split duration given in **microseconds** (the wire unit) as
  * `S.mmm` seconds, or minutes:seconds when ≥ 60s. `null`/`undefined` → `'—'`.
  */
-export function formatMicros(micros: bigint | null | undefined): string {
+export function formatMicros(micros: bigint | number | null | undefined): string {
   if (micros === null || micros === undefined) return '—';
-  const totalMs = Number(micros / 1000n);
+  // ts-rs types i64 micros as `bigint`, but serde sends i64 as a JSON *number*, so the
+  // runtime value is usually a `number`. Coerce to Number BEFORE any arithmetic — mixing
+  // a bigint and a number (e.g. `250000 / 1000n`) throws "Cannot mix BigInt and other types"
+  // and, thrown mid-render, aborts the update. (The wire-vs-type i64/bigint mismatch is a
+  // class to address systematically in the contract review.)
+  const totalMs = Math.floor(Number(micros) / 1000);
   if (totalMs >= 60000) return formatClock(totalMs);
   const seconds = Math.floor(totalMs / 1000);
   const millis = totalMs % 1000;
