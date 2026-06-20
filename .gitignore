@@ -12,3 +12,13 @@
 
 # Local reverse-engineering / analysis artifacts (not part of the project)
 pyghidra_mcp_projects/
+
+# Frontend monorepo (frontend/)
+frontend/node_modules/
+frontend/**/node_modules/
+frontend/**/dist/
+frontend/**/build/
+frontend/**/.svelte-kit/
+frontend/**/.vite/
+frontend/**/*.tsbuildinfo
+frontend/.eslintcache
