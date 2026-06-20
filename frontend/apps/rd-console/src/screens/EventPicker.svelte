@@ -16,8 +16,13 @@
   import type { EventMeta } from '@gridfpv/types';
   import type { Session, CreateEventFields } from '../lib/session.svelte.js';
   import { PRACTICE_EVENT_ID } from '../lib/session.svelte.js';
+  import Timers from './Timers.svelte';
 
   let { session }: { session: Session } = $props();
+
+  // The app-level Timers registry (issue #73) — configured once, reused across events, so it
+  // opens from the picker (home) rather than inside an event. A modal over the picker.
+  let timersOpen = $state(false);
 
   type LoadState =
     | { kind: 'loading' }
@@ -178,7 +183,10 @@
           <span class="kicker">Race Director Console</span>
         </div>
       </div>
-      <Button variant="primary" onclick={openNew}>+ New event</Button>
+      <div class="head-actions">
+        <Button variant="secondary" onclick={() => (timersOpen = true)}>Timers</Button>
+        <Button variant="primary" onclick={openNew}>+ New event</Button>
+      </div>
     </header>
 
     <h1 class="title">Choose an event</h1>
@@ -305,6 +313,9 @@
   {/snippet}
 </Dialog>
 
+<!-- The app-level Timers registry, opened from the header (issue #73). -->
+<Timers {session} bind:open={timersOpen} />
+
 <style>
   .picker {
     display: grid;
@@ -332,6 +343,11 @@
     display: flex;
     align-items: center;
     gap: var(--gf-space-3);
+  }
+  .head-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
   }
   .brand-text {
     display: flex;

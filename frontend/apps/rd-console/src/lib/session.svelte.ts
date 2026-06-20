@@ -42,6 +42,11 @@ import {
   createEvent,
   getActiveEvent,
   setActiveEvent,
+  listTimers,
+  createTimer,
+  updateTimer,
+  deleteTimer,
+  setEventTimers,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
@@ -51,12 +56,16 @@ import type {
   Command,
   CommandAck,
   CreateEventRequest,
+  CreateTimerRequest,
   EventMeta,
   HeatId,
   HeatResult,
   LiveRaceState,
   ProjectionBody,
-  Scope
+  Scope,
+  Timer,
+  TimerId,
+  UpdateTimerRequest
 } from '@gridfpv/types';
 
 const TOKEN_STORAGE_KEY = 'gridfpv.rd.token';
@@ -174,6 +183,11 @@ export class Session {
   #createEventImpl: typeof createEvent;
   #getActiveEventImpl: typeof getActiveEvent;
   #setActiveEventImpl: typeof setActiveEvent;
+  #listTimersImpl: typeof listTimers;
+  #createTimerImpl: typeof createTimer;
+  #updateTimerImpl: typeof updateTimer;
+  #deleteTimerImpl: typeof deleteTimer;
+  #setEventTimersImpl: typeof setEventTimers;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -182,6 +196,11 @@ export class Session {
     createEventImpl?: typeof createEvent;
     getActiveEventImpl?: typeof getActiveEvent;
     setActiveEventImpl?: typeof setActiveEvent;
+    listTimersImpl?: typeof listTimers;
+    createTimerImpl?: typeof createTimer;
+    updateTimerImpl?: typeof updateTimer;
+    deleteTimerImpl?: typeof deleteTimer;
+    setEventTimersImpl?: typeof setEventTimers;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -191,6 +210,11 @@ export class Session {
     this.#createEventImpl = opts?.createEventImpl ?? createEvent;
     this.#getActiveEventImpl = opts?.getActiveEventImpl ?? getActiveEvent;
     this.#setActiveEventImpl = opts?.setActiveEventImpl ?? setActiveEvent;
+    this.#listTimersImpl = opts?.listTimersImpl ?? listTimers;
+    this.#createTimerImpl = opts?.createTimerImpl ?? createTimer;
+    this.#updateTimerImpl = opts?.updateTimerImpl ?? updateTimer;
+    this.#deleteTimerImpl = opts?.deleteTimerImpl ?? deleteTimer;
+    this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -239,6 +263,84 @@ export class Session {
    */
   listEvents(): Promise<EventMeta[]> {
     return this.#listEventsImpl(this.baseUrl, { token: this.#token });
+  }
+
+  // ── Timer registry (issue #73) ─────────────────────────────────────────────
+  //
+  // Timers are **application-level** configuration (a persisted registry the RD tunes once),
+  // not event state — so these live on the session itself, reachable from the picker, and not
+  // gated on `currentEvent`. Reads are open; writes are control-gated and follow the same
+  // full-trust-first posture as every other privileged action: attempted tokenless, and only
+  // if the Director answers 401/403 (it has a token configured) does the lazy prompt fire once
+  // and the write retry — see {@link #privilegedWrite}.
+
+  /**
+   * List every configured timer (`GET /timers`, open, no token) — the built-in **Mock** first.
+   * Used by the app-level Timers management screen. Rejects on a transport/HTTP failure.
+   */
+  listTimers(): Promise<Timer[]> {
+    return this.#listTimersImpl(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Run a control-gated write with the full-trust-then-lazy-prompt retry: call `attempt` with
+   * the currently-held token; if it fails for **auth** and no token is held yet, prompt once and
+   * retry. Returns the result, or `undefined` if the RD cancelled the prompt; re-throws any
+   * non-auth failure (so the caller surfaces a 400/404/transport error verbatim).
+   */
+  async #privilegedWrite<T>(
+    attempt: (token: string | undefined) => Promise<T>
+  ): Promise<T | undefined> {
+    try {
+      return await attempt(this.#token);
+    } catch (e) {
+      if (this.#token || !isAuthFailure(e)) throw e;
+      if (!(await this.#promptForToken())) return undefined;
+      return await attempt(this.#token);
+    }
+  }
+
+  /**
+   * Create a timer (`POST /timers`). Returns the new {@link Timer}, `undefined` if a gated
+   * Director's token prompt was cancelled, or throws on a non-auth failure.
+   */
+  createTimer(request: CreateTimerRequest): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#createTimerImpl(this.baseUrl, request, token));
+  }
+
+  /**
+   * Edit a timer (`PUT /timers/{id}`) — retune Mock laps/pace, or repoint a RotorHazard url.
+   * Returns the updated {@link Timer}, `undefined` on a cancelled prompt, or throws otherwise.
+   */
+  updateTimer(id: TimerId, request: UpdateTimerRequest): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#updateTimerImpl(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * Remove a timer (`DELETE /timers/{id}`). The built-in **Mock cannot be deleted** (the Director
+   * answers **400**); that surfaces to the caller as a thrown error to handle gracefully. Resolves
+   * once the delete succeeds, `undefined` on a cancelled prompt, or throws on any other failure.
+   */
+  deleteTimer(id: TimerId): Promise<void | undefined> {
+    return this.#privilegedWrite((token) => this.#deleteTimerImpl(this.baseUrl, id, token));
+  }
+
+  /**
+   * Set the **current event's** selected timers (`PUT /events/{id}/timers`) — the per-event
+   * reference into the app-level registry. No-op (resolves `undefined`) when no event is selected.
+   * On success the updated {@link EventMeta} replaces {@link currentEvent} so the workspace's view
+   * of the selection stays in sync; returns it, `undefined` on a cancelled prompt, or throws.
+   */
+  async setEventTimers(ids: TimerId[]): Promise<EventMeta | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const updated = await this.#privilegedWrite((token) =>
+      this.#setEventTimersImpl(this.baseUrl, event.id, ids, token)
+    );
+    if (updated) this.currentEvent = updated;
+    return updated;
   }
 
   /**
