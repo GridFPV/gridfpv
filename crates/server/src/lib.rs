@@ -3,15 +3,17 @@
 //! by the Cloud). The wire types are defined here once and generated to TypeScript
 //! (ts-rs), so clients never hand-write a wire type. See docs/protocol.html.
 //!
-//! # What this crate is, as of #41 / #42
+//! # What this crate is, as of #41 / #42 / #43
 //!
 //! The wire-type surface — the Rust types that *are* the protocol (protocol.html §6:
 //! "the contract defined once, in Rust") — plus the **read transport** over them: the
-//! live race-state projection ([`live_state`], #41) and the axum snapshot endpoints
-//! ([`app`], #42). The change stream (#43), auth (#44), and control endpoints (#45)
-//! build on the same [`app::AppState`] and [`app::router`]. Defining the types first
-//! means every one of those issues — and the frontend protocol client (#49) — builds
-//! against a single generated contract that already exists.
+//! live race-state projection ([`live_state`], #41), the axum snapshot endpoints
+//! ([`app`], #42), and the WebSocket change stream ([`ws`], #43) that keeps a client's
+//! scoped projection current after the snapshot. Auth (#44) and control endpoints (#45)
+//! build on the same [`app::AppState`] and [`app::router`] — the control path reusing
+//! [`app::AppState::append`], the one log-write-plus-stream-wakeup the change stream
+//! observes. Defining the types first means every one of those issues — and the frontend
+//! protocol client (#49) — builds against a single generated contract that already exists.
 //!
 //! Every public wire type derives [`serde`] (its JSON encoding *is* the wire format)
 //! and [`ts_rs::TS`] with `#[ts(export, export_to = "bindings/")]`, exactly mirroring
@@ -39,10 +41,11 @@
 //! # Deferred (later issues + the doc-reconciliation pass)
 //!
 //! - **Exact delta encodings.** [`Change::Delta`](stream::Change::Delta) is a
-//!   `serde_json::Value` placeholder for now; the precise per-projection delta shapes
-//!   (a single appended lap, a heat-state transition, …) are pinned when the change
-//!   stream lands (#43). The *structure* — per-projection, delta-vs-fresh — is fixed
-//!   here, which is what later issues need.
+//!   `serde_json::Value` placeholder; the change stream ([`ws`], #43) emits only
+//!   [`Change::FreshValue`](stream::Change::FreshValue) envelopes for now, while wiring
+//!   the per-projection delta-vs-fresh *distinction* (§9.2) so the precise delta shapes
+//!   (a single appended lap, a heat-state transition, …) can be pinned in #59 without
+//!   reshaping the stream or its sequencing.
 //! - **Scope addressing grammar.** [`app::router`] pins a concrete REST addressing over
 //!   the four resources (event/class/heat/pilot, §4); the richer filter grammar (§9.6),
 //!   and the log-level *class* filter (the log carries no class tag yet), are refined in
@@ -60,6 +63,7 @@ pub mod live_state;
 pub mod scope;
 pub mod snapshot;
 pub mod stream;
+pub mod ws;
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
