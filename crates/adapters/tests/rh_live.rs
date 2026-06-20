@@ -33,6 +33,7 @@ fn event_kind(e: &Event) -> &'static str {
         Event::SessionStarted { .. } => "SessionStarted",
         Event::SessionEnded { .. } => "SessionEnded",
         Event::CompetitorSeen { .. } => "CompetitorSeen",
+        Event::CompetitorRegistered { .. } => "CompetitorRegistered",
         Event::Pass(_) => "Pass",
         Event::HeatScheduled { .. } => "HeatScheduled",
         Event::HeatStateChanged { .. } => "HeatStateChanged",
