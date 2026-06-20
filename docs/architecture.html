@@ -269,6 +269,127 @@ flowchart TB
       warehouse are conveniences layered around it.
     </p>
 
+    <h3>The Event as aggregate root</h3>
+    <p>
+      The conceptual <strong>Event</strong> from §4 is the <strong>aggregate root</strong> of
+      the whole model: the entire event-sourced fact log — heats, registrations, passes,
+      marshaling adjudications, configuration — belongs to <em>exactly one</em> event. There is
+      no fact that floats outside an event, and no fact that spans two. An event's log is the
+      complete, self-contained history of that event and nothing else.
+    </p>
+    <div class="principle">
+      <p><span class="name">One log per event; every fact has exactly one owning event.</span>
+      The log is the aggregate boundary. Reads are always <em>event-scoped</em>, and each event
+      keeps its own dense, gap-free offset sequence starting at <code>0</code>. Cross-event
+      answers (career, season) are projections that fold over many event logs — never a single
+      shared log queried by filter.</p>
+    </div>
+    <p>
+      <strong>Practice</strong> is a built-in, always-present event — the one event that exists
+      before you create anything (<a href="pipeline-practice.html">Pipeline: Practice</a>,
+      <em>Roadmap</em> v0.4 Slice&nbsp;1). It is the same aggregate as any other event in every
+      respect but one: it is <strong>non-persistent</strong>. Its log lives only for the session
+      and is discarded on exit — you can always fly without first naming and saving an event, and
+      that throwaway flying is itself a real (if ephemeral) event log.
+    </p>
+
+    <h3>One logical model, two storage realizations</h3>
+    <p>
+      The event-as-container model is <em>logical</em>. It has two distinct <em>physical</em>
+      realizations — the local desktop Director today, and the Postgres Cloud at v0.7 — unified by
+      a single backend-agnostic abstraction so the rest of the system never has to know which one
+      is underneath.
+    </p>
+    <div class="principle">
+      <p><span class="name">The <code>EventLog</code> trait + <code>EventRegistry</code> are the
+      seam.</span> An <code>EventLog</code> is the append/read interface for <em>one</em> event's
+      ordered fact log; an <code>EventRegistry</code> resolves an <code>EventId</code> to that
+      event's log. Both are backend-agnostic: reads are always event-scoped and offsets are
+      per-event-dense regardless of backend. The engine, projection, and protocol layers hold a
+      registry and a log — never a database handle — so they cannot tell whether an event's log is
+      a SQLite file or a row-set in Postgres.</p>
+    </div>
+
+    <h3>Realization 1 — Local (desktop Director, now)</h3>
+    <p>
+      Each <strong>persistent event is its own SQLite database file</strong> — the file that "is
+      the event," portable and replayable in isolation (the per-event tier from §4). The built-in
+      <strong>Practice</strong> event is realized as an <strong>in-memory log</strong>, lost on
+      exit — same trait, no file. The <code>EventRegistry</code> is the map from
+      <code>EventId</code>&nbsp;→&nbsp;<em>that event's log</em>: it opens (or creates) the SQLite
+      file for a persistent event, or hands back the in-memory log for Practice.
+    </p>
+
+    <h3>Realization 2 — Cloud (Postgres, v0.7)</h3>
+    <p>
+      The Cloud aggregates many events into <strong>one shared Postgres database</strong>. The
+      container that was a separate file on the desktop becomes an <strong>explicit container
+      row</strong>, and per-event log isolation becomes a foreign key rather than a separate file:
+    </p>
+    <dl class="entities">
+      <dt><code>events</code> table — the container</dt>
+      <dd>One row per event: <code>event_id</code> primary key (the UUID the offline Director
+      minted), plus <code>name</code>, <code>owner</code>, <code>created_at</code>,
+      <code>visibility</code>, and the rest of the event's framing. This is the explicit
+      realization of the aggregate root that the desktop expresses implicitly as "a file."</dd>
+      <dt><code>event_log</code> table — the facts</dt>
+      <dd>The append-only fact log for <em>all</em> events in one table, carrying
+      <code>event_id</code> as a <strong>foreign key</strong> to <code>events</code>. The
+      composite primary key <code>(event_id, offset)</code> gives <em>each event its own dense
+      offset sequence</em> — exactly the per-event-dense offsets the trait promises — while a
+      <code>recorded_at</code> timestamp and a <code>fact</code> column (<strong>JSONB</strong>)
+      carry the entry itself.</dd>
+      <dt>Materialized projection tables</dt>
+      <dd>Any projection the warehouse materializes (heat results, standings, career, season) also
+      carries <code>event_id</code> as a foreign key, so derived rows stay scoped to their owning
+      event and recompute per event.</dd>
+    </dl>
+    <p>A small schema sketch for the two container tables:</p>
+    <pre class="code">CREATE TABLE events (
+    event_id    UUID        PRIMARY KEY,   -- minted by the offline Director
+    name        TEXT        NOT NULL,
+    owner       TEXT        NOT NULL,      -- account / chapter that owns it
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    visibility  TEXT        NOT NULL DEFAULT 'open'
+    -- ... further event framing (class set, enabled phases, ...)
+);
+
+CREATE TABLE event_log (
+    event_id    UUID        NOT NULL REFERENCES events (event_id),
+    "offset"    BIGINT      NOT NULL,      -- dense, gap-free, per-event, from 0
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    fact        JSONB       NOT NULL,      -- the canonical fact, as received
+    PRIMARY KEY (event_id, "offset")       -- each event keeps its own sequence
+);</pre>
+    <p>
+      The <code>(event_id, offset)</code> key is also what makes the resumable Cloud push an
+      idempotent upsert — same offset, same bytes, no duplicate
+      (<a href="cloud.html">Cloud &amp; Season</a> §2). The fuller warehouse concerns —
+      partitioning the log by event, retention, materialization policy — live in that doc; the
+      schema above is just the container shape the rest of this section depends on.
+    </p>
+
+    <h3>Why the scoping lives in storage, not the fact model</h3>
+    <div class="principle">
+      <p><span class="name">The abstraction is what lets the Cloud slot in without touching the
+      core.</span> Because reads are always event-scoped and offsets are per-event-dense
+      <em>at the trait</em>, the engine, projection, and protocol layers are written against the
+      <code>EventLog</code>/<code>EventRegistry</code> abstraction and never learn the backend. The
+      v0.7 Postgres realization is a new trait implementation behind the same
+      <code>EventRegistry</code> — a <code>WHERE event_id = …</code> row-set instead of a file —
+      and nothing in the core changes.</p>
+    </div>
+    <p>
+      This is precisely <em>why</em> the local design uses <strong>per-event logs</strong> rather
+      than tagging every fact with an <code>event_id</code> in one big log: the event scoping
+      lives in the <strong>storage layer</strong>, not in the fact model. A fact does not carry
+      "which event am I in" — the log it lives in <em>is</em> the answer. The Postgres realization
+      reintroduces an <code>event_id</code> column only because a shared database has no
+      per-file boundary to lean on; the FK reconstructs, inside one database, the same isolation a
+      separate SQLite file gives for free. Either way the logical model is identical: one event,
+      one log, its own dense offsets.
+    </p>
+
     <h2>5. Components</h2>
     <dl class="entities">
       <dt>Timer adapter layer</dt>
@@ -405,15 +526,36 @@ flowchart TB
       and access splits into <strong>read</strong> and <strong>control</strong>.
     </p>
     <div class="principle">
-      <p><span class="name">Control is privileged; reads are open on the LAN.</span> Running
-      the race — race control, marshaling, configuration — requires the RD's authenticated
-      role. Watching it (racer PWA, overlays) is open, or lightly tokened, to anyone on the
-      LAN. Control authority never leaves the Director.</p>
+      <p><span class="name">Loopback is trusted; remote control is opt-in.</span> Running the
+      race — race control, marshaling, configuration — is the RD's privileged capability. On the
+      Director's own machine it needs <strong>no auth at all</strong>: a loopback request is the
+      operator at the keyboard by definition, so the RD console gets full control with no login.
+      Reaching control from anywhere else (the RD's phone over the LAN) is <strong>opt-in, off by
+      default, gated by an RD-set passphrase</strong>. Either way control authority stays
+      Director-only and LAN-only — it never reaches the Cloud.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Reads are a first-class tier; open on the LAN.</span> Watching the
+      race — the pilot apps, spectator PWA, overlays — is a scoped read capability every such
+      client uses, open (or lightly join-token-gated) to anyone on the LAN. A pilot app shows
+      that pilot's own schedule and laps; reads never confer control.</p>
     </div>
     <div class="principle">
       <p><span class="name">The Cloud authenticates accounts but is never authoritative.</span>
       Off-LAN viewers reach the Cloud with accounts, but the Cloud only ever serves the read
       contract and relays — no race is controlled through it.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Cloud TLS is mandatory and non-negotiable.</strong> Anything the Cloud serves or
+        receives over the public internet — account auth, the read snapshot and change stream, the
+        Director&rarr;Cloud log push — travels over <strong>HTTPS / WSS end-to-end, with zero
+        unencrypted traffic over the internet, ever</strong>. This is a hard, enforced requirement
+        of the architecture, not a recommendation. On the trusted LAN plain HTTP is acceptable now;
+        the v0.5 PWA / remote-control path requires a TLS plan (self-signed or challenge-response)
+        so the passphrase never crosses untrusted WiFi in clear (mechanics in
+        <a href="protocol.html">Protocol</a> §5).
+      </p>
     </div>
     <p>
       <strong>Identity</strong> has two layers. Within an event, a timer's local reference
@@ -425,9 +567,10 @@ flowchart TB
     </p>
     <div class="callout">
       <p>
-        Wire-level mechanics — how the RD role authenticates, token/session format, and how
-        read access is scoped on LAN vs Cloud — are the <a href="protocol.html">Protocol</a>
-        spec's job. The cross-event registry and the reconcile-on-sync rules belong to
+        Wire-level mechanics — the loopback source-IP check and remote-control passphrase, the
+        token/session format, and how read access is scoped on LAN vs Cloud — are the
+        <a href="protocol.html">Protocol</a> spec's job. The cross-event registry and the
+        reconcile-on-sync rules belong to
         <a href="cloud.html">Cloud &amp; Season</a>. This section fixes only the trust
         boundaries.
       </p>
