@@ -58,6 +58,7 @@
 
 pub mod app;
 pub mod control;
+pub mod control_handler;
 pub mod error;
 pub mod live_state;
 pub mod scope;
