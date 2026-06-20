@@ -6,6 +6,19 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# `live` pulls the dockerized-RotorHazard e2e harness (the testkit container + the
+# engine's heat loop) into the server's *dev*-builds so `tests/full_event_live.rs` can
+# drive a real event over real RH into the protocol server's log and observe it through a
+# protocol client (HTTP snapshot + WS change-stream). It mirrors the engine's `live`
+# feature: off by default so the core server stays Docker-free, and the e2e test is also
+# `#[ignore]` so it never runs in the shared CI suite — only in the dedicated `rh-live`
+# job (`cargo test -p gridfpv-server --features live --test full_event_live -- --ignored`).
+#
+# It enables only dev-dependencies (the test harness), so it adds nothing to the shipped
+# library. `gridfpv-engine/live` pulls the adapters' Socket.IO transport the harness drives.
+live = ["dep:gridfpv-testkit", "dep:gridfpv-adapters", "gridfpv-adapters/live", "gridfpv-engine/live"]
+
 [dependencies]
 gridfpv-events.workspace = true
 gridfpv-projection.workspace = true
@@ -25,6 +38,16 @@ tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", 
 # `getrandom` draws them straight from the OS CSPRNG — minimal, std-ish, no key
 # management. Real signed/HMAC join tokens are a later concern (see `auth` module docs).
 getrandom = "0.3"
+
+# The mock-RH e2e harness (#47), enabled only by the `live` feature. Optional so the
+# default server build pulls no Docker/Socket.IO machinery; the `full_event_live` test
+# drives it to stand up a real RotorHazard and feed a real event into the server's log.
+# (A regular — not dev — dependency because cargo features can only gate `[dependencies]`
+# via `dep:`; it is dead weight unless `live` is on, exactly like the engine's testkit dep.)
+gridfpv-testkit = { workspace = true, optional = true }
+# The RotorHazard transport (#47, `live` only): the e2e drives the dockerized RH the same
+# way the engine's harness does — connect, reset, stage, drain the timer's real passes.
+gridfpv-adapters = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` drives the snapshot router in integration tests with no
