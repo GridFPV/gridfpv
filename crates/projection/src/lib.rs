@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 
 use gridfpv_events::{AdapterId, CompetitorRef, Event, Pass, SourceTime};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Identifies a competitor *within a single timing source*.
 ///
@@ -38,7 +39,8 @@ use serde::{Deserialize, Serialize};
 /// timer), so laps are grouped on the `(AdapterId, CompetitorRef)` pair. Binding
 /// these per-source competitors to a single GridFPV pilot is a later registration
 /// concern (Architecture §9) and deliberately out of scope here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct CompetitorKey {
     /// The timing source the competitor belongs to.
     pub adapter: AdapterId,
@@ -57,7 +59,8 @@ impl CompetitorKey {
 }
 
 /// A single completed lap: the interval between two consecutive lap-gate passes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct Lap {
     /// 1-based lap number within the competitor's run.
     pub number: u32,
@@ -67,7 +70,8 @@ pub struct Lap {
 }
 
 /// Every lap a single competitor completed, in order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct CompetitorLaps {
     /// Which source-local competitor these laps belong to.
     pub competitor: CompetitorKey,
@@ -96,7 +100,8 @@ impl CompetitorLaps {
 ///
 /// Competitors are ordered deterministically by [`CompetitorKey`] so the
 /// projection is stable across runs regardless of event arrival order.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct LapList {
     /// Per-competitor laps, ordered by competitor key.
     pub competitors: Vec<CompetitorLaps>,

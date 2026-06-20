@@ -19,6 +19,10 @@ gridfpv-events.workspace = true
 # Scoring (#30) and the other engine features build on the projection; add it now so
 # the v0.3 wave that lands them doesn't have to touch this manifest again.
 gridfpv-projection.workspace = true
+serde.workspace = true
+# Rust→TypeScript type export (#4, #40): heat results, rankings, and the full-event
+# outcome are served snapshot bodies, so their public output types generate TS bindings.
+ts-rs = "12"
 gridfpv-adapters = { workspace = true, optional = true }
 gridfpv-testkit = { workspace = true, optional = true }
 

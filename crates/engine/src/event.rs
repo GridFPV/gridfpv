@@ -44,6 +44,8 @@
 use std::collections::BTreeMap;
 
 use gridfpv_events::{Event, Pass, SourceTime};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::format::{CompletedHeat, Generator, GeneratorStep, HeatPlan, RankEntry, advance_top_n};
 use crate::scoring::{HeatResult, WinCondition, score};
@@ -92,7 +94,8 @@ pub fn run_format(
 
 /// The result of running a whole event: the qualifying ranking that seeded the bracket,
 /// the bracket's final standings, and the single winner at the top of them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct EventOutcome {
     /// The qualifying phase's final ranking (best seed first) — what seeds the bracket.
     pub qualifying: Vec<RankEntry>,
