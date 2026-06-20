@@ -81,6 +81,9 @@
 //! and feeding decoded frames into [`VelocidroneAdapter::translate`] is left to the
 //! live-transport task (no network crates are pulled in here).
 
+#[cfg(feature = "live")]
+pub mod transport;
+
 use serde::Deserialize;
 use std::collections::HashMap;
 
