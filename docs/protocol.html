@@ -319,53 +319,112 @@ sequenceDiagram
 
     <h2>5. Auth &amp; authorization</h2>
     <p>
-      Access splits into <strong>read</strong> and <strong>control</strong>, following the
-      trust boundaries fixed in <a href="architecture.html">Architecture</a> §9. This doc
-      decides only the wire mechanics.
+      Access splits into two capabilities — <strong>control</strong> (run the race) and
+      <strong>read</strong> (watch it) — following the trust boundaries fixed in
+      <a href="architecture.html">Architecture</a> §9. This doc decides the wire mechanics. The
+      model below is the <strong>decided evolution</strong> of the earlier "RD bearer token +
+      read-only join token" sketch: loopback-trust replaces the local RD <em>login</em>, the
+      old RD token becomes a remote-access <em>passphrase setting</em>, and the join token is
+      the basis of a first-class read tier.
     </p>
+
+    <h3>Control — loopback is trusted, remote is opt-in</h3>
     <div class="principle">
-      <p><span class="name">Reads are open (or lightly tokened) on the LAN.</span> Anyone on
-      the venue LAN can fetch snapshots and subscribe to the read stream — that's the point of
-      a local spectator/overlay experience with no internet. An optional lightweight join
-      token (printed as a QR code, baked into the URL) can gate casual access to the event
-      without standing up accounts; it grants read scope only and never confers control.</p>
+      <p><span class="name">Loopback is trusted; there is no local auth.</span> The RD console
+      runs on the Director's own machine (the Tauri app, or the v0.4 web app served at
+      <code>localhost</code>). A request whose source address is loopback is the operator at the
+      keyboard <em>by definition</em>, so it gets full control with <strong>no login, no token,
+      no passphrase</strong> — the RD opens the app and is in. This is enforced by source-IP
+      middleware (<code>peer.ip().is_loopback()</code>), and it is safe because the OS drops
+      spoofed-loopback "martian" packets at the kernel before they ever reach the server: a
+      remote host cannot forge a loopback source address. The practical consequence is that
+      <strong>there is no local auth UI</strong> — no login screen in front of the event picker,
+      nothing to type to start running a race on your own machine.</p>
     </div>
     <div class="principle">
-      <p><span class="name">Control is authenticated and Director-local.</span> Race control,
-      marshaling, and configuration require the RD's authenticated role and run only against
-      the Director. The control path is a distinct, privileged set of endpoints / a privileged
-      channel on the same connection — bidirectional by nature (commands up, acknowledgements
-      and resulting state down), which is part of why the RD console wants WebSocket
-      regardless of the spectator-transport decision.</p>
-      <p><em>Future:</em> the control path may serve <strong>one or more</strong> authenticated
-      RD-role clients on the LAN — the desktop RD console and/or a future <strong>mobile
-      RD-control surface</strong> the RD uses to run the race from their phone (e.g. start the
-      heat from their seat). It still requires the RD role (with stricter auth for a mobile
-      device) and, like all control, is <strong>Director-only and never exposed on the
-      Cloud</strong>.</p>
+      <p><span class="name">Remote control is opt-in and off by default, gated by a passphrase.</span>
+      Reaching the control path from anywhere other than loopback — the RD's PWA on a phone over
+      the LAN, so the RD can start, abort, or advance a heat from their seat — is a deliberate
+      choice the RD makes, <strong>disabled by default</strong>. When the RD enables it, they set
+      a <strong>passphrase</strong>; a non-loopback request must present it to touch control. The
+      same source-IP middleware that grants loopback its free pass is what holds remote requests
+      to the passphrase gate. <strong>Control authority stays Director-only and LAN-only</strong>
+      either way — enabling remote control only adds a second place to exercise the existing
+      Director role over the LAN; it never widens <em>who</em> controls a race or exposes control
+      to the Cloud.</p>
+      <p>This is what the earlier "RD bearer token" becomes: not a login a local RD must clear,
+      but a <em>remote-access passphrase</em> the RD opts into for off-machine control.</p>
     </div>
+
+    <h3>Read — a first-class tier for pilots and spectators</h3>
+    <div class="principle">
+      <p><span class="name">Reads are a first-class, scoped capability — required for the pilot apps.</span>
+      Reading is not an afterthought of control; it is the tier <em>every</em> pilot and spectator
+      client uses. A read client gets a lightweight, scoped capability (a <code>Scope::Pilot</code>
+      or event scope, §4): a pilot app shows <em>that pilot's</em> schedule, laps, and bracket
+      position; a spectator or overlay watches the event or a heat. On the LAN this read is open by
+      default, optionally gated by a lightweight <strong>join token</strong> (printed as a QR code,
+      baked into the URL) when an event wants to gate casual access — the join token grants
+      <strong>read scope only and never confers control</strong>. This read tier is the basis of the
+      Cloud account's read authorization too (§ below, and <a href="cloud.html">Cloud &amp; Season</a> §7).</p>
+    </div>
+
     <div class="principle">
       <p><span class="name">The Cloud authenticates accounts but never controls.</span>
       Off-LAN viewers reach the Cloud with accounts; the Cloud serves the identical read
-      contract and relays. <strong>It exposes no control path at all</strong> — control
-      authority never leaves the Director (<a href="architecture.html">Architecture</a> §9).
-      An RD does not run a race "through the Cloud"; the Cloud only ever reflects what the
-      Director already decided.</p>
+      contract and relays, mapping an account onto the same scoped read tier. <strong>It exposes
+      no control path at all</strong> — control authority never leaves the Director
+      (<a href="architecture.html">Architecture</a> §9). An RD does not run a race "through the
+      Cloud"; the Cloud only ever reflects what the Director already decided.</p>
     </div>
     <div class="callout">
       <p>
         <strong>Same read contract, different gate.</strong> The read half of the protocol is
-        byte-identical on both transports; only what stands in front of it differs — open /
+        byte-identical on every transport; only what stands in front of it differs — open /
         join-token on the LAN, account auth on the Cloud. Because the storage trait makes the
         server crate identical on both sides, "authorize this read" is a thin policy layer,
         not a fork of the contract. The exact token/session format (opaque token, signed JWT,
-        cookie session) is deliberately left open below.
+        cookie session) is recorded in Open decisions.
       </p>
     </div>
+
+    <h3>TLS posture</h3>
+    <p>
+      The two access tiers above carry a credential only in two cases — the remote-control
+      passphrase, and Cloud account auth. Where that credential (or any traffic) travels over an
+      untrusted network, it must be encrypted. The posture is staged with the transports:
+    </p>
+    <dl class="entities">
+      <dt>Local / LAN (now)</dt>
+      <dd>Plain HTTP is acceptable. The venue LAN is a trusted network and loopback control
+      carries no credential at all, so there is nothing to protect in clear on the wire at this
+      stage.</dd>
+      <dt>PWA / remote control (v0.5)</dt>
+      <dd>A <strong>TLS plan is required</strong> before the remote-control passphrase or the
+      installable PWA ships — self-signed certificates or a challenge-response scheme — so the
+      passphrase never crosses untrusted WiFi in the clear. (A secure context is also what
+      unlocks the PWA's install / service-worker / push features; see
+      <a href="clients.html">Clients</a> §4.)</dd>
+      <dt>Cloud (v0.7)</dt>
+      <dd><strong>TLS is mandatory — HTTPS / WSS end-to-end, with zero unencrypted traffic over
+      the internet, ever.</strong> This is a hard requirement enforced in the architecture, not a
+      recommendation. Cloud account auth and the read stream both ride encrypted transport without
+      exception. See the callout below and <a href="cloud.html">Cloud &amp; Season</a>.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>Mandatory Cloud TLS is non-negotiable.</strong> Every byte the Cloud serves or
+        receives over the public internet — account auth, the read snapshot and change stream, the
+        Director&rarr;Cloud log push — travels over <strong>HTTPS / WSS, end-to-end, always</strong>.
+        There is no "plain-HTTP Cloud" mode and no exception for development convenience reachable on
+        a public address. This is stated as a hard, enforced requirement, not a best-effort "should."
+      </p>
+    </div>
+
     <div class="sim-note">
       <p><span class="label">IRL</span>The control path is exercised constantly — staging,
-      frequency assignment, marshaling rulings, re-runs — all from the authenticated RD
-      console.</p>
+      frequency assignment, marshaling rulings, re-runs — almost always from the loopback RD
+      console; remote control is the occasional "RD is racing too" case.</p>
       <p><span class="label">Sim</span>Same control path, lighter use — mostly start/abort and
       discard-and-re-run; no frequency or signal marshaling.</p>
     </div>
@@ -484,15 +543,28 @@ flowchart LR
       <a href="architecture.html">Architecture</a> §4. Exact window sizes are tuned at
       implementation. <strong>As built (v0.4):</strong> the retained window is 256 log offsets;
       an older cursor gets a <code>ReSnapshotRequired</code> / <code>StaleCursor</code> response.</li>
-      <li><span class="q">RESOLVED — Auth credential format: opaque bearer tokens (+ optional signed join-token).</span>
-      RD and account auth use <strong>opaque bearer tokens</strong> backed by a server-side
-      session (easy to revoke), plus an optional <strong>lightweight signed join-token</strong>
-      (printed as a QR code, baked into the URL) granting read-only LAN access. Trust boundaries
-      are fixed in <a href="architecture.html">Architecture</a> §9. <em>Revisit JWT only if</em>
-      stateless Cloud scaling later demands it. <strong>As built (v0.4):</strong> opaque 256-bit
-      bearer tokens in an in-memory revocable <code>TokenStore</code>, with roles <code>Rd</code>
-      and <code>ReadOnly</code> — reads are open, control is RD-gated, and the read-only join-token
-      grants read scope only.</li>
+      <li><span class="q">RESOLVED — Access model: loopback-trust control + opt-in remote passphrase + first-class read tier.</span>
+      Control is granted to <strong>loopback with no auth</strong> (source-IP middleware,
+      <code>peer.ip().is_loopback()</code>; safe because the OS drops spoofed-loopback martians);
+      <strong>remote control is opt-in, off by default, gated by an RD-set passphrase</strong>; and
+      <strong>read is a first-class scoped tier</strong> every pilot/spectator client uses, open or
+      join-token-gated on the LAN (§5). The old local "RD token" is therefore a remote-access
+      passphrase setting, not a login — there is no local auth UI. <em>Credential format:</em> the
+      passphrase and Cloud account auth use <strong>opaque bearer tokens</strong> backed by a
+      revocable server-side session, with the lightweight signed join-token granting read scope
+      only; revisit JWT only if stateless Cloud scaling later demands it. Trust boundaries are fixed
+      in <a href="architecture.html">Architecture</a> §9. <strong>As built (v0.4):</strong> opaque
+      256-bit bearer tokens in an in-memory revocable <code>TokenStore</code>, with roles
+      <code>Rd</code> and <code>ReadOnly</code>; loopback-trust and the remote passphrase land with
+      the auth slice (#80), and the PWA remote-control path follows in v0.5.</li>
+      <li><span class="q">RESOLVED — TLS posture: HTTP on the trusted LAN, mandatory TLS on the Cloud.</span>
+      Plain HTTP is acceptable on the <strong>local/LAN</strong> trusted network (loopback control
+      carries no credential); a <strong>TLS plan is required for the v0.5 PWA / remote control</strong>
+      (self-signed or challenge-response) so the passphrase never crosses untrusted WiFi in clear;
+      and <strong>Cloud TLS is mandatory and non-negotiable</strong> — HTTPS/WSS end-to-end, zero
+      unencrypted traffic over the internet, ever, enforced in the architecture (§5,
+      <a href="cloud.html">Cloud &amp; Season</a>). <strong>As built (v0.4):</strong> Director serves
+      plain HTTP on the LAN; the PWA TLS plan is v0.5 and mandatory Cloud TLS is v0.7.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Sequence-cursor representation.</span>
       The public projection sequence is a <strong>single monotonic integer per stream</strong>
       (not per-projection cursors a client composes). How it stays stable across a Director
