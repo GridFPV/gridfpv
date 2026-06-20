@@ -136,12 +136,19 @@ fn run_bracket_heat(plan: &HeatPlan, winner: &CompetitorRef) -> CompletedHeat {
                 position: next_pos,
                 laps: 0,
                 metric: gridfpv_engine::scoring::Metric::LastLapAt(None),
+                ..Default::default()
             });
             next_pos += 1;
         }
     }
 
-    CompletedHeat::new(plan.heat.0.clone(), HeatResult { places })
+    CompletedHeat::new(
+        plan.heat.0.clone(),
+        HeatResult {
+            places,
+            ..Default::default()
+        },
+    )
 }
 
 /// The seat node index behind a `node-{i}` competitor ref, if it has that shape.
@@ -159,6 +166,7 @@ fn remap(place: &Placement, as_ref: &CompetitorRef) -> Placement {
         position: place.position,
         laps: place.laps,
         metric: place.metric,
+        disqualified: place.disqualified,
     }
 }
 

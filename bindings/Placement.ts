@@ -28,4 +28,13 @@ laps: number,
 /**
  * The condition-specific deciding metric for this competitor.
  */
-metric: Metric, };
+metric: Metric, 
+/**
+ * Whether this competitor was **disqualified** by an adjudication
+ * ([`gridfpv_events::Penalty::Disqualify`] via
+ * [`gridfpv_events::Event::PenaltyApplied`]). A disqualified competitor is ranked
+ * **after every non-disqualified competitor**, regardless of their on-track result
+ * (see [`score_with_adjudications`]). Defaults to `false` and is omitted from the
+ * wire when false, so clean results carry no extra bytes.
+ */
+disqualified?: boolean, };

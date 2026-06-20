@@ -69,6 +69,7 @@ fn remap(place: &Placement, as_ref: &CompetitorRef) -> Placement {
         position: place.position,
         laps: place.laps,
         metric: place.metric,
+        disqualified: place.disqualified,
     }
 }
 
@@ -143,12 +144,16 @@ fn run_real_heat(plan: &HeatPlan, winner: &CompetitorRef) -> HeatResult {
                 position: next_pos,
                 laps: 0,
                 metric: Metric::LastLapAt(None),
+                ..Default::default()
             });
             next_pos += 1;
         }
     }
 
-    HeatResult { places }
+    HeatResult {
+        places,
+        ..Default::default()
+    }
 }
 
 /// The intended winner of a heat: the highest seed present in the lineup. Seeds here are

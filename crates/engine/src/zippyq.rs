@@ -229,8 +229,10 @@ mod tests {
                     position: *position,
                     laps: *laps,
                     metric: Metric::LastLapAt(None),
+                    ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 

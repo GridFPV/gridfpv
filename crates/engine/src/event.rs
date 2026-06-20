@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::format::{CompletedHeat, Generator, GeneratorStep, HeatPlan, RankEntry, advance_top_n};
-use crate::scoring::{HeatResult, WinCondition, score};
+use crate::scoring::{HeatResult, WinCondition, apply_adjudications};
 
 /// Turn one planned heat into its scored result. The single injected dependency the
 /// event driver needs: it owns *how* a heat is run (replay a fixture log, drive real
@@ -168,8 +168,14 @@ pub fn run_event(
 /// with [`gridfpv_projection::lap_list_marshaled`] by construction (both fold via the
 /// single source of truth).
 ///
+/// On top of the marshaling fold, this also applies the heat's **adjudications**
+/// ([`gridfpv_events::Event::PenaltyApplied`] / [`gridfpv_events::Event::HeatVoided`], #13):
+/// a `Disqualify` sinks a competitor below the field (flagging it), a `TimeAdded` worsens
+/// their deciding time, and a `HeatVoided` flags the whole result voided — so a full event
+/// run reflects penalties and heat-voids, not just lap corrections.
+///
 /// `race_start` is the shared race clock for [`WinCondition::Timed`] (ignored by the
-/// qualifying / first-to-N conditions), matching [`score`].
+/// qualifying / first-to-N conditions), matching [`crate::scoring::score`].
 pub fn score_marshaled(
     events: &[Event],
     condition: WinCondition,
@@ -180,7 +186,10 @@ pub fn score_marshaled(
     // corrected lap-gate passes it returns. The scorer re-groups/re-orders by competitor.
     let corrected =
         gridfpv_projection::corrected_passes(events.iter().enumerate().map(|(i, e)| (i as u64, e)));
-    score(&corrected, condition, race_start)
+    // Penalties / heat-void are a *separate* fold from the marshaling corrections above:
+    // apply them on the corrected pass stream so an adjudicated, marshaled heat reflects
+    // both (#13). A log with no penalties scores exactly as before.
+    apply_adjudications(&corrected, condition, race_start, events)
 }
 
 #[cfg(test)]
@@ -309,8 +318,10 @@ mod tests {
                     position: (i as u32) + 1,
                     laps: 0,
                     metric: Metric::BestLapMicros(*micros),
+                    ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -328,8 +339,10 @@ mod tests {
                     position: *position,
                     laps: *laps,
                     metric: Metric::LastLapAt(None),
+                    ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 

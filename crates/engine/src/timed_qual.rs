@@ -251,6 +251,7 @@ mod tests {
             position,
             laps,
             metric,
+            ..Default::default()
         }
     }
 
@@ -265,6 +266,7 @@ mod tests {
                     placement(name, (i as u32) + 1, 0, Metric::BestLapMicros(*micros))
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -278,6 +280,7 @@ mod tests {
                     placement(name, (i as u32) + 1, *laps, Metric::LastLapAt(None))
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -416,6 +419,7 @@ mod tests {
                 placement("A", 1, 3, Metric::BestConsecutiveMicros(a)),
                 placement("B", 2, 3, Metric::BestConsecutiveMicros(b)),
             ],
+            ..Default::default()
         };
         let r1 = CompletedHeat::new("round-1", round(Some(6_000_000), Some(5_500_000)));
         // A improves to 5.0s in round 2; B holds at 5.5s. A's best (5.0) beats B's (5.5).

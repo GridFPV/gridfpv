@@ -12,4 +12,11 @@ export type HeatResult = {
 /**
  * Placements in finishing order (ties adjacent, sharing a position).
  */
-places: Array<Placement>, };
+places: Array<Placement>, 
+/**
+ * Whether the whole heat was **voided** by an adjudication
+ * ([`gridfpv_events::Event::HeatVoided`]). A voided result is nullified: its
+ * `places` are still scored (so the on-track standing is visible) but the heat does
+ * not count. Defaults to `false` and is omitted from the wire when false.
+ */
+voided?: boolean, };

@@ -39,7 +39,9 @@
 //! about the function distinguishes a finished heat from an in-progress one.
 #![forbid(unsafe_code)]
 
-use gridfpv_events::{Event, Pass, SourceTime};
+use std::collections::{BTreeMap, BTreeSet};
+
+use gridfpv_events::{CompetitorRef, Event, Pass, Penalty, SourceTime};
 use gridfpv_projection::CompetitorKey;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -102,6 +104,41 @@ pub struct Placement {
     pub laps: u32,
     /// The condition-specific deciding metric for this competitor.
     pub metric: Metric,
+    /// Whether this competitor was **disqualified** by an adjudication
+    /// ([`gridfpv_events::Penalty::Disqualify`] via
+    /// [`gridfpv_events::Event::PenaltyApplied`]). A disqualified competitor is ranked
+    /// **after every non-disqualified competitor**, regardless of their on-track result
+    /// (see [`score_with_adjudications`]). Defaults to `false` and is omitted from the
+    /// wire when false, so clean results carry no extra bytes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disqualified: bool,
+}
+
+/// serde `skip_serializing_if` predicate: omit additive `bool` flags when false so a
+/// clean result serialises exactly as it did before these fields existed.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl Default for Placement {
+    /// An empty placeholder placement. Exists so constructors (chiefly test fixtures)
+    /// can spread `..Default::default()` and only set the fields they care about, which
+    /// keeps additive [`Placement`] fields from rippling into every struct-literal again
+    /// (a later field defaults rather than breaking the build). `CompetitorKey` has no
+    /// `Default` of its own, so this supplies an empty one; callers always overwrite it.
+    fn default() -> Self {
+        Placement {
+            competitor: CompetitorKey {
+                adapter: gridfpv_events::AdapterId(String::new()),
+                competitor: CompetitorRef(String::new()),
+            },
+            position: 0,
+            laps: 0,
+            metric: Metric::LastLapAt(None),
+            disqualified: false,
+        }
+    }
 }
 
 /// The condition-specific value a [`Placement`] was ranked on, kept for display and
@@ -127,11 +164,17 @@ pub enum Metric {
 /// Ties share a `position` (see [`Placement::position`]). The order within a tie
 /// group is still deterministic — competitors are ordered by [`CompetitorKey`] as
 /// the final, total tie-break — but their `position` numbers are equal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct HeatResult {
     /// Placements in finishing order (ties adjacent, sharing a position).
     pub places: Vec<Placement>,
+    /// Whether the whole heat was **voided** by an adjudication
+    /// ([`gridfpv_events::Event::HeatVoided`]). A voided result is nullified: its
+    /// `places` are still scored (so the on-track standing is visible) but the heat does
+    /// not count. Defaults to `false` and is omitted from the wire when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub voided: bool,
 }
 
 /// A single completed lap, with both its absolute completion time and its duration.
@@ -201,19 +244,96 @@ impl Run {
 /// a position. Called on a partial pass list this is the **provisional / live
 /// ranking** (see the module docs).
 pub fn score(passes: &[Pass], condition: WinCondition, race_start: SourceTime) -> HeatResult {
-    let runs = Run::group(passes);
-    match condition {
-        WinCondition::Timed { window_micros } => score_timed(runs, race_start, window_micros),
-        WinCondition::FirstToLaps { n } => score_first_to_laps(runs, n),
-        WinCondition::BestLap => score_best_lap(runs),
-        WinCondition::BestConsecutive { n } => score_best_consecutive(runs, n),
+    score_inner(passes, condition, race_start, &Adjudications::default())
+}
+
+/// The adjudications a heat's [`Event::PenaltyApplied`] / [`Event::HeatVoided`] log
+/// distils to, applied on top of the pure on-track scoring (race-engine.html §7.1, #13).
+///
+/// Built by [`Adjudications::collect`] from a heat's events; pure data, so the same log
+/// always yields the same adjudications and the scored result replays identically (no
+/// clock or RNG). Penalties are keyed by [`CompetitorRef`] because that is what the
+/// penalty events carry; a heat's events are all one heat, so the ref is unambiguous.
+#[derive(Debug, Clone, Default)]
+struct Adjudications {
+    /// Per-competitor microseconds added to their deciding time, **accumulated** across
+    /// every [`Penalty::TimeAdded`] for that competitor (multiple penalties stack).
+    time_added: BTreeMap<CompetitorRef, i64>,
+    /// Competitors disqualified by a [`Penalty::Disqualify`] — ranked after everyone not
+    /// disqualified and flagged [`Placement::disqualified`].
+    disqualified: BTreeSet<CompetitorRef>,
+    /// Whether the whole heat was voided ([`Event::HeatVoided`]).
+    voided: bool,
+}
+
+impl Adjudications {
+    /// Distil a heat's event log into its adjudications. Ignores everything that is not a
+    /// [`Event::PenaltyApplied`] / [`Event::HeatVoided`]; `TimeAdded` penalties accumulate,
+    /// any `Disqualify` disqualifies, any `HeatVoided` voids. Deterministic — pure fold.
+    fn collect(events: &[Event]) -> Self {
+        let mut adj = Adjudications::default();
+        for event in events {
+            match event {
+                Event::PenaltyApplied {
+                    competitor,
+                    penalty,
+                    ..
+                } => match penalty {
+                    Penalty::Disqualify => {
+                        adj.disqualified.insert(competitor.clone());
+                    }
+                    Penalty::TimeAdded { micros } => {
+                        *adj.time_added.entry(competitor.clone()).or_default() += *micros;
+                    }
+                },
+                Event::HeatVoided { .. } => adj.voided = true,
+                _ => {}
+            }
+        }
+        adj
+    }
+
+    /// Microseconds to add to `competitor`'s deciding time (0 if none).
+    fn added(&self, competitor: &CompetitorRef) -> i64 {
+        self.time_added.get(competitor).copied().unwrap_or_default()
+    }
+
+    /// Whether `competitor` was disqualified.
+    fn is_dq(&self, competitor: &CompetitorRef) -> bool {
+        self.disqualified.contains(competitor)
     }
 }
 
-/// Convenience wrapper over a canonical [`Event`] log: filters to lap-gate
-/// [`Pass`]es and scores them, so callers holding a heat's event log (e.g. from the
-/// mock-RH harness) need not pre-filter.
-pub fn score_events(
+/// Score `passes` under `condition`, then apply `adj`'s adjudications: [`Penalty::TimeAdded`]
+/// worsens the deciding time used to rank a competitor, [`Penalty::Disqualify`] sinks a
+/// competitor below every non-disqualified one (flagging [`Placement::disqualified`]), and
+/// [`Event::HeatVoided`] flags the whole [`HeatResult`] voided.
+fn score_inner(
+    passes: &[Pass],
+    condition: WinCondition,
+    race_start: SourceTime,
+    adj: &Adjudications,
+) -> HeatResult {
+    let runs = Run::group(passes);
+    let mut result = match condition {
+        WinCondition::Timed { window_micros } => score_timed(runs, race_start, window_micros, adj),
+        WinCondition::FirstToLaps { n } => score_first_to_laps(runs, n, adj),
+        WinCondition::BestLap => score_best_lap(runs, adj),
+        WinCondition::BestConsecutive { n } => score_best_consecutive(runs, n, adj),
+    };
+    result.voided = adj.voided;
+    result
+}
+
+/// Score a heat's event log under `condition`, applying its **adjudications**
+/// ([`Event::PenaltyApplied`] / [`Event::HeatVoided`], #13).
+///
+/// This is the single home of penalty / heat-void application. It scores the raw
+/// lap-gate passes the log carries, then folds in the heat's adjudications. Marshaling
+/// corrections (void/insert/adjust) are a *separate* fold ([`crate::event::score_marshaled`]);
+/// that path calls [`apply_adjudications`] on the corrected stream so penalties and
+/// marshaling compose without either fold knowing about the other.
+pub fn score_with_adjudications(
     events: &[Event],
     condition: WinCondition,
     race_start: SourceTime,
@@ -225,45 +345,122 @@ pub fn score_events(
             _ => None,
         })
         .collect();
-    score(&passes, condition, race_start)
+    score_inner(
+        &passes,
+        condition,
+        race_start,
+        &Adjudications::collect(events),
+    )
 }
 
-/// Assemble a [`HeatResult`] from `(competitor, laps, metric, rank_key)` rows.
+/// Score already-grouped/corrected `passes`, applying the adjudications carried by `events`.
 ///
-/// `rank_key` is a total, deterministic ordering key (smaller = better). Rows are
-/// sorted by `(rank_key, competitor)` so the competitor key is the final tie-break
-/// and the order is always total; competitors whose `rank_key` is *equal* (the part
-/// the condition cares about) share a position, with the next distinct group's
-/// position skipping past them (1, 2, 2, 4).
-fn rank<K: Ord + Clone>(rows: Vec<(CompetitorKey, u32, Metric, K)>) -> HeatResult {
-    let mut rows = rows;
-    // Total order: rank key first, competitor key as the final deterministic
-    // tie-break so two rows are never "equal" for sorting purposes.
-    rows.sort_by(|a, b| a.3.cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
+/// Used by the marshaling-aware path ([`crate::event::score_marshaled`]): it has already
+/// folded void/insert/adjust into a corrected pass stream, so here we only re-derive the
+/// adjudications from the same log and apply them — penalties and heat-void compose with
+/// marshaling without either fold knowing about the other.
+pub(crate) fn apply_adjudications(
+    passes: &[Pass],
+    condition: WinCondition,
+    race_start: SourceTime,
+    events: &[Event],
+) -> HeatResult {
+    score_inner(
+        passes,
+        condition,
+        race_start,
+        &Adjudications::collect(events),
+    )
+}
+
+/// Convenience wrapper over a canonical [`Event`] log: filters to lap-gate [`Pass`]es,
+/// scores them, and applies any adjudications the log carries
+/// ([`Event::PenaltyApplied`] / [`Event::HeatVoided`]) — so callers holding a heat's
+/// event log (e.g. from the mock-RH harness) get the fully-adjudicated result without
+/// pre-filtering. A log with no penalties scores exactly as [`score`] does.
+pub fn score_events(
+    events: &[Event],
+    condition: WinCondition,
+    race_start: SourceTime,
+) -> HeatResult {
+    score_with_adjudications(events, condition, race_start)
+}
+
+/// Assemble a [`HeatResult`] from `(competitor, laps, metric, rank_key)` rows, applying
+/// `adj`'s disqualifications.
+///
+/// `rank_key` is a total, deterministic ordering key (smaller = better; any
+/// [`Penalty::TimeAdded`] is already folded into it by the per-condition scorer). Rows
+/// are sorted by `(disqualified, rank_key, competitor)`: **disqualified competitors sink
+/// below every non-disqualified one** regardless of on-track result, then within each
+/// group the rank key orders and the competitor key is the final deterministic tie-break.
+/// Competitors whose `(disqualified, rank_key)` is *equal* share a position, with the next
+/// distinct group's position skipping past them (1, 2, 2, 4). DQ'd placements carry
+/// [`Placement::disqualified`] `= true`.
+fn rank<K: Ord + Clone>(
+    rows: Vec<(CompetitorKey, u32, Metric, K)>,
+    adj: &Adjudications,
+) -> HeatResult {
+    // Pair each row with its DQ flag; the flag is the *primary* sort key (false < true),
+    // so every disqualified competitor ranks after every non-disqualified one.
+    let mut rows: Vec<(bool, CompetitorKey, u32, Metric, K)> = rows
+        .into_iter()
+        .map(|(competitor, laps, metric, key)| {
+            (
+                adj.is_dq(&competitor.competitor),
+                competitor,
+                laps,
+                metric,
+                key,
+            )
+        })
+        .collect();
+    // Total order: DQ first, then rank key, then competitor key as the final
+    // deterministic tie-break so two rows are never "equal" for sorting purposes.
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.4.cmp(&b.4))
+            .then_with(|| a.1.cmp(&b.1))
+    });
 
     let mut places = Vec::with_capacity(rows.len());
-    let mut prev_key: Option<K> = None;
+    // A position groups by the *ranking* identity that competitors share: the DQ flag
+    // plus the rank key. A DQ'd competitor never shares a position with a non-DQ'd one.
+    let mut prev_group: Option<(bool, K)> = None;
     let mut position = 0u32;
-    for (index, (competitor, laps, metric, key)) in rows.into_iter().enumerate() {
-        // A new position whenever the *ranking* key changes; equal ranking keys
-        // share the position of the first row in their group.
-        if prev_key.as_ref() != Some(&key) {
+    for (index, (disqualified, competitor, laps, metric, key)) in rows.into_iter().enumerate() {
+        let group = (disqualified, key);
+        if prev_group.as_ref() != Some(&group) {
             position = (index as u32) + 1;
-            prev_key = Some(key.clone());
+            prev_group = Some(group);
         }
         places.push(Placement {
             competitor,
             position,
             laps,
             metric,
+            disqualified,
         });
     }
-    HeatResult { places }
+    HeatResult {
+        places,
+        voided: false,
+    }
 }
 
 /// Timed: count laps whose completing pass is strictly before the cutoff, rank by
 /// count desc then earlier last-counted-lap completion.
-fn score_timed(runs: Vec<Run>, race_start: SourceTime, window_micros: i64) -> HeatResult {
+///
+/// `TimeAdded` here is a **pure lap-count** condition, so the penalty cannot change the
+/// lap count; per the recorded rule it is folded into the **tie-break time** (the last
+/// counted lap's completion), worsening a penalised competitor's standing against others
+/// on the same lap count without inventing or removing laps.
+fn score_timed(
+    runs: Vec<Run>,
+    race_start: SourceTime,
+    window_micros: i64,
+    adj: &Adjudications,
+) -> HeatResult {
     let cutoff = race_start.micros + window_micros;
     let rows = runs
         .into_iter()
@@ -277,22 +474,29 @@ fn score_timed(runs: Vec<Run>, race_start: SourceTime, window_micros: i64) -> He
                 .collect();
             let count = counted.len() as u32;
             let last_at = counted.last().map(|lap| lap.at);
+            let added = adj.added(&run.competitor.competitor);
             // Rank key: fewer laps is worse (negate count so smaller = better), then
-            // earlier last-lap completion is better. `i64::MAX` for "no lap" sorts a
-            // lapless competitor behind everyone with a lap at the same (zero) count.
+            // earlier last-lap completion is better, with any TimeAdded worsening it.
+            // `i64::MAX` for "no lap" sorts a lapless competitor behind everyone with a
+            // lap at the same (zero) count.
             let key = (
                 -(count as i64),
-                last_at.map(|t| t.micros).unwrap_or(i64::MAX),
+                last_at
+                    .map(|t| t.micros.saturating_add(added))
+                    .unwrap_or(i64::MAX),
             );
             (run.competitor, count, Metric::LastLapAt(last_at), key)
         })
         .collect();
-    rank(rows)
+    rank(rows, adj)
 }
 
 /// First-to-N: rank by who reached lap `n` earliest; non-reachers after, by laps
 /// desc then last-lap completion.
-fn score_first_to_laps(runs: Vec<Run>, n: u32) -> HeatResult {
+///
+/// `TimeAdded` worsens the **deciding time**: a reacher's reach-time and a non-reacher's
+/// last-lap tie-break time both shift later by the accumulated penalty.
+fn score_first_to_laps(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatResult {
     let rows = runs
         .into_iter()
         .map(|run| {
@@ -304,27 +508,33 @@ fn score_first_to_laps(runs: Vec<Run>, n: u32) -> HeatResult {
                 None
             };
             let last_at = run.laps.last().map(|lap| lap.at);
+            let added = adj.added(&run.competitor.competitor);
             // Reachers (group 0) sort ahead of non-reachers (group 1). Within
-            // reachers, earlier reach-time wins. Within non-reachers, more laps then
-            // earlier last-lap completion.
+            // reachers, earlier (penalty-worsened) reach-time wins. Within non-reachers,
+            // more laps then earlier (penalty-worsened) last-lap completion.
             let key = match reached_at {
-                Some(t) => (0i8, t.micros, 0i64, 0i64),
+                Some(t) => (0i8, t.micros.saturating_add(added), 0i64, 0i64),
                 None => (
                     1i8,
                     0,
                     -(count as i64),
-                    last_at.map(|t| t.micros).unwrap_or(i64::MAX),
+                    last_at
+                        .map(|t| t.micros.saturating_add(added))
+                        .unwrap_or(i64::MAX),
                 ),
             };
             (run.competitor, count, Metric::ReachedAt(reached_at), key)
         })
         .collect();
-    rank(rows)
+    rank(rows, adj)
 }
 
 /// Best single lap: rank by smallest lap duration; ties break by when that lap was
 /// set; no-lap competitors last.
-fn score_best_lap(runs: Vec<Run>) -> HeatResult {
+///
+/// `TimeAdded` worsens the **deciding time** by lengthening the best-lap duration the
+/// competitor is ranked on (the on-track `metric` is left unchanged for display).
+fn score_best_lap(runs: Vec<Run>, adj: &Adjudications) -> HeatResult {
     let rows = runs
         .into_iter()
         .map(|run| {
@@ -340,10 +550,14 @@ fn score_best_lap(runs: Vec<Run>) -> HeatResult {
                 })
                 .copied();
             let best_micros = best.map(|lap| lap.duration_micros);
-            // Smaller duration is better; `i64::MAX` parks no-lap competitors last.
-            // Second key (set-time) makes equal-duration laps a total order.
+            let added = adj.added(&run.competitor.competitor);
+            // Smaller (penalty-lengthened) duration is better; `i64::MAX` parks no-lap
+            // competitors last. Second key (set-time) makes equal-duration laps a total
+            // order.
             let key = (
-                best_micros.unwrap_or(i64::MAX),
+                best_micros
+                    .map(|d| d.saturating_add(added))
+                    .unwrap_or(i64::MAX),
                 best.map(|lap| lap.at.micros).unwrap_or(i64::MAX),
             );
             (
@@ -354,13 +568,16 @@ fn score_best_lap(runs: Vec<Run>) -> HeatResult {
             )
         })
         .collect();
-    rank(rows)
+    rank(rows, adj)
 }
 
 /// Best consecutive `n`: rank by smallest sum over any `n` consecutive laps; ties
 /// break by the completion time of the window's last lap; under-`n` competitors
 /// last.
-fn score_best_consecutive(runs: Vec<Run>, n: u32) -> HeatResult {
+///
+/// `TimeAdded` worsens the **deciding time** by adding to the best window's sum the
+/// competitor is ranked on (the on-track `metric` is left unchanged for display).
+fn score_best_consecutive(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatResult {
     let n = n.max(1) as usize;
     let rows = runs
         .into_iter()
@@ -378,10 +595,11 @@ fn score_best_consecutive(runs: Vec<Run>, n: u32) -> HeatResult {
                 })
                 .min_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             let best_sum = best.map(|(sum, _)| sum);
-            // Smaller sum is better; no window (fewer than `n` laps) sorts last,
-            // ordered among themselves by lap count desc.
+            let added = adj.added(&run.competitor.competitor);
+            // Smaller (penalty-lengthened) sum is better; no window (fewer than `n` laps)
+            // sorts last, ordered among themselves by lap count desc.
             let key = match best {
-                Some((sum, end_at)) => (0i8, sum, end_at, 0i64),
+                Some((sum, end_at)) => (0i8, sum.saturating_add(added), end_at, 0i64),
                 None => (1i8, 0, 0, -(count as i64)),
             };
             (
@@ -392,13 +610,13 @@ fn score_best_consecutive(runs: Vec<Run>, n: u32) -> HeatResult {
             )
         })
         .collect();
-    rank(rows)
+    rank(rows, adj)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex};
+    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex, HeatId};
 
     const ADAPTER: &str = "vd";
 
@@ -795,5 +1013,200 @@ mod tests {
 
         let r = score(&passes, WinCondition::BestLap, start());
         assert_eq!(r.places.len(), 2);
+    }
+
+    // --- Adjudications: penalties & heat-void (#13) -------------------------
+
+    /// The lap-gate passes of a whole run, wrapped as `Event::Pass`es.
+    fn pass_events(competitor: &str, ats: &[i64]) -> Vec<Event> {
+        run(competitor, ats).into_iter().map(Event::Pass).collect()
+    }
+
+    /// A `PenaltyApplied` for `competitor` in a fixed heat.
+    fn penalty(competitor: &str, penalty: Penalty) -> Event {
+        Event::PenaltyApplied {
+            heat: HeatId("h".into()),
+            competitor: CompetitorRef(competitor.into()),
+            penalty,
+        }
+    }
+
+    #[test]
+    fn clean_log_score_events_matches_pure_score() {
+        // No adjudications: the adjudicated path equals the pure scorer exactly, and
+        // the additive flags are all false.
+        let events = pass_events("A", &[0, 2_000_000, 4_000_000]);
+        let cond = WinCondition::BestLap;
+        let r = score_events(&events, cond, start());
+        let pure = score(&run("A", &[0, 2_000_000, 4_000_000]), cond, start());
+        assert_eq!(r, pure);
+        assert!(!r.voided);
+        assert!(r.places.iter().all(|p| !p.disqualified));
+    }
+
+    #[test]
+    fn disqualify_drops_leader_to_last_and_shifts_others_up() {
+        // Timed: A leads (3 laps), B (2), C (1) → A,B,C. DQ A: A sinks to last, B and C
+        // shift up, and A is flagged disqualified.
+        let mut events = pass_events("A", &[0, 5_000_000, 10_000_000, 15_000_000]);
+        events.extend(pass_events("B", &[0, 6_000_000, 13_000_000]));
+        events.extend(pass_events("C", &[0, 7_000_000]));
+        events.push(penalty("A", Penalty::Disqualify));
+
+        let r = score_events(
+            &events,
+            WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            start(),
+        );
+
+        assert_eq!(place(&r, "B").position, 1);
+        assert_eq!(place(&r, "C").position, 2);
+        assert_eq!(place(&r, "A").position, 3);
+        assert!(place(&r, "A").disqualified);
+        assert!(!place(&r, "B").disqualified);
+        assert!(!place(&r, "C").disqualified);
+        // The DQ does not erase A's on-track laps in the metric — only the ranking moves.
+        assert_eq!(place(&r, "A").laps, 3);
+        assert!(!r.voided);
+    }
+
+    #[test]
+    fn disqualify_two_leaders_both_sink_below_the_field() {
+        // DQ both A (3 laps) and B (2): C (1 lap) is now first; the two DQ'd competitors
+        // rank behind it, ordered among themselves by their on-track standing then key.
+        let mut events = pass_events("A", &[0, 5_000_000, 10_000_000, 15_000_000]);
+        events.extend(pass_events("B", &[0, 6_000_000, 13_000_000]));
+        events.extend(pass_events("C", &[0, 7_000_000]));
+        events.push(penalty("A", Penalty::Disqualify));
+        events.push(penalty("B", Penalty::Disqualify));
+
+        let r = score_events(
+            &events,
+            WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            start(),
+        );
+
+        assert_eq!(place(&r, "C").position, 1);
+        assert!(!place(&r, "C").disqualified);
+        // A (3 laps) still beats B (2 laps) *within* the disqualified group.
+        assert_eq!(place(&r, "A").position, 2);
+        assert_eq!(place(&r, "B").position, 3);
+        assert!(place(&r, "A").disqualified);
+        assert!(place(&r, "B").disqualified);
+    }
+
+    #[test]
+    fn time_added_reorders_a_best_lap_result() {
+        // BestLap: A's best lap is 2.0s, B's is 2.2s → A first. Add 0.5s to A's deciding
+        // time (2.0 → 2.5) and now B (2.2) wins; A drops to 2nd. The on-track metric is
+        // unchanged (still 2.0s for A) — only the ranking reflects the penalty.
+        let mut events = pass_events("A", &[0, 3_000_000, 5_000_000, 9_000_000]);
+        events.extend(pass_events("B", &[0, 2_500_000, 4_700_000]));
+        events.push(penalty("A", Penalty::TimeAdded { micros: 500_000 }));
+
+        let r = score_events(&events, WinCondition::BestLap, start());
+
+        assert_eq!(place(&r, "B").position, 1);
+        assert_eq!(place(&r, "A").position, 2);
+        assert_eq!(
+            place(&r, "A").metric,
+            Metric::BestLapMicros(Some(2_000_000))
+        );
+    }
+
+    #[test]
+    fn time_added_reorders_a_timed_tiebreak() {
+        // Timed, equal lap count (2 each). Without penalty B (last lap 9.0s) beats A
+        // (last lap 9.5s). Add 1.0s to B's deciding time (9.0 → 10.0): A (9.5) now wins.
+        let mut events = pass_events("A", &[0, 5_000_000, 9_500_000]);
+        events.extend(pass_events("B", &[0, 4_000_000, 9_000_000]));
+        events.push(penalty("B", Penalty::TimeAdded { micros: 1_000_000 }));
+
+        let r = score_events(
+            &events,
+            WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            start(),
+        );
+
+        assert_eq!(place(&r, "A").laps, 2);
+        assert_eq!(place(&r, "B").laps, 2);
+        assert_eq!(place(&r, "A").position, 1);
+        assert_eq!(place(&r, "B").position, 2);
+    }
+
+    #[test]
+    fn time_added_accumulates_across_penalties() {
+        // Two +1.0s penalties on B stack to +2.0s. BestLap: A 2.0s, B 1.5s. B's deciding
+        // time becomes 1.5 + 2.0 = 3.5s, so A (2.0) wins despite B's faster raw lap.
+        let mut events = pass_events("A", &[0, 2_000_000]);
+        events.extend(pass_events("B", &[0, 1_500_000]));
+        events.push(penalty("B", Penalty::TimeAdded { micros: 1_000_000 }));
+        events.push(penalty("B", Penalty::TimeAdded { micros: 1_000_000 }));
+
+        let r = score_events(&events, WinCondition::BestLap, start());
+        assert_eq!(place(&r, "A").position, 1);
+        assert_eq!(place(&r, "B").position, 2);
+    }
+
+    #[test]
+    fn heat_voided_flags_the_result() {
+        // A clean 2-competitor heat, then a HeatVoided: the result is flagged voided but
+        // its on-track places are still scored (the standing remains visible).
+        let mut events = pass_events("A", &[0, 5_000_000, 10_000_000]);
+        events.extend(pass_events("B", &[0, 6_000_000]));
+        events.push(Event::HeatVoided {
+            heat: HeatId("h".into()),
+        });
+
+        let r = score_events(
+            &events,
+            WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            start(),
+        );
+
+        assert!(r.voided);
+        assert_eq!(place(&r, "A").position, 1);
+        assert_eq!(place(&r, "B").position, 2);
+    }
+
+    #[test]
+    fn penalty_and_marshaling_compose() {
+        // A's middle pass is a phantom voided by marshaling (A: 2 laps → 1), and B is
+        // disqualified. Score through the adjudicated wrapper over the *corrected* stream
+        // (here via crate::event::score_marshaled). Expect A first (its sole remaining
+        // lap), B disqualified to last.
+        use crate::event::score_marshaled;
+        use gridfpv_events::LogRef;
+
+        let mut events: Vec<Event> = Vec::new();
+        events.push(Event::Pass(pass("A", 0, 0))); // offset 0
+        events.push(Event::Pass(pass("A", 2_000_000, 1))); // offset 1 — phantom
+        events.push(Event::Pass(pass("A", 6_000_000, 2))); // offset 2
+        events.extend(pass_events("B", &[0, 4_000_000, 8_000_000])); // B: 2 laps
+        events.push(Event::DetectionVoided { target: LogRef(1) });
+        events.push(penalty("B", Penalty::Disqualify));
+
+        let r = score_marshaled(
+            &events,
+            WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            start(),
+        );
+
+        // Marshaling collapsed A to a single lap (0 → 6.0s).
+        assert_eq!(place(&r, "A").laps, 1);
+        // B disqualified despite 2 on-track laps: ranked last and flagged.
+        assert_eq!(place(&r, "A").position, 1);
+        assert_eq!(place(&r, "B").position, 2);
+        assert!(place(&r, "B").disqualified);
     }
 }
