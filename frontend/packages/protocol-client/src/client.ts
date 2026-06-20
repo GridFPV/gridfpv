@@ -115,10 +115,9 @@ export interface ProtocolClient {
   close(): void;
 }
 
-/** Error frame the server may send on the stream (protocol.html §9.8). */
-interface ErrorFrame {
-  error: ProtocolError;
-}
+// The stream frames are `StreamMessage` (protocol.html §3, bindings/StreamMessage.ts),
+// externally tagged: `{ "Change": ChangeEnvelope }` | `{ "ReSnapshotRequired": ProtocolError }`.
+// A bare `ProtocolError` may also arrive (e.g. a VersionMismatch just before close).
 
 // ── Cursor (bigint) wire handling ──────────────────────────────────────────────
 //
@@ -166,8 +165,14 @@ const isProtocolError = (v: unknown): v is ProtocolError =>
 const isChangeEnvelope = (v: unknown): v is ChangeEnvelope =>
   typeof v === 'object' && v !== null && 'sequence' in v && 'projection' in v && 'change' in v;
 
-const isErrorFrame = (v: unknown): v is ErrorFrame =>
-  typeof v === 'object' && v !== null && 'error' in v && isProtocolError((v as ErrorFrame).error);
+const isStreamChange = (v: unknown): v is { Change: ChangeEnvelope } =>
+  typeof v === 'object' &&
+  v !== null &&
+  'Change' in v &&
+  isChangeEnvelope((v as { Change: unknown }).Change);
+
+const isReSnapshotRequired = (v: unknown): v is { ReSnapshotRequired: ProtocolError } =>
+  typeof v === 'object' && v !== null && 'ReSnapshotRequired' in v;
 
 /** Map an http(s) base URL to its ws(s) equivalent. */
 function toWebSocketBase(baseUrl: string): string {
@@ -371,29 +376,34 @@ export function connect(options: ConnectOptions): ProtocolClient {
       return;
     }
 
-    if (isErrorFrame(parsed)) {
-      // A stale cursor means resume is impossible → re-snapshot from scratch (§3).
-      if (parsed.error.code === 'StaleCursor') {
+    // `StreamMessage::Change(envelope)` — the common case: unwrap + apply.
+    if (isStreamChange(parsed)) {
+      const result = applyEnvelope(normalizeEnvelope(parsed.Change));
+      if (result === 'gap') {
+        // Missed envelopes the stream can't replay → re-snapshot and re-subscribe.
         await resnapshot(gen);
-      } else {
-        fail(parsed.error);
+        return;
       }
+      if (result === 'applied') emit();
       return;
     }
 
-    if (!isChangeEnvelope(parsed)) {
-      // Unknown frame (e.g. a ServerHello in a richer handshake) — ignore it so an
-      // additive protocol change doesn't break an older client (§7).
-      return;
-    }
-
-    const result = applyEnvelope(normalizeEnvelope(parsed));
-    if (result === 'gap') {
-      // Missed envelopes the stream can't replay → re-snapshot and re-subscribe.
+    // `StreamMessage::ReSnapshotRequired(error)` — the cursor is unreplayable →
+    // re-snapshot from scratch (always correct, §3).
+    if (isReSnapshotRequired(parsed)) {
       await resnapshot(gen);
       return;
     }
-    if (result === 'applied') emit();
+
+    // A bare ProtocolError (e.g. a VersionMismatch sent just before the socket closes).
+    if (isProtocolError(parsed)) {
+      if (parsed.code === 'StaleCursor') await resnapshot(gen);
+      else fail(parsed);
+      return;
+    }
+
+    // Unknown frame (e.g. a future additive message) — ignore it so an additive
+    // protocol change doesn't break an older client (§7).
   }
 
   // Re-snapshot in place (gap or stale cursor), then re-subscribe from the fresh

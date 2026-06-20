@@ -121,6 +121,14 @@ const envelope = (sequence: bigint, phase: HeatPhase): ChangeEnvelope => ({
   change: { FreshValue: liveState(phase) }
 });
 
+/**
+ * Wrap an envelope as the `StreamMessage` the server actually sends on the wire:
+ * `{ Change: ChangeEnvelope }` (externally tagged). The client must unwrap it — a
+ * raw, unwrapped envelope was the shape these mocks used before, which masked the
+ * client ignoring every real (wrapped) frame.
+ */
+const change = (sequence: bigint, phase: HeatPhase) => ({ Change: envelope(sequence, phase) });
+
 // Let queued microtasks (the async snapshot fetch) settle.
 const flush = async (): Promise<void> => {
   await Promise.resolve();
@@ -176,9 +184,9 @@ describe('ProtocolClient', () => {
     await flush();
     sockets[0].open();
 
-    sockets[0].emit(envelope(1n, 'Staged'));
-    sockets[0].emit(envelope(2n, 'Armed'));
-    sockets[0].emit(envelope(3n, 'Running'));
+    sockets[0].emit(change(1n, 'Staged'));
+    sockets[0].emit(change(2n, 'Armed'));
+    sockets[0].emit(change(3n, 'Running'));
 
     // Every envelope applied → body converged. The resume cursor stays the snapshot
     // offset (the stream sequence is not a log offset).
@@ -195,12 +203,12 @@ describe('ProtocolClient', () => {
     await flush();
     sockets[0].open();
 
-    sockets[0].emit(envelope(1n, 'Staged'));
-    sockets[0].emit(envelope(2n, 'Armed'));
+    sockets[0].emit(change(1n, 'Staged'));
+    sockets[0].emit(change(2n, 'Armed'));
     // Re-deliver 1 and 2 (at-least-once): they're at/below the last applied sequence
     // (2), so they're no-ops and must not regress the state back to 'Scheduled'.
-    sockets[0].emit(envelope(1n, 'Scheduled'));
-    sockets[0].emit(envelope(2n, 'Scheduled'));
+    sockets[0].emit(change(1n, 'Scheduled'));
+    sockets[0].emit(change(2n, 'Scheduled'));
 
     expect(phaseOf(client.getState().body)).toBe('Armed');
 
@@ -217,9 +225,9 @@ describe('ProtocolClient', () => {
     await flush();
     sockets[0].open();
 
-    sockets[0].emit(envelope(1n, 'Staged'));
+    sockets[0].emit(change(1n, 'Staged'));
     // Gap: jump to 4 (missed 2 and 3). The client must re-snapshot.
-    sockets[0].emit(envelope(4n, 'Armed'));
+    sockets[0].emit(change(4n, 'Armed'));
     await flush();
 
     // A second snapshot fetch happened and the old socket was torn down.
@@ -237,7 +245,7 @@ describe('ProtocolClient', () => {
     // The fresh subscription restarts the per-stream sequence, so its first envelope
     // is accepted and the body converges. The resume cursor stays the re-snapshot
     // offset (5).
-    sockets[1].emit(envelope(6n, 'Finished'));
+    sockets[1].emit(change(6n, 'Finished'));
     expect(phaseOf(client.getState().body)).toBe('Finished');
     expect(client.getState().cursor).toBe(5n);
 
@@ -255,7 +263,7 @@ describe('ProtocolClient', () => {
     sockets[0].open();
 
     const staleErr: ProtocolError = { code: 'StaleCursor', message: 'cursor too old to replay' };
-    sockets[0].emit({ error: staleErr });
+    sockets[0].emit({ ReSnapshotRequired: staleErr });
     await flush();
 
     expect(calls).toHaveLength(2);
@@ -280,8 +288,8 @@ describe('ProtocolClient', () => {
     });
     await flush();
     sockets[0].open();
-    sockets[0].emit(envelope(1n, 'Staged'));
-    sockets[0].emit(envelope(2n, 'Armed'));
+    sockets[0].emit(change(1n, 'Staged'));
+    sockets[0].emit(change(2n, 'Armed'));
 
     // Socket drops.
     sockets[0].drop();
@@ -304,7 +312,7 @@ describe('ProtocolClient', () => {
     expect(client.getState().status).toBe('live');
 
     // The resumed subscription restarts the sequence; its first envelope converges.
-    sockets[1].emit(envelope(1n, 'Running'));
+    sockets[1].emit(change(1n, 'Running'));
     expect(phaseOf(client.getState().body)).toBe('Running');
 
     client.close();
@@ -319,14 +327,14 @@ describe('ProtocolClient', () => {
     const unsub = client.onState((s) => seen.push(phaseOf(s.body)));
     await flush();
     sockets[0].open();
-    sockets[0].emit(envelope(1n, 'Staged'));
+    sockets[0].emit(change(1n, 'Staged'));
 
     expect(seen).toContain('Scheduled');
     expect(seen).toContain('Staged');
 
     unsub();
     const before = seen.length;
-    sockets[0].emit(envelope(2n, 'Armed'));
+    sockets[0].emit(change(2n, 'Armed'));
     expect(seen.length).toBe(before); // unsubscribed: no more notifications
 
     client.close();
