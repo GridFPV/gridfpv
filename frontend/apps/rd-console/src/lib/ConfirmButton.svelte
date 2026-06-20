@@ -4,8 +4,13 @@
    * confirm-on-destructive). On first click it flips into a two-step "Confirm? /
    * Cancel" state; the action only runs on the explicit confirm. Non-destructive
    * callers pass `confirm={false}` for a plain one-click button.
+   *
+   * Restyled by #71 to delegate to the shared `Button` primitive so every action
+   * in the console matches the design system. The caller's `variant` is mapped to
+   * the primitive's variants (`default` → secondary).
    */
   import type { Snippet } from 'svelte';
+  import { Button } from '@gridfpv/components';
 
   let {
     onconfirm,
@@ -24,6 +29,10 @@
   } = $props();
 
   let armed = $state(false);
+
+  const btnVariant = $derived(
+    variant === 'primary' ? 'primary' : variant === 'danger' ? 'danger' : 'secondary'
+  );
 
   function click() {
     if (!confirm) {
@@ -45,28 +54,12 @@
 
 <span class="confirm-wrap">
   {#if armed}
-    <button
-      type="button"
-      class="btn confirm"
-      class:danger={variant === 'danger'}
-      {disabled}
-      onclick={click}
-    >
-      Confirm
-    </button>
-    <button type="button" class="btn cancel" onclick={cancel}>Cancel</button>
+    <Button variant="danger" {disabled} onclick={click}>Confirm</Button>
+    <Button variant="ghost" onclick={cancel}>Cancel</Button>
   {:else}
-    <button
-      type="button"
-      class="btn"
-      class:primary={variant === 'primary'}
-      class:danger={variant === 'danger'}
-      {disabled}
-      {title}
-      onclick={click}
-    >
+    <Button variant={btnVariant} {disabled} {title} onclick={click}>
       {@render children()}
-    </button>
+    </Button>
   {/if}
 </span>
 
@@ -74,41 +67,5 @@
   .confirm-wrap {
     display: inline-flex;
     gap: var(--gf-space-2);
-  }
-  .btn {
-    font-family: var(--gf-font-family);
-    font-size: var(--gf-font-size-sm);
-    font-weight: var(--gf-font-weight-medium);
-    padding: var(--gf-space-2) var(--gf-space-4);
-    border-radius: var(--gf-radius-sm);
-    border: 1px solid var(--gf-color-border);
-    background: var(--gf-color-surface);
-    color: var(--gf-color-text);
-    cursor: pointer;
-  }
-  .btn:hover:not(:disabled) {
-    border-color: var(--gf-color-accent);
-  }
-  .btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .btn.primary {
-    background: var(--gf-color-accent);
-    color: var(--gf-color-accent-contrast);
-    border-color: var(--gf-color-accent);
-  }
-  .btn.danger,
-  .btn.confirm.danger {
-    border-color: var(--gf-color-danger);
-    color: var(--gf-color-danger);
-  }
-  .btn.confirm {
-    background: var(--gf-color-accent);
-    color: var(--gf-color-accent-contrast);
-    border-color: var(--gf-color-accent);
-  }
-  .btn.cancel {
-    background: transparent;
   }
 </style>

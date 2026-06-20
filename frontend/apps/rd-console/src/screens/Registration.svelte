@@ -8,6 +8,7 @@
    * never does itself — architecture.html §9). A failed ack surfaces via `ErrorBanner`.
    */
   import type { AdapterId, CompetitorRef, LiveRaceState } from '@gridfpv/types';
+  import { Button, Badge, Card } from '@gridfpv/components';
   import { registerCommand } from '../lib/registration.js';
   import type { Session } from '../lib/session.svelte.js';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
@@ -47,47 +48,55 @@
   {/if}
 
   {#if seen.length === 0}
-    <p class="empty">No competitors seen yet. They appear here as the timer reports them.</p>
+    <Card elevation="flat">
+      <p class="empty">No competitors seen yet. They appear here as the timer reports them.</p>
+    </Card>
   {:else}
-    <table>
-      <thead>
-        <tr>
-          <th>Competitor (source ref)</th>
-          <th>Pilot</th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each seen as ref (ref)}
+    <Card pad={false}>
+      <table>
+        <thead>
           <tr>
-            <td class="ref">{ref}</td>
-            <td>
-              <input
-                type="text"
-                placeholder="pilot id"
-                aria-label={`Pilot for ${ref}`}
-                bind:value={
-                  () => pilotInputs[ref] ?? bound[ref] ?? '',
-                  (v) => (pilotInputs = { ...pilotInputs, [ref]: v })
-                }
-              />
-            </td>
-            <td>
-              <button
-                type="button"
-                onclick={() => register(ref)}
-                disabled={!(pilotInputs[ref] ?? '').trim() && !bound[ref]}
-              >
-                {bound[ref] ? 'Re-bind' : 'Register'}
-              </button>
-              {#if bound[ref]}
-                <span class="bound" aria-label="Bound">✓ {bound[ref]}</span>
-              {/if}
-            </td>
+            <th>Competitor (source ref)</th>
+            <th>Pilot</th>
+            <th class="action-col">Action</th>
           </tr>
-        {/each}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {#each seen as ref (ref)}
+            <tr>
+              <td class="ref">{ref}</td>
+              <td>
+                <input
+                  class="gf-reg-input"
+                  type="text"
+                  placeholder="pilot id"
+                  aria-label={`Pilot for ${ref}`}
+                  bind:value={
+                    () => pilotInputs[ref] ?? bound[ref] ?? '',
+                    (v) => (pilotInputs = { ...pilotInputs, [ref]: v })
+                  }
+                />
+              </td>
+              <td>
+                <div class="action-cell">
+                  <Button
+                    variant={bound[ref] ? 'secondary' : 'primary'}
+                    size="sm"
+                    onclick={() => register(ref)}
+                    disabled={!(pilotInputs[ref] ?? '').trim() && !bound[ref]}
+                  >
+                    {bound[ref] ? 'Re-bind' : 'Register'}
+                  </Button>
+                  {#if bound[ref]}
+                    <span aria-label="Bound"><Badge tone="success" dot>{bound[ref]}</Badge></span>
+                  {/if}
+                </div>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </Card>
   {/if}
 </section>
 
@@ -98,58 +107,82 @@
     gap: var(--gf-space-4);
   }
   h2 {
-    font-size: var(--gf-font-size-lg);
+    font-size: var(--gf-font-size-xl);
     margin: 0;
+    letter-spacing: var(--gf-tracking-tight);
   }
   .muted {
-    color: var(--gf-color-text-muted);
+    color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
     margin: var(--gf-space-1) 0 0;
+  }
+  .muted code {
+    color: var(--gf-text-secondary);
+    background: var(--gf-surface-alt);
+    padding: 0.05em 0.35em;
+    border-radius: var(--gf-radius-xs);
   }
   table {
     border-collapse: collapse;
     width: 100%;
-  }
-  th,
-  td {
-    text-align: left;
-    padding: var(--gf-space-2) var(--gf-space-3);
-    border-bottom: 1px solid var(--gf-color-border);
     font-size: var(--gf-font-size-sm);
+  }
+  thead th {
+    text-align: left;
+    padding: var(--gf-space-3) var(--gf-space-4);
+    border-bottom: 1px solid var(--gf-border);
+    background: var(--gf-surface-alt);
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+  }
+  tbody td {
+    text-align: left;
+    padding: var(--gf-space-3) var(--gf-space-4);
+  }
+  tbody tr + tr td {
+    border-top: 1px solid var(--gf-border-subtle);
+  }
+  .action-col {
+    width: 1%;
   }
   .ref {
-    font-family: monospace;
+    font-family: var(--gf-font-mono);
+    color: var(--gf-text-secondary);
   }
-  input {
+  .action-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+  }
+  .gf-reg-input {
+    width: 100%;
+    max-width: 16rem;
+    box-sizing: border-box;
+    height: 2.1rem;
+    padding: 0 var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text);
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
-    padding: var(--gf-space-1) var(--gf-space-2);
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-sm);
-    background: var(--gf-color-surface);
-    color: var(--gf-color-text);
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      box-shadow var(--gf-motion-fast) var(--gf-ease-out);
   }
-  button {
-    font-family: var(--gf-font-family);
-    font-size: var(--gf-font-size-sm);
-    padding: var(--gf-space-2) var(--gf-space-4);
-    border-radius: var(--gf-radius-sm);
-    border: 1px solid var(--gf-color-accent);
-    background: var(--gf-color-accent);
-    color: var(--gf-color-accent-contrast);
-    cursor: pointer;
+  .gf-reg-input::placeholder {
+    color: var(--gf-text-faint);
   }
-  button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .bound {
-    margin-left: var(--gf-space-2);
-    color: var(--gf-color-live);
-    font-size: var(--gf-font-size-xs);
+  .gf-reg-input:focus {
+    outline: none;
+    border-color: var(--gf-accent);
+    box-shadow: 0 0 0 3px var(--gf-accent-soft);
   }
   .empty {
-    color: var(--gf-color-text-muted);
+    color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
   }
 </style>

@@ -1,0 +1,85 @@
+/**
+ * RD console global base — the app canvas reset + defaults, sitting on top of
+ * the @gridfpv/components design tokens. Everything else styles via tokens; this
+ * file just establishes the dark page, sane box-sizing, scrollbar styling, and
+ * the document-level type defaults so the console reads as one cohesive surface.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--gf-surface-sunken);
+  color: var(--gf-text);
+  font-family: var(--gf-font-family);
+  font-size: var(--gf-font-size-md);
+  line-height: var(--gf-line-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* A subtle radial wash on the canvas so the dark page has depth rather than a
+ * flat fill — broadcast-graphics feel, kept very low-contrast. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      1200px 600px at 18% -10%,
+      color-mix(in srgb, var(--gf-accent) 9%, transparent),
+      transparent 60%
+    ),
+    radial-gradient(
+      900px 500px at 100% 0%,
+      color-mix(in srgb, var(--gf-info) 7%, transparent),
+      transparent 55%
+    );
+}
+
+:focus-visible {
+  outline: none;
+}
+
+/* Modern, unobtrusive scrollbars that match the dark surface. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--gf-border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--gf-border-strong);
+  border-radius: var(--gf-radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--gf-text-faint);
+  background-clip: padding-box;
+}
+
+code,
+kbd,
+samp {
+  font-family: var(--gf-font-mono);
+}
+
+::selection {
+  background: var(--gf-accent-soft);
+}

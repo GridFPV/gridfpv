@@ -41,59 +41,73 @@
   .gridfpv-standings {
     border-collapse: collapse;
     width: 100%;
-    color: var(--gf-color-text);
-    background: var(--gf-color-surface);
+    color: var(--gf-text);
+    background: var(--gf-elevated);
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
   }
   caption {
     text-align: left;
-    padding: var(--gf-space-2) var(--gf-space-3);
-    color: var(--gf-color-text-muted);
-    font-weight: var(--gf-font-weight-medium);
+    padding: var(--gf-space-3) var(--gf-space-3);
+    color: var(--gf-text-muted);
+    font-weight: var(--gf-font-weight-semibold);
+    font-size: var(--gf-font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
   }
   th,
   td {
-    padding: var(--gf-space-2) var(--gf-space-3);
+    padding: var(--gf-space-3) var(--gf-space-3);
     text-align: left;
   }
   thead th {
-    color: var(--gf-color-text-muted);
-    font-weight: var(--gf-font-weight-medium);
-    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
+    font-weight: var(--gf-font-weight-semibold);
+    font-size: var(--gf-font-size-2xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    border-bottom: 1px solid var(--gf-color-border);
+    letter-spacing: var(--gf-tracking-caps);
+    border-bottom: 1px solid var(--gf-border);
+  }
+  tbody tr {
+    transition: background var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  tbody tr:hover {
+    background: var(--gf-accent-soft);
   }
   tbody tr + tr td {
-    border-top: 1px solid var(--gf-color-border);
+    border-top: 1px solid var(--gf-border-subtle);
   }
   .pos {
-    width: 2.5em;
+    width: 2.75em;
   }
   .badge {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 1.6em;
-    padding: 0 0.3em;
+    min-width: 1.7em;
+    height: 1.7em;
+    padding: 0 0.35em;
     border-radius: var(--gf-radius-sm);
-    background: var(--gf-color-surface-alt);
+    background: var(--gf-surface-alt);
+    color: var(--gf-text-secondary);
     font-weight: var(--gf-font-weight-bold);
+    font-variant-numeric: tabular-nums;
   }
   tr.medal[data-medal='gold'] .badge {
     background: var(--gf-color-gold);
-    color: #000;
+    color: var(--gf-medal-gold-contrast);
+    box-shadow: 0 0 12px -2px color-mix(in srgb, var(--gf-color-gold) 70%, transparent);
   }
   tr.medal[data-medal='silver'] .badge {
     background: var(--gf-color-silver);
-    color: #000;
+    color: var(--gf-medal-silver-contrast);
   }
   tr.medal[data-medal='bronze'] .badge {
     background: var(--gf-color-bronze);
-    color: #fff;
+    color: var(--gf-medal-bronze-contrast);
   }
   .pilot {
-    font-weight: var(--gf-font-weight-medium);
+    font-weight: var(--gf-font-weight-semibold);
+    letter-spacing: var(--gf-tracking-tight);
   }
 </style>

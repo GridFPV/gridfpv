@@ -1,71 +1,295 @@
 /**
- * GridFPV design tokens — one token set, three contexts (docs/clients.html §5).
+ * GridFPV design tokens — the single source of truth for the whole console
+ * (docs/clients.html §5: one token set, themed per surface/context).
  *
- * Every component styles itself only through these CSS custom properties, so a
- * surface re-themes the whole library by overriding tokens on a wrapping element
- * (or `:root`) — no per-component CSS overrides. The defaults below are the
- * "RD console" baseline (readable on a light surface); the `.gridfpv-overlay`
- * and `.gridfpv-dense` context classes below re-point the same tokens for the
- * OBS overlay (transparent, large, high-contrast) and dense-table contexts.
+ * This is the v0.4 "design foundation" (#71, Slice 0): a modern, dark-mode-first
+ * race-operations look in the spirit of Linear / Vercel / live-sports broadcast
+ * graphics. Every component and screen styles itself ONLY through these CSS
+ * custom properties — no hard-coded colors, sizes, or shadows anywhere else — so
+ * a surface re-themes the entire library by overriding tokens on a wrapping
+ * element (`.gridfpv-root`) or `:root`.
+ *
+ * Themes & contexts:
+ *   :root / .gridfpv-root        the DARK baseline (the default console look)
+ *   .theme-light / [data-theme]  the light override of the same semantic tokens
+ *   .gridfpv-overlay             broadcast keyer (transparent, oversized text)
+ *   .gridfpv-dense               tighter spacing + type for data-dense tables
  *
  * Token groups:
- *   --gf-color-*   palette (surface, text, accent, position medals, state)
- *   --gf-space-*   spacing scale (4px base)
- *   --gf-font-*    type family + size scale + weights
- *   --gf-radius-*  corner radii
+ *   --gf-color-*    raw neutral + brand + accent ramps (rarely used directly)
+ *   --gf-surface/…  SEMANTIC color roles (surface, elevated, border, text, …)
+ *   --gf-phase-*    the six heat-phase colors (Scheduled→…→Scored)
+ *   --gf-conn-*     connection-state colors
+ *   --gf-space-*    spacing scale (4px base)
+ *   --gf-font-*     type family + size scale + weights + line-heights
+ *   --gf-radius-*   corner radii
+ *   --gf-shadow-*   elevation / shadow ramp
+ *   --gf-ring-*     focus rings
+ *   --gf-motion-*   durations + easings
  *
- * Import this once per surface (e.g. in an app's entry CSS):
+ * Import once per surface (e.g. an app's entry):
  *   import '@gridfpv/components/tokens.css';
  */
 
+/* ── Webfont: Inter (UI) — offline-friendly, variable. ──────────────────────
+ * Maps a stable family name to a locally-installed Inter if present, falling
+ * back to a clean system grotesk stack so the console stays legible without the
+ * bundled font. Inter-class grotesk is the modern-console look the brief asks
+ * for; no network fetch, so it stays offline-friendly. */
+@font-face {
+  font-family: 'GridFPV Sans';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: local('Inter'), local('Inter Variable'), local('InterVariable');
+}
+
 :where(.gridfpv-root),
 :root {
-  /* ── Palette ─────────────────────────────────────────────────────────── */
-  --gf-color-surface: #ffffff;
-  --gf-color-surface-alt: #f4f5f7;
-  --gf-color-border: #d9dce1;
-  --gf-color-text: #1a1d21;
-  --gf-color-text-muted: #6b7280;
-  --gf-color-accent: #2563eb;
-  --gf-color-accent-contrast: #ffffff;
+  /* ── Brand & accent ramp ─────────────────────────────────────────────────
+   * GridFPV brand accent: an electric "grid green" — the signal/aliveness of a
+   * live race feed. Distinct from the phase/state greens (those skew toward the
+   * stoplight semantics); the brand is cooler and more saturated. */
+  --gf-brand-300: #6ff7c8;
+  --gf-brand-400: #34e6a8;
+  --gf-brand-500: #10d191; /* primary brand accent */
+  --gf-brand-600: #06a874;
+  --gf-brand-700: #097a57;
+  --gf-brand-contrast: #04140f;
 
-  /* Position / medal colors, used by leaderboards + standings. */
-  --gf-color-gold: #d4af37;
-  --gf-color-silver: #9aa0a6;
-  --gf-color-bronze: #b06a2c;
+  /* Neutral ramp — cool, slightly blue-tinted slate (a broadcast-console look,
+   * not a flat gray). 0 = deepest background, 1000 = brightest text. */
+  --gf-neutral-0: #0a0d12;
+  --gf-neutral-50: #0e1218;
+  --gf-neutral-100: #131820;
+  --gf-neutral-150: #181e28;
+  --gf-neutral-200: #1d2531;
+  --gf-neutral-300: #28323f;
+  --gf-neutral-400: #3a4658;
+  --gf-neutral-500: #55647a;
+  --gf-neutral-600: #788699;
+  --gf-neutral-700: #9aa6b6;
+  --gf-neutral-800: #c2cad4;
+  --gf-neutral-900: #e4e8ee;
+  --gf-neutral-1000: #f7f9fb;
 
-  /* State colors (live phase, win/leader, penalty/DQ). */
-  --gf-color-live: #16a34a;
-  --gf-color-leader: #2563eb;
-  --gf-color-warn: #b45309;
-  --gf-color-danger: #dc2626;
+  /* Shared accent hues used by semantic state roles below. */
+  --gf-blue-400: #4b93ff;
+  --gf-blue-500: #2f7df0;
+  --gf-green-400: #2fd87a;
+  --gf-green-500: #18b765;
+  --gf-amber-400: #f7b545;
+  --gf-amber-500: #e09316;
+  --gf-red-400: #ff6b6b;
+  --gf-red-500: #e84545;
+  --gf-violet-400: #9d7bff;
+  --gf-violet-500: #7c54f0;
+  --gf-cyan-400: #38d6e6;
 
-  /* ── Spacing scale (4px base) ────────────────────────────────────────── */
+  /* ── Semantic surface / text roles (DARK baseline) ───────────────────────
+   * These are what components actually consume. `surface` is the app canvas,
+   * `elevated` a raised card/panel, `overlay` a popover/dialog plane. */
+  --gf-surface: var(--gf-neutral-50);
+  --gf-surface-sunken: var(--gf-neutral-0);
+  --gf-surface-alt: var(--gf-neutral-100);
+  --gf-elevated: var(--gf-neutral-150);
+  --gf-elevated-hover: var(--gf-neutral-200);
+  --gf-overlay: var(--gf-neutral-200);
+  --gf-border: var(--gf-neutral-300);
+  --gf-border-strong: var(--gf-neutral-400);
+  --gf-border-subtle: var(--gf-neutral-200);
+
+  --gf-text: var(--gf-neutral-1000);
+  --gf-text-secondary: var(--gf-neutral-800);
+  --gf-text-muted: var(--gf-neutral-600);
+  --gf-text-faint: var(--gf-neutral-500);
+  --gf-text-on-accent: var(--gf-brand-contrast);
+
+  /* Brand accent as semantic roles. */
+  --gf-accent: var(--gf-brand-500);
+  --gf-accent-hover: var(--gf-brand-400);
+  --gf-accent-active: var(--gf-brand-600);
+  --gf-accent-contrast: var(--gf-brand-contrast);
+  --gf-accent-soft: color-mix(in srgb, var(--gf-brand-500) 16%, transparent);
+  --gf-accent-ring: color-mix(in srgb, var(--gf-brand-500) 45%, transparent);
+
+  /* Back-compat aliases for the previous flat token names. Existing components
+   * referencing `--gf-color-*` keep working while everything migrates to the
+   * semantic roles above. New code should use the role tokens. */
+  --gf-color-surface: var(--gf-surface);
+  --gf-color-surface-alt: var(--gf-surface-alt);
+  --gf-color-border: var(--gf-border);
+  --gf-color-text: var(--gf-text);
+  --gf-color-text-muted: var(--gf-text-muted);
+  --gf-color-accent: var(--gf-accent);
+  --gf-color-accent-contrast: var(--gf-accent-contrast);
+
+  /* ── Position / medal colors (leaderboards + standings). ─────────────────── */
+  --gf-color-gold: #f5c542;
+  --gf-color-silver: #c2cad4;
+  --gf-color-bronze: #d08a4a;
+  --gf-medal-gold-contrast: #2a1e00;
+  --gf-medal-silver-contrast: #14181f;
+  --gf-medal-bronze-contrast: #1a0e02;
+
+  /* ── Semantic status colors (success / warning / danger / info). ─────────── */
+  --gf-success: var(--gf-green-400);
+  --gf-success-soft: color-mix(in srgb, var(--gf-green-400) 16%, transparent);
+  --gf-warn: var(--gf-amber-400);
+  --gf-warn-soft: color-mix(in srgb, var(--gf-amber-400) 16%, transparent);
+  --gf-danger: var(--gf-red-400);
+  --gf-danger-soft: color-mix(in srgb, var(--gf-red-400) 16%, transparent);
+  --gf-info: var(--gf-blue-400);
+  --gf-info-soft: color-mix(in srgb, var(--gf-blue-400) 16%, transparent);
+
+  /* Legacy state aliases. */
+  --gf-color-live: var(--gf-success);
+  --gf-color-leader: var(--gf-accent);
+  --gf-color-warn: var(--gf-warn);
+  --gf-color-danger: var(--gf-danger);
+
+  /* ── Heat-phase colors (Scheduled→Staged→Armed→Running→Finished→Scored). ───
+   * A deliberate progression: neutral → warming amber → hot red (armed/ready) →
+   * live brand-green (running) → cool blue (finished) → settled violet (scored). */
+  --gf-phase-scheduled: var(--gf-neutral-600);
+  --gf-phase-staged: var(--gf-amber-400);
+  --gf-phase-armed: var(--gf-red-400);
+  --gf-phase-running: var(--gf-brand-500);
+  --gf-phase-finished: var(--gf-blue-400);
+  --gf-phase-scored: var(--gf-violet-400);
+
+  /* ── Connection-state colors (live / connecting / reconnecting / closed). ─── */
+  --gf-conn-live: var(--gf-success);
+  --gf-conn-pending: var(--gf-info);
+  --gf-conn-warn: var(--gf-warn);
+  --gf-conn-idle: var(--gf-text-faint);
+
+  /* ── Spacing scale (4px base) ────────────────────────────────────────────── */
+  --gf-space-0: 0;
   --gf-space-1: 0.25rem;
   --gf-space-2: 0.5rem;
   --gf-space-3: 0.75rem;
   --gf-space-4: 1rem;
+  --gf-space-5: 1.25rem;
   --gf-space-6: 1.5rem;
   --gf-space-8: 2rem;
+  --gf-space-10: 2.5rem;
+  --gf-space-12: 3rem;
 
-  /* ── Typography ──────────────────────────────────────────────────────── */
-  --gf-font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --gf-font-mono: ui-monospace, 'SF Mono', 'Roboto Mono', monospace;
+  /* ── Typography ────────────────────────────────────────────────────────────
+   * UI is a grotesk (Inter / system fallback); numeric/timing readouts use a
+   * tabular mono so columns stay aligned. */
+  --gf-font-family: 'GridFPV Sans', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --gf-font-mono:
+    'JetBrains Mono', ui-monospace, 'SF Mono', 'Roboto Mono', 'Cascadia Code', monospace;
 
+  --gf-font-size-2xs: 0.6875rem;
   --gf-font-size-xs: 0.75rem;
-  --gf-font-size-sm: 0.875rem;
-  --gf-font-size-md: 1rem;
-  --gf-font-size-lg: 1.25rem;
-  --gf-font-size-xl: 1.75rem;
-  --gf-font-size-2xl: 2.5rem;
+  --gf-font-size-sm: 0.8125rem;
+  --gf-font-size-md: 0.9375rem;
+  --gf-font-size-lg: 1.125rem;
+  --gf-font-size-xl: 1.5rem;
+  --gf-font-size-2xl: 2rem;
+  --gf-font-size-3xl: 2.75rem;
 
   --gf-font-weight-normal: 400;
-  --gf-font-weight-medium: 600;
+  --gf-font-weight-medium: 500;
+  --gf-font-weight-semibold: 600;
   --gf-font-weight-bold: 700;
 
-  /* ── Radii ───────────────────────────────────────────────────────────── */
-  --gf-radius-sm: 4px;
-  --gf-radius-md: 8px;
+  --gf-line-tight: 1.15;
+  --gf-line-snug: 1.3;
+  --gf-line-normal: 1.5;
+
+  --gf-tracking-tight: -0.01em;
+  --gf-tracking-normal: 0;
+  --gf-tracking-wide: 0.04em;
+  --gf-tracking-caps: 0.06em;
+
+  /* ── Radii ─────────────────────────────────────────────────────────────── */
+  --gf-radius-xs: 4px;
+  --gf-radius-sm: 6px;
+  --gf-radius-md: 10px;
+  --gf-radius-lg: 14px;
+  --gf-radius-xl: 20px;
+  --gf-radius-pill: 999px;
+
+  /* ── Elevation / shadows (tuned for a dark canvas). ──────────────────────── */
+  --gf-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --gf-shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.45);
+  --gf-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --gf-shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.6);
+  --gf-shadow-glow: 0 0 0 1px var(--gf-accent-ring), 0 0 24px -4px var(--gf-accent-ring);
+  --gf-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+
+  /* ── Focus rings ─────────────────────────────────────────────────────────── */
+  --gf-ring-width: 2px;
+  --gf-ring-offset: 2px;
+  --gf-ring-color: var(--gf-accent-ring);
+  --gf-focus-ring:
+    0 0 0 var(--gf-ring-offset) var(--gf-surface),
+    0 0 0 calc(var(--gf-ring-offset) + var(--gf-ring-width)) var(--gf-accent);
+
+  /* ── Motion ─────────────────────────────────────────────────────────────── */
+  --gf-motion-fast: 120ms;
+  --gf-motion-base: 200ms;
+  --gf-motion-slow: 320ms;
+  --gf-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --gf-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --gf-ease-spring: cubic-bezier(0.22, 1.2, 0.36, 1);
+}
+
+/**
+ * Light theme — re-points the SEMANTIC roles only (the brand/accent stays the
+ * same hue family). Apply `class="theme-light"` or `data-theme="light"` on a
+ * wrapping element (or `:root`). The dense/overlay contexts compose on top.
+ */
+:where(.theme-light),
+:where([data-theme='light']) {
+  --gf-surface: #ffffff;
+  --gf-surface-sunken: #eef1f5;
+  --gf-surface-alt: #f4f6f9;
+  --gf-elevated: #ffffff;
+  --gf-elevated-hover: #f4f6f9;
+  --gf-overlay: #ffffff;
+  --gf-border: #dce0e6;
+  --gf-border-strong: #c3c9d2;
+  --gf-border-subtle: #eaedf1;
+
+  --gf-text: #0c1118;
+  --gf-text-secondary: #2c3440;
+  --gf-text-muted: #5d6775;
+  --gf-text-faint: #8a93a1;
+  --gf-text-on-accent: var(--gf-brand-contrast);
+
+  --gf-accent: var(--gf-brand-600);
+  --gf-accent-hover: var(--gf-brand-500);
+  --gf-accent-active: var(--gf-brand-700);
+  --gf-accent-soft: color-mix(in srgb, var(--gf-brand-600) 12%, transparent);
+  --gf-accent-ring: color-mix(in srgb, var(--gf-brand-600) 40%, transparent);
+
+  --gf-success: var(--gf-green-500);
+  --gf-warn: var(--gf-amber-500);
+  --gf-danger: var(--gf-red-500);
+  --gf-info: var(--gf-blue-500);
+
+  --gf-phase-scheduled: var(--gf-neutral-500);
+  --gf-phase-staged: var(--gf-amber-500);
+  --gf-phase-armed: var(--gf-red-500);
+  --gf-phase-running: var(--gf-brand-600);
+  --gf-phase-finished: var(--gf-blue-500);
+  --gf-phase-scored: var(--gf-violet-500);
+
+  --gf-color-gold: #d4af37;
+  --gf-color-silver: #9aa0a6;
+  --gf-color-bronze: #b06a2c;
+  --gf-medal-silver-contrast: #14181f;
+
+  --gf-shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --gf-shadow-sm: 0 1px 3px rgba(16, 24, 40, 0.1), 0 1px 2px rgba(16, 24, 40, 0.06);
+  --gf-shadow-md: 0 8px 24px rgba(16, 24, 40, 0.12);
+  --gf-shadow-lg: 0 18px 48px rgba(16, 24, 40, 0.16);
+  --gf-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 /**
@@ -73,18 +297,30 @@
  * broadcast keyer. Apply `class="gridfpv-overlay"` on a wrapping element.
  */
 :where(.gridfpv-overlay) {
-  --gf-color-surface: transparent;
-  --gf-color-surface-alt: rgba(0, 0, 0, 0.35);
-  --gf-color-border: rgba(255, 255, 255, 0.25);
-  --gf-color-text: #ffffff;
-  --gf-color-text-muted: rgba(255, 255, 255, 0.7);
-  --gf-color-accent: #38bdf8;
+  --gf-surface: transparent;
+  --gf-surface-alt: rgba(0, 0, 0, 0.4);
+  --gf-elevated: rgba(0, 0, 0, 0.5);
+  --gf-border: rgba(255, 255, 255, 0.25);
+  --gf-text: #ffffff;
+  --gf-text-muted: rgba(255, 255, 255, 0.72);
+  --gf-accent: var(--gf-brand-400);
+
+  --gf-color-surface: var(--gf-surface);
+  --gf-color-surface-alt: var(--gf-surface-alt);
+  --gf-color-border: var(--gf-border);
+  --gf-color-text: var(--gf-text);
+  --gf-color-text-muted: var(--gf-text-muted);
+  --gf-color-accent: var(--gf-accent);
 
   --gf-font-size-sm: 1rem;
   --gf-font-size-md: 1.25rem;
   --gf-font-size-lg: 1.75rem;
   --gf-font-size-xl: 2.5rem;
-  --gf-font-size-2xl: 3.5rem;
+  --gf-font-size-2xl: 3.25rem;
+  --gf-font-size-3xl: 4rem;
+
+  --gf-shadow-sm: 0 2px 12px rgba(0, 0, 0, 0.6);
+  --gf-shadow-md: 0 4px 24px rgba(0, 0, 0, 0.7);
 }
 
 /**
@@ -94,8 +330,19 @@
 :where(.gridfpv-dense) {
   --gf-space-2: 0.375rem;
   --gf-space-3: 0.5rem;
-  --gf-space-4: 0.625rem;
+  --gf-space-4: 0.75rem;
+  --gf-space-6: 1.125rem;
 
   --gf-font-size-sm: 0.8125rem;
   --gf-font-size-md: 0.875rem;
+}
+
+/* Honor reduced-motion: collapse durations so transitions are instant. */
+@media (prefers-reduced-motion: reduce) {
+  :where(.gridfpv-root),
+  :root {
+    --gf-motion-fast: 0ms;
+    --gf-motion-base: 0ms;
+    --gf-motion-slow: 0ms;
+  }
 }

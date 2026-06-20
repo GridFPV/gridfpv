@@ -12,6 +12,7 @@
    * and aborts the rest of the batch so the RD can correct and retry.
    */
   import type { HeatId } from '@gridfpv/types';
+  import { Button, Input } from '@gridfpv/components';
   import {
     defineHeatCommands,
     isHeatValid,
@@ -58,37 +59,41 @@
 </script>
 
 <section class="new-heat" aria-label="New heat">
-  <h3>New heat</h3>
-  <p class="muted">
-    Type the heat id and the pilots flying it. Each name is registered on
-    <code>sim</code> and becomes the heat's lineup.
-  </p>
+  <header class="head">
+    <h3>New heat</h3>
+    <p class="muted">
+      Type the heat id and the pilots flying it. Each name is registered on
+      <code>sim</code> and becomes the heat's lineup.
+    </p>
+  </header>
 
-  <label class="heat-id">
-    Heat id
-    <input type="text" bind:value={heatId} placeholder="q-1" aria-label="Heat id" />
+  <label class="heat-id field">
+    <span class="field-label">Heat id</span>
+    <Input bind:value={heatId} placeholder="q-1" aria-label="Heat id" />
   </label>
 
   <div class="pilots">
-    <span class="pilots-label">Pilots</span>
+    <span class="pilots-label field-label">Pilots</span>
     {#each names as pilot, i (i)}
       <div class="pilot-row">
-        <input
-          type="text"
+        <span class="pilot-num" aria-hidden="true">{i + 1}</span>
+        <Input
           bind:value={pilot.name}
           placeholder={`Pilot ${i + 1}`}
           aria-label={`Pilot ${i + 1} name`}
         />
-        <button
-          type="button"
-          class="remove"
+        <Button
+          variant="ghost"
+          size="sm"
           onclick={() => removePilot(i)}
           disabled={names.length <= 1}
-          aria-label={`Remove pilot ${i + 1}`}>Remove</button
+          aria-label={`Remove pilot ${i + 1}`}>Remove</Button
         >
       </div>
     {/each}
-    <button type="button" class="add" onclick={addPilot}>Add pilot</button>
+    <div class="add-row">
+      <Button variant="secondary" size="sm" onclick={addPilot}>+ Add pilot</Button>
+    </div>
   </div>
 
   {#if problems.length > 0}
@@ -97,36 +102,56 @@
     </ul>
   {/if}
 
-  <button type="button" class="schedule" onclick={schedule} disabled={!ready || scheduling}>
-    {scheduling ? 'Scheduling…' : 'Schedule heat'}
-  </button>
+  <div class="actions">
+    <Button variant="primary" onclick={schedule} loading={scheduling} disabled={!ready}>
+      {scheduling ? 'Scheduling…' : 'Schedule heat'}
+    </Button>
+  </div>
 </section>
 
 <style>
   .new-heat {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-3);
-    padding: var(--gf-space-4);
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-md);
-    background: var(--gf-color-surface);
+    gap: var(--gf-space-4);
+    padding: var(--gf-space-5);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    background: var(--gf-elevated);
+    box-shadow: var(--gf-shadow-xs);
   }
-  h3 {
+  .head h3 {
     margin: 0;
     font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
+    letter-spacing: var(--gf-tracking-tight);
   }
   .muted {
-    color: var(--gf-color-text-muted);
+    color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
-    margin: 0;
+    margin: var(--gf-space-1) 0 0;
   }
-  label,
-  .pilots-label {
+  .muted code {
+    color: var(--gf-text-secondary);
+    background: var(--gf-surface-alt);
+    padding: 0.05em 0.35em;
+    border-radius: var(--gf-radius-xs);
+    font-size: 0.92em;
+  }
+  .field {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-1);
-    font-size: var(--gf-font-size-sm);
+    gap: var(--gf-space-2);
+  }
+  .field-label {
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    color: var(--gf-text-muted);
+  }
+  .heat-id {
+    max-width: 14rem;
   }
   .pilots {
     display: flex;
@@ -138,40 +163,28 @@
     gap: var(--gf-space-2);
     align-items: center;
   }
-  input {
-    font-family: var(--gf-font-family);
-    font-size: var(--gf-font-size-sm);
-    padding: var(--gf-space-1) var(--gf-space-2);
-    border: 1px solid var(--gf-color-border);
+  .pilot-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    flex-shrink: 0;
     border-radius: var(--gf-radius-sm);
-    background: var(--gf-color-surface);
-    color: var(--gf-color-text);
+    background: var(--gf-surface-alt);
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-xs);
+    font-weight: var(--gf-font-weight-bold);
+    font-variant-numeric: tabular-nums;
   }
-  .heat-id input {
-    max-width: 12rem;
+  .add-row {
+    margin-top: var(--gf-space-1);
   }
-  button {
-    font-family: var(--gf-font-family);
-    font-size: var(--gf-font-size-sm);
-    padding: var(--gf-space-2) var(--gf-space-4);
-    border-radius: var(--gf-radius-sm);
-    border: 1px solid var(--gf-color-border);
-    background: var(--gf-color-surface);
-    color: var(--gf-color-text);
-    cursor: pointer;
-  }
-  button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .schedule {
-    align-self: flex-start;
-    border-color: var(--gf-color-accent);
-    background: var(--gf-color-accent);
-    color: var(--gf-color-accent-contrast);
+  .actions {
+    display: flex;
   }
   .problems {
-    color: var(--gf-color-danger);
+    color: var(--gf-danger);
     font-size: var(--gf-font-size-sm);
     margin: 0;
     padding-left: var(--gf-space-4);
