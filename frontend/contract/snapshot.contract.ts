@@ -64,7 +64,7 @@ function isSnapshot(v: unknown): v is { cursor: number; body: Record<string, unk
 
 describe('seam 1: snapshot routes are path-scoped', () => {
   it('GET /snapshot/event/{id} → 200 LiveRaceState + numeric cursor', async () => {
-    const { status, json } = await getSnapshot('/snapshot/event/spring-cup');
+    const { status, json } = await getSnapshot('/events/practice/snapshot/event/spring-cup');
     expect(status).toBe(200);
     expect(isSnapshot(json)).toBe(true);
     const snap = json as { cursor: number; body: Record<string, unknown> };
@@ -73,25 +73,29 @@ describe('seam 1: snapshot routes are path-scoped', () => {
   });
 
   it('GET /snapshot/heat/{id} → 200 LiveRaceState (default projection)', async () => {
-    const { status, json } = await getSnapshot(`/snapshot/heat/${HEAT}`);
+    const { status, json } = await getSnapshot(`/events/practice/snapshot/heat/${HEAT}`);
     expect(status).toBe(200);
     expect(Object.keys((json as { body: object }).body)).toEqual(['LiveRaceState']);
   });
 
   it('GET /snapshot/heat/{id}?projection=laps → 200 LapList', async () => {
-    const { status, json } = await getSnapshot(`/snapshot/heat/${HEAT}?projection=laps`);
+    const { status, json } = await getSnapshot(
+      `/events/practice/snapshot/heat/${HEAT}?projection=laps`
+    );
     expect(status).toBe(200);
     expect(Object.keys((json as { body: object }).body)).toEqual(['LapList']);
   });
 
   it('GET /snapshot/heat/{id}?projection=result → 200 HeatResult', async () => {
-    const { status, json } = await getSnapshot(`/snapshot/heat/${HEAT}?projection=result`);
+    const { status, json } = await getSnapshot(
+      `/events/practice/snapshot/heat/${HEAT}?projection=result`
+    );
     expect(status).toBe(200);
     expect(Object.keys((json as { body: object }).body)).toEqual(['HeatResult']);
   });
 
   it('GET /snapshot/class/{event}/{class} → 200 LiveRaceState', async () => {
-    const { status, json } = await getSnapshot('/snapshot/class/spring-cup/open');
+    const { status, json } = await getSnapshot('/events/practice/snapshot/class/spring-cup/open');
     expect(status).toBe(200);
     expect(Object.keys((json as { body: object }).body)).toEqual(['LiveRaceState']);
   });
@@ -105,7 +109,7 @@ describe('seam 1: snapshot routes are path-scoped', () => {
     const deadline = Date.now() + 8_000;
     let snap: { status: number; json: unknown } | undefined;
     while (Date.now() < deadline) {
-      snap = await getSnapshot('/snapshot/pilot/spring-cup/A');
+      snap = await getSnapshot('/events/practice/snapshot/pilot/spring-cup/A');
       if (snap.status === 200) break;
       await new Promise((r) => setTimeout(r, 50));
     }
@@ -115,7 +119,7 @@ describe('seam 1: snapshot routes are path-scoped', () => {
 
   it('an unknown SCOPE id → 404 ProtocolError(UnknownScope), not a silent Snapshot', async () => {
     // A real path with a missing id: the contract is a typed 404, not a 200 fallback.
-    const { status, json } = await getSnapshot('/snapshot/heat/does-not-exist');
+    const { status, json } = await getSnapshot('/events/practice/snapshot/heat/does-not-exist');
     expect(status).toBe(404);
     expect((json as { code?: string }).code).toBe('UnknownScope');
   });
@@ -153,7 +157,7 @@ describe('seam 1: snapshot routes are path-scoped', () => {
 
 describe('seam 4: wire integers are JSON numbers, never bigint/string', () => {
   it('snapshot cursor is a number > 0 on a non-empty log', async () => {
-    const { json } = await getSnapshot('/snapshot/event/spring-cup');
+    const { json } = await getSnapshot('/events/practice/snapshot/event/spring-cup');
     const snap = json as { cursor: number };
     expect(typeof snap.cursor).toBe('number');
     expect(Number.isInteger(snap.cursor)).toBe(true);
@@ -166,7 +170,7 @@ describe('seam 4: wire integers are JSON numbers, never bigint/string', () => {
     const deadline = Date.now() + 8_000;
     let progressed: { laps_completed: unknown; last_lap_micros?: unknown } | undefined;
     while (Date.now() < deadline) {
-      const { json } = await getSnapshot(`/snapshot/heat/${HEAT}`);
+      const { json } = await getSnapshot(`/events/practice/snapshot/heat/${HEAT}`);
       const ls = (
         json as { body: { LiveRaceState: { progress?: Array<Record<string, unknown>> } } }
       ).body.LiveRaceState;
@@ -186,7 +190,7 @@ describe('seam 4: wire integers are JSON numbers, never bigint/string', () => {
     const deadline = Date.now() + 8_000;
     let dur: unknown;
     while (Date.now() < deadline) {
-      const { json } = await getSnapshot(`/snapshot/heat/${HEAT}?projection=laps`);
+      const { json } = await getSnapshot(`/events/practice/snapshot/heat/${HEAT}?projection=laps`);
       const list = (
         json as {
           body: { LapList: { competitors: Array<{ laps: Array<{ duration_micros: unknown }> }> } };

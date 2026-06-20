@@ -19,7 +19,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { connect } from '../packages/protocol-client/dist/index.js';
 import { type Director } from '../test-harness/director.ts';
-import { openSocket, rdControl, startContractDirector, waitForFrame, wsBase } from './harness.ts';
+import {
+  eventRoot,
+  openSocket,
+  rdControl,
+  startContractDirector,
+  waitForFrame,
+  wsBase
+} from './harness.ts';
 
 const TOKEN = 'rd-stream-contract';
 const HEAT = 'q-1';
@@ -38,9 +45,13 @@ afterAll(async () => {
   await director?.stop();
 });
 
-/** The snapshot cursor for a scope path — the `from:` a stream resumes at. */
+/**
+ * The snapshot cursor for a scope path — the `from:` a stream resumes at. `path` is the
+ * within-event snapshot path (e.g. `/snapshot/heat/q-1`); it is rooted under the Practice
+ * event (#72) here.
+ */
 async function snapshotCursor(path: string): Promise<number> {
-  const res = await fetch(`${director.baseUrl}${path}`);
+  const res = await fetch(`${eventRoot(director.baseUrl)}${path}`);
   const snap = (await res.json()) as { cursor: number };
   return snap.cursor;
 }
@@ -48,7 +59,7 @@ async function snapshotCursor(path: string): Promise<number> {
 describe('seam 2: stream frames are externally-tagged StreamMessage', () => {
   it('a control append produces a `{ Change: ChangeEnvelope }` frame, not a bare envelope', async () => {
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
-    const { ws, frames } = await openSocket(`${wsBase(director.baseUrl)}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
 
     // A heat-state change after the subscribe re-folds the scope and pushes one envelope.
@@ -74,7 +85,9 @@ describe('seam 2: stream frames are externally-tagged StreamMessage', () => {
         Register: { adapter: 'sim', competitor: `x${i}`, pilot: `p${i}` }
       });
     }
-    const { ws, frames, closed } = await openSocket(`${wsBase(director.baseUrl)}/stream`);
+    const { ws, frames, closed } = await openSocket(
+      `${wsBase(eventRoot(director.baseUrl))}/stream`
+    );
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: 1 }));
     await waitForFrame(frames, (f) => f.length > 0);
 
@@ -90,7 +103,7 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
     expect(cursor).toBeGreaterThan(0); // the cursor axis is well past 1
 
-    const { ws, frames } = await openSocket(`${wsBase(director.baseUrl)}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
     await rdControl(director.baseUrl, TOKEN, { Arm: { heat: HEAT } });
     await waitForFrame(frames, (f) => f.length > 0);
@@ -131,7 +144,9 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
 
 describe('seam 7: contract-version negotiation', () => {
   it('an out-of-band contract_version → VersionMismatch refresh signal + close', async () => {
-    const { ws, frames, closed } = await openSocket(`${wsBase(director.baseUrl)}/stream`);
+    const { ws, frames, closed } = await openSocket(
+      `${wsBase(eventRoot(director.baseUrl))}/stream`
+    );
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, contract_version: 999 }));
     await waitForFrame(frames, (f) => f.length > 0);
     const frame = frames[0] as { code?: string };
@@ -141,7 +156,7 @@ describe('seam 7: contract-version negotiation', () => {
 
   it('an absent contract_version subscribes and streams normally', async () => {
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
-    const { ws, frames } = await openSocket(`${wsBase(director.baseUrl)}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
     // No contract_version field at all — treated as this build's version, streams fine.
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
     await rdControl(director.baseUrl, TOKEN, { Finish: { heat: HEAT } });

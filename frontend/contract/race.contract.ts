@@ -13,7 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { connect } from '../packages/protocol-client/dist/index.js';
 import { type Director } from '../test-harness/director.ts';
-import { driveToRunning, rdControl, startContractDirector } from './harness.ts';
+import { driveToRunning, eventRoot, rdControl, startContractDirector } from './harness.ts';
 
 const TOKEN = 'rd-race-contract';
 const HEAT = 'final';
@@ -90,7 +90,7 @@ describe('seam 8: a full race converges through the real protocol-client', () =>
 
       // And the scored HeatResult is served on the read path (a result exists).
       const result = (await (
-        await fetch(`${director.baseUrl}/snapshot/heat/${HEAT}?projection=result`)
+        await fetch(`${eventRoot(director.baseUrl)}/snapshot/heat/${HEAT}?projection=result`)
       ).json()) as { body: { HeatResult: { places: unknown[] } } };
       expect(result.body.HeatResult.places.length).toBe(LINEUP.length);
     } finally {

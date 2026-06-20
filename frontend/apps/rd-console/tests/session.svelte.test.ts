@@ -39,7 +39,8 @@ describe('Session', () => {
 
     expect(session.authenticated).toBe(true);
     expect(connect).toHaveBeenCalledOnce();
-    expect(controlFactory).toHaveBeenCalledWith('http://d.local', 'tok');
+    // The control client is rooted under the default Practice event (#72).
+    expect(controlFactory).toHaveBeenCalledWith('http://d.local', 'tok', { eventId: 'practice' });
 
     // Stream pushes a LiveRaceState body → session.liveState reflects it.
     push({ body: { LiveRaceState: liveRunning }, cursor: 1, status: 'live', error: undefined });

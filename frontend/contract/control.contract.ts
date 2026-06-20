@@ -26,6 +26,7 @@ import type { Command, JoinTokenResponse } from '@gridfpv/types';
 
 import { type Director } from '../test-harness/director.ts';
 import {
+  eventRoot,
   openSocket,
   postControl,
   rdControl,
@@ -53,7 +54,7 @@ describe('seam 5: control command shape + headers', () => {
       ScheduleHeat: { heat: 'h-shape', lineup: ['A', 'B'] }
     });
     expect(ack).toEqual({ ok: true });
-    const res = await fetch(`${director.baseUrl}/snapshot/heat/h-shape`);
+    const res = await fetch(`${eventRoot(director.baseUrl)}/snapshot/heat/h-shape`);
     expect(res.status).toBe(200); // it now resolves — the append took effect
   });
 
@@ -135,10 +136,12 @@ describe('seam 5: control command shape + headers', () => {
     await rdControl(director.baseUrl, TOKEN, {
       ScheduleHeat: { heat: 'h-reaches', lineup: ['A'] }
     });
-    const snap = (await (await fetch(`${director.baseUrl}/snapshot/heat/h-reaches`)).json()) as {
+    const snap = (await (
+      await fetch(`${eventRoot(director.baseUrl)}/snapshot/heat/h-reaches`)
+    ).json()) as {
       cursor: number;
     };
-    const { ws, frames } = await openSocket(`${wsBase(director.baseUrl)}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: 'h-reaches' } }, from: snap.cursor }));
     // Drive a change over the CONTROL path; it must surface on the READ stream.
     await rdControl(director.baseUrl, TOKEN, { Stage: { heat: 'h-reaches' } });
@@ -155,7 +158,7 @@ describe('seam 5: control command shape + headers', () => {
   });
 
   it('the bidirectional control WS (with the auth header) acks commands', async () => {
-    const { ws, frames } = await openSocket(`${wsBase(director.baseUrl)}/control`, {
+    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/control`, {
       Authorization: `Bearer ${TOKEN}`
     });
     ws.send(JSON.stringify({ ScheduleHeat: { heat: 'h-ws', lineup: ['A'] } }));
@@ -191,18 +194,18 @@ describe('seam 6: auth gates control, reads stay open', () => {
   });
 
   it('the control WS upgrade is rejected without the auth header', async () => {
-    const withAuth = await tryOpenControlWs(`${wsBase(director.baseUrl)}/control`, {
+    const withAuth = await tryOpenControlWs(`${wsBase(eventRoot(director.baseUrl))}/control`, {
       Authorization: `Bearer ${TOKEN}`
     });
-    const withoutAuth = await tryOpenControlWs(`${wsBase(director.baseUrl)}/control`);
+    const withoutAuth = await tryOpenControlWs(`${wsBase(eventRoot(director.baseUrl))}/control`);
     expect(withAuth).toBe(true);
     expect(withoutAuth).toBe(false);
   });
 
   it('reads are OPEN — /snapshot and /stream need no token', async () => {
-    const snap = await fetch(`${director.baseUrl}/snapshot/event/any`);
+    const snap = await fetch(`${eventRoot(director.baseUrl)}/snapshot/event/any`);
     expect(snap.status).toBe(200); // no Authorization header sent
-    const { ws, frames } = await openSocket(`${wsBase(director.baseUrl)}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
     ws.send(JSON.stringify({ scope: { Event: { event: 'any' } }, from: 0 }));
     // It subscribes without auth and does not get an Unauthorized error frame.
     await new Promise((r) => setTimeout(r, 300));
@@ -212,10 +215,10 @@ describe('seam 6: auth gates control, reads stay open', () => {
 
   it('minting a join token requires the RD token — no/bad token → 401 (#63)', async () => {
     // No Authorization → 401.
-    const anon = await fetch(`${director.baseUrl}/auth/join-token`, { method: 'POST' });
+    const anon = await fetch(`${eventRoot(director.baseUrl)}/auth/join-token`, { method: 'POST' });
     expect(anon.status).toBe(401);
     // An unknown token → 401.
-    const bad = await fetch(`${director.baseUrl}/auth/join-token`, {
+    const bad = await fetch(`${eventRoot(director.baseUrl)}/auth/join-token`, {
       method: 'POST',
       headers: { Authorization: 'Bearer not-a-real-token' }
     });
@@ -224,7 +227,7 @@ describe('seam 6: auth gates control, reads stay open', () => {
 
   it('an RD mints a read-only join token that reads but is REJECTED on control (#63)', async () => {
     // The RD trades its RD token for a fresh read-only join token over the wire.
-    const res = await fetch(`${director.baseUrl}/auth/join-token`, {
+    const res = await fetch(`${eventRoot(director.baseUrl)}/auth/join-token`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}` }
     });
@@ -235,7 +238,7 @@ describe('seam 6: auth gates control, reads stay open', () => {
     expect(join).not.toBe(TOKEN); // a distinct, freshly-minted credential
 
     // The minted join token authenticates a READ (reads accept a valid token of either role).
-    const read = await fetch(`${director.baseUrl}/snapshot/event/any`, {
+    const read = await fetch(`${eventRoot(director.baseUrl)}/snapshot/event/any`, {
       headers: { Authorization: `Bearer ${join}` }
     });
     expect(read.status).toBe(200);
