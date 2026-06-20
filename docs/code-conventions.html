@@ -79,8 +79,8 @@
       <p><span class="name">Integer-microsecond source time.</span> Time is carried as
       <code>SourceTime</code> — <strong>integer microseconds on the source's own clock</strong>
       (<code>i64</code>). Interval math uses no floats, so comparisons are stable and tests are
-      byte-deterministic. It is serde-<code>transparent</code> / <code>ts(as = "i64")</code>, a
-      bare <code>number</code> on the wire.</p>
+      byte-deterministic. It is serde-<code>transparent</code> — a bare integer-microsecond
+      value, rendered to TS as a <code>number</code> (not <code>bigint</code>; see §3).</p>
     </div>
     <div class="principle">
       <p><span class="name">Externally-tagged events; observations only.</span> The canonical
