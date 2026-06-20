@@ -42,7 +42,7 @@ describe('Session', () => {
     expect(controlFactory).toHaveBeenCalledWith('http://d.local', 'tok');
 
     // Stream pushes a LiveRaceState body → session.liveState reflects it.
-    push({ body: { LiveRaceState: liveRunning }, cursor: 1n, status: 'live', error: undefined });
+    push({ body: { LiveRaceState: liveRunning }, cursor: 1, status: 'live', error: undefined });
     expect(session.connectionStatus).toBe('live');
     expect(session.liveState?.current_heat).toBe('heat-1');
   });

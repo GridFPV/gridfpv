@@ -66,6 +66,8 @@ pub struct Lap {
     pub number: u32,
     /// Lap duration in microseconds on the source clock
     /// (`pass[n + 1].at - pass[n].at`). Always `>= 0` for in-order passes.
+    /// Renders as a plain TS `number` (bounded far below 2^53).
+    #[ts(type = "number")]
     pub duration_micros: i64,
 }
 

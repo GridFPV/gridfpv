@@ -20,13 +20,13 @@ export const heatResult: HeatResult = {
       competitor: { adapter: 'rh-1', competitor: 'ALICE' },
       position: 1,
       laps: 3,
-      metric: { BestLapMicros: 41_250_000n }
+      metric: { BestLapMicros: 41_250_000 }
     },
     {
       competitor: { adapter: 'rh-1', competitor: 'BOB' },
       position: 2,
       laps: 3,
-      metric: { BestLapMicros: 42_100_000n }
+      metric: { BestLapMicros: 42_100_000 }
     },
     {
       competitor: { adapter: 'rh-1', competitor: 'CARMEN' },
@@ -47,7 +47,7 @@ export const standings: RankEntry[] = [
 export const pilotProgress: PilotProgress = {
   competitor: 'ALICE',
   laps_completed: 2,
-  last_lap_micros: 41_250_000n
+  last_lap_micros: 41_250_000
 };
 
 export const liveState: LiveRaceState = {
@@ -55,8 +55,8 @@ export const liveState: LiveRaceState = {
   phase: 'Running',
   active_pilots: ['ALICE', 'BOB', 'CARMEN'] as CompetitorRef[],
   progress: [
-    { competitor: 'ALICE', laps_completed: 3, last_lap_micros: 41_000_000n },
-    { competitor: 'BOB', laps_completed: 2, last_lap_micros: 43_000_000n },
+    { competitor: 'ALICE', laps_completed: 3, last_lap_micros: 41_000_000 },
+    { competitor: 'BOB', laps_completed: 2, last_lap_micros: 43_000_000 },
     { competitor: 'CARMEN', laps_completed: 2, last_lap_micros: undefined }
   ],
   running_order: ['ALICE', 'BOB', 'CARMEN'] as CompetitorRef[]

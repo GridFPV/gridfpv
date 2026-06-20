@@ -71,10 +71,11 @@ pub struct PilotId(pub String);
 /// and comparisons stable (no float-equality hazards in tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
-// serde flattens this to the bare `micros` integer (transparent). `#[ts(as = "i64")]`
-// mirrors that on the wire: `SourceTime` resolves to a plain `number` everywhere it
-// is referenced, exactly as it serialises.
-#[ts(export, export_to = "bindings/", as = "i64")]
+// serde flattens this to the bare `micros` integer (transparent). `#[ts(as = "f64")]`
+// renders it as a plain TS `number`: our source times are microsecond counts bounded
+// far below 2^53, so `number` is exact and avoids the wire/type mismatch a wide-integer
+// TS mapping would introduce.
+#[ts(export, export_to = "bindings/", as = "f64")]
 pub struct SourceTime {
     /// Microseconds on the source's clock.
     pub micros: i64,
@@ -144,8 +145,10 @@ pub struct Pass {
     /// passes that share a timestamp and survives clock adjustments; also the basis
     /// for reconnect deduplication.
     // serde skips this when `None`; `#[ts(optional)]` mirrors that as `sequence?:`.
+    // `#[ts(type = "number")]` renders the sequence as a plain TS `number` (it is
+    // bounded far below 2^53), not a `bigint`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, type = "number")]
     pub sequence: Option<u64>,
     /// The gate crossed; defaults to the lap gate.
     #[serde(default, skip_serializing_if = "GateIndex::is_lap_gate")]
@@ -173,7 +176,10 @@ pub struct HeatId(pub String);
 /// by the storage layer when the target event was appended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
-#[ts(export, export_to = "bindings/")]
+// `#[ts(as = "f64")]` renders the offset as a plain TS `number`: log offsets are
+// bounded far below 2^53 in our domain, so `number` is exact and avoids a wide-integer
+// wire mismatch.
+#[ts(export, export_to = "bindings/", as = "f64")]
 pub struct LogRef(pub u64);
 
 /// A transition of the heat-loop state machine (race-engine.html §2). The recorded
@@ -212,7 +218,10 @@ pub enum Penalty {
     /// Disqualified from the heat.
     Disqualify,
     /// Time added to the competitor's result, in microseconds.
-    TimeAdded { micros: i64 },
+    TimeAdded {
+        #[ts(type = "number")]
+        micros: i64,
+    },
 }
 
 /// A canonical event in the append-only log.

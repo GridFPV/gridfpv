@@ -117,9 +117,9 @@ pub struct PilotProgress {
     /// Completed laps so far in the heat.
     pub laps_completed: u32,
     /// Duration (µs, source clock) of the most recently completed lap, or `None` before
-    /// the pilot has completed a lap.
+    /// the pilot has completed a lap. Renders as a plain TS `number` (bounded far below 2^53).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, type = "number")]
     pub last_lap_micros: Option<i64>,
 }
 

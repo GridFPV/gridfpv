@@ -71,8 +71,8 @@ describe('createControlClient', () => {
     expect(ack.error?.code).toBe('Internal');
   });
 
-  it('renders bigint command fields as JSON numbers (serde u64 default)', () => {
-    const cmd: Command = { AdjustLap: { target: 42n, at: 1_500_000n } };
+  it('renders numeric command fields as JSON numbers (serde u64 default)', () => {
+    const cmd: Command = { AdjustLap: { target: 42, at: 1_500_000 } };
     expect(JSON.parse(stringifyCommand(cmd))).toEqual({
       AdjustLap: { target: 42, at: 1_500_000 }
     });

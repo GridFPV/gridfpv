@@ -11,5 +11,6 @@ number: number,
 /**
  * Lap duration in microseconds on the source clock
  * (`pass[n + 1].at - pass[n].at`). Always `>= 0` for in-order passes.
+ * Renders as a plain TS `number` (bounded far below 2^53).
  */
-duration_micros: bigint, };
+duration_micros: number, };

@@ -45,7 +45,7 @@ export function makeTestSession(opts?: { ack?: CommandAck; live?: LiveRaceState 
   session.login('http://d.local', 'tok');
 
   const pushLive = (state: LiveRaceState) =>
-    listener?.({ body: { LiveRaceState: state }, cursor: 1n, status: 'live', error: undefined });
+    listener?.({ body: { LiveRaceState: state }, cursor: 1, status: 'live', error: undefined });
 
   return { session, sendSpy, pushLive };
 }

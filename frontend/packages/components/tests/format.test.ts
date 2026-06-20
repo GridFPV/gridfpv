@@ -15,11 +15,11 @@ describe('formatClock', () => {
 
 describe('formatMicros', () => {
   it('renders sub-minute durations as S.mmm seconds', () => {
-    expect(formatMicros(41_250_000n)).toBe('41.250');
-    expect(formatMicros(1_500_000n)).toBe('1.500');
+    expect(formatMicros(41_250_000)).toBe('41.250');
+    expect(formatMicros(1_500_000)).toBe('1.500');
   });
   it('rolls over to M:SS.mmm at or above a minute', () => {
-    expect(formatMicros(83_456_000n)).toBe('1:23.456');
+    expect(formatMicros(83_456_000)).toBe('1:23.456');
   });
   it('renders null/undefined as an em dash', () => {
     expect(formatMicros(null)).toBe('—');
@@ -29,10 +29,10 @@ describe('formatMicros', () => {
 
 describe('formatMetric', () => {
   it('formats each win-condition metric variant', () => {
-    expect(formatMetric({ BestLapMicros: 41_250_000n } as Metric)).toBe('41.250');
-    expect(formatMetric({ BestConsecutiveMicros: 120_000_000n } as Metric)).toBe('2:00.000');
+    expect(formatMetric({ BestLapMicros: 41_250_000 } as Metric)).toBe('41.250');
+    expect(formatMetric({ BestConsecutiveMicros: 120_000_000 } as Metric)).toBe('2:00.000');
     expect(formatMetric({ BestLapMicros: null } as Metric)).toBe('—');
-    expect(formatMetric({ LastLapAt: 5n } as Metric)).toBe('banked');
+    expect(formatMetric({ LastLapAt: 5 } as Metric)).toBe('banked');
     expect(formatMetric({ ReachedAt: null } as Metric)).toBe('—');
   });
 });

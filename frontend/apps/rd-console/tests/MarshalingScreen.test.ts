@@ -35,7 +35,7 @@ describe('Marshaling', () => {
       ApplyPenalty: {
         heat: 'heat-1',
         competitor: 'BOB',
-        penalty: { TimeAdded: { micros: 2_000_000n } }
+        penalty: { TimeAdded: { micros: 2_000_000 } }
       }
     });
   });
@@ -45,6 +45,6 @@ describe('Marshaling', () => {
     render(Marshaling, { session });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Void detection' }));
-    expect(sendSpy).toHaveBeenCalledWith({ VoidDetection: { target: 0n } });
+    expect(sendSpy).toHaveBeenCalledWith({ VoidDetection: { target: 0 } });
   });
 });

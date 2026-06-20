@@ -10,7 +10,8 @@
  *
  * `Command`'s five marshaling variants are pure functions of their inputs here, so the
  * screen builds them declaratively and the tests assert the exact wire shape. Targets
- * are `LogRef` (a u64 log offset, `bigint`); times are `SourceTime` (µs, `bigint`).
+ * are `LogRef` (a u64 log offset, rendered as a TS `number`); times are `SourceTime`
+ * (µs, rendered as a TS `number`).
  */
 
 import type {
@@ -58,7 +59,7 @@ export function applyPenaltyCommand(
 
 /** Build a `TimeAdded` penalty from a whole-second amount (the console's input unit). */
 export function timeAddedPenalty(seconds: number): Penalty {
-  return { TimeAdded: { micros: BigInt(Math.round(seconds * 1_000_000)) } };
+  return { TimeAdded: { micros: Math.round(seconds * 1_000_000) } };
 }
 
 /** The disqualification penalty. */
@@ -66,5 +67,5 @@ export const DISQUALIFY: Penalty = 'Disqualify';
 
 /** Convert the console's whole-second time input to `SourceTime` microseconds. */
 export function secondsToSourceTime(seconds: number): SourceTime {
-  return BigInt(Math.round(seconds * 1_000_000));
+  return Math.round(seconds * 1_000_000);
 }

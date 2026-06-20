@@ -26,6 +26,6 @@ pilot?: PilotId,
 laps_completed: number, 
 /**
  * Duration (µs, source clock) of the most recently completed lap, or `None` before
- * the pilot has completed a lap.
+ * the pilot has completed a lap. Renders as a plain TS `number` (bounded far below 2^53).
  */
-last_lap_micros?: bigint, };
+last_lap_micros?: number, };

@@ -29,11 +29,12 @@ use crate::snapshot::{ProjectionBody, ProjectionKind};
 /// advances it; on reconnect the client presents its last-applied cursor to resume
 /// (§3).
 ///
-/// Transparent `u64` newtype; `#[ts(as = "bigint")]` so it renders as a TS `bigint`
-/// (a `u64` exceeds JS's safe-integer range), matching how it serialises.
+/// Transparent `u64` newtype; `#[ts(as = "f64")]` so it renders as a plain TS
+/// `number`. Our cursors/sequences are bounded well below 2^53, so `number` is exact
+/// and avoids the wire/type mismatch a `u64` → wide-integer TS mapping would introduce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
-#[ts(export, export_to = "bindings/", as = "u64")]
+#[ts(export, export_to = "bindings/", as = "f64")]
 pub struct Cursor {
     /// The monotonic per-stream sequence value.
     pub seq: u64,

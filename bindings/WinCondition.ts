@@ -7,8 +7,9 @@
 export type WinCondition = { "Timed": { 
 /**
  * Window length in microseconds, measured from the race start.
+ * Renders as a plain TS `number` (bounded far below 2^53).
  */
-window_micros: bigint, } } | { "FirstToLaps": { 
+window_micros: number, } } | { "FirstToLaps": { 
 /**
  * The target lap count.
  */

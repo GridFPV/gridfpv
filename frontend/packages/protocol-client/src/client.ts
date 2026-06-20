@@ -119,41 +119,12 @@ export interface ProtocolClient {
 // externally tagged: `{ "Change": ChangeEnvelope }` | `{ "ReSnapshotRequired": ProtocolError }`.
 // A bare `ProtocolError` may also arrive (e.g. a VersionMismatch just before close).
 
-// ── Cursor (bigint) wire handling ──────────────────────────────────────────────
+// ── Cursor wire handling ───────────────────────────────────────────────────────
 //
-// `Cursor` is a u64 rendered as a TS `bigint` (bindings/Cursor.ts). On the wire it
-// arrives as a JSON number or string depending on the server's serializer; `bigint`
-// values, conversely, are not serializable by `JSON.stringify`. These two helpers
-// bracket that mismatch so cursors stay precise (a u64 can exceed JS's safe-integer
-// range) and the rest of the client works in `bigint`.
-
-/** Coerce a wire cursor (number | string | bigint) to a `bigint`. */
-function toCursor(v: unknown): Cursor {
-  if (typeof v === 'bigint') return v;
-  if (typeof v === 'number') return BigInt(Math.trunc(v));
-  if (typeof v === 'string' && v.length > 0) return BigInt(v);
-  throw new Error(`invalid cursor: ${String(v)}`);
-}
-
-/**
- * `JSON.stringify` with bigints rendered as JSON numbers (serde's u64 default),
- * since `JSON.stringify` cannot serialize a bigint directly. Cursors past 2^53
- * lose precision in this number form; if a deployment ever needs full-u64 cursors
- * on the wire the server would serialize them as strings and this would follow.
- */
-function stringifyWire(value: unknown): string {
-  return JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
-}
-
-/** Normalize a parsed snapshot so its cursor is a `bigint`. */
-function normalizeSnapshot(data: Snapshot): Snapshot {
-  return { ...data, cursor: toCursor((data as { cursor: unknown }).cursor) };
-}
-
-/** Normalize a parsed envelope so its sequence is a `bigint`. */
-function normalizeEnvelope(env: ChangeEnvelope): ChangeEnvelope {
-  return { ...env, sequence: toCursor((env as { sequence: unknown }).sequence) };
-}
+// `Cursor` is a u64 rendered as a plain TS `number` (bindings/Cursor.ts). Our
+// cursors/sequences are bounded well below 2^53, and serde serialises them as JSON
+// numbers, so they arrive already as `number`s — no coercion or custom stringifier
+// is needed.
 
 const isProtocolError = (v: unknown): v is ProtocolError =>
   typeof v === 'object' &&
@@ -231,7 +202,7 @@ export function connect(options: ConnectOptions): ProtocolClient {
   // The per-stream `sequence` axis (protocol.html §3/§9.5): starts at 1 on each
   // subscription, distinct from `cursor`. Reset to 0 on every (re)subscribe so the
   // first envelope is accepted whatever the snapshot cursor's value.
-  let streamSeq: Cursor = 0n;
+  let streamSeq: Cursor = 0;
   let status: ConnectionStatus = 'connecting';
   let lastError: ProtocolError | undefined;
 
@@ -287,7 +258,7 @@ export function connect(options: ConnectOptions): ProtocolClient {
       fail(err);
       return false;
     }
-    const data = normalizeSnapshot((await resp.json()) as Snapshot);
+    const data = (await resp.json()) as Snapshot;
     if (gen !== generation || closed) return false;
     body = data.body;
     cursor = data.cursor;
@@ -307,11 +278,11 @@ export function connect(options: ConnectOptions): ProtocolClient {
     // (protocol.html §3/§9.5); conflating them drops the early stream as bogus
     // "duplicates" and freezes the live view. `streamSeq === 0` means this is the
     // first envelope of a fresh subscription, so accept it whatever its value.
-    if (streamSeq !== 0n) {
+    if (streamSeq !== 0) {
       // Idempotent, keyed by sequence: anything at or below the last applied is a no-op.
       if (seq <= streamSeq) return 'duplicate';
       // The stream is contiguous: the next envelope must be exactly +1.
-      if (seq !== streamSeq + 1n) return 'gap';
+      if (seq !== streamSeq + 1) return 'gap';
     }
     const change = env.change;
     if ('FreshValue' in change) {
@@ -333,7 +304,7 @@ export function connect(options: ConnectOptions): ProtocolClient {
     if (gen !== generation || closed) return;
     // A fresh subscription: the server restarts the per-stream sequence at 1, so
     // reset our tracker to accept it from the top.
-    streamSeq = 0n;
+    streamSeq = 0;
     setStatus('subscribing');
     const url = token ? `${wsBase}/stream?token=${encodeURIComponent(token)}` : `${wsBase}/stream`;
     let socket: WebSocketLike;
@@ -348,7 +319,7 @@ export function connect(options: ConnectOptions): ProtocolClient {
     socket.onopen = () => {
       if (gen !== generation || closed) return;
       const req: SubscribeRequest = { scope, from: cursor };
-      socket.send(stringifyWire(req));
+      socket.send(JSON.stringify(req));
       setStatus('live');
     };
 
@@ -378,7 +349,7 @@ export function connect(options: ConnectOptions): ProtocolClient {
 
     // `StreamMessage::Change(envelope)` — the common case: unwrap + apply.
     if (isStreamChange(parsed)) {
-      const result = applyEnvelope(normalizeEnvelope(parsed.Change));
+      const result = applyEnvelope(parsed.Change);
       if (result === 'gap') {
         // Missed envelopes the stream can't replay → re-snapshot and re-subscribe.
         await resnapshot(gen);

@@ -10,4 +10,4 @@
  * Director's session axis separately. Integer microseconds keep interval math exact
  * and comparisons stable (no float-equality hazards in tests).
  */
-export type SourceTime = bigint;
+export type SourceTime = number;

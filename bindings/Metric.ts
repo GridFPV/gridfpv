@@ -5,4 +5,4 @@ import type { SourceTime } from "./SourceTime";
  * The condition-specific value a [`Placement`] was ranked on, kept for display and
  * for tests to assert against exact numbers.
  */
-export type Metric = { "LastLapAt": SourceTime | null } | { "ReachedAt": SourceTime | null } | { "BestLapMicros": bigint | null } | { "BestConsecutiveMicros": bigint | null };
+export type Metric = { "LastLapAt": SourceTime | null } | { "ReachedAt": SourceTime | null } | { "BestLapMicros": number | null } | { "BestConsecutiveMicros": number | null };

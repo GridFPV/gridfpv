@@ -3,4 +3,4 @@
 /**
  * A marshaling penalty applied to a competitor in a heat.
  */
-export type Penalty = "Disqualify" | { "TimeAdded": { micros: bigint, } };
+export type Penalty = "Disqualify" | { "TimeAdded": { micros: number, } };

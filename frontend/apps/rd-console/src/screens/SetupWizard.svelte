@@ -52,7 +52,8 @@
 
   // Win-condition is a discriminated union; expose the numeric knob for the chosen kind.
   function winConditionNumber(wc: WinCondition): number {
-    if (typeof wc === 'object' && 'Timed' in wc) return Number(wc.Timed.window_micros / 1_000_000n);
+    if (typeof wc === 'object' && 'Timed' in wc)
+      return Math.round(wc.Timed.window_micros / 1_000_000);
     if (typeof wc === 'object' && 'FirstToLaps' in wc) return wc.FirstToLaps.n;
     if (typeof wc === 'object' && 'BestConsecutive' in wc) return wc.BestConsecutive.n;
     return 0;
@@ -69,7 +70,7 @@
       const wc = c.winCondition;
       let next: WinCondition = wc;
       if (typeof wc === 'object' && 'Timed' in wc)
-        next = { Timed: { window_micros: BigInt(Math.round(value * 1_000_000)) } };
+        next = { Timed: { window_micros: Math.round(value * 1_000_000) } };
       else if (typeof wc === 'object' && 'FirstToLaps' in wc)
         next = { FirstToLaps: { n: Math.max(1, Math.round(value)) } };
       else if (typeof wc === 'object' && 'BestConsecutive' in wc)
