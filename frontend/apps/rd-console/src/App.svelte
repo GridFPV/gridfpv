@@ -1,22 +1,25 @@
 <script lang="ts">
   /**
-   * The RD console shell (#51, restyled by the #71 design foundation) — the app
-   * frame: bearer-token login gate, a keyboard-friendly sidebar across the five
-   * screens, a topbar carrying the event/heat context + the live connection pill,
-   * and the global toast host. Everything wraps the `.gridfpv-root .gridfpv-dense`
-   * token context (clients.html §1: the console is the dense, control-oriented
-   * surface) so the whole frame themes off the shared design tokens.
+   * The RD console shell (#51; event-centric landing per #72, Slice 1b).
    *
-   * The console is "just a co-located web client over the same protocol" (clients.html
-   * §1): reads come through `@gridfpv/protocol-client`, writes through the control
-   * client — both held by the shared `Session`. Screens compose the shared
-   * `@gridfpv/components`; this shell only routes between them and owns the session.
+   * The event is the outer container, so the **event picker IS the landing screen**: with no
+   * event selected the shell shows {@link EventPicker}; selecting one opens the event
+   * workspace (the existing screens, now scoped to that event). The old Login screen is gone —
+   * the Director is the page's own origin, and the RD token is handled **lazily**: reads/browse
+   * need none, and a privileged action prompts for it via {@link TokenDialog} (registered as the
+   * session's token provider). A settings/gear lets the RD set or clear the token up front.
+   *
+   * The console is "just a co-located web client over the same protocol" (clients.html §1):
+   * reads come through `@gridfpv/protocol-client`, writes through the control client — both held
+   * by the shared `Session`. Screens compose the shared `@gridfpv/components`; this shell only
+   * routes between them and owns the session.
    */
   import '@gridfpv/components/tokens.css';
-  import { StatusPill, ToastHost } from '@gridfpv/components';
+  import { StatusPill, ToastHost, Dialog, Button, Field, Input, toast } from '@gridfpv/components';
   import { Session } from './lib/session.svelte.js';
   import { emptyConfig, type EventConfig } from './lib/setup.js';
-  import Login from './screens/Login.svelte';
+  import EventPicker from './screens/EventPicker.svelte';
+  import TokenDialog from './screens/TokenDialog.svelte';
   import SetupWizard from './screens/SetupWizard.svelte';
   import Registration from './screens/Registration.svelte';
   import LiveRaceControl from './screens/LiveRaceControl.svelte';
@@ -24,6 +27,11 @@
   import Results from './screens/Results.svelte';
 
   const session = new Session();
+
+  // The lazy token prompt: register a provider that opens the TokenDialog and resolves
+  // with the entered token (or undefined if cancelled). This is the only auth surface left.
+  let tokenDialog = $state<TokenDialog>();
+  session.setTokenProvider(() => tokenDialog?.request() ?? Promise.resolve(undefined));
 
   type ScreenId = 'setup' | 'registration' | 'live' | 'marshaling' | 'results';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
@@ -52,9 +60,16 @@
     active = 'registration';
   }
 
+  function leaveToPicker() {
+    session.leaveEvent();
+    // Reset the workspace's local view so re-entering starts clean.
+    active = 'live';
+    config = emptyConfig();
+  }
+
   // A keyboard shortcut per screen (Alt+digit), keeping the console keyboard-driven.
   function onKeydown(e: KeyboardEvent) {
-    if (!session.authenticated) return;
+    if (!session.currentEvent) return;
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const match = SCREENS.find((s) => s.key === e.key);
       if (match) {
@@ -64,19 +79,34 @@
     }
   }
 
-  // Note: the wizard's config is held locally (no event/class/track setup command on
-  // the contract yet — see lib/setup.ts); the one wire-driving setup action available
-  // today is `scheduleHeatCommand` (ScheduleHeat), emitted once a lineup is known.
+  // ── Settings (the RD token, set/cleared up front) ──────────────────────────
+  let settingsOpen = $state(false);
+  let tokenInput = $state('');
+  function openSettings() {
+    tokenInput = '';
+    settingsOpen = true;
+  }
+  function saveToken() {
+    if (!tokenInput.trim()) return;
+    session.setToken(tokenInput.trim());
+    settingsOpen = false;
+    toast.success('Control token saved for this session.');
+  }
+  function clearToken() {
+    session.clearToken();
+    tokenInput = '';
+    toast.info('Control token cleared.');
+  }
 
-  const eventLabel = $derived(config.eventName?.trim() || 'No event configured');
+  const eventName = $derived(session.currentEvent?.name ?? '');
   const liveHeat = $derived(session.liveState?.current_heat);
 </script>
 
 <svelte:window onkeydown={onKeydown} />
 
-{#if !session.authenticated}
+{#if !session.currentEvent}
   <div class="gridfpv-root gridfpv-dense">
-    <Login {session} />
+    <EventPicker {session} />
   </div>
 {:else}
   <div class="gridfpv-root gridfpv-dense app">
@@ -132,22 +162,43 @@
           <span class="conn-label">{session.connectionStatus}</span>
         </div>
         <code class="base">{session.baseUrl}</code>
-        <button type="button" class="signout" onclick={() => session.logout()}>Sign out</button>
+        <button type="button" class="switch-event" onclick={leaveToPicker}>← Switch event</button>
       </div>
     </aside>
 
     <div class="main-col">
       <header class="topbar">
         <div class="crumbs">
-          <span class="event" title={eventLabel}>{eventLabel}</span>
+          <button type="button" class="event-switch" onclick={leaveToPicker} title="Switch event">
+            <span class="event-name" title={eventName}>{eventName}</span>
+            <span class="event-caret" aria-hidden="true">⌄</span>
+          </button>
           <span class="sep" aria-hidden="true">/</span>
           <h1 class="screen-title">{activeScreen?.label}</h1>
           {#if liveHeat}
             <span class="heat-chip">Heat {liveHeat}</span>
           {/if}
         </div>
-        <div class="topbar-status">
+        <div class="topbar-actions">
           <StatusPill status={session.connectionStatus} />
+          <button
+            type="button"
+            class="gear"
+            onclick={openSettings}
+            aria-label="Settings"
+            title={session.hasToken ? 'Settings — token set' : 'Settings — no token'}
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path
+                d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 13a7.8 7.8 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.8 7.8 0 0 0-1.7-1l-.4-2.6h-4l-.4 2.6a7.8 7.8 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.8 7.8 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.8 7.8 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.8 7.8 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linejoin="round"
+              />
+            </svg>
+            {#if session.hasToken}<span class="gear-dot" aria-hidden="true"></span>{/if}
+          </button>
         </div>
       </header>
 
@@ -177,8 +228,36 @@
       </main>
     </div>
   </div>
-  <ToastHost />
 {/if}
+
+<!-- The lazy token prompt + the up-front settings menu live above any screen. -->
+<TokenDialog bind:this={tokenDialog} />
+
+<Dialog bind:open={settingsOpen} title="Settings">
+  <div class="settings">
+    <Field label="Control token" hint="Held for this session only — never written to disk.">
+      <Input
+        type="password"
+        bind:value={tokenInput}
+        placeholder={session.hasToken ? '•••••••• (set)' : 'bearer token'}
+        aria-label="Control token"
+        autocomplete="off"
+      />
+    </Field>
+    <p class="settings-note">
+      A token is only needed for privileged actions (creating an event, running a heat, registering,
+      marshaling). You'll be asked automatically when one is required.
+    </p>
+  </div>
+  {#snippet footer()}
+    {#if session.hasToken}
+      <Button variant="ghost" onclick={clearToken}>Clear token</Button>
+    {/if}
+    <Button variant="primary" onclick={saveToken} disabled={!tokenInput.trim()}>Save token</Button>
+  {/snippet}
+</Dialog>
+
+<ToastHost />
 
 <style>
   .app {
@@ -325,7 +404,7 @@
     color: var(--gf-text-faint);
     word-break: break-all;
   }
-  .signout {
+  .switch-event {
     align-self: flex-start;
     background: transparent;
     border: 1px solid var(--gf-border);
@@ -339,7 +418,7 @@
       border-color var(--gf-motion-fast) var(--gf-ease-out),
       color var(--gf-motion-fast) var(--gf-ease-out);
   }
-  .signout:hover {
+  .switch-event:hover {
     border-color: var(--gf-border-strong);
     color: var(--gf-text);
   }
@@ -370,13 +449,40 @@
     gap: var(--gf-space-3);
     min-width: 0;
   }
-  .event {
-    font-size: var(--gf-font-size-sm);
-    color: var(--gf-text-muted);
+  .event-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-1);
     max-width: 16rem;
+    padding: var(--gf-space-1) var(--gf-space-2);
+    margin-left: calc(-1 * var(--gf-space-2));
+    border: 1px solid transparent;
+    border-radius: var(--gf-radius-sm);
+    background: transparent;
+    color: var(--gf-text-muted);
+    font-family: inherit;
+    font-size: var(--gf-font-size-sm);
+    cursor: pointer;
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      background var(--gf-motion-fast) var(--gf-ease-out),
+      color var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .event-switch:hover {
+    background: var(--gf-elevated);
+    border-color: var(--gf-border);
+    color: var(--gf-text);
+  }
+  .event-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .event-caret {
+    color: var(--gf-text-faint);
+    font-size: var(--gf-font-size-sm);
+    flex-shrink: 0;
   }
   .sep {
     color: var(--gf-text-faint);
@@ -396,14 +502,57 @@
     font-weight: var(--gf-font-weight-semibold);
     font-variant-numeric: tabular-nums;
   }
-  .topbar-status {
+  .topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-3);
     flex-shrink: 0;
+  }
+  .gear {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    background: transparent;
+    color: var(--gf-text-muted);
+    cursor: pointer;
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      color var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .gear:hover {
+    border-color: var(--gf-border-strong);
+    color: var(--gf-text);
+  }
+  .gear-dot {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--gf-accent);
   }
 
   .content {
     flex: 1;
     padding: var(--gf-space-8);
     overflow: auto;
+  }
+
+  .settings {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+  }
+  .settings-note {
+    margin: 0;
+    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
   }
 
   @media (max-width: 60rem) {
@@ -422,8 +571,9 @@
     .nav-item {
       justify-content: center;
     }
-    .event {
-      display: none;
+    .switch-event {
+      font-size: 0;
+      padding: var(--gf-space-1);
     }
   }
 </style>

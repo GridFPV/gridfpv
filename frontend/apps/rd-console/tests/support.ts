@@ -5,8 +5,16 @@
  */
 import { vi } from 'vitest';
 import type { ProtocolClient, ProtocolState, StateListener } from '@gridfpv/protocol-client';
-import type { Command, CommandAck, LiveRaceState } from '@gridfpv/types';
+import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
+
+/** The built-in Practice event the screen tests render inside. */
+const PRACTICE: EventMeta = {
+  id: 'practice',
+  name: 'Practice',
+  created_at: 0,
+  persistent: false
+};
 
 export interface TestSession {
   session: Session;
@@ -40,9 +48,12 @@ export function makeTestSession(opts?: { ack?: CommandAck; live?: LiveRaceState 
   const session = new Session({
     connectImpl: () => client,
     controlFactory: () => ({ baseUrl: 'http://d.local', sendCommand: sendSpy }),
+    baseUrl: 'http://d.local',
     autoRestore: false
   });
-  session.login('http://d.local', 'tok');
+  // Seed a token (so privileged sends don't trigger the lazy prompt) and enter Practice.
+  session.setToken('tok');
+  session.selectEvent(PRACTICE);
 
   const pushLive = (state: LiveRaceState) =>
     listener?.({ body: { LiveRaceState: state }, cursor: 1, status: 'live', error: undefined });
