@@ -10,8 +10,11 @@
 
   let { session }: { session: Session } = $props();
 
-  // Seed the field from any restored base URL once; the input owns it thereafter.
-  let baseUrl = $state(untrack(() => session.baseUrl) || 'http://localhost:8080');
+  // The console is served BY the Director, so the Director is this page's own origin —
+  // default to it (prevents the "localhost from the wrong machine" Failed-to-fetch trap).
+  let baseUrl = $state(
+    globalThis.location?.origin || untrack(() => session.baseUrl) || 'http://localhost:8080'
+  );
   let token = $state('');
 
   function submit(e: Event) {
