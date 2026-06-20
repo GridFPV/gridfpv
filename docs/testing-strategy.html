@@ -255,6 +255,50 @@ flowchart LR
       included.</strong>
     </p>
 
+    <h3>5.1 Emulated-signal races — driving RH's real pipeline</h3>
+    <p>
+      Beyond capturing fixtures and bare-lap injection, the dockerized RH can be driven by
+      <strong>emulated node-output streams</strong>. RotorHazard's mock node interface reads a
+      per-node <code>mock_data_{N}.csv</code> — the post-detection signal a real timer node
+      sends the server (per-tick RSSI, peak/nadir, a crossing flag, and an incrementing lap id) —
+      and runs it through its <em>real</em> lap-recording pipeline. So a generated signal stream
+      produces a genuine RH race over Socket.IO, which our adapter translates exactly as it would
+      a hardware event. This sits a layer above the two simpler modes:
+    </p>
+    <table>
+      <thead><tr><th>Layer</th><th>Driven by</th><th>Exercises</th></tr></thead>
+      <tbody>
+        <tr><td>Recorded-session replay</td><td>checked-in canonical fixtures</td><td>adapter translation + projection — fast, deterministic, no container</td></tr>
+        <tr><td>Bare-lap live (<code>simulate_lap</code>)</td><td>injected passes</td><td>the live Socket.IO transport + lap recording; signal detection bypassed</td></tr>
+        <tr><td>Emulated-signal race (<code>mock_data</code>)</td><td>generated RSSI / crossing streams</td><td>the full chain — emulated signal → RH detection/recording → Socket.IO → adapter → projection, with signal context</td></tr>
+      </tbody>
+    </table>
+    <p>
+      A small generator turns a high-level scenario (per node: lap cadence, peak RSSI, active vs
+      silent) into the CSVs; the harness mounts them into a disposable container, runs the race,
+      and asserts the translated result. Because the mock reads its file continuously (decoupled
+      from race start), exact lap timing is approximate — assertions are
+      <strong>structural and tolerance-based</strong> (lap counts, per-node independence, signal
+      magnitude, dedup over re-sent snapshots), not exact microseconds.
+    </p>
+    <div class="callout">
+      <p>
+        <strong>Why this matters going forward.</strong> This is the closest thing to a real race
+        we can run in automation, and it generates a genuine timed lap stream on demand. As the
+        <a href="race-engine.html">Race Engine</a> lands, the same harness becomes the way to test
+        every <strong>timing-dependent stage</strong> end to end — the heat-loop state machine,
+        scoring and win conditions, marshaling, and format advancement — driven by realistic,
+        scriptable signals rather than hand-built fixtures. Edge cases (missed crossings,
+        simultaneous passes, marginal signal, silent nodes) are expressed as signal scenarios.
+      </p>
+    </div>
+    <p>
+      The harness is a <strong>local class</strong> — it needs Docker, so it stays out of the
+      shared pipeline; <code>cargo xtask live</code> spins each disposable RH up and down. See
+      <code>crates/adapters/tests/</code> (the generator + scenario tests) and
+      <code>docker/rotorhazard/</code>.
+    </p>
+
     <h2>6. Testing the format generators</h2>
     <p>
       Format / qualifying generators are a pure function of state too

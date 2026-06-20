@@ -47,27 +47,47 @@ ground truth the adapter + its golden replay test are validated against.
 - `node_data` carries per-node `pass_peak_rssi[]` (and node/nadir variants) —
   this is where per-pass RSSI comes from (0 under mock nodes).
 
-## Live integration test
+## Live & emulated-signal tests
 
 The RotorHazard adapter has a live Socket.IO transport (`crates/adapters`, feature
-`live`) and an integration test (`crates/adapters/tests/rh_live.rs`) that drives a
-real race on this container and asserts the adapter produces correct laps.
-
-It's a **local-only** test class — container-dependent tests don't run in the
-shared CI pipeline. The one-command entry point brings the container up, runs the
-test, and tears it down:
+`live`). These are a **local-only** test class — container-dependent tests don't run
+in the shared CI pipeline. Each test spins up and tears down its own disposable RH,
+so `cargo xtask live` is the one command you need (Docker required):
 
 ```sh
-cargo xtask live
+cargo xtask live      # runs all live targets, one container at a time
 ```
 
-Or manually, against an already-running container:
+There are two ways the tests drive RH, in increasing realism:
+
+### 1. Bare-lap live (`tests/rh_live.rs`)
+
+Drives passes via `simulate_lap` — a server-level injector that bypasses RotorHazard's
+signal detection. Exercises the live Socket.IO transport + lap recording + our adapter.
+
+### 2. Emulated-signal race (`tests/rh_signal.rs`)
+
+Drives RH from **emulated node-output streams** so its *real* lap pipeline produces the
+passes. RotorHazard's mock interface reads a per-node `mock_data_{N}.csv` — one CSV row
+per tick (`RH_UPDATE_INTERVAL`, set low to speed replay) — and records a lap each time
+the row's `lap_id` column increments. A small generator (`tests/common/mod.rs::node_csv`)
+turns a scenario (lap cadence, peak RSSI, active/silent node) into the CSVs; `RhContainer`
+mounts them and runs the race. This tests the full chain: emulated signal → RH
+detection/recording → Socket.IO → adapter → projection, including signal context.
+
+> **mock_data CSV gotcha:** the mock reads its file continuously from container start,
+> decoupled from race start — so `lap_id` must increment **throughout** the file (a
+> capped `lap_id` stops producing laps before the race begins). Exact lap timing is
+> therefore approximate; assert structure (lap counts, signal magnitude, dedup), not µs.
+
+This emulated-signal harness is also what we'll use to test timing-dependent **race
+engine** features (heat loop, scoring, marshaling, advancement) end to end — see
+`docs/testing-strategy.html` §5.1.
+
+### Manual
 
 ```sh
 docker compose -f docker/rotorhazard/docker-compose.yml up -d --wait
-cargo test -p gridfpv-adapters --features live --test rh_live -- --ignored --nocapture
+python docker/rotorhazard/capture_frames.py     # or poke the Socket.IO API yourself
+docker compose -f docker/rotorhazard/docker-compose.yml down
 ```
-
-> Note: the live test drives passes via `simulate_lap` (a server-level injector),
-> which bypasses RotorHazard's RSSI detection. Driving the **real detection** from
-> emulated RSSI signals (`mock_data_*.csv`) is tracked separately (issue #27).
