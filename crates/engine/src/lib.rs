@@ -8,3 +8,4 @@
 #![forbid(unsafe_code)]
 
 pub mod heat;
+pub mod scoring;

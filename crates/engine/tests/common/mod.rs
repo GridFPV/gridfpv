@@ -33,6 +33,11 @@ use gridfpv_testkit::RhContainer;
 /// the engine's e2e can in principle run alongside them without a port clash; the
 /// targets are still run sequentially by `cargo xtask live` so at most one container
 /// exists at a time.
+///
+/// `allow(dead_code)`: this shared `common` module is compiled into every engine
+/// `live` test binary, but each test uses only the port it needs (the scoring e2e
+/// runs on its own distinct port), so an individual binary may not reference this.
+#[allow(dead_code)]
 pub const DEFAULT_PORT: u16 = 5032;
 
 /// The container's CSV tick interval (seconds), matching the adapters' signal test.
