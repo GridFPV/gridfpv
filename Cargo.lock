@@ -409,7 +409,10 @@ dependencies = [
 name = "gridfpv-engine"
 version = "0.1.0"
 dependencies = [
+ "gridfpv-adapters",
  "gridfpv-events",
+ "gridfpv-projection",
+ "gridfpv-testkit",
  "serde_json",
 ]
 
