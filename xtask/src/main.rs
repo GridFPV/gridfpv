@@ -166,7 +166,8 @@ fn live() -> bool {
     let heat_live = target("gridfpv-engine", "heat_live", true);
     let scoring_live = target("gridfpv-engine", "scoring_live", true);
     let marshaling_live = target("gridfpv-engine", "marshaling_live", true);
-    ws && live_rh && signal && heat_live && scoring_live && marshaling_live
+    let format_live = target("gridfpv-engine", "format_live", true);
+    ws && live_rh && signal && heat_live && scoring_live && marshaling_live && format_live
 }
 
 fn main() {
