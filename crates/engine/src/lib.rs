@@ -7,6 +7,7 @@
 //! recorded session always replays identically.
 #![forbid(unsafe_code)]
 
+pub mod event;
 pub mod format;
 pub mod heat;
 pub mod schedule;
