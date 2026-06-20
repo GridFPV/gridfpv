@@ -17,11 +17,15 @@
 //! Corrections are never mutations (architecture.html §3): the raw [`Pass`]es
 //! stay byte-identical in the log forever, and a marshal's ruling is a *new*
 //! appended event that the projection **folds in** over them.
-//! [`lap_list_marshaled`] is the marshaling-aware lap projection — it takes each
+//! [`corrected_passes`] is the **single home** of that fold (#39): it takes each
 //! event paired with its append **offset** and folds the adjudications
 //! ([`Event::DetectionVoided`], [`Event::LapInserted`], [`Event::LapAdjusted`])
-//! into a *corrected view* of the lap-gate passes, then derives laps from that
-//! view exactly as [`lap_list`] does. [`lap_list`] is the no-adjudications case:
+//! into a *corrected view* of the lap-gate passes. [`lap_list_marshaled`] is the
+//! marshaling-aware lap projection — a thin consumer of [`corrected_passes`] that
+//! groups that corrected view by competitor and derives laps from it exactly as
+//! [`lap_list`] does — and the engine's marshaling-aware scorer
+//! (`gridfpv_engine::event::score_marshaled`) consumes the *same* [`corrected_passes`]
+//! output, so the void/insert/adjust logic exists once. [`lap_list`] is the no-adjudications case:
 //! it is a thin wrapper that assigns positional offsets and folds the same way,
 //! so a log with no rulings projects identically through either entry point.
 #![forbid(unsafe_code)]
@@ -189,27 +193,21 @@ where
     lap_list_marshaled(events.into_iter().enumerate().map(|(i, e)| (i as u64, e)))
 }
 
-/// A lap-gate pass in the **corrected view** the marshaling fold builds.
+/// Fold a sequence of `(offset, event)` pairs into the **corrected lap-gate pass
+/// stream**, applying every marshaling adjudication keyed on its target's append
+/// **offset** (#31).
 ///
-/// It is never a mutation of a raw [`Pass`] — it is a derived datum carrying just
-/// the `(adapter, competitor, at, sequence)` the lap derivation needs, sourced
-/// either from a raw `Pass` (possibly re-timed by a [`Event::LapAdjusted`]) or
-/// synthesised from a [`Event::LapInserted`]. The raw log is untouched.
-#[derive(Debug, Clone)]
-struct CorrectedPass {
-    competitor: CompetitorKey,
-    at: SourceTime,
-    sequence: Option<u64>,
-}
-
-/// Fold a sequence of `(offset, event)` pairs into the lap-list read model,
-/// applying marshaling adjudications keyed on the target's append **offset** (#31).
+/// This is the *single source of truth* for the void/insert/adjust marshaling fold.
+/// Both [`lap_list_marshaled`] (which groups these passes by competitor and derives
+/// laps) and the engine's marshaling-aware scorer
+/// (`gridfpv_engine::event::score_marshaled`) consume this one function — the fold
+/// is implemented here, once, and nowhere else (#39).
 ///
-/// This is the marshaling-aware sibling of [`lap_list`]. Each event is paired with
-/// its append [`LogRef`](gridfpv_events::LogRef) offset; rulings reference the raw
-/// event they correct by that offset. The fold builds a **corrected view** of the
-/// lap-gate passes and then derives laps from it exactly like [`lap_list`] — the
-/// raw [`Pass`]es in the input are never mutated (architecture.html §3).
+/// Each event is paired with its append [`LogRef`](gridfpv_events::LogRef) offset;
+/// rulings reference the raw event they correct by that offset. The result is a fresh
+/// `Vec<Pass>` of the surviving lap-gate passes (synthetic inserts included, re-timed
+/// passes moved to their new instant), in **offset order** — the raw [`Pass`]es in the
+/// input are never mutated (architecture.html §3); callers re-group/re-order as needed.
 ///
 /// # Adjudications folded
 ///
@@ -251,10 +249,10 @@ struct CorrectedPass {
 /// # Heat / result-level rulings
 ///
 /// [`Event::HeatVoided`] and [`Event::PenaltyApplied`] are *not* lap-level — they
-/// reshape the heat result, not the per-competitor lap list — so the lap projection
-/// ignores them here. They are consumed by scoring/results (#30, #33+), which fold
-/// the same log alongside this lap view.
-pub fn lap_list_marshaled<'a, I>(events: I) -> LapList
+/// reshape the heat result, not the per-competitor lap list — so this fold ignores
+/// them. They are consumed by scoring/results (#30, #33+), which fold the same log
+/// alongside this corrected view.
+pub fn corrected_passes<'a, I>(events: I) -> Vec<Pass>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
@@ -262,15 +260,11 @@ where
     // raw lap-gate passes and the adjudications themselves — plus the rulings to
     // apply. We resolve targets against this map so "void the void" (a ruling whose
     // target is another ruling) and last-writer-wins both fall out of offset order.
-    #[derive(Clone)]
     enum Entry<'a> {
         /// A raw lap-gate pass observed by an adapter (never mutated).
         RawPass(&'a Pass),
         /// A synthetic lap-gate pass inserted by marshaling.
-        Inserted {
-            competitor: CompetitorKey,
-            at: SourceTime,
-        },
+        Inserted(Pass),
         /// A re-time ruling: the target pass's `at` is overridden to this value.
         Adjusted { target: u64, at: SourceTime },
         /// A void ruling: the target entry is dropped from the corrected view.
@@ -290,13 +284,15 @@ where
             } => {
                 entries.insert(
                     offset,
-                    Entry::Inserted {
-                        competitor: CompetitorKey {
-                            adapter: adapter.clone(),
-                            competitor: competitor.clone(),
-                        },
+                    Entry::Inserted(Pass {
+                        adapter: adapter.clone(),
+                        competitor: competitor.clone(),
                         at: *at,
-                    },
+                        // A synthetic pass carries no source sequence; ordered by `at`.
+                        sequence: None,
+                        gate: gridfpv_events::GateIndex::LAP,
+                        signal: None,
+                    }),
                 );
             }
             Event::LapAdjusted { target, at } => {
@@ -325,9 +321,9 @@ where
     // (we process offsets ascending, so a later ruling overwrites an earlier one).
     let mut voided: BTreeMap<u64, bool> = BTreeMap::new();
     let mut retime: BTreeMap<u64, SourceTime> = BTreeMap::new();
-    for (_offset, entry) in entries.iter() {
+    for entry in entries.values() {
         match entry {
-            Entry::RawPass(_) | Entry::Inserted { .. } => {}
+            Entry::RawPass(_) | Entry::Inserted(_) => {}
             Entry::Adjusted { target, at } => {
                 // Re-time the target raw/inserted pass, and un-void it: an adjust is
                 // the newest ruling on that target, so it supersedes an earlier void.
@@ -363,33 +359,57 @@ where
         }
     }
 
-    // Build the corrected view: every raw/inserted pass that survived voiding,
-    // with any re-time applied. Group by competitor for lap derivation.
-    let mut by_competitor: BTreeMap<CompetitorKey, Vec<CorrectedPass>> = BTreeMap::new();
+    // Emit the surviving passes (raw + inserted) with any re-time applied, in offset
+    // order; callers re-group and re-order them as needed.
+    let mut out: Vec<Pass> = Vec::new();
     for (offset, entry) in entries.iter() {
         if voided.get(offset).copied().unwrap_or(false) {
             continue;
         }
-        let corrected = match entry {
-            Entry::RawPass(pass) => CorrectedPass {
-                competitor: CompetitorKey::from_pass(pass),
-                at: retime.get(offset).copied().unwrap_or(pass.at),
-                sequence: pass.sequence,
-            },
-            Entry::Inserted { competitor, at } => CorrectedPass {
-                competitor: competitor.clone(),
-                // An inserted lap can itself be re-timed by a later adjust.
-                at: retime.get(offset).copied().unwrap_or(*at),
-                // Synthetic passes carry no source sequence; ordered by `at`.
-                sequence: None,
-            },
-            // Rulings are not passes in the view.
-            Entry::Adjusted { .. } | Entry::Voided { .. } => continue,
-        };
+        match entry {
+            Entry::RawPass(pass) => {
+                let mut p = (*pass).clone();
+                if let Some(at) = retime.get(offset) {
+                    p.at = *at;
+                }
+                out.push(p);
+            }
+            Entry::Inserted(pass) => {
+                let mut p = pass.clone();
+                if let Some(at) = retime.get(offset) {
+                    p.at = *at;
+                }
+                out.push(p);
+            }
+            Entry::Adjusted { .. } | Entry::Voided { .. } => {}
+        }
+    }
+    out
+}
+
+/// Fold a sequence of `(offset, event)` pairs into the lap-list read model,
+/// applying marshaling adjudications keyed on the target's append **offset** (#31).
+///
+/// This is the marshaling-aware sibling of [`lap_list`]. It is a thin consumer of
+/// [`corrected_passes`] — the single home of the void/insert/adjust fold (#39): it
+/// takes that corrected lap-gate pass stream, groups it by `(adapter, competitor)`,
+/// orders each group, and derives laps exactly like [`lap_list`]. The raw [`Pass`]es
+/// in the input are never mutated (architecture.html §3).
+///
+/// See [`corrected_passes`] for the adjudications folded, the offset/last-writer-wins
+/// semantics, and the "void the void" cases.
+pub fn lap_list_marshaled<'a, I>(events: I) -> LapList
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    // Group the corrected pass stream by competitor and derive laps. The fold itself
+    // lives in `corrected_passes`; here we only project it into the lap-list view.
+    let mut by_competitor: BTreeMap<CompetitorKey, Vec<Pass>> = BTreeMap::new();
+    for pass in corrected_passes(events) {
         by_competitor
-            .entry(corrected.competitor.clone())
+            .entry(CompetitorKey::from_pass(&pass))
             .or_default()
-            .push(corrected);
+            .push(pass);
     }
 
     let competitors = by_competitor
@@ -416,13 +436,13 @@ where
 /// [`lap_list`]: when there are no rulings, a source either numbers its passes
 /// monotonically in step with `at` or carries no sequence at all, so ordering by
 /// `at` yields the same lap list.
-fn corrected_order_key(pass: &CorrectedPass) -> (SourceTime, bool, Option<u64>) {
+fn corrected_order_key(pass: &Pass) -> (SourceTime, bool, Option<u64>) {
     (pass.at, pass.sequence.is_none(), pass.sequence)
 }
 
 /// Turn an ordered run of corrected lap-gate passes into laps: `K` passes ⇒
 /// `K - 1` laps, each spanning a consecutive pair.
-fn laps_from_corrected(passes: &[CorrectedPass]) -> Vec<Lap> {
+fn laps_from_corrected(passes: &[Pass]) -> Vec<Lap> {
     passes
         .windows(2)
         .enumerate()
