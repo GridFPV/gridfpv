@@ -49,6 +49,15 @@ test('RD drives a full basic sim race through the console UI', async ({ page }) 
   // through connecting → snapshotting on the way).
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
+  // ── #90: the active event is Director state — a reload RESUMES into it, not the picker ──
+  // Entering Practice persisted it as the Director's active event (`PUT /active-event`), so a
+  // full page reload reads `GET /active-event` and re-enters the workspace directly — the
+  // picker's "Choose an event" heading must NOT reappear.
+  await page.reload();
+  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeHidden();
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
+
   // ── Define a heat with named pilots ──────────────────────────────────────────────────
   const newHeat = page.getByRole('region', { name: 'New heat' });
   await newHeat.getByLabel('Heat id').fill(HEAT_ID);

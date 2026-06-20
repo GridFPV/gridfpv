@@ -88,8 +88,16 @@
     return `Created ${formatDate(ev.created_at)}`;
   }
 
-  function enter(meta: EventMeta) {
-    session.selectEvent(meta);
+  async function enter(meta: EventMeta) {
+    // Persist the choice as the Director's active event (#90) so a reload/another client resumes
+    // into it, then enter. A gated Director may prompt for the RD token (handled in the session);
+    // a cancelled prompt or a transport error surfaces as a toast and stays on the picker.
+    try {
+      const chosen = await session.chooseEvent(meta);
+      if (!chosen) toast.info('A control token is required to switch the active event.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
   }
 
   function openNew() {

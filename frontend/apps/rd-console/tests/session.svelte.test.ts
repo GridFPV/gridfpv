@@ -254,6 +254,127 @@ describe('Session', () => {
     expect(meta?.id).toBe('evt-a');
   });
 
+  // ── #90: the active event is Director state — resume across reloads ──────────────────
+
+  it('resolveActiveEvent resumes into the Director active event on load', async () => {
+    const { connect } = mockConnect(connecting);
+    const controlFactory = vi.fn(() => ({
+      baseUrl: 'http://d.local',
+      sendCommand: vi.fn(async () => okAck)
+    }));
+    // The Director has an active event set → resume into it (no picker).
+    const getActiveEventImpl = vi.fn(async () => ({ event: EVENT_A }));
+    const session = new Session({
+      connectImpl: connect,
+      controlFactory,
+      getActiveEventImpl,
+      autoRestore: false
+    });
+
+    expect(session.resolvingActiveEvent).toBe(true);
+    await session.resolveActiveEvent();
+    expect(getActiveEventImpl).toHaveBeenCalledWith(session.baseUrl, { token: undefined });
+    expect(session.currentEvent?.id).toBe('evt-a');
+    expect(connect).toHaveBeenLastCalledWith(expect.objectContaining({ eventId: 'evt-a' }));
+    expect(session.resolvingActiveEvent).toBe(false);
+  });
+
+  it('resolveActiveEvent stays at the picker when no event is active', async () => {
+    const { connect } = mockConnect(connecting);
+    const getActiveEventImpl = vi.fn(async () => ({ event: null }));
+    const session = new Session({ connectImpl: connect, getActiveEventImpl, autoRestore: false });
+
+    await session.resolveActiveEvent();
+    expect(session.currentEvent).toBeUndefined();
+    expect(connect).not.toHaveBeenCalled();
+    expect(session.resolvingActiveEvent).toBe(false);
+  });
+
+  it('resolveActiveEvent falls back to the picker when the Director is unreachable', async () => {
+    const getActiveEventImpl = vi.fn(async () => {
+      throw new Error('fetch failed');
+    });
+    const session = new Session({ getActiveEventImpl, autoRestore: false });
+    await session.resolveActiveEvent();
+    expect(session.currentEvent).toBeUndefined();
+    expect(session.resolvingActiveEvent).toBe(false);
+  });
+
+  it('chooseEvent persists the active event server-side, then enters it', async () => {
+    const { connect } = mockConnect(connecting);
+    const controlFactory = vi.fn(() => ({
+      baseUrl: 'http://d.local',
+      sendCommand: vi.fn(async () => okAck)
+    }));
+    const setActiveEventImpl = vi.fn(async () => EVENT_A);
+    const session = new Session({
+      connectImpl: connect,
+      controlFactory,
+      setActiveEventImpl,
+      autoRestore: false
+    });
+
+    const chosen = await session.chooseEvent(EVENT_A);
+    // The choice is persisted as the Director active event (no token against an open Director)…
+    expect(setActiveEventImpl).toHaveBeenCalledWith(session.baseUrl, 'evt-a', undefined);
+    // …and then entered.
+    expect(chosen?.id).toBe('evt-a');
+    expect(session.currentEvent?.id).toBe('evt-a');
+    expect(connect).toHaveBeenCalledOnce();
+  });
+
+  it('chooseEvent prompts + retries when the Director gates the active-event set with a 401', async () => {
+    const { connect } = mockConnect(connecting);
+    const controlFactory = vi.fn(() => ({
+      baseUrl: 'http://d.local',
+      sendCommand: vi.fn(async () => okAck)
+    }));
+    let calls = 0;
+    const setActiveEventImpl = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('PUT /active-event failed: HTTP 401');
+      return EVENT_A;
+    });
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+    const session = new Session({
+      connectImpl: connect,
+      controlFactory,
+      setActiveEventImpl,
+      autoRestore: false
+    });
+    session.setTokenProvider(tokenProvider);
+
+    const chosen = await session.chooseEvent(EVENT_A);
+    expect(tokenProvider).toHaveBeenCalledOnce();
+    expect(setActiveEventImpl).toHaveBeenCalledTimes(2);
+    expect(chosen?.id).toBe('evt-a');
+    expect(session.currentEvent?.id).toBe('evt-a');
+  });
+
+  it('leaveEvent (switch event) does NOT clear the Director active event', async () => {
+    // Switching back to the picker is a client-side view change; the server active event stays
+    // set (so a reload mid-switch resumes, and other clients are not disrupted, #90).
+    const { connect } = mockConnect(connecting);
+    const controlFactory = vi.fn(() => ({
+      baseUrl: 'http://d.local',
+      sendCommand: vi.fn(async () => okAck)
+    }));
+    const setActiveEventImpl = vi.fn(async () => EVENT_A);
+    const session = new Session({
+      connectImpl: connect,
+      controlFactory,
+      setActiveEventImpl,
+      autoRestore: false
+    });
+
+    await session.chooseEvent(EVENT_A);
+    setActiveEventImpl.mockClear();
+    session.leaveEvent();
+    // No call to clear/reset the server active event — switch is purely local.
+    expect(setActiveEventImpl).not.toHaveBeenCalled();
+    expect(session.currentEvent).toBeUndefined();
+  });
+
   it('leaveEvent tears the read client down and returns to the picker', () => {
     const { connect, client } = mockConnect({
       body: undefined,

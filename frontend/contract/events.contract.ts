@@ -139,3 +139,71 @@ describe('seam 9: events lifecycle API', () => {
     expect(body.code).toBe('UnknownScope');
   });
 });
+
+/**
+ * Issue #90: the **active event is Director (server-side) state** — a reload/reconnect resumes
+ * into the selected event instead of dropping to the picker.
+ *
+ * guards:
+ *  - `GET /active-event` is an **open read** → `{ event: EventMeta | null }`; a fresh Director
+ *    has no active event (`null`).
+ *  - `PUT /active-event` is **RD-gated** (no/bad token → 401), validates the id names a known
+ *    event (unknown → 404 `UnknownScope`), and on success persists it: a subsequent open
+ *    `GET /active-event` resolves the same event — the resume semantics every client reads.
+ */
+describe('seam 9b: the Director active event (#90)', () => {
+  /** `GET /active-event` → the parsed `{ event }` body (asserting a 200, open read). */
+  async function getActive(): Promise<{ event: EventMeta | null }> {
+    const res = await fetch(`${director.baseUrl}/active-event`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as { event: EventMeta | null };
+  }
+
+  /** `PUT /active-event` with `{ id }` and an optional bearer token → raw status + parsed body. */
+  async function putActive(
+    id: string,
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${director.baseUrl}/active-event`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ id })
+    });
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = undefined;
+    }
+    return { status: res.status, body };
+  }
+
+  it('PUT /active-event is RD-gated — no/bad token → 401', async () => {
+    expect((await putActive('practice')).status).toBe(401);
+    expect((await putActive('practice', 'not-a-real-token')).status).toBe(401);
+  });
+
+  it('PUT /active-event rejects an unknown event with 404 UnknownScope', async () => {
+    const { status, body } = await putActive('no-such-event', TOKEN);
+    expect(status).toBe(404);
+    expect((body as { code?: string }).code).toBe('UnknownScope');
+  });
+
+  it('setting the active event makes an open GET resume into it', async () => {
+    // Create a fresh persistent event, set it active (RD-gated), then read it back openly.
+    const created = (await createEvent('Resume Me', TOKEN)).body as EventMeta;
+    const set = await putActive(created.id, TOKEN);
+    expect(set.status).toBe(200);
+    expect((set.body as EventMeta).id).toBe(created.id);
+
+    // The open read now resolves the same event — the resume semantics every client follows.
+    const active = await getActive();
+    expect(active.event?.id).toBe(created.id);
+
+    // And switching it to Practice re-points the Director (last write wins).
+    expect((await putActive('practice', TOKEN)).status).toBe(200);
+    expect((await getActive()).event?.id).toBe('practice');
+  });
+});

@@ -51,6 +51,10 @@ pub const PRACTICE_EVENT_ID: &str = "practice";
 /// The display name of the built-in Practice event.
 pub const PRACTICE_EVENT_NAME: &str = "Practice";
 
+/// The file name (under the data dir) the Director's active-event id is persisted to (issue
+/// #90), so the selected event survives a Director restart.
+pub const ACTIVE_EVENT_FILE: &str = "active-event";
+
 /// The metadata describing one event in the registry (issue #72).
 ///
 /// The wire shape `GET /events` returns: a stable [`EventId`], a human display `name`, the
@@ -91,6 +95,30 @@ pub struct EventMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub organizer: Option<String>,
+}
+
+/// The wire shape of `GET /active-event` — the **Director's currently-active event**, or
+/// `null` when none is set (issue #90).
+///
+/// The active event is **Director (server-side) state**: there is exactly one Race Director
+/// running one event, so the selected event lives on the Director, not in each browser. Every
+/// client reads this on connect/reload to resume into the workspace (or fall to the picker when
+/// `null`). The `event` field is the full [`EventMeta`] so a client renders the context header
+/// without a second round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ActiveEvent {
+    /// The active event's metadata, or `null` when no event is active (→ the picker).
+    pub event: Option<EventMeta>,
+}
+
+/// The body of `PUT /active-event` — the id of the event to make the Director's active one
+/// (issue #90). The id must name a known event, else a typed 404 (`UnknownScope`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SetActiveEventRequest {
+    /// The event to make active.
+    pub id: EventId,
 }
 
 /// The body of `POST /events` — the only thing a caller supplies when creating an event.
@@ -155,6 +183,11 @@ struct Registry {
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
+    /// The Director's **currently-active event** (issue #90) — the one all clients resume
+    /// into on connect/reload. `None` ⇒ the picker. Persisted to `<data_dir>/active-event`
+    /// (when a data dir is configured) so it survives a Director restart; in-memory only with
+    /// no data dir.
+    active_event: Option<EventId>,
 }
 
 impl EventRegistry {
@@ -195,13 +228,55 @@ impl EventRegistry {
             })?;
         }
 
+        // Restore the persisted active event (issue #90) on boot: read `<data_dir>/active-event`
+        // if present and it still names a known event. A missing file, an unreadable one, or a
+        // stale id (the event no longer exists) all degrade to `None` — the picker — rather than
+        // failing to boot.
+        let active_event = data_dir
+            .as_deref()
+            .and_then(read_persisted_active_event)
+            .filter(|id| events.contains_key(id));
+
         Ok(Self {
             inner: Arc::new(RwLock::new(Registry {
                 events,
                 tokens,
                 data_dir,
+                active_event,
             })),
         })
+    }
+
+    /// The Director's currently-active event's [`EventMeta`] (issue #90), or `None` when no
+    /// event is active (the picker). The single read every client makes on connect/reload to
+    /// resume into the selected event.
+    pub fn active(&self) -> Option<EventMeta> {
+        let reg = self.read();
+        reg.active_event
+            .as_ref()
+            .and_then(|id| reg.events.get(id))
+            .map(|e| e.meta.clone())
+    }
+
+    /// Set the Director's active event (issue #90), returning its [`EventMeta`]. Validates the
+    /// id names a known event, else [`RegistryError`] (the caller maps it to a typed 404). The
+    /// new active id is **persisted** to `<data_dir>/active-event` (when a data dir is
+    /// configured) so it survives a Director restart; with no data dir it is held in memory.
+    pub fn set_active(&self, id: &EventId) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let meta = reg
+            .events
+            .get(id)
+            .map(|e| e.meta.clone())
+            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+        reg.active_event = Some(id.clone());
+        // Persist best-effort; a write failure is logged-shaped (returned) but the in-memory
+        // state is already updated so the live session is correct regardless.
+        if let Some(dir) = reg.data_dir.clone() {
+            write_persisted_active_event(&dir, id)
+                .map_err(|e| RegistryError(format!("could not persist active event: {e}")))?;
+        }
+        Ok(meta)
     }
 
     /// The shared [`TokenStore`] — the Director mints/pins its RD token through this so the
@@ -310,6 +385,29 @@ impl EventRegistry {
 /// The SQLite file an event's log lives in under `dir`: `<dir>/<id>.sqlite`.
 fn event_db_path(dir: &Path, id: &EventId) -> PathBuf {
     dir.join(format!("{}.sqlite", id.0))
+}
+
+/// The file the active-event id is persisted to under `dir` (issue #90).
+fn active_event_path(dir: &Path) -> PathBuf {
+    dir.join(ACTIVE_EVENT_FILE)
+}
+
+/// Read the persisted active-event id from `<dir>/active-event`, or `None` if the file is
+/// absent/unreadable/blank. The id is validated against the live event set by the caller, so a
+/// stale id here is harmless. The file holds just the id (trimmed).
+fn read_persisted_active_event(dir: &Path) -> Option<EventId> {
+    let raw = std::fs::read_to_string(active_event_path(dir)).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(EventId(trimmed.to_string()))
+    }
+}
+
+/// Persist the active-event id to `<dir>/active-event` (issue #90), overwriting any prior value.
+fn write_persisted_active_event(dir: &Path, id: &EventId) -> std::io::Result<()> {
+    std::fs::write(active_event_path(dir), &id.0)
 }
 
 /// An error creating an event or its registry (a storage failure, a bad data dir).
@@ -475,6 +573,50 @@ mod tests {
         assert_eq!(slugify("  weird___name  "), "weird-name");
         assert_eq!(slugify("!!!"), "event");
         assert_eq!(slugify(""), "event");
+    }
+
+    #[test]
+    fn active_event_defaults_to_none_then_set_and_read_back() {
+        let reg = EventRegistry::new(None).unwrap();
+        assert!(reg.active().is_none());
+
+        // Setting to a known event returns its meta and reads back.
+        let practice = EventId(PRACTICE_EVENT_ID.into());
+        let meta = reg.set_active(&practice).unwrap();
+        assert_eq!(meta.id, practice);
+        assert_eq!(reg.active().map(|m| m.id), Some(practice));
+    }
+
+    #[test]
+    fn set_active_rejects_an_unknown_event() {
+        let reg = EventRegistry::new(None).unwrap();
+        assert!(reg.set_active(&EventId("nope".into())).is_err());
+        assert!(reg.active().is_none());
+    }
+
+    #[test]
+    fn active_event_persists_across_a_restart_with_a_data_dir() {
+        let dir = std::env::temp_dir().join(format!("gridfpv-active-test-{}", short_suffix()));
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Persisted")).unwrap();
+            reg.set_active(&created.id).unwrap();
+            // A fresh registry over the SAME data dir restores the active event…
+            let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+            // …as long as that event still exists. The created event's SQLite file is on disk,
+            // but the registry only re-seeds Practice on boot (created events are not re-listed
+            // here), so a created-id active pointer is dropped as stale — assert Practice instead.
+            assert!(reopened.active().is_none());
+
+            // Persisting Practice (always present) survives the restart.
+            reg.set_active(&EventId(PRACTICE_EVENT_ID.into())).unwrap();
+            let reopened2 = EventRegistry::new(Some(dir.clone())).unwrap();
+            assert_eq!(
+                reopened2.active().map(|m| m.id.0),
+                Some(PRACTICE_EVENT_ID.to_string())
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
