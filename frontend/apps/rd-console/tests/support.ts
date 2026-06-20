@@ -4,7 +4,16 @@
  * screen emits; `pushLive` injects a `LiveRaceState` onto the read stream.
  */
 import { vi } from 'vitest';
-import type { ProtocolClient, ProtocolState, StateListener } from '@gridfpv/protocol-client';
+import type {
+  ProtocolClient,
+  ProtocolState,
+  StateListener,
+  listTimers,
+  createTimer,
+  updateTimer,
+  deleteTimer,
+  setEventTimers
+} from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
 
@@ -17,13 +26,24 @@ const PRACTICE: EventMeta = {
   timers: ['mock']
 };
 
+/** The timer-registry seams a screen test can override (all optional; defaults are inert). */
+export interface TimerImpls {
+  listTimersImpl?: typeof listTimers;
+  createTimerImpl?: typeof createTimer;
+  updateTimerImpl?: typeof updateTimer;
+  deleteTimerImpl?: typeof deleteTimer;
+  setEventTimersImpl?: typeof setEventTimers;
+}
+
 export interface TestSession {
   session: Session;
   sendSpy: ReturnType<typeof vi.fn<(c: Command) => Promise<CommandAck>>>;
   pushLive: (state: LiveRaceState) => void;
 }
 
-export function makeTestSession(opts?: { ack?: CommandAck; live?: LiveRaceState }): TestSession {
+export function makeTestSession(
+  opts?: { ack?: CommandAck; live?: LiveRaceState; event?: EventMeta } & TimerImpls
+): TestSession {
   const ack: CommandAck = opts?.ack ?? { ok: true };
   const sendSpy = vi.fn<(c: Command) => Promise<CommandAck>>(async () => ack);
 
@@ -50,11 +70,17 @@ export function makeTestSession(opts?: { ack?: CommandAck; live?: LiveRaceState 
     connectImpl: () => client,
     controlFactory: () => ({ baseUrl: 'http://d.local', sendCommand: sendSpy }),
     baseUrl: 'http://d.local',
-    autoRestore: false
+    autoRestore: false,
+    // Timer-registry seams (issue #73): inert unless a test overrides them.
+    listTimersImpl: opts?.listTimersImpl,
+    createTimerImpl: opts?.createTimerImpl,
+    updateTimerImpl: opts?.updateTimerImpl,
+    deleteTimerImpl: opts?.deleteTimerImpl,
+    setEventTimersImpl: opts?.setEventTimersImpl
   });
-  // Seed a token (so privileged sends don't trigger the lazy prompt) and enter Practice.
+  // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event.
   session.setToken('tok');
-  session.selectEvent(PRACTICE);
+  session.selectEvent(opts?.event ?? PRACTICE);
 
   const pushLive = (state: LiveRaceState) =>
     listener?.({ body: { LiveRaceState: state }, cursor: 1, status: 'live', error: undefined });
