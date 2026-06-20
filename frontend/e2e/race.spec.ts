@@ -1,12 +1,13 @@
 /**
  * Full RD console click-through against a real Director (#13, v0.4 Director wiring +
- * observability harness).
+ * observability harness; entry reshaped for the event-picker landing, #72 Slice 1b).
  *
- * This is the deliverable proof: a person opens the RD console, logs in, defines a heat
- * with named pilots, runs it, **watches the live laps climb in the rendered DOM**, finishes
- * + scores, and reads results with the pilots and their lap counts — every step a real
- * click/input in headless chromium, every command on the real control path, every lap from
- * the real built-in sim source. Nothing is mocked.
+ * This is the deliverable proof: a person opens the RD console, lands on the **event
+ * picker**, enters **Practice**, defines a heat with named pilots, runs it (providing the
+ * RD token when the lazy prompt fires on the first control action), **watches the live laps
+ * climb in the rendered DOM**, finishes + scores, and reads results with the pilots and
+ * their lap counts — every step a real click/input in headless chromium, every command on
+ * the real control path, every lap from the real built-in sim source. Nothing is mocked.
  *
  * The lap-counts-climbing assertion is the load-bearing one: it polls the per-pilot lap
  * numbers rendered in the HeatSheet and asserts they increase over a couple of seconds —
@@ -25,16 +26,20 @@ import { RD_TOKEN } from '../playwright.config.js';
 const PILOTS = ['Ace', 'Bee', 'Cee'];
 const HEAT_ID = 'q-1';
 
-test('RD drives a full basic sim race through the console UI', async ({ page, baseURL }) => {
-  const base = baseURL!;
-
-  // ── Open the console ─────────────────────────────────────────────────────────────────
+test('RD drives a full basic sim race through the console UI', async ({ page }) => {
+  // ── Open the console: the event picker is the landing screen (#72) ───────────────────
   await page.goto('/');
 
-  // ── Log in with the Director address + the known RD token ────────────────────────────
-  await page.getByLabel('Director address').fill(base);
-  await page.getByLabel('Control token').fill(RD_TOKEN);
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  // ── Enter the always-present Practice event (no token needed to browse/enter) ────────
+  // The picker reads the open event list and renders Practice prominently; clicking it
+  // enters the event workspace. The Director is the page's own origin — no address to type.
+  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
+    timeout: 15_000
+  });
+  await page
+    .getByRole('button', { name: /Practice/ })
+    .first()
+    .click();
 
   // The shell is up: the Live control screen is the default landing screen.
   await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible();
@@ -51,8 +56,14 @@ test('RD drives a full basic sim race through the console UI', async ({ page, ba
     await newHeat.getByLabel(`Pilot ${i + 1} name`).fill(PILOTS[i]);
   }
 
-  // ── Schedule it ──────────────────────────────────────────────────────────────────────
+  // ── Schedule it: this is the first control action, so the lazy RD-token prompt fires ──
   await newHeat.getByRole('button', { name: 'Schedule heat' }).click();
+  // Provide the known RD token in the lazy prompt; once entered, the action proceeds and
+  // the token is reused for every subsequent control action this session.
+  const tokenPrompt = page.getByRole('form', { name: 'Control token' });
+  await expect(tokenPrompt).toBeVisible();
+  await tokenPrompt.getByLabel('Control token').fill(RD_TOKEN);
+  await page.getByRole('button', { name: 'Use token' }).click();
 
   // The heat lands on the timer: current heat + the lineup show, phase Scheduled.
   await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID);
