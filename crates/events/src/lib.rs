@@ -47,6 +47,20 @@ pub struct CompetitorRef(pub String);
 #[ts(export, export_to = "bindings/")]
 pub struct SessionId(pub String);
 
+/// A GridFPV pilot's stable, event-scoped identity — the racer a source-local
+/// [`CompetitorRef`] is *bound* to by a registration action (Architecture §9), never by
+/// the adapter. For a basic race this is the pilot's callsign / stable id; richer pilot
+/// metadata (display name, team, avatar) can layer on later.
+///
+/// This is the canonical pilot handle the whole stack shares: the event model records
+/// the binding ([`Event::CompetitorRegistered`]) and the wire/scope layer addresses a
+/// pilot by the same type, so the log and the protocol never disagree on what a pilot id
+/// is.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct PilotId(pub String);
+
 /// A timestamp in the **source's own clock**, stored as microseconds.
 ///
 /// Lap and split durations are computed from these values, which are internally
@@ -236,6 +250,17 @@ pub enum Event {
         adapter: AdapterId,
         competitor: CompetitorRef,
     },
+    /// The RD bound a source-local competitor to a GridFPV pilot — the *registration*
+    /// action the adapter never performs itself (Architecture §9): "this timer channel
+    /// **is** this pilot". This is the logged binding the live and lap projections fold
+    /// to surface pilot identity over a bare [`CompetitorRef`]. Last registration for a
+    /// given `(adapter, competitor)` wins (a re-bind supersedes the earlier one); the
+    /// raw observations it maps over are never mutated.
+    CompetitorRegistered {
+        adapter: AdapterId,
+        competitor: CompetitorRef,
+        pilot: PilotId,
+    },
     /// A gate crossing — the atom (see [`Pass`]).
     Pass(Pass),
 
@@ -417,6 +442,28 @@ mod tests {
             let back: HeatTransition = serde_json::from_str(&json).unwrap();
             assert_eq!(t, back);
         }
+    }
+
+    #[test]
+    fn competitor_registered_round_trips() {
+        // The registration binding: this source competitor *is* this pilot.
+        let event = Event::CompetitorRegistered {
+            adapter: AdapterId("rh".into()),
+            competitor: CompetitorRef("node-2".into()),
+            pilot: PilotId("acroace".into()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn pilot_id_is_transparent_on_the_wire() {
+        // `PilotId` is a transparent newtype — it serialises as the bare callsign string.
+        assert_eq!(
+            serde_json::to_string(&PilotId("acroace".into())).unwrap(),
+            "\"acroace\""
+        );
     }
 
     #[test]

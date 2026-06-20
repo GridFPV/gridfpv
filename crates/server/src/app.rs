@@ -80,7 +80,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use gridfpv_engine::scoring::{WinCondition, score_events};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
-use gridfpv_projection::{LapList, lap_list_marshaled};
+use gridfpv_projection::{LapList, lap_list_marshaled, registrations};
 use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -378,21 +378,40 @@ async fn snapshot_heat(
 
 /// `GET /snapshot/pilot/{event}/{pilot}` — a pilot's laps across the event (§4 pilot scope).
 ///
-/// Filters the lap projection to the competitor whose ref equals the `pilot` id (the
-/// registration binding mapping a `PilotId` to source competitors is out of scope here —
-/// see the module docs).
+/// Resolves the `PilotId` to the source competitor(s) it is **bound** to by the registration
+/// projection ([`registrations`], #60), then filters the lap projection to those
+/// competitors — so a pilot following their own laps sees every channel they were
+/// registered on (e.g. across re-seats / multiple timers). For an event with no registration
+/// bindings yet, it falls back to the legacy behaviour of treating the `pilot` id as a bare
+/// [`CompetitorRef`], so an un-registered setup still resolves a pilot by their source ref.
 async fn snapshot_pilot(
     State(state): State<AppState>,
     Path((_event, pilot)): Path<(EventId, PilotId)>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
     let (events, cursor) = state.read()?;
 
+    // The source competitors bound to this pilot (by the registration fold). When the log
+    // carries no binding for the pilot, fall back to matching the pilot id against a bare
+    // competitor ref (the pre-#60 behaviour) so unregistered events still resolve.
+    let bindings = registrations(&events);
+    let bound: Vec<CompetitorRef> = bindings
+        .iter()
+        .filter(|(_, bound_pilot)| **bound_pilot == pilot)
+        .map(|(key, _)| key.competitor.clone())
+        .collect();
+    let fallback_ref = CompetitorRef(pilot.0.clone());
+
     let full = lap_list_marshaled(events.iter().enumerate().map(|(i, e)| (i as u64, e)));
-    let pilot_ref = CompetitorRef(pilot.0.clone());
     let competitors: Vec<_> = full
         .competitors
         .into_iter()
-        .filter(|c| c.competitor.competitor == pilot_ref)
+        .filter(|c| {
+            if bound.is_empty() {
+                c.competitor.competitor == fallback_ref
+            } else {
+                bound.contains(&c.competitor.competitor)
+            }
+        })
         .collect();
 
     if competitors.is_empty() {
@@ -639,6 +658,32 @@ mod tests {
         match snap.body {
             ProjectionBody::LapList(laps) => {
                 // Only pilot A's laps, not B's.
+                assert_eq!(laps.competitors.len(), 1);
+                assert_eq!(
+                    laps.competitors[0].competitor.competitor,
+                    CompetitorRef("A".into())
+                );
+                assert_eq!(laps.competitors[0].lap_count(), 2);
+            }
+            other => panic!("expected lap list, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pilot_scope_resolves_a_registered_pilot_to_its_bound_competitor() {
+        // Bind pilot "acroace" to (vd, A), then query the pilot by their PilotId — the
+        // snapshot resolves the binding and returns A's laps (#60).
+        let mut events = recorded_heat();
+        events.push(Event::CompetitorRegistered {
+            adapter: AdapterId("vd".into()),
+            competitor: CompetitorRef("A".into()),
+            pilot: gridfpv_events::PilotId("acroace".into()),
+        });
+        let (state, _) = state_with(events);
+        let (status, snap) = get_snapshot(state, "/snapshot/pilot/spring-cup/acroace").await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::LapList(laps) => {
                 assert_eq!(laps.competitors.len(), 1);
                 assert_eq!(
                     laps.competitors[0].competitor.competitor,

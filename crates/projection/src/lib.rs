@@ -28,7 +28,7 @@
 
 use std::collections::BTreeMap;
 
-use gridfpv_events::{AdapterId, CompetitorRef, Event, Pass, SourceTime};
+use gridfpv_events::{AdapterId, CompetitorRef, Event, Pass, PilotId, SourceTime};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -112,6 +112,41 @@ impl LapList {
     pub fn competitor(&self, key: &CompetitorKey) -> Option<&CompetitorLaps> {
         self.competitors.iter().find(|c| &c.competitor == key)
     }
+}
+
+/// Fold the log's registration bindings into a `(adapter, competitor) -> pilot` map (#60).
+///
+/// Each [`Event::CompetitorRegistered`] records that a source-local competitor *is* a
+/// GridFPV pilot (Architecture §9). A competitor is keyed by its per-source
+/// [`CompetitorKey`] — a bare [`CompetitorRef`] is only meaningful relative to its adapter
+/// — and **last registration wins**: a later re-bind of the same `(adapter, competitor)`
+/// supersedes the earlier one. The fold is pure and order-preserving, so replaying the
+/// same log yields the same mapping. Competitors with no registration are simply absent —
+/// they still appear by their bare [`CompetitorRef`] in the projections that consume this.
+pub fn registrations<'a, I>(events: I) -> BTreeMap<CompetitorKey, PilotId>
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    let mut bindings = BTreeMap::new();
+    for event in events {
+        if let Event::CompetitorRegistered {
+            adapter,
+            competitor,
+            pilot,
+        } = event
+        {
+            // Insert (overwriting any earlier binding) — log order is append order, so the
+            // last writer for a given competitor wins.
+            bindings.insert(
+                CompetitorKey {
+                    adapter: adapter.clone(),
+                    competitor: competitor.clone(),
+                },
+                pilot.clone(),
+            );
+        }
+    }
+    bindings
 }
 
 /// Fold a sequence of events into the lap-list read model.
@@ -643,6 +678,65 @@ mod tests {
                     duration_micros: 2_000_000, // 7.0s - 5.0s
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn registrations_map_bindings_last_writer_wins() {
+        use gridfpv_events::PilotId;
+        let events = vec![
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh".into()),
+                competitor: CompetitorRef("node-2".into()),
+                pilot: PilotId("acroace".into()),
+            },
+            // A different competitor binds to a different pilot.
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh".into()),
+                competitor: CompetitorRef("node-3".into()),
+                pilot: PilotId("bee".into()),
+            },
+            // node-2 is re-bound: the later registration wins.
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh".into()),
+                competitor: CompetitorRef("node-2".into()),
+                pilot: PilotId("zoomer".into()),
+            },
+        ];
+        let map = registrations(&events);
+        assert_eq!(
+            map.get(&key("rh", "node-2")),
+            Some(&PilotId("zoomer".into()))
+        );
+        assert_eq!(map.get(&key("rh", "node-3")), Some(&PilotId("bee".into())));
+        // An unregistered competitor is simply absent.
+        assert_eq!(map.get(&key("rh", "node-9")), None);
+    }
+
+    #[test]
+    fn registrations_are_per_source() {
+        use gridfpv_events::PilotId;
+        // The same ref on two adapters is two distinct bindings.
+        let events = vec![
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh-a".into()),
+                competitor: CompetitorRef("node-2".into()),
+                pilot: PilotId("acroace".into()),
+            },
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh-b".into()),
+                competitor: CompetitorRef("node-2".into()),
+                pilot: PilotId("bee".into()),
+            },
+        ];
+        let map = registrations(&events);
+        assert_eq!(
+            map.get(&key("rh-a", "node-2")),
+            Some(&PilotId("acroace".into()))
+        );
+        assert_eq!(
+            map.get(&key("rh-b", "node-2")),
+            Some(&PilotId("bee".into()))
         );
     }
 

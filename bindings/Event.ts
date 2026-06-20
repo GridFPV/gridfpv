@@ -6,6 +6,7 @@ import type { HeatTransition } from "./HeatTransition";
 import type { LogRef } from "./LogRef";
 import type { Pass } from "./Pass";
 import type { Penalty } from "./Penalty";
+import type { PilotId } from "./PilotId";
 import type { SessionId } from "./SessionId";
 import type { SourceTime } from "./SourceTime";
 
@@ -21,4 +22,4 @@ import type { SourceTime } from "./SourceTime";
  * `{ "VariantName": { ..fields } }`, which maps cleanly to a discriminated union in
  * the generated TypeScript (#4).
  */
-export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "AdapterDisconnected": { adapter: AdapterId, } } | { "SessionStarted": { adapter: AdapterId, session: SessionId, } } | { "SessionEnded": { adapter: AdapterId, session: SessionId, } } | { "CompetitorSeen": { adapter: AdapterId, competitor: CompetitorRef, } } | { "Pass": Pass } | { "HeatScheduled": { heat: HeatId, lineup: Array<CompetitorRef>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "HeatVoided": { heat: HeatId, } } | { "PenaltyApplied": { heat: HeatId, competitor: CompetitorRef, penalty: Penalty, } };
+export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "AdapterDisconnected": { adapter: AdapterId, } } | { "SessionStarted": { adapter: AdapterId, session: SessionId, } } | { "SessionEnded": { adapter: AdapterId, session: SessionId, } } | { "CompetitorSeen": { adapter: AdapterId, competitor: CompetitorRef, } } | { "CompetitorRegistered": { adapter: AdapterId, competitor: CompetitorRef, pilot: PilotId, } } | { "Pass": Pass } | { "HeatScheduled": { heat: HeatId, lineup: Array<CompetitorRef>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "HeatVoided": { heat: HeatId, } } | { "PenaltyApplied": { heat: HeatId, competitor: CompetitorRef, penalty: Penalty, } };
