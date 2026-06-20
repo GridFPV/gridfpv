@@ -8,8 +8,9 @@
  *   broke comparison + rendering; v0.4 bug class).
  *
  * Asserts the real wire: each correct path returns `200` + the right externally-tagged
- * `ProjectionBody` variant + a numeric `cursor`; a wrong/unknown route does NOT return a
- * parseable `Snapshot` (it is the SPA fallback, not a silent 200 Snapshot); and every
+ * `ProjectionBody` variant + a numeric `cursor`; a wrong/unknown **API** route returns a
+ * typed `ProtocolError` 404 (the smart fallback #64), never the SPA shell or a silent 200
+ * Snapshot, while a genuine non-API client route still falls through to the SPA; and every
  * integer field is `typeof === 'number'`.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -119,14 +120,34 @@ describe('seam 1: snapshot routes are path-scoped', () => {
     expect((json as { code?: string }).code).toBe('UnknownScope');
   });
 
-  it('a WRONG route (`?scope=` style) is NOT a Snapshot — it is the SPA fallback', async () => {
-    // THE path-vs-scope bug: a client that addressed the snapshot by a `?scope=` query (or
-    // any path the protocol router does not own) falls through to the SPA `fallback_service`.
-    // With no built console that is a 404 text body; with one it is `index.html` (200). Either
-    // way it is NOT a parseable `Snapshot`, so a client must address by PATH, never `?scope=`.
+  it('a WRONG API route → typed 404 ProtocolError, NOT the SPA shell (#64)', async () => {
+    // THE path-vs-scope bug, now fixed by the smart fallback (#64): a client that addressed
+    // the snapshot by a `?scope=` query (path `/snapshot`) — or any path under a known API
+    // tree the protocol router does not concretely own — gets a typed `ProtocolError` 404
+    // JSON, NOT the SPA `index.html`. So a mistyped API call is an honest, parseable error a
+    // client can branch on, never an HTML 200 it would choke on. It is still NOT a `Snapshot`,
+    // so a client must address by PATH, never `?scope=`.
     const wrong = await getSnapshot('/snapshot?scope=event:spring-cup');
+    expect(wrong.status).toBe(404);
+    expect((wrong.json as { code?: string }).code).toBe('UnknownScope');
     expect(isSnapshot(wrong.json)).toBe(false);
-    expect(wrong.text).not.toContain('"cursor"');
+
+    // A bad nested API path is likewise a typed 404, not the SPA.
+    const garbage = await getSnapshot('/snapshot/zzz/nope/extra');
+    expect(garbage.status).toBe(404);
+    expect((garbage.json as { code?: string }).code).toBe('UnknownScope');
+  });
+
+  it('a NON-API client route still falls through to the SPA shell, not a typed 404 (#64)', async () => {
+    // The smart fallback only typed-404s *API-tree* paths; a genuine client-side route (a
+    // deep link the SPA router owns) still resolves to the SPA shell. The contract Director
+    // points `GRIDFPV_ASSETS` at an empty dir, so the unbuilt-console fallback is a 404 text
+    // body — but, crucially, it is NOT a `ProtocolError` JSON (no `code`), proving the path
+    // took the SPA branch, not the API-404 branch.
+    const spa = await getSnapshot('/heats/q-1/live');
+    expect((spa.json as { code?: string } | undefined)?.code).toBeUndefined();
+    expect(isSnapshot(spa.json)).toBe(false);
+    expect(spa.text).not.toContain('"cursor"');
   });
 });
 

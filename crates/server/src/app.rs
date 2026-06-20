@@ -74,10 +74,11 @@ use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use gridfpv_engine::scoring::{WinCondition, score_events};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{LapList, lap_list_marshaled, registrations};
@@ -85,7 +86,8 @@ use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
 use serde::Deserialize;
 use tokio::sync::Notify;
 
-use crate::auth::TokenStore;
+use crate::auth::{JoinTokenResponse, TokenStore};
+use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::live_state::live_state;
 use crate::scope::{ClassId, EventId, PilotId};
@@ -265,10 +267,123 @@ pub fn router(state: AppState) -> Router {
         .route("/snapshot/class/{event}/{class}", get(snapshot_class))
         .route("/snapshot/heat/{heat}", get(snapshot_heat))
         .route("/snapshot/pilot/{event}/{pilot}", get(snapshot_pilot))
-        .route("/stream", get(crate::ws::stream_handler));
+        .route("/stream", get(crate::ws::stream_handler))
+        // RD-gated mint of a read-only join token (#63): an authenticated RD trades its RD
+        // token for a fresh spectator (read-only) token to share (e.g. a venue QR).
+        .route("/auth/join-token", post(mint_join_token));
     // The privileged RD control surface (§5) is composed on separately so #44 can wrap
     // just these routes in its auth layer.
-    crate::control_handler::control_routes(read).with_state(state)
+    crate::control_handler::control_routes(read)
+        // Any path under a known API tree that matched no route above is a typed 404
+        // (#64), not the SPA shell — see [`api_fallback`] / [`smart_fallback`].
+        .fallback(api_fallback)
+        .with_state(state)
+}
+
+/// `POST /auth/join-token` — mint a fresh **read-only** join token (protocol.html §5,
+/// §9.4) — issue #63.
+///
+/// [`ControlAuth`] runs first: only an authenticated **RD** (a valid `Authorization:
+/// Bearer <RD token>`) may mint one; any other caller — no token, a read-only/join token,
+/// an unknown or revoked token — is [`ErrorCode::Unauthorized`] → HTTP 401 (the extractor
+/// rejects before the handler body runs). On success a brand-new read-only token is issued
+/// from the shared [`TokenStore`] and returned as a [`JoinTokenResponse`]; the spectator
+/// who later presents it authenticates LAN reads but is rejected on control.
+async fn mint_join_token(
+    _auth: ControlAuth,
+    State(state): State<AppState>,
+) -> Json<JoinTokenResponse> {
+    let token = state.tokens().issue_join_token();
+    Json(JoinTokenResponse { token })
+}
+
+/// Whether a request path addresses a known protocol **API tree** (#64).
+///
+/// The blanket SPA fallback (in the Director wiring) serves `index.html` for any unmatched
+/// path so client-side routes resolve. That is wrong for a *mistyped API* path — a bad
+/// `/snapshot/...`, `/control/...`, `/stream/...`, `/health/...`, or `/auth/...` — which
+/// should surface a typed [`ProtocolError`], not an HTML 200 the client cannot parse as a
+/// `Snapshot`. This predicate names the API prefixes so the [`smart_fallback`] can split
+/// "mistyped API → 404 JSON" from "genuine client-side route → SPA shell".
+///
+/// A path matches when it equals a prefix exactly or continues with `/` (so `/snapshotxyz`
+/// is *not* an API path, but `/snapshot`, `/snapshot/`, and `/snapshot/zzz` all are).
+pub fn is_api_path(path: &str) -> bool {
+    const API_PREFIXES: [&str; 5] = ["/health", "/snapshot", "/stream", "/control", "/auth"];
+    API_PREFIXES.iter().any(|prefix| {
+        path == *prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// The typed-404 fallback for **unmatched API-tree** paths (#64).
+///
+/// Mounted as [`router`]'s own fallback so a request under a known API prefix that matched
+/// no concrete route (a wrong `/snapshot/zzz/...`, a `/control/bogus`, a `/auth/nope`)
+/// returns a [`ProtocolError`] of [`ErrorCode::UnknownScope`] as JSON (HTTP 404) — the one
+/// uniform error shape — rather than falling through to the SPA shell. Non-API paths never
+/// reach this fallback when the SPA service is composed via [`smart_fallback`]; reached
+/// directly (a bare `router` with no SPA) every unmatched path is a typed 404, which is the
+/// correct API-only behaviour.
+async fn api_fallback(req: Request<Body>) -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::UnknownScope,
+        format!(
+            "no protocol route matches {} {}",
+            req.method(),
+            req.uri().path()
+        ),
+    )
+}
+
+/// Compose the Director's outer fallback (#64): a **mistyped API path → typed 404 JSON**,
+/// **any other path → the SPA `spa` service** (the client-side router shell).
+///
+/// The Director mounts the protocol [`router`] first, then needs *one* fallback for
+/// everything it does not own. A naive `fallback_service(spa)` serves `index.html` for a
+/// mistyped API path too — so a wrong `/snapshot/...` arrives as an HTML 200 the client
+/// cannot parse (v0.4 bug #64). This wraps the SPA service so a path under a known API tree
+/// ([`is_api_path`]) instead gets the typed [`ProtocolError`] 404 from [`api_fallback`],
+/// while genuine client-side routes still resolve to the SPA shell exactly as before.
+///
+/// Generic over the inner SPA service so the Director's `ServeDir(+ index.html fallback)`
+/// drops straight in (its `Response<ServeFileSystemResponseBody>` is mapped into the axum
+/// [`Response`]); the returned service is itself usable with [`Router::fallback_service`].
+pub fn smart_fallback<S, B>(spa: S) -> Router
+where
+    S: tower::Service<Request<Body>, Response = Response<B>, Error = std::convert::Infallible>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    S::Future: Send + 'static,
+    B: axum::body::HttpBody<Data = axum::body::Bytes> + Send + 'static,
+    B::Error: Into<axum::BoxError>,
+{
+    Router::new()
+        // Unmatched API-tree paths → typed 404 (#64). A `Router` with no routes matches
+        // nothing, so *every* request hits this fallback; we branch on the path there.
+        .fallback(move |req: Request<Body>| {
+            let mut spa = spa.clone();
+            async move {
+                if is_api_path(req.uri().path()) {
+                    api_fallback(req).await.into_response()
+                } else {
+                    // Drive the SPA service for a genuine client-side route, mapping its
+                    // body into the axum `Body` the fallback returns.
+                    use tower::ServiceExt;
+                    match spa.ready().await {
+                        Ok(svc) => match svc.call(req).await {
+                            Ok(response) => response.map(Body::new),
+                            Err(infallible) => match infallible {},
+                        },
+                        Err(infallible) => match infallible {},
+                    }
+                }
+            }
+        })
 }
 
 /// The projection a heat-scope snapshot returns. Selected by `?projection=…`; defaults to
@@ -487,9 +602,9 @@ impl IntoResponse for ProtocolError {
 
 #[cfg(test)]
 mod tests {
+    // `Body` and `Request` come in via `use super::*` (they are `use`d at module level for
+    // the smart fallback); the tests reach them through the glob.
     use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
     use gridfpv_events::{AdapterId, GateIndex, HeatTransition, Pass};
     use gridfpv_projection::CompetitorKey;
     use gridfpv_storage::InMemoryLog;
@@ -786,5 +901,192 @@ mod tests {
             }
             other => panic!("expected lap list, got {other:?}"),
         }
+    }
+
+    // --- #64: unknown API-tree paths are a typed 404, not the SPA shell -----------------
+
+    /// Drive a request against the bare protocol `router` (no SPA composed) and return the
+    /// status plus the parsed [`ProtocolError`] body, if the body is one.
+    async fn get_raw(state: AppState, uri: &str) -> (StatusCode, Option<ProtocolError>) {
+        let response = router(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let err = serde_json::from_slice::<ProtocolError>(&bytes).ok();
+        (status, err)
+    }
+
+    #[test]
+    fn is_api_path_matches_only_the_known_trees() {
+        // Exact prefix and any `/`-continuation are API paths.
+        for p in [
+            "/health",
+            "/snapshot",
+            "/snapshot/zzz/q-1",
+            "/stream",
+            "/control",
+            "/control/bogus",
+            "/auth",
+            "/auth/join-token",
+        ] {
+            assert!(is_api_path(p), "{p} should be an API path");
+        }
+        // A bare client-side route — and a prefix that is only a substring — are NOT.
+        for p in [
+            "/",
+            "/heats/q-1/live",
+            "/snapshotxyz",
+            "/streaming",
+            "/index.html",
+        ] {
+            assert!(!is_api_path(p), "{p} should NOT be an API path");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_snapshot_route_is_typed_404_not_spa() {
+        // A wrong /snapshot/... shape (an extra/garbage segment) matched no route → typed 404.
+        let (state, _) = state_with(recorded_heat());
+        let (status, err) = get_raw(state, "/snapshot/zzz/nope/extra").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            err.expect("a ProtocolError body").code,
+            ErrorCode::UnknownScope
+        );
+    }
+
+    #[tokio::test]
+    async fn bogus_control_path_is_typed_404() {
+        let (state, _) = state_with(recorded_heat());
+        let (status, err) = get_raw(state, "/control/bogus").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            err.expect("a ProtocolError body").code,
+            ErrorCode::UnknownScope
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_route_still_works_alongside_the_api_fallback() {
+        let (state, _) = state_with(recorded_heat());
+        let (status, snap) = get_snapshot(state, "/snapshot/heat/q-1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(matches!(
+            snap.unwrap().body,
+            ProjectionBody::LiveRaceState(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn smart_fallback_serves_spa_for_non_api_routes_and_404s_api_ones() {
+        use axum::response::Html;
+
+        // An inner "SPA" service that returns a recognisable shell for any path.
+        let spa = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, std::convert::Infallible>(Html("<title>RD Console</title>").into_response())
+        });
+        let app = smart_fallback(spa);
+
+        // A genuine client-side route → the SPA shell (200), not a typed 404.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/heats/q-1/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("RD Console"));
+
+        // A mistyped API path → typed 404 ProtocolError, NOT the SPA shell.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/snapshot/zzz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let err: ProtocolError = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(err.code, ErrorCode::UnknownScope);
+    }
+
+    // --- #63: minting a read-only join token over HTTP ----------------------------------
+
+    /// `POST /auth/join-token` with an optional bearer token; returns status + parsed body.
+    async fn post_join_token(
+        state: AppState,
+        token: Option<&str>,
+    ) -> (StatusCode, Option<JoinTokenResponse>) {
+        let mut builder = Request::builder().method("POST").uri("/auth/join-token");
+        if let Some(token) = token {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = router(state)
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<JoinTokenResponse>(&bytes).ok();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn rd_token_mints_a_join_token_that_reads_but_cannot_control() {
+        use crate::auth::Role;
+
+        let (state, _) = state_with(recorded_heat());
+        let rd = state.tokens().issue_rd_token();
+
+        // An RD mints a fresh read-only join token over HTTP.
+        let (status, body) = post_join_token(state.clone(), Some(&rd)).await;
+        assert_eq!(status, StatusCode::OK);
+        let join = body.expect("a JoinTokenResponse body").token;
+        assert!(!join.is_empty());
+
+        // The minted token authenticates a READ as a read-only session…
+        let read = state
+            .tokens()
+            .authenticate_read(Some(&join))
+            .unwrap()
+            .expect("the minted token resolves a session");
+        assert_eq!(read.role, Role::ReadOnly);
+        // …but is rejected on CONTROL.
+        assert_eq!(
+            state
+                .tokens()
+                .authenticate_control(Some(&join))
+                .unwrap_err()
+                .code,
+            ErrorCode::Unauthorized
+        );
+    }
+
+    #[tokio::test]
+    async fn minting_a_join_token_requires_an_rd_token() {
+        let (state, _) = state_with(recorded_heat());
+
+        // No token → 401.
+        let (status, _) = post_join_token(state.clone(), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // A read-only/join token → 401 (it may not mint another).
+        let join = state.tokens().issue_join_token();
+        let (status, _) = post_join_token(state.clone(), Some(&join)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // An unknown token → 401.
+        let (status, _) = post_join_token(state, Some("not-a-real-token")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

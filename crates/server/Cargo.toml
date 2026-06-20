@@ -34,6 +34,11 @@ ts-rs = "12"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "net"] }
 
+# The smart SPA-or-typed-404 fallback (#64) drives an inner SPA `Service` (the Director's
+# `ServeDir`) by hand, so it needs `tower`'s `Service`/`ServiceExt` in the *library* (not
+# just dev-builds) — hence a regular dependency. `util` brings `ServiceExt::ready`.
+tower = { version = "0.5", features = ["util"] }
+
 # Auth (#44): opaque bearer + read-only join tokens are random, unguessable strings.
 # `getrandom` draws them straight from the OS CSPRNG — minimal, std-ish, no key
 # management. Real signed/HMAC join tokens are a later concern (see `auth` module docs).

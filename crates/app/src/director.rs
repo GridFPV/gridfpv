@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use gridfpv_server::app::{AppState, router};
+use gridfpv_server::app::{AppState, router, smart_fallback};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
@@ -101,8 +101,12 @@ pub fn default_assets_dir() -> PathBuf {
 /// `/snapshot/...`, `/stream`, the control surface) take precedence. A
 /// [`ServeDir`](tower_http::services::ServeDir) then serves `assets` as the SPA root with a
 /// **fallback to `index.html`** so client-side routes (deep links into the console) resolve
-/// to the SPA shell instead of 404ing. Finally [`CorsLayer::permissive`] is applied so a
-/// different-origin client (the Tauri RD app) can call the API and upgrade the WS.
+/// to the SPA shell instead of 404ing — wrapped in
+/// [`smart_fallback`](gridfpv_server::app::smart_fallback) (#64) so a *mistyped API* path
+/// (a wrong `/snapshot/...`, `/control/...`, `/auth/...`) returns a typed `ProtocolError`
+/// 404 instead of the SPA shell, while genuine client-side routes still resolve to it.
+/// Finally [`CorsLayer::permissive`] is applied so a different-origin client (the Tauri RD
+/// app) can call the API and upgrade the WS.
 ///
 /// If `assets` does not exist the static service is *still* mounted (so the binary runs
 /// without a prior `npm run build`); requests for `/` then yield a 404 from `ServeDir`
@@ -119,8 +123,9 @@ pub fn build_app(state: AppState, assets: &Path) -> Router {
     let serve_dir = ServeDir::new(assets).fallback(spa_fallback(index_html));
 
     router(state)
-        // Anything the protocol router does not handle falls through to the SPA.
-        .fallback_service(serve_dir)
+        // Anything the protocol router does not handle falls through to `smart_fallback`:
+        // a mistyped API path → a typed `ProtocolError` 404 (#64), any other path → the SPA.
+        .fallback_service(smart_fallback(serve_dir))
         // Permissive CORS so the cross-origin Tauri RD app can reach the API + WS.
         .layer(CorsLayer::permissive())
 }

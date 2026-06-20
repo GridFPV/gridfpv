@@ -47,6 +47,7 @@ export type * from '@bindings/HeatPhase';
 export type * from '@bindings/HeatResult';
 export type * from '@bindings/HeatTransition';
 export type * from '@bindings/Hello';
+export type * from '@bindings/JoinTokenResponse';
 export type * from '@bindings/Lap';
 export type * from '@bindings/LapList';
 export type * from '@bindings/LiveRaceState';

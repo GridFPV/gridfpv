@@ -50,8 +50,24 @@ use std::sync::{Arc, RwLock};
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::error::{ErrorCode, ProtocolError};
+
+/// The body of a successful `POST /auth/join-token` (protocol.html §5, §9.4) — issue #63.
+///
+/// A freshly-minted **read-only** join token, returned to an authenticated RD so it can
+/// hand it (e.g. as a venue QR / share URL) to a spectator. The token authenticates LAN
+/// **reads** but is rejected on control ([`Role::can_control`]). The single-field wire
+/// shape leaves room to grow additively (an expiry, a scope) without breaking an older
+/// client that reads only `token`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct JoinTokenResponse {
+    /// The opaque, URL/QR-safe read-only join token (see [`random_token`]).
+    pub token: String,
+}
 
 /// The authority a [`Session`] grants (protocol.html §5).
 ///
