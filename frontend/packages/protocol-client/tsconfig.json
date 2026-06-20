@@ -4,5 +4,8 @@
     "outDir": "dist",
     "rootDir": "src"
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Tests are type-checked and run by Vitest (vitest.config.ts), not shipped in
+  // the package build.
+  "exclude": ["src/**/*.test.ts"]
 }

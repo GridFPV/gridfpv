@@ -14,6 +14,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "check": "npm run check --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "dev:rd-console": "npm run dev --workspace @gridfpv/rd-console"

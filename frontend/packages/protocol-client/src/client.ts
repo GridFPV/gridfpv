@@ -1,0 +1,458 @@
+/**
+ * The protocol client implementation.
+ *
+ * Lifecycle (protocol.html §2–§3):
+ *
+ *  1. `connect()` → GET the scoped snapshot. The snapshot carries the projection
+ *     `body` plus the `cursor` the stream resumes from.
+ *  2. Open a WebSocket and send a `SubscribeRequest { scope, from: cursor }`.
+ *  3. Apply each incoming `ChangeEnvelope` in strictly increasing `sequence`
+ *     order. Application is idempotent and keyed by `sequence`: an envelope at or
+ *     below the last-applied cursor is a no-op (at-least-once, deduplicated).
+ *  4. A *gap* (an envelope whose sequence skips past `lastApplied + 1`) means we
+ *     missed envelopes the stream cannot replay → re-snapshot and re-subscribe
+ *     from the fresh cursor.
+ *  5. On socket drop, reconnect and resume from the last-applied cursor; if the
+ *     server reports the cursor is too old (`StaleCursor`) — or resume otherwise
+ *     fails — fall back to a re-snapshot.
+ */
+
+import type {
+  ChangeEnvelope,
+  Cursor,
+  ProjectionBody,
+  ProtocolError,
+  Scope,
+  Snapshot,
+  SubscribeRequest
+} from '@gridfpv/types';
+
+/** Minimal `fetch` surface this client needs (injectable for tests / Node). */
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Minimal `WebSocket` surface this client needs — a structural subset of the DOM
+ * `WebSocket` so tests can inject a mock and Node can supply a polyfill.
+ */
+export interface WebSocketLike {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  onopen: ((this: WebSocketLike, ev: unknown) => unknown) | null;
+  onclose: ((this: WebSocketLike, ev: unknown) => unknown) | null;
+  onerror: ((this: WebSocketLike, ev: unknown) => unknown) | null;
+  onmessage: ((this: WebSocketLike, ev: { data: unknown }) => unknown) | null;
+}
+
+/** Factory that opens a {@link WebSocketLike} for a `ws(s)://…` URL. */
+export type WebSocketFactory = (url: string) => WebSocketLike;
+
+/** Where the connection is in its snapshot/stream lifecycle. */
+export type ConnectionStatus =
+  | 'connecting'
+  | 'snapshotting'
+  | 'subscribing'
+  | 'live'
+  | 'reconnecting'
+  | 'closed';
+
+/** The current typed projection state the client exposes to consumers. */
+export interface ProtocolState {
+  /** The materialized projection body, or `undefined` before the first snapshot. */
+  readonly body: ProjectionBody | undefined;
+  /** The last-applied stream cursor (snapshot cursor, advanced by each envelope). */
+  readonly cursor: Cursor | undefined;
+  /** Lifecycle status. */
+  readonly status: ConnectionStatus;
+  /** The last protocol/transport error, if the connection is degraded. */
+  readonly error: ProtocolError | undefined;
+}
+
+/** A listener notified on every state change. Returns an unsubscribe function. */
+export type StateListener = (state: ProtocolState) => void;
+
+/** Options for {@link connect}. */
+export interface ConnectOptions {
+  /**
+   * Base URL of the Director (or Cloud) protocol server, e.g.
+   * `http://director.local:8080` or `https://cloud.gridfpv.example`. The client
+   * is configured with the base URL *only*, so it cannot tell LAN from Cloud.
+   */
+  baseUrl: string;
+  /** The resource this connection is scoped to (protocol.html §4). */
+  scope: Scope;
+  /** Optional bearer token (sent as `Authorization: Bearer …` and on the WS URL). */
+  token?: string;
+  /** Inject a `fetch` (defaults to the global). Used by tests and Node. */
+  fetch?: FetchLike;
+  /** Inject a WebSocket factory (defaults to the global `WebSocket`). */
+  webSocketFactory?: WebSocketFactory;
+  /**
+   * Reconnect backoff in ms (delay before re-opening a dropped socket).
+   * Defaults to 1000ms. A timer of `0` reconnects on the next tick.
+   */
+  reconnectDelayMs?: number;
+  /** Inject a timer (defaults to `setTimeout`). Used by tests. */
+  setTimer?: (cb: () => void, ms: number) => unknown;
+  /** Inject a timer-clear (defaults to `clearTimeout`). Used by tests. */
+  clearTimer?: (handle: unknown) => void;
+}
+
+/**
+ * A live connection to the protocol server: snapshot + WS subscribe, exposing the
+ * current typed projection state via a framework-agnostic subscribe API.
+ */
+export interface ProtocolClient {
+  readonly baseUrl: string;
+  readonly scope: Scope;
+  /** A synchronous snapshot of the current state. */
+  getState(): ProtocolState;
+  /**
+   * Subscribe to state changes. The listener is invoked immediately with the
+   * current state, then on every subsequent change. Returns an unsubscribe fn.
+   */
+  onState(listener: StateListener): () => void;
+  /** Close the connection and tear down the WebSocket. Idempotent. */
+  close(): void;
+}
+
+/** Error frame the server may send on the stream (protocol.html §9.8). */
+interface ErrorFrame {
+  error: ProtocolError;
+}
+
+// ── Cursor (bigint) wire handling ──────────────────────────────────────────────
+//
+// `Cursor` is a u64 rendered as a TS `bigint` (bindings/Cursor.ts). On the wire it
+// arrives as a JSON number or string depending on the server's serializer; `bigint`
+// values, conversely, are not serializable by `JSON.stringify`. These two helpers
+// bracket that mismatch so cursors stay precise (a u64 can exceed JS's safe-integer
+// range) and the rest of the client works in `bigint`.
+
+/** Coerce a wire cursor (number | string | bigint) to a `bigint`. */
+function toCursor(v: unknown): Cursor {
+  if (typeof v === 'bigint') return v;
+  if (typeof v === 'number') return BigInt(Math.trunc(v));
+  if (typeof v === 'string' && v.length > 0) return BigInt(v);
+  throw new Error(`invalid cursor: ${String(v)}`);
+}
+
+/**
+ * `JSON.stringify` with bigints rendered as JSON numbers (serde's u64 default),
+ * since `JSON.stringify` cannot serialize a bigint directly. Cursors past 2^53
+ * lose precision in this number form; if a deployment ever needs full-u64 cursors
+ * on the wire the server would serialize them as strings and this would follow.
+ */
+function stringifyWire(value: unknown): string {
+  return JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
+}
+
+/** Normalize a parsed snapshot so its cursor is a `bigint`. */
+function normalizeSnapshot(data: Snapshot): Snapshot {
+  return { ...data, cursor: toCursor((data as { cursor: unknown }).cursor) };
+}
+
+/** Normalize a parsed envelope so its sequence is a `bigint`. */
+function normalizeEnvelope(env: ChangeEnvelope): ChangeEnvelope {
+  return { ...env, sequence: toCursor((env as { sequence: unknown }).sequence) };
+}
+
+const isProtocolError = (v: unknown): v is ProtocolError =>
+  typeof v === 'object' &&
+  v !== null &&
+  'code' in v &&
+  'message' in v &&
+  typeof (v as ProtocolError).message === 'string';
+
+const isChangeEnvelope = (v: unknown): v is ChangeEnvelope =>
+  typeof v === 'object' && v !== null && 'sequence' in v && 'projection' in v && 'change' in v;
+
+const isErrorFrame = (v: unknown): v is ErrorFrame =>
+  typeof v === 'object' && v !== null && 'error' in v && isProtocolError((v as ErrorFrame).error);
+
+/** Map an http(s) base URL to its ws(s) equivalent. */
+function toWebSocketBase(baseUrl: string): string {
+  if (baseUrl.startsWith('https://')) return 'wss://' + baseUrl.slice('https://'.length);
+  if (baseUrl.startsWith('http://')) return 'ws://' + baseUrl.slice('http://'.length);
+  return baseUrl;
+}
+
+const trimSlash = (s: string): string => (s.endsWith('/') ? s.slice(0, -1) : s);
+
+/**
+ * Connect to a GridFPV protocol server and begin the snapshot→subscribe handshake.
+ *
+ * Returns immediately with a {@link ProtocolClient}; the snapshot fetch and WS
+ * subscribe proceed asynchronously and surface through the state/`onState` API.
+ */
+export function connect(options: ConnectOptions): ProtocolClient {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const wsFactory: WebSocketFactory =
+    options.webSocketFactory ??
+    ((url) => new globalThis.WebSocket(url) as unknown as WebSocketLike);
+  const setTimer = options.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
+  const clearTimer =
+    options.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+  const reconnectDelayMs = options.reconnectDelayMs ?? 1000;
+
+  const baseUrl = trimSlash(options.baseUrl);
+  const wsBase = trimSlash(toWebSocketBase(options.baseUrl));
+  const scope = options.scope;
+  const token = options.token;
+  const scopeParam = encodeURIComponent(JSON.stringify(scope));
+
+  // ── Mutable connection state ───────────────────────────────────────────────
+  let body: ProjectionBody | undefined;
+  let cursor: Cursor | undefined;
+  let status: ConnectionStatus = 'connecting';
+  let lastError: ProtocolError | undefined;
+
+  let ws: WebSocketLike | null = null;
+  let closed = false;
+  let reconnectHandle: unknown = null;
+  /** Bumps every (re)connect attempt so stale callbacks from an old socket no-op. */
+  let generation = 0;
+
+  const listeners = new Set<StateListener>();
+
+  const snapshot = (): ProtocolState => ({ body, cursor, status, error: lastError });
+
+  function emit(): void {
+    const s = snapshot();
+    for (const l of listeners) l(s);
+  }
+
+  function setStatus(next: ConnectionStatus): void {
+    if (status !== next) {
+      status = next;
+      emit();
+    }
+  }
+
+  function fail(err: ProtocolError): void {
+    lastError = err;
+    emit();
+  }
+
+  // ── Snapshot (protocol.html §2) ────────────────────────────────────────────
+  async function fetchSnapshot(gen: number): Promise<boolean> {
+    setStatus('snapshotting');
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let resp: Response;
+    try {
+      resp = await fetchImpl(`${baseUrl}/snapshot?scope=${scopeParam}`, { headers });
+    } catch (e) {
+      if (gen !== generation || closed) return false;
+      fail({ code: 'Internal', message: `snapshot fetch failed: ${String(e)}` });
+      return false;
+    }
+    if (gen !== generation || closed) return false;
+    if (!resp.ok) {
+      let err: ProtocolError = { code: 'Internal', message: `snapshot HTTP ${resp.status}` };
+      try {
+        const data: unknown = await resp.json();
+        if (isProtocolError(data)) err = data;
+      } catch {
+        /* keep the HTTP-status error */
+      }
+      fail(err);
+      return false;
+    }
+    const data = normalizeSnapshot((await resp.json()) as Snapshot);
+    if (gen !== generation || closed) return false;
+    body = data.body;
+    cursor = data.cursor;
+    lastError = undefined;
+    emit();
+    return true;
+  }
+
+  // ── Apply one ordered change envelope (protocol.html §3) ────────────────────
+  //
+  // Returns 'applied', 'duplicate' (already seen — idempotent no-op), or 'gap'
+  // (missed envelopes → caller must re-snapshot).
+  function applyEnvelope(env: ChangeEnvelope): 'applied' | 'duplicate' | 'gap' {
+    const seq = env.sequence;
+    if (cursor !== undefined) {
+      // Idempotent, keyed by sequence: anything at or below the cursor is a no-op.
+      if (seq <= cursor) return 'duplicate';
+      // The stream is contiguous: the next envelope must be exactly cursor + 1.
+      if (seq !== cursor + 1n) return 'gap';
+    }
+    const change = env.change;
+    if ('FreshValue' in change) {
+      body = change.FreshValue;
+    } else {
+      // Delta. The per-projection delta encodings are deferred (#43): the wire
+      // type carries an opaque payload today. We advance the cursor so ordering
+      // and resume stay correct; once #43 pins the typed deltas, fold them into
+      // `body` here per ProjectionKind. Until then a delta cannot mutate `body`,
+      // and a re-snapshot (always correct, §3) reconciles any drift.
+      void change.Delta;
+    }
+    cursor = seq;
+    return 'applied';
+  }
+
+  // ── WebSocket subscribe + stream (protocol.html §3) ─────────────────────────
+  function openSocket(gen: number): void {
+    if (gen !== generation || closed) return;
+    setStatus('subscribing');
+    const url = token ? `${wsBase}/stream?token=${encodeURIComponent(token)}` : `${wsBase}/stream`;
+    let socket: WebSocketLike;
+    try {
+      socket = wsFactory(url);
+    } catch (e) {
+      scheduleReconnect(gen, { code: 'Internal', message: `WS open failed: ${String(e)}` });
+      return;
+    }
+    ws = socket;
+
+    socket.onopen = () => {
+      if (gen !== generation || closed) return;
+      const req: SubscribeRequest = { scope, from: cursor };
+      socket.send(stringifyWire(req));
+      setStatus('live');
+    };
+
+    socket.onmessage = (ev) => {
+      if (gen !== generation || closed) return;
+      void handleMessage(gen, ev.data);
+    };
+
+    socket.onerror = () => {
+      /* surfaced via onclose; nothing actionable here */
+    };
+
+    socket.onclose = () => {
+      if (gen !== generation || closed) return;
+      scheduleReconnect(gen, undefined);
+    };
+  }
+
+  async function handleMessage(gen: number, raw: unknown): Promise<void> {
+    let parsed: unknown;
+    try {
+      parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+      fail({ code: 'BadRequest', message: 'malformed stream frame' });
+      return;
+    }
+
+    if (isErrorFrame(parsed)) {
+      // A stale cursor means resume is impossible → re-snapshot from scratch (§3).
+      if (parsed.error.code === 'StaleCursor') {
+        await resnapshot(gen);
+      } else {
+        fail(parsed.error);
+      }
+      return;
+    }
+
+    if (!isChangeEnvelope(parsed)) {
+      // Unknown frame (e.g. a ServerHello in a richer handshake) — ignore it so an
+      // additive protocol change doesn't break an older client (§7).
+      return;
+    }
+
+    const result = applyEnvelope(normalizeEnvelope(parsed));
+    if (result === 'gap') {
+      // Missed envelopes the stream can't replay → re-snapshot and re-subscribe.
+      await resnapshot(gen);
+      return;
+    }
+    if (result === 'applied') emit();
+  }
+
+  // Re-snapshot in place (gap or stale cursor), then re-subscribe from the fresh
+  // cursor. The existing socket is torn down so the new subscribe is unambiguous.
+  async function resnapshot(gen: number): Promise<void> {
+    if (gen !== generation || closed) return;
+    teardownSocket();
+    const ok = await fetchSnapshot(gen);
+    if (gen !== generation || closed) return;
+    if (ok) openSocket(gen);
+    else scheduleReconnect(gen, lastError);
+  }
+
+  function scheduleReconnect(gen: number, err: ProtocolError | undefined): void {
+    if (gen !== generation || closed) return;
+    teardownSocket();
+    if (err) lastError = err;
+    setStatus('reconnecting');
+    reconnectHandle = setTimer(() => {
+      if (closed) return;
+      reconnect();
+    }, reconnectDelayMs);
+  }
+
+  // Reconnect (protocol.html §3): resume from the last-applied cursor by
+  // re-subscribing; if we never got a snapshot, take one first. A StaleCursor on
+  // resume drives a re-snapshot via the stream error path.
+  function reconnect(): void {
+    if (closed) return;
+    const gen = ++generation;
+    if (cursor === undefined) {
+      void (async () => {
+        const ok = await fetchSnapshot(gen);
+        if (gen !== generation || closed) return;
+        if (ok) openSocket(gen);
+        else scheduleReconnect(gen, lastError);
+      })();
+    } else {
+      openSocket(gen);
+    }
+  }
+
+  function teardownSocket(): void {
+    if (reconnectHandle !== null) {
+      clearTimer(reconnectHandle);
+      reconnectHandle = null;
+    }
+    if (ws) {
+      const dead = ws;
+      ws = null;
+      dead.onopen = null;
+      dead.onclose = null;
+      dead.onerror = null;
+      dead.onmessage = null;
+      try {
+        dead.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // ── Kick off the handshake ─────────────────────────────────────────────────
+  function start(): void {
+    const gen = ++generation;
+    void (async () => {
+      const ok = await fetchSnapshot(gen);
+      if (gen !== generation || closed) return;
+      if (ok) openSocket(gen);
+      else scheduleReconnect(gen, lastError);
+    })();
+  }
+
+  start();
+
+  return {
+    baseUrl,
+    scope,
+    getState: snapshot,
+    onState(listener: StateListener): () => void {
+      listeners.add(listener);
+      listener(snapshot());
+      return () => listeners.delete(listener);
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      generation++;
+      teardownSocket();
+      setStatus('closed');
+      listeners.clear();
+    }
+  };
+}

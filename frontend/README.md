@@ -28,7 +28,7 @@ frontend/
 ├── eslint.config.js        # flat config, TS + Svelte
 ├── packages/
 │   ├── types/              # @gridfpv/types — re-exports the generated bindings/*.ts
-│   ├── protocol-client/    # @gridfpv/protocol-client — thin transport+subscribe layer (STUB, filled by #49)
+│   ├── protocol-client/    # @gridfpv/protocol-client — thin transport+subscribe layer (snapshot + WS, #49)
 │   └── components/         # @gridfpv/components — shared Svelte 5 component library (svelte-package)
 └── apps/
     └── rd-console/         # @gridfpv/rd-console — the RD console surface (minimal shell, filled by #51+)
@@ -48,23 +48,23 @@ into the repo-root `bindings/` directory (one file per type, per `docs/clients.h
 generated bindings so every app and package imports protocol types from one place:
 
 ```ts
-import type { RaceSnapshot, PilotId } from '@gridfpv/types';
+import type { Snapshot, ChangeEnvelope, Command, LapList } from '@gridfpv/types';
 ```
 
 How regenerated bindings flow in:
 
-1. The Rust side regenerates `bindings/*.ts` (e.g. `cargo test` with ts-rs, or `xtask`).
-2. `packages/types/src/index.ts` re-exports from the generated barrel. While `bindings/` has
-   no barrel of its own, `packages/types/src/generated.ts` is the adapter that points at it
-   (via the `tsconfig` path alias `@bindings/*` → `../../../bindings/*`).
+1. The Rust side regenerates `bindings/*.ts` (e.g. `cargo xtask gen`).
+2. `packages/types/src/index.ts` re-exports from `packages/types/src/generated.ts`, the
+   barrel. ts-rs emits one file per type and no `index.ts` of its own, so `generated.ts`
+   re-exports each `bindings/*.ts` module (`export type * from '@bindings/<Name>'`), resolved
+   through the `@bindings/*` tsconfig path alias (`@bindings/* → ../bindings/*`, defined once
+   in `tsconfig.base.json`). Adding a new type is one new `export type *` line; nothing else.
 3. Nothing else changes: apps already import from `@gridfpv/types`, so a contract change in
    Rust surfaces as a TypeScript compile error in the frontend rather than silent drift.
 
-**Standalone-build note.** When `bindings/` is absent (e.g. a frontend-only checkout, or CI
-that hasn't run the Rust generation step), `@gridfpv/types` falls back to a small set of
-placeholder types in `src/generated.ts` so the monorepo still builds and type-checks. Once
-real bindings exist, that fallback is replaced by the re-export — see the comments in
-`packages/types/src/generated.ts`.
+`@gridfpv/types` is a pure type seam — every export is `export type`, so it emits no JS and
+consumers resolve `@gridfpv/types` straight to its TypeScript source. It type-checks with
+`tsc --noEmit` rather than producing a `dist/`.
 
 ## Commands
 
@@ -72,6 +72,7 @@ real bindings exist, that fallback is replaced by the re-export — see the comm
 npm install            # from frontend/ — installs all workspaces
 npm run build          # build components + rd-console (and any other workspace)
 npm run check          # svelte-check / tsc across workspaces
+npm run test           # vitest across workspaces (protocol-client unit tests)
 npm run lint           # eslint + prettier --check
 npm run format         # prettier --write
 npm run dev:rd-console # vite dev server for the RD console
