@@ -139,11 +139,11 @@ fn gen_check() -> bool {
 fn live() -> bool {
     // Run each target sequentially so at most one RotorHazard container exists at a
     // time (cargo runs separate test binaries in parallel otherwise).
-    let target = |name: &str, ignored: bool| {
+    let target = |package: &str, name: &str, ignored: bool| {
         let mut args = vec![
             "test",
             "-p",
-            "gridfpv-adapters",
+            package,
             "--features",
             "live",
             "--test",
@@ -157,11 +157,13 @@ fn live() -> bool {
         run("cargo", &args)
     };
     // No container needed (in-process mock WS server).
-    let ws = target("velocidrone_ws", false);
+    let ws = target("gridfpv-adapters", "velocidrone_ws", false);
     // Each spins up + tears down its own disposable RotorHazard.
-    let live_rh = target("rh_live", true);
-    let signal = target("rh_signal", true);
-    ws && live_rh && signal
+    let live_rh = target("gridfpv-adapters", "rh_live", true);
+    let signal = target("gridfpv-adapters", "rh_signal", true);
+    // The engine's mock-RH e2e: drives a full heat through the shared harness (#29).
+    let heat_live = target("gridfpv-engine", "heat_live", true);
+    ws && live_rh && signal && heat_live
 }
 
 fn main() {
