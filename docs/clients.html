@@ -16,7 +16,8 @@
 
     <p class="lead">
       Everything that renders GridFPV is a <strong>web client of the one protocol</strong>:
-      the RD console in the Tauri window, the racer/spectator PWA, the OBS overlays, and (future)
+      the RD console (destined for a Tauri window, shipped as a web app in v0.4), the
+      racer/spectator PWA, the OBS overlays, and (future)
       a privileged RD mobile-control surface on the LAN. They
       differ only in <em>permissions</em>, <em>transport</em>, and <em>what they emphasize</em> —
       not in how they talk to the Director. This doc settles the frontend stack those surfaces
@@ -58,7 +59,7 @@ flowchart TB
     ui["Component library&lt;br/&gt;leaderboard · bracket · clock"]
   end
 
-  rd["RD console&lt;br/&gt;control · dense · authenticated&lt;br/&gt;in Tauri window"]
+  rd["RD console&lt;br/&gt;control · dense · authenticated&lt;br/&gt;web app (Tauri deferred)"]
   pwa["Racer / spectator PWA&lt;br/&gt;read · installable · push"]
   ovl["OBS overlays&lt;br/&gt;read-only · lean · browser source"]
 
@@ -85,20 +86,24 @@ flowchart TB
 
     <h3>The RD console — control-oriented, dense, authenticated</h3>
     <p>
-      The race director's cockpit, loaded inside the <strong>Tauri window</strong> (Architecture
-      §2). It is the only surface that exercises the protocol's privileged write/control path —
+      The race director's cockpit, designed to load inside the <strong>Tauri window</strong>
+      (Architecture §2). <strong>The Tauri shell and 3-OS single-binary packaging are deferred
+      (#57/#58); v0.4 ships the RD console as a web app served by the Director.</strong> It is the
+      only surface that exercises the protocol's privileged write/control path —
       arming heats, marshaling, configuring the pipeline — so it authenticates with the RD role
       (Architecture §9; mechanics in <a href="protocol.html">Protocol</a>). It is information-dense
       and keyboard-friendly: a working tool for someone running a live event, not a viewer.
     </p>
     <div class="callout">
       <p>
-        The console is "just a co-located web client" (Architecture §2): it loads over the
-        Tauri webview but talks to the same local <code>axum</code> server, over the same
-        protocol, as everyone else. The Tauri shell buys a friendly native window and OS
-        integration (file dialogs for export, single-binary packaging) — it does
-        <strong>not</strong> buy a private back channel. Control authority is a protocol role,
-        not a shell privilege.
+        The console is "just a co-located web client" (Architecture §2): once the Tauri shell
+        lands it will load over the Tauri webview, but either way it talks to the same local
+        <code>axum</code> server, over the same protocol, as everyone else. The Tauri shell will
+        buy a friendly native window and OS integration (file dialogs for export, single-binary
+        packaging) — it does <strong>not</strong> buy a private back channel. Control authority is
+        a protocol role, not a shell privilege. <em>As built (v0.4): the Tauri shell and
+        single-binary packaging are deferred (#57/#58); the console is served as a web app by the
+        Director.</em>
       </p>
     </div>
 
@@ -167,7 +172,7 @@ flowchart TB
         <tr><th>Surface</th><th>Direction</th><th>Auth</th><th>Transport</th><th>Shell</th><th>Emphasis</th></tr>
       </thead>
       <tbody>
-        <tr><td>RD console</td><td>read + <strong>control</strong></td><td>RD role</td><td>LAN (local)</td><td>Tauri</td><td>dense, keyboard, working tool</td></tr>
+        <tr><td>RD console</td><td>read + <strong>control</strong></td><td>RD role</td><td>LAN (local)</td><td>web app (Tauri deferred, #57/#58)</td><td>dense, keyboard, working tool</td></tr>
         <tr><td>Racer / spectator PWA</td><td>read</td><td>open / light token (LAN) · account (Cloud)</td><td>LAN <em>or</em> Cloud</td><td>browser → future Capacitor</td><td>approachable, mobile-first, installable</td></tr>
         <tr><td>OBS overlay</td><td>read-only</td><td>open / light token</td><td>LAN <em>or</em> Cloud</td><td>OBS browser source</td><td>transparent, fixed canvas, lean</td></tr>
         <tr><td>RD mobile-control <em>(future)</em></td><td><strong>control</strong></td><td>RD role, <strong>stricter</strong> (explicit login / pairing)</td><td>LAN-only</td><td>mobile browser / PWA</td><td>focused live-control</td></tr>
@@ -208,6 +213,8 @@ flowchart TB
       tiny bundles suiting lean OBS overlays and the LAN PWA. It matches the lean,
       single-binary Tauri ethos rather than fighting it. The contract is the same generated
       TypeScript either way, so the realtime/overlay work is comfortably within Svelte's reach.</p>
+      <p>As built (v0.4): Svelte 5 + Vite (no SvelteKit), an npm-workspaces monorepo
+      (<code>packages/{types,protocol-client,components}</code> + <code>apps/rd-console</code>).</p>
     </div>
 
     <div class="callout">
@@ -267,6 +274,10 @@ flowchart TB
       from Rust; the frontend consumes them. The component library is the only place UI lives, so
       every surface shows the same data the same way unless it deliberately chooses otherwise.</p>
     </div>
+    <p>
+      As built (v0.4): the frontend uses vitest; the suite is green (78 tests — 20 component,
+      7 protocol-client, 51 RD console).
+    </p>
 
     <h2>4. PWA mechanics</h2>
     <p>
@@ -358,10 +369,12 @@ flowchart LR
     <h2>6. Native deferral via Capacitor</h2>
     <p>
       Native apps are deferred but kept cheap, by deliberate symmetry with the Director
-      (Architecture §7). The Director's RD console is a web UI wrapped in <strong>Tauri</strong>;
-      the racer/spectator PWA can later be wrapped in <strong>Capacitor</strong> to ship a native
-      app to the app stores. In both cases the <em>web protocol-client is the constant</em>, and
-      the native shell is an optional enhancement, not a rewrite.
+      (Architecture §7). The Director's RD console is a web UI destined to be wrapped in
+      <strong>Tauri</strong> (the shell and 3-OS single-binary packaging are deferred, #57/#58 —
+      v0.4 serves it as a web app); the racer/spectator PWA can later be wrapped in
+      <strong>Capacitor</strong> to ship a native app to the app stores. In both cases the
+      <em>web protocol-client is the constant</em>, and the native shell is an optional
+      enhancement, not a rewrite.
     </p>
     <div class="principle">
       <p><span class="name">The web client is the constant on both ends.</span> Tauri wraps the
