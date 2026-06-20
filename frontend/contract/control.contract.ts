@@ -8,18 +8,21 @@
  *    well-formed `{ ok: false, error: ProtocolError(BadRequest) }` (NOT an HTTP error); and the
  *    consequence of a command reaches a `/stream` subscriber on the read path.
  *  - seam 6 → auth: control with no token / an unknown (revoked-equivalent) token is `401`; a
- *    valid RD token is accepted; reads (`/snapshot`, `/stream`) are open with no token.
+ *    valid RD token is accepted; reads (`/snapshot`, `/stream`) are open with no token; and an
+ *    RD can mint a read-only **join token** over the wire (`POST /auth/join-token`, #63) that
+ *    authenticates a READ but is rejected on CONTROL.
  *
- * NOTE (recorded gap, not a failure): the server exposes **no wire endpoint to mint a
- * read-only join token** — `issue_join_token` exists in `crates/server/src/auth.rs` but is not
- * reachable over HTTP, and only the single `GRIDFPV_RD_TOKEN` is pinned. So the "a read-only
- * join-token is rejected on control" arm of seam 6 cannot be exercised over the wire here; it
- * is covered by the Rust unit test `auth::tests::join_token_is_read_only_and_rejected_on_control`.
- * We assert the reachable equivalent: an unknown token (which a revoked token becomes) is 401.
+ * NOTE (#63, formerly a recorded gap): the server now exposes `POST /auth/join-token` — an
+ * RD-gated endpoint that mints a fresh read-only join token (`issue_join_token`) as a
+ * `JoinTokenResponse`. So the "a read-only join-token is rejected on control" arm of seam 6 is
+ * exercised over the real wire here (mint with the RD token, then assert the minted token is
+ * accepted on a read and rejected — 401 — on control). The Rust unit test
+ * `auth::tests::join_token_is_read_only_and_rejected_on_control` still covers the store-level
+ * invariant.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Command } from '@gridfpv/types';
+import type { Command, JoinTokenResponse } from '@gridfpv/types';
 
 import { type Director } from '../test-harness/director.ts';
 import {
@@ -205,5 +208,45 @@ describe('seam 6: auth gates control, reads stay open', () => {
     await new Promise((r) => setTimeout(r, 300));
     expect((frames[0] as { code?: string } | undefined)?.code).not.toBe('Unauthorized');
     ws.close();
+  });
+
+  it('minting a join token requires the RD token — no/bad token → 401 (#63)', async () => {
+    // No Authorization → 401.
+    const anon = await fetch(`${director.baseUrl}/auth/join-token`, { method: 'POST' });
+    expect(anon.status).toBe(401);
+    // An unknown token → 401.
+    const bad = await fetch(`${director.baseUrl}/auth/join-token`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer not-a-real-token' }
+    });
+    expect(bad.status).toBe(401);
+  });
+
+  it('an RD mints a read-only join token that reads but is REJECTED on control (#63)', async () => {
+    // The RD trades its RD token for a fresh read-only join token over the wire.
+    const res = await fetch(`${director.baseUrl}/auth/join-token`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}` }
+    });
+    expect(res.status).toBe(200);
+    const { token: join } = (await res.json()) as JoinTokenResponse;
+    expect(typeof join).toBe('string');
+    expect(join.length).toBeGreaterThan(0);
+    expect(join).not.toBe(TOKEN); // a distinct, freshly-minted credential
+
+    // The minted join token authenticates a READ (reads accept a valid token of either role).
+    const read = await fetch(`${director.baseUrl}/snapshot/event/any`, {
+      headers: { Authorization: `Bearer ${join}` }
+    });
+    expect(read.status).toBe(200);
+
+    // …but it is REJECTED on CONTROL — a spectator can watch, never run the race.
+    const { status, body } = await postControl(
+      director.baseUrl,
+      { ScheduleHeat: { heat: 'h-join-rejected', lineup: [] } },
+      { token: join }
+    );
+    expect(status).toBe(401);
+    expect((body as { code?: string }).code).toBe('Unauthorized');
   });
 });
