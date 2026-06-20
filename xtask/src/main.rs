@@ -128,6 +128,52 @@ fn gen_check() -> bool {
     clean
 }
 
+/// `cargo xtask live` — the local-only integration test class.
+///
+/// Container-dependent tests don't belong in the shared CI pipeline (flaky,
+/// resource-limited). This brings up dockerized RotorHazard, waits for it to be
+/// healthy, runs the `live`-gated `#[ignore]`d integration test against it, and
+/// tears the container down again. Requires Docker. Run it locally (or on a
+/// Docker-capable self-hosted runner).
+fn live() -> bool {
+    let root = workspace_root();
+    let compose = root.join("docker/rotorhazard/docker-compose.yml");
+    let compose = compose.to_str().expect("compose path is valid UTF-8");
+    let compose_args = ["compose", "-f", compose];
+
+    // Bring RotorHazard up and block until its healthcheck passes.
+    let up: Vec<&str> = compose_args
+        .iter()
+        .copied()
+        .chain(["up", "-d", "--wait"])
+        .collect();
+    if !run("docker", &up) {
+        eprintln!("live: failed to start RotorHazard (is Docker running?)");
+        return false;
+    }
+
+    let ok = run(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "gridfpv-adapters",
+            "--features",
+            "live",
+            "--test",
+            "rh_live",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    );
+
+    // Always tear down, regardless of the test result.
+    let down: Vec<&str> = compose_args.iter().copied().chain(["down"]).collect();
+    run("docker", &down);
+    ok
+}
+
 fn main() {
     let task = std::env::args().nth(1).unwrap_or_else(|| "ci".to_string());
     let ok = match task.as_str() {
@@ -136,9 +182,10 @@ fn main() {
         "test" => test(),
         "gen" => generate(),
         "ci" => fmt() && lint() && test() && gen_check(),
+        "live" => live(),
         other => {
             eprintln!("unknown task: {other}");
-            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen]");
+            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live]");
             false
         }
     };

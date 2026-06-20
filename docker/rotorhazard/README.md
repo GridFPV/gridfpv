@@ -47,8 +47,27 @@ ground truth the adapter + its golden replay test are validated against.
 - `node_data` carries per-node `pass_peak_rssi[]` (and node/nadir variants) —
   this is where per-pass RSSI comes from (0 under mock nodes).
 
-## Live integration test (deferred)
+## Live integration test
 
-A live Socket.IO transport client (driving the adapter against this container in
-CI) is deferred to a follow-up — see the `#[ignore]`d skeleton in the adapter
-tests. This directory + the captured fixture are what unblock that work.
+The RotorHazard adapter has a live Socket.IO transport (`crates/adapters`, feature
+`live`) and an integration test (`crates/adapters/tests/rh_live.rs`) that drives a
+real race on this container and asserts the adapter produces correct laps.
+
+It's a **local-only** test class — container-dependent tests don't run in the
+shared CI pipeline. The one-command entry point brings the container up, runs the
+test, and tears it down:
+
+```sh
+cargo xtask live
+```
+
+Or manually, against an already-running container:
+
+```sh
+docker compose -f docker/rotorhazard/docker-compose.yml up -d --wait
+cargo test -p gridfpv-adapters --features live --test rh_live -- --ignored --nocapture
+```
+
+> Note: the live test drives passes via `simulate_lap` (a server-level injector),
+> which bypasses RotorHazard's RSSI detection. Driving the **real detection** from
+> emulated RSSI signals (`mock_data_*.csv`) is tracked separately (issue #27).

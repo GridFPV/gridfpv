@@ -5,15 +5,21 @@
 //! live stream into correct laps — the "real timing in" half of v0.2's done-when.
 //!
 //! Gated behind the `live` feature AND `#[ignore]`, so it never runs in the
-//! default `cargo test`/CI. Run it explicitly against a running RH:
+//! default `cargo test` or the shared CI pipeline. It's a **local** class —
+//! the one-command runner brings up dockerized RH, runs this, and tears it down:
 //!
 //! ```sh
-//! docker compose -f docker/rotorhazard/docker-compose.yml up -d
+//! cargo xtask live
+//! ```
+//!
+//! Or manually against an already-running container:
+//!
+//! ```sh
+//! docker compose -f docker/rotorhazard/docker-compose.yml up -d --wait
 //! cargo test -p gridfpv-adapters --features live --test rh_live -- --ignored --nocapture
 //! ```
 //!
-//! `RH_URL` overrides the server (defaults to `http://localhost:5000`; CI sets the
-//! service alias).
+//! `RH_URL` overrides the server (defaults to `http://localhost:5000`).
 #![cfg(feature = "live")]
 
 use std::time::{Duration, Instant};
