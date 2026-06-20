@@ -22,6 +22,7 @@
   import EventPicker from './screens/EventPicker.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
   import SetupWizard from './screens/SetupWizard.svelte';
+  import EventTimers from './screens/EventTimers.svelte';
   import Registration from './screens/Registration.svelte';
   import LiveRaceControl from './screens/LiveRaceControl.svelte';
   import Marshaling from './screens/Marshaling.svelte';
@@ -42,7 +43,7 @@
     void session.resolveActiveEvent();
   });
 
-  type ScreenId = 'setup' | 'registration' | 'live' | 'marshaling' | 'results';
+  type ScreenId = 'setup' | 'timers' | 'registration' | 'live' | 'marshaling' | 'results';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
     { id: 'setup', label: 'Setup', key: '1', icon: 'M4 6h16M4 12h16M4 18h10' },
     {
@@ -53,7 +54,13 @@
     },
     { id: 'live', label: 'Live control', key: '3', icon: 'M5 3l14 9-14 9V3z' },
     { id: 'marshaling', label: 'Marshaling', key: '4', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
-    { id: 'results', label: 'Results', key: '5', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' }
+    { id: 'results', label: 'Results', key: '5', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
+    {
+      id: 'timers',
+      label: 'Timers',
+      key: '6',
+      icon: 'M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'
+    }
   ];
   let active = $state<ScreenId>('live');
   const activeScreen = $derived(SCREENS.find((s) => s.id === active));
@@ -208,6 +215,8 @@
             eventName={session.currentEvent?.name ?? ''}
             oncommit={onSetupCommit}
           />
+        {:else if active === 'timers'}
+          <EventTimers {session} />
         {:else if active === 'registration'}
           <Registration {session} />
         {:else if active === 'live'}

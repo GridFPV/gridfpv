@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProtocolClient, ProtocolState, StateListener } from '@gridfpv/protocol-client';
-import type { CommandAck, EventMeta } from '@gridfpv/types';
+import type { CommandAck, EventMeta, Timer } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
 import { liveRunning, okAck, failAck } from './fixtures.js';
 
@@ -447,6 +447,128 @@ describe('Session', () => {
     // Control was rebuilt without a token; reads (the connect call) are untouched.
     expect(controlFactory).toHaveBeenLastCalledWith(session.baseUrl, undefined, {
       eventId: 'practice'
+    });
+  });
+
+  // ── Timer registry (issue #73) ─────────────────────────────────────────────
+  describe('timers', () => {
+    const MOCK_TIMER: Timer = {
+      id: 'mock',
+      name: 'Mock',
+      kind: { Mock: { laps: 3, lap_ms: 30000 } },
+      status: 'Ready'
+    };
+
+    function timerSession(overrides?: {
+      listTimersImpl?: ReturnType<typeof vi.fn>;
+      createTimerImpl?: ReturnType<typeof vi.fn>;
+      updateTimerImpl?: ReturnType<typeof vi.fn>;
+      deleteTimerImpl?: ReturnType<typeof vi.fn>;
+      setEventTimersImpl?: ReturnType<typeof vi.fn>;
+    }) {
+      const { connect } = mockConnect(connecting);
+      const controlFactory = vi.fn(() => ({
+        baseUrl: 'http://d.local',
+        sendCommand: vi.fn(async () => okAck)
+      }));
+      const session = new Session({
+        connectImpl: connect,
+        controlFactory,
+        baseUrl: 'http://d.local',
+        autoRestore: false,
+        ...overrides
+      });
+      return session;
+    }
+
+    it('listTimers reads the registry open (no token)', async () => {
+      const listTimersImpl = vi.fn(async () => [MOCK_TIMER]);
+      const session = timerSession({ listTimersImpl });
+      const timers = await session.listTimers();
+      expect(timers).toEqual([MOCK_TIMER]);
+      expect(listTimersImpl).toHaveBeenCalledWith('http://d.local', { token: undefined });
+    });
+
+    it('createTimer returns the new timer (full-trust, no token)', async () => {
+      const created: Timer = {
+        id: 'fast-x1',
+        name: 'Fast',
+        kind: { Mock: { laps: 5, lap_ms: 12000 } },
+        status: 'Ready'
+      };
+      const createTimerImpl = vi.fn(async () => created);
+      const session = timerSession({ createTimerImpl });
+      const req = { name: 'Fast', kind: { Mock: { laps: 5, lap_ms: 12000 } } } as const;
+      const result = await session.createTimer(req);
+      expect(result).toEqual(created);
+      expect(createTimerImpl).toHaveBeenCalledWith('http://d.local', req, undefined);
+    });
+
+    it('createTimer prompts then retries once on an auth (401) failure', async () => {
+      const created: Timer = {
+        ...MOCK_TIMER,
+        id: 'rh-1',
+        name: 'RH',
+        kind: { Rotorhazard: { url: 'http://rh' } }
+      };
+      const createTimerImpl = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('POST /timers failed: HTTP 401'))
+        .mockResolvedValueOnce(created);
+      const session = timerSession({ createTimerImpl });
+      session.setTokenProvider(async () => 'tok');
+      const result = await session.createTimer({
+        name: 'RH',
+        kind: { Rotorhazard: { url: 'http://rh' } }
+      });
+      expect(result).toEqual(created);
+      expect(createTimerImpl).toHaveBeenCalledTimes(2);
+      // The retry carried the freshly-entered token.
+      expect(createTimerImpl).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
+    });
+
+    it('createTimer resolves undefined when the auth prompt is cancelled', async () => {
+      const createTimerImpl = vi.fn().mockRejectedValue(new Error('POST /timers failed: HTTP 401'));
+      const session = timerSession({ createTimerImpl });
+      session.setTokenProvider(async () => undefined);
+      const result = await session.createTimer({
+        name: 'X',
+        kind: { Mock: { laps: 1, lap_ms: 1000 } }
+      });
+      expect(result).toBeUndefined();
+      expect(createTimerImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it('deleteTimer re-throws a non-auth (400) failure for the UI to surface', async () => {
+      const deleteTimerImpl = vi
+        .fn()
+        .mockRejectedValue(new Error('DELETE /timers/mock failed: HTTP 400'));
+      const session = timerSession({ deleteTimerImpl });
+      await expect(session.deleteTimer('mock')).rejects.toThrow(/400/);
+    });
+
+    it('setEventTimers is a no-op (undefined) with no event selected', async () => {
+      const setEventTimersImpl = vi.fn();
+      const session = timerSession({ setEventTimersImpl });
+      const result = await session.setEventTimers(['mock']);
+      expect(result).toBeUndefined();
+      expect(setEventTimersImpl).not.toHaveBeenCalled();
+    });
+
+    it('setEventTimers saves and re-homes currentEvent with the server response', async () => {
+      const updated: EventMeta = { ...PRACTICE, timers: ['mock', 'rh-1'] };
+      const setEventTimersImpl = vi.fn(async () => updated);
+      const session = timerSession({ setEventTimersImpl });
+      session.selectEvent(PRACTICE);
+      const result = await session.setEventTimers(['mock', 'rh-1']);
+      expect(result).toEqual(updated);
+      expect(setEventTimersImpl).toHaveBeenCalledWith(
+        'http://d.local',
+        'practice',
+        ['mock', 'rh-1'],
+        undefined
+      );
+      expect(session.currentEvent?.timers).toEqual(['mock', 'rh-1']);
     });
   });
 });
