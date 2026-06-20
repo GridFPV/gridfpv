@@ -15,8 +15,9 @@
    * routes between them and owns the session.
    */
   import '@gridfpv/components/tokens.css';
-  import { StatusPill, ToastHost, Dialog, Button, Field, Input, toast } from '@gridfpv/components';
+  import { ToastHost, Dialog, Button, Field, Input, toast } from '@gridfpv/components';
   import { Session } from './lib/session.svelte.js';
+  import ContextHeader from './ContextHeader.svelte';
   import { emptyConfig, type EventConfig } from './lib/setup.js';
   import EventPicker from './screens/EventPicker.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
@@ -96,9 +97,6 @@
     tokenInput = '';
     toast.info('Control token cleared.');
   }
-
-  const eventName = $derived(session.currentEvent?.name ?? '');
-  const liveHeat = $derived(session.liveState?.current_heat);
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -156,34 +154,15 @@
       </nav>
 
       <div class="sidebar-foot">
-        <div class="conn" title={`Read stream: ${session.connectionStatus}`}>
-          <StatusPill status={session.connectionStatus} size="sm" />
-          <span class="conn-label">{session.connectionStatus}</span>
-        </div>
         <code class="base">{session.baseUrl}</code>
-        <button type="button" class="switch-event" onclick={leaveToPicker}>← Switch event</button>
       </div>
     </aside>
 
     <div class="main-col">
       <header class="topbar">
-        <div class="crumbs">
-          <button
-            type="button"
-            class="event-home"
-            onclick={() => (active = 'live')}
-            title={`${eventName} — go to live control`}
-          >
-            <span class="event-name">{eventName}</span>
-          </button>
-          <span class="sep" aria-hidden="true">/</span>
-          <h1 class="screen-title">{activeScreen?.label}</h1>
-          {#if liveHeat}
-            <span class="heat-chip">Heat {liveHeat}</span>
-          {/if}
-        </div>
+        <ContextHeader {session} ongolive={() => (active = 'live')} onswitchevent={leaveToPicker} />
         <div class="topbar-actions">
-          <StatusPill status={session.connectionStatus} />
+          <h1 class="screen-title">{activeScreen?.label}</h1>
           <button
             type="button"
             class="gear"
@@ -391,43 +370,10 @@
     padding: var(--gf-space-3) var(--gf-space-2) 0;
     border-top: 1px solid var(--gf-border-subtle);
   }
-  .conn {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-2);
-  }
-  /* Kept as an explicit text hook for the e2e (`.conn-label` === status text),
-   * but visually folded into the StatusPill above; hidden off-screen. */
-  .conn-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
   .base {
     font-size: var(--gf-font-size-2xs);
     color: var(--gf-text-faint);
     word-break: break-all;
-  }
-  .switch-event {
-    align-self: flex-start;
-    background: transparent;
-    border: 1px solid var(--gf-border);
-    border-radius: var(--gf-radius-sm);
-    padding: var(--gf-space-1) var(--gf-space-3);
-    color: var(--gf-text-secondary);
-    font-family: inherit;
-    font-size: var(--gf-font-size-xs);
-    cursor: pointer;
-    transition:
-      border-color var(--gf-motion-fast) var(--gf-ease-out),
-      color var(--gf-motion-fast) var(--gf-ease-out);
-  }
-  .switch-event:hover {
-    border-color: var(--gf-border-strong);
-    color: var(--gf-text);
   }
 
   /* ── Main column (topbar + content) ──────────────────────────────────────── */
@@ -450,58 +396,19 @@
     backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--gf-border-subtle);
   }
-  .crumbs {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-3);
+  /* The context bar fills the topbar; the screen title + gear sit to its right. */
+  .topbar :global(.ctx-bar) {
+    flex: 1;
     min-width: 0;
-  }
-  .event-home {
-    display: inline-flex;
-    align-items: center;
-    max-width: 16rem;
-    padding: var(--gf-space-1) var(--gf-space-2);
-    margin-left: calc(-1 * var(--gf-space-2));
-    border: 1px solid transparent;
-    border-radius: var(--gf-radius-sm);
-    background: transparent;
-    color: var(--gf-text-muted);
-    font-family: inherit;
-    font-size: var(--gf-font-size-sm);
-    cursor: pointer;
-    transition:
-      border-color var(--gf-motion-fast) var(--gf-ease-out),
-      background var(--gf-motion-fast) var(--gf-ease-out),
-      color var(--gf-motion-fast) var(--gf-ease-out);
-  }
-  .event-home:hover {
-    background: var(--gf-elevated);
-    border-color: var(--gf-border);
-    color: var(--gf-text);
-  }
-  .event-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: var(--gf-font-weight-semibold);
-  }
-  .sep {
-    color: var(--gf-text-faint);
   }
   .screen-title {
     margin: 0;
-    font-size: var(--gf-font-size-lg);
+    font-size: var(--gf-font-size-sm);
     font-weight: var(--gf-font-weight-semibold);
-    letter-spacing: var(--gf-tracking-tight);
-  }
-  .heat-chip {
-    padding: 0.15em 0.6em;
-    border-radius: var(--gf-radius-pill);
-    background: var(--gf-accent-soft);
-    color: var(--gf-accent);
-    font-size: var(--gf-font-size-xs);
-    font-weight: var(--gf-font-weight-semibold);
-    font-variant-numeric: tabular-nums;
+    letter-spacing: var(--gf-tracking-caps);
+    text-transform: uppercase;
+    color: var(--gf-text-muted);
+    white-space: nowrap;
   }
   .topbar-actions {
     display: flex;
@@ -571,10 +478,6 @@
     }
     .nav-item {
       justify-content: center;
-    }
-    .switch-event {
-      font-size: 0;
-      padding: var(--gf-space-1);
     }
   }
 </style>
