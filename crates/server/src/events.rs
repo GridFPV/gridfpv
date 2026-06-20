@@ -72,6 +72,25 @@ pub struct EventMeta {
     /// Whether the event's log is durable (a SQLite file) or ephemeral (the in-memory
     /// Practice log, `false`).
     pub persistent: bool,
+    /// Optional **display date** of the event, as a free-form string (e.g. `"2026-06-20"` or
+    /// `"Sat 20 Jun"`). A string, not an epoch — it is a *human label the RD types*, shown
+    /// verbatim on the picker and (later) the context header; the authoritative machine
+    /// timestamp is [`created_at`](Self::created_at). Omitted from the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub date: Option<String>,
+    /// Optional venue / location label (e.g. `"Main field"`). Omitted from the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub location: Option<String>,
+    /// Optional free-text description / notes for the event. Omitted from the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    /// Optional organizer name (the running club / person). Omitted from the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub organizer: Option<String>,
 }
 
 /// The body of `POST /events` — the only thing a caller supplies when creating an event.
@@ -85,6 +104,23 @@ pub struct EventMeta {
 pub struct CreateEventRequest {
     /// The display name for the new event.
     pub name: String,
+    /// Optional **display date** stored on the new event's [`EventMeta::date`] (see there).
+    /// Omitted from the wire when unset — a name-only create stays a one-field body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub date: Option<String>,
+    /// Optional venue / location, stored on [`EventMeta::location`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub location: Option<String>,
+    /// Optional free-text description, stored on [`EventMeta::description`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    /// Optional organizer name, stored on [`EventMeta::organizer`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub organizer: Option<String>,
 }
 
 /// One registered event: its metadata plus the [`AppState`] (its own log + append-notify,
@@ -144,6 +180,10 @@ impl EventRegistry {
                     name: PRACTICE_EVENT_NAME.to_string(),
                     created_at: now_millis(),
                     persistent: false,
+                    date: None,
+                    location: None,
+                    description: None,
+                    organizer: None,
                 },
                 state: practice_state,
             },
@@ -198,15 +238,17 @@ impl EventRegistry {
         out
     }
 
-    /// Create a new persistent event from a display `name`, returning its [`EventMeta`].
+    /// Create a new persistent event from a [`CreateEventRequest`], returning its [`EventMeta`].
     ///
-    /// The **id is auto-generated** — a slug of `name` plus a short random suffix — so it is
-    /// unique and never user-entered (names are display-only). A file-backed
-    /// [`SqliteLog`](gridfpv_storage::SqliteLog) is opened under the configured data dir
-    /// (`<data_dir>/<id>.sqlite`); with no data dir configured the event falls back to an
-    /// in-memory log so creation still succeeds. The new event shares the registry's token
-    /// store, so the RD's token controls it immediately.
-    pub fn create(&self, name: &str) -> Result<EventMeta, RegistryError> {
+    /// The **id is auto-generated** — a slug of the request's `name` plus a short random
+    /// suffix — so it is unique and never user-entered (names are display-only). The optional
+    /// descriptive fields (`date`/`location`/`description`/`organizer`) are stored verbatim on
+    /// the new event's meta. A file-backed [`SqliteLog`](gridfpv_storage::SqliteLog) is opened
+    /// under the configured data dir (`<data_dir>/<id>.sqlite`); with no data dir configured the
+    /// event falls back to an in-memory log so creation still succeeds. The new event shares the
+    /// registry's token store, so the RD's token controls it immediately.
+    pub fn create(&self, request: &CreateEventRequest) -> Result<EventMeta, RegistryError> {
+        let name = request.name.as_str();
         let mut reg = self.write();
 
         // Auto-generate a unique id: slug + short random suffix, retried on the (astronomically
@@ -234,11 +276,17 @@ impl EventRegistry {
             ),
         };
 
+        // Optional descriptive fields are stored verbatim, normalized so a blank string is
+        // treated as "unset" (so an empty "Add details" field never persists an empty label).
         let meta = EventMeta {
             id: id.clone(),
             name: name.to_string(),
             created_at: now_millis(),
             persistent,
+            date: normalize_optional(&request.date),
+            location: normalize_optional(&request.location),
+            description: normalize_optional(&request.description),
+            organizer: normalize_optional(&request.organizer),
         };
         reg.events.insert(
             id,
@@ -284,6 +332,16 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// Trim an optional descriptive field, treating a blank/whitespace-only value as **unset**
+/// (`None`) so an empty "Add details" input never persists an empty label.
+fn normalize_optional(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Slugify a display name into the id-friendly stem: lowercase, ASCII alphanumerics kept,
 /// every run of other characters collapsed to a single `-`, trimmed of leading/trailing
 /// dashes. An empty/symbol-only name yields `event` so the id stem is never blank.
@@ -325,6 +383,17 @@ mod tests {
     use super::*;
     use gridfpv_events::{CompetitorRef, Event, HeatId};
 
+    /// A name-only create request (the common one-click path) for the tests.
+    fn req(name: &str) -> CreateEventRequest {
+        CreateEventRequest {
+            name: name.to_string(),
+            date: None,
+            location: None,
+            description: None,
+            organizer: None,
+        }
+    }
+
     #[test]
     fn practice_is_always_present_and_first() {
         let reg = EventRegistry::new(None).unwrap();
@@ -345,8 +414,8 @@ mod tests {
     #[test]
     fn create_auto_generates_a_unique_slug_id() {
         let reg = EventRegistry::new(None).unwrap();
-        let a = reg.create("Spring Cup 2026!").unwrap();
-        let b = reg.create("Spring Cup 2026!").unwrap();
+        let a = reg.create(&req("Spring Cup 2026!")).unwrap();
+        let b = reg.create(&req("Spring Cup 2026!")).unwrap();
         // Same name, distinct ids (the random suffix disambiguates); slug is name-derived.
         assert!(a.id.0.starts_with("spring-cup-2026-"));
         assert!(b.id.0.starts_with("spring-cup-2026-"));
@@ -362,7 +431,7 @@ mod tests {
     fn created_event_log_is_independent_of_practice() {
         let reg = EventRegistry::new(None).unwrap();
         let practice = reg.resolve(&EventId(PRACTICE_EVENT_ID.into())).unwrap();
-        let created = reg.create("Race Night").unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
         let created_state = reg.resolve(&created.id).unwrap();
 
         // Append a heat into the created event only.
@@ -387,7 +456,7 @@ mod tests {
     fn one_rd_token_controls_every_event() {
         let reg = EventRegistry::new(None).unwrap();
         let rd = reg.tokens().issue_rd_token();
-        let created = reg.create("Race Night").unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
         // The shared token store is the same instance behind every event's AppState.
         let practice = reg.resolve(&EventId(PRACTICE_EVENT_ID.into())).unwrap();
         let created_state = reg.resolve(&created.id).unwrap();
@@ -412,7 +481,7 @@ mod tests {
     fn create_persists_a_file_per_event_when_a_data_dir_is_set() {
         let dir = std::env::temp_dir().join(format!("gridfpv-reg-test-{}", short_suffix()));
         let reg = EventRegistry::new(Some(dir.clone())).unwrap();
-        let created = reg.create("Persisted").unwrap();
+        let created = reg.create(&req("Persisted")).unwrap();
         assert!(created.persistent);
         let path = event_db_path(&dir, &created.id);
         assert!(path.exists(), "an event DB file should be created");

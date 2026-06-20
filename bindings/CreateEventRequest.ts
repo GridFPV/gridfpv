@@ -12,4 +12,21 @@ export type CreateEventRequest = {
 /**
  * The display name for the new event.
  */
-name: string, };
+name: string, 
+/**
+ * Optional **display date** stored on the new event's [`EventMeta::date`] (see there).
+ * Omitted from the wire when unset — a name-only create stays a one-field body.
+ */
+date?: string, 
+/**
+ * Optional venue / location, stored on [`EventMeta::location`].
+ */
+location?: string, 
+/**
+ * Optional free-text description, stored on [`EventMeta::description`].
+ */
+description?: string, 
+/**
+ * Optional organizer name, stored on [`EventMeta::organizer`].
+ */
+organizer?: string, };
