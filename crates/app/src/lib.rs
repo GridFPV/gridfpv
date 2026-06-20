@@ -8,7 +8,15 @@
 //! 3. a **minimal read** renders the lap list as text (#9).
 //!
 //! The same pieces back the replay harness (`tests/replay.rs`, #10).
+//!
+//! As of v0.4 (#13) the binary itself is the **Director server**: `main.rs` opens the
+//! event log, builds the protocol [`server::app::router`], serves the built RD console
+//! SPA, and binds an address (see the [`director`] module). The walking-skeleton fold
+//! below is kept as the `gridfpv demo` subcommand and as the test surface the replay
+//! harness exercises.
 #![forbid(unsafe_code)]
+
+pub mod director;
 
 use gridfpv_events::{AdapterId, CompetitorRef, Event, GateIndex, Pass, SourceTime};
 use gridfpv_projection::{LapList, lap_list};

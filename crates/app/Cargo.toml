@@ -15,6 +15,22 @@ gridfpv-events.workspace = true
 gridfpv-storage.workspace = true
 gridfpv-projection.workspace = true
 
+# The Director server: `main.rs` opens the log, builds `server::router(state)`, and
+# serves the protocol API + the built RD console SPA over axum. `tokio` runs the async
+# runtime; `tower-http` adds `ServeDir` (SPA fallback) + permissive CORS (so the Windows
+# Tauri app, a different origin, can call the API/WS). axum matches the server's 0.8.
+# NO adapters / `live` feature here — server + storage + axum + tower-http + tokio only,
+# so the Director binary never pulls openssl.
+gridfpv-server.workspace = true
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+
 [dev-dependencies]
 serde_json.workspace = true
 gridfpv-adapters.workspace = true
+# The Director integration test (#13) drives the served router with no real network via
+# `tower::ServiceExt::oneshot`, collecting the response body to assert on it.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
