@@ -241,14 +241,16 @@ impl AppState {
 /// The WS stream (#43), auth middleware (#44), and control routes (#45) layer onto this
 /// same router and state.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let read = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/snapshot/event/{event}", get(snapshot_event))
         .route("/snapshot/class/{event}/{class}", get(snapshot_class))
         .route("/snapshot/heat/{heat}", get(snapshot_heat))
         .route("/snapshot/pilot/{event}/{pilot}", get(snapshot_pilot))
-        .route("/stream", get(crate::ws::stream_handler))
-        .with_state(state)
+        .route("/stream", get(crate::ws::stream_handler));
+    // The privileged RD control surface (§5) is composed on separately so #44 can wrap
+    // just these routes in its auth layer.
+    crate::control_handler::control_routes(read).with_state(state)
 }
 
 /// The projection a heat-scope snapshot returns. Selected by `?projection=…`; defaults to
