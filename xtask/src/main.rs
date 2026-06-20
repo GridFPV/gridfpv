@@ -161,9 +161,12 @@ fn live() -> bool {
     // Each spins up + tears down its own disposable RotorHazard.
     let live_rh = target("gridfpv-adapters", "rh_live", true);
     let signal = target("gridfpv-adapters", "rh_signal", true);
-    // The engine's mock-RH e2e: drives a full heat through the shared harness (#29).
+    // The engine's mock-RH e2e tests: each drives a full heat through the shared
+    // harness on its own port (#29 heat loop, #30 scoring, #31 marshaling).
     let heat_live = target("gridfpv-engine", "heat_live", true);
-    ws && live_rh && signal && heat_live
+    let scoring_live = target("gridfpv-engine", "scoring_live", true);
+    let marshaling_live = target("gridfpv-engine", "marshaling_live", true);
+    ws && live_rh && signal && heat_live && scoring_live && marshaling_live
 }
 
 fn main() {
