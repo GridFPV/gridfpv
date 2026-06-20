@@ -242,6 +242,23 @@ export class Session {
   }
 
   /**
+   * Read the id of the Director's **active event** (`GET /active-event`, open, no token) — issue
+   * #91. The picker uses this to mark which event is currently live, independent of whether this
+   * console is inside it: "Switch event" ({@link leaveEvent}) returns to the picker *without*
+   * clearing the server's active event, so the picker can show the **Active** pill on the row of
+   * the still-live event. Resolves the id, or `undefined` when nothing is active or the read fails
+   * (the picker simply shows no pill — it never blocks the list).
+   */
+  async getActiveEventId(): Promise<EventMeta['id'] | undefined> {
+    try {
+      const { event } = await this.#getActiveEventImpl(this.baseUrl, { token: this.#token });
+      return event?.id;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Resolve the Director's **active event** on load/connect (issue #90) and either resume into
    * it or fall back to the picker. The active event is server-side Director state — there is one
    * RD on one event — so a reload/reconnect/app-restart reads it (`GET /active-event`) and enters

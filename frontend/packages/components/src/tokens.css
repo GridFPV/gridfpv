@@ -132,6 +132,16 @@
   --gf-medal-silver-contrast: #14181f;
   --gf-medal-bronze-contrast: #1a0e02;
 
+  /* ── Practice accent — a warm red-orange (#91). ──────────────────────────────
+   * The Practice "scratch space" hero in the event picker uses a warm accent
+   * rather than the brand green: green reads as "live / brand", so a friendly
+   * red-orange better signals a non-persistent, just-try-it space. It sits
+   * between the amber and red ramps so it reads warm but never alarming on the
+   * dark slate. `-soft` is the tinted hero wash; `-ring` the row border. */
+  --gf-accent-practice: #ff7a45;
+  --gf-accent-practice-soft: color-mix(in srgb, var(--gf-accent-practice) 16%, transparent);
+  --gf-accent-practice-ring: color-mix(in srgb, var(--gf-accent-practice) 45%, transparent);
+
   /* ── Semantic status colors (success / warning / danger / info). ─────────── */
   --gf-success: var(--gf-green-400);
   --gf-success-soft: color-mix(in srgb, var(--gf-green-400) 16%, transparent);
@@ -272,6 +282,11 @@
   --gf-warn: var(--gf-amber-500);
   --gf-danger: var(--gf-red-500);
   --gf-info: var(--gf-blue-500);
+
+  /* Practice accent (#91): a touch deeper so it holds contrast on a white canvas. */
+  --gf-accent-practice: #e8602a;
+  --gf-accent-practice-soft: color-mix(in srgb, var(--gf-accent-practice) 12%, transparent);
+  --gf-accent-practice-ring: color-mix(in srgb, var(--gf-accent-practice) 40%, transparent);
 
   --gf-phase-scheduled: var(--gf-neutral-500);
   --gf-phase-staged: var(--gf-amber-500);
