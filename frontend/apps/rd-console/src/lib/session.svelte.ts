@@ -321,10 +321,15 @@ export class Session {
   /**
    * Remove a timer (`DELETE /timers/{id}`). The built-in **Mock cannot be deleted** (the Director
    * answers **400**); that surfaces to the caller as a thrown error to handle gracefully. Resolves
-   * once the delete succeeds, `undefined` on a cancelled prompt, or throws on any other failure.
+   * to `true` once the delete succeeds, `undefined` on a cancelled token prompt, or throws on any
+   * other failure. (Returning `true` lets callers tell success apart from a cancelled prompt — the
+   * `DELETE` itself has no body, so a raw `void` would be indistinguishable from the cancel case.)
    */
-  deleteTimer(id: TimerId): Promise<void | undefined> {
-    return this.#privilegedWrite((token) => this.#deleteTimerImpl(this.baseUrl, id, token));
+  deleteTimer(id: TimerId): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#deleteTimerImpl(this.baseUrl, id, token);
+      return true as const;
+    });
   }
 
   /**
