@@ -1,6 +1,15 @@
 # GridFPV CI — runs the SAME check suite as local dev: `cargo xtask ci`.
 # Keep this file thin. All check logic lives in xtask/ (issue #18) so the
 # pipeline and a developer's machine can never run different checks.
+# This shared pipeline runs only the core, deterministic check suite. The
+# container-dependent live integration tests (the `live` feature, dockerized
+# RotorHazard) are deliberately NOT here — they're flaky and resource-heavy on
+# shared runners. They run as a separate local class:
+#
+#     cargo xtask live      # brings up dockerized RH, runs the live test, tears down
+#
+# (Requires Docker. Add a Docker-capable self-hosted runner later if we want it in
+# CI.) See docker/rotorhazard/README.md and crates/adapters/tests/rh_live.rs.
 stages:
   - check
 

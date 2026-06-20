@@ -1,0 +1,149 @@
+//! Live RotorHazard Socket.IO transport (feature `live`).
+//!
+//! Connects to a running RotorHazard server, decodes its socket events into the
+//! adapter's [`Raw`] messages, runs them through [`RotorHazardAdapter`], and
+//! accumulates the canonical [`Event`]s. This is the thin network layer the pure
+//! translator (the rest of the module) was designed to sit behind: all wire-format
+//! knowledge stays in `Raw`/`translate`; this file only moves bytes.
+//!
+//! The RotorHazard server emits each payload as a one-element array
+//! (`[ {…} ]`); we decode the first element into the matching `Raw` variant.
+//!
+//! Read-only in production (drain [`RotorHazardConnection::events`]); the
+//! `stage_race` / `simulate_lap` / `stop_race` helpers exist to **drive** a
+//! dockerized RH from the live integration test.
+
+// `rust_socketio::Error` is a large external enum; we thread it through unchanged
+// rather than box every signature in this thin wrapper.
+#![allow(clippy::result_large_err)]
+
+use std::sync::{Arc, Mutex};
+
+use rust_socketio::client::Client;
+use rust_socketio::{ClientBuilder, Payload, RawClient};
+use serde_json::json;
+
+use super::{Raw, RawCurrentLaps, RawNodeData, RawPassRecord, RawRaceStatus, RotorHazardAdapter};
+use crate::Adapter;
+use gridfpv_events::Event;
+
+/// Decode a RotorHazard socket event (`event` name + its payload) into a [`Raw`].
+///
+/// Returns `None` for events we don't translate, or payloads that don't match the
+/// expected shape — the transport simply ignores those.
+pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
+    // RotorHazard wraps each emit's data in a one-element array.
+    let value = match payload {
+        Payload::Text(values) => values.first()?.clone(),
+        _ => return None,
+    };
+    match event {
+        "race_status" => serde_json::from_value::<RawRaceStatus>(value)
+            .ok()
+            .map(Raw::RaceStatus),
+        "current_laps" => serde_json::from_value::<RawCurrentLaps>(value)
+            .ok()
+            .map(Raw::CurrentLaps),
+        "pass_record" => serde_json::from_value::<RawPassRecord>(value)
+            .ok()
+            .map(Raw::PassRecord),
+        "node_data" => serde_json::from_value::<RawNodeData>(value)
+            .ok()
+            .map(Raw::NodeData),
+        _ => None,
+    }
+}
+
+/// A live connection to a RotorHazard server, translating its socket stream into
+/// canonical [`Event`]s.
+pub struct RotorHazardConnection {
+    client: Client,
+    events: Arc<Mutex<Vec<Event>>>,
+}
+
+impl RotorHazardConnection {
+    /// Connect to `url` (e.g. `http://localhost:5000`) and start translating the
+    /// RotorHazard socket stream through `adapter`.
+    pub fn connect(url: &str, adapter: RotorHazardAdapter) -> Result<Self, rust_socketio::Error> {
+        let adapter = Arc::new(Mutex::new(adapter));
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // One handler per translated event: decode -> translate -> accumulate.
+        let handler = |name: &'static str,
+                       adapter: Arc<Mutex<RotorHazardAdapter>>,
+                       sink: Arc<Mutex<Vec<Event>>>| {
+            move |payload: Payload, _client: RawClient| {
+                if let Some(raw) = raw_from_socket(name, &payload) {
+                    let translated = adapter.lock().unwrap().translate(raw);
+                    if !translated.is_empty() {
+                        sink.lock().unwrap().extend(translated);
+                    }
+                }
+            }
+        };
+
+        let client = ClientBuilder::new(url.to_string())
+            // Resume after a dropped connection. On reconnect RotorHazard re-sends the
+            // full `current_laps` snapshot; the adapter's per-lap dedup makes that
+            // replay safe (no double-counted laps) — see the dedup module + the
+            // rh_signal snapshot-dedup assertion.
+            .reconnect(true)
+            .on(
+                "race_status",
+                handler("race_status", adapter.clone(), events.clone()),
+            )
+            .on(
+                "current_laps",
+                handler("current_laps", adapter.clone(), events.clone()),
+            )
+            .on(
+                "node_data",
+                handler("node_data", adapter.clone(), events.clone()),
+            )
+            .on(
+                "pass_record",
+                handler("pass_record", adapter.clone(), events.clone()),
+            )
+            .connect()?;
+
+        // Warm initial state on (re)connect: ask RH to send current per-node RSSI so
+        // the signal-context cache is populated before the first pass. `current_laps`
+        // and `race_status` arrive via the normal snapshot stream.
+        let _ = client.emit("load_data", json!({ "load_types": ["node_data"] }));
+
+        Ok(Self { client, events })
+    }
+
+    /// Take everything translated since the last call.
+    pub fn events(&self) -> Vec<Event> {
+        let mut guard = self.events.lock().unwrap();
+        std::mem::take(&mut *guard)
+    }
+
+    /// Stage (and auto-start) a race — for driving a dockerized RH from tests.
+    pub fn stage_race(&self) -> Result<(), rust_socketio::Error> {
+        // 0-arg server handler: emit with no payload args.
+        self.client.emit("stage_race", Payload::Text(vec![]))
+    }
+
+    /// Inject a simulated pass on `node` (0-based) — driving helper for tests.
+    pub fn simulate_lap(&self, node: u64) -> Result<(), rust_socketio::Error> {
+        self.client.emit("simulate_lap", json!({ "node": node }))
+    }
+
+    /// Stop the current race — driving helper for tests.
+    pub fn stop_race(&self) -> Result<(), rust_socketio::Error> {
+        self.client.emit("stop_race", Payload::Text(vec![]))
+    }
+
+    /// Discard the current race's laps, returning RotorHazard to a READY state —
+    /// driving helper so a test can stage cleanly regardless of prior state.
+    pub fn discard_laps(&self) -> Result<(), rust_socketio::Error> {
+        self.client.emit("discard_laps", Payload::Text(vec![]))
+    }
+
+    /// Disconnect from the server.
+    pub fn disconnect(self) -> Result<(), rust_socketio::Error> {
+        self.client.disconnect()
+    }
+}

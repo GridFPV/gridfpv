@@ -4,6 +4,7 @@ members = [
     "crates/events",
     "crates/storage",
     "crates/projection",
+    "crates/adapters",
     "crates/app",
     "xtask",
 ]
@@ -21,6 +22,7 @@ rust-version = "1.85"
 gridfpv-events = { path = "crates/events" }
 gridfpv-storage = { path = "crates/storage" }
 gridfpv-projection = { path = "crates/projection" }
+gridfpv-adapters = { path = "crates/adapters" }
 
 # Third-party.
 serde = { version = "1", features = ["derive"] }

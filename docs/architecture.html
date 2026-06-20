@@ -317,9 +317,13 @@ flowchart TB
       Cloud (off-LAN) — a client is configured only with a base URL.
     </p>
     <div class="principle">
-      <p><span class="name">Contract defined once, in Rust.</span> The wire types live in
-      the server crate and are generated into TypeScript for the frontend, so the Director,
-      the Cloud, and every client share one definition that can't drift.</p>
+      <p><span class="name">Contract defined once, in Rust.</span> The wire types live in a
+      shared Rust crate — today the canonical event model (<code>gridfpv-events</code>),
+      extended with the protocol's snapshot/read types as they land — and are generated into
+      TypeScript for the frontend, so the Director, the Cloud, and every client share one
+      definition that can't drift. <em>(The event-log vocabulary already generates to TS via
+      ts-rs with a CI drift check; the projection/snapshot types get their own bindings when
+      the protocol crate arrives.)</em></p>
     </div>
     <p>
       Exact message shapes (snapshot format, the change-stream envelope, auth) are a
@@ -461,9 +465,11 @@ flowchart TB
       (every framework consumes the same generated types); chosen for leanness and
       realtime/overlay fit — rationale in <a href="clients.html">Clients</a> (React recorded as
       the revisitable alternative).</li>
-      <li><span class="q">Adapter internals &amp; how "raw" the raw timing is.</span> The
-      canonical event model, per-source translation, and whether a lap is a re-derivable
-      projection of captured signal — <a href="timer-adapters.html">Timer Adapters</a>.</li>
+      <li><span class="resolved">In progress — Adapter internals &amp; how "raw" the raw timing
+      is.</span> The canonical event model is built (<code>gridfpv-events</code>), and the first
+      two adapters (RotorHazard, Velocidrone) translate validated real wire formats; a lap is a
+      re-derivable projection of the pass stream. Remaining detail (richer signal summary,
+      signal-based recovery) — <a href="timer-adapters.html">Timer Adapters</a>.</li>
       <li><span class="q">Protocol message shapes, realtime transport &amp; auth.</span>
       Snapshot format, change envelope, WS-vs-SSE, and the RD's privileged write path —
       <a href="protocol.html">Protocol</a>.</li>

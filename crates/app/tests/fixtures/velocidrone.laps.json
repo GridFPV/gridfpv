@@ -1,0 +1,17 @@
+{
+  "competitors": [
+    {
+      "competitor": { "adapter": "velocidrone", "competitor": "Ace" },
+      "laps": [
+        { "number": 1, "duration_micros": 12000000 },
+        { "number": 2, "duration_micros": 13000000 }
+      ]
+    },
+    {
+      "competitor": { "adapter": "velocidrone", "competitor": "Bee" },
+      "laps": [
+        { "number": 1, "duration_micros": 13000000 }
+      ]
+    }
+  ]
+}

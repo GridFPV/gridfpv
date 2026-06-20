@@ -1,0 +1,15 @@
+{
+  "competitors": [
+    {
+      "competitor": { "adapter": "rotorhazard", "competitor": "node-0" },
+      "laps": [
+        { "number": 1, "duration_micros": 5201223 },
+        { "number": 2, "duration_micros": 2601166 }
+      ]
+    },
+    {
+      "competitor": { "adapter": "rotorhazard", "competitor": "node-1" },
+      "laps": []
+    }
+  ]
+}

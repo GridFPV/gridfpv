@@ -17,3 +17,4 @@ gridfpv-projection.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+gridfpv-adapters.workspace = true

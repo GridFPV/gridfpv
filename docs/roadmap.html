@@ -76,6 +76,17 @@ flowchart LR
     </pre>
     <p class="phase-meta">v0.4 (highlighted) is the first build that can run a real event end to end.</p>
 
+    <div class="callout">
+      <p>
+        <strong>Status (2026-06):</strong> <strong>v0.1</strong> (walking skeleton) and
+        <strong>v0.2</strong> (first adapters + replay harness) are <strong>complete and
+        merged</strong> — the SQLite append-only log, projection engine, Rust→TS generation,
+        RotorHazard + Velocidrone adapters, recorded-session replay golden tests, and live +
+        emulated-signal dockerized-RH tests are all in the tree. As designed, v0.2 already
+        ingests a live (dockerized) source — "shadow mode." Next: <strong>v0.3 — Race engine</strong>.
+      </p>
+    </div>
+
     <h3>v0.1 — Walking skeleton</h3>
     <p><strong>Goal:</strong> prove the append-only spine end to end with the simplest possible pieces.</p>
     <ul>

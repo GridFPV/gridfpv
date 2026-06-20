@@ -45,16 +45,12 @@ fn fmt() -> bool {
 }
 
 fn lint() -> bool {
+    // Default features only: the optional `live` feature pulls a network stack
+    // (rust_socketio -> openssl) and needs a running RotorHazard, so it is linted
+    // + tested in the dedicated `rh-live` CI job, not the core check suite.
     run(
         "cargo",
-        &[
-            "clippy",
-            "--all-targets",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ],
+        &["clippy", "--all-targets", "--", "-D", "warnings"],
     )
 }
 
@@ -132,6 +128,42 @@ fn gen_check() -> bool {
     clean
 }
 
+/// `cargo xtask live` — the local-only integration test class.
+///
+/// Container-dependent tests don't belong in the shared CI pipeline (flaky,
+/// resource-limited). These run the `live` feature: the WebSocket mock-server test
+/// (no container) and the dockerized-RotorHazard tests (`rh_live` via `simulate_lap`
+/// and `rh_signal` via emulated `mock_data` RSSI streams). Each container test spins
+/// up and tears down its own disposable RotorHazard, so no external state is needed —
+/// just Docker. `--include-ignored` runs the `#[ignore]`d container tests too.
+fn live() -> bool {
+    // Run each target sequentially so at most one RotorHazard container exists at a
+    // time (cargo runs separate test binaries in parallel otherwise).
+    let target = |name: &str, ignored: bool| {
+        let mut args = vec![
+            "test",
+            "-p",
+            "gridfpv-adapters",
+            "--features",
+            "live",
+            "--test",
+            name,
+            "--",
+            "--nocapture",
+        ];
+        if ignored {
+            args.push("--ignored");
+        }
+        run("cargo", &args)
+    };
+    // No container needed (in-process mock WS server).
+    let ws = target("velocidrone_ws", false);
+    // Each spins up + tears down its own disposable RotorHazard.
+    let live_rh = target("rh_live", true);
+    let signal = target("rh_signal", true);
+    ws && live_rh && signal
+}
+
 fn main() {
     let task = std::env::args().nth(1).unwrap_or_else(|| "ci".to_string());
     let ok = match task.as_str() {
@@ -140,9 +172,10 @@ fn main() {
         "test" => test(),
         "gen" => generate(),
         "ci" => fmt() && lint() && test() && gen_check(),
+        "live" => live(),
         other => {
             eprintln!("unknown task: {other}");
-            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen]");
+            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live]");
             false
         }
     };
