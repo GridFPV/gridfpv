@@ -405,6 +405,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridfpv-engine"
+version = "0.1.0"
+dependencies = [
+ "gridfpv-events",
+ "serde_json",
+]
+
+[[package]]
 name = "gridfpv-events"
 version = "0.1.0"
 dependencies = [
@@ -432,6 +440,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "gridfpv-testkit"
+version = "0.1.0"
 
 [[package]]
 name = "h2"
