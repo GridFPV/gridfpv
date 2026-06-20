@@ -1,5 +1,6 @@
 /**
- * Full RD console click-through against a real Director (#13, v0.4 Director wiring).
+ * Full RD console click-through against a real Director (#13, v0.4 Director wiring +
+ * observability harness).
  *
  * This is the deliverable proof: a person opens the RD console, logs in, defines a heat
  * with named pilots, runs it, **watches the live laps climb in the rendered DOM**, finishes
@@ -12,10 +13,13 @@
  * proving the live read stream (protocol-client) and the reactive `Session` push updates
  * all the way through the real render path.
  *
- * The Director (built console SPA + known RD token + fast sim) is stood up by the config's
- * `webServer`; `baseURL` points at it.
+ * The Director (built console SPA + known RD token + fast sim) is a worker-scoped fixture in
+ * `./observability.ts` (boot harness: `../test-harness/director.ts`); `baseURL` points at it.
+ * Importing `test`/`expect` from `./observability.js` (not `@playwright/test`) means this spec
+ * now fails LOUD: if it ever breaks, the failure output carries the full-stack dump — browser
+ * console, page errors, WS frames, and the Director's server log — together.
  */
-import { expect, test } from '@playwright/test';
+import { expect, test } from './observability.js';
 import { RD_TOKEN } from '../playwright.config.js';
 
 const PILOTS = ['Ace', 'Bee', 'Cee'];
