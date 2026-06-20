@@ -125,6 +125,24 @@ impl TokenStore {
         self.issue(Role::ReadOnly)
     }
 
+    /// Register an **RD-role** session under a caller-supplied `token`, returning whether it
+    /// was registered. Unlike [`issue_rd_token`](TokenStore::issue_rd_token) (which mints a
+    /// random opaque token), this pins a *known* control token so a deployment can configure
+    /// a fixed credential — the Director uses it to honour a `GRIDFPV_RD_TOKEN` env, letting
+    /// an automated client (the e2e harness, the Tauri app under test) log in with a known
+    /// value. A blank token is rejected (`false`) so an empty env never registers an empty,
+    /// trivially-guessable key; otherwise the session is registered and `true` returned.
+    pub fn register_rd_token(&self, token: &str) -> bool {
+        if token.trim().is_empty() {
+            return false;
+        }
+        self.sessions
+            .write()
+            .expect("token store lock poisoned")
+            .insert(token.to_string(), Session { role: Role::Rd });
+        true
+    }
+
     /// Register a session for `role` under a fresh opaque token and return the token.
     fn issue(&self, role: Role) -> String {
         let token = random_token();

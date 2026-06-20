@@ -22,3 +22,9 @@ frontend/**/.svelte-kit/
 frontend/**/.vite/
 frontend/**/*.tsbuildinfo
 frontend/.eslintcache
+
+# Playwright e2e run artifacts + downloaded browser binaries (never committed)
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/.playwright/
