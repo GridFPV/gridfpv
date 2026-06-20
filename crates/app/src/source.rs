@@ -301,9 +301,9 @@ pub const REGISTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// log when a heat goes `Running` *there*. Which source(s) run is now the **event's selected
 /// timers** (issue #73), not a single global env source: each bridge reads its event's
 /// [`EventMeta::timers`](gridfpv_server::events::EventMeta::timers) selection live (resolving each
-/// id through the app-level [`TimerRegistry`]) when a heat starts. A selected **Sim** timer runs
+/// id through the app-level [`TimerRegistry`]) when a heat starts. A selected **Mock** timer runs
 /// the synthetic emission with *that timer's* `laps`/`lap_ms`; a selected **RotorHazard** timer is
-/// a no-op stub (2b / #65 connects it). The built-in Simulator's config comes from the env
+/// a no-op stub (2b / #65 connects it). The built-in Mock's config comes from the env
 /// defaults seeded into the timer registry.
 ///
 /// This spawner seeds a bridge for every event present at startup (Practice + any already-loaded
@@ -409,7 +409,7 @@ pub(crate) async fn run_bridge(
 /// Resolve the event's selected timers into the [`LapSource`]s to run for this heat (issue #73).
 ///
 /// Reads the event's current `timers` selection from `registry`, looks each id up in the app-level
-/// `timers` registry, and maps each **Sim** timer to a [`SimSource`] with that timer's
+/// `timers` registry, and maps each **Mock** timer to a [`SimSource`] with that timer's
 /// `laps`/`lap_ms`. A selected **RotorHazard** timer is skipped (a no-op stub for 2b / #65); an id
 /// that no longer resolves (a since-deleted timer) is skipped too. Returns the sources to drive
 /// concurrently for the running heat — empty when the event selects no usable timer.
@@ -427,7 +427,7 @@ fn selected_sources(
             continue;
         };
         match timer.kind {
-            TimerKind::Sim { laps, lap_ms } => {
+            TimerKind::Mock { laps, lap_ms } => {
                 sources.push(Arc::new(SimSource::new(
                     laps,
                     Duration::from_millis(lap_ms),
@@ -572,28 +572,28 @@ mod tests {
 
     use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
     use gridfpv_server::live_state::live_state;
-    use gridfpv_server::timers::{SIM_TIMER_ID, TimerId, TimerKind, UpdateTimerRequest};
+    use gridfpv_server::timers::{MOCK_TIMER_ID, TimerId, TimerKind, UpdateTimerRequest};
     use tokio::time::{Instant, sleep, timeout};
 
-    /// The Practice event id every bridge test drives (its in-memory log + default `["sim"]`
+    /// The Practice event id every bridge test drives (its in-memory log + default `["mock"]`
     /// selection).
     fn practice() -> EventId {
         EventId(PRACTICE_EVENT_ID.to_string())
     }
 
-    /// Build a fresh registry and retune its built-in **Simulator** to a fast pace (`lap_ms`) and
+    /// Build a fresh registry and retune its built-in **Mock** to a fast pace (`lap_ms`) and
     /// the wanted `laps`, so the whole heat runs in a few ms. Practice defaults to selecting the
-    /// Simulator, so the bridge over Practice drives this retuned source. The bridge polls at
+    /// Mock, so the bridge over Practice drives this retuned source. The bridge polls at
     /// [`POLL_INTERVAL`], which dominates start-up latency, so tests keep total laps small.
     fn fast_registry(laps: u32, lap_ms: u64) -> EventRegistry {
         let registry = EventRegistry::new(None).unwrap();
         registry
             .timers()
             .update(
-                &TimerId(SIM_TIMER_ID.to_string()),
+                &TimerId(MOCK_TIMER_ID.to_string()),
                 &UpdateTimerRequest {
                     name: None,
-                    kind: Some(TimerKind::Sim { laps, lap_ms }),
+                    kind: Some(TimerKind::Mock { laps, lap_ms }),
                 },
             )
             .unwrap();
@@ -895,7 +895,7 @@ mod tests {
             .timers()
             .create(&CreateTimerRequest {
                 name: "Fast Sim".into(),
-                kind: TimerKind::Sim { laps: 2, lap_ms: 1 },
+                kind: TimerKind::Mock { laps: 2, lap_ms: 1 },
             })
             .unwrap();
         registry.set_timers(&practice(), vec![timer.id]).unwrap();

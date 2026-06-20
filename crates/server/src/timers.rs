@@ -1,7 +1,7 @@
 //! Timers as **application-level configuration** — the `TimerRegistry` and `Timer` (issue #73).
 //!
 //! A timer is the thing that *produces lap-gate passes* — the built-in synthetic
-//! **Simulator**, or (reserved for #65/2b) a real **RotorHazard** server. The model parallels
+//! **Mock**, or (reserved for #65/2b) a real **RotorHazard** server. The model parallels
 //! the event model ([`EventRegistry`](crate::events::EventRegistry)): a Race Director configures
 //! their timers **once** at the application level (a persisted registry) and each event simply
 //! **selects** which of them to use (see [`EventMeta::timers`](crate::events::EventMeta::timers)).
@@ -12,7 +12,7 @@
 //! - **App-level registry (this module).** The [`TimerRegistry`] holds every configured
 //!   [`Timer`] behind a lock and **persists** them to `<GRIDFPV_DATA_DIR>/timers.json`
 //!   (restored on boot; in-memory only when no data dir is configured). A built-in
-//!   **Simulator** ([`SIM_TIMER_ID`]) is always present — so an unconfigured Director can run a
+//!   **Mock** ([`MOCK_TIMER_ID`]) is always present — so an unconfigured Director can run a
 //!   sim race out of the box — and cannot be deleted.
 //! - **Per-event selection (`crate::events`).** Each [`EventMeta`](crate::events::EventMeta)
 //!   carries a `timers: Vec<TimerId>` of the timers that event uses; new events (and Practice)
@@ -20,7 +20,7 @@
 //!
 //! # The kinds
 //!
-//! [`TimerKind::Sim`] is the synthetic source wired end-to-end here (its `laps`/`lap_ms` drive
+//! [`TimerKind::Mock`] is the synthetic source wired end-to-end here (its `laps`/`lap_ms` drive
 //! the per-event sim bridge). [`TimerKind::Rotorhazard`] is **config-only / reserved** — it
 //! holds the RH server `url` so the surface and persistence are forward-compatible, but nothing
 //! connects to it in this slice; that is 2b (#65). A selected RotorHazard timer is a no-op stub.
@@ -32,23 +32,23 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// The reserved id of the always-present built-in **Simulator** timer.
+/// The reserved id of the always-present built-in **Mock** timer.
 ///
-/// The Simulator is seeded into every registry, draws its `laps`/`lap_ms` from the Director's
+/// The Mock is seeded into every registry, draws its `laps`/`lap_ms` from the Director's
 /// env defaults (`GRIDFPV_SIM_LAPS` / `GRIDFPV_SIM_LAP_MS`), and cannot be deleted — so a
 /// Director with nothing configured can still run a sim race. New events default to selecting it.
-pub const SIM_TIMER_ID: &str = "sim";
+pub const MOCK_TIMER_ID: &str = "mock";
 
-/// The display name of the built-in Simulator timer.
-pub const SIM_TIMER_NAME: &str = "Simulator";
+/// The display name of the built-in Mock timer.
+pub const MOCK_TIMER_NAME: &str = "Mock";
 
 /// The file name (under the data dir) the timer registry is persisted to (issue #73).
 pub const TIMERS_FILE: &str = "timers.json";
 
 /// Identifies a **timer** in the application-level registry (issue #73).
 ///
-/// A transparent string newtype like [`EventId`](crate::scope::EventId): the built-in Simulator
-/// has the reserved id [`SIM_TIMER_ID`]; created timers get an auto-generated slug + suffix id,
+/// A transparent string newtype like [`EventId`](crate::scope::EventId): the built-in Mock
+/// has the reserved id [`MOCK_TIMER_ID`]; created timers get an auto-generated slug + suffix id,
 /// never user-entered (names are display-only).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
@@ -57,7 +57,7 @@ pub struct TimerId(pub String);
 
 /// The kind of a timer — *how* it produces passes (issue #73).
 ///
-/// Externally tagged so it maps to a TS discriminated union. [`Sim`](TimerKind::Sim) is the
+/// Externally tagged so it maps to a TS discriminated union. [`Mock`](TimerKind::Mock) is the
 /// synthetic source wired end-to-end in this slice; [`Rotorhazard`](TimerKind::Rotorhazard) is
 /// **reserved / config-only** — its `url` is stored and round-trips on the wire and on disk, but
 /// nothing connects to it here (that is 2b / #65). A selected RotorHazard timer is a no-op stub.
@@ -66,7 +66,7 @@ pub struct TimerId(pub String);
 pub enum TimerKind {
     /// The built-in synthetic source: emit a holeshot + `laps` laps per pilot at `lap_ms`
     /// real-time pace when a heat goes Running (mirrors the existing sim knobs).
-    Sim {
+    Mock {
         /// Laps each sim pilot flies beyond the holeshot.
         laps: u32,
         /// The nominal real-time pace of one sim lap, in milliseconds.
@@ -83,13 +83,13 @@ pub enum TimerKind {
 
 /// Whether a timer is currently usable (issue #73).
 ///
-/// The Simulator is always [`Ready`](TimerStatus::Ready) (it needs nothing external). A reserved
+/// The Mock is always [`Ready`](TimerStatus::Ready) (it needs nothing external). A reserved
 /// RotorHazard timer reports [`Configured`](TimerStatus::Configured) — it has a URL on file but is
 /// not yet connected (2b wires the live connection and the `Connected`/`Unreachable` states).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum TimerStatus {
-    /// Usable right now — the built-in Simulator.
+    /// Usable right now — the built-in Mock.
     Ready,
     /// Configured but not connected (a reserved RotorHazard timer; 2b connects it).
     Configured,
@@ -108,18 +108,18 @@ pub struct Timer {
     pub id: TimerId,
     /// The human-readable display name (display-only; the id is authoritative).
     pub name: String,
-    /// The kind + config: a [`TimerKind::Sim`] or a reserved [`TimerKind::Rotorhazard`].
+    /// The kind + config: a [`TimerKind::Mock`] or a reserved [`TimerKind::Rotorhazard`].
     pub kind: TimerKind,
     /// The derived usability of the timer (see [`TimerStatus`]).
     pub status: TimerStatus,
 }
 
 impl Timer {
-    /// Derive the [`TimerStatus`] from a [`TimerKind`]: the Simulator is [`Ready`](TimerStatus::Ready);
+    /// Derive the [`TimerStatus`] from a [`TimerKind`]: the Mock is [`Ready`](TimerStatus::Ready);
     /// a reserved RotorHazard timer is [`Configured`](TimerStatus::Configured) (not yet connected).
     fn status_for(kind: &TimerKind) -> TimerStatus {
         match kind {
-            TimerKind::Sim { .. } => TimerStatus::Ready,
+            TimerKind::Mock { .. } => TimerStatus::Ready,
             TimerKind::Rotorhazard { .. } => TimerStatus::Configured,
         }
     }
@@ -142,7 +142,7 @@ pub struct CreateTimerRequest {
 ///
 /// Edits the display `name` and/or the [`TimerKind`] config (e.g. retune the sim's `lap_ms`, or
 /// point a RotorHazard timer at a new URL). Both optional so a partial edit is a one-field body;
-/// the id is fixed (it is in the path) and the built-in Simulator may be retuned but not removed.
+/// the id is fixed (it is in the path) and the built-in Mock may be retuned but not removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct UpdateTimerRequest {
@@ -166,7 +166,7 @@ pub struct SetEventTimersRequest {
 
 /// The application-level registry of all configured timers (issue #73).
 ///
-/// Maps each [`TimerId`] to its [`Timer`]. A built-in **Simulator** ([`SIM_TIMER_ID`]) is always
+/// Maps each [`TimerId`] to its [`Timer`]. A built-in **Mock** ([`MOCK_TIMER_ID`]) is always
 /// present. The set is **persisted** to `<data_dir>/timers.json` (restored on boot) so the RD's
 /// timers survive a Director restart; with no data dir configured it is in-memory only. Cloning
 /// shares the one registry (`Arc<RwLock<…>>`), so it is the axum router state cloned into every
@@ -178,7 +178,7 @@ pub struct TimerRegistry {
 
 /// The guarded interior: the timer map and where `timers.json` lives.
 struct Registry {
-    /// `TimerId → Timer`. A `BTreeMap` so listing is deterministic (the Simulator is listed
+    /// `TimerId → Timer`. A `BTreeMap` so listing is deterministic (the Mock is listed
     /// first explicitly regardless).
     timers: BTreeMap<TimerId, Timer>,
     /// Directory `timers.json` is persisted under; `None` ⇒ in-memory only (no data dir).
@@ -186,12 +186,12 @@ struct Registry {
 }
 
 impl TimerRegistry {
-    /// Build a registry seeded with the built-in Simulator, persisting to `data_dir` when given.
+    /// Build a registry seeded with the built-in Mock, persisting to `data_dir` when given.
     ///
-    /// The Simulator's `laps`/`lap_ms` default from `sim_laps`/`sim_lap_ms` (the Director passes
+    /// The Mock's `laps`/`lap_ms` default from `sim_laps`/`sim_lap_ms` (the Director passes
     /// the env defaults). When `data_dir` is `Some` and a `timers.json` already exists, the saved
     /// timers are restored over the top (an unreadable/corrupt file degrades to just the
-    /// Simulator rather than failing to boot); a restored Simulator's config wins so a retune
+    /// Mock rather than failing to boot); a restored Mock's config wins so a retune
     /// survives a restart. When `data_dir` is `None` the registry is in-memory only.
     pub fn new(
         data_dir: Option<PathBuf>,
@@ -200,11 +200,11 @@ impl TimerRegistry {
     ) -> Result<Self, TimerError> {
         let mut timers = BTreeMap::new();
 
-        // Always seed the built-in Simulator first.
+        // Always seed the built-in Mock first.
         let sim = Timer {
-            id: TimerId(SIM_TIMER_ID.to_string()),
-            name: SIM_TIMER_NAME.to_string(),
-            kind: TimerKind::Sim {
+            id: TimerId(MOCK_TIMER_ID.to_string()),
+            name: MOCK_TIMER_NAME.to_string(),
+            kind: TimerKind::Mock {
                 laps: sim_laps,
                 lap_ms: sim_lap_ms,
             },
@@ -217,7 +217,7 @@ impl TimerRegistry {
                 TimerError(format!("could not create data dir {}: {e}", dir.display()))
             })?;
             // Restore persisted timers over the seed (a missing/corrupt file is ignored — the
-            // Director still boots with at least the Simulator).
+            // Director still boots with at least the Mock).
             if let Some(restored) = read_persisted_timers(dir) {
                 for mut timer in restored {
                     // Keep the derived status authoritative (never trust a persisted status).
@@ -232,11 +232,11 @@ impl TimerRegistry {
         })
     }
 
-    /// Every timer, **Simulator first**, then the rest in id order — the `GET /timers` body.
+    /// Every timer, **Mock first**, then the rest in id order — the `GET /timers` body.
     pub fn list(&self) -> Vec<Timer> {
         let reg = self.read();
         let mut out = Vec::with_capacity(reg.timers.len());
-        let sim = TimerId(SIM_TIMER_ID.to_string());
+        let sim = TimerId(MOCK_TIMER_ID.to_string());
         if let Some(s) = reg.timers.get(&sim) {
             out.push(s.clone());
         }
@@ -267,7 +267,7 @@ impl TimerRegistry {
         let mut reg = self.write();
         let id = loop {
             let candidate = TimerId(format!("{}-{}", slugify(&request.name), short_suffix()));
-            if candidate.0 != SIM_TIMER_ID && !reg.timers.contains_key(&candidate) {
+            if candidate.0 != MOCK_TIMER_ID && !reg.timers.contains_key(&candidate) {
                 break candidate;
             }
         };
@@ -284,7 +284,7 @@ impl TimerRegistry {
 
     /// Edit a timer's name and/or kind (issue #73), returning the updated [`Timer`].
     ///
-    /// The built-in Simulator may be retuned (e.g. a new `lap_ms`) but not renamed away — any
+    /// The built-in Mock may be retuned (e.g. a new `lap_ms`) but not renamed away — any
     /// timer's name/kind is editable. An unknown id is a [`TimerError`]. The registry is
     /// **persisted** on success.
     pub fn update(&self, id: &TimerId, request: &UpdateTimerRequest) -> Result<Timer, TimerError> {
@@ -308,13 +308,13 @@ impl TimerRegistry {
         Ok(updated)
     }
 
-    /// Delete a timer (issue #73). The built-in **Simulator cannot be deleted** (it is always
+    /// Delete a timer (issue #73). The built-in **Mock cannot be deleted** (it is always
     /// present); attempting to is a [`TimerError`]. An unknown id is also an error. The registry
     /// is **persisted** on success.
     pub fn delete(&self, id: &TimerId) -> Result<(), TimerError> {
-        if id.0 == SIM_TIMER_ID {
+        if id.0 == MOCK_TIMER_ID {
             return Err(TimerError(
-                "the built-in Simulator timer cannot be deleted".to_string(),
+                "the built-in Mock timer cannot be deleted".to_string(),
             ));
         }
         let mut reg = self.write();
@@ -336,7 +336,7 @@ impl TimerRegistry {
 
 impl Registry {
     /// Persist the timer set to `<data_dir>/timers.json` (issue #73), a no-op with no data dir.
-    /// The Simulator is persisted too so a retune survives a restart.
+    /// The Mock is persisted too so a retune survives a restart.
     fn persist(&self) -> Result<(), TimerError> {
         let Some(dir) = &self.data_dir else {
             return Ok(());
@@ -355,7 +355,7 @@ fn timers_path(dir: &Path) -> PathBuf {
 }
 
 /// Read the persisted timers from `<dir>/timers.json`, or `None` if absent/unreadable/corrupt.
-/// A bad file degrades to "no persisted timers" so the Director still boots with the Simulator.
+/// A bad file degrades to "no persisted timers" so the Director still boots with the Mock.
 fn read_persisted_timers(dir: &Path) -> Option<Vec<Timer>> {
     let raw = std::fs::read_to_string(timers_path(dir)).ok()?;
     serde_json::from_str(&raw).ok()
@@ -415,7 +415,7 @@ mod tests {
     fn sim_req(name: &str) -> CreateTimerRequest {
         CreateTimerRequest {
             name: name.to_string(),
-            kind: TimerKind::Sim {
+            kind: TimerKind::Mock {
                 laps: 3,
                 lap_ms: 2000,
             },
@@ -432,17 +432,17 @@ mod tests {
     }
 
     #[test]
-    fn simulator_is_always_present_and_first() {
+    fn mock_is_always_present_and_first() {
         let reg = TimerRegistry::new(None, 5, 2500).unwrap();
         let list = reg.list();
         let first = list.first().unwrap();
-        assert_eq!(first.id.0, SIM_TIMER_ID);
-        assert_eq!(first.name, SIM_TIMER_NAME);
+        assert_eq!(first.id.0, MOCK_TIMER_ID);
+        assert_eq!(first.name, MOCK_TIMER_NAME);
         assert_eq!(first.status, TimerStatus::Ready);
-        // The Simulator draws its config from the Director's env defaults.
+        // The Mock draws its config from the Director's env defaults.
         assert_eq!(
             first.kind,
-            TimerKind::Sim {
+            TimerKind::Mock {
                 laps: 5,
                 lap_ms: 2500
             }
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn create_auto_generates_a_unique_slug_id_and_lists_after_sim() {
+    fn create_auto_generates_a_unique_slug_id_and_lists_after_mock() {
         let reg = TimerRegistry::new(None, 5, 2500).unwrap();
         let a = reg
             .create(&rh_req("Track RH!", "http://rh.local:5000"))
@@ -462,7 +462,7 @@ mod tests {
         assert_ne!(a.id, b.id);
         assert_eq!(a.status, TimerStatus::Configured);
         let ids: Vec<_> = reg.list().into_iter().map(|t| t.id).collect();
-        assert_eq!(ids[0].0, SIM_TIMER_ID);
+        assert_eq!(ids[0].0, MOCK_TIMER_ID);
         assert!(ids.contains(&a.id) && ids.contains(&b.id));
     }
 
@@ -475,7 +475,7 @@ mod tests {
                 &created.id,
                 &UpdateTimerRequest {
                     name: Some("Renamed".into()),
-                    kind: Some(TimerKind::Sim {
+                    kind: Some(TimerKind::Mock {
                         laps: 9,
                         lap_ms: 1000,
                     }),
@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(updated.name, "Renamed");
         assert_eq!(
             updated.kind,
-            TimerKind::Sim {
+            TimerKind::Mock {
                 laps: 9,
                 lap_ms: 1000
             }
@@ -493,15 +493,15 @@ mod tests {
     }
 
     #[test]
-    fn retuning_the_simulator_is_allowed_but_deleting_it_is_not() {
+    fn retuning_the_mock_is_allowed_but_deleting_it_is_not() {
         let reg = TimerRegistry::new(None, 5, 2500).unwrap();
-        let sim = TimerId(SIM_TIMER_ID.into());
+        let sim = TimerId(MOCK_TIMER_ID.into());
         // Retune is fine.
         reg.update(
             &sim,
             &UpdateTimerRequest {
                 name: None,
-                kind: Some(TimerKind::Sim {
+                kind: Some(TimerKind::Mock {
                     laps: 1,
                     lap_ms: 50,
                 }),
@@ -510,7 +510,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             reg.get(&sim).unwrap().kind,
-            TimerKind::Sim {
+            TimerKind::Mock {
                 laps: 1,
                 lap_ms: 50
             }
@@ -538,12 +538,12 @@ mod tests {
             let created = reg
                 .create(&rh_req("Field RH", "http://rh.local:5000"))
                 .unwrap();
-            // Retune the Simulator too, to prove its config also survives.
+            // Retune the Mock too, to prove its config also survives.
             reg.update(
-                &TimerId(SIM_TIMER_ID.into()),
+                &TimerId(MOCK_TIMER_ID.into()),
                 &UpdateTimerRequest {
                     name: None,
-                    kind: Some(TimerKind::Sim {
+                    kind: Some(TimerKind::Mock {
                         laps: 7,
                         lap_ms: 1234,
                     }),
@@ -561,10 +561,10 @@ mod tests {
                 }
             );
             assert_eq!(got.status, TimerStatus::Configured);
-            // …and so did the retuned Simulator config.
+            // …and so did the retuned Mock config.
             assert_eq!(
-                reopened.get(&TimerId(SIM_TIMER_ID.into())).unwrap().kind,
-                TimerKind::Sim {
+                reopened.get(&TimerId(MOCK_TIMER_ID.into())).unwrap().kind,
+                TimerKind::Mock {
                     laps: 7,
                     lap_ms: 1234
                 }
@@ -574,14 +574,14 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_timers_file_degrades_to_just_the_simulator() {
+    fn a_corrupt_timers_file_degrades_to_just_the_mock() {
         let dir = std::env::temp_dir().join(format!("gridfpv-timers-bad-{}", short_suffix()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(timers_path(&dir), b"not json at all").unwrap();
         let reg = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
         let list = reg.list();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id.0, SIM_TIMER_ID);
+        assert_eq!(list[0].id.0, MOCK_TIMER_ID);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

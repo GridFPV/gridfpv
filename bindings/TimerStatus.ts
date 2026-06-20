@@ -3,7 +3,7 @@
 /**
  * Whether a timer is currently usable (issue #73).
  *
- * The Simulator is always [`Ready`](TimerStatus::Ready) (it needs nothing external). A reserved
+ * The Mock is always [`Ready`](TimerStatus::Ready) (it needs nothing external). A reserved
  * RotorHazard timer reports [`Configured`](TimerStatus::Configured) — it has a URL on file but is
  * not yet connected (2b wires the live connection and the `Connected`/`Unreachable` states).
  */

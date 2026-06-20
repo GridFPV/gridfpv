@@ -21,7 +21,7 @@ id: TimerId,
  */
 name: string, 
 /**
- * The kind + config: a [`TimerKind::Sim`] or a reserved [`TimerKind::Rotorhazard`].
+ * The kind + config: a [`TimerKind::Mock`] or a reserved [`TimerKind::Rotorhazard`].
  */
 kind: TimerKind, 
 /**

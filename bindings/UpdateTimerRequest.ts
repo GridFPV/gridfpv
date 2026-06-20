@@ -6,7 +6,7 @@ import type { TimerKind } from "./TimerKind";
  *
  * Edits the display `name` and/or the [`TimerKind`] config (e.g. retune the sim's `lap_ms`, or
  * point a RotorHazard timer at a new URL). Both optional so a partial edit is a one-field body;
- * the id is fixed (it is in the path) and the built-in Simulator may be retuned but not removed.
+ * the id is fixed (it is in the path) and the built-in Mock may be retuned but not removed.
  */
 export type UpdateTimerRequest = { 
 /**

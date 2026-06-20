@@ -298,7 +298,7 @@ export async function setActiveEvent(
  * List every configured timer (`GET /timers`) — issue #73. Timers are **application-level
  * configuration**: the RD configures them once (a persisted registry) and each event selects
  * which to use. Reads are open on the LAN (no token needed; an optional token is sent when
- * present). Resolves to the {@link Timer}s (the built-in **Simulator** first), or rejects on a
+ * present). Resolves to the {@link Timer}s (the built-in **Mock** first), or rejects on a
  * transport/HTTP failure.
  */
 export async function listTimers(
@@ -343,7 +343,7 @@ export async function createTimer(
 
 /**
  * Edit a timer (`PUT /timers/{id}`) — issue #73. RD-gated. The body's fields are all optional
- * (a partial edit of `name` and/or `kind`); the built-in Simulator may be retuned but not deleted.
+ * (a partial edit of `name` and/or `kind`); the built-in Mock may be retuned but not deleted.
  * An unknown id answers **404**. Resolves to the updated {@link Timer}, or rejects on a non-2xx /
  * transport failure.
  */
@@ -370,7 +370,7 @@ export async function updateTimer(
 }
 
 /**
- * Delete a timer (`DELETE /timers/{id}`) — issue #73. RD-gated. The built-in **Simulator cannot be
+ * Delete a timer (`DELETE /timers/{id}`) — issue #73. RD-gated. The built-in **Mock cannot be
  * deleted** (a **400**); an unknown id answers **404**. Resolves once the delete succeeds, or
  * rejects on a non-2xx / transport failure (the HTTP status is in the message for branching).
  */

@@ -3,8 +3,8 @@
 /**
  * Identifies a **timer** in the application-level registry (issue #73).
  *
- * A transparent string newtype like [`EventId`](crate::scope::EventId): the built-in Simulator
- * has the reserved id [`SIM_TIMER_ID`]; created timers get an auto-generated slug + suffix id,
+ * A transparent string newtype like [`EventId`](crate::scope::EventId): the built-in Mock
+ * has the reserved id [`MOCK_TIMER_ID`]; created timers get an auto-generated slug + suffix id,
  * never user-entered (names are display-only).
  */
 export type TimerId = string;

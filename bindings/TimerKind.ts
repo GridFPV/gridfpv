@@ -3,12 +3,12 @@
 /**
  * The kind of a timer — *how* it produces passes (issue #73).
  *
- * Externally tagged so it maps to a TS discriminated union. [`Sim`](TimerKind::Sim) is the
+ * Externally tagged so it maps to a TS discriminated union. [`Mock`](TimerKind::Mock) is the
  * synthetic source wired end-to-end in this slice; [`Rotorhazard`](TimerKind::Rotorhazard) is
  * **reserved / config-only** — its `url` is stored and round-trips on the wire and on disk, but
  * nothing connects to it here (that is 2b / #65). A selected RotorHazard timer is a no-op stub.
  */
-export type TimerKind = { "Sim": { 
+export type TimerKind = { "Mock": { 
 /**
  * Laps each sim pilot flies beyond the holeshot.
  */

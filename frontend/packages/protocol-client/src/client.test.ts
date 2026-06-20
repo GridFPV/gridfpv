@@ -473,9 +473,9 @@ describe('events lifecycle helpers (#72)', () => {
         status: 200,
         json: async (): Promise<unknown> => [
           {
-            id: 'sim',
-            name: 'Simulator',
-            kind: { Sim: { laps: 5, lap_ms: 2500 } },
+            id: 'mock',
+            name: 'Mock',
+            kind: { Mock: { laps: 5, lap_ms: 2500 } },
             status: 'Ready'
           }
         ]
@@ -484,7 +484,7 @@ describe('events lifecycle helpers (#72)', () => {
     const { listTimers } = await import('./client.js');
     const timers = await listTimers('http://director.local:8080/', { fetch });
     expect(calls[0]).toBe('http://director.local:8080/timers');
-    expect(timers[0].id).toBe('sim');
+    expect(timers[0].id).toBe('mock');
   });
 
   it('createTimer POSTs the request to /timers with the RD token and returns the new Timer', async () => {
@@ -523,9 +523,9 @@ describe('events lifecycle helpers (#72)', () => {
         ok: true,
         status: 200,
         json: async (): Promise<unknown> => ({
-          id: 'sim',
-          name: 'Simulator',
-          kind: { Sim: { laps: 9, lap_ms: 100 } },
+          id: 'mock',
+          name: 'Mock',
+          kind: { Mock: { laps: 9, lap_ms: 100 } },
           status: 'Ready'
         })
       } as unknown as Response;
@@ -533,14 +533,14 @@ describe('events lifecycle helpers (#72)', () => {
     const { updateTimer, deleteTimer } = await import('./client.js');
     const updated = await updateTimer(
       'http://director.local:8080',
-      'sim',
-      { kind: { Sim: { laps: 9, lap_ms: 100 } } },
+      'mock',
+      { kind: { Mock: { laps: 9, lap_ms: 100 } } },
       'rd-tok',
       { fetch }
     );
-    expect(seen[0].url).toBe('http://director.local:8080/timers/sim');
+    expect(seen[0].url).toBe('http://director.local:8080/timers/mock');
     expect(seen[0].method).toBe('PUT');
-    expect(updated.kind).toEqual({ Sim: { laps: 9, lap_ms: 100 } });
+    expect(updated.kind).toEqual({ Mock: { laps: 9, lap_ms: 100 } });
 
     await deleteTimer('http://director.local:8080', 'race-rh-xy99', 'rd-tok', { fetch });
     expect(seen[1].url).toBe('http://director.local:8080/timers/race-rh-xy99');
@@ -559,7 +559,7 @@ describe('events lifecycle helpers (#72)', () => {
           name: 'Friday Series',
           created_at: 1,
           persistent: true,
-          timers: ['sim', 'field-rh-ab12']
+          timers: ['mock', 'field-rh-ab12']
         })
       } as unknown as Response;
     };
@@ -567,12 +567,12 @@ describe('events lifecycle helpers (#72)', () => {
     const meta = await setEventTimers(
       'http://director.local:8080',
       'evt-a',
-      ['sim', 'field-rh-ab12'],
+      ['mock', 'field-rh-ab12'],
       'rd-tok',
       { fetch }
     );
     expect(seen[0].url).toBe('http://director.local:8080/events/evt-a/timers');
-    expect(seen[0].body).toEqual({ ids: ['sim', 'field-rh-ab12'] });
-    expect(meta.timers).toEqual(['sim', 'field-rh-ab12']);
+    expect(seen[0].body).toEqual({ ids: ['mock', 'field-rh-ab12'] });
+    expect(meta.timers).toEqual(['mock', 'field-rh-ab12']);
   });
 });

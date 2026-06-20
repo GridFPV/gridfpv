@@ -210,7 +210,7 @@ describe('seam 9b: the Director active event (#90)', () => {
  * configures once, and each event selects which timers to use.
  *
  * guards:
- *  - `GET /timers` is an **open read** → `Timer[]` with the built-in **Simulator** first.
+ *  - `GET /timers` is an **open read** → `Timer[]` with the built-in **Mock** first.
  *  - `POST /timers` is **RD-gated** (no/bad token → 401), auto-generates an id, returns the
  *    new `Timer`, which then appears in the listing.
  *  - `PUT /events/{id}/timers` is **RD-gated**, validates each id names a known timer (unknown →
@@ -267,16 +267,16 @@ describe('seam 10: application-level timers + per-event selection (#73)', () => 
     return { status: res.status, body: parsed };
   }
 
-  it('GET /timers lists the built-in Simulator first (open read)', async () => {
+  it('GET /timers lists the built-in Mock first (open read)', async () => {
     const timers = await listTimers();
     expect(timers.length).toBeGreaterThanOrEqual(1);
-    expect(timers[0].id).toBe('sim');
-    expect(timers[0].name).toBe('Simulator');
-    expect('Sim' in timers[0].kind).toBe(true);
+    expect(timers[0].id).toBe('mock');
+    expect(timers[0].name).toBe('Mock');
+    expect('Mock' in timers[0].kind).toBe(true);
   });
 
   it('POST /timers requires the RD token — no/bad token → 401', async () => {
-    const body = { name: 'No Auth', kind: { Sim: { laps: 1, lap_ms: 50 } } };
+    const body = { name: 'No Auth', kind: { Mock: { laps: 1, lap_ms: 50 } } };
     expect((await createTimer(body)).status).toBe(401);
     expect((await createTimer(body, 'not-a-real-token')).status).toBe(401);
   });
@@ -292,14 +292,14 @@ describe('seam 10: application-level timers + per-event selection (#73)', () => 
     expect(created.status).toBe('Configured');
 
     const ids = (await listTimers()).map((t) => t.id);
-    expect(ids[0]).toBe('sim');
+    expect(ids[0]).toBe('mock');
     expect(ids).toContain(created.id);
   });
 
   it('PUT /events/{id}/timers validates ids and records the selection', async () => {
     // Create a real timer, then select it for a fresh event.
     const timer = (
-      await createTimer({ name: 'Extra Sim', kind: { Sim: { laps: 1, lap_ms: 50 } } }, TOKEN)
+      await createTimer({ name: 'Extra Sim', kind: { Mock: { laps: 1, lap_ms: 50 } } }, TOKEN)
     ).body as Timer;
     const event = (await createEvent('Timers Event', TOKEN)).body as EventMeta;
 

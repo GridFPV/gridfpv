@@ -40,7 +40,7 @@ use gridfpv_storage::{InMemoryLog, SqliteLog};
 use crate::app::AppState;
 use crate::auth::TokenStore;
 use crate::scope::EventId;
-use crate::timers::{SIM_TIMER_ID, TimerId, TimerRegistry};
+use crate::timers::{MOCK_TIMER_ID, TimerId, TimerRegistry};
 
 /// The reserved id of the always-present built-in **Practice** event.
 ///
@@ -99,7 +99,7 @@ pub struct EventMeta {
     /// The application-level timers this event **selects** (issue #73) — the per-event reference
     /// into the app-level [`TimerRegistry`](crate::timers::TimerRegistry). Additive
     /// (`#[serde(default)]`) so an event persisted before #73 reads back with an empty list; new
-    /// events and Practice default to `["sim"]` (the built-in Simulator) so they work out of the
+    /// events and Practice default to `["mock"]` (the built-in Mock) so they work out of the
     /// box. The per-event source bridge runs the selected Sim timers; a selected RotorHazard is a
     /// reserved no-op stub (2b / #65).
     #[serde(default)]
@@ -217,7 +217,7 @@ impl EventRegistry {
         let mut events = BTreeMap::new();
 
         // Build the Director-wide application-level timer registry (issue #73): the built-in
-        // Simulator (drawing its `laps`/`lap_ms` from the env defaults) plus any timers persisted
+        // Mock (drawing its `laps`/`lap_ms` from the env defaults) plus any timers persisted
         // to `<data_dir>/timers.json`. Shares the same data dir as the events.
         let (sim_laps, sim_lap_ms) = sim_defaults();
         let timers = TimerRegistry::new(data_dir.clone(), sim_laps, sim_lap_ms)
@@ -478,15 +478,15 @@ impl std::fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
-/// The default per-event timer selection (issue #73): just the built-in **Simulator**
-/// ([`SIM_TIMER_ID`]). New events and Practice select it so they run a sim race out of the box.
+/// The default per-event timer selection (issue #73): just the built-in **Mock**
+/// ([`MOCK_TIMER_ID`]). New events and Practice select it so they run a sim race out of the box.
 fn default_timer_selection() -> Vec<TimerId> {
-    vec![TimerId(SIM_TIMER_ID.to_string())]
+    vec![TimerId(MOCK_TIMER_ID.to_string())]
 }
 
-/// The built-in Simulator timer's default `laps`/`lap_ms` (issue #73), read from the same env
+/// The built-in Mock timer's default `laps`/`lap_ms` (issue #73), read from the same env
 /// knobs the sim source uses (`GRIDFPV_SIM_LAPS` / `GRIDFPV_SIM_LAP_MS`), falling back to the
-/// canonical defaults (5 laps @ 2500ms) when unset/unparseable — so the Simulator timer's config
+/// canonical defaults (5 laps @ 2500ms) when unset/unparseable — so the Mock timer's config
 /// matches the env-driven sim exactly. Kept here (not in the app crate) to avoid a dependency
 /// cycle; the values mirror `gridfpv_app::source::DEFAULT_SIM_LAPS`/`DEFAULT_SIM_LAP_MS`.
 fn sim_defaults() -> (u32, u64) {

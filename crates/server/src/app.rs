@@ -293,8 +293,8 @@ pub fn router(registry: EventRegistry) -> Router {
         // selected event on connect/reload, and an RD-gated write to set it.
         .route("/active-event", get(get_active_event).put(set_active_event))
         // Application-level timers (issue #73): the persisted registry the RD configures once and
-        // each event selects from. `GET /timers` is an open read (Simulator first); create/edit/
-        // delete are RD-gated. `DELETE` rejects the built-in Simulator.
+        // each event selects from. `GET /timers` is an open read (Mock first); create/edit/
+        // delete are RD-gated. `DELETE` rejects the built-in Mock.
         .route("/timers", get(list_timers).post(create_timer))
         .route("/timers/{timer_id}", put(update_timer).delete(delete_timer))
         // Per-event timer **selection** (issue #73): RD-gated; each id must name a known timer.
@@ -401,7 +401,7 @@ async fn set_active_event(
     Ok(Json(meta))
 }
 
-/// `GET /timers` — list every configured timer, **Simulator first** (issue #73).
+/// `GET /timers` — list every configured timer, **Mock first** (issue #73).
 ///
 /// An **open read** (no token): a client renders the timer picker / per-event selection without a
 /// credential, mirroring `GET /events`.
@@ -427,7 +427,7 @@ async fn create_timer(
 
 /// `PUT /timers/{timer_id}` — edit a timer's name/config, RD-gated (issue #73).
 ///
-/// The built-in Simulator may be retuned but not removed (that is `DELETE`'s concern). An unknown
+/// The built-in Mock may be retuned but not removed (that is `DELETE`'s concern). An unknown
 /// id is a typed 404 (`UnknownScope`). On success the updated [`Timer`] is returned and the
 /// registry persisted.
 async fn update_timer(
@@ -445,7 +445,7 @@ async fn update_timer(
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated (issue #73).
 ///
-/// The built-in **Simulator cannot be deleted** (it is always present) — attempting to is a
+/// The built-in **Mock cannot be deleted** (it is always present) — attempting to is a
 /// `BadRequest`; an unknown id is a 404 (`UnknownScope`). On success an empty 200 is returned and
 /// the registry persisted.
 async fn delete_timer(
@@ -453,7 +453,7 @@ async fn delete_timer(
     State(registry): State<EventRegistry>,
     Path(timer_id): Path<TimerId>,
 ) -> Result<StatusCode, ProtocolError> {
-    // The protected-Simulator delete is a client error (BadRequest); a genuinely unknown id is a
+    // The protected-Mock delete is a client error (BadRequest); a genuinely unknown id is a
     // 404. Distinguish by whether the timer exists at all.
     registry.timers().delete(&timer_id).map_err(|e| {
         let code = if registry.timers().exists(&timer_id) {
@@ -1508,12 +1508,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timers_list_has_the_simulator_first_and_is_open() {
+    async fn timers_list_has_the_mock_first_and_is_open() {
         let (registry, _state, _) = state_with(vec![]);
         let (status, timers) = get_timers(registry).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(timers.first().unwrap().id.0, "sim");
-        assert!(matches!(timers[0].kind, TimerKind::Sim { .. }));
+        assert_eq!(timers.first().unwrap().id.0, "mock");
+        assert!(matches!(timers[0].kind, TimerKind::Mock { .. }));
     }
 
     #[tokio::test]
@@ -1540,7 +1540,7 @@ mod tests {
         let _rd = state.tokens().issue_rd_token();
         let body = CreateTimerRequest {
             name: "Gated".into(),
-            kind: TimerKind::Sim {
+            kind: TimerKind::Mock {
                 laps: 1,
                 lap_ms: 50,
             },
@@ -1550,13 +1550,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_rejects_the_builtin_simulator() {
+    async fn delete_rejects_the_builtin_mock() {
         let (registry, _state, _) = state_with(vec![]);
         let response = router(registry)
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/timers/sim")
+                    .uri("/timers/mock")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1572,7 +1572,7 @@ mod tests {
         // Create a real timer to select.
         let body = CreateTimerRequest {
             name: "Extra Sim".into(),
-            kind: TimerKind::Sim {
+            kind: TimerKind::Mock {
                 laps: 1,
                 lap_ms: 50,
             },
@@ -1619,11 +1619,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_timer_retunes_the_simulator() {
+    async fn update_timer_retunes_the_mock() {
         let (registry, _state, _) = state_with(vec![]);
         let body = UpdateTimerRequest {
             name: None,
-            kind: Some(TimerKind::Sim {
+            kind: Some(TimerKind::Mock {
                 laps: 9,
                 lap_ms: 100,
             }),
@@ -1632,7 +1632,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/timers/sim")
+                    .uri("/timers/mock")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
                     .unwrap(),
@@ -1641,10 +1641,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let (_, timers) = get_timers(registry).await;
-        let sim = timers.iter().find(|t| t.id.0 == "sim").unwrap();
+        let sim = timers.iter().find(|t| t.id.0 == "mock").unwrap();
         assert_eq!(
             sim.kind,
-            TimerKind::Sim {
+            TimerKind::Mock {
                 laps: 9,
                 lap_ms: 100
             }
