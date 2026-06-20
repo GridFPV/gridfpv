@@ -164,8 +164,13 @@ describe('ProtocolClient', () => {
     client.close();
   });
 
-  it('applies an ordered change stream in sequence and stays converged', async () => {
-    const { fetch } = mockFetch([{ cursor: 0n, body: liveState('Scheduled') }]);
+  it('applies an ordered change stream regardless of the snapshot cursor value', async () => {
+    // Regression (the freeze): the snapshot cursor is a log OFFSET (here 5), while the
+    // stream's `sequence` is its own axis starting at 1. The client must order the
+    // stream by `sequence` — conflating it with the cursor (`seq <= 5` → "duplicate")
+    // dropped the early stream and froze the live view against any non-empty log,
+    // which is every real Director snapshot. Earlier tests used cursor 0n, masking it.
+    const { fetch } = mockFetch([{ cursor: 5n, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
     const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
     await flush();
@@ -175,8 +180,10 @@ describe('ProtocolClient', () => {
     sockets[0].emit(envelope(2n, 'Armed'));
     sockets[0].emit(envelope(3n, 'Running'));
 
-    expect(client.getState().cursor).toBe(3n);
+    // Every envelope applied → body converged. The resume cursor stays the snapshot
+    // offset (the stream sequence is not a log offset).
     expect(phaseOf(client.getState().body)).toBe('Running');
+    expect(client.getState().cursor).toBe(5n);
 
     client.close();
   });
@@ -190,11 +197,11 @@ describe('ProtocolClient', () => {
 
     sockets[0].emit(envelope(1n, 'Staged'));
     sockets[0].emit(envelope(2n, 'Armed'));
-    // Re-deliver 1 and 2 (at-least-once): they must not regress the state.
+    // Re-deliver 1 and 2 (at-least-once): they're at/below the last applied sequence
+    // (2), so they're no-ops and must not regress the state back to 'Scheduled'.
     sockets[0].emit(envelope(1n, 'Scheduled'));
     sockets[0].emit(envelope(2n, 'Scheduled'));
 
-    expect(client.getState().cursor).toBe(2n);
     expect(phaseOf(client.getState().body)).toBe('Armed');
 
     client.close();
@@ -227,10 +234,12 @@ describe('ProtocolClient', () => {
     const req = JSON.parse(sockets[1].sent[0]);
     expect(req.from).toBe(5);
 
-    // The stream continues converged from 6.
+    // The fresh subscription restarts the per-stream sequence, so its first envelope
+    // is accepted and the body converges. The resume cursor stays the re-snapshot
+    // offset (5).
     sockets[1].emit(envelope(6n, 'Finished'));
-    expect(client.getState().cursor).toBe(6n);
     expect(phaseOf(client.getState().body)).toBe('Finished');
+    expect(client.getState().cursor).toBe(5n);
 
     client.close();
   });
@@ -287,12 +296,16 @@ describe('ProtocolClient', () => {
 
     sockets[1].open();
     const req = JSON.parse(sockets[1].sent[0]);
-    expect(req.from).toBe(2);
+    // Resume from the snapshot's log offset (0) — NOT the stream sequence (which is a
+    // different axis). The server replays from there and fresh-value envelopes
+    // re-converge. (A future enhancement: carry the log offset on envelopes so the
+    // resume point can advance; until then resume re-replays from the snapshot.)
+    expect(req.from).toBe(0);
     expect(client.getState().status).toBe('live');
 
-    // Stream continues converged.
-    sockets[1].emit(envelope(3n, 'Running'));
-    expect(client.getState().cursor).toBe(3n);
+    // The resumed subscription restarts the sequence; its first envelope converges.
+    sockets[1].emit(envelope(1n, 'Running'));
+    expect(phaseOf(client.getState().body)).toBe('Running');
 
     client.close();
   });
