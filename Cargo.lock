@@ -435,6 +435,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridfpv-server"
+version = "0.1.0"
+dependencies = [
+ "gridfpv-engine",
+ "gridfpv-events",
+ "gridfpv-projection",
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
 name = "gridfpv-storage"
 version = "0.1.0"
 dependencies = [

@@ -7,6 +7,7 @@ members = [
     "crates/adapters",
     "crates/engine",
     "crates/testkit",
+    "crates/server",
     "crates/app",
     "xtask",
 ]
@@ -26,6 +27,7 @@ gridfpv-storage = { path = "crates/storage" }
 gridfpv-projection = { path = "crates/projection" }
 gridfpv-adapters = { path = "crates/adapters" }
 gridfpv-engine = { path = "crates/engine" }
+gridfpv-server = { path = "crates/server" }
 gridfpv-testkit = { path = "crates/testkit" }
 
 # Third-party.
