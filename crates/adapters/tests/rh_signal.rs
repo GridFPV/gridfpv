@@ -14,15 +14,13 @@
 //! ```
 #![cfg(feature = "live")]
 
-mod common;
-
 use std::time::{Duration, Instant};
 
-use common::{NodeCsv, RhContainer, node_csv};
 use gridfpv_adapters::rotorhazard::RotorHazardAdapter;
 use gridfpv_adapters::rotorhazard::transport::RotorHazardConnection;
 use gridfpv_events::Event;
 use gridfpv_projection::{LapList, lap_list};
+use gridfpv_testkit::{NodeCsv, RhContainer, node_csv};
 
 const PORT: u16 = 5031;
 const TICK: &str = "0.1";
