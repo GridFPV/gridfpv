@@ -3,3 +3,7 @@ build
 node_modules
 .svelte-kit
 packages/types/vendor
+
+# Playwright e2e run artifacts (generated)
+test-results
+playwright-report

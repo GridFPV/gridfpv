@@ -49,10 +49,16 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         None => AppState::new(SqliteLog::open_in_memory()?),
     };
 
-    // Mint the RD's control token up front and print it with the URL so the RD console (or
-    // the Tauri app) can log straight in. The store is in-memory, so this is the token for
-    // *this* run of the process.
-    let rd_token = state.tokens().issue_rd_token();
+    // Mint (or pin) the RD's control token up front and print it with the URL so the RD
+    // console (or the Tauri app) can log straight in. The store is in-memory, so this is the
+    // token for *this* run of the process. If `GRIDFPV_RD_TOKEN` is set to a non-blank value
+    // it is registered as the RD token verbatim — a *known* credential so an automated client
+    // (the Playwright e2e, the Tauri app under test) can log in deterministically; otherwise a
+    // fresh random token is minted.
+    let rd_token = match std::env::var("GRIDFPV_RD_TOKEN") {
+        Ok(value) if state.tokens().register_rd_token(&value) => value,
+        _ => state.tokens().issue_rd_token(),
+    };
 
     // Resolve the built-in lap source (default `sim`) and spawn the control→source bridge
     // alongside the server: it shares this same `AppState`/log, watches for heats driven to
