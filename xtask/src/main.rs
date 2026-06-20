@@ -139,11 +139,11 @@ fn gen_check() -> bool {
 fn live() -> bool {
     // Run each target sequentially so at most one RotorHazard container exists at a
     // time (cargo runs separate test binaries in parallel otherwise).
-    let target = |name: &str, ignored: bool| {
+    let target = |package: &str, name: &str, ignored: bool| {
         let mut args = vec![
             "test",
             "-p",
-            "gridfpv-adapters",
+            package,
             "--features",
             "live",
             "--test",
@@ -157,11 +157,32 @@ fn live() -> bool {
         run("cargo", &args)
     };
     // No container needed (in-process mock WS server).
-    let ws = target("velocidrone_ws", false);
+    let ws = target("gridfpv-adapters", "velocidrone_ws", false);
     // Each spins up + tears down its own disposable RotorHazard.
-    let live_rh = target("rh_live", true);
-    let signal = target("rh_signal", true);
-    ws && live_rh && signal
+    let live_rh = target("gridfpv-adapters", "rh_live", true);
+    let signal = target("gridfpv-adapters", "rh_signal", true);
+    // The engine's mock-RH e2e tests: each drives a full heat through the shared
+    // harness on its own port (#29 heat loop, #30 scoring, #31 marshaling).
+    let heat_live = target("gridfpv-engine", "heat_live", true);
+    let scoring_live = target("gridfpv-engine", "scoring_live", true);
+    let marshaling_live = target("gridfpv-engine", "marshaling_live", true);
+    let format_live = target("gridfpv-engine", "format_live", true);
+    let timed_qual_live = target("gridfpv-engine", "timed_qual_live", true);
+    let single_elim_live = target("gridfpv-engine", "single_elim_live", true);
+    let zippyq_live = target("gridfpv-engine", "zippyq_live", true);
+    let multiclass_live = target("gridfpv-engine", "multiclass_live", true);
+    let full_event_live = target("gridfpv-engine", "full_event_live", true);
+    ws && live_rh
+        && signal
+        && heat_live
+        && scoring_live
+        && marshaling_live
+        && format_live
+        && timed_qual_live
+        && single_elim_live
+        && zippyq_live
+        && multiclass_live
+        && full_event_live
 }
 
 fn main() {

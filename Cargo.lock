@@ -387,6 +387,7 @@ version = "0.1.0"
 dependencies = [
  "gridfpv-events",
  "gridfpv-projection",
+ "gridfpv-testkit",
  "rust_socketio",
  "serde",
  "serde_json",
@@ -401,6 +402,17 @@ dependencies = [
  "gridfpv-events",
  "gridfpv-projection",
  "gridfpv-storage",
+ "serde_json",
+]
+
+[[package]]
+name = "gridfpv-engine"
+version = "0.1.0"
+dependencies = [
+ "gridfpv-adapters",
+ "gridfpv-events",
+ "gridfpv-projection",
+ "gridfpv-testkit",
  "serde_json",
 ]
 
@@ -432,6 +444,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "gridfpv-testkit"
+version = "0.1.0"
 
 [[package]]
 name = "h2"

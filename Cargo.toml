@@ -5,6 +5,8 @@ members = [
     "crates/storage",
     "crates/projection",
     "crates/adapters",
+    "crates/engine",
+    "crates/testkit",
     "crates/app",
     "xtask",
 ]
@@ -23,6 +25,8 @@ gridfpv-events = { path = "crates/events" }
 gridfpv-storage = { path = "crates/storage" }
 gridfpv-projection = { path = "crates/projection" }
 gridfpv-adapters = { path = "crates/adapters" }
+gridfpv-engine = { path = "crates/engine" }
+gridfpv-testkit = { path = "crates/testkit" }
 
 # Third-party.
 serde = { version = "1", features = ["derive"] }

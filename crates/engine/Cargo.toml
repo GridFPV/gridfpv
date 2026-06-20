@@ -1,0 +1,26 @@
+[package]
+name = "gridfpv-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# `live` pulls the dockerized-RotorHazard e2e harness (the adapters' Socket.IO
+# transport + the testkit container) so the engine's heat loop can be driven against
+# a real RH end to end. Off by default: the core engine is a pure function of the log
+# and stays dependency-light (no rust_socketio/openssl). The `heat_live` e2e test
+# enables it; it runs in the dedicated `rh-live` job, never the shared CI suite.
+live = ["dep:gridfpv-adapters", "dep:gridfpv-testkit", "gridfpv-adapters/live"]
+
+[dependencies]
+gridfpv-events.workspace = true
+# Scoring (#30) and the other engine features build on the projection; add it now so
+# the v0.3 wave that lands them doesn't have to touch this manifest again.
+gridfpv-projection.workspace = true
+gridfpv-adapters = { workspace = true, optional = true }
+gridfpv-testkit = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

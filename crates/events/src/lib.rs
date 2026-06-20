@@ -142,7 +142,71 @@ pub struct Pass {
     pub signal: Option<SignalContext>,
 }
 
-/// A canonical event appended to the log by an adapter.
+// --- Race-engine vocabulary (#28) -------------------------------------------
+// Beyond the adapter's raw observations, the race engine and the RD append events
+// too: heat-loop state transitions and marshaling adjudications. These fold into
+// the same projections (race-engine.html §2, architecture.html §3); raw
+// observations are never mutated.
+
+/// Identifies a heat within the event log.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct HeatId(pub String);
+
+/// A reference to an already-logged event by its append **offset** — the stable id
+/// marshaling adjudications target (e.g. "void *this* pass"). The offset is assigned
+/// by the storage layer when the target event was appended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct LogRef(pub u64);
+
+/// A transition of the heat-loop state machine (race-engine.html §2). The recorded
+/// transition is named for the state it enters on the forward path (Staged → Armed →
+/// Running → Finished → Scored), with the off-ramps (abort/restart/discard) named for
+/// the action so they stay distinct even when they land on the same state. The engine
+/// validates legality against the current state. Heat *creation* is a separate event
+/// ([`Event::HeatScheduled`]) — it carries the lineup, which a transition does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum HeatTransition {
+    /// Countdown begins; IRL staging assigns frequencies.
+    Staged,
+    /// The gate opens to detections.
+    Armed,
+    /// The race is running; passes are consumed from here (plus the grace window).
+    Running,
+    /// The race closed — time elapsed or all landed.
+    Finished,
+    /// The result is finalized.
+    Scored,
+    /// Results are handed to the format generator.
+    Advanced,
+    /// Abandoned before scoring (Staged/Armed/Running → back a state).
+    Aborted,
+    /// A running heat restarted from staging.
+    Restarted,
+    /// A scored heat discarded for a re-run.
+    Discarded,
+}
+
+/// A marshaling penalty applied to a competitor in a heat.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum Penalty {
+    /// Disqualified from the heat.
+    Disqualify,
+    /// Time added to the competitor's result, in microseconds.
+    TimeAdded { micros: i64 },
+}
+
+/// A canonical event in the append-only log.
+///
+/// Adapters append **raw observations** (lifecycle, [`CompetitorSeen`](Event::CompetitorSeen),
+/// [`Pass`]); the **race engine** appends heat-loop state transitions and the **RD** appends
+/// marshaling adjudications (#28). Everything folds into the same projections — laps, results,
+/// standings — and raw observations are never mutated; a correction is a new appended event.
 ///
 /// Externally tagged (the default serde representation): each variant serialises as
 /// `{ "VariantName": { ..fields } }`, which maps cleanly to a discriminated union in
@@ -174,6 +238,41 @@ pub enum Event {
     },
     /// A gate crossing — the atom (see [`Pass`]).
     Pass(Pass),
+
+    // --- race-engine events (#28) ---
+    /// A heat is created with its lineup and enters the `Scheduled` state — the
+    /// `[*] → Scheduled` entry of the heat loop (race-engine.html §2). Minimal for
+    /// now: the competitors in the heat; seat/frequency assignment lands with the
+    /// scheduler (#36).
+    HeatScheduled {
+        heat: HeatId,
+        lineup: Vec<CompetitorRef>,
+    },
+    /// A heat-loop state transition appended by the engine (race-engine.html §2).
+    HeatStateChanged {
+        heat: HeatId,
+        transition: HeatTransition,
+    },
+    /// Marshaling: void a previously-detected pass, referenced by log offset. The
+    /// projection folds it out as if it never happened — the raw [`Pass`] stays in
+    /// the log untouched.
+    DetectionVoided { target: LogRef },
+    /// Marshaling: insert a lap-gate pass the timer missed.
+    LapInserted {
+        adapter: AdapterId,
+        competitor: CompetitorRef,
+        at: SourceTime,
+    },
+    /// Marshaling: re-time a previously-detected pass (referenced by log offset).
+    LapAdjusted { target: LogRef, at: SourceTime },
+    /// Marshaling: void an entire heat.
+    HeatVoided { heat: HeatId },
+    /// Marshaling: apply a penalty to a competitor in a heat.
+    PenaltyApplied {
+        heat: HeatId,
+        competitor: CompetitorRef,
+        penalty: Penalty,
+    },
 }
 
 #[cfg(test)]
@@ -257,5 +356,73 @@ mod tests {
         let a = SourceTime::from_micros(10_000_000);
         let b = SourceTime::from_micros(22_500_000);
         assert_eq!(b.micros_since(a), 12_500_000);
+    }
+
+    #[test]
+    fn race_engine_events_round_trip() {
+        let events = vec![
+            Event::HeatScheduled {
+                heat: HeatId("q-1".into()),
+                lineup: vec![
+                    CompetitorRef("node-0".into()),
+                    CompetitorRef("node-1".into()),
+                ],
+            },
+            Event::HeatStateChanged {
+                heat: HeatId("q-1".into()),
+                transition: HeatTransition::Running,
+            },
+            Event::HeatStateChanged {
+                heat: HeatId("q-1".into()),
+                transition: HeatTransition::Aborted,
+            },
+            Event::DetectionVoided { target: LogRef(42) },
+            Event::LapInserted {
+                adapter: AdapterId("rh".into()),
+                competitor: CompetitorRef("node-0".into()),
+                at: SourceTime::from_micros(5_000_000),
+            },
+            Event::LapAdjusted {
+                target: LogRef(43),
+                at: SourceTime::from_micros(5_100_000),
+            },
+            Event::HeatVoided {
+                heat: HeatId("q-1".into()),
+            },
+            Event::PenaltyApplied {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("AcroAce".into()),
+                penalty: Penalty::TimeAdded { micros: 2_000_000 },
+            },
+            Event::PenaltyApplied {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("Bee".into()),
+                penalty: Penalty::Disqualify,
+            },
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let back: Event = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, back);
+        }
+    }
+
+    #[test]
+    fn all_heat_transitions_round_trip() {
+        use HeatTransition::*;
+        for t in [
+            Staged, Armed, Running, Finished, Scored, Advanced, Aborted, Restarted, Discarded,
+        ] {
+            let json = serde_json::to_string(&t).unwrap();
+            let back: HeatTransition = serde_json::from_str(&json).unwrap();
+            assert_eq!(t, back);
+        }
+    }
+
+    #[test]
+    fn log_ref_is_a_bare_offset_on_the_wire() {
+        // `LogRef` is transparent — it serialises as the raw offset integer, the
+        // stable id adjudications target.
+        assert_eq!(serde_json::to_string(&LogRef(42)).unwrap(), "42");
     }
 }

@@ -25,9 +25,10 @@
       <p><span class="name">A Cargo workspace of <code>gridfpv-*</code> crates.</span>
       The spine lives under <code>crates/</code>: <code>events</code> (the canonical event model),
       <code>storage</code> (the append-only log + SQLite), <code>projection</code>,
-      <code>adapters</code> (timer adapters), and <code>app</code> (which builds the single
-      <code>gridfpv</code> binary). <code>xtask/</code> is a non-published
-      (<code>publish = false</code>) helper crate. Internal dependencies are path deps declared
+      <code>engine</code> (the race engine — heat loop, scoring, marshaling, format generators,
+      scheduling), <code>adapters</code> (timer adapters), and <code>app</code> (which builds the
+      single <code>gridfpv</code> binary). <code>xtask/</code> and <code>testkit/</code> (the
+      shared mock-RH test harness) are non-published (<code>publish = false</code>) helper crates. Internal dependencies are path deps declared
       once in <code>[workspace.dependencies]</code> and inherited with
       <code>name.workspace = true</code>.</p>
     </div>
@@ -76,6 +77,18 @@
       TypeScript discriminated union. Adapters emit <em>raw observations</em> only (no laps or
       results); optional detail (<code>sequence</code>, <code>gate</code>, <code>signal</code>)
       is <code>skip_serializing_if</code>-omitted at its default to keep the common case compact.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Event naming: states for our state machines, past-tense facts
+      elsewhere.</span> A transition of a state machine <em>we</em> run is named for the state it
+      enters — the heat loop's <code>HeatTransition</code> uses <code>Running</code>/<code>Finished</code>,
+      not <code>Started</code>/<code>Landed</code> (its off-ramps stay action-named:
+      <code>Aborted</code>/<code>Restarted</code>/<code>Discarded</code>). Everything else —
+      observed source lifecycle (<code>SessionStarted</code>/<code>SessionEnded</code>), marshaling
+      adjudications (<code>DetectionVoided</code>, <code>PenaltyApplied</code>) — stays past-tense
+      (the event-sourcing default for facts). The engine's <em>command</em> API is imperative
+      (<code>stage</code>/<code>arm</code>/<code>start</code>/<code>finish</code>) and <em>produces</em>
+      these state events.</p>
     </div>
 
     <h2>5. Live &amp; container tests</h2>

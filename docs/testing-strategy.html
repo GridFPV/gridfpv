@@ -298,6 +298,16 @@ flowchart LR
       <code>crates/adapters/tests/</code> (the generator + scenario tests) and
       <code>docker/rotorhazard/</code>.
     </p>
+    <div class="principle">
+      <p><span class="name">Every feature gets a mock-RH end-to-end test.</span> From the race
+      engine (v0.3) on, each feature is proven against the emulated-signal harness — drive mock-RH
+      laps through the adapter into the feature and assert end to end — <em>in addition to</em> the
+      fast unit/table tests for pure logic. The harness is the primary integration vehicle, so the
+      whole pipeline (signal → adapter → engine → projection) is exercised with realistic input on
+      every build, not just at the seams. Because mock timing is approximate, these e2e assertions
+      are structural/tolerance-based; exact-µs scoring and tie-break correctness ride hand-authored
+      canonical-log fixtures (§4).</p>
+    </div>
 
     <h2>6. Testing the format generators</h2>
     <p>
