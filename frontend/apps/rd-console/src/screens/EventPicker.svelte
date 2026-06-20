@@ -12,7 +12,7 @@
    * for the RD token (handled by the session's token provider). The Director address is the
    * page's own origin — there is no address to type.
    */
-  import { Button, Card, Dialog, Field, Input, toast } from '@gridfpv/components';
+  import { Badge, Button, Card, Dialog, Field, Input, toast } from '@gridfpv/components';
   import type { EventMeta } from '@gridfpv/types';
   import type { Session, CreateEventFields } from '../lib/session.svelte.js';
   import { PRACTICE_EVENT_ID } from '../lib/session.svelte.js';
@@ -25,6 +25,14 @@
     | { kind: 'ready'; events: EventMeta[] };
 
   let loadState = $state<LoadState>({ kind: 'loading' });
+
+  /**
+   * The id of the Director's **active event** (#91), if any — the event currently live. Read on
+   * load (open, no token) so the picker can mark it with an "Active" pill, even when this console
+   * is browsing the picker after a "Switch event" (which leaves the server's active event set).
+   * `undefined` when nothing is active or the read fails: no pill, never blocks the list.
+   */
+  let activeEventId = $state<string | undefined>(undefined);
 
   // The "new event" dialog. Name-only is the one-click default (#72, Slice 1b C); the
   // optional descriptive fields live behind a collapsible "Add details" section.
@@ -40,6 +48,10 @@
 
   async function load() {
     loadState = { kind: 'loading' };
+    // Read the active event id alongside the list (#91): it's an independent, best-effort read
+    // (no token; resolves undefined on failure), so a slow/failed active-event read never holds
+    // up — or breaks — the list. The pill simply appears once both have settled.
+    void session.getActiveEventId().then((id) => (activeEventId = id));
     try {
       const events = await session.listEvents();
       loadState = { kind: 'ready', events };
@@ -201,6 +213,9 @@
             <span class="event-main">
               <span class="event-name">{practice.name}</span>
             </span>
+            {#if practice.id === activeEventId}
+              <span class="active-pill"><Badge tone="success" dot>Active</Badge></span>
+            {/if}
             <span class="event-go" aria-hidden="true">→</span>
           </button>
         </section>
@@ -224,6 +239,9 @@
                     <span class="event-name">{ev.name}</span>
                     <span class="event-sub">{rowSubtitle(ev)}</span>
                   </span>
+                  {#if ev.id === activeEventId}
+                    <span class="active-pill"><Badge tone="success" dot>Active</Badge></span>
+                  {/if}
                   <span class="event-go" aria-hidden="true">→</span>
                 </button>
               </li>
@@ -420,14 +438,22 @@
     outline: none;
     box-shadow: var(--gf-focus-ring);
   }
+  /* Practice hero — a warm red-orange wash (#91), not the brand green: green reads as
+     "live / brand", so the warm accent signals a friendly, non-persistent scratch space. */
   .event-row.practice {
     background: linear-gradient(
       180deg,
-      var(--gf-accent-soft),
+      var(--gf-accent-practice-soft),
       color-mix(in srgb, var(--gf-surface) 88%, transparent)
     );
-    border-color: color-mix(in srgb, var(--gf-accent) 45%, var(--gf-border));
+    border-color: color-mix(in srgb, var(--gf-accent-practice) 45%, var(--gf-border));
     padding: var(--gf-space-5);
+  }
+  .event-row.practice:hover {
+    border-color: var(--gf-accent-practice);
+  }
+  .event-row.practice:hover .event-go {
+    color: var(--gf-accent-practice);
   }
   .event-icon {
     display: inline-flex;
@@ -442,9 +468,13 @@
     font-size: var(--gf-font-size-xs);
   }
   .event-icon.practice-icon {
-    background: var(--gf-accent-soft);
-    color: var(--gf-accent);
+    background: var(--gf-accent-practice-soft);
+    color: var(--gf-accent-practice);
     font-size: var(--gf-font-size-md);
+  }
+  /* The "Active" pill (#91): sits between the name and the arrow, never shrinking. */
+  .active-pill {
+    flex-shrink: 0;
   }
   .event-main {
     display: flex;

@@ -300,6 +300,29 @@ describe('Session', () => {
     expect(session.resolvingActiveEvent).toBe(false);
   });
 
+  // ── #91: the picker reads the active event id to mark the live row ───────────────────
+
+  it('getActiveEventId returns the Director active event id', async () => {
+    const getActiveEventImpl = vi.fn(async () => ({ event: EVENT_A }));
+    const session = new Session({ getActiveEventImpl, autoRestore: false });
+    expect(await session.getActiveEventId()).toBe('evt-a');
+    expect(getActiveEventImpl).toHaveBeenCalledWith(session.baseUrl, { token: undefined });
+  });
+
+  it('getActiveEventId resolves undefined when nothing is active', async () => {
+    const getActiveEventImpl = vi.fn(async () => ({ event: null }));
+    const session = new Session({ getActiveEventImpl, autoRestore: false });
+    expect(await session.getActiveEventId()).toBeUndefined();
+  });
+
+  it('getActiveEventId swallows a read failure (no pill, never blocks the list)', async () => {
+    const getActiveEventImpl = vi.fn(async () => {
+      throw new Error('fetch failed');
+    });
+    const session = new Session({ getActiveEventImpl, autoRestore: false });
+    expect(await session.getActiveEventId()).toBeUndefined();
+  });
+
   it('chooseEvent persists the active event server-side, then enters it', async () => {
     const { connect } = mockConnect(connecting);
     const controlFactory = vi.fn(() => ({
