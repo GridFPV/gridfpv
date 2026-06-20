@@ -19,7 +19,15 @@ import { connect } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
-import type { Command, CommandAck, LiveRaceState, ProjectionBody, Scope } from '@gridfpv/types';
+import type {
+  Command,
+  CommandAck,
+  HeatId,
+  HeatResult,
+  LiveRaceState,
+  ProjectionBody,
+  Scope
+} from '@gridfpv/types';
 
 const STORAGE_KEY = 'gridfpv.rd.session';
 
@@ -65,10 +73,21 @@ export class Session {
   baseUrl = $state('');
   /** The live read-client's lifecycle status (connecting → live → …). */
   connectionStatus = $state<ConnectionStatus | 'idle'>('idle');
-  /** The latest full protocol state (body + cursor + status + error). */
-  protocolState = $state<ProtocolState | undefined>(undefined);
-  /** The current `LiveRaceState`, when the live scope is connected. */
-  liveState = $state<LiveRaceState | undefined>(undefined);
+  /**
+   * The latest full protocol state (body + cursor + status + error). `$state.raw`:
+   * the body is an immutable whole value replaced wholesale on every stream update,
+   * so we reassign rather than deep-proxy it — deep `$state` proxying a large
+   * projection body is wasteful and a re-render footgun for external immutable data.
+   */
+  protocolState = $state.raw<ProtocolState | undefined>(undefined);
+  /** The current `LiveRaceState`, when the live scope is connected (immutable whole). */
+  liveState = $state.raw<LiveRaceState | undefined>(undefined);
+  /**
+   * The latest scored heat result the RD pulled via {@link fetchHeatResult}. The live
+   * read stream only carries `LiveRaceState`; a scored `HeatResult` is a separate,
+   * tighter heat-scope read (`?projection=result`), so the Results screen reads this.
+   */
+  heatResult = $state.raw<HeatResult | undefined>(undefined);
   /** The last control-path error surfaced to the RD (cleared on the next send). */
   lastCommandError = $state<CommandAck['error']>(undefined);
 
@@ -144,6 +163,7 @@ export class Session {
     this.connectionStatus = 'idle';
     this.protocolState = undefined;
     this.liveState = undefined;
+    this.heatResult = undefined;
     this.lastCommandError = undefined;
     if (clearStorage) persist(null);
   }
@@ -169,5 +189,39 @@ export class Session {
   /** Clear the last surfaced command error (e.g. when the RD dismisses it). */
   clearCommandError(): void {
     this.lastCommandError = undefined;
+  }
+
+  /**
+   * Pull a heat's scored result (`GET /snapshot/heat/{heat}?projection=result`) and
+   * store it on {@link heatResult} for the Results screen. The live read stream only
+   * carries `LiveRaceState`; the scored `HeatResult` is a separate heat-scope read. A
+   * non-2xx or malformed body leaves `heatResult` unchanged.
+   */
+  async fetchHeatResult(heat: HeatId): Promise<HeatResult | undefined> {
+    const base = this.baseUrl.endsWith('/') ? this.baseUrl.slice(0, -1) : this.baseUrl;
+    const headers: Record<string, string> = {};
+    if (this.#token) headers.Authorization = `Bearer ${this.#token}`;
+    try {
+      const resp = await globalThis.fetch(
+        `${base}/snapshot/heat/${encodeURIComponent(heat)}?projection=result`,
+        { headers }
+      );
+      if (!resp.ok) return undefined;
+      const snap: unknown = await resp.json();
+      if (
+        snap &&
+        typeof snap === 'object' &&
+        'body' in snap &&
+        snap.body &&
+        typeof snap.body === 'object' &&
+        'HeatResult' in snap.body
+      ) {
+        this.heatResult = (snap.body as { HeatResult: HeatResult }).HeatResult;
+        return this.heatResult;
+      }
+    } catch {
+      /* leave heatResult unchanged */
+    }
+    return undefined;
   }
 }

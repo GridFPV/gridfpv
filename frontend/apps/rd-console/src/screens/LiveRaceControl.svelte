@@ -23,6 +23,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
+  import NewHeat from './NewHeat.svelte';
 
   let { session, names = {} }: { session: Session; names?: Record<string, string> } = $props();
 
@@ -58,7 +59,13 @@
 
   async function fire(action: HeatAction) {
     if (!heat) return;
-    await session.send(commandForAction(action, heat));
+    const ack = await session.send(commandForAction(action, heat));
+    // Scoring locks in the heat result; pull it so the Results screen has it to show. The
+    // live stream only carries `LiveRaceState`, so the scored `HeatResult` is a separate
+    // heat-scope fetch (`?projection=result`).
+    if (ack.ok && action === 'Score') {
+      await session.fetchHeatResult(heat);
+    }
   }
 </script>
 
@@ -87,6 +94,8 @@
   {#if session.lastCommandError}
     <ErrorBanner error={session.lastCommandError} ondismiss={() => session.clearCommandError()} />
   {/if}
+
+  <NewHeat {session} />
 
   <div class="controls" role="group" aria-label="Heat transitions">
     {#each ACTION_ORDER as action (action)}

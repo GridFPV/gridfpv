@@ -112,9 +112,10 @@
         <Marshaling {session} />
       {:else if active === 'results'}
         <Results
-          heatResult={session.protocolState?.body && 'HeatResult' in session.protocolState.body
-            ? session.protocolState.body.HeatResult
-            : undefined}
+          heatResult={session.heatResult ??
+            (session.protocolState?.body && 'HeatResult' in session.protocolState.body
+              ? session.protocolState.body.HeatResult
+              : undefined)}
           standings={session.protocolState?.body && 'Ranking' in session.protocolState.body
             ? session.protocolState.body.Ranking
             : undefined}
