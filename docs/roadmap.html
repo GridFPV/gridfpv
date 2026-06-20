@@ -198,7 +198,7 @@ flowchart LR
     <h3>v0.7 — Cloud</h3>
     <p><strong>Goal:</strong> off-LAN reach and longevity. (<a href="cloud.html">Cloud &amp; Season</a>)</p>
     <ul>
-      <li><strong>One-way resumable push</strong> (Director → Cloud); Postgres warehouse via the same server crate + storage trait.</li>
+      <li><strong>One-way resumable push</strong> (Director → Cloud); Postgres warehouse via the same server crate + storage trait — the Cloud realization of the event-as-container model (the <code>events</code> + <code>event_log</code> schema in <a href="architecture.html">Architecture</a> §4).</li>
       <li><strong>Accounts</strong> + free-account-gated reads; the live relay (same PWA off-LAN) + web push; long-term portal basics (career, standings); the <strong>season</strong> model.</li>
     </ul>
     <p><strong>Done when:</strong> a Director with internet relays a live event to off-LAN viewers, a season aggregates across events, and a self-hosted Cloud deploy is documented.</p>
