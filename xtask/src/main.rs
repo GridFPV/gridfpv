@@ -171,6 +171,10 @@ fn live() -> bool {
     let zippyq_live = target("gridfpv-engine", "zippyq_live", true);
     let multiclass_live = target("gridfpv-engine", "multiclass_live", true);
     let full_event_live = target("gridfpv-engine", "full_event_live", true);
+    // Additional format generators (#68 double-elim, #69 round-robin, #70 multi-main).
+    let double_elim_live = target("gridfpv-engine", "double_elim_live", true);
+    let round_robin_live = target("gridfpv-engine", "round_robin_live", true);
+    let multi_main_live = target("gridfpv-engine", "multi_main_live", true);
     // The protocol server's mock-RH e2e: full event → server log → protocol client (#47).
     let server_e2e = target("gridfpv-server", "full_event_live", true);
     ws && live_rh
@@ -184,6 +188,9 @@ fn live() -> bool {
         && zippyq_live
         && multiclass_live
         && full_event_live
+        && double_elim_live
+        && round_robin_live
+        && multi_main_live
         && server_e2e
 }
 
