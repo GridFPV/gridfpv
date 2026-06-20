@@ -9,7 +9,7 @@
    * destructive off-ramps (Abort/Restart/Discard) confirm before firing. A failed
    * `CommandAck` surfaces through the shared `ErrorBanner`.
    */
-  import { HeatSheet, RaceClock, Leaderboard } from '@gridfpv/components';
+  import { HeatSheet, RaceClock, Leaderboard, Card } from '@gridfpv/components';
   import type { HeatId, HeatResult, LiveRaceState } from '@gridfpv/types';
   import {
     ACTION_ORDER,
@@ -108,21 +108,34 @@
 </script>
 
 <section class="live-control" aria-label="Live race control">
-  <header class="top">
-    <div class="heat-id">
-      {#if heat}
-        <span class="label">Current heat</span>
-        <span class="value">{heat}</span>
-      {:else}
-        <span class="label">No heat on the timer</span>
-      {/if}
+  <header class="hud" data-phase={phase}>
+    <div class="hud-heat">
+      <span class="label">Current heat</span>
+      <div class="heat-id">
+        {#if heat}
+          <span class="value">{heat}</span>
+        {:else}
+          <span class="value none">— none on the timer —</span>
+        {/if}
+      </div>
     </div>
-    <div class="phase" data-phase={phase}>{phase}</div>
-    <div class="clock">
-      <RaceClock {elapsedMs} label="Heat time" />
+
+    <div class="hud-phase">
+      <span class="label">Phase</span>
+      <div class="phase" data-phase={phase}>
+        <span class="phase-dot" aria-hidden="true"></span>{phase}
+      </div>
     </div>
+
+    <div class="hud-clock">
+      <span class="label">Heat time</span>
+      <div class="clock">
+        <RaceClock {elapsedMs} label="Heat time" />
+      </div>
+    </div>
+
     {#if live?.on_deck}
-      <div class="on-deck">
+      <div class="hud-ondeck">
         <span class="label">On deck</span>
         <span class="value">{live.on_deck}</span>
       </div>
@@ -136,37 +149,38 @@
   <NewHeat {session} />
 
   <div class="controls" role="group" aria-label="Heat transitions">
-    {#each ACTION_ORDER as action (action)}
-      {@const legal = isActionLegal(phase, action)}
-      <ConfirmButton
-        onconfirm={() => fire(action)}
-        confirm={isDestructive(action)}
-        disabled={!legal || !heat}
-        variant={action === primary ? 'primary' : isDestructive(action) ? 'danger' : 'default'}
-        title={actionDescription(action)}
-      >
-        {action}
-      </ConfirmButton>
-    {/each}
+    <span class="controls-label">Transitions</span>
+    <div class="controls-row">
+      {#each ACTION_ORDER as action (action)}
+        {@const legal = isActionLegal(phase, action)}
+        <ConfirmButton
+          onconfirm={() => fire(action)}
+          confirm={isDestructive(action)}
+          disabled={!legal || !heat}
+          variant={action === primary ? 'primary' : isDestructive(action) ? 'danger' : 'default'}
+          title={actionDescription(action)}
+        >
+          {action}
+        </ConfirmButton>
+      {/each}
+    </div>
   </div>
 
   <div class="panels">
-    <div class="panel">
-      <h3>Heat sheet</h3>
+    <Card title="Heat sheet" pad={false}>
       {#if live}
         <HeatSheet state={live} {names} />
       {:else}
         <p class="empty">Waiting for a live heat…</p>
       {/if}
-    </div>
-    <div class="panel">
-      <h3>Live standing</h3>
+    </Card>
+    <Card title="Live standing" pad={false}>
       {#if liveResult}
         <Leaderboard result={liveResult} metricLabel="Last lap" />
       {:else}
         <p class="empty">No laps yet.</p>
       {/if}
-    </div>
+    </Card>
   </div>
 </section>
 
@@ -174,58 +188,153 @@
   .live-control {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-4);
+    gap: var(--gf-space-5);
   }
-  .top {
-    display: flex;
+
+  /* ── HUD: the race-ops command bar ───────────────────────────────────────── */
+  .hud {
+    --_phase: var(--gf-phase-scheduled);
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
     align-items: center;
     gap: var(--gf-space-8);
-    flex-wrap: wrap;
+    padding: var(--gf-space-5) var(--gf-space-6);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    background: linear-gradient(
+      100deg,
+      color-mix(in srgb, var(--_phase) 10%, var(--gf-elevated)),
+      var(--gf-elevated) 60%
+    );
+    box-shadow: var(--gf-shadow-sm), var(--gf-shadow-inset);
+    position: relative;
+    overflow: hidden;
+  }
+  .hud::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background: var(--_phase);
+  }
+  .hud[data-phase='Scheduled'] {
+    --_phase: var(--gf-phase-scheduled);
+  }
+  .hud[data-phase='Staged'] {
+    --_phase: var(--gf-phase-staged);
+  }
+  .hud[data-phase='Armed'] {
+    --_phase: var(--gf-phase-armed);
+  }
+  .hud[data-phase='Running'] {
+    --_phase: var(--gf-phase-running);
+  }
+  .hud[data-phase='Finished'] {
+    --_phase: var(--gf-phase-finished);
+  }
+  .hud[data-phase='Scored'] {
+    --_phase: var(--gf-phase-scored);
   }
   .label {
     display: block;
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-color-text-muted);
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--gf-tracking-caps);
+    font-weight: var(--gf-font-weight-semibold);
+    margin-bottom: var(--gf-space-1);
   }
   .value {
-    font-size: var(--gf-font-size-lg);
+    font-size: var(--gf-font-size-xl);
     font-weight: var(--gf-font-weight-bold);
+    letter-spacing: var(--gf-tracking-tight);
+    font-variant-numeric: tabular-nums;
+  }
+  .value.none {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-medium);
+    color: var(--gf-text-faint);
   }
   .phase {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
     padding: var(--gf-space-2) var(--gf-space-4);
-    border-radius: var(--gf-radius-sm);
-    background: var(--gf-color-surface-alt);
-    border: 1px solid var(--gf-color-border);
+    border-radius: var(--gf-radius-pill);
+    background: color-mix(in srgb, var(--_phase) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--_phase) 45%, transparent);
+    color: color-mix(in srgb, var(--_phase) 90%, var(--gf-text));
     font-weight: var(--gf-font-weight-bold);
+    font-size: var(--gf-font-size-md);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-wide);
   }
-  .phase[data-phase='Running'] {
-    background: var(--gf-color-live);
-    color: var(--gf-color-accent-contrast);
-    border-color: var(--gf-color-live);
+  .phase-dot {
+    width: 0.55em;
+    height: 0.55em;
+    border-radius: 50%;
+    background: var(--_phase);
   }
+  .hud[data-phase='Running'] .phase-dot {
+    animation: hud-pulse 1.4s var(--gf-ease-out) infinite;
+  }
+  @keyframes hud-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--_phase) 70%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 0.6em transparent;
+    }
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hud[data-phase='Running'] .phase-dot {
+      animation: none;
+    }
+  }
+
+  /* ── Transition controls ─────────────────────────────────────────────────── */
   .controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-4) var(--gf-space-5);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    background: var(--gf-surface);
+  }
+  .controls-label {
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .controls-row {
     display: flex;
     flex-wrap: wrap;
     gap: var(--gf-space-3);
-    padding: var(--gf-space-4);
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-md);
-    background: var(--gf-color-surface);
   }
+
   .panels {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: var(--gf-space-6);
-  }
-  .panel h3 {
-    font-size: var(--gf-font-size-md);
-    margin: 0 0 var(--gf-space-3);
+    gap: var(--gf-space-5);
   }
   .empty {
-    color: var(--gf-color-text-muted);
+    color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
+    padding: var(--gf-space-5);
+  }
+  @media (max-width: 75rem) {
+    .hud {
+      grid-template-columns: 1fr 1fr;
+      gap: var(--gf-space-5);
+    }
   }
   @media (max-width: 60rem) {
     .panels {

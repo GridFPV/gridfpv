@@ -40,7 +40,7 @@
     display: flex;
     gap: var(--gf-space-6);
     align-items: stretch;
-    color: var(--gf-color-text);
+    color: var(--gf-text);
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
     overflow-x: auto;
@@ -50,40 +50,44 @@
     flex-direction: column;
     justify-content: space-around;
     gap: var(--gf-space-4);
-    min-width: 9rem;
+    min-width: 10rem;
   }
   .round-name {
     margin: 0;
-    color: var(--gf-color-text-muted);
-    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--gf-tracking-caps);
   }
   .match {
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-sm);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
     overflow: hidden;
-    background: var(--gf-color-surface);
+    background: var(--gf-elevated);
+    box-shadow: var(--gf-shadow-xs);
   }
   .slot {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--gf-space-2);
-    padding: var(--gf-space-2) var(--gf-space-3);
+    padding: var(--gf-space-3) var(--gf-space-3);
+    transition: background var(--gf-motion-fast) var(--gf-ease-out);
   }
   .slot + .slot {
-    border-top: 1px solid var(--gf-color-border);
+    border-top: 1px solid var(--gf-border-subtle);
   }
   .slot.winner {
-    background: var(--gf-color-surface-alt);
+    background: var(--gf-accent-soft);
     font-weight: var(--gf-font-weight-bold);
+    box-shadow: inset 2px 0 0 var(--gf-accent);
   }
   .slot.winner .competitor {
-    color: var(--gf-color-leader);
+    color: var(--gf-accent);
   }
   .check {
-    color: var(--gf-color-live);
+    color: var(--gf-accent);
     font-weight: var(--gf-font-weight-bold);
   }
 </style>

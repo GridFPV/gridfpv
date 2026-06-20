@@ -46,31 +46,41 @@
     align-items: center;
     gap: var(--gf-space-3);
     padding: var(--gf-space-3) var(--gf-space-4);
-    background: var(--gf-color-surface);
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-md);
-    color: var(--gf-color-text);
+    background: var(--gf-elevated);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    color: var(--gf-text);
     font-family: var(--gf-font-family);
+    box-shadow: var(--gf-shadow-xs);
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      transform var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .gridfpv-pilot-card:hover {
+    border-color: var(--gf-border-strong);
   }
   .position {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 1.8em;
-    min-height: 1.8em;
-    border-radius: var(--gf-radius-sm);
-    background: var(--gf-color-leader);
-    color: var(--gf-color-accent-contrast);
+    min-width: 2em;
+    min-height: 2em;
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-accent);
+    color: var(--gf-accent-contrast);
     font-weight: var(--gf-font-weight-bold);
     font-size: var(--gf-font-size-lg);
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 0 16px -4px var(--gf-accent-ring);
   }
   .body {
     flex: 1;
   }
   .name {
     display: block;
-    font-weight: var(--gf-font-weight-medium);
+    font-weight: var(--gf-font-weight-semibold);
     font-size: var(--gf-font-size-md);
+    letter-spacing: var(--gf-tracking-tight);
   }
   .stats {
     display: flex;
@@ -80,17 +90,20 @@
   .stat {
     display: flex;
     flex-direction: column;
+    gap: 2px;
   }
   dt {
-    color: var(--gf-color-text-muted);
-    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-2xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--gf-tracking-caps);
+    font-weight: var(--gf-font-weight-semibold);
   }
   dd {
     margin: 0;
     font-family: var(--gf-font-mono);
     font-variant-numeric: tabular-nums;
     font-weight: var(--gf-font-weight-medium);
+    color: var(--gf-text-secondary);
   }
 </style>

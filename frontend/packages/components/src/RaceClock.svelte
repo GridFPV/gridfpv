@@ -29,14 +29,16 @@
 <style>
   .gridfpv-race-clock {
     display: inline-block;
-    color: var(--gf-color-text);
+    color: var(--gf-text);
     font-family: var(--gf-font-mono);
-    font-size: var(--gf-font-size-xl);
+    font-size: var(--gf-font-size-2xl);
     font-weight: var(--gf-font-weight-bold);
     font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
     line-height: 1;
+    font-feature-settings: 'tnum' 1;
   }
   .gridfpv-race-clock[data-mode='remaining'] {
-    color: var(--gf-color-warn);
+    color: var(--gf-warn);
   }
 </style>

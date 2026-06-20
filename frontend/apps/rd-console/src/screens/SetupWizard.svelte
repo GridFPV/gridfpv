@@ -200,61 +200,94 @@
   .wizard {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-4);
+    gap: var(--gf-space-5);
+    max-width: 48rem;
   }
   .steps {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--gf-space-2);
     list-style: none;
     margin: 0;
     padding: 0;
+    counter-reset: step;
   }
   .steps li button {
-    background: var(--gf-color-surface);
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-sm);
-    padding: var(--gf-space-1) var(--gf-space-3);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    background: var(--gf-surface-alt);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-pill);
+    padding: var(--gf-space-2) var(--gf-space-4);
+    font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
-    color: var(--gf-color-text);
+    color: var(--gf-text-muted);
     cursor: pointer;
+    transition:
+      color var(--gf-motion-fast) var(--gf-ease-out),
+      background var(--gf-motion-fast) var(--gf-ease-out),
+      border-color var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .steps li button:hover {
+    color: var(--gf-text);
   }
   .steps li.active button {
-    border-color: var(--gf-color-accent);
-    color: var(--gf-color-accent);
-    font-weight: var(--gf-font-weight-bold);
+    border-color: var(--gf-accent);
+    background: var(--gf-accent-soft);
+    color: var(--gf-accent);
+    font-weight: var(--gf-font-weight-semibold);
   }
   .steps li.done button {
-    color: var(--gf-color-text-muted);
+    color: var(--gf-text-secondary);
+    border-color: var(--gf-border);
   }
   .panel {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-3);
-    padding: var(--gf-space-4);
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-md);
-    background: var(--gf-color-surface);
+    gap: var(--gf-space-4);
+    padding: var(--gf-space-6);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    background: var(--gf-elevated);
+    box-shadow: var(--gf-shadow-xs);
   }
   h3 {
     margin: 0;
-    font-size: var(--gf-font-size-md);
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-semibold);
+    letter-spacing: var(--gf-tracking-tight);
   }
   label {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-1);
-    font-size: var(--gf-font-size-sm);
+    gap: var(--gf-space-2);
+    font-size: var(--gf-font-size-xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    color: var(--gf-text-muted);
     max-width: 24rem;
   }
   input,
   select {
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
-    padding: var(--gf-space-1) var(--gf-space-2);
-    border: 1px solid var(--gf-color-border);
+    font-weight: var(--gf-font-weight-normal);
+    text-transform: none;
+    letter-spacing: normal;
+    height: 2.25rem;
+    padding: 0 var(--gf-space-3);
+    border: 1px solid var(--gf-border);
     border-radius: var(--gf-radius-sm);
-    background: var(--gf-color-surface);
-    color: var(--gf-color-text);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text);
+  }
+  input:focus,
+  select:focus {
+    outline: none;
+    border-color: var(--gf-accent);
+    box-shadow: 0 0 0 3px var(--gf-accent-soft);
   }
   .class-row {
     display: flex;
@@ -262,52 +295,78 @@
     align-items: center;
   }
   fieldset {
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-sm);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    padding: var(--gf-space-4);
     display: flex;
     gap: var(--gf-space-4);
     align-items: end;
     flex-wrap: wrap;
   }
   legend {
-    font-weight: var(--gf-font-weight-bold);
+    font-weight: var(--gf-font-weight-semibold);
     font-size: var(--gf-font-size-sm);
+    padding: 0 var(--gf-space-2);
   }
   .review dt {
-    font-weight: var(--gf-font-weight-bold);
-    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    font-size: var(--gf-font-size-2xs);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    color: var(--gf-text-muted);
   }
   .review dd {
-    margin: 0 0 var(--gf-space-2);
+    margin: var(--gf-space-1) 0 var(--gf-space-3);
     font-size: var(--gf-font-size-sm);
   }
+  .review code {
+    color: var(--gf-text-muted);
+    font-family: var(--gf-font-mono);
+  }
   .muted {
-    color: var(--gf-color-text-muted);
+    color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
   }
   .problems {
-    color: var(--gf-color-danger);
+    color: var(--gf-danger);
     font-size: var(--gf-font-size-sm);
   }
   button {
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
-    padding: var(--gf-space-2) var(--gf-space-4);
+    font-weight: var(--gf-font-weight-semibold);
+    height: 2.25rem;
+    padding: 0 var(--gf-space-4);
     border-radius: var(--gf-radius-sm);
-    border: 1px solid var(--gf-color-border);
-    background: var(--gf-color-surface);
-    color: var(--gf-color-text);
+    border: 1px solid var(--gf-border);
+    background: var(--gf-elevated);
+    color: var(--gf-text);
     cursor: pointer;
+    transition:
+      background var(--gf-motion-fast) var(--gf-ease-out),
+      border-color var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  button:hover:not(:disabled) {
+    background: var(--gf-elevated-hover);
+    border-color: var(--gf-border-strong);
+  }
+  button:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
   }
   button:disabled {
-    opacity: 0.45;
+    opacity: 0.5;
     cursor: not-allowed;
   }
   .finish {
-    border-color: var(--gf-color-accent);
-    background: var(--gf-color-accent);
-    color: var(--gf-color-accent-contrast);
+    border-color: var(--gf-accent);
+    background: var(--gf-accent);
+    color: var(--gf-accent-contrast);
     align-self: flex-start;
+  }
+  .finish:hover:not(:disabled) {
+    background: var(--gf-accent-hover);
+    border-color: var(--gf-accent-hover);
   }
   .nav {
     display: flex;

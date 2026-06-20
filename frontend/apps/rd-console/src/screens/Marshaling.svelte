@@ -164,34 +164,46 @@
   .marshaling {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-4);
+    gap: var(--gf-space-5);
   }
   h2 {
-    font-size: var(--gf-font-size-lg);
+    font-size: var(--gf-font-size-xl);
     margin: 0;
+    letter-spacing: var(--gf-tracking-tight);
   }
   .heat {
-    color: var(--gf-color-text-muted);
+    color: var(--gf-text-muted);
     font-weight: var(--gf-font-weight-normal);
   }
   .muted {
-    color: var(--gf-color-text-muted);
+    color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
     margin: var(--gf-space-1) 0 0;
   }
   .laps {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--gf-space-6);
+    gap: var(--gf-space-4);
+  }
+  .comp {
+    flex: 1 1 14rem;
+    padding: var(--gf-space-4);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    background: var(--gf-elevated);
+    box-shadow: var(--gf-shadow-xs);
   }
   .comp h4 {
     margin: 0 0 var(--gf-space-2);
     font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
   }
   .comp ol {
     margin: 0;
     padding-left: var(--gf-space-6);
     font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+    font-family: var(--gf-font-mono);
   }
   .actions {
     display: grid;
@@ -199,51 +211,80 @@
     gap: var(--gf-space-4);
   }
   fieldset {
-    border: 1px solid var(--gf-color-border);
-    border-radius: var(--gf-radius-md);
-    padding: var(--gf-space-3) var(--gf-space-4);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    padding: var(--gf-space-4) var(--gf-space-5);
     display: flex;
     flex-wrap: wrap;
     align-items: end;
     gap: var(--gf-space-3);
+    background: var(--gf-elevated);
   }
   legend {
-    font-weight: var(--gf-font-weight-bold);
+    font-weight: var(--gf-font-weight-semibold);
     font-size: var(--gf-font-size-sm);
+    padding: 0 var(--gf-space-2);
   }
   label {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-1);
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-color-text-muted);
+    gap: var(--gf-space-2);
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    color: var(--gf-text-muted);
   }
   input,
   select {
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
-    padding: var(--gf-space-1) var(--gf-space-2);
-    border: 1px solid var(--gf-color-border);
+    font-weight: var(--gf-font-weight-normal);
+    text-transform: none;
+    letter-spacing: normal;
+    height: 2.1rem;
+    padding: 0 var(--gf-space-3);
+    border: 1px solid var(--gf-border);
     border-radius: var(--gf-radius-sm);
-    background: var(--gf-color-surface);
-    color: var(--gf-color-text);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text);
+  }
+  input:focus,
+  select:focus {
+    outline: none;
+    border-color: var(--gf-accent);
+    box-shadow: 0 0 0 3px var(--gf-accent-soft);
   }
   button {
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);
-    padding: var(--gf-space-2) var(--gf-space-4);
+    font-weight: var(--gf-font-weight-semibold);
+    height: 2.1rem;
+    padding: 0 var(--gf-space-4);
     border-radius: var(--gf-radius-sm);
-    border: 1px solid var(--gf-color-border);
-    background: var(--gf-color-surface);
-    color: var(--gf-color-text);
+    border: 1px solid var(--gf-border);
+    background: var(--gf-elevated);
+    color: var(--gf-text);
     cursor: pointer;
+    transition:
+      background var(--gf-motion-fast) var(--gf-ease-out),
+      border-color var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  button:hover:not(:disabled) {
+    background: var(--gf-elevated-hover);
+    border-color: var(--gf-border-strong);
+  }
+  button:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
   }
   button:disabled {
-    opacity: 0.45;
+    opacity: 0.5;
     cursor: not-allowed;
   }
   .danger-zone {
-    border-color: var(--gf-color-danger);
+    border-color: color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
+    background: var(--gf-danger-soft);
   }
   @media (max-width: 60rem) {
     .actions {
