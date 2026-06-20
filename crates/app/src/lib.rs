@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod director;
+pub mod source;
 
 use gridfpv_events::{AdapterId, CompetitorRef, Event, GateIndex, Pass, SourceTime};
 use gridfpv_projection::{LapList, lap_list};
