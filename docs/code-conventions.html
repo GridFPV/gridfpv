@@ -63,6 +63,11 @@
       regenerated bindings with the Rust change. The protocol <strong>contract version</strong>
       (<code>CONTRACT_VERSION</code>, a monotonic <code>u32</code>) bumps only on a breaking wire
       change; additive changes an older client can ignore do not bump it.</p>
+      <p>Transferred integers render as a TS <code>number</code>: microsecond times / durations
+      (<code>i64</code>) and cursors / sequences (<code>u64</code>) are all bounded ≪ 2<sup>53</sup>,
+      so <code>number</code> is exact and matches serde's JSON-number output — avoiding a
+      <code>bigint</code>/<code>number</code> mismatch between the two ends. Reserve
+      <code>string</code> for any full-range <code>u64</code>.</p>
     </div>
 
     <h2>4. Safety &amp; the data model</h2>

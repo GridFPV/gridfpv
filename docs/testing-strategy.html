@@ -309,7 +309,36 @@ flowchart LR
       canonical-log fixtures (§4).</p>
     </div>
 
-    <h2>6. Testing the format generators</h2>
+    <h2>6. The frontend wire-contract suite &amp; observability harness</h2>
+    <p>
+      Two test layers landed in v0.4 that sit <em>between</em> the mocked frontend unit tests and
+      the dockerized mock-RH end-to-end run, and they exist for one reason: the v0.4 integration-seam
+      bugs <strong>all passed their unit tests</strong> — each side mocked its own assumption of the
+      contract, so the drift between the two sides was exactly what nothing tested.
+    </p>
+    <div class="principle">
+      <p><span class="name">A real-client ↔ real-Director contract suite at every seam.</span>
+      The contract suite (<code>frontend/contract/</code>, <code>npm run contract</code>) runs the
+      <em>real</em> protocol client against the <em>real</em> Director and asserts actual wire
+      behaviour — the path-scoped snapshot routes, the externally-tagged <code>StreamMessage</code>
+      frames, the per-stream-<code>sequence</code>-vs-snapshot-<code>cursor</code> distinction
+      (<a href="protocol.html">Protocol</a> §9.5), the control path (headers + auth + acks), and
+      that the wire carries <code>number</code>s. It is the layer between the mocked unit tests and
+      the dockerized mock-RH e2e, and it needs <strong>no Docker and no browser</strong>, so it runs
+      in the shared CI pipeline. It exists because the v0.4 seam bugs each passed their own unit
+      tests while drifting from the contract.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Debug with full-stack observability first.</span> A reusable harness
+      (<code>frontend/test-harness/</code>, <code>npm run observe</code>) boots the real Director and
+      captures the <strong>browser console, page errors, WS frames, and server logs together</strong>,
+      dumping all of them on any failure. The standing rule that follows: when something breaks,
+      <strong>look at full-stack observability — browser console + server logs + wire — before
+      forming a hypothesis</strong>. A render-time fault (a thrown exception during render) then
+      surfaces immediately in the console capture instead of presenting as a silent blank page.</p>
+    </div>
+
+    <h2>7. Testing the format generators</h2>
     <p>
       Format / qualifying generators are a pure function of state too
       (<a href="race-engine.html">Race Engine</a> §3): given the seeded field, config, and the
@@ -338,7 +367,7 @@ flowchart LR
       this same interface.
     </p>
 
-    <h2>7. Test levels</h2>
+    <h2>8. Test levels</h2>
     <p>
       The levels mirror the Director's data path — translate in, derive, serve out — and each
       proves a different claim. Nothing above unit level touches a live source; replay is the
@@ -348,7 +377,7 @@ flowchart LR
       <dt>Unit</dt>
       <dd>Pure functions in isolation: adapter <strong>translators</strong> (golden cases,
       §2), the <strong>derivation</strong> stages (passes→laps→results→standings, §4), and the
-      format <strong>generators</strong> (table-driven, §6). Fast, hermetic, the bulk of the
+      format <strong>generators</strong> (table-driven, §7). Fast, hermetic, the bulk of the
       suite.</dd>
       <dt>Integration — replay</dt>
       <dd>A recorded session (raw or canonical) replayed through the assembled adapter →
@@ -392,7 +421,7 @@ flowchart TB
   contract -.-> e2e
     </pre>
 
-    <h2>8. Open decisions</h2>
+    <h2>9. Open decisions</h2>
     <ol class="decisions">
       <li><span class="resolved">Resolved — Fixture format &amp; storage.</span> Fixtures are
       stored as JSON and checked in alongside the code: per-adapter source/canonical fixtures
