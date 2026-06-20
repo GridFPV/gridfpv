@@ -314,9 +314,12 @@ async fn control_post_requires_a_valid_rd_token() {
     // A valid RD token is admitted.
     assert_eq!(post_status(&addr, &cmd, Some(&rd)).await, 200);
 
-    // Revoke the RD token; it stops working.
+    // Revoke the RD token; it stops working. (Issue a second RD token first so control stays
+    // gated after the revoke — removing the *last* credential would open the Director.)
+    let keep = state.tokens().issue_rd_token();
     assert!(state.tokens().revoke(&rd));
     assert_eq!(post_status(&addr, &cmd, Some(&rd)).await, 401);
+    assert_eq!(post_status(&addr, &cmd, Some(&keep)).await, 200);
 }
 
 /// `GET /control` (the WS upgrade) is gated the same way: a connection without a valid RD
