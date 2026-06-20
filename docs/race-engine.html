@@ -162,6 +162,25 @@ stateDiagram-v2
       before the window closes; an in-progress lap at the cutoff does not count.</li>
     </ul>
 
+    <div class="callout">
+      <p><strong>Needs further discussion — signal-level marshaling &amp; the adapter boundary.</strong>
+      Today's marshaling is <em>lap-level</em>: void / insert / adjust on canonical passes — a single,
+      timer-agnostic implementation (the RD's judgment). The richer experience some timers offer (e.g.
+      RotorHazard's RSSI chart with adjustable entry/exit thresholds that <em>re-derives</em> laps from
+      the raw signal) is <em>signal-level</em> and inherently timer-specific: it depends on the timer
+      exposing raw signal and on that timer's detection algorithm. The intended split is to keep the
+      <strong>decision</strong> tooling timer-specific (a capability-gated panel; delegate the
+      re-analysis to the timer) while the <strong>commit</strong> stays uniform — any correction, however
+      decided, lands as the same canonical adjudications folded into the projection, so the engine never
+      cares how it was reached. Open question for the abstraction review: an <strong>adapter capability
+      interface</strong> (raw-signal access, re-analysis) and whether GridFPV <strong>ingests + stores
+      raw signal</strong> itself (offline/replayable re-analysis, but large data + re-implementing each
+      timer's detection) or <strong>delegates live</strong> to the timer. Provisional lean: universal
+      lap-level marshaling now + a capability for live timer-delegated tuning; native raw-signal ingest
+      is a deliberate future scope call. (The maintainer wants to use the interface hands-on before
+      deciding what, if anything, the marshaling data model must add.)</p>
+    </div>
+
     <h2>5. Advancement &amp; scheduling</h2>
     <p>
       When a heat is scored, its result is handed to the format generator, which decides
