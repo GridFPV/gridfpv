@@ -74,8 +74,8 @@ stateDiagram-v2
   Scheduled --> Staged: stage
   Staged --> Armed: arm
   Armed --> Running: start
-  Running --> Landed: time elapsed / all landed
-  Landed --> Scored: score
+  Running --> Finished: time elapsed / all landed
+  Finished --> Scored: score
   Scored --> [*]: advance
   Staged --> Scheduled: abort
   Armed --> Staged: abort
@@ -85,11 +85,19 @@ stateDiagram-v2
 
     <p>
       Passes are consumed only while a heat is <em>Running</em> (and during a grace window
-      after — late crossings still count until the heat is scored). <em>Staging</em> is the
-      countdown; <em>arm</em> opens the gate to detections; <em>land</em> closes the race;
-      <em>score</em> finalizes the result; <em>advance</em> hands results to the format.
-      Abort, restart, and discard-and-re-run are first-class transitions, recorded like any
-      other.
+      after — late crossings still count until the heat is scored; the window is configurable,
+      default until scored). <em>Staging</em> is the countdown; <em>arm</em> opens the gate to
+      detections; <em>finish</em> closes the race (time elapsed / all landed); <em>score</em>
+      finalizes the result; <em>advance</em> hands results to the format. Abort, restart, and
+      discard-and-re-run are first-class transitions, recorded like any other.
+    </p>
+    <p>
+      In the log these are canonical events: a heat is created by a <code>HeatScheduled</code>
+      event (carrying its lineup — the <code>[*] → Scheduled</code> entry), and every transition
+      after is a <code>HeatStateChanged</code> carrying the state entered
+      (<code>Staged / Armed / Running / Finished / Scored / Advanced</code>) or the off-ramp taken
+      (<code>Aborted / Restarted / Discarded</code>). Live race control is just commands that
+      drive these transitions.
     </p>
     <div class="sim-note">
       <p><span class="label">IRL</span>Staging assigns frequencies/channels and avoids

@@ -162,10 +162,12 @@ pub struct HeatId(pub String);
 #[ts(export, export_to = "bindings/")]
 pub struct LogRef(pub u64);
 
-/// A transition of the heat-loop state machine (race-engine.html §2). One event per
-/// verb; the engine validates legality against the current state — the recorded
-/// transition, not a target state, so abort/restart/discard stay distinct even when
-/// they land on the same state.
+/// A transition of the heat-loop state machine (race-engine.html §2). The recorded
+/// transition is named for the state it enters on the forward path (Staged → Armed →
+/// Running → Finished → Scored), with the off-ramps (abort/restart/discard) named for
+/// the action so they stay distinct even when they land on the same state. The engine
+/// validates legality against the current state. Heat *creation* is a separate event
+/// ([`Event::HeatScheduled`]) — it carries the lineup, which a transition does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum HeatTransition {
@@ -173,10 +175,10 @@ pub enum HeatTransition {
     Staged,
     /// The gate opens to detections.
     Armed,
-    /// The race starts; passes are consumed from here (plus the grace window).
-    Started,
-    /// The race closes — time elapsed or all landed.
-    Landed,
+    /// The race is running; passes are consumed from here (plus the grace window).
+    Running,
+    /// The race closed — time elapsed or all landed.
+    Finished,
     /// The result is finalized.
     Scored,
     /// Results are handed to the format generator.
@@ -238,6 +240,14 @@ pub enum Event {
     Pass(Pass),
 
     // --- race-engine events (#28) ---
+    /// A heat is created with its lineup and enters the `Scheduled` state — the
+    /// `[*] → Scheduled` entry of the heat loop (race-engine.html §2). Minimal for
+    /// now: the competitors in the heat; seat/frequency assignment lands with the
+    /// scheduler (#36).
+    HeatScheduled {
+        heat: HeatId,
+        lineup: Vec<CompetitorRef>,
+    },
     /// A heat-loop state transition appended by the engine (race-engine.html §2).
     HeatStateChanged {
         heat: HeatId,
@@ -351,9 +361,16 @@ mod tests {
     #[test]
     fn race_engine_events_round_trip() {
         let events = vec![
+            Event::HeatScheduled {
+                heat: HeatId("q-1".into()),
+                lineup: vec![
+                    CompetitorRef("node-0".into()),
+                    CompetitorRef("node-1".into()),
+                ],
+            },
             Event::HeatStateChanged {
                 heat: HeatId("q-1".into()),
-                transition: HeatTransition::Started,
+                transition: HeatTransition::Running,
             },
             Event::HeatStateChanged {
                 heat: HeatId("q-1".into()),
@@ -394,7 +411,7 @@ mod tests {
     fn all_heat_transitions_round_trip() {
         use HeatTransition::*;
         for t in [
-            Staged, Armed, Started, Landed, Scored, Advanced, Aborted, Restarted, Discarded,
+            Staged, Armed, Running, Finished, Scored, Advanced, Aborted, Restarted, Discarded,
         ] {
             let json = serde_json::to_string(&t).unwrap();
             let back: HeatTransition = serde_json::from_str(&json).unwrap();
