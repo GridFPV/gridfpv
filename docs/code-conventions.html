@@ -25,9 +25,10 @@
       <p><span class="name">A Cargo workspace of <code>gridfpv-*</code> crates.</span>
       The spine lives under <code>crates/</code>: <code>events</code> (the canonical event model),
       <code>storage</code> (the append-only log + SQLite), <code>projection</code>,
-      <code>adapters</code> (timer adapters), and <code>app</code> (which builds the single
-      <code>gridfpv</code> binary). <code>xtask/</code> is a non-published
-      (<code>publish = false</code>) helper crate. Internal dependencies are path deps declared
+      <code>engine</code> (the race engine — heat loop, scoring, marshaling, format generators,
+      scheduling), <code>adapters</code> (timer adapters), and <code>app</code> (which builds the
+      single <code>gridfpv</code> binary). <code>xtask/</code> and <code>testkit/</code> (the
+      shared mock-RH test harness) are non-published (<code>publish = false</code>) helper crates. Internal dependencies are path deps declared
       once in <code>[workspace.dependencies]</code> and inherited with
       <code>name.workspace = true</code>.</p>
     </div>

@@ -110,7 +110,11 @@ stateDiagram-v2
     <p>
       Formats are a pluggable registry — the same idea as adapters, for competition
       structure. There is <strong>one unified generator interface</strong>, and qualifying
-      formats and bracket formats are both implementations of it.
+      formats and bracket formats are both implementations of it. Concretely, a
+      <code>FormatRegistry</code> maps a format name + a config bag to a live generator (the
+      competition-structure analogue of the adapter registry); the Director picks a format by
+      name and the heat loop only ever sees the trait object (<code>Generator::next</code> →
+      run the next heat(s) or <code>Complete</code>, plus <code>ranking</code>).
     </p>
     <div class="principle">
       <p><span class="name">A format is a function of state, not a fixed schedule.</span>
@@ -147,10 +151,15 @@ stateDiagram-v2
       completes on each subsequent crossing of the lap gate (a full circuit of the gates /
       splits where the track has them). Marshaling adjudications (void, insert, adjust) fold
       in exactly as in <a href="architecture.html">Architecture</a> §3 — the lap list is a
-      projection.</li>
+      projection (<code>lap_list_marshaled</code>), with each adjudication targeting a prior
+      pass by its append offset (<code>LogRef</code>), last-writer-wins by log order; the raw
+      passes stay byte-identical.</li>
       <li><strong>Win condition (per-heat / format config).</strong> Most laps in a time
       window, first to N laps, or best single / consecutive lap (qualifying). The engine
-      applies the configured condition; ties break by a recorded rule.</li>
+      applies the configured condition; ties break by a recorded rule. For the <em>timed</em>
+      condition the window is anchored to a shared race clock from the start with a
+      <strong>hard cutoff</strong> — a lap counts only if its completing crossing falls strictly
+      before the window closes; an in-progress lap at the cutoff does not count.</li>
     </ul>
 
     <h2>5. Advancement &amp; scheduling</h2>
@@ -163,13 +172,21 @@ stateDiagram-v2
     <p>
       <strong>Multi-class scheduling.</strong> Several classes can be live at once, each with
       its own format, sharing scarce resources — the timer and, for IRL, the frequency pool.
-      The engine interleaves heats across classes and serializes access to shared resources;
-      frequency allocation specifically is a contested ownership question (below).
+      The engine interleaves heats <strong>round-robin</strong> across classes in a fixed
+      rotation (so no class starves; a format that emits several heats at once has them buffered
+      and drained one per turn rather than monopolising the serialized timer), and
+      <strong>allocates</strong> each IRL heat's video channels from a shared frequency pool by
+      deterministic first-fit in seed order — the engine's half of the split (§7.3): it decides
+      who flies on what channel, the adapter applies the tuning. Sim classes have no frequency
+      step and get an empty allocation. Both interleaving and allocation are pure functions of
+      the log (§6).
     </p>
     <p>
       <strong>Manual adjustments.</strong> Re-seeding, moving a pilot between heats before
       they fly, and discard-and-re-run are RD actions appended as events the generator
-      respects on its next step — never edits to past truth.
+      respects on its next step — never edits to past truth. (In v0.3 discard-and-re-run is a
+      real <code>HeatTransition::Discarded</code> event; the remaining RD-action event variants
+      land with the RD console.)
     </p>
 
     <h2>6. Determinism &amp; replay</h2>
@@ -178,7 +195,10 @@ stateDiagram-v2
       events, it produces the same heats, results, and standings — that's what lets
       projections rebuild and recorded sessions replay (the testing backbone). Anything
       non-deterministic — a random draw for seeding, a coin-flip tie-break — is resolved
-      once and its <em>outcome</em> recorded as an event, so replay never re-rolls it.</p>
+      once and its <em>outcome</em> recorded, so replay never re-rolls it. In v0.3 this is the
+      <code>SeedingOutcome</code> — a recorded permutation a generator is constructed with and
+      applies deterministically; promoting it to a first-class log event is deferred, and will
+      not change the generator contract.</p>
     </div>
 
     <h2>7. Open decisions</h2>
