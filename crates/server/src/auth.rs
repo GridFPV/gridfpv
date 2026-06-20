@@ -216,21 +216,27 @@ impl TokenStore {
     ///
     /// Policy, in order:
     /// - **No control credential configured** ([`has_control_credential`](Self::has_control_credential)
-    ///   is `false`) ⇒ control is **open**: an anonymous (no-token) caller is admitted
-    ///   ([`Role::Rd`]). This is the local-trust posture for an unconfigured Director.
-    /// - **A token is present** ⇒ it is always validated, even on an otherwise-open Director:
-    ///   a present-but-unknown/revoked token, or a read-only/join token, is rejected. (So a
-    ///   stale token never silently succeeds.)
-    /// - **A control credential IS configured** and **no token** is presented ⇒ rejected.
-    ///   This preserves the original gated behaviour the moment a token is configured.
+    ///   is `false`) ⇒ control is **OPEN (full trust)**: admit as [`Role::Rd`] regardless of
+    ///   any token. A present token — even a stale/unknown or read-only one — is **ignored**:
+    ///   there is nothing configured to validate it against, and "full trust" means a leftover
+    ///   token (e.g. from when the Director was previously run gated) must not break it.
+    /// - **A control credential IS configured** ⇒ control is **gated**: a present control token
+    ///   is validated (unknown/revoked or read-only ⇒ rejected); no token ⇒ rejected.
     ///
     /// This is the whole control policy in one place; [`ControlAuth`] is the only caller
     /// (see [`crate::control_handler`]). The loopback/remote split is #80 (not built here).
     ///
     /// [`ControlAuth`]: crate::control_handler::ControlAuth
     pub fn authenticate_control(&self, token: Option<&str>) -> Result<Session, ProtocolError> {
+        // Full-trust first: when no control credential is configured, control is OPEN —
+        // admit as RD regardless of any token presented. A leftover/stale token (e.g. from
+        // when the Director was previously run gated) must NOT break an open Director;
+        // there is nothing to validate it against, so it is simply ignored.
+        if !self.has_control_credential() {
+            return Ok(Session { role: Role::Rd });
+        }
+        // Gated: a credential IS configured, so a valid control token is required.
         match token {
-            // A present token is always validated, on an open or gated Director alike.
             Some(token) => match self.session(token) {
                 Some(session) if session.role.can_control() => Ok(session),
                 Some(_) => Err(ProtocolError::new(
@@ -242,18 +248,10 @@ impl TokenStore {
                     "unknown or revoked control token",
                 )),
             },
-            // No token: open when nothing is configured (full trust), else gated.
-            None => {
-                if self.has_control_credential() {
-                    Err(ProtocolError::new(
-                        ErrorCode::Unauthorized,
-                        "control requires an Authorization: Bearer <RD token> header",
-                    ))
-                } else {
-                    // Full-trust: no credential configured, so an anonymous caller controls.
-                    Ok(Session { role: Role::Rd })
-                }
-            }
+            None => Err(ProtocolError::new(
+                ErrorCode::Unauthorized,
+                "control requires an Authorization: Bearer <RD token> header",
+            )),
         }
     }
 
@@ -365,13 +363,14 @@ mod tests {
     }
 
     #[test]
-    fn join_token_is_read_only_and_rejected_on_control() {
+    fn join_token_is_read_only_and_rejected_on_control_when_gated() {
         let store = TokenStore::new();
+        store.issue_rd_token(); // gate control so a presented token is actually validated
         let token = store.issue_join_token();
         // Authenticates a read…
         let read = store.authenticate_read(Some(&token)).unwrap().unwrap();
         assert_eq!(read.role, Role::ReadOnly);
-        // …but never control.
+        // …but never control (on a gated Director).
         let err = store.authenticate_control(Some(&token)).unwrap_err();
         assert_eq!(err.code, ErrorCode::Unauthorized);
     }
@@ -412,39 +411,45 @@ mod tests {
     }
 
     #[test]
-    fn a_present_but_invalid_token_is_rejected_even_on_an_open_director() {
-        // Even with nothing configured (open), a *presented* token must be valid — a stale
-        // token never silently succeeds.
+    fn a_present_token_is_ignored_on_an_open_director() {
+        // Full-trust (#72): with nothing configured (open), control admits as RD regardless of
+        // any token — a stale/unknown token, or even a read-only one, is IGNORED, not rejected.
+        // A leftover token from a previously-gated run must never break an open Director.
         let store = TokenStore::new();
         assert_eq!(
-            store.authenticate_control(Some("stale")).unwrap_err().code,
-            ErrorCode::Unauthorized
+            store.authenticate_control(Some("stale")).unwrap().role,
+            Role::Rd
         );
-        // A read-only token presented on control is still rejected, open or not.
-        let join = store.issue_join_token();
+        let join = store.issue_join_token(); // a join token still does not gate control
+        assert!(!store.has_control_credential());
         assert_eq!(
-            store.authenticate_control(Some(&join)).unwrap_err().code,
-            ErrorCode::Unauthorized
+            store.authenticate_control(Some(&join)).unwrap().role,
+            Role::Rd
         );
     }
 
     #[test]
-    fn revoked_token_stops_working() {
+    fn revoked_token_stops_working_while_control_stays_gated() {
         let store = TokenStore::new();
+        let keep = store.issue_rd_token(); // a second credential keeps control gated post-revoke
         let token = store.issue_rd_token();
         assert!(store.authenticate_control(Some(&token)).is_ok());
         assert!(store.revoke(&token));
+        // Still gated (the `keep` credential remains), so the revoked token is now rejected.
+        assert!(store.has_control_credential());
         assert_eq!(
             store.authenticate_control(Some(&token)).unwrap_err().code,
             ErrorCode::Unauthorized
         );
+        assert!(store.authenticate_control(Some(&keep)).is_ok());
         // A second revoke is a harmless no-op.
         assert!(!store.revoke(&token));
     }
 
     #[test]
-    fn unknown_token_is_unauthorized_on_both_paths() {
+    fn unknown_token_is_unauthorized_on_both_paths_when_gated() {
         let store = TokenStore::new();
+        store.issue_rd_token(); // gate control so an unknown token is validated + rejected
         assert_eq!(
             store.authenticate_control(Some("nope")).unwrap_err().code,
             ErrorCode::Unauthorized
