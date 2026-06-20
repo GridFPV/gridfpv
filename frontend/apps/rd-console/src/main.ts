@@ -1,4 +1,7 @@
 import { mount } from 'svelte';
+// The component library's design tokens — imported once per surface so every
+// @gridfpv/components widget themes off the same CSS custom properties.
+import '@gridfpv/components/tokens.css';
 import App from './App.svelte';
 
 const target = document.getElementById('app');

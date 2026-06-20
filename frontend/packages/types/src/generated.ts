@@ -55,6 +55,7 @@ export type * from '@bindings/Metric';
 export type * from '@bindings/Pass';
 export type * from '@bindings/Penalty';
 export type * from '@bindings/PilotId';
+export type * from '@bindings/PilotProgress';
 export type * from '@bindings/Placement';
 export type * from '@bindings/ProjectionBody';
 export type * from '@bindings/ProjectionKind';
