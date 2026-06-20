@@ -171,6 +171,7 @@ fn live() -> bool {
     let single_elim_live = target("gridfpv-engine", "single_elim_live", true);
     let zippyq_live = target("gridfpv-engine", "zippyq_live", true);
     let multiclass_live = target("gridfpv-engine", "multiclass_live", true);
+    let full_event_live = target("gridfpv-engine", "full_event_live", true);
     ws && live_rh
         && signal
         && heat_live
@@ -181,6 +182,7 @@ fn live() -> bool {
         && single_elim_live
         && zippyq_live
         && multiclass_live
+        && full_event_live
 }
 
 fn main() {
