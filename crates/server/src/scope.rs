@@ -17,6 +17,18 @@ use gridfpv_events::HeatId;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// The event-scoped pilot handle a scope addresses (protocol.html §4 "Pilot scope") — a
+/// racer following their own laps, results, and next heat.
+///
+/// This is the **canonical** [`PilotId`](gridfpv_events::PilotId) re-exported from the
+/// event model, so the wire/scope layer and the logged registration binding
+/// ([`Event::CompetitorRegistered`](gridfpv_events::Event::CompetitorRegistered)) share
+/// one type — distinct from the per-source
+/// [`CompetitorRef`](gridfpv_events::CompetitorRef) the timer reports: a pilot is bound to
+/// source competitors by a registration action (Architecture §9), now modelled in the log
+/// (#60).
+pub use gridfpv_events::PilotId;
+
 /// Identifies an **event** — the whole competition (protocol.html §4 "Event scope").
 ///
 /// A transparent string newtype like the event-model ids. The cross-event registry
@@ -33,18 +45,6 @@ pub struct EventId(pub String);
 #[serde(transparent)]
 #[ts(export, export_to = "bindings/")]
 pub struct ClassId(pub String);
-
-/// Identifies a **pilot** across an event (protocol.html §4 "Pilot scope") — a racer
-/// following their own laps, results, and next heat.
-///
-/// This is the event-scoped pilot handle a scope addresses, distinct from the
-/// per-source [`CompetitorRef`](gridfpv_events::CompetitorRef) the timer reports: a
-/// pilot is bound to source competitors by a registration action (Architecture §9),
-/// which is out of scope here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
-#[serde(transparent)]
-#[ts(export, export_to = "bindings/")]
-pub struct PilotId(pub String);
 
 /// What a subscription addresses (protocol.html §4): one of the four resources a
 /// client can scope to. Externally tagged like the event model, so it maps to a TS

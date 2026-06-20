@@ -16,7 +16,7 @@
 //! |---------------|------------|----------------|
 //! | heat-loop (`Stage`/`Arm`/`Start`/`Finish`/`Score`/`Advance`/`Abort`/`Restart`/`Discard`) | [`heat::heat_state`] folds the heat's current state; [`heat::apply`] checks the transition is legal | [`Event::HeatStateChanged`] with the engine-returned [`HeatTransition`](gridfpv_events::HeatTransition) |
 //! | [`Command::ScheduleHeat`] | none (it creates the heat) | [`Event::HeatScheduled`] |
-//! | [`Command::Register`] | — | **deferred** — see below |
+//! | [`Command::Register`] | none (the binding is always recordable; last-registration-wins folds downstream) | [`Event::CompetitorRegistered`] |
 //! | [`Command::VoidDetection`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::DetectionVoided`] |
 //! | [`Command::AdjustLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::LapAdjusted`] |
 //! | [`Command::InsertLap`] | none (it adds a pass) | [`Event::LapInserted`] |
@@ -34,16 +34,16 @@
 //! scheduled (no `HeatScheduled` in the log, so `heat_state` is `None`) is rejected with
 //! [`ErrorCode::UnknownScope`] — nothing is appended.
 //!
-//! ## Register is deferred (a model gap, not a protocol gap)
+//! ## Register binds a competitor to a pilot (#60)
 //!
-//! The event log (`gridfpv-events`) carries **no pilot-binding event** — there is a
-//! [`CompetitorSeen`](gridfpv_events::Event::CompetitorSeen) *adapter observation*, but no
-//! event that records "this source competitor *is* this event-scoped pilot" (Architecture
-//! §9; the same gap the snapshot path notes for pilot scope). Rather than append a
-//! lossy stand-in, [`Command::Register`] is acknowledged as **not yet modelled** with a
-//! [`ProtocolError`] of [`ErrorCode::BadRequest`] that names the deferral, and **nothing
-//! is appended**. When the registration event lands in the log model this becomes a
-//! one-line append like the others; the command vocabulary and endpoint already carry it.
+//! [`Command::Register`] appends [`Event::CompetitorRegistered`] — the logged binding
+//! "this source competitor *is* this event-scoped pilot" (Architecture §9), the action the
+//! adapter never performs itself. There is nothing to validate against current state: a
+//! binding is always recordable, and a re-bind of the same `(adapter, competitor)` is a
+//! fresh append that supersedes the earlier one (last-registration-wins is folded
+//! downstream by the registrations projection, not enforced here). The live and lap
+//! projections fold these bindings to surface the pilot identity over a bare
+//! [`CompetitorRef`](gridfpv_events::CompetitorRef).
 //!
 //! # Endpoints — the privileged control channel (protocol.html §5)
 //!
@@ -248,12 +248,16 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         // --- Scheduling: creates the heat, so no prior-state check. ---
         Command::ScheduleHeat { heat, lineup } => Ok(Event::HeatScheduled { heat, lineup }),
 
-        // --- Registration: no binding event in the log model yet (see module docs). ---
-        Command::Register { .. } => Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            "registration binding is not yet modelled in the event log \
-             (Architecture §9; deferred — no pilot-binding event exists to append)",
-        )),
+        // --- Registration: bind a source competitor to a pilot (no prior-state check). ---
+        Command::Register {
+            adapter,
+            competitor,
+            pilot,
+        } => Ok(Event::CompetitorRegistered {
+            adapter,
+            competitor,
+            pilot,
+        }),
 
         // --- Marshaling adjudications: validate targets where cheap, then append. ---
         Command::VoidDetection { target } => {
@@ -545,22 +549,29 @@ mod tests {
         assert!(!ack.ok);
     }
 
-    /// `Register` is acknowledged as not-yet-modelled and appends nothing (the model gap).
+    /// `Register` acks ok and appends the `CompetitorRegistered` binding (#60).
     #[test]
-    fn register_is_deferred_and_appends_nothing() {
+    fn register_appends_competitor_registered_and_acks_ok() {
+        use gridfpv_events::PilotId;
         let state = scheduled_state();
-        let (before, _) = state.read().unwrap();
         let ack = apply_command(
             &state,
             Command::Register {
                 adapter: AdapterId("rh".into()),
                 competitor: CompetitorRef("node-2".into()),
-                pilot: crate::scope::PilotId("acroace".into()),
+                pilot: PilotId("acroace".into()),
             },
         );
-        assert!(!ack.ok);
-        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
-        let (after, _) = state.read().unwrap();
-        assert_eq!(before.len(), after.len());
+        assert!(ack.ok, "got {ack:?}");
+        assert!(ack.error.is_none());
+
+        let (events, _) = state.read().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::CompetitorRegistered { adapter, competitor, pilot }
+                if *adapter == AdapterId("rh".into())
+                    && *competitor == CompetitorRef("node-2".into())
+                    && *pilot == PilotId("acroace".into())
+        )));
     }
 }

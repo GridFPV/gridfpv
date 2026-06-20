@@ -41,8 +41,8 @@
 use std::collections::BTreeMap;
 
 use gridfpv_engine::heat::{HeatState, heat_state};
-use gridfpv_events::{CompetitorRef, Event, HeatId};
-use gridfpv_projection::{CompetitorKey, lap_list_marshaled};
+use gridfpv_events::{CompetitorRef, Event, HeatId, PilotId};
+use gridfpv_projection::{CompetitorKey, lap_list_marshaled, registrations};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -108,6 +108,12 @@ impl Default for LiveRaceState {
 pub struct PilotProgress {
     /// The source-local competitor this progress is for (a member of the lineup).
     pub competitor: CompetitorRef,
+    /// The GridFPV pilot this competitor is bound to, if a registration
+    /// ([`Event::CompetitorRegistered`]) has bound it (#60). `None` for an unregistered
+    /// competitor, which still appears by its bare [`CompetitorRef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pilot: Option<PilotId>,
     /// Completed laps so far in the heat.
     pub laps_completed: u32,
     /// Duration (µs, source clock) of the most recently completed lap, or `None` before
@@ -147,6 +153,17 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
         entry.1 = cl.laps.last().map(|l| l.duration_micros).or(entry.1);
     }
 
+    // Fold the registration bindings and index them by competitor ref. The lineup carries
+    // only the bare `CompetitorRef`; registrations are keyed per-source `(adapter,
+    // competitor)`, so collapse to a ref→pilot lookup. The fold already applied
+    // last-registration-wins per key; iterating the map in (adapter, competitor) order
+    // keeps the collapse deterministic when one ref is bound on more than one adapter.
+    let bindings = registrations(events);
+    let pilot_by_ref: BTreeMap<&CompetitorRef, &PilotId> = bindings
+        .iter()
+        .map(|(CompetitorKey { competitor, .. }, pilot)| (competitor, pilot))
+        .collect();
+
     let progress: Vec<PilotProgress> = active_pilots
         .iter()
         .map(|competitor| {
@@ -154,6 +171,7 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
                 by_ref.get(competitor).copied().unwrap_or((0, None));
             PilotProgress {
                 competitor: competitor.clone(),
+                pilot: pilot_by_ref.get(competitor).map(|p| (*p).clone()),
                 laps_completed,
                 last_lap_micros,
             }
@@ -281,6 +299,14 @@ mod tests {
             gate: GateIndex::LAP,
             signal: None,
         })
+    }
+
+    fn registered(competitor: &str, pilot: &str) -> Event {
+        Event::CompetitorRegistered {
+            adapter: AdapterId("vd".into()),
+            competitor: CompetitorRef(competitor.into()),
+            pilot: PilotId(pilot.into()),
+        }
     }
 
     #[test]
@@ -424,6 +450,43 @@ mod tests {
         assert_eq!(s.phase, HeatPhase::Running);
         // q-2 is the next still-scheduled heat behind the current one.
         assert_eq!(s.on_deck, Some(HeatId("q-2".into())));
+    }
+
+    #[test]
+    fn registered_competitor_surfaces_its_pilot_unregistered_stays_bare() {
+        // A is bound to a pilot; B is never registered. A's progress carries the pilot;
+        // B's pilot stays `None` (it appears by its bare CompetitorRef).
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            registered("A", "acroace"),
+            changed("q-1", HeatTransition::Running),
+        ];
+        let s = live_state(&events);
+        let a = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .unwrap();
+        assert_eq!(a.pilot, Some(PilotId("acroace".into())));
+        let b = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("B".into()))
+            .unwrap();
+        assert_eq!(b.pilot, None);
+    }
+
+    #[test]
+    fn last_registration_wins_when_a_competitor_is_rebound() {
+        // A is bound to acroace, then re-bound to zoomer: the live state shows zoomer.
+        let events = vec![
+            scheduled("q-1", &["A"]),
+            registered("A", "acroace"),
+            registered("A", "zoomer"),
+        ];
+        let s = live_state(&events);
+        let a = &s.progress[0];
+        assert_eq!(a.pilot, Some(PilotId("zoomer".into())));
     }
 
     #[test]
