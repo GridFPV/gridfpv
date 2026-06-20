@@ -32,6 +32,44 @@
   const heat = $derived<HeatId | undefined>(live?.current_heat);
   const primary = $derived(primaryAction(phase));
 
+  // ── Race clock (#62) ────────────────────────────────────────────────────────────────
+  // Drive the `RaceClock`'s `elapsedMs` client-side off the live `phase`. Behaviour:
+  //   • Running                → tick a wall-clock timer (`Date.now() - start`) every 50ms.
+  //   • Finished / Scored      → freeze the clock at its last ticked value (stop ticking).
+  //   • Scheduled/Staged/Armed → reset to 0 (a fresh/idle heat, or no heat at all).
+  // The off-ramps Abort/Restart/Discard aren't phases of their own — they fold back onto
+  // one of the above (typically Scheduled), so they fall out of these same rules: an abort
+  // back to Scheduled resets, a restart back to Scheduled resets, etc.
+  //
+  // This is the v1 fix and is *approximate*: on a late join (the heat is already Running
+  // when this screen mounts, or after a reconnect) we start counting from "now", not from
+  // the real heat start, so the displayed time can be short. The fuller fix (#62 follow-up)
+  // is a server-authoritative start time in `LiveRaceState` — the recorded-at of the
+  // Running transition — which makes the clock exact and reconnect-safe.
+  let elapsedMs = $state(0);
+
+  $effect(() => {
+    // `phase` is the only reactive read in this effect, so it re-runs *only* on a phase
+    // change — not on every render — which keeps the clock from restarting spuriously.
+    if (phase === 'Running') {
+      const startedAt = Date.now();
+      const advance = () => {
+        elapsedMs = Date.now() - startedAt;
+      };
+      advance();
+      const id = setInterval(advance, 50);
+      // Teardown: stop ticking when the phase leaves Running (or on unmount). The next
+      // effect run applies the freeze (Finished/Scored) or reset (everything else).
+      return () => clearInterval(id);
+    }
+    if (phase === 'Finished' || phase === 'Scored') {
+      // Freeze: leave `elapsedMs` at its last Running value.
+      return;
+    }
+    // Scheduled / Staged / Armed / no heat (incl. where Abort/Restart/Discard land): reset.
+    elapsedMs = 0;
+  });
+
   // A live, provisional leaderboard from the running order + per-pilot progress, so the
   // RD sees standings before the heat is scored. Built into a `HeatResult` so we reuse
   // the shared `Leaderboard` component (laps + last-lap-time as the metric).
@@ -81,7 +119,7 @@
     </div>
     <div class="phase" data-phase={phase}>{phase}</div>
     <div class="clock">
-      <RaceClock elapsedMs={0} label="Heat time" />
+      <RaceClock {elapsedMs} label="Heat time" />
     </div>
     {#if live?.on_deck}
       <div class="on-deck">
