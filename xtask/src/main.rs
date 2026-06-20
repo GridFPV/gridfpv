@@ -180,6 +180,7 @@ fn live() -> bool {
         && timed_qual_live
         && single_elim_live
         && zippyq_live
+        && multiclass_live
 }
 
 fn main() {
