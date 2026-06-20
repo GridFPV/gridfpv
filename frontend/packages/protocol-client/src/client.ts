@@ -179,6 +179,25 @@ function toWebSocketBase(baseUrl: string): string {
 const trimSlash = (s: string): string => (s.endsWith('/') ? s.slice(0, -1) : s);
 
 /**
+ * Build the snapshot path for a scope. The server addresses snapshots by PATH
+ * (`/snapshot/event/{id}`, `/snapshot/heat/{id}`, `/snapshot/class/{event}/{class}`,
+ * `/snapshot/pilot/{event}/{pilot}` — protocol.html §4 endpoint surface), NOT a
+ * `?scope=` query, so the client maps the scope to that path.
+ */
+function snapshotPath(scope: Scope): string {
+  if ('Event' in scope) return `/snapshot/event/${encodeURIComponent(scope.Event.event)}`;
+  if ('Heat' in scope) return `/snapshot/heat/${encodeURIComponent(scope.Heat.heat)}`;
+  if ('Class' in scope) {
+    return `/snapshot/class/${encodeURIComponent(scope.Class.event)}/${encodeURIComponent(
+      scope.Class.class
+    )}`;
+  }
+  return `/snapshot/pilot/${encodeURIComponent(scope.Pilot.event)}/${encodeURIComponent(
+    scope.Pilot.pilot
+  )}`;
+}
+
+/**
  * Connect to a GridFPV protocol server and begin the snapshot→subscribe handshake.
  *
  * Returns immediately with a {@link ProtocolClient}; the snapshot fetch and WS
@@ -198,7 +217,6 @@ export function connect(options: ConnectOptions): ProtocolClient {
   const wsBase = trimSlash(toWebSocketBase(options.baseUrl));
   const scope = options.scope;
   const token = options.token;
-  const scopeParam = encodeURIComponent(JSON.stringify(scope));
 
   // ── Mutable connection state ───────────────────────────────────────────────
   let body: ProjectionBody | undefined;
@@ -246,7 +264,7 @@ export function connect(options: ConnectOptions): ProtocolClient {
     if (token) headers.Authorization = `Bearer ${token}`;
     let resp: Response;
     try {
-      resp = await fetchImpl(`${baseUrl}/snapshot?scope=${scopeParam}`, { headers });
+      resp = await fetchImpl(`${baseUrl}${snapshotPath(scope)}`, { headers });
     } catch (e) {
       if (gen !== generation || closed) return false;
       fail({ code: 'Internal', message: `snapshot fetch failed: ${String(e)}` });

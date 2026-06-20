@@ -146,9 +146,9 @@ describe('ProtocolClient', () => {
     });
     await flush();
 
-    // Snapshot was fetched and applied.
+    // Snapshot was fetched (path-scoped, matching the server's routes) and applied.
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain('/snapshot?scope=');
+    expect(calls[0]).toContain('/snapshot/heat/heat-1');
     expect(client.getState().cursor).toBe(10n);
     expect(phaseOf(client.getState().body)).toBe('Staged');
 
