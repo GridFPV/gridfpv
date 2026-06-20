@@ -14,6 +14,9 @@ pub mod schedule;
 pub mod scoring;
 
 // Concrete formats on the `format::Generator` interface (#33/#34/#35).
+pub mod double_elim;
+pub mod multi_main;
+pub mod round_robin;
 pub mod single_elim;
 pub mod timed_qual;
 pub mod zippyq;
