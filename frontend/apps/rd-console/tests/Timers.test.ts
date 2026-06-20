@@ -15,7 +15,7 @@ const RH: Timer = {
   id: 'rh-1',
   name: 'Track RH',
   kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
-  status: 'Disconnected'
+  status: 'Configured'
 };
 
 describe('Timers (picker CRUD modal)', () => {
