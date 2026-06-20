@@ -431,7 +431,10 @@ mod tests {
     /// A trivial empty [`HeatResult`] for the scheduler tests, which only need *a*
     /// result to feed back — the scheduler never inspects its contents.
     fn empty_result() -> HeatResult {
-        HeatResult { places: Vec::new() }
+        HeatResult {
+            places: Vec::new(),
+            ..Default::default()
+        }
     }
 
     // --- Frequency allocation -----------------------------------------------

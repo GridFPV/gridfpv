@@ -68,6 +68,7 @@ fn remap(place: &Placement, as_ref: &CompetitorRef) -> Placement {
         position: place.position,
         laps: place.laps,
         metric: place.metric,
+        disqualified: place.disqualified,
     }
 }
 
@@ -131,12 +132,19 @@ fn run_main_heat(plan: &HeatPlan, winner: &CompetitorRef) -> CompletedHeat {
                 position: next_pos,
                 laps: 0,
                 metric: gridfpv_engine::scoring::Metric::LastLapAt(None),
+                ..Default::default()
             });
             next_pos += 1;
         }
     }
 
-    CompletedHeat::new(plan.heat.0.clone(), HeatResult { places })
+    CompletedHeat::new(
+        plan.heat.0.clone(),
+        HeatResult {
+            places,
+            ..Default::default()
+        },
+    )
 }
 
 #[test]
