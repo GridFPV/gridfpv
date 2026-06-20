@@ -200,7 +200,11 @@ sequenceDiagram
     <p>
       Where the Director keeps one SQLite file per event (the file <em>is</em> the event), the
       Cloud aggregates many events' logs — across classes, chapters, and Directors — into one
-      Postgres store. It is the third storage tier from Architecture §4.
+      Postgres store. It is the third storage tier from Architecture §4. The container shape this
+      builds on — an <code>events</code> table plus an <code>event_log</code> table keyed
+      <code>(event_id, offset)</code> with the fact as JSONB — is the Cloud storage realization
+      sketched in <a href="architecture.html">Architecture</a> §4; this section adds the
+      warehouse-scale concerns (aggregation, partitioning, retention) on top of it.
     </p>
 
     <h3>Raw log vs projections</h3>
