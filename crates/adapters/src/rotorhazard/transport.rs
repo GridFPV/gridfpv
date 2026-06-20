@@ -83,6 +83,11 @@ impl RotorHazardConnection {
         };
 
         let client = ClientBuilder::new(url.to_string())
+            // Resume after a dropped connection. On reconnect RotorHazard re-sends the
+            // full `current_laps` snapshot; the adapter's per-lap dedup makes that
+            // replay safe (no double-counted laps) — see the dedup module + the
+            // rh_signal snapshot-dedup assertion.
+            .reconnect(true)
             .on(
                 "race_status",
                 handler("race_status", adapter.clone(), events.clone()),
@@ -100,6 +105,11 @@ impl RotorHazardConnection {
                 handler("pass_record", adapter.clone(), events.clone()),
             )
             .connect()?;
+
+        // Warm initial state on (re)connect: ask RH to send current per-node RSSI so
+        // the signal-context cache is populated before the first pass. `current_laps`
+        // and `race_status` arrive via the normal snapshot stream.
+        let _ = client.emit("load_data", json!({ "load_types": ["node_data"] }));
 
         Ok(Self { client, events })
     }
