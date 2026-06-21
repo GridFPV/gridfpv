@@ -165,6 +165,39 @@ fn sqlite_persists_across_reopen() {
 }
 
 #[test]
+fn sqlite_meta_table_upserts_and_persists_across_reopen() {
+    // The sidecar `meta` table (issue #111): a missing key reads `None`, a set value reads
+    // back, a second set for the same key overwrites, and all of it survives a reopen — the
+    // server stores an event's `EventMeta` JSON here so created events survive a restart.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("event.sqlite");
+    {
+        let log = SqliteLog::open(&path).unwrap();
+        assert_eq!(log.get_meta("event_meta").unwrap(), None);
+        log.set_meta("event_meta", "{\"name\":\"Spring Cup\"}")
+            .unwrap();
+        assert_eq!(
+            log.get_meta("event_meta").unwrap().as_deref(),
+            Some("{\"name\":\"Spring Cup\"}")
+        );
+        // Upsert overwrites in place (config, not append-only).
+        log.set_meta("event_meta", "{\"name\":\"Summer Cup\"}")
+            .unwrap();
+        assert_eq!(
+            log.get_meta("event_meta").unwrap().as_deref(),
+            Some("{\"name\":\"Summer Cup\"}")
+        );
+    }
+    // A fresh connection reads the persisted value back.
+    let reopened = SqliteLog::open(&path).unwrap();
+    assert_eq!(
+        reopened.get_meta("event_meta").unwrap().as_deref(),
+        Some("{\"name\":\"Summer Cup\"}")
+    );
+    assert_eq!(reopened.get_meta("absent").unwrap(), None);
+}
+
+#[test]
 fn backends_agree_byte_for_byte() {
     // The two backends must produce identical StoredEvent sequences from the
     // same input — the equivalence the trait exists to guarantee.
