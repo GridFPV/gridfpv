@@ -177,6 +177,9 @@ fn live() -> bool {
     let multi_main_live = target("gridfpv-engine", "multi_main_live", true);
     // The protocol server's mock-RH e2e: full event → server log → protocol client (#47).
     let server_e2e = target("gridfpv-server", "full_event_live", true);
+    // The Director's RH-connect e2e (#65, #73): the per-event bridge connects dockerized RH,
+    // drives status to Connected, and feeds real passes into the event log.
+    let rh_connect = target("gridfpv-app", "rh_connect_live", true);
     ws && live_rh
         && signal
         && heat_live
@@ -192,6 +195,7 @@ fn live() -> bool {
         && round_robin_live
         && multi_main_live
         && server_e2e
+        && rh_connect
 }
 
 fn main() {
