@@ -8,8 +8,8 @@ import { makeTestSession } from './support.js';
 const noop = () => {};
 
 const PILOTS: Pilot[] = [
-  { id: 'p1', callsign: 'Ace', name: 'Alice', country: 'US', attributes: {} },
-  { id: 'p2', callsign: 'Bee', attributes: {} }
+  { id: 'p1', callsign: 'Ace', name: 'Alice', country: 'US', vtx_types: [], attributes: {} },
+  { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} }
 ];
 
 describe('PilotsPage (#74) — hosts the shared PilotManager', () => {

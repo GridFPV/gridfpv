@@ -8,33 +8,50 @@
  */
 import type { CreatePilotRequest, Pilot, UpdatePilotRequest, VtxType } from '@gridfpv/types';
 
-/** The selectable VTX types in the form, in display order (the empty string is "None"). */
-export const VTX_TYPES: readonly VtxType[] = ['Analog', 'HDZero', 'DJI', 'Walksnail'];
+/**
+ * The selectable VTX types in the form, in display order. A pilot carries a **set** of these (every
+ * FPV pilot flies some video system, and many run more than one), so the form toggles them on/off
+ * rather than picking one — there is no "None". `Other` is the catch-all.
+ */
+export const VTX_TYPES: readonly VtxType[] = ['Analog', 'HDZero', 'DJI', 'Walksnail', 'Other'];
 
 /** The Badge `tone` for each VTX type — a quiet, consistent palette across the directory. */
-const VTX_TONES: Record<VtxType, 'accent' | 'info' | 'success' | 'warn'> = {
+const VTX_TONES: Record<VtxType, 'accent' | 'info' | 'success' | 'warn' | 'neutral'> = {
   Analog: 'warn',
   HDZero: 'info',
   DJI: 'accent',
-  Walksnail: 'success'
+  Walksnail: 'success',
+  Other: 'neutral'
 };
 
 /** The Badge `tone` for a VTX type. */
-export function vtxTone(vtx: VtxType): 'accent' | 'info' | 'success' | 'warn' {
+export function vtxTone(vtx: VtxType): 'accent' | 'info' | 'success' | 'warn' | 'neutral' {
   return VTX_TONES[vtx];
 }
 
+/** Dedup a VTX list and return it in the canonical {@link VTX_TYPES} order (stable, set-like). */
+export function normalizeVtxTypes(types: readonly VtxType[]): VtxType[] {
+  return VTX_TYPES.filter((kind) => types.includes(kind));
+}
+
+/** Whether two VTX sets are equal as sets (order-independent). */
+function sameVtxSet(a: readonly VtxType[], b: readonly VtxType[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((kind) => b.includes(kind));
+}
+
 /**
- * The editable shape the form holds while open — every field a string (the form binds plain inputs)
- * plus the attributes bag. `vtx` is `''` for "None". The form diffs this against the pilot being
- * edited to build the {@link UpdatePilotRequest}, or maps it straight to a {@link CreatePilotRequest}.
+ * The editable shape the form holds while open — every text field a string (the form binds plain
+ * inputs) plus the attributes bag and the `vtx_types` **set** (the toggle chips). The form diffs this
+ * against the pilot being edited to build the {@link UpdatePilotRequest}, or maps it straight to a
+ * {@link CreatePilotRequest}.
  */
 export interface PilotFormValues {
   callsign: string;
   name: string;
   phonetic: string;
   team: string;
-  vtx: VtxType | '';
+  vtx_types: VtxType[];
   color: string;
   country: string;
   multigp_id: string;
@@ -49,7 +66,7 @@ export function emptyForm(): PilotFormValues {
     name: '',
     phonetic: '',
     team: '',
-    vtx: '',
+    vtx_types: [],
     color: '',
     country: '',
     multigp_id: '',
@@ -65,13 +82,20 @@ export function formFromPilot(p: Pilot): PilotFormValues {
     name: p.name ?? '',
     phonetic: p.phonetic ?? '',
     team: p.team ?? '',
-    vtx: p.vtx_type ?? '',
+    vtx_types: normalizeVtxTypes(p.vtx_types ?? []),
     color: p.color ?? '',
     country: p.country ?? '',
     multigp_id: p.multigp_id ?? '',
     velocidrone_id: p.velocidrone_id ?? '',
     attributes: { ...p.attributes }
   };
+}
+
+/** Toggle a VTX type in a set — add it if absent, remove it if present (returns a new array). */
+export function toggleVtxType(types: readonly VtxType[], vtx: VtxType): VtxType[] {
+  return types.includes(vtx)
+    ? types.filter((kind) => kind !== vtx)
+    : normalizeVtxTypes([...types, vtx]);
 }
 
 /** Drop attribute rows with a blank key; trim keys (values are kept verbatim). */
@@ -85,13 +109,15 @@ export function cleanAttributes(attrs: Record<string, string>): Record<string, s
 }
 
 /**
- * Build the **create** body from the form: the required callsign plus only the optional fields the
- * user filled (a blank optional is simply omitted — `POST /pilots` treats absent as unset). The
- * attributes bag is sent (empty `{}` is fine).
+ * Build the **create** body from the form: the required callsign plus only the optional text fields
+ * the user filled (a blank optional is simply omitted — `POST /pilots` treats absent as unset). The
+ * attributes bag and the `vtx_types` set are always sent (an empty `{}` / `[]` is fine — both default
+ * empty server-side).
  */
 export function buildCreateRequest(v: PilotFormValues): CreatePilotRequest {
   const req: CreatePilotRequest = {
     callsign: v.callsign.trim(),
+    vtx_types: normalizeVtxTypes(v.vtx_types),
     attributes: cleanAttributes(v.attributes)
   };
   const name = v.name.trim();
@@ -100,7 +126,6 @@ export function buildCreateRequest(v: PilotFormValues): CreatePilotRequest {
   if (phonetic) req.phonetic = phonetic;
   const team = v.team.trim();
   if (team) req.team = team;
-  if (v.vtx) req.vtx_type = v.vtx;
   const color = v.color.trim();
   if (color) req.color = color;
   const country = v.country.trim();
@@ -156,9 +181,10 @@ export function buildUpdateRequest(prev: Pilot, v: PilotFormValues): UpdatePilot
   const prevCountry = prev.country ?? '';
   if (nextCountry !== prevCountry) req.country = nextCountry === '' ? null : nextCountry;
 
-  // VTX: a closed enum (or '' for none) — omit if unchanged, null if cleared, value if set.
-  const prevVtx = prev.vtx_type ?? '';
-  if (v.vtx !== prevVtx) req.vtx_type = v.vtx === '' ? null : v.vtx;
+  // VTX: a full-replacement set (like attributes) — send the array whenever it differs as a set;
+  // a now-empty set is sent as `[]` (clears it). There is no "None" / null case.
+  const nextVtx = normalizeVtxTypes(v.vtx_types);
+  if (!sameVtxSet(nextVtx, prev.vtx_types ?? [])) req.vtx_types = nextVtx;
 
   // Attributes: a full-replacement map — send it whenever the cleaned bag differs.
   const nextAttrs = cleanAttributes(v.attributes);

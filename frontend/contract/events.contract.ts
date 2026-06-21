@@ -442,7 +442,7 @@ describe('seam 10b: primary/alternate timer roles (#112)', () => {
  * guards:
  *  - `GET /pilots` is an **open read** → `Pilot[]` (empty on a fresh Director — no built-in pilot).
  *  - `POST /pilots` is **RD-gated** (no/bad token → 401), requires a `callsign`, auto-generates an
- *    id, carries optional metadata incl. the cloud-pull `vtx_type`/`multigp_id` hooks, and the new
+ *    id, carries optional metadata incl. the cloud-pull `vtx_types`/`multigp_id` hooks, and the new
  *    pilot then appears in the listing.
  *  - `PUT /events/{id}/roster` is **RD-gated**, validates each id names a directory pilot (unknown →
  *    404 `UnknownScope`), and records the roster on the event's `EventMeta.roster` (empty default).
@@ -520,7 +520,7 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
           team: 'Team Zoom',
           color: '#1188ff',
           country: 'gb', // normalized uppercase by the server
-          vtx_type: 'HDZero',
+          vtx_types: ['Analog', 'HDZero'],
           multigp_id: 'mgp-42',
           attributes: { bib: '7', insurance: 'AMA-123' }
         },
@@ -534,7 +534,7 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
     expect(created.team).toBe('Team Zoom');
     expect(created.color).toBe('#1188FF'); // hex normalized uppercase
     expect(created.country).toBe('GB'); // ISO alpha-2, uppercased
-    expect(created.vtx_type).toBe('HDZero');
+    expect(created.vtx_types).toEqual(['Analog', 'HDZero']);
     expect(created.multigp_id).toBe('mgp-42');
     expect(created.attributes).toEqual({ bib: '7', insurance: 'AMA-123' });
 

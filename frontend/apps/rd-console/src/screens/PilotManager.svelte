@@ -19,9 +19,9 @@
    * The list refreshes after every create/edit/delete; the latest `pilots` are exposed back through
    * the bindable `pilots` prop and an `onchange` callback so a selection owner can reconcile.
    */
-  import { Badge, Button, Dialog, Field, Input, Select, toast } from '@gridfpv/components';
+  import { Badge, Button, Dialog, Field, Input, toast } from '@gridfpv/components';
   import type { Snippet } from 'svelte';
-  import type { CreatePilotRequest, Pilot, UpdatePilotRequest } from '@gridfpv/types';
+  import type { CreatePilotRequest, Pilot, UpdatePilotRequest, VtxType } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import {
     VTX_TYPES,
@@ -29,6 +29,7 @@
     buildUpdateRequest,
     emptyForm,
     formFromPilot,
+    toggleVtxType,
     vtxTone,
     type PilotFormValues
   } from '../lib/pilots.js';
@@ -129,6 +130,11 @@
     attrRows = rowsFromBag(form.attributes);
     formError = undefined;
     formOpen = true;
+  }
+
+  /** Toggle one VTX chip in the form's set (multi-select; none selected is fine). */
+  function toggleVtx(vtx: VtxType) {
+    form.vtx_types = toggleVtxType(form.vtx_types, vtx);
   }
 
   function addAttrRow() {
@@ -251,8 +257,9 @@
               {/if}
               <span class="callsign">{pilot.callsign}</span>
               {#if pilot.team}<Badge tone="neutral">{pilot.team}</Badge>{/if}
-              {#if pilot.vtx_type}<Badge tone={vtxTone(pilot.vtx_type)}>{pilot.vtx_type}</Badge
-                >{/if}
+              {#each pilot.vtx_types as vtx (vtx)}
+                <Badge tone={vtxTone(vtx)}>{vtx}</Badge>
+              {/each}
             </div>
             {#if pilot.name}<span class="real-name">{pilot.name}</span>{/if}
           </div>
@@ -295,19 +302,26 @@
       </Field>
     </div>
 
-    <div class="form-grid">
-      <Field label="Team">
-        <Input bind:value={form.team} aria-label="Team" autocomplete="off" />
-      </Field>
-      <Field label="VTX type">
-        <Select bind:value={form.vtx} aria-label="VTX type">
-          <option value="">None</option>
-          {#each VTX_TYPES as vtx (vtx)}
-            <option value={vtx}>{vtx}</option>
-          {/each}
-        </Select>
-      </Field>
-    </div>
+    <Field label="Team">
+      <Input bind:value={form.team} aria-label="Team" autocomplete="off" />
+    </Field>
+
+    <Field label="VTX" hint="The video system(s) this pilot flies — tap all that apply.">
+      <div class="vtx-chips" role="group" aria-label="VTX types">
+        {#each VTX_TYPES as vtx (vtx)}
+          {@const selected = form.vtx_types.includes(vtx)}
+          <button
+            type="button"
+            class="vtx-chip"
+            class:selected
+            aria-pressed={selected}
+            onclick={() => toggleVtx(vtx)}
+          >
+            {vtx}
+          </button>
+        {/each}
+      </div>
+    </Field>
 
     <div class="form-grid">
       <Field label="Color" hint="For overlays & leaderboards.">
@@ -559,6 +573,42 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: var(--gf-space-3);
+  }
+
+  .vtx-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+  }
+  .vtx-chip {
+    appearance: none;
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
+    line-height: 1;
+    padding: var(--gf-space-3) var(--gf-space-4);
+    border-radius: var(--gf-radius-pill);
+    border: 2px solid var(--gf-border-strong);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text-secondary);
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      background var(--gf-motion-fast) var(--gf-ease-out),
+      color var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .vtx-chip:hover {
+    border-color: var(--gf-accent);
+    color: var(--gf-text);
+  }
+  .vtx-chip:focus-visible {
+    outline: 2px solid var(--gf-accent);
+    outline-offset: 2px;
+  }
+  .vtx-chip.selected {
+    border-color: var(--gf-accent);
+    background: var(--gf-accent);
+    color: var(--gf-text-on-accent);
   }
 
   .color-control {

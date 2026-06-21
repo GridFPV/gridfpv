@@ -34,9 +34,10 @@ color?: string,
  */
 country?: string, 
 /**
- * Optional video-transmitter type, stored on [`Pilot::vtx_type`].
+ * The pilot's video-transmitter system(s), stored (deduped, stable order) on
+ * [`Pilot::vtx_types`]. Defaults empty (unspecified).
  */
-vtx_type?: VtxType, 
+vtx_types: Array<VtxType>, 
 /**
  * Optional MultiGP id, stored on [`Pilot::multigp_id`].
  */

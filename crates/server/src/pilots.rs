@@ -44,8 +44,9 @@ pub const PILOTS_FILE: &str = "pilots.json";
 ///
 /// A small closed enum the directory records so the RD can group / display pilots by their video
 /// system. Externally tagged (the default serde enum representation) so it maps to a TS string
-/// union (`"Analog" | "HDZero" | "DJI" | "Walksnail"`). Optional on a [`Pilot`] — a directory
-/// entry need not state a VTX type.
+/// union (`"Analog" | "HDZero" | "DJI" | "Walksnail" | "Other"`). A pilot carries a **set** of
+/// these (see [`Pilot::vtx_types`]) since many pilots run more than one video system; the
+/// [`Other`](VtxType::Other) variant is the catch-all for anything not enumerated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum VtxType {
@@ -57,6 +58,62 @@ pub enum VtxType {
     DJI,
     /// Walksnail Avatar digital video.
     Walksnail,
+    /// Any other video system not enumerated above (catch-all).
+    Other,
+}
+
+impl VtxType {
+    /// The canonical display order of the variants, used to keep a pilot's [`vtx_types`](Pilot::vtx_types)
+    /// set in a stable, deterministic order regardless of the order they were ticked.
+    const ORDER: [VtxType; 5] = [
+        VtxType::Analog,
+        VtxType::HDZero,
+        VtxType::DJI,
+        VtxType::Walksnail,
+        VtxType::Other,
+    ];
+}
+
+/// Dedup a VTX list and return it in the canonical [`VtxType::ORDER`], so a pilot's
+/// `vtx_types` is always a stable, duplicate-free set (issue #74).
+fn normalize_vtx_types(vtx_types: &[VtxType]) -> Vec<VtxType> {
+    VtxType::ORDER
+        .iter()
+        .copied()
+        .filter(|kind| vtx_types.contains(kind))
+        .collect()
+}
+
+/// Deserialize a [`Pilot::vtx_types`] set, tolerating **both** the new and the old on-disk shape
+/// (issue #74 follow-up):
+///
+/// - the new shape — a JSON array of [`VtxType`] (`"vtx_types": ["Analog", "HDZero"]`) — loads as-is;
+/// - the legacy shape — a single scalar `VtxType` (`"vtx_type": "Analog"`, reached through the field
+///   `alias`) — migrates into a one-element set `[Analog]`.
+///
+/// In every case the result is normalized (deduped, canonical order) so demo data persisted under
+/// the old single-value `vtx_type` key survives the upgrade rather than being dropped on load. A
+/// JSON `null` (legacy unset) maps to the empty set.
+fn deserialize_vtx_types<'de, D>(deserializer: D) -> Result<Vec<VtxType>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    /// Either the new array form or the old single-scalar form (or a legacy `null`).
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum VtxTypesCompat {
+        /// The new shape: a set of VTX types.
+        Many(Vec<VtxType>),
+        /// The legacy shape: a single optional VTX type (`Some(X)` → `[X]`, `None` → `[]`).
+        One(Option<VtxType>),
+    }
+
+    let raw = match VtxTypesCompat::deserialize(deserializer)? {
+        VtxTypesCompat::Many(list) => list,
+        VtxTypesCompat::One(Some(one)) => vec![one],
+        VtxTypesCompat::One(None) => Vec::new(),
+    };
+    Ok(normalize_vtx_types(&raw))
 }
 
 /// One pilot in the application-level directory (issue #74).
@@ -111,10 +168,22 @@ pub struct Pilot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub country: Option<String>,
-    /// The pilot's video-transmitter type, if recorded (see [`VtxType`]). Omitted when unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub vtx_type: Option<VtxType>,
+    /// The pilot's **video-transmitter system(s)** (see [`VtxType`]). An FPV pilot always flies
+    /// *some* video system, and many run more than one (e.g. Analog + HDZero), so this is a **set**
+    /// rather than a single optional value. Empty means *unspecified*. Kept deduplicated and in a
+    /// stable [`VtxType::ORDER`] on every create/update. Defaults empty (and, being a `Vec`, an
+    /// empty set still serializes to `[]`).
+    ///
+    /// **Persisted-format note:** the old on-disk shape was a single optional scalar
+    /// `vtx_type: VtxType`. A custom deserializer (see [`deserialize_vtx_types`]) accepts both the
+    /// new `vtx_types: [..]` array and migrates a legacy `vtx_type: X` into `[X]`, so existing
+    /// `pilots.json` rows load without data loss.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_vtx_types",
+        alias = "vtx_type"
+    )]
+    pub vtx_types: Vec<VtxType>,
     /// The pilot's **MultiGP** pilot id, if known — a forward hook for a later cloud-pull import
     /// (#74). A free-form string. Omitted from the wire when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,10 +232,10 @@ pub struct CreatePilotRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub country: Option<String>,
-    /// Optional video-transmitter type, stored on [`Pilot::vtx_type`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub vtx_type: Option<VtxType>,
+    /// The pilot's video-transmitter system(s), stored (deduped, stable order) on
+    /// [`Pilot::vtx_types`]. Defaults empty (unspecified).
+    #[serde(default)]
+    pub vtx_types: Vec<VtxType>,
     /// Optional MultiGP id, stored on [`Pilot::multigp_id`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -219,10 +288,12 @@ pub struct UpdatePilotRequest {
     #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
     #[ts(optional = nullable)]
     pub country: OptionalEdit<String>,
-    /// A new VTX type (set / clear / leave-unchanged, like [`name`](Self::name)).
-    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
-    #[ts(optional = nullable)]
-    pub vtx_type: OptionalEdit<VtxType>,
+    /// A **full replacement** of the VTX set when present (absent leaves it unchanged; present `[]`
+    /// clears it). Mirrors how [`attributes`](Self::attributes) updates — a present array replaces
+    /// the stored set wholesale (deduped, stable order), rather than a per-value set/clear edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub vtx_types: Option<Vec<VtxType>>,
     /// A new MultiGP id (set / clear / leave-unchanged).
     #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
     #[ts(optional = nullable)]
@@ -451,7 +522,7 @@ impl PilotDirectory {
             team: normalize_optional(&request.team),
             color,
             country,
-            vtx_type: request.vtx_type,
+            vtx_types: normalize_vtx_types(&request.vtx_types),
             multigp_id: normalize_optional(&request.multigp_id),
             velocidrone_id: normalize_optional(&request.velocidrone_id),
             attributes,
@@ -497,10 +568,10 @@ impl PilotDirectory {
         if let Some(value) = country_edit {
             pilot.country = value;
         }
-        match &request.vtx_type {
-            OptionalEdit::Keep => {}
-            OptionalEdit::Clear => pilot.vtx_type = None,
-            OptionalEdit::Set(value) => pilot.vtx_type = Some(*value),
+        // VTX is a full-replacement set (like `attributes`): a present array replaces the stored
+        // set (normalized); `Some([])` clears it; absent (`None`) leaves it unchanged.
+        if let Some(vtx_types) = &request.vtx_types {
+            pilot.vtx_types = normalize_vtx_types(vtx_types);
         }
         apply_string_edit(&mut pilot.multigp_id, &request.multigp_id);
         apply_string_edit(&mut pilot.velocidrone_id, &request.velocidrone_id);
@@ -805,14 +876,17 @@ mod tests {
             .create(&CreatePilotRequest {
                 callsign: "Zoom".to_string(),
                 name: Some("Zoe Oom".to_string()),
-                vtx_type: Some(VtxType::HDZero),
+                // Multiple VTX types, deliberately out of canonical order + a duplicate, to prove
+                // create dedups and reorders.
+                vtx_types: vec![VtxType::HDZero, VtxType::Analog, VtxType::HDZero],
                 multigp_id: Some("mgp-123".to_string()),
                 velocidrone_id: Some("  ".to_string()), // blank → unset
                 ..Default::default()
             })
             .unwrap();
         assert_eq!(pilot.name.as_deref(), Some("Zoe Oom"));
-        assert_eq!(pilot.vtx_type, Some(VtxType::HDZero));
+        // Deduped + canonical order (Analog before HDZero).
+        assert_eq!(pilot.vtx_types, vec![VtxType::Analog, VtxType::HDZero]);
         assert_eq!(pilot.multigp_id.as_deref(), Some("mgp-123"));
         assert_eq!(pilot.velocidrone_id, None);
     }
@@ -824,12 +898,12 @@ mod tests {
             .create(&CreatePilotRequest {
                 callsign: "Old".to_string(),
                 name: Some("Real Name".to_string()),
-                vtx_type: Some(VtxType::Analog),
+                vtx_types: vec![VtxType::Analog],
                 ..Default::default()
             })
             .unwrap();
 
-        // Set callsign + multigp_id, clear name, leave vtx_type unchanged.
+        // Set callsign + multigp_id, clear name, leave vtx_types unchanged (absent).
         let updated = dir
             .update(
                 &created.id,
@@ -843,7 +917,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated.callsign, "New");
         assert_eq!(updated.name, None);
-        assert_eq!(updated.vtx_type, Some(VtxType::Analog));
+        assert_eq!(updated.vtx_types, vec![VtxType::Analog]); // absent → unchanged
         assert_eq!(updated.multigp_id.as_deref(), Some("mgp-9"));
 
         // A blank callsign is ignored (required field never cleared).
@@ -962,7 +1036,7 @@ mod tests {
                     team: Some("Team Zoom".to_string()),
                     color: Some("#ff0000".to_string()),
                     country: Some("gb".to_string()),
-                    vtx_type: Some(VtxType::DJI),
+                    vtx_types: vec![VtxType::DJI, VtxType::Other],
                     multigp_id: Some("mgp-7".to_string()),
                     velocidrone_id: None,
                     attributes: BTreeMap::from([
@@ -980,7 +1054,7 @@ mod tests {
             assert_eq!(got.team.as_deref(), Some("Team Zoom"));
             assert_eq!(got.color.as_deref(), Some("#FF0000")); // normalized uppercase
             assert_eq!(got.country.as_deref(), Some("GB")); // normalized uppercase
-            assert_eq!(got.vtx_type, Some(VtxType::DJI));
+            assert_eq!(got.vtx_types, vec![VtxType::DJI, VtxType::Other]);
             assert_eq!(got.multigp_id.as_deref(), Some("mgp-7"));
             assert_eq!(got.velocidrone_id, None);
             assert_eq!(got.attributes.get("bib").map(String::as_str), Some("7"));
@@ -1165,6 +1239,91 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(bad_update.kind, PilotErrorKind::Invalid);
+    }
+
+    #[test]
+    fn vtx_types_replace_dedup_and_clear_via_empty_array() {
+        let dir = PilotDirectory::new(None).unwrap();
+        let created = dir
+            .create(&CreatePilotRequest {
+                callsign: "Multi".to_string(),
+                vtx_types: vec![VtxType::Analog, VtxType::HDZero],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(created.vtx_types, vec![VtxType::Analog, VtxType::HDZero]);
+
+        // A present array fully replaces the set (and is deduped + reordered to canonical order).
+        let replaced = dir
+            .update(
+                &created.id,
+                &UpdatePilotRequest {
+                    vtx_types: Some(vec![VtxType::Other, VtxType::DJI, VtxType::Other]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(replaced.vtx_types, vec![VtxType::DJI, VtxType::Other]);
+
+        // An absent vtx_types leaves the set unchanged.
+        let unchanged = dir
+            .update(
+                &created.id,
+                &UpdatePilotRequest {
+                    name: OptionalEdit::Set("Nom".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(unchanged.vtx_types, vec![VtxType::DJI, VtxType::Other]);
+
+        // A present empty array clears the set (there is no "None" concept — empty = unspecified).
+        let cleared = dir
+            .update(
+                &created.id,
+                &UpdatePilotRequest {
+                    vtx_types: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(cleared.vtx_types.is_empty());
+    }
+
+    #[test]
+    fn loads_legacy_scalar_vtx_type_as_a_one_element_set() {
+        // An existing pilots.json row written before this change carries the old scalar
+        // `vtx_type: "HDZero"` (and no `vtx_types`). It must migrate to `vtx_types: ["HDZero"]`
+        // rather than crashing the boot or losing the value.
+        let data_dir =
+            std::env::temp_dir().join(format!("gridfpv-pilots-legacy-{}", short_suffix()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            pilots_path(&data_dir),
+            br#"[{"id":"legacy-1","callsign":"Legacy","vtx_type":"HDZero","attributes":{}}]"#,
+        )
+        .unwrap();
+
+        let dir = PilotDirectory::new(Some(data_dir.clone())).unwrap();
+        let got = dir.get(&PilotId("legacy-1".into())).unwrap();
+        assert_eq!(got.callsign, "Legacy");
+        assert_eq!(
+            got.vtx_types,
+            vec![VtxType::HDZero],
+            "legacy scalar migrates"
+        );
+
+        // A legacy row that never set a VTX (no key at all) loads as the empty set.
+        std::fs::write(
+            pilots_path(&data_dir),
+            br#"[{"id":"legacy-2","callsign":"NoVtx","attributes":{}}]"#,
+        )
+        .unwrap();
+        let reopened = PilotDirectory::new(Some(data_dir.clone())).unwrap();
+        let none = reopened.get(&PilotId("legacy-2".into())).unwrap();
+        assert!(none.vtx_types.is_empty());
+
+        std::fs::remove_dir_all(&data_dir).ok();
     }
 
     #[test]
