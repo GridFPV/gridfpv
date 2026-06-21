@@ -82,7 +82,21 @@ impl RotorHazardConnection {
             }
         };
 
+        // RotorHazard timers are LAN devices; a box served over HTTPS will almost always carry a
+        // **self-signed** cert. Accept invalid certs/hostnames for the timer connection so a
+        // self-signed RH still works. This LAN-trust relaxation is scoped to the **timer adapter
+        // only** — it is explicitly NOT the posture for cloud/internet traffic, which must verify
+        // TLS properly (the cloud rule). Plain-HTTP RotorHazard — the common case — is unaffected
+        // (no handshake occurs). `rust_socketio` uses the same `.expect()` for its own connector;
+        // building one from flags performs no I/O and does not realistically fail.
+        let tls = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
+            .build()
+            .expect("build a relaxed TLS connector for the LAN RotorHazard timer");
+
         let client = ClientBuilder::new(url.to_string())
+            .tls_config(tls)
             // Resume after a dropped connection. On reconnect RotorHazard re-sends the
             // full `current_laps` snapshot; the adapter's per-lap dedup makes that
             // replay safe (no double-counted laps) — see the dedup module + the
