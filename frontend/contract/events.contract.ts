@@ -604,6 +604,26 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
     expect((await put(created.id, { color: 'nope' }, TOKEN)).status).toBe(400);
     expect(((await put(created.id, {}, TOKEN)).body as Pilot).color).toBe('#ABCDEF');
 
+    // Three-state `OptionalEdit` over the wire, proven on `color`/`country` — the fields whose
+    // `#hex` / 2-letter validation rejects an empty string, so a wire `null` is the *only* way to
+    // clear them. (Before the fix, a wire `null` deserialized the same as an absent field and these
+    // could never be cleared.)
+    //   1. present value → set (here a fresh, valid color/country).
+    const setBoth = (await put(created.id, { color: '#001122', country: 'gb' }, TOKEN))
+      .body as Pilot;
+    expect(setBoth.color).toBe('#001122');
+    expect(setBoth.country).toBe('GB');
+    //   2. present `null` → clear (the case that was broken). `team` absent → left untouched.
+    const clearedBoth = (await put(created.id, { color: null, country: null }, TOKEN))
+      .body as Pilot;
+    expect(clearedBoth.color).toBeUndefined(); // cleared (omitted from the wire when unset)
+    expect(clearedBoth.country).toBeUndefined(); // cleared
+    expect(clearedBoth.team).toBe('Solo'); // absent in this body → unchanged
+    //   3. absent → leave unchanged (a no-op body leaves the now-cleared fields cleared).
+    const leftAlone = (await put(created.id, {}, TOKEN)).body as Pilot;
+    expect(leftAlone.color).toBeUndefined();
+    expect(leftAlone.country).toBeUndefined();
+
     // RD-gated.
     expect((await put(created.id, { team: 'X' })).status).toBe(401);
   });

@@ -7,10 +7,12 @@ import type { VtxType } from "./VtxType";
  *
  * Every field is optional so a partial edit is a one-field body; the id is fixed (it is in the
  * path). A present `callsign` replaces it (a blank one is ignored — the callsign is required and
- * never cleared). For the optional metadata, a present field **replaces** the stored value
- * (including with `null` to clear it); an absent field leaves it unchanged. The wire-level
- * distinction between "field absent" and "field present and null" is what lets a caller both
- * leave-alone and clear.
+ * never cleared). Each optional-metadata field is a three-state [`OptionalEdit`]: **absent** leaves
+ * it unchanged ([`Keep`](OptionalEdit::Keep)), present **`null`** clears it
+ * ([`Clear`](OptionalEdit::Clear)), and present **with a value** sets it ([`Set`](OptionalEdit::Set)).
+ * The wire-level distinction between "field absent" and "field present and `null`" is what lets a
+ * caller both leave-alone and clear — `#[serde(default)]` on each field maps an absent field to
+ * `Keep` while a present `null`/value runs [`OptionalEdit`]'s deserializer.
  */
 export type UpdatePilotRequest = { 
 /**
@@ -18,7 +20,7 @@ export type UpdatePilotRequest = {
  */
 callsign?: string, 
 /**
- * A new real name (`Some(value)` to set, `Some(null)` to clear, absent to leave unchanged).
+ * A new real name: present value → set, present `null` → clear, absent → leave unchanged.
  */
 name?: OptionalEdit<string>, 
 /**
