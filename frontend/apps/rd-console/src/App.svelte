@@ -38,28 +38,82 @@
   import LiveRaceControl from './screens/LiveRaceControl.svelte';
   import Marshaling from './screens/Marshaling.svelte';
   import Results from './screens/Results.svelte';
+  import {
+    parseHash,
+    formatHash,
+    reconcileRoute,
+    resolveInitialRoute,
+    type Route,
+    type AppPage,
+    type WorkspaceTab
+  } from './lib/route.js';
 
   const session = new Session();
 
-  // ── App-level routing (#118) ───────────────────────────────────────────────
-  // The two-level IA: with no event selected the shell is on one of the app-level routes — the hub
-  // or one of its three pages. Entering an event switches to the workspace; leaving the workspace
-  // returns to the Events page (where the switch happened). `goHome` is the brand/breadcrumb root.
-  type AppRoute = 'home' | 'events' | 'timers' | 'pilots';
-  let route = $state<AppRoute>('home');
-  const goHome = () => (route = 'home');
+  // ── Hash-based URL routing (#118) ──────────────────────────────────────────
+  // The view is reflected in `location.hash` so a refresh stays on the same page/tab and
+  // back/forward + bookmarks work. The hash is the source of truth: navigating sets it, and the
+  // reactive `route` is parsed from it on load and on every `hashchange`/`popstate`. We use a hash
+  // (not a path) because `/pilots`, `/events`, `/timers` are already Director API routes — the `#`
+  // stays client-side and can't collide. See `lib/route.ts` for the scheme + reconciliation rules.
+  //
+  // `route` is the *intended* view. It's reconciled against the live active event (server state)
+  // for rendering: a workspace route with no active event reconciles to the Events page, and an
+  // empty/hub hash with an active event resumes into the workspace (#90), all in `lib/route.ts`.
+  let route = $state<Route>(parseHash(location.hash));
+
+  // Navigate to a route: this is the single mutation point. It updates `location.hash`, which (for
+  // a real change) fires `hashchange` and reloads `route` from the hash — keeping hash and view in
+  // lockstep. We also set `route` directly so a no-op hash write (same hash) still re-renders.
+  function navigate(next: Route) {
+    const hash = formatHash(next);
+    route = next;
+    if (location.hash !== hash) location.hash = hash;
+  }
+
+  // Page navigations (hub cards, breadcrumbs, page "Home" crumbs).
+  const goPage = (page: AppPage) => navigate({ kind: 'page', page });
+  const goHome = () => goPage('home');
+  // The workspace's app-route concept is "Events" (where event entry/switch happens).
+  const route$page = $derived(route.kind === 'page' ? route.page : 'home');
+
+  // On `hashchange`/`popstate` (back/forward, manual edit, or our own `navigate`) re-derive the
+  // route from the hash. Reconcile against the live active event so a workspace hash with no event
+  // doesn't render a broken workspace.
+  function onHashChange() {
+    route = reconcileRoute(parseHash(location.hash), !!session.currentEvent);
+  }
 
   // The lazy token prompt: register a provider that opens the TokenDialog and resolves
   // with the entered token (or undefined if cancelled). This is the only auth surface left.
   let tokenDialog = $state<TokenDialog>();
   session.setTokenProvider(() => tokenDialog?.request() ?? Promise.resolve(undefined));
 
-  // Resume into the Director's active event on load (#90): the active event is server-side
-  // state, so a reload/reconnect/app-restart reads `GET /active-event` and re-enters the same
-  // event instead of dropping to the picker. While this resolves we show a brief loading state;
-  // it then settles into the workspace (active set) or the picker (none / unreachable).
+  // Resume into the Director's active event on load (#90), composed with the hash route (#118):
+  // the active event is server-side state, so a reload reads `GET /active-event` and re-enters the
+  // same event. Once it settles we resolve the *initial* route from the hash + whether an event is
+  // active — an `#/event/<tab>` hash restores that tab, a top-level page hash shows that page, and
+  // an empty hash resumes into the workspace (active set) or lands on the hub. While it resolves we
+  // show a brief loading state. After this one-shot resume, the hash stays the source of truth.
+  let resumed = false;
   $effect(() => {
-    void session.resolveActiveEvent();
+    if (resumed) return;
+    resumed = true;
+    void (async () => {
+      await session.resolveActiveEvent();
+      navigate(resolveInitialRoute(location.hash, !!session.currentEvent));
+    })();
+  });
+
+  // Entering an event happens *inside* the EventPicker via session state (`chooseEvent` /
+  // `createEventAndEnter` set `session.currentEvent`), not through a `navigate` call here. So when
+  // the active event appears while we're on the Events page, flip the route into the workspace so
+  // the hash becomes `#/event/live`. This is the routing counterpart of the old `route = 'events'`
+  // → workspace transition that used to be implicit in `{#if session.currentEvent}`.
+  $effect(() => {
+    if (session.currentEvent && route.kind === 'page' && route.page === 'events') {
+      navigate({ kind: 'workspace', tab: 'live' });
+    }
   });
 
   type ScreenId = 'setup' | 'timers' | 'registration' | 'live' | 'marshaling' | 'results';
@@ -81,8 +135,12 @@
       icon: 'M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'
     }
   ];
-  let active = $state<ScreenId>('live');
+  // The active workspace tab is derived from the route (the hash is the source of truth, #118):
+  // a `workspace` route carries the tab; outside the workspace it's the default (`live`). Switching
+  // a sidebar tab is `setTab`, which sets the `#/event/<tab>` hash so a refresh restores it.
+  const active = $derived<ScreenId>(route.kind === 'workspace' ? route.tab : 'live');
   const activeScreen = $derived(SCREENS.find((s) => s.id === active));
+  const setTab = (tab: WorkspaceTab) => navigate({ kind: 'workspace', tab });
 
   // The setup wizard's config lives at the shell so it survives screen switches.
   let config = $state<EventConfig>(emptyConfig());
@@ -91,25 +149,24 @@
     // The console is already inside an event (#72) — the live read client was scoped to it on
     // entry — so committing the wizard just advances to registration; there is no separate
     // event to re-scope to (the redundant event field was removed, #72 Slice 1b A1).
-    active = 'registration';
+    setTab('registration');
   }
 
   function leaveToPicker() {
     session.leaveEvent();
     // Reset the workspace's local view so re-entering starts clean, and land back on the Events
-    // page (the app route the "Switch event" action conceptually returns to).
-    active = 'live';
+    // page (the app route the "Switch event" action conceptually returns to). Setting the hash to
+    // `#/events` keeps the URL honest after leaving the workspace.
     config = emptyConfig();
-    route = 'events';
+    goPage('events');
   }
 
   // Leave the workspace straight to the **home hub** (#118) — the brand/logo and the breadcrumb's
   // "Home" crumb both use this. Same teardown as a switch, but lands on the hub, not the picker.
   function goToHubFromWorkspace() {
     session.leaveEvent();
-    active = 'live';
     config = emptyConfig();
-    route = 'home';
+    goHome();
   }
 
   // A keyboard shortcut per screen (Alt+digit), keeping the console keyboard-driven.
@@ -118,7 +175,7 @@
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const match = SCREENS.find((s) => s.key === e.key);
       if (match) {
-        active = match.id;
+        setTab(match.id);
         e.preventDefault();
       }
     }
@@ -144,7 +201,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} onhashchange={onHashChange} onpopstate={onHashChange} />
 
 {#if session.resolvingActiveEvent && !session.currentEvent}
   <!-- Resolving the Director's active event (#90): a brief loading state before we know
@@ -155,26 +212,28 @@
       <span>Resuming…</span>
     </div>
   </div>
-{:else if !session.currentEvent}
-  <!-- App-level routes (#118): the home hub, or one of its three pages. No event is selected,
-       so the in-event workspace is not shown; the page owns its own breadcrumb back to Home. -->
+{:else if route.kind === 'page'}
+  <!-- App-level routes (#118): the home hub, or one of its three pages. The view is driven by the
+       hash, not just `session.currentEvent` — an explicit page hash (e.g. `#/pilots`) shows that
+       page even if an event is active on the Director, so a refresh on a top-level page stays put.
+       The page owns its own breadcrumb back to Home. -->
   <div class="gridfpv-root gridfpv-dense">
-    {#if route === 'home'}
+    {#if route$page === 'home'}
       <HomeHub
         {session}
-        onpilots={() => (route = 'pilots')}
-        onevents={() => (route = 'events')}
-        ontimers={() => (route = 'timers')}
+        onpilots={() => goPage('pilots')}
+        onevents={() => goPage('events')}
+        ontimers={() => goPage('timers')}
       />
-    {:else if route === 'events'}
+    {:else if route$page === 'events'}
       <EventPicker {session} onhome={goHome} />
-    {:else if route === 'timers'}
+    {:else if route$page === 'timers'}
       <TimersPage {session} onhome={goHome} />
-    {:else if route === 'pilots'}
+    {:else if route$page === 'pilots'}
       <PilotsPage {session} onhome={goHome} />
     {/if}
   </div>
-{:else}
+{:else if session.currentEvent}
   <div class="gridfpv-root gridfpv-dense app">
     <aside class="sidebar">
       <!-- The brand is the home root from inside the workspace (#118): it leaves the event and
@@ -206,7 +265,7 @@
             class="nav-item"
             class:active={active === s.id}
             aria-current={active === s.id ? 'page' : undefined}
-            onclick={() => (active = s.id)}
+            onclick={() => setTab(s.id)}
           >
             <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path
@@ -243,7 +302,7 @@
       </div>
 
       <header class="topbar">
-        <ContextHeader {session} ongolive={() => (active = 'live')} onswitchevent={leaveToPicker} />
+        <ContextHeader {session} ongolive={() => setTab('live')} onswitchevent={leaveToPicker} />
         <div class="topbar-actions">
           <h1 class="screen-title">{activeScreen?.label}</h1>
           <button
@@ -297,6 +356,16 @@
           />
         {/if}
       </main>
+    </div>
+  </div>
+{:else}
+  <!-- Edge case: a workspace route with no active event (e.g. a hand-edited `#/event/*` hash with
+       nothing active). `onHashChange`/`reconcileRoute` flips the route to the Events page on the
+       same tick, so this is a momentary fallback — show the resume spinner, never a broken shell. -->
+  <div class="gridfpv-root gridfpv-dense">
+    <div class="resume-loading" role="status">
+      <span class="resume-spinner" aria-hidden="true"></span>
+      <span>Resuming…</span>
     </div>
   </div>
 {/if}
