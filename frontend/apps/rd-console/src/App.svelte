@@ -9,8 +9,10 @@
    * screens, scoped to that event); the workspace's sidebar + {@link ContextHeader} are unchanged.
    * The old picker-as-landing and the Timers **modal** are retired — Timers is now its own page.
    *
-   * Active-event resume (#90) is preserved: on load the session resolves the Director's active
-   * event and, if one is set, enters its workspace directly; otherwise the shell lands on the hub.
+   * On load the shell resolves the Director's active event (server state, #90) so a workspace URL
+   * can render, but the hash is authoritative for *which* view to show (#118): a bare/hub load
+   * stays on the hub and never auto-enters an event — the user only enters by navigating in or
+   * loading a workspace URL.
    *
    * The RD token is handled **lazily**: reads/browse need none, and a privileged action prompts for
    * it via {@link TokenDialog} (registered as the session's token provider). A settings/gear lets
@@ -58,8 +60,9 @@
   // stays client-side and can't collide. See `lib/route.ts` for the scheme + reconciliation rules.
   //
   // `route` is the *intended* view. It's reconciled against the live active event (server state)
-  // for rendering: a workspace route with no active event reconciles to the Events page, and an
-  // empty/hub hash with an active event resumes into the workspace (#90), all in `lib/route.ts`.
+  // for rendering: a workspace route with no active event reconciles to the Events page. The hash
+  // is authoritative — an empty/hub hash stays on the hub even when an event is active (it no
+  // longer auto-resumes into the workspace), all in `lib/route.ts`.
   let route = $state<Route>(parseHash(location.hash));
 
   // Navigate to a route: this is the single mutation point. It updates `location.hash`, which (for
@@ -89,12 +92,14 @@
   let tokenDialog = $state<TokenDialog>();
   session.setTokenProvider(() => tokenDialog?.request() ?? Promise.resolve(undefined));
 
-  // Resume into the Director's active event on load (#90), composed with the hash route (#118):
-  // the active event is server-side state, so a reload reads `GET /active-event` and re-enters the
-  // same event. Once it settles we resolve the *initial* route from the hash + whether an event is
-  // active — an `#/event/<tab>` hash restores that tab, a top-level page hash shows that page, and
-  // an empty hash resumes into the workspace (active set) or lands on the hub. While it resolves we
-  // show a brief loading state. After this one-shot resume, the hash stays the source of truth.
+  // Resolve the *initial* route on load (#118): the active event is server-side state, so we first
+  // read `GET /active-event` (it determines whether a workspace hash can render), then resolve the
+  // route from the hash + whether an event is active. The hash is authoritative — an `#/event/<tab>`
+  // hash restores that tab (or reconciles to Events if no event is active), a top-level page hash
+  // shows that page, and an empty/hub hash stays on the hub *even when an event is active* (we no
+  // longer auto-resume into the workspace; this intentionally supersedes #90's reload-resume per
+  // user feedback). While it resolves we show a brief loading state; after this the hash is the
+  // source of truth.
   let resumed = false;
   $effect(() => {
     if (resumed) return;

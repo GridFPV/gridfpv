@@ -190,11 +190,17 @@ test('home hub navigates to each page and back, with working breadcrumbs', async
     .click();
   await expect(page.getByRole('heading', { name: 'Timers' })).toBeVisible();
 
-  // Home → Events: the picker (former landing), reachable as a page now.
+  // Home → Events: the picker (former landing), reachable as a page now. The worker's Director may
+  // still have an active event from an earlier spec, in which case `currentEvent` is hydrated and
+  // the Events page auto-enters that event's workspace (#118); "Switch event" then returns to the
+  // picker. So we land on the picker whether or not an event was active.
   await page.getByRole('button', { name: /Events/ }).click();
-  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
-    timeout: 15_000
-  });
+  const picker = page.getByRole('heading', { name: 'Choose an event' });
+  await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+  if (await liveNav.isVisible().catch(() => false)) {
+    await page.getByRole('button', { name: /Switch event/ }).click();
+  }
+  await expect(picker).toBeVisible({ timeout: 15_000 });
   await page
     .getByRole('navigation', { name: 'Breadcrumb' })
     .getByRole('button', { name: 'Home' })

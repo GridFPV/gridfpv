@@ -16,7 +16,11 @@
  */
 import { expect, test } from './observability.js';
 
-/** Return to the home hub regardless of whether the shell resumed into a workspace (#90). */
+/**
+ * Return to the home hub. The hash is authoritative (#118) so a bare `goto('/')` lands on the hub
+ * directly; the workspace-resume fallback below is kept defensively in case a prior test left the
+ * shell mid-workspace, but it should no longer be reached on a fresh load.
+ */
 async function gotoHub(page: import('@playwright/test').Page) {
   await page.goto('/');
   const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
@@ -29,6 +33,26 @@ async function gotoHub(page: import('@playwright/test').Page) {
       .click();
   }
   await expect(pilotsCard).toBeVisible({ timeout: 15_000 });
+}
+
+/**
+ * Open the **Events picker** ("Choose an event"). The worker's Director is shared, so an event may
+ * already be active server-side; on a fresh load the shell hydrates `currentEvent` from it, and the
+ * Events page then auto-enters that event's workspace (#118). When that happens we use "Switch
+ * event" to return to the picker (it clears the local event). So this lands on the picker whether or
+ * not an event was active.
+ */
+async function gotoPicker(page: import('@playwright/test').Page) {
+  await gotoHub(page);
+  await page.getByRole('button', { name: /Events/ }).click();
+  const picker = page.getByRole('heading', { name: 'Choose an event' });
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+  if (await liveNav.isVisible().catch(() => false)) {
+    // Auto-entered the active event's workspace — "Switch event" leaves it and lands on the picker.
+    await page.getByRole('button', { name: /Switch event/ }).click();
+  }
+  await expect(picker).toBeVisible({ timeout: 15_000 });
 }
 
 test('a refresh on the Pilots page stays on Pilots (hash reflects the view)', async ({ page }) => {
@@ -52,13 +76,8 @@ test('a refresh on the Pilots page stays on Pilots (hash reflects the view)', as
 test('inside an event, a refresh stays on the open tab; browser back returns to the previous view', async ({
   page
 }) => {
-  await gotoHub(page);
-
-  // Hub → Events → enter Practice → the workspace opens on the default Live tab (#/event/live).
-  await page.getByRole('button', { name: /Events/ }).click();
-  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
-    timeout: 15_000
-  });
+  // Hub → Events picker → enter Practice → the workspace opens on the default Live tab (#/event/live).
+  await gotoPicker(page);
   await page
     .getByRole('button', { name: /Practice/ })
     .first()
@@ -97,4 +116,49 @@ test('inside an event, a refresh stays on the open tab; browser back returns to 
     timeout: 15_000
   });
   await expect.poll(() => new URL(page.url()).hash).toBe('#/event/registration');
+});
+
+test('on the hub with an active event, a refresh stays on the hub (no auto-resume into the event)', async ({
+  page
+}) => {
+  // First make an event ACTIVE on the Director (server state, #90): enter Practice. After this the
+  // Director's active event is set, which is exactly the condition that used to yank a hub reload
+  // into the workspace. The fix (#118) makes the hash authoritative, so it must no longer happen.
+  //
+  // The Director is worker-scoped and reused across specs, so an event may already be active when
+  // this spec runs. The Events page auto-enters the workspace when an event is active, so clicking
+  // Events lands us in the workspace either way (directly if already active, or after we pick
+  // Practice in the picker) — leaving the Director's active event set, which is what we need.
+  await gotoHub(page);
+  await page.getByRole('button', { name: /Events/ }).click();
+  const picker = page.getByRole('heading', { name: 'Choose an event' });
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+  if (await picker.isVisible().catch(() => false)) {
+    await page
+      .getByRole('button', { name: /Practice/ })
+      .first()
+      .click();
+  }
+  await expect(liveNav).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => new URL(page.url()).hash).toBe('#/event/live');
+
+  // Leave the event back to the hub via the breadcrumb Home crumb. `leaveEvent()` tears down the
+  // local workspace but does NOT clear the Director's active event (it stays live for the picker's
+  // Active pill), so the active-event condition persists across the reload below. Hash → canonical #/.
+  await page
+    .getByRole('navigation', { name: 'Breadcrumb' })
+    .getByRole('button', { name: 'Home' })
+    .click();
+  await expect(page.getByRole('heading', { name: 'Pilots' })).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => new URL(page.url()).hash).toMatch(/^(#\/?)?$/);
+
+  // Reload — the key proof: with the active event STILL set on the Director, we stay on the hub
+  // (hub cards visible, no workspace), rather than being auto-pulled back into the event workspace.
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Pilots' })).toBeVisible({ timeout: 15_000 });
+  // The hub stayed: the hash is the canonical #/ (or empty), not #/event/<tab>.
+  expect(new URL(page.url()).hash).toMatch(/^(#\/?)?$/);
+  // And we are NOT in the workspace — the Live control sidebar button is absent on the hub.
+  await expect(page.getByRole('button', { name: /Live control/ })).toBeHidden();
 });

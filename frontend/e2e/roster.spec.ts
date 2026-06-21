@@ -20,20 +20,23 @@ const CALLSIGN = `E2E-Roster-${Date.now()}`;
 test('RD registers a pilot inline and checks it into the event roster', async ({ page }) => {
   await page.goto('/');
 
-  // ── Get into an event (Practice). The worker's Director may already be in a workspace from a
-  //    prior spec; if we're on the hub, go Events → Practice. ───────────────────────────────────
+  // ── Get into an event (Practice). The worker's Director may already have an active event from a
+  //    prior spec. On a fresh load the hash is authoritative (#118), so we land on the hub even when
+  //    an event is active; clicking Events then either opens the picker (no event active) or
+  //    auto-enters the active event's workspace. Either way we end up in a workspace on Practice. ──
   const liveNav = page.getByRole('button', { name: /Live control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
     await eventsCard.click();
-    await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
-      timeout: 15_000
-    });
-    await page
-      .getByRole('button', { name: /Practice/ })
-      .first()
-      .click();
+    const picker = page.getByRole('heading', { name: 'Choose an event' });
+    await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+    if (await picker.isVisible().catch(() => false)) {
+      await page
+        .getByRole('button', { name: /Practice/ })
+        .first()
+        .click();
+    }
     await expect(liveNav).toBeVisible({ timeout: 15_000 });
   }
 
