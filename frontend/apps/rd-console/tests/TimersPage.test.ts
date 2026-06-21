@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { Timer } from '@gridfpv/types';
-import Timers from '../src/screens/Timers.svelte';
+import TimersPage from '../src/screens/TimersPage.svelte';
 import { makeTestSession } from './support.js';
+
+/** The page hosts the shared TimerManager; tests render it with a no-op `onhome`. */
+const noop = () => {};
 
 const MOCK: Timer = {
   id: 'mock',
@@ -18,11 +21,11 @@ const RH: Timer = {
   status: 'Configured'
 };
 
-describe('Timers (picker CRUD modal)', () => {
-  it('lists the registry on open, with the built-in Mock undeletable', async () => {
+describe('TimersPage (app-level timer registry)', () => {
+  it('lists the registry on mount, with the built-in Mock undeletable', async () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
     const { session } = makeTestSession({ listTimersImpl });
-    render(Timers, { session, open: true });
+    render(TimersPage, { session, onhome: noop });
 
     await screen.findByText('Mock');
     expect(screen.getByText('Track RH')).toBeInTheDocument();
@@ -45,7 +48,7 @@ describe('Timers (picker CRUD modal)', () => {
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));
     const createTimerImpl = vi.fn(async () => created);
     const { session } = makeTestSession({ listTimersImpl, createTimerImpl });
-    render(Timers, { session, open: true });
+    render(TimersPage, { session, onhome: noop });
 
     await screen.findByText('Mock');
     await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
@@ -68,7 +71,7 @@ describe('Timers (picker CRUD modal)', () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
     const updateTimerImpl = vi.fn(async () => ({ ...RH, name: 'Renamed' }));
     const { session } = makeTestSession({ listTimersImpl, updateTimerImpl });
-    render(Timers, { session, open: true });
+    render(TimersPage, { session, onhome: noop });
 
     await screen.findByText('Track RH');
     const list = screen.getByRole('list', { name: 'Configured timers' });
@@ -93,7 +96,7 @@ describe('Timers (picker CRUD modal)', () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
     const deleteTimerImpl = vi.fn(async () => undefined as unknown as void);
     const { session } = makeTestSession({ listTimersImpl, deleteTimerImpl });
-    render(Timers, { session, open: true });
+    render(TimersPage, { session, onhome: noop });
 
     await screen.findByText('Track RH');
     const list = screen.getByRole('list', { name: 'Configured timers' });

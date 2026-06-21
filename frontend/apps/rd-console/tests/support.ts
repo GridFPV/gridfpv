@@ -13,7 +13,8 @@ import type {
   updateTimer,
   deleteTimer,
   setEventTimers,
-  setPrimaryTimer
+  setPrimaryTimer,
+  listPilots
 } from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
@@ -28,7 +29,7 @@ const PRACTICE: EventMeta = {
   roster: []
 };
 
-/** The timer-registry seams a screen test can override (all optional; defaults are inert). */
+/** The registry seams a screen test can override (all optional; defaults are inert). */
 export interface TimerImpls {
   listTimersImpl?: typeof listTimers;
   createTimerImpl?: typeof createTimer;
@@ -36,6 +37,8 @@ export interface TimerImpls {
   deleteTimerImpl?: typeof deleteTimer;
   setEventTimersImpl?: typeof setEventTimers;
   setPrimaryTimerImpl?: typeof setPrimaryTimer;
+  /** The app-level pilot directory read (issue #74) — backs the hub + Pilots page tests. */
+  listPilotsImpl?: typeof listPilots;
 }
 
 export interface TestSession {
@@ -45,7 +48,13 @@ export interface TestSession {
 }
 
 export function makeTestSession(
-  opts?: { ack?: CommandAck; live?: LiveRaceState; event?: EventMeta } & TimerImpls
+  opts?: {
+    ack?: CommandAck;
+    live?: LiveRaceState;
+    event?: EventMeta;
+    /** Skip entering an event — for the app-level hub/page tests that render with no event. */
+    noEnter?: boolean;
+  } & TimerImpls
 ): TestSession {
   const ack: CommandAck = opts?.ack ?? { ok: true };
   const sendSpy = vi.fn<(c: Command) => Promise<CommandAck>>(async () => ack);
@@ -80,11 +89,13 @@ export function makeTestSession(
     updateTimerImpl: opts?.updateTimerImpl,
     deleteTimerImpl: opts?.deleteTimerImpl,
     setEventTimersImpl: opts?.setEventTimersImpl,
-    setPrimaryTimerImpl: opts?.setPrimaryTimerImpl
+    setPrimaryTimerImpl: opts?.setPrimaryTimerImpl,
+    listPilotsImpl: opts?.listPilotsImpl
   });
-  // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event.
+  // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event,
+  // unless the test wants the app-level (no-event) context.
   session.setToken('tok');
-  session.selectEvent(opts?.event ?? PRACTICE);
+  if (!opts?.noEnter) session.selectEvent(opts?.event ?? PRACTICE);
 
   const pushLive = (state: LiveRaceState) =>
     listener?.({ body: { LiveRaceState: state }, cursor: 1, status: 'live', error: undefined });

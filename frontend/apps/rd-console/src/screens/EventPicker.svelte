@@ -1,12 +1,16 @@
 <script lang="ts">
   /**
-   * EventPicker — the RD console's landing screen (#72, Slice 1b).
+   * EventPicker — the home hub's **Events** page (#118; was the landing screen, #72 Slice 1b).
    *
-   * The event is the outer container: you can't act outside an event, so the picker *is*
-   * the home screen. On load it reads the open event list (`listEvents()`, no token) and
-   * renders **Practice** prominently as the no-friction "just try it" entry, then the list
-   * of created (persistent) events. Selecting one enters its workspace. "+ New event" opens
-   * a name `Dialog` → `createEvent(name)` (which obtains the RD token lazily) → enters it.
+   * In the two-level IA the home hub is the landing and this is the **Events page** (Home ›
+   * Events) — the select/create surface. On load it reads the open event list (`listEvents()`,
+   * no token) and renders **Practice** prominently as the no-friction "just try it" entry, then
+   * the list of created (persistent) events. Selecting one enters its workspace. "+ New event"
+   * opens a name `Dialog` → `createEvent(name)` (which obtains the RD token lazily) → enters it.
+   *
+   * The old picker-header "Timers" modal entry is **gone** — app-level timer management is now its
+   * own page in the hub ({@link TimersPage}). Breadcrumbs (Home › Events) + a Home button get you
+   * back to the hub from here.
    *
    * Auth is lazy here: listing/browsing needs no token; only **creating** an event prompts
    * for the RD token (handled by the session's token provider). The Director address is the
@@ -16,13 +20,9 @@
   import type { EventMeta } from '@gridfpv/types';
   import type { Session, CreateEventFields } from '../lib/session.svelte.js';
   import { PRACTICE_EVENT_ID } from '../lib/session.svelte.js';
-  import Timers from './Timers.svelte';
+  import Breadcrumbs from '../Breadcrumbs.svelte';
 
-  let { session }: { session: Session } = $props();
-
-  // The app-level Timers registry (issue #73) — configured once, reused across events, so it
-  // opens from the picker (home) rather than inside an event. A modal over the picker.
-  let timersOpen = $state(false);
+  let { session, onhome }: { session: Session; onhome: () => void } = $props();
 
   type LoadState =
     | { kind: 'loading' }
@@ -163,33 +163,14 @@
 
 <div class="picker">
   <div class="picker-inner">
+    <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Events' }]} />
+
     <header class="head">
-      <div class="brand">
-        <span class="logo" aria-hidden="true">
-          <svg viewBox="0 0 32 32" width="40" height="40">
-            <rect x="2" y="2" width="28" height="28" rx="8" fill="var(--gf-accent-soft)" />
-            <path
-              d="M16 6 L25 11 L25 21 L16 26 L7 21 L7 11 Z"
-              fill="none"
-              stroke="var(--gf-accent)"
-              stroke-width="2"
-              stroke-linejoin="round"
-            />
-            <circle cx="16" cy="16" r="3" fill="var(--gf-accent)" />
-          </svg>
-        </span>
-        <div class="brand-text">
-          <span class="name">GridFPV</span>
-          <span class="kicker">Race Director Console</span>
-        </div>
-      </div>
+      <h1 class="title">Choose an event</h1>
       <div class="head-actions">
-        <Button variant="secondary" onclick={() => (timersOpen = true)}>Timers</Button>
         <Button variant="primary" onclick={openNew}>+ New event</Button>
       </div>
     </header>
-
-    <h1 class="title">Choose an event</h1>
 
     {#if loadState.kind === 'loading'}
       <div class="state-msg" role="status">
@@ -314,9 +295,6 @@
   {/snippet}
 </Dialog>
 
-<!-- The app-level Timers registry, opened from the header (issue #73). -->
-<Timers {session} bind:open={timersOpen} />
-
 <style>
   .picker {
     display: grid;
@@ -332,7 +310,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-5);
-    padding-top: var(--gf-space-8);
+    padding-top: var(--gf-space-6);
   }
   .head {
     display: flex;
@@ -340,34 +318,13 @@
     justify-content: space-between;
     gap: var(--gf-space-4);
   }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-3);
-  }
   .head-actions {
     display: flex;
     align-items: center;
     gap: var(--gf-space-2);
   }
-  .brand-text {
-    display: flex;
-    flex-direction: column;
-    line-height: 1.15;
-  }
-  .brand-text .name {
-    font-weight: var(--gf-font-weight-bold);
-    font-size: var(--gf-font-size-lg);
-    letter-spacing: var(--gf-tracking-tight);
-  }
-  .brand-text .kicker {
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-muted);
-    text-transform: uppercase;
-    letter-spacing: var(--gf-tracking-caps);
-  }
   .title {
-    margin: var(--gf-space-4) 0 0;
+    margin: 0;
     font-size: var(--gf-font-size-2xl);
     letter-spacing: var(--gf-tracking-tight);
   }

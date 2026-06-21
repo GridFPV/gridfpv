@@ -1,16 +1,16 @@
 /**
  * Full RD console click-through against a real Director (#13, v0.4 Director wiring +
- * observability harness; entry reshaped for the event-picker landing, #72 Slice 1b).
+ * observability harness; entry reshaped for the home-hub IA, #118).
  *
- * This is the deliverable proof: a person opens the RD console, lands on the **event
- * picker**, enters **Practice**, defines a heat with named pilots, runs it, **watches the live
- * laps climb in the rendered DOM**, finishes + scores, and reads results with the pilots and
- * their lap counts — every step a real click/input in headless chromium, every command on the
+ * This is the deliverable proof: a person opens the RD console, lands on the **home hub**, opens
+ * the **Events** page, enters **Practice**, defines a heat with named pilots, runs it, **watches
+ * the live laps climb in the rendered DOM**, finishes + scores, and reads results with the pilots
+ * and their lap counts — every step a real click/input in headless chromium, every command on the
  * real control path, every lap from the real built-in sim source. Nothing is mocked.
  *
  * The Director is booted with **no token configured**, so control is **open** (full-trust by
- * default, #72 Slice 1b): the run goes picker → Practice → build heat → control with **no token
- * step** — the lazy prompt never fires. (The token-gated path is a separate, optional concern.)
+ * default, #72 Slice 1b): the run goes hub → Events → Practice → build heat → control with **no
+ * token step** — the lazy prompt never fires. (The token-gated path is a separate, optional concern.)
  *
  * The lap-counts-climbing assertion is the load-bearing one: it polls the per-pilot lap
  * numbers rendered in the HeatSheet and asserts they increase over a couple of seconds —
@@ -29,12 +29,13 @@ const PILOTS = ['Ace', 'Bee', 'Cee'];
 const HEAT_ID = 'q-1';
 
 test('RD drives a full basic sim race through the console UI', async ({ page }) => {
-  // ── Open the console: the event picker is the landing screen (#72) ───────────────────
+  // ── Open the console: the home hub is the landing screen (#118) ──────────────────────
   await page.goto('/');
 
-  // ── Enter the always-present Practice event (no token needed to browse/enter) ────────
-  // The picker reads the open event list and renders Practice prominently; clicking it
-  // enters the event workspace. The Director is the page's own origin — no address to type.
+  // ── Hub → Events page → enter Practice (no token needed to browse/enter) ─────────────
+  // The hub's three cards land on Pilots/Events/Timers pages; the Events page is the former
+  // picker, which renders Practice prominently. The Director is the page's own origin.
+  await page.getByRole('button', { name: /Events/ }).click();
   await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
     timeout: 15_000
   });
@@ -135,4 +136,67 @@ test('RD drives a full basic sim race through the console UI', async ({ page }) 
   // Positions are decided and start at 1.
   const firstPos = await rows.first().locator('.pos .badge').textContent();
   expect(firstPos?.trim()).toBe('1');
+});
+
+/**
+ * The home-hub navigation itself (#118): from the hub, each of the three cards opens its page and
+ * the breadcrumb's "Home" crumb returns to the hub; the Timers page renders the registry manager.
+ * No event is entered here — this exercises the app-level shell, not the workspace.
+ */
+test('home hub navigates to each page and back, with working breadcrumbs', async ({ page }) => {
+  await page.goto('/');
+
+  // The worker's Director is shared, so a prior spec may have left an active event — on load the
+  // shell would then resume into that workspace (#90). Wait for the shell to settle (either the
+  // hub's Pilots card or the workspace's Live-control nav appears), and if we resumed into the
+  // workspace use the brand/logo (a Home root, #118) to return to the hub.
+  const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  await expect(pilotsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+  if (await liveNav.isVisible().catch(() => false)) {
+    // Resumed into the workspace — the breadcrumb's Home crumb returns to the hub.
+    await page
+      .getByRole('navigation', { name: 'Breadcrumb' })
+      .getByRole('button', { name: 'Home' })
+      .click();
+  }
+
+  // The hub: three cards.
+  await expect(pilotsCard).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('heading', { name: 'Events' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Timers' })).toBeVisible();
+
+  // Home → Timers: the page renders the shared registry manager (the built-in Mock is listed),
+  // and the breadcrumb shows Home › Timers.
+  await page.getByRole('button', { name: /Timers/ }).click();
+  await expect(page.getByRole('heading', { name: 'Timers', level: 1 })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Configured timers' })).toBeVisible({
+    timeout: 15_000
+  });
+  const crumbs = page.getByRole('navigation', { name: 'Breadcrumb' });
+  await expect(crumbs.getByText('Timers')).toBeVisible();
+  // Breadcrumb Home returns to the hub.
+  await crumbs.getByRole('button', { name: 'Home' }).click();
+  await expect(page.getByRole('heading', { name: 'Events' })).toBeVisible();
+
+  // Home → Pilots: the placeholder page with the "registration UI coming" note.
+  await page.getByRole('button', { name: /Pilots/ }).click();
+  await expect(page.getByRole('heading', { name: 'Pilots', level: 1 })).toBeVisible();
+  await expect(page.getByText(/registration UI/i)).toBeVisible({ timeout: 15_000 });
+  await page
+    .getByRole('navigation', { name: 'Breadcrumb' })
+    .getByRole('button', { name: 'Home' })
+    .click();
+  await expect(page.getByRole('heading', { name: 'Timers' })).toBeVisible();
+
+  // Home → Events: the picker (former landing), reachable as a page now.
+  await page.getByRole('button', { name: /Events/ }).click();
+  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
+    timeout: 15_000
+  });
+  await page
+    .getByRole('navigation', { name: 'Breadcrumb' })
+    .getByRole('button', { name: 'Home' })
+    .click();
+  await expect(page.getByRole('heading', { name: 'Pilots' })).toBeVisible();
 });
