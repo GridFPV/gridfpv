@@ -58,6 +58,11 @@ use gridfpv_server::timers::{TimerKind, TimerRegistry};
 use gridfpv_storage::Offset;
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "live")]
+mod rotorhazard;
+#[cfg(feature = "live")]
+pub use rotorhazard::RhSource;
+
 /// How often the bridge polls the log tail for new heat-loop events. Short enough that a
 /// `Start` click feels instant (the first pass lands within a poll), long enough to be a
 /// negligible idle cost. A real source would use the RH event callback instead of polling.
@@ -122,6 +127,26 @@ impl PassSink {
             .append(pass, None)
             .map_err(|e| SourceError(format!("{e:?}")))?;
         Ok(())
+    }
+
+    /// Append an already-built canonical [`Event`] through this sink's [`AppState`], stamping
+    /// passes with the sink's `adapter` id. Used by the live RotorHazard source to feed the
+    /// adapter's translated passes (which carry their own real signal context, source-clock
+    /// timestamps and per-node sequence) straight into the event log — rather than re-synthesizing
+    /// them through [`emit`](Self::emit). Returns the resulting [`Offset`] on success.
+    #[cfg(feature = "live")]
+    pub(crate) fn append_event(&self, event: Event) -> Result<(), SourceError> {
+        self.state
+            .append(event, None)
+            .map_err(|e| SourceError(format!("{e:?}")))?;
+        Ok(())
+    }
+
+    /// This sink's adapter id (the configured RH timer's adapter), for re-stamping translated
+    /// passes onto a single source in the lap projection.
+    #[cfg(feature = "live")]
+    pub(crate) fn adapter(&self) -> &AdapterId {
+        &self.adapter
     }
 }
 
@@ -406,13 +431,17 @@ pub(crate) async fn run_bridge(
     }
 }
 
-/// Resolve the event's selected timers into the [`LapSource`]s to run for this heat (issue #73).
+/// Resolve the event's selected timers into the [`LapSource`]s to run for this heat (issues #73,
+/// #65).
 ///
 /// Reads the event's current `timers` selection from `registry`, looks each id up in the app-level
 /// `timers` registry, and maps each **Mock** timer to a [`SimSource`] with that timer's
-/// `laps`/`lap_ms`. A selected **RotorHazard** timer is skipped (a no-op stub for 2b / #65); an id
-/// that no longer resolves (a since-deleted timer) is skipped too. Returns the sources to drive
-/// concurrently for the running heat — empty when the event selects no usable timer.
+/// `laps`/`lap_ms`. A selected **RotorHazard** timer maps to a live [`RhSource`] (under the `live`
+/// feature) that connects to its `url`, drives the race, feeds RH passes into the event log, and
+/// updates that timer's connection [`TimerStatus`](gridfpv_server::timers::TimerStatus) as it goes;
+/// in a **non-`live`** build a RotorHazard timer is a no-op stub (skipped). An id that no longer
+/// resolves (a since-deleted timer) is skipped too. Returns the sources to drive concurrently for
+/// the running heat — empty when the event selects no usable timer.
 fn selected_sources(
     registry: &EventRegistry,
     timers: &TimerRegistry,
@@ -433,8 +462,12 @@ fn selected_sources(
                     Duration::from_millis(lap_ms),
                 )));
             }
-            // RotorHazard is a reserved no-op stub in this slice (2b / #65 connects it).
-            TimerKind::Rotorhazard { .. } => {}
+            // A live build connects the real RotorHazard; the default build keeps it a no-op stub.
+            TimerKind::Rotorhazard { url } => {
+                let _ = (&id, &url);
+                #[cfg(feature = "live")]
+                sources.push(Arc::new(RhSource::new(id, url, timers.clone())));
+            }
         }
     }
     sources
