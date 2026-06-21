@@ -89,6 +89,22 @@
     void load();
   });
 
+  /**
+   * The rows to render: the loaded registry, but with each timer's **status** overlaid from the
+   * session's live-polled {@link Session.timers} when available (#73, Slice 2b). The load fetches
+   * the registry once (and on every CRUD); the in-event poll keeps the *status* fresh, so a timer
+   * dropping off updates here too — the screen and the header read the same live value. Outside an
+   * event (the picker's Timers modal) the poll is idle, so this is just the loaded list unchanged.
+   */
+  const displayTimers = $derived.by(() => {
+    if (loadState.kind !== 'ready') return [];
+    const liveStatus = new Map(session.timers.map((t) => [t.id, t.status]));
+    return loadState.timers.map((t) => {
+      const status = liveStatus.get(t.id);
+      return status && status !== t.status ? { ...t, status } : t;
+    });
+  });
+
   /** Reload, then notify the parent so a selection owner can reconcile against the fresh set. */
   async function reload() {
     await load();
@@ -241,7 +257,7 @@
   {:else}
     {@render listHeader?.()}
     <ul class="timer-list" aria-label="Configured timers">
-      {#each loadState.timers as timer (timer.id)}
+      {#each displayTimers as timer (timer.id)}
         <li class="timer-row" class:checked={rowChecked?.(timer)}>
           {@render rowLead?.(timer)}
           <div class="timer-main">

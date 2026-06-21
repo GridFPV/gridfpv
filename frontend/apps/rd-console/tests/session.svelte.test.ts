@@ -555,6 +555,90 @@ describe('Session', () => {
       expect(setEventTimersImpl).not.toHaveBeenCalled();
     });
 
+    // ── Live status polling for the header pills (#73, Slice 2b) ─────────────────
+    const MOCK_CONNECTED: Timer = { ...MOCK_TIMER, status: 'Connected' };
+
+    it('polls listTimers while inside an event and exposes the live list', async () => {
+      vi.useFakeTimers();
+      try {
+        const listTimersImpl = vi.fn(async () => [MOCK_TIMER]);
+        const session = timerSession({ listTimersImpl });
+        session.selectEvent(PRACTICE);
+        // An immediate poll fires on enter.
+        await vi.advanceTimersByTimeAsync(0);
+        expect(listTimersImpl).toHaveBeenCalledTimes(1);
+        expect(session.timers).toEqual([MOCK_TIMER]);
+
+        // The Director mutates status live; the next poll picks it up.
+        listTimersImpl.mockResolvedValue([MOCK_CONNECTED]);
+        await vi.advanceTimersByTimeAsync(2_500);
+        expect(listTimersImpl).toHaveBeenCalledTimes(2);
+        expect(session.timers).toEqual([MOCK_CONNECTED]);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops polling and clears the list on leaveEvent', async () => {
+      vi.useFakeTimers();
+      try {
+        const listTimersImpl = vi.fn(async () => [MOCK_TIMER]);
+        const session = timerSession({ listTimersImpl });
+        session.selectEvent(PRACTICE);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(listTimersImpl).toHaveBeenCalledTimes(1);
+
+        session.leaveEvent();
+        expect(session.timers).toEqual([]);
+        // No further polls after leaving.
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(listTimersImpl).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
+    it('selectedTimers intersects the event selection with the polled registry, in saved order', async () => {
+      vi.useFakeTimers();
+      try {
+        const rh: Timer = {
+          id: 'rh-1',
+          name: 'Track RH',
+          kind: { Rotorhazard: { url: 'http://rh' } },
+          status: 'Disconnected'
+        };
+        const listTimersImpl = vi.fn(async () => [rh, MOCK_CONNECTED]); // registry order differs
+        const session = timerSession({ listTimersImpl });
+        // Event selects mock then rh-1 — selectedTimers must honor THAT order.
+        session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'] });
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(session.selectedTimers.map((t) => t.id)).toEqual(['mock', 'rh-1']);
+        expect(session.selectedTimers.map((t) => t.status)).toEqual(['Connected', 'Disconnected']);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
+    it('selectedTimers skips a selected id not yet in the registry, and is empty at the picker', async () => {
+      vi.useFakeTimers();
+      try {
+        const listTimersImpl = vi.fn(async () => [MOCK_TIMER]); // only mock is known
+        const session = timerSession({ listTimersImpl });
+        expect(session.selectedTimers).toEqual([]); // picker: no event
+        session.selectEvent({ ...PRACTICE, timers: ['mock', 'ghost'] });
+        await vi.advanceTimersByTimeAsync(0);
+        // The unknown id is skipped rather than rendered.
+        expect(session.selectedTimers.map((t) => t.id)).toEqual(['mock']);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
     it('setEventTimers saves and re-homes currentEvent with the server response', async () => {
       const updated: EventMeta = { ...PRACTICE, timers: ['mock', 'rh-1'] };
       const setEventTimersImpl = vi.fn(async () => updated);
