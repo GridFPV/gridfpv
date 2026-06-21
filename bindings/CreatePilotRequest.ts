@@ -18,6 +18,22 @@ callsign: string,
  */
 name?: string, 
 /**
+ * Optional pronunciation hint, stored on [`Pilot::phonetic`].
+ */
+phonetic?: string, 
+/**
+ * Optional team / club, stored on [`Pilot::team`].
+ */
+team?: string, 
+/**
+ * Optional hex color `#RRGGBB`, stored on [`Pilot::color`] (validated).
+ */
+color?: string, 
+/**
+ * Optional ISO 3166-1 alpha-2 country code, stored on [`Pilot::country`] (validated).
+ */
+country?: string, 
+/**
  * Optional video-transmitter type, stored on [`Pilot::vtx_type`].
  */
 vtx_type?: VtxType, 
@@ -28,4 +44,9 @@ multigp_id?: string,
 /**
  * Optional Velocidrone id, stored on [`Pilot::velocidrone_id`].
  */
-velocidrone_id?: string, };
+velocidrone_id?: string, 
+/**
+ * Optional custom-attributes bag, stored on [`Pilot::attributes`]. Empty keys are rejected;
+ * keys and values are trimmed. Defaults empty.
+ */
+attributes: { [key in string]: string }, };

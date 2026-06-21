@@ -94,7 +94,7 @@ use crate::events::{
     SetEventRosterRequest,
 };
 use crate::live_state::live_state;
-use crate::pilots::{CreatePilotRequest, Pilot, UpdatePilotRequest};
+use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
 use crate::stream::Cursor;
@@ -579,7 +579,7 @@ async fn create_pilot(
     let pilot = registry
         .pilots()
         .create(&body)
-        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+        .map_err(pilot_error_to_protocol)?;
     Ok(Json(pilot))
 }
 
@@ -596,7 +596,7 @@ async fn update_pilot(
     let pilot = registry
         .pilots()
         .update(&pilot_id, &body)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(pilot_error_to_protocol)?;
     Ok(Json(pilot))
 }
 
@@ -612,8 +612,20 @@ async fn delete_pilot(
     registry
         .pilots()
         .delete(&pilot_id)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(pilot_error_to_protocol)?;
     Ok(StatusCode::OK)
+}
+
+/// Map a [`PilotError`] to a typed [`ProtocolError`] (issue #74): a validation failure is a
+/// `BadRequest` (400), an unknown id is an `UnknownScope` (404), and a persistence failure is
+/// `Internal` (500).
+fn pilot_error_to_protocol(error: PilotError) -> ProtocolError {
+    let code = match error.kind {
+        PilotErrorKind::Invalid => ErrorCode::BadRequest,
+        PilotErrorKind::NotFound => ErrorCode::UnknownScope,
+        PilotErrorKind::Internal => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, error.to_string())
 }
 
 /// `PUT /events/{event_id}/roster` — set an event's **roster** (issue #74), RD-gated.
