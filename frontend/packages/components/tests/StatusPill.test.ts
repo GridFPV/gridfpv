@@ -19,9 +19,10 @@ describe('StatusPill', () => {
 
   // ── Timer connection status (#73, Slice 2b) ──────────────────────────────────
   it('maps a timer TimerStatus to a calm/healthy/alarming tone', () => {
-    // Resting config reads neutral so a single Mock never alarms.
-    expect(pill({ status: 'Ready' }).tone).toBe('idle');
-    expect(pill({ status: 'Configured' }).tone).toBe('idle');
+    // Resting states carry their own color (not gray): a ready Mock reads healthy
+    // (green), a configured-but-unconnected timer reads informational (blue).
+    expect(pill({ status: 'Ready' }).tone).toBe('ready');
+    expect(pill({ status: 'Configured' }).tone).toBe('configured');
     // Live healthy connection is green and pulses; dialing is pending.
     expect(pill({ status: 'Connecting' }).tone).toBe('pending');
     const connected = pill({ status: 'Connected' });

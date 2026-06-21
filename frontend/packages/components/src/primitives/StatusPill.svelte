@@ -47,8 +47,8 @@
     // Timer connection status (`TimerStatus`, capitalized — #73/#65). A live, healthy
     // timer reads green; while dialing it's pending; dropped/errored is danger; the
     // resting Mock/configured states are calm/neutral so a single Mock never alarms.
-    Ready: 'idle',
-    Configured: 'idle',
+    Ready: 'ready',
+    Configured: 'configured',
     Connecting: 'pending',
     Connected: 'live',
     Disconnected: 'warn',
@@ -132,6 +132,12 @@
   }
   .gf-pill[data-tone='idle'] {
     --_c: var(--gf-conn-idle);
+  }
+  .gf-pill[data-tone='ready'] {
+    --_c: var(--gf-success);
+  }
+  .gf-pill[data-tone='configured'] {
+    --_c: var(--gf-info);
   }
   .gf-pill[data-tone='danger'] {
     --_c: var(--gf-danger);
