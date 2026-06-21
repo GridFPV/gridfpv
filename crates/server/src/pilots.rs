@@ -427,8 +427,9 @@ impl<T: TS> TS for OptionalEdit<T> {
 impl<T> OptionalEdit<T> {
     /// Whether this edit is [`Keep`](OptionalEdit::Keep) (the field was absent) — used as the
     /// per-field `skip_serializing_if` so an unchanged field stays *absent* on the wire rather than
-    /// round-tripping to a `null` (which would mean *clear*).
-    fn is_keep(&self) -> bool {
+    /// round-tripping to a `null` (which would mean *clear*). `pub(crate)` so sibling registries
+    /// (e.g. the class directory, #84) reuse the same three-state edit on their own request types.
+    pub(crate) fn is_keep(&self) -> bool {
         matches!(self, OptionalEdit::Keep)
     }
 }

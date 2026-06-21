@@ -21,7 +21,7 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Command, EventMeta, Pilot, Timer } from '@gridfpv/types';
+import type { Class, Command, EventMeta, Pilot, Timer } from '@gridfpv/types';
 
 import { type Director } from '../test-harness/director.ts';
 import { eventRoot, startContractDirector } from './harness.ts';
@@ -684,5 +684,166 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
     // Remove one; removing an absent one is a no-op.
     expect(((await removeOne(a.id)).body as EventMeta).roster).toEqual([b.id]);
     expect(((await removeOne(a.id)).body as EventMeta).roster).toEqual([b.id]);
+  });
+});
+
+/**
+ * Issue #84 (registry slice): classes are **application-level configuration** — a persisted
+ * directory the RD maintains once, and each event selects which directory classes run at it. The
+ * directory mirrors the pilot directory (a `ClassSource` provenance + optional reference/description;
+ * the `ClassId`/`OptionalEdit` types are reused). Rounds / the phase engine are NOT in this slice.
+ *
+ * guards:
+ *  - `GET /classes` is an **open read** → `Class[]` (empty on a fresh Director — no built-in class).
+ *  - `POST /classes` is **RD-gated** (no/bad token → 401), requires a `name`, auto-generates an id,
+ *    carries the `source`/`reference`/`description` metadata, and the new class appears in the listing.
+ *  - `PUT /classes/{id}` edits (set / clear via wire-`null` — the `OptionalEdit` three-state).
+ *  - `PUT /events/{id}/classes` is **RD-gated**, validates each id names a directory class (unknown →
+ *    404 `UnknownScope`), and records the selection on the event's `EventMeta.classes` (empty default).
+ */
+describe('seam 12: application-level classes + per-event selection (#84)', () => {
+  /** `GET /classes` → the parsed `Class[]` (asserting a 200, open read). */
+  async function listClasses(): Promise<Class[]> {
+    const res = await fetch(`${director.baseUrl}/classes`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as Class[];
+  }
+
+  /** `POST /classes` with an optional bearer token → raw status + parsed body. */
+  async function createClass(
+    body: unknown,
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${director.baseUrl}/classes`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** `PUT /events/{id}/classes` with `{ ids }` + optional token → raw status + parsed body. */
+  async function setEventClasses(
+    eventId: string,
+    ids: string[],
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/classes`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ ids })
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  it('GET /classes is an open read (empty on a fresh Director — no built-in class)', async () => {
+    const classes = await listClasses();
+    expect(Array.isArray(classes)).toBe(true);
+  });
+
+  it('POST /classes requires the RD token — no/bad token → 401', async () => {
+    const body = { name: 'No Auth' };
+    expect((await createClass(body)).status).toBe(401);
+    expect((await createClass(body, 'not-a-real-token')).status).toBe(401);
+  });
+
+  it('POST /classes rejects a missing/blank name with 400', async () => {
+    expect((await createClass({ name: '   ' }, TOKEN)).status).toBe(400);
+  });
+
+  it('POST /classes creates a class (with metadata) and it appears in the listing', async () => {
+    const created = (
+      await createClass(
+        { name: 'Open', source: 'MultiGP', reference: 'mgp-open', description: 'The open class' },
+        TOKEN
+      )
+    ).body as Class;
+    expect(created.id).toMatch(/^open-/);
+    expect(created.name).toBe('Open');
+    expect(created.source).toBe('MultiGP');
+    expect(created.reference).toBe('mgp-open');
+    expect(created.description).toBe('The open class');
+
+    // The source defaults to "Custom" when omitted.
+    const custom = (await createClass({ name: 'Spec' }, TOKEN)).body as Class;
+    expect(custom.source).toBe('Custom');
+
+    const ids = (await listClasses()).map((c) => c.id);
+    expect(ids).toContain(created.id);
+  });
+
+  it('PUT /classes/{id} edits (set, and clear via wire-null — the OptionalEdit three-state)', async () => {
+    const created = (
+      await createClass({ name: 'Editable', reference: 'ref-1', description: 'desc' }, TOKEN)
+    ).body as Class;
+
+    const put = async (id: string, body: unknown, token?: string) => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${director.baseUrl}/classes/${id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(body)
+      });
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
+    };
+
+    // Set name + source, leave reference/description untouched (absent → unchanged).
+    const updated = (await put(created.id, { name: 'Renamed', source: 'Other' }, TOKEN))
+      .body as Class;
+    expect(updated.name).toBe('Renamed');
+    expect(updated.source).toBe('Other');
+    expect(updated.reference).toBe('ref-1'); // unchanged
+    expect(updated.description).toBe('desc'); // unchanged
+
+    // Wire `null` clears reference/description (the OptionalEdit clear case).
+    const cleared = (await put(created.id, { reference: null, description: null }, TOKEN))
+      .body as Class;
+    expect(cleared.reference).toBeUndefined(); // cleared (omitted from the wire when unset)
+    expect(cleared.description).toBeUndefined(); // cleared
+
+    // Absent → leave unchanged (a no-op body leaves the now-cleared fields cleared).
+    const leftAlone = (await put(created.id, {}, TOKEN)).body as Class;
+    expect(leftAlone.reference).toBeUndefined();
+
+    // RD-gated, and an unknown id → 404.
+    expect((await put(created.id, { name: 'X' })).status).toBe(401);
+    expect((await put('no-such-class', { name: 'X' }, TOKEN)).status).toBe(404);
+  });
+
+  it('PUT /events/{id}/classes validates ids and records the selection (empty default)', async () => {
+    // A new event has an empty class selection by default.
+    const event = (await createEvent('Classes Event', TOKEN)).body as EventMeta;
+    expect(event.classes).toEqual([]);
+
+    // Create a directory class and select it.
+    const cls = (await createClass({ name: 'Selectable' }, TOKEN)).body as Class;
+    const ok = await setEventClasses(event.id, [cls.id], TOKEN);
+    expect(ok.status).toBe(200);
+    expect((ok.body as EventMeta).classes).toEqual([cls.id]);
+
+    // An UNKNOWN class id → 404 UnknownScope.
+    const bad = await setEventClasses(event.id, ['no-such-class'], TOKEN);
+    expect(bad.status).toBe(404);
+    expect((bad.body as { code?: string }).code).toBe('UnknownScope');
+
+    // RD-gated: no token → 401.
+    expect((await setEventClasses(event.id, [cls.id])).status).toBe(401);
   });
 });

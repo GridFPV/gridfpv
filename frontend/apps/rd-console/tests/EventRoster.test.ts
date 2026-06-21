@@ -15,7 +15,8 @@ const EVENT: EventMeta = {
   created_at: 0,
   persistent: true,
   timers: ['mock'],
-  roster: ['p1']
+  roster: ['p1'],
+  classes: []
 };
 
 describe('EventRoster (in-event roster + inline CRUD)', () => {

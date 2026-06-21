@@ -39,8 +39,9 @@ use gridfpv_storage::{InMemoryLog, SqliteLog};
 
 use crate::app::AppState;
 use crate::auth::TokenStore;
+use crate::classes::ClassDirectory;
 use crate::pilots::PilotDirectory;
-use crate::scope::{EventId, PilotId};
+use crate::scope::{ClassId, EventId, PilotId};
 use crate::timers::{MOCK_TIMER_ID, TimerId, TimerRegistry};
 
 /// The reserved id of the always-present built-in **Practice** event.
@@ -137,6 +138,17 @@ pub struct EventMeta {
     /// roster pilot flies in a heat) are a separate concern (#117) and are not modelled here.
     #[serde(default)]
     pub roster: Vec<PilotId>,
+    /// The application-level **classes** this event runs (issue #84) — the per-event reference into
+    /// the app-level [`ClassDirectory`](crate::classes::ClassDirectory), by their [`ClassId`]. The
+    /// per-event selection into the app-level class directory: a Director maintains their racing
+    /// categories once, and each event simply picks which of them run at it (mirroring
+    /// [`roster`](Self::roster) and [`timers`](Self::timers)).
+    ///
+    /// Additive (`#[serde(default)]`) so an event persisted before #84 reads back with an empty
+    /// selection; new events and Practice default to an **empty** selection. This is the registry
+    /// slice only — the rounds / phase engine a class later drives is a separate concern.
+    #[serde(default)]
+    pub classes: Vec<ClassId>,
 }
 
 impl EventMeta {
@@ -188,6 +200,16 @@ pub struct SetActiveEventRequest {
 pub struct SetEventRosterRequest {
     /// The directory pilots this event rosters, in selection order. Each must name a known pilot.
     pub pilot_ids: Vec<PilotId>,
+}
+
+/// The body of `PUT /events/{id}/classes` — the directory class ids that make up an event's
+/// selection (issue #84). Each must name a class in the application-level
+/// [`ClassDirectory`](crate::classes::ClassDirectory), else a typed 404.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SetEventClassesRequest {
+    /// The directory classes this event runs, in selection order. Each must name a known class.
+    pub ids: Vec<ClassId>,
 }
 
 /// The body of `POST /events` — the only thing a caller supplies when creating an event.
@@ -259,6 +281,12 @@ struct Registry {
     /// references; it lives here so the single router state ([`EventRegistry`]) exposes it to the
     /// Pilots API handlers without a second axum state type. Cloning shares the one directory.
     pilots: PilotDirectory,
+    /// The Director-wide application-level **class directory** (issue #84). Like the pilot
+    /// directory, it is one app-level authority the per-event class selection
+    /// ([`EventMeta::classes`]) references; it lives here so the single router state
+    /// ([`EventRegistry`]) exposes it to the Classes API handlers without a second axum state type.
+    /// Cloning shares the one directory.
+    classes: ClassDirectory,
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
@@ -294,6 +322,12 @@ impl EventRegistry {
         let pilots = PilotDirectory::new(data_dir.clone())
             .map_err(|e| RegistryError(format!("could not build pilot directory: {e}")))?;
 
+        // Build the Director-wide application-level class directory (issue #84): the classes
+        // persisted to `<data_dir>/classes.json` (empty on first boot — there is no built-in
+        // class). Shares the same data dir as the events, timers, and pilots.
+        let classes = ClassDirectory::new(data_dir.clone())
+            .map_err(|e| RegistryError(format!("could not build class directory: {e}")))?;
+
         // Seed Practice: an in-memory (non-persistent) log, sharing the one token store.
         let practice_id = EventId(PRACTICE_EVENT_ID.to_string());
         let practice_state = AppState::with_tokens(InMemoryLog::new(), tokens.clone());
@@ -312,6 +346,7 @@ impl EventRegistry {
                     timers: default_timer_selection(),
                     primary_timer: None,
                     roster: Vec::new(),
+                    classes: Vec::new(),
                 },
                 state: practice_state,
             },
@@ -345,6 +380,7 @@ impl EventRegistry {
                 tokens,
                 timers,
                 pilots,
+                classes,
                 data_dir,
                 active_event,
             })),
@@ -363,6 +399,13 @@ impl EventRegistry {
     /// directory.
     pub fn pilots(&self) -> PilotDirectory {
         self.read().pilots.clone()
+    }
+
+    /// The Director-wide application-level **class directory** (issue #84) — the app-level authority
+    /// the Classes API mutates and the per-event class selection references. Cloning shares the one
+    /// directory.
+    pub fn classes(&self) -> ClassDirectory {
+        self.read().classes.clone()
     }
 
     /// The Director's currently-active event's [`EventMeta`] (issue #90), or `None` when no
@@ -480,6 +523,26 @@ impl EventRegistry {
             .get_mut(id)
             .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
         event.meta.roster = pilot_ids;
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(meta)
+    }
+
+    /// Set an event's **class selection** (issue #84), returning its updated [`EventMeta`].
+    ///
+    /// Replaces the event's classes wholesale with `ids`. Validates the event exists (else a
+    /// [`RegistryError`] the caller maps to a typed 404); the caller is responsible for validating
+    /// each id names a directory class (the class directory is a separate authority). The selection
+    /// is recorded on the event's [`EventMeta`] and **written through** to the event's SQLite `meta`
+    /// table (issue #115) so it survives a Director restart — exactly the roster path.
+    pub fn set_classes(&self, id: &EventId, ids: Vec<ClassId>) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+        event.meta.classes = ids;
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
@@ -627,6 +690,7 @@ impl EventRegistry {
             timers: default_timer_selection(),
             primary_timer: None,
             roster: Vec::new(),
+            classes: Vec::new(),
         };
         // Persist the freshly-built meta into the event's own SQLite `meta` table (issue
         // #111) so a Director restart can restore it. Only for a persistent (file-backed)
@@ -1133,6 +1197,55 @@ mod tests {
         assert_eq!(
             restored.roster,
             vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn new_events_default_to_an_empty_class_selection_and_set_works() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Class Event")).unwrap();
+        assert!(event.classes.is_empty(), "a new event selects no classes");
+        // Practice also defaults to an empty class selection.
+        assert!(
+            reg.meta_of(&EventId(PRACTICE_EVENT_ID.into()))
+                .unwrap()
+                .classes
+                .is_empty()
+        );
+
+        let a = ClassId("open-1".into());
+        let b = ClassId("spec-2".into());
+        // set_classes replaces wholesale.
+        let meta = reg
+            .set_classes(&event.id, vec![a.clone(), b.clone()])
+            .unwrap();
+        assert_eq!(meta.classes, vec![a.clone(), b.clone()]);
+
+        // unknown event → error.
+        assert!(reg.set_classes(&EventId("nope".into()), vec![]).is_err());
+    }
+
+    #[test]
+    fn an_events_class_selection_persists_across_a_restart() {
+        // The #115 meta mechanism must carry the additive class selection through a restart.
+        let dir = std::env::temp_dir().join(format!("gridfpv-classes-reg-{}", short_suffix()));
+        let created_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Persisted Classes")).unwrap();
+            created_id = created.id.clone();
+            reg.set_classes(
+                &created.id,
+                vec![ClassId("open-1".into()), ClassId("spec-2".into())],
+            )
+            .unwrap();
+        }
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        let restored = reopened.meta_of(&created_id).expect("event reloaded");
+        assert_eq!(
+            restored.classes,
+            vec![ClassId("open-1".into()), ClassId("spec-2".into())]
         );
         std::fs::remove_dir_all(&dir).ok();
     }

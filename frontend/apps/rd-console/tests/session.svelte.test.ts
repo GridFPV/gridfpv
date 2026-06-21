@@ -10,7 +10,8 @@ const PRACTICE: EventMeta = {
   created_at: 0,
   persistent: false,
   timers: ['mock'],
-  roster: []
+  roster: [],
+  classes: []
 };
 const EVENT_A: EventMeta = {
   id: 'evt-a',
@@ -18,7 +19,8 @@ const EVENT_A: EventMeta = {
   created_at: 1,
   persistent: true,
   timers: ['mock'],
-  roster: []
+  roster: [],
+  classes: []
 };
 
 /** A mock ProtocolClient that lets a test push state into the session. */
