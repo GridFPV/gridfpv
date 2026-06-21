@@ -41,6 +41,10 @@
   // The active event's selected timers with their live (polled) connection status (#73, Slice 2b).
   // A compact pill per timer keeps "is the timer still connected?" answerable from any in-event page.
   const timers = $derived(session.selectedTimers);
+  // The effective primary (issue #112) — marked subtly on its pill when 2+ timers feed the event,
+  // so "which one is live?" is answerable at a glance. A single timer is trivially primary (no marker).
+  const primaryId = $derived(session.primaryTimerId);
+  const showRoles = $derived(timers.length >= 2);
   // Only show a phase once there's a live heat on the timer; otherwise the event is idle.
   const phase = $derived(heat ? (live?.phase ?? 'Scheduled') : undefined);
 
@@ -83,7 +87,18 @@
     {#if timers.length}
       <div class="ctx-timers" aria-label="Timer status">
         {#each timers as timer (timer.id)}
-          <span class="ctx-timer" title={`${timer.name}: ${timer.status}`}>
+          {@const isPrimary = showRoles && timer.id === primaryId}
+          <span
+            class="ctx-timer"
+            title={`${timer.name}: ${timer.status}${
+              showRoles ? (isPrimary ? ' (primary)' : ' (alternate)') : ''
+            }`}
+          >
+            {#if showRoles}
+              <span class="ctx-role" class:role-primary={isPrimary} aria-hidden="true">
+                {isPrimary ? 'P' : 'A'}
+              </span>
+            {/if}
             <span class="ctx-timer-name">{timer.name}</span>
             <StatusPill status={timer.status} label={timer.status} size="sm" />
           </span>
@@ -219,6 +234,24 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 8rem;
+  }
+  /* Subtle primary/alternate marker (#112): a tiny "P"/"A" chip on each pill when 2+ timers feed. */
+  .ctx-role {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    border-radius: var(--gf-radius-pill);
+    color: var(--gf-text-muted);
+    background: var(--gf-surface-sunken);
+  }
+  .ctx-role.role-primary {
+    color: var(--gf-success);
+    background: var(--gf-success-soft);
   }
 
   /* ── Connection + switch ───────────────────────────────────────────────────── */

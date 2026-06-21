@@ -575,4 +575,60 @@ describe('events lifecycle helpers (#72)', () => {
     expect(seen[0].body).toEqual({ ids: ['mock', 'field-rh-ab12'] });
     expect(meta.timers).toEqual(['mock', 'field-rh-ab12']);
   });
+
+  it('setPrimaryTimer PUTs { id } to /events/{id}/primary-timer and returns the updated EventMeta', async () => {
+    const seen: { url: string; method?: string; body?: unknown }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({
+        url: String(input),
+        method: init?.method,
+        body: JSON.parse(String(init?.body))
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => ({
+          id: 'evt-a',
+          name: 'Friday Series',
+          created_at: 1,
+          persistent: true,
+          timers: ['mock', 'field-rh-ab12'],
+          primary_timer: 'field-rh-ab12'
+        })
+      } as unknown as Response;
+    };
+    const { setPrimaryTimer } = await import('./client.js');
+    const meta = await setPrimaryTimer(
+      'http://director.local:8080',
+      'evt-a',
+      'field-rh-ab12',
+      'rd-tok',
+      { fetch }
+    );
+    expect(seen[0].url).toBe('http://director.local:8080/events/evt-a/primary-timer');
+    expect(seen[0].method).toBe('PUT');
+    expect(seen[0].body).toEqual({ id: 'field-rh-ab12' });
+    expect(meta.primary_timer).toBe('field-rh-ab12');
+  });
+
+  it('setPrimaryTimer sends { id: null } to clear the override', async () => {
+    const seen: { body?: unknown }[] = [];
+    const fetch: FetchLike = async (_input, init) => {
+      seen.push({ body: JSON.parse(String(init?.body)) });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => ({
+          id: 'evt-a',
+          name: 'Friday Series',
+          created_at: 1,
+          persistent: true,
+          timers: ['mock', 'field-rh-ab12']
+        })
+      } as unknown as Response;
+    };
+    const { setPrimaryTimer } = await import('./client.js');
+    await setPrimaryTimer('http://director.local:8080', 'evt-a', null, 'rd-tok', { fetch });
+    expect(seen[0].body).toEqual({ id: null });
+  });
 });

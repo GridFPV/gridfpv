@@ -419,6 +419,36 @@ export async function setEventTimers(
 }
 
 /**
+ * Designate an event's **primary** timer (`PUT /events/{id}/primary-timer`) — issue #112. Among
+ * the event's selected timers, exactly one is the primary (it feeds the race); the rest are
+ * **alternates** (hot standby). Pass `id` to make that timer primary (it must be one of the
+ * event's currently-selected timers, else **400**); pass `null` to clear the override so the
+ * **first** selected timer becomes the effective primary. RD-gated. Resolves to the updated event
+ * {@link EventMeta}, or rejects on a non-2xx / transport failure.
+ */
+export async function setPrimaryTimer(
+  baseUrl: string,
+  eventId: EventId,
+  id: TimerId | null,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/primary-timer`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ id })
+  });
+  if (!resp.ok) throw new Error(`PUT /events/${eventId}/primary-timer failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta;
+}
+
+/**
  * Connect to a GridFPV protocol server and begin the snapshot→subscribe handshake.
  *
  * Returns immediately with a {@link ProtocolClient}; the snapshot fetch and WS

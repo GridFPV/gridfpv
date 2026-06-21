@@ -465,6 +465,7 @@ describe('Session', () => {
       updateTimerImpl?: ReturnType<typeof vi.fn>;
       deleteTimerImpl?: ReturnType<typeof vi.fn>;
       setEventTimersImpl?: ReturnType<typeof vi.fn>;
+      setPrimaryTimerImpl?: ReturnType<typeof vi.fn>;
     }) {
       const { connect } = mockConnect(connecting);
       const controlFactory = vi.fn(() => ({
@@ -653,6 +654,65 @@ describe('Session', () => {
         undefined
       );
       expect(session.currentEvent?.timers).toEqual(['mock', 'rh-1']);
+    });
+
+    it('setPrimaryTimer is a no-op (undefined) with no event selected', async () => {
+      const setPrimaryTimerImpl = vi.fn();
+      const session = timerSession({ setPrimaryTimerImpl });
+      const result = await session.setPrimaryTimer('mock');
+      expect(result).toBeUndefined();
+      expect(setPrimaryTimerImpl).not.toHaveBeenCalled();
+    });
+
+    it('setPrimaryTimer designates and re-homes currentEvent with the server response', async () => {
+      const updated: EventMeta = { ...PRACTICE, timers: ['mock', 'rh-1'], primary_timer: 'rh-1' };
+      const setPrimaryTimerImpl = vi.fn(async () => updated);
+      const session = timerSession({ setPrimaryTimerImpl });
+      session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'] });
+      const result = await session.setPrimaryTimer('rh-1');
+      expect(result).toEqual(updated);
+      expect(setPrimaryTimerImpl).toHaveBeenCalledWith(
+        'http://d.local',
+        'practice',
+        'rh-1',
+        undefined
+      );
+      expect(session.currentEvent?.primary_timer).toBe('rh-1');
+    });
+
+    it('primaryTimerId applies the "first selected = primary when null" rule', async () => {
+      const session = timerSession({});
+      // No event → undefined.
+      expect(session.primaryTimerId).toBeUndefined();
+      // No explicit primary → the first selected timer.
+      session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'] });
+      expect(session.primaryTimerId).toBe('mock');
+      // An explicit, in-selection primary wins.
+      session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'], primary_timer: 'rh-1' });
+      expect(session.primaryTimerId).toBe('rh-1');
+      // An explicit primary NOT in the selection is ignored → first selected.
+      session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'], primary_timer: 'gone' });
+      expect(session.primaryTimerId).toBe('mock');
+    });
+
+    it('setPrimaryTimer prompts then retries once on an auth (401) failure', async () => {
+      const updated: EventMeta = { ...PRACTICE, timers: ['mock', 'rh-1'], primary_timer: 'rh-1' };
+      const setPrimaryTimerImpl = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('PUT /events/practice/primary-timer failed: HTTP 401'))
+        .mockResolvedValueOnce(updated);
+      const session = timerSession({ setPrimaryTimerImpl });
+      session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'] });
+      session.setTokenProvider(async () => 'tok');
+      const result = await session.setPrimaryTimer('rh-1');
+      expect(result).toEqual(updated);
+      expect(setPrimaryTimerImpl).toHaveBeenCalledTimes(2);
+      expect(setPrimaryTimerImpl).toHaveBeenLastCalledWith(
+        'http://d.local',
+        'practice',
+        'rh-1',
+        'tok'
+      );
     });
   });
 });

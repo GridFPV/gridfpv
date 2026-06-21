@@ -47,6 +47,7 @@ import {
   updateTimer,
   deleteTimer,
   setEventTimers,
+  setPrimaryTimer,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
@@ -205,6 +206,7 @@ export class Session {
   #updateTimerImpl: typeof updateTimer;
   #deleteTimerImpl: typeof deleteTimer;
   #setEventTimersImpl: typeof setEventTimers;
+  #setPrimaryTimerImpl: typeof setPrimaryTimer;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -218,6 +220,7 @@ export class Session {
     updateTimerImpl?: typeof updateTimer;
     deleteTimerImpl?: typeof deleteTimer;
     setEventTimersImpl?: typeof setEventTimers;
+    setPrimaryTimerImpl?: typeof setPrimaryTimer;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -232,6 +235,7 @@ export class Session {
     this.#updateTimerImpl = opts?.updateTimerImpl ?? updateTimer;
     this.#deleteTimerImpl = opts?.deleteTimerImpl ?? deleteTimer;
     this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
+    this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -360,6 +364,25 @@ export class Session {
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
       this.#setEventTimersImpl(this.baseUrl, event.id, ids, token)
+    );
+    if (updated) this.currentEvent = updated;
+    return updated;
+  }
+
+  /**
+   * Designate the **current event's** primary timer (`PUT /events/{id}/primary-timer`) — issue
+   * #112. Among the selected timers exactly one is the primary (it feeds the race); the rest are
+   * alternates. Pass a timer `id` (it must be one of the event's selected timers) to make it
+   * primary, or `null` to clear the override so the **first** selected timer is the effective
+   * primary. No-op (resolves `undefined`) when no event is selected. On success the updated
+   * {@link EventMeta} replaces {@link currentEvent}; returns it, `undefined` on a cancelled prompt,
+   * or throws.
+   */
+  async setPrimaryTimer(id: TimerId | null): Promise<EventMeta | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const updated = await this.#privilegedWrite((token) =>
+      this.#setPrimaryTimerImpl(this.baseUrl, event.id, id, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -501,6 +524,20 @@ export class Session {
     if (!ids?.length) return [];
     const byId = new Map(this.timers.map((t) => [t.id, t]));
     return ids.map((id) => byId.get(id)).filter((t): t is Timer => t !== undefined);
+  }
+
+  /**
+   * The current event's **effective primary** timer id (issue #112), applying the "first selected
+   * = primary when null" rule: `EventMeta.primary_timer` when set and still in the selection,
+   * otherwise the first selected timer. `undefined` when no event/selection. The remaining selected
+   * timers are alternates (hot standby).
+   */
+  get primaryTimerId(): TimerId | undefined {
+    const ids = this.currentEvent?.timers;
+    if (!ids?.length) return undefined;
+    const explicit = this.currentEvent?.primary_timer;
+    if (explicit && ids.includes(explicit)) return explicit;
+    return ids[0];
   }
 
   /** Re-scope the live read client within the current event (e.g. to a heat scope). */
