@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProtocolClient, ProtocolState, StateListener } from '@gridfpv/protocol-client';
-import type { CommandAck, CreatePilotRequest, EventMeta, Pilot, Timer } from '@gridfpv/types';
+import type {
+  Class,
+  CommandAck,
+  CreateClassRequest,
+  CreatePilotRequest,
+  EventMeta,
+  Pilot,
+  Timer
+} from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
 import { liveRunning, okAck, failAck } from './fixtures.js';
 
@@ -803,6 +811,103 @@ describe('Session', () => {
         deletePilotImpl: vi.fn().mockRejectedValue(new Error('DELETE /pilots/p1 failed: HTTP 404'))
       });
       await expect(failing.deletePilot('p1')).rejects.toThrow(/404/);
+    });
+  });
+
+  describe('classes (#84)', () => {
+    const OPEN: Class = { id: 'c1', name: 'Open', source: 'MultiGP' };
+
+    function classSession(overrides?: {
+      listClassesImpl?: ReturnType<typeof vi.fn>;
+      createClassImpl?: ReturnType<typeof vi.fn>;
+      updateClassImpl?: ReturnType<typeof vi.fn>;
+      deleteClassImpl?: ReturnType<typeof vi.fn>;
+      setEventClassesImpl?: ReturnType<typeof vi.fn>;
+    }) {
+      const { connect } = mockConnect(connecting);
+      const controlFactory = vi.fn(() => ({
+        baseUrl: 'http://d.local',
+        sendCommand: vi.fn(async () => okAck)
+      }));
+      return new Session({
+        connectImpl: connect,
+        controlFactory,
+        baseUrl: 'http://d.local',
+        autoRestore: false,
+        ...overrides
+      });
+    }
+
+    it('listClasses reads the directory open (no token)', async () => {
+      const listClassesImpl = vi.fn(async () => [OPEN]);
+      const session = classSession({ listClassesImpl });
+      const classes = await session.listClasses();
+      expect(classes).toEqual([OPEN]);
+      expect(listClassesImpl).toHaveBeenCalledWith('http://d.local', { token: undefined });
+    });
+
+    it('createClass returns the new class (full-trust, no token)', async () => {
+      const createClassImpl = vi.fn(async () => OPEN);
+      const session = classSession({ createClassImpl });
+      const req: CreateClassRequest = { name: 'Open', source: 'MultiGP' };
+      const result = await session.createClass(req);
+      expect(result).toEqual(OPEN);
+      expect(createClassImpl).toHaveBeenCalledWith('http://d.local', req, undefined);
+    });
+
+    it('createClass prompts then retries once on an auth (401) failure', async () => {
+      const createClassImpl = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('POST /classes failed: HTTP 401'))
+        .mockResolvedValueOnce(OPEN);
+      const session = classSession({ createClassImpl });
+      session.setTokenProvider(async () => 'tok');
+      const result = await session.createClass({ name: 'Open', source: 'MultiGP' });
+      expect(result).toEqual(OPEN);
+      expect(createClassImpl).toHaveBeenCalledTimes(2);
+      expect(createClassImpl).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
+    });
+
+    it('updateClass passes the clear-via-null diff through verbatim', async () => {
+      const updated: Class = { ...OPEN, name: 'Pro Open' };
+      const updateClassImpl = vi.fn(async () => updated);
+      const session = classSession({ updateClassImpl });
+      const req = { name: 'Pro Open', reference: null, description: null } as const;
+      const result = await session.updateClass('c1', req);
+      expect(result).toEqual(updated);
+      expect(updateClassImpl).toHaveBeenCalledWith('http://d.local', 'c1', req, undefined);
+    });
+
+    it('deleteClass resolves true on success and re-throws a non-auth (404) failure', async () => {
+      const deleteClassImpl = vi.fn(async () => undefined as unknown as void);
+      const session = classSession({ deleteClassImpl });
+      await expect(session.deleteClass('c1')).resolves.toBe(true);
+      expect(deleteClassImpl).toHaveBeenCalledWith('http://d.local', 'c1', undefined);
+
+      const failing = classSession({
+        deleteClassImpl: vi.fn().mockRejectedValue(new Error('DELETE /classes/c1 failed: HTTP 404'))
+      });
+      await expect(failing.deleteClass('c1')).rejects.toThrow(/404/);
+    });
+
+    it('setEventClasses is a no-op (undefined) with no event selected', async () => {
+      const setEventClassesImpl = vi.fn();
+      const session = classSession({ setEventClassesImpl });
+      const result = await session.setEventClasses(['c1']);
+      expect(result).toBeUndefined();
+      expect(setEventClassesImpl).not.toHaveBeenCalled();
+    });
+
+    it('setEventClasses saves and re-homes currentEvent with the server response', async () => {
+      const updated: EventMeta = { ...PRACTICE, classes: ['c1'] };
+      const setEventClassesImpl = vi.fn(async () => updated);
+      const session = classSession({ setEventClassesImpl });
+      session.setToken('tok');
+      session.selectEvent(PRACTICE);
+      const result = await session.setEventClasses(['c1']);
+      expect(result).toEqual(updated);
+      expect(setEventClassesImpl).toHaveBeenCalledWith('http://d.local', 'practice', ['c1'], 'tok');
+      expect(session.currentEvent?.classes).toEqual(['c1']);
     });
   });
 });

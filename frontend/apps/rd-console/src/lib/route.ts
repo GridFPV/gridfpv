@@ -13,10 +13,11 @@
  * The hash scheme:
  *   - `#/` (or empty)        → the home hub
  *   - `#/pilots`             → the Pilots page
+ *   - `#/classes`            → the Classes page
  *   - `#/events`             → the Events page (the picker)
  *   - `#/timers`             → the Timers page
  *   - `#/event/<tab>`        → the in-event workspace on `<tab>`
- *                              (tab ∈ setup | registration | live | marshaling | results | timers)
+ *                              (tab ∈ setup | registration | classes | live | marshaling | results | timers)
  *
  * The active event itself is **app-wide server state** (the Director's active event, #90), so the
  * hash only restores *which tab* of the workspace — not *which* event. The workspace always shows
@@ -25,10 +26,17 @@
  */
 
 /** The app-level pages shown when no event is selected. */
-export type AppPage = 'home' | 'events' | 'timers' | 'pilots';
+export type AppPage = 'home' | 'events' | 'timers' | 'pilots' | 'classes';
 
 /** The in-event workspace sidebar tabs. */
-export type WorkspaceTab = 'setup' | 'registration' | 'live' | 'marshaling' | 'results' | 'timers';
+export type WorkspaceTab =
+  | 'setup'
+  | 'registration'
+  | 'classes'
+  | 'live'
+  | 'marshaling'
+  | 'results'
+  | 'timers';
 
 /**
  * A parsed route. Either an app-level page (no event), or the in-event workspace on a tab. This is
@@ -40,13 +48,14 @@ export type Route = { kind: 'page'; page: AppPage } | { kind: 'workspace'; tab: 
 export const WORKSPACE_TABS: readonly WorkspaceTab[] = [
   'setup',
   'registration',
+  'classes',
   'live',
   'marshaling',
   'results',
   'timers'
 ];
 
-const APP_PAGES: readonly AppPage[] = ['home', 'events', 'timers', 'pilots'];
+const APP_PAGES: readonly AppPage[] = ['home', 'events', 'timers', 'pilots', 'classes'];
 
 /** The route shown when the hash is empty or unrecognised: the home hub. */
 export const DEFAULT_ROUTE: Route = { kind: 'page', page: 'home' };

@@ -33,16 +33,27 @@ test('RD drives a full basic sim race through the console UI', async ({ page }) 
   await page.goto('/');
 
   // ── Hub → Events page → enter Practice (no token needed to browse/enter) ─────────────
-  // The hub's three cards land on Pilots/Events/Timers pages; the Events page is the former
-  // picker, which renders Practice prominently. The Director is the page's own origin.
+  // The hub's cards land on Pilots/Classes/Events/Timers pages; the Events page is the former
+  // picker, which renders Practice prominently. The Director is the page's own origin. The
+  // worker's Director may already have an active event from a prior spec (#90): on a fresh load
+  // the hash is authoritative (#118) so we land on the hub even then, and clicking Events either
+  // shows the picker (nothing active) or auto-enters the active event's workspace — handle both.
+  const liveNav = page.getByRole('button', { name: /Live control/ });
   await page.getByRole('button', { name: /Events/ }).click();
-  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
-    timeout: 15_000
-  });
-  await page
-    .getByRole('button', { name: /Practice/ })
-    .first()
-    .click();
+  await expect(
+    page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
+  ).toBeVisible({ timeout: 15_000 });
+  if (
+    await page
+      .getByRole('heading', { name: 'Choose an event' })
+      .isVisible()
+      .catch(() => false)
+  ) {
+    await page
+      .getByRole('button', { name: /Practice/ })
+      .first()
+      .click();
+  }
 
   // The shell is up: the Live control screen is the default landing screen.
   await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible();

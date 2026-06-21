@@ -31,6 +31,11 @@ export {
   setEventRoster,
   addToRoster,
   removeFromRoster,
+  listClasses,
+  createClass,
+  updateClass,
+  deleteClass,
+  setEventClasses,
   PRACTICE_EVENT_ID
 } from './client.js';
 export type {

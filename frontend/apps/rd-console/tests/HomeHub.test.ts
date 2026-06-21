@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
-import type { EventMeta, Pilot, Timer } from '@gridfpv/types';
+import type { Class, EventMeta, Pilot, Timer } from '@gridfpv/types';
 import HomeHub from '../src/screens/HomeHub.svelte';
 import { makeTestSession } from './support.js';
 
 const PILOTS: Pilot[] = [
   { id: 'p1', callsign: 'Ace', vtx_types: [], attributes: {} },
   { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} }
+];
+const CLASSES: Class[] = [
+  { id: 'c1', name: 'Open', source: 'MultiGP' },
+  { id: 'c2', name: 'Spec', source: 'MultiGP' },
+  { id: 'c3', name: 'House', source: 'Custom' }
 ];
 const EVENTS: EventMeta[] = [
   {
@@ -42,34 +47,45 @@ const TIMERS: Timer[] = [
 describe('HomeHub (app-level landing, #118)', () => {
   function setup() {
     const listPilotsImpl = vi.fn(async () => PILOTS);
+    const listClassesImpl = vi.fn(async () => CLASSES);
     const listEventsImpl = vi.fn(async () => EVENTS);
     const listTimersImpl = vi.fn(async () => TIMERS);
     // The hub is the no-event landing, so render with no event entered.
-    const session = makeTestSession({ noEnter: true, listTimersImpl, listPilotsImpl }).session;
+    const session = makeTestSession({
+      noEnter: true,
+      listTimersImpl,
+      listPilotsImpl,
+      listClassesImpl
+    }).session;
     // listEvents isn't a constructor seam, so stub it directly.
     vi.spyOn(session, 'listEvents').mockImplementation(listEventsImpl);
     return { session };
   }
 
-  it('renders the three cards with their summary counts', async () => {
+  it('renders the four cards with their summary counts', async () => {
     const { session } = setup();
     const onpilots = vi.fn();
+    const onclasses = vi.fn();
     const onevents = vi.fn();
     const ontimers = vi.fn();
-    render(HomeHub, { session, onpilots, onevents, ontimers });
+    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers });
 
-    // Three navigable cards.
+    // Four navigable cards.
     expect(screen.getByRole('heading', { name: 'Pilots' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Classes' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Events' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Timers' })).toBeInTheDocument();
 
-    // Summaries settle per card (count + unit are separate spans): 2 pilots, 2 events,
+    // Summaries settle per card (count + unit are separate spans): 2 pilots, 3 classes, 2 events,
     // 2 timers · 1 connected (only Mock is Ready).
     const pilotsCard = screen.getByRole('heading', { name: 'Pilots' }).closest('button')!;
+    const classesCard = screen.getByRole('heading', { name: 'Classes' }).closest('button')!;
     const eventsCard = screen.getByRole('heading', { name: 'Events' }).closest('button')!;
     const timersCard = screen.getByRole('heading', { name: 'Timers' }).closest('button')!;
     await waitFor(() => expect(within(pilotsCard).getByText('2')).toBeInTheDocument());
     expect(within(pilotsCard).getByText('pilots')).toBeInTheDocument();
+    await waitFor(() => expect(within(classesCard).getByText('3')).toBeInTheDocument());
+    expect(within(classesCard).getByText('classes')).toBeInTheDocument();
     await waitFor(() => expect(within(eventsCard).getByText('2')).toBeInTheDocument());
     expect(within(eventsCard).getByText('events')).toBeInTheDocument();
     await waitFor(() => expect(within(timersCard).getByText('timers')).toBeInTheDocument());
@@ -79,15 +95,18 @@ describe('HomeHub (app-level landing, #118)', () => {
   it('navigates to each page on card click', async () => {
     const { session } = setup();
     const onpilots = vi.fn();
+    const onclasses = vi.fn();
     const onevents = vi.fn();
     const ontimers = vi.fn();
-    render(HomeHub, { session, onpilots, onevents, ontimers });
+    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers });
 
     await fireEvent.click(screen.getByRole('heading', { name: 'Pilots' }).closest('button')!);
+    await fireEvent.click(screen.getByRole('heading', { name: 'Classes' }).closest('button')!);
     await fireEvent.click(screen.getByRole('heading', { name: 'Events' }).closest('button')!);
     await fireEvent.click(screen.getByRole('heading', { name: 'Timers' }).closest('button')!);
 
     expect(onpilots).toHaveBeenCalledTimes(1);
+    expect(onclasses).toHaveBeenCalledTimes(1);
     expect(onevents).toHaveBeenCalledTimes(1);
     expect(ontimers).toHaveBeenCalledTimes(1);
   });
@@ -99,7 +118,14 @@ describe('HomeHub (app-level landing, #118)', () => {
     const session = makeTestSession({ noEnter: true, listTimersImpl }).session;
     vi.spyOn(session, 'listEvents').mockResolvedValue(EVENTS);
     vi.spyOn(session, 'listPilots').mockResolvedValue(PILOTS);
-    render(HomeHub, { session, onpilots: vi.fn(), onevents: vi.fn(), ontimers: vi.fn() });
+    vi.spyOn(session, 'listClasses').mockResolvedValue(CLASSES);
+    render(HomeHub, {
+      session,
+      onpilots: vi.fn(),
+      onclasses: vi.fn(),
+      onevents: vi.fn(),
+      ontimers: vi.fn()
+    });
 
     const timersCard = screen.getByRole('heading', { name: 'Timers' }).closest('button')!;
     await waitFor(() => expect(within(timersCard).getByText('—')).toBeInTheDocument());
