@@ -4,7 +4,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["svelte", "vitest/globals", "@testing-library/jest-dom"]
+    "types": ["svelte", "vite/client", "vitest/globals", "@testing-library/jest-dom"]
   },
   "include": ["tests", "vitest.setup.ts", "src"]
 }
