@@ -24,7 +24,6 @@
    * routes between them and owns the session.
    */
   import '@gridfpv/components/tokens.css';
-  import logoUrl from './assets/logo.png';
   import { ToastHost, Dialog, Button, Field, Input, toast } from '@gridfpv/components';
   import { Session } from './lib/session.svelte.js';
   import ContextHeader from './ContextHeader.svelte';
@@ -245,7 +244,16 @@
       <!-- The brand is the home root from inside the workspace (#118): it leaves the event and
            returns to the hub, mirroring the breadcrumb's "Home" crumb. -->
       <button type="button" class="brand" onclick={goToHubFromWorkspace} title="Home — GridFPV hub">
-        <img class="logo" src={logoUrl} alt="GridFPV" width="30" height="30" />
+        <svg class="brand-mark" viewBox="20 20 60 60" role="img" aria-label="GridFPV">
+          <path
+            d="M71 33 H40 Q31 33 31 42 V58 Q31 67 40 67 H60 Q69 67 69 58 V51 H53"
+            fill="none"
+            stroke="var(--gf-brand-500)"
+            stroke-width="10"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
         <span class="wordmark">
           GridFPV
           <span class="sub">RD Console</span>
@@ -466,14 +474,12 @@
     outline: none;
     box-shadow: var(--gf-focus-ring);
   }
-  .logo {
+  .brand-mark {
     display: block;
     flex-shrink: 0;
     width: 30px;
     height: 30px;
-    /* The mark is its own rounded square (transparent corners) — render the image
-       as-is, just crisply downscaled from the 512px source. */
-    object-fit: contain;
+    /* The simplified inline monogram sits directly on the dark surface — no tile. */
   }
   .wordmark {
     display: flex;
