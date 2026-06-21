@@ -38,6 +38,9 @@
   const eventName = $derived(session.currentEvent?.name ?? '');
   const live = $derived(session.liveState);
   const heat = $derived(live?.current_heat);
+  // The active event's selected timers with their live (polled) connection status (#73, Slice 2b).
+  // A compact pill per timer keeps "is the timer still connected?" answerable from any in-event page.
+  const timers = $derived(session.selectedTimers);
   // Only show a phase once there's a live heat on the timer; otherwise the event is idle.
   const phase = $derived(heat ? (live?.phase ?? 'Scheduled') : undefined);
 
@@ -77,6 +80,18 @@
   </div>
 
   <div class="ctx-right">
+    {#if timers.length}
+      <div class="ctx-timers" aria-label="Timer status">
+        {#each timers as timer (timer.id)}
+          <span class="ctx-timer" title={`${timer.name}: ${timer.status}`}>
+            <span class="ctx-timer-name">{timer.name}</span>
+            <StatusPill status={timer.status} label={timer.status} size="sm" />
+          </span>
+        {/each}
+      </div>
+      <span class="ctx-sep" aria-hidden="true"></span>
+    {/if}
+
     <div class="ctx-conn" title={`Read stream: ${session.connectionStatus}`}>
       <StatusPill status={session.connectionStatus} size="sm" />
       <!-- Text hook for the e2e (`.conn-label` === status text); visually folded into the pill. -->
@@ -180,6 +195,32 @@
     font-size: var(--gf-font-size-lg);
   }
 
+  /* ── Timer connection status (#73, Slice 2b) ───────────────────────────────── */
+  .ctx-timers {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+    min-width: 0;
+    overflow: hidden;
+  }
+  .ctx-timer {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    min-width: 0;
+  }
+  .ctx-timer-name {
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    font-weight: var(--gf-font-weight-semibold);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 8rem;
+  }
+
   /* ── Connection + switch ───────────────────────────────────────────────────── */
   .ctx-conn {
     display: inline-flex;
@@ -215,7 +256,8 @@
   }
 
   @media (max-width: 60rem) {
-    .ctx-heat-label {
+    .ctx-heat-label,
+    .ctx-timer-name {
       display: none;
     }
   }

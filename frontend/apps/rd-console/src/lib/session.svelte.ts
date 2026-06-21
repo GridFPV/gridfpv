@@ -70,6 +70,13 @@ import type {
 
 const TOKEN_STORAGE_KEY = 'gridfpv.rd.token';
 
+/**
+ * How often the session re-reads `GET /timers` for live connection status while inside an event
+ * (#73, Slice 2b). Polling is the agreed v1 — `GET /timers` returns current status per request —
+ * and ~2.5s reads "at a glance" without hammering the Director. The interval only runs in-event.
+ */
+const TIMER_POLL_MS = 2_500;
+
 /** The optional descriptive fields a create-event dialog may supply alongside the name. */
 export type CreateEventFields = Omit<CreateEventRequest, 'name'>;
 
@@ -168,6 +175,14 @@ export class Session {
   heatResult = $state.raw<HeatResult | undefined>(undefined);
   /** The last control-path error surfaced to the RD (cleared on the next send). */
   lastCommandError = $state<CommandAck['error']>(undefined);
+  /**
+   * The Director's timer registry with **live** status, polled while inside an event (#73,
+   * Slice 2b). `GET /timers` returns each timer's *current* status on every request (the
+   * Director mutates an RH timer's status live as its connection comes and goes), so the
+   * console polls it (~{@link TIMER_POLL_MS}) so a timer dropping off shows up at a glance.
+   * `$state.raw`: an immutable list replaced wholesale per poll. Empty until the first poll.
+   */
+  timers = $state.raw<Timer[]>([]);
 
   // Non-reactive internals.
   #token: string | undefined;
@@ -176,6 +191,8 @@ export class Session {
   #unsub: (() => void) | undefined;
   /** The shell's lazy token prompt (a `Dialog`); set via {@link setTokenProvider}. */
   #tokenProvider: TokenProvider | undefined;
+  /** The live-status poll interval while inside an event; cleared on leave/teardown. */
+  #timerPoll: ReturnType<typeof setInterval> | undefined;
   // Injectable for tests so the session never opens a real socket.
   #connectImpl: typeof connect;
   #controlFactory: typeof createControlClient;
@@ -440,6 +457,50 @@ export class Session {
       this.connectionStatus = state.status;
       this.liveState = liveStateOf(state.body);
     });
+
+    // Begin polling the timer registry's live status for the header pills (#73, Slice 2b).
+    this.#startTimerPoll();
+  }
+
+  /**
+   * Poll `GET /timers` while inside an event so the header pills (and the Timers screens, which
+   * read the same {@link timers}) reflect each timer's **live** connection status (#73, Slice 2b).
+   * Reads once immediately, then every {@link TIMER_POLL_MS}; a failed poll keeps the last list
+   * (a transient blip shouldn't blank the pills). {@link selectEvent} starts it; {@link leaveEvent}
+   * (and a re-select) clears it first, so only one interval ever runs.
+   */
+  #startTimerPoll(): void {
+    this.#stopTimerPoll();
+    const poll = async () => {
+      try {
+        this.timers = await this.listTimers();
+      } catch {
+        /* keep the last good list; the next tick retries */
+      }
+    };
+    void poll();
+    this.#timerPoll = setInterval(poll, TIMER_POLL_MS);
+  }
+
+  /** Stop the timer-status poll and clear the handle (idempotent). */
+  #stopTimerPoll(): void {
+    if (this.#timerPoll !== undefined) {
+      clearInterval(this.#timerPoll);
+      this.#timerPoll = undefined;
+    }
+  }
+
+  /**
+   * The current event's **selected** timers, paired with their live polled status (#73, Slice 2b):
+   * `currentEvent.timers` (the per-event selection, in its saved order) intersected with the polled
+   * {@link timers} registry. Drives the context header's status pills. Empty at the picker, or until
+   * the first poll lands; a selected id not yet in the registry is simply skipped.
+   */
+  get selectedTimers(): Timer[] {
+    const ids = this.currentEvent?.timers;
+    if (!ids?.length) return [];
+    const byId = new Map(this.timers.map((t) => [t.id, t]));
+    return ids.map((id) => byId.get(id)).filter((t): t is Timer => t !== undefined);
   }
 
   /** Re-scope the live read client within the current event (e.g. to a heat scope). */
@@ -470,6 +531,7 @@ export class Session {
    * (`PUT /active-event` via {@link chooseEvent}) is what actually re-points the Director.
    */
   leaveEvent(): void {
+    this.#stopTimerPoll();
     this.#unsub?.();
     this.#unsub = undefined;
     this.#client?.close();
@@ -481,6 +543,7 @@ export class Session {
     this.liveState = undefined;
     this.heatResult = undefined;
     this.lastCommandError = undefined;
+    this.timers = [];
   }
 
   /**

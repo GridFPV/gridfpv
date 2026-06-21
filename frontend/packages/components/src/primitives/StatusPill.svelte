@@ -1,13 +1,18 @@
 <script lang="ts">
   /**
-   * StatusPill — a domain-aware status indicator for the two console state
-   * machines: heat **phase** (Scheduled→Staged→Armed→Running→Finished→Scored)
-   * and **connection** status (live/connecting/reconnecting/closed/idle).
+   * StatusPill — a domain-aware status indicator for the console state machines:
+   * heat **phase** (Scheduled→Staged→Armed→Running→Finished→Scored), the read-stream
+   * **connection** status (live/connecting/reconnecting/closed/idle), and a **timer's**
+   * connection status (Ready/Configured/Connecting/Connected/Disconnected/Error, #73/#65).
    *
    * Pass `phase` OR `status`; the pill maps it to the matching token color and a
-   * leading dot. The active/live states (Running, live) pulse to read as "alive"
-   * across a room. `label` overrides the displayed text (the state value is used
-   * by default).
+   * leading dot. The active/live states (Running, live, Connected) pulse to read as
+   * "alive" across a room. `label` overrides the displayed text (the state value is
+   * used by default).
+   *
+   * The connection and timer status vocabularies don't collide (the read stream uses
+   * lowercase `live`/`connecting`; a timer's `TimerStatus` is capitalized `Connected`/
+   * `Connecting`/…), so one `status` map serves both.
    */
   type Phase = 'Scheduled' | 'Staged' | 'Armed' | 'Running' | 'Finished' | 'Scored';
 
@@ -32,12 +37,22 @@
     Scored: 'scored'
   };
   const CONN_TONE: Record<string, string> = {
+    // Read-stream connection status (lowercase).
     live: 'live',
     connecting: 'pending',
     snapshotting: 'pending',
     reconnecting: 'warn',
     closed: 'warn',
-    idle: 'idle'
+    idle: 'idle',
+    // Timer connection status (`TimerStatus`, capitalized — #73/#65). A live, healthy
+    // timer reads green; while dialing it's pending; dropped/errored is danger; the
+    // resting Mock/configured states are calm/neutral so a single Mock never alarms.
+    Ready: 'idle',
+    Configured: 'idle',
+    Connecting: 'pending',
+    Connected: 'live',
+    Disconnected: 'warn',
+    Error: 'danger'
   };
 
   const kind = $derived(phase !== undefined ? 'phase' : 'conn');
@@ -47,7 +62,7 @@
       ? (PHASE_TONE[phase] ?? 'scheduled')
       : (CONN_TONE[status ?? ''] ?? 'pending')
   );
-  const pulse = $derived(value === 'Running' || value === 'live');
+  const pulse = $derived(value === 'Running' || value === 'live' || value === 'Connected');
   const text = $derived(label ?? value);
 </script>
 
@@ -117,6 +132,9 @@
   }
   .gf-pill[data-tone='idle'] {
     --_c: var(--gf-conn-idle);
+  }
+  .gf-pill[data-tone='danger'] {
+    --_c: var(--gf-danger);
   }
 
   .gf-pill-dot {
