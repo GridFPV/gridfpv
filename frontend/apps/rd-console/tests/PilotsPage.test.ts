@@ -8,23 +8,23 @@ import { makeTestSession } from './support.js';
 const noop = () => {};
 
 const PILOTS: Pilot[] = [
-  { id: 'p1', callsign: 'Ace', name: 'Alice', attributes: {} },
+  { id: 'p1', callsign: 'Ace', name: 'Alice', country: 'US', attributes: {} },
   { id: 'p2', callsign: 'Bee', attributes: {} }
 ];
 
-describe('PilotsPage (placeholder for #74)', () => {
-  it('lists the directory callsigns read-only and notes the registration UI is coming', async () => {
+describe('PilotsPage (#74) — hosts the shared PilotManager', () => {
+  it('lists the directory and exposes Add / Edit / Remove controls', async () => {
     const listPilotsImpl = vi.fn(async () => PILOTS);
     const { session } = makeTestSession({ noEnter: true, listPilotsImpl });
     render(PilotsPage, { session, onhome: noop });
 
-    // The read-only callsigns appear.
     await screen.findByText('Ace');
     expect(screen.getByText('Bee')).toBeInTheDocument();
-    // The "coming" note seam for the next slice.
-    expect(screen.getByText(/registration UI/i)).toBeInTheDocument();
-    // No management controls in this slice.
-    expect(screen.queryByRole('button', { name: /Add pilot/i })).toBeNull();
+    // The page's primary action opens the add form.
+    expect(screen.getByRole('button', { name: '+ Add pilot' })).toBeInTheDocument();
+    // Per-row management controls exist.
+    expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
   });
 
   it('surfaces a read error with a retry', async () => {

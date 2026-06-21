@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProtocolClient, ProtocolState, StateListener } from '@gridfpv/protocol-client';
-import type { CommandAck, EventMeta, Timer } from '@gridfpv/types';
+import type { CommandAck, EventMeta, Pilot, Timer } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
 import { liveRunning, okAck, failAck } from './fixtures.js';
 
@@ -715,6 +715,92 @@ describe('Session', () => {
         'rh-1',
         'tok'
       );
+    });
+  });
+
+  describe('pilots (#74)', () => {
+    const ACE: Pilot = { id: 'p1', callsign: 'Ace', attributes: {} };
+
+    function pilotSession(overrides?: {
+      listPilotsImpl?: ReturnType<typeof vi.fn>;
+      createPilotImpl?: ReturnType<typeof vi.fn>;
+      updatePilotImpl?: ReturnType<typeof vi.fn>;
+      deletePilotImpl?: ReturnType<typeof vi.fn>;
+    }) {
+      const { connect } = mockConnect(connecting);
+      const controlFactory = vi.fn(() => ({
+        baseUrl: 'http://d.local',
+        sendCommand: vi.fn(async () => okAck)
+      }));
+      return new Session({
+        connectImpl: connect,
+        controlFactory,
+        baseUrl: 'http://d.local',
+        autoRestore: false,
+        ...overrides
+      });
+    }
+
+    it('listPilots reads the directory open (no token)', async () => {
+      const listPilotsImpl = vi.fn(async () => [ACE]);
+      const session = pilotSession({ listPilotsImpl });
+      const pilots = await session.listPilots();
+      expect(pilots).toEqual([ACE]);
+      expect(listPilotsImpl).toHaveBeenCalledWith('http://d.local', { token: undefined });
+    });
+
+    it('createPilot returns the new pilot (full-trust, no token)', async () => {
+      const createPilotImpl = vi.fn(async () => ACE);
+      const session = pilotSession({ createPilotImpl });
+      const req = { callsign: 'Ace', attributes: {} } as const;
+      const result = await session.createPilot(req);
+      expect(result).toEqual(ACE);
+      expect(createPilotImpl).toHaveBeenCalledWith('http://d.local', req, undefined);
+    });
+
+    it('createPilot prompts then retries once on an auth (401) failure', async () => {
+      const createPilotImpl = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('POST /pilots failed: HTTP 401'))
+        .mockResolvedValueOnce(ACE);
+      const session = pilotSession({ createPilotImpl });
+      session.setTokenProvider(async () => 'tok');
+      const result = await session.createPilot({ callsign: 'Ace', attributes: {} });
+      expect(result).toEqual(ACE);
+      expect(createPilotImpl).toHaveBeenCalledTimes(2);
+      expect(createPilotImpl).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
+    });
+
+    it('createPilot resolves undefined when the auth prompt is cancelled', async () => {
+      const createPilotImpl = vi.fn().mockRejectedValue(new Error('POST /pilots failed: HTTP 401'));
+      const session = pilotSession({ createPilotImpl });
+      session.setTokenProvider(async () => undefined);
+      const result = await session.createPilot({ callsign: 'X', attributes: {} });
+      expect(result).toBeUndefined();
+      expect(createPilotImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it('updatePilot passes the clear-via-null diff through verbatim', async () => {
+      const updated: Pilot = { ...ACE, name: 'Alice' };
+      const updatePilotImpl = vi.fn(async () => updated);
+      const session = pilotSession({ updatePilotImpl });
+      // A representative diff: set name, clear color/country with null, leave the rest absent.
+      const req = { name: 'Alice', color: null, country: null } as const;
+      const result = await session.updatePilot('p1', req);
+      expect(result).toEqual(updated);
+      expect(updatePilotImpl).toHaveBeenCalledWith('http://d.local', 'p1', req, undefined);
+    });
+
+    it('deletePilot resolves true on success and re-throws a non-auth (404) failure', async () => {
+      const deletePilotImpl = vi.fn(async () => undefined as unknown as void);
+      const session = pilotSession({ deletePilotImpl });
+      await expect(session.deletePilot('p1')).resolves.toBe(true);
+      expect(deletePilotImpl).toHaveBeenCalledWith('http://d.local', 'p1', undefined);
+
+      const failing = pilotSession({
+        deletePilotImpl: vi.fn().mockRejectedValue(new Error('DELETE /pilots/p1 failed: HTTP 404'))
+      });
+      await expect(failing.deletePilot('p1')).rejects.toThrow(/404/);
     });
   });
 });

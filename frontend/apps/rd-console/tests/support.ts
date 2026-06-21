@@ -14,7 +14,10 @@ import type {
   deleteTimer,
   setEventTimers,
   setPrimaryTimer,
-  listPilots
+  listPilots,
+  createPilot,
+  updatePilot,
+  deletePilot
 } from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
@@ -39,6 +42,10 @@ export interface TimerImpls {
   setPrimaryTimerImpl?: typeof setPrimaryTimer;
   /** The app-level pilot directory read (issue #74) — backs the hub + Pilots page tests. */
   listPilotsImpl?: typeof listPilots;
+  /** The pilot-directory write seams (issue #74) — back the PilotManager tests. */
+  createPilotImpl?: typeof createPilot;
+  updatePilotImpl?: typeof updatePilot;
+  deletePilotImpl?: typeof deletePilot;
 }
 
 export interface TestSession {
@@ -90,7 +97,11 @@ export function makeTestSession(
     deleteTimerImpl: opts?.deleteTimerImpl,
     setEventTimersImpl: opts?.setEventTimersImpl,
     setPrimaryTimerImpl: opts?.setPrimaryTimerImpl,
-    listPilotsImpl: opts?.listPilotsImpl
+    listPilotsImpl: opts?.listPilotsImpl,
+    // Pilot-directory write seams (issue #74): inert unless a test overrides them.
+    createPilotImpl: opts?.createPilotImpl,
+    updatePilotImpl: opts?.updatePilotImpl,
+    deletePilotImpl: opts?.deletePilotImpl
   });
   // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event,
   // unless the test wants the app-level (no-event) context.
