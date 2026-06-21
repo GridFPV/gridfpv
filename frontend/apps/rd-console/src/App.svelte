@@ -34,7 +34,7 @@
   import TokenDialog from './screens/TokenDialog.svelte';
   import SetupWizard from './screens/SetupWizard.svelte';
   import EventTimers from './screens/EventTimers.svelte';
-  import Registration from './screens/Registration.svelte';
+  import EventRoster from './screens/EventRoster.svelte';
   import LiveRaceControl from './screens/LiveRaceControl.svelte';
   import Marshaling from './screens/Marshaling.svelte';
   import Results from './screens/Results.svelte';
@@ -277,7 +277,7 @@
         {:else if active === 'timers'}
           <EventTimers {session} />
         {:else if active === 'registration'}
-          <Registration {session} />
+          <EventRoster {session} />
         {:else if active === 'live'}
           <LiveRaceControl {session} />
         {:else if active === 'marshaling'}
