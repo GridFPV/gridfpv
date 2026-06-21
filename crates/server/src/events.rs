@@ -56,6 +56,15 @@ pub const PRACTICE_EVENT_NAME: &str = "Practice";
 /// #90), so the selected event survives a Director restart.
 pub const ACTIVE_EVENT_FILE: &str = "active-event";
 
+/// The key, in an event's sidecar `meta` table, under which its [`EventMeta`] is persisted
+/// as JSON (issue #111). Stored on create and re-written on every meta mutation
+/// (`set_timers`/`set_primary_timer`/…) so a Director restart restores the latest config.
+pub const EVENT_META_KEY: &str = "event_meta";
+
+/// The file-name suffix (and the only files the boot-scan opens) of a persistent event's
+/// SQLite log under the data dir: `<id>.sqlite` (issue #111).
+const EVENT_DB_SUFFIX: &str = ".sqlite";
+
 /// The metadata describing one event in the registry (issue #72).
 ///
 /// The wire shape `GET /events` returns: a stable [`EventId`], a human display `name`, the
@@ -279,6 +288,13 @@ impl EventRegistry {
             std::fs::create_dir_all(dir).map_err(|e| {
                 RegistryError(format!("could not create data dir {}: {e}", dir.display()))
             })?;
+            // Reload every previously-created event (issue #111): scan the data dir for the
+            // per-event `<id>.sqlite` files and restore each event's `EventMeta` + its log into
+            // the registry. Without this the registry only ever seeded Practice on boot, so
+            // created events vanished on a Director restart (and the persisted active-event id
+            // degraded to the picker because its event wasn't loaded). Practice stays the
+            // built-in in-memory event, seeded above and never overwritten here.
+            restore_persisted_events(dir, &tokens, &mut events);
         }
 
         // Restore the persisted active event (issue #90) on boot: read `<data_dir>/active-event`
@@ -362,7 +378,12 @@ impl EventRegistry {
                 event.meta.primary_timer = None;
             }
         }
-        Ok(event.meta.clone())
+        let meta = event.meta.clone();
+        // Write the updated meta through to disk (issue #111) so a restart sees the latest
+        // selection. Best-effort against a configured data dir for a persistent event.
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(meta)
     }
 
     /// Set an event's **primary** timer (issue #112), returning its updated [`EventMeta`].
@@ -392,7 +413,12 @@ impl EventRegistry {
             }
         }
         event.meta.primary_timer = primary;
-        Ok(event.meta.clone())
+        let meta = event.meta.clone();
+        // Write the updated meta through to disk (issue #111) so a restart sees the latest
+        // primary designation.
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(meta)
     }
 
     /// An event's full [`EventMeta`] (issue #112), or `None` if no such event — the source bridge
@@ -495,6 +521,15 @@ impl EventRegistry {
             timers: default_timer_selection(),
             primary_timer: None,
         };
+        // Persist the freshly-built meta into the event's own SQLite `meta` table (issue
+        // #111) so a Director restart can restore it. Only for a persistent (file-backed)
+        // event — an in-memory event has nothing to persist to.
+        if persistent {
+            if let Some(dir) = reg.data_dir.clone() {
+                persist_event_meta(&dir, &meta)?;
+            }
+        }
+
         reg.events.insert(
             id,
             RegisteredEvent {
@@ -516,7 +551,92 @@ impl EventRegistry {
 
 /// The SQLite file an event's log lives in under `dir`: `<dir>/<id>.sqlite`.
 fn event_db_path(dir: &Path, id: &EventId) -> PathBuf {
-    dir.join(format!("{}.sqlite", id.0))
+    dir.join(format!("{}{}", id.0, EVENT_DB_SUFFIX))
+}
+
+/// Persist an event's [`EventMeta`] into its own SQLite file's sidecar `meta` table (issue
+/// #111), so a Director restart can restore it. Opens the event's `<dir>/<id>.sqlite` (WAL
+/// allows this alongside the live `AppState` connection), serialises the meta to JSON, and
+/// upserts it under [`EVENT_META_KEY`].
+fn persist_event_meta(dir: &Path, meta: &EventMeta) -> Result<(), RegistryError> {
+    let path = event_db_path(dir, &meta.id);
+    let log = SqliteLog::open(&path).map_err(|e| {
+        RegistryError(format!(
+            "could not open event log {} to persist meta: {e}",
+            path.display()
+        ))
+    })?;
+    let json = serde_json::to_string(meta)
+        .map_err(|e| RegistryError(format!("could not serialise event meta: {e}")))?;
+    log.set_meta(EVENT_META_KEY, &json)
+        .map_err(|e| RegistryError(format!("could not persist event meta: {e}")))?;
+    Ok(())
+}
+
+/// Write an updated [`EventMeta`] through to its SQLite file when the event is persistent and
+/// a data dir is configured (issue #111) — the shared tail of every meta mutation
+/// (`set_timers`/`set_primary_timer`/…). A non-persistent event (in-memory, no data dir) is a
+/// no-op: it has nothing to persist to and is gone on restart by design (Practice).
+fn persist_meta_change(data_dir: Option<&Path>, meta: &EventMeta) -> Result<(), RegistryError> {
+    match data_dir {
+        Some(dir) if meta.persistent => persist_event_meta(dir, meta),
+        _ => Ok(()),
+    }
+}
+
+/// Restore every persisted event in `dir` into `events` on boot (issue #111).
+///
+/// Scans `<dir>` for `*.sqlite` files (each a created event's own log), and for each one opens
+/// the log, reads its [`EventMeta`] back from the sidecar `meta` table, and rebuilds a
+/// [`RegisteredEvent`] over that same on-disk log — so created events (and their metadata)
+/// survive a Director restart. An entry that cannot be opened, has no persisted meta, or whose
+/// meta cannot be parsed is **skipped** (logged-shaped, not fatal) so one bad file never blocks
+/// boot. The reserved `practice` id is never produced here (Practice is the in-memory built-in,
+/// seeded separately); a stray `practice.sqlite` is ignored so it can't shadow it.
+fn restore_persisted_events(
+    dir: &Path,
+    tokens: &TokenStore,
+    events: &mut BTreeMap<EventId, RegisteredEvent>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // No data dir yet (first boot) — nothing to restore.
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only event log files: a `<id>.sqlite`. Derive the id from the stem and skip
+        // anything else (the `active-event` pointer, `timers.json`, WAL/SHM sidecars).
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(EVENT_DB_SUFFIX) else {
+            continue;
+        };
+        // Never let a stray `practice.sqlite` shadow the built-in in-memory Practice event.
+        if stem == PRACTICE_EVENT_ID || stem.is_empty() {
+            continue;
+        }
+        let id = EventId(stem.to_string());
+
+        // Open the event's own log and read its persisted meta back.
+        let log = match SqliteLog::open(&path) {
+            Ok(log) => log,
+            Err(_) => continue, // unreadable file — skip, don't fail boot
+        };
+        let meta = match log.get_meta(EVENT_META_KEY) {
+            Ok(Some(json)) => match serde_json::from_str::<EventMeta>(&json) {
+                Ok(meta) => meta,
+                Err(_) => continue, // unparseable meta — skip
+            },
+            // No persisted meta (a pre-#111 file, or a half-written create) — skip rather
+            // than fabricate a name; without meta the event isn't safely reconstructable.
+            Ok(None) | Err(_) => continue,
+        };
+
+        let state = AppState::with_tokens(log, tokens.clone());
+        events.insert(id, RegisteredEvent { meta, state });
+    }
 }
 
 /// The file the active-event id is persisted to under `dir` (issue #90).
@@ -756,12 +876,11 @@ mod tests {
             let reg = EventRegistry::new(Some(dir.clone())).unwrap();
             let created = reg.create(&req("Persisted")).unwrap();
             reg.set_active(&created.id).unwrap();
-            // A fresh registry over the SAME data dir restores the active event…
+            // A fresh registry over the SAME data dir restores the active event — the created
+            // event's SQLite file (and its persisted meta) is reloaded on boot (issue #111), so
+            // a created-id active pointer resolves rather than degrading to the picker.
             let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
-            // …as long as that event still exists. The created event's SQLite file is on disk,
-            // but the registry only re-seeds Practice on boot (created events are not re-listed
-            // here), so a created-id active pointer is dropped as stale — assert Practice instead.
-            assert!(reopened.active().is_none());
+            assert_eq!(reopened.active().map(|m| m.id), Some(created.id.clone()));
 
             // Persisting Practice (always present) survives the restart.
             reg.set_active(&EventId(PRACTICE_EVENT_ID.into())).unwrap();
@@ -771,6 +890,80 @@ mod tests {
                 Some(PRACTICE_EVENT_ID.to_string())
             );
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn created_events_and_their_metadata_survive_a_restart() {
+        // The core #111 regression: a created event (with a name, descriptive fields, a timer
+        // selection, and a primary) must be re-listed with its metadata intact, and its log, after
+        // the Director restarts over the same data dir.
+        let dir = std::env::temp_dir().join(format!("gridfpv-reload-test-{}", short_suffix()));
+        let created_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg
+                .create(&CreateEventRequest {
+                    name: "Spring Cup".to_string(),
+                    date: Some("2026-06-20".to_string()),
+                    location: Some("Main field".to_string()),
+                    description: None,
+                    organizer: Some("GridFPV Club".to_string()),
+                })
+                .unwrap();
+            created_id = created.id.clone();
+
+            // Give it a non-default timer selection + an explicit primary, then a log fact.
+            let a = TimerId("rh-1".into());
+            let b = TimerId(MOCK_TIMER_ID.into());
+            reg.set_timers(&created.id, vec![a.clone(), b.clone()])
+                .unwrap();
+            reg.set_primary_timer(&created.id, Some(a.clone())).unwrap();
+            reg.set_active(&created.id).unwrap();
+
+            let state = reg.resolve(&created.id).unwrap();
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("q-1".into()),
+                        lineup: vec![CompetitorRef("A".into())],
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+
+        // Simulate a Director restart: a brand-new registry over the SAME data dir.
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+
+        // The event is listed again (Practice first, then the created one) with its metadata.
+        let restored = reopened
+            .meta_of(&created_id)
+            .expect("the created event should be reloaded on restart");
+        assert_eq!(restored.name, "Spring Cup");
+        assert!(restored.persistent);
+        assert_eq!(restored.date.as_deref(), Some("2026-06-20"));
+        assert_eq!(restored.location.as_deref(), Some("Main field"));
+        assert_eq!(restored.organizer.as_deref(), Some("GridFPV Club"));
+        assert_eq!(
+            restored.timers,
+            vec![TimerId("rh-1".into()), TimerId(MOCK_TIMER_ID.into())]
+        );
+        assert_eq!(restored.primary_timer, Some(TimerId("rh-1".into())));
+
+        // It is in the public list, after Practice.
+        let ids: Vec<_> = reopened.list().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids.first().map(|i| i.0.as_str()), Some(PRACTICE_EVENT_ID));
+        assert!(ids.contains(&created_id));
+
+        // Its log facts survived too.
+        let state = reopened.resolve(&created_id).unwrap();
+        let (events, _) = state.read().unwrap();
+        assert_eq!(events.len(), 1);
+
+        // And the active-event pointer restores to it (no longer degrades to the picker).
+        assert_eq!(reopened.active().map(|m| m.id), Some(created_id));
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
