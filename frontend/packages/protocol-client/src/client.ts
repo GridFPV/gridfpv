@@ -473,7 +473,7 @@ export async function listPilots(
 
 /**
  * Create a pilot (`POST /pilots`) — issue #74. RD-gated (full-trust by default). The body's
- * `callsign` is required; everything else (`name`, `vtx_type`, `multigp_id`, `velocidrone_id`) is
+ * `callsign` is required; everything else (`name`, `vtx_types`, `multigp_id`, `velocidrone_id`) is
  * optional. The id is auto-generated server-side. Resolves to the new {@link Pilot}, or rejects on
  * a non-2xx / transport failure (a missing/blank callsign is a **400**).
  */

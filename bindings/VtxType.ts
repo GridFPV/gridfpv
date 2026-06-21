@@ -5,7 +5,8 @@
  *
  * A small closed enum the directory records so the RD can group / display pilots by their video
  * system. Externally tagged (the default serde enum representation) so it maps to a TS string
- * union (`"Analog" | "HDZero" | "DJI" | "Walksnail"`). Optional on a [`Pilot`] — a directory
- * entry need not state a VTX type.
+ * union (`"Analog" | "HDZero" | "DJI" | "Walksnail" | "Other"`). A pilot carries a **set** of
+ * these (see [`Pilot::vtx_types`]) since many pilots run more than one video system; the
+ * [`Other`](VtxType::Other) variant is the catch-all for anything not enumerated.
  */
-export type VtxType = "Analog" | "HDZero" | "DJI" | "Walksnail";
+export type VtxType = "Analog" | "HDZero" | "DJI" | "Walksnail" | "Other";

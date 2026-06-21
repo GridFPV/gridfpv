@@ -50,6 +50,11 @@ test('RD adds, edits (clearing color + country), and removes a directory pilot',
   // Color (a native color input writes #rrggbb).
   await addForm.getByLabel('Color').fill('#ff8800');
 
+  // VTX is a multi-select of toggle chips: tick two (Analog + HDZero).
+  const vtxGroup = addForm.getByRole('group', { name: 'VTX types' });
+  await vtxGroup.getByRole('button', { name: 'Analog' }).click();
+  await vtxGroup.getByRole('button', { name: 'HDZero' }).click();
+
   // Country: open the searchable selector, search, pick United States.
   await addForm.getByRole('button', { name: 'Country', exact: true }).click();
   await addForm.getByRole('textbox', { name: 'Search countries' }).fill('United States');
@@ -74,8 +79,11 @@ test('RD adds, edits (clearing color + country), and removes a directory pilot',
   await expect(row.locator('.flag svg')).toBeVisible();
   // The color swatch reflects the chosen color.
   await expect(row.locator('.color-swatch')).toBeVisible();
+  // Both VTX types render as badges on the row.
+  await expect(row.getByText('Analog', { exact: true })).toBeVisible();
+  await expect(row.getByText('HDZero', { exact: true })).toBeVisible();
 
-  // ── Edit: clear the color and the country ──────────────────────────────────────────────
+  // ── Edit: clear the color + country, and change the VTX set (drop Analog, add DJI) ──────
   await row.getByRole('button', { name: 'Edit' }).click();
   const editForm = page.getByRole('form', { name: 'Edit pilot' });
   await expect(editForm).toBeVisible();
@@ -83,6 +91,19 @@ test('RD adds, edits (clearing color + country), and removes a directory pilot',
   await expect(editForm.getByRole('button', { name: 'Country', exact: true })).toContainText(
     'United States'
   );
+
+  // The two previously-ticked chips are pressed; toggle Analog off and DJI on.
+  const editVtx = editForm.getByRole('group', { name: 'VTX types' });
+  await expect(editVtx.getByRole('button', { name: 'Analog' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
+  await expect(editVtx.getByRole('button', { name: 'HDZero' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
+  await editVtx.getByRole('button', { name: 'Analog' }).click();
+  await editVtx.getByRole('button', { name: 'DJI' }).click();
 
   // Clear the color (its inline Clear button) and the country (the selector's clear control).
   await editForm.getByRole('button', { name: 'Clear', exact: true }).click();
@@ -96,6 +117,10 @@ test('RD adds, edits (clearing color + country), and removes a directory pilot',
   // The callsign + name are unchanged (only color/country were cleared).
   await expect(row.getByText(CALLSIGN)).toBeVisible();
   await expect(row.getByText('Ada Lovelace')).toBeVisible();
+  // The VTX set changed: Analog gone, HDZero kept, DJI added.
+  await expect(row.getByText('Analog', { exact: true })).toHaveCount(0);
+  await expect(row.getByText('HDZero', { exact: true })).toBeVisible();
+  await expect(row.getByText('DJI', { exact: true })).toBeVisible();
 
   // ── Remove (with the confirm step) ─────────────────────────────────────────────────────
   await row.getByRole('button', { name: 'Remove' }).click();

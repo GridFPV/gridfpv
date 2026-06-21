@@ -59,9 +59,18 @@ color?: string,
  */
 country?: string, 
 /**
- * The pilot's video-transmitter type, if recorded (see [`VtxType`]). Omitted when unset.
+ * The pilot's **video-transmitter system(s)** (see [`VtxType`]). An FPV pilot always flies
+ * *some* video system, and many run more than one (e.g. Analog + HDZero), so this is a **set**
+ * rather than a single optional value. Empty means *unspecified*. Kept deduplicated and in a
+ * stable [`VtxType::ORDER`] on every create/update. Defaults empty (and, being a `Vec`, an
+ * empty set still serializes to `[]`).
+ *
+ * **Persisted-format note:** the old on-disk shape was a single optional scalar
+ * `vtx_type: VtxType`. A custom deserializer (see [`deserialize_vtx_types`]) accepts both the
+ * new `vtx_types: [..]` array and migrates a legacy `vtx_type: X` into `[X]`, so existing
+ * `pilots.json` rows load without data loss.
  */
-vtx_type?: VtxType, 
+vtx_types: Array<VtxType>, 
 /**
  * The pilot's **MultiGP** pilot id, if known — a forward hook for a later cloud-pull import
  * (#74). A free-form string. Omitted from the wire when unset.

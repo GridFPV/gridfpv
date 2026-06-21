@@ -41,9 +41,11 @@ color?: OptionalEdit<string>,
  */
 country?: OptionalEdit<string>, 
 /**
- * A new VTX type (set / clear / leave-unchanged, like [`name`](Self::name)).
+ * A **full replacement** of the VTX set when present (absent leaves it unchanged; present `[]`
+ * clears it). Mirrors how [`attributes`](Self::attributes) updates — a present array replaces
+ * the stored set wholesale (deduped, stable order), rather than a per-value set/clear edit.
  */
-vtx_type?: OptionalEdit<VtxType>, 
+vtx_types?: Array<VtxType>, 
 /**
  * A new MultiGP id (set / clear / leave-unchanged).
  */

@@ -5,8 +5,8 @@ import type { EventMeta, Pilot } from '@gridfpv/types';
 import EventRoster from '../src/screens/EventRoster.svelte';
 import { makeTestSession } from './support.js';
 
-const ACE: Pilot = { id: 'p1', callsign: 'Ace', name: 'Alice', attributes: {} };
-const BEE: Pilot = { id: 'p2', callsign: 'Bee', attributes: {} };
+const ACE: Pilot = { id: 'p1', callsign: 'Ace', name: 'Alice', vtx_types: [], attributes: {} };
+const BEE: Pilot = { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} };
 
 /** An event that already rosters Ace (so its checkbox seeds checked). */
 const EVENT: EventMeta = {
@@ -73,7 +73,7 @@ describe('EventRoster (in-event roster + inline CRUD)', () => {
   });
 
   it('an inline-created pilot becomes selectable without leaving the event', async () => {
-    const created: Pilot = { id: 'p9', callsign: 'Newbie', attributes: {} };
+    const created: Pilot = { id: 'p9', callsign: 'Newbie', vtx_types: [], attributes: {} };
     let calls = 0;
     const listPilotsImpl = vi.fn(async () => (calls++ === 0 ? [ACE] : [ACE, created]));
     const createPilotImpl = vi.fn(async () => created);

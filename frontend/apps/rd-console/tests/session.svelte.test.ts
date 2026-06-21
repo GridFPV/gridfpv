@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProtocolClient, ProtocolState, StateListener } from '@gridfpv/protocol-client';
-import type { CommandAck, EventMeta, Pilot, Timer } from '@gridfpv/types';
+import type { CommandAck, CreatePilotRequest, EventMeta, Pilot, Timer } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
 import { liveRunning, okAck, failAck } from './fixtures.js';
 
@@ -719,7 +719,7 @@ describe('Session', () => {
   });
 
   describe('pilots (#74)', () => {
-    const ACE: Pilot = { id: 'p1', callsign: 'Ace', attributes: {} };
+    const ACE: Pilot = { id: 'p1', callsign: 'Ace', vtx_types: [], attributes: {} };
 
     function pilotSession(overrides?: {
       listPilotsImpl?: ReturnType<typeof vi.fn>;
@@ -752,7 +752,7 @@ describe('Session', () => {
     it('createPilot returns the new pilot (full-trust, no token)', async () => {
       const createPilotImpl = vi.fn(async () => ACE);
       const session = pilotSession({ createPilotImpl });
-      const req = { callsign: 'Ace', attributes: {} } as const;
+      const req: CreatePilotRequest = { callsign: 'Ace', vtx_types: [], attributes: {} };
       const result = await session.createPilot(req);
       expect(result).toEqual(ACE);
       expect(createPilotImpl).toHaveBeenCalledWith('http://d.local', req, undefined);
@@ -765,7 +765,7 @@ describe('Session', () => {
         .mockResolvedValueOnce(ACE);
       const session = pilotSession({ createPilotImpl });
       session.setTokenProvider(async () => 'tok');
-      const result = await session.createPilot({ callsign: 'Ace', attributes: {} });
+      const result = await session.createPilot({ callsign: 'Ace', vtx_types: [], attributes: {} });
       expect(result).toEqual(ACE);
       expect(createPilotImpl).toHaveBeenCalledTimes(2);
       expect(createPilotImpl).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
@@ -775,7 +775,7 @@ describe('Session', () => {
       const createPilotImpl = vi.fn().mockRejectedValue(new Error('POST /pilots failed: HTTP 401'));
       const session = pilotSession({ createPilotImpl });
       session.setTokenProvider(async () => undefined);
-      const result = await session.createPilot({ callsign: 'X', attributes: {} });
+      const result = await session.createPilot({ callsign: 'X', vtx_types: [], attributes: {} });
       expect(result).toBeUndefined();
       expect(createPilotImpl).toHaveBeenCalledTimes(1);
     });

@@ -6,8 +6,8 @@ import HomeHub from '../src/screens/HomeHub.svelte';
 import { makeTestSession } from './support.js';
 
 const PILOTS: Pilot[] = [
-  { id: 'p1', callsign: 'Ace', attributes: {} },
-  { id: 'p2', callsign: 'Bee', attributes: {} }
+  { id: 'p1', callsign: 'Ace', vtx_types: [], attributes: {} },
+  { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} }
 ];
 const EVENTS: EventMeta[] = [
   {

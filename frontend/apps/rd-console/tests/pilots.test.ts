@@ -6,6 +6,8 @@ import {
   cleanAttributes,
   emptyForm,
   formFromPilot,
+  normalizeVtxTypes,
+  toggleVtxType,
   type PilotFormValues
 } from '../src/lib/pilots.js';
 
@@ -18,7 +20,7 @@ const FULL: Pilot = {
   team: 'Red',
   color: '#FF0000',
   country: 'US',
-  vtx_type: 'DJI',
+  vtx_types: ['Analog', 'DJI'],
   multigp_id: 'mg-1',
   velocidrone_id: 'vd-1',
   attributes: { bib: '7' }
@@ -31,11 +33,17 @@ describe('buildCreateRequest', () => {
     v.name = 'Alice';
     v.country = 'us'; // lower-case input → uppercased
     const req = buildCreateRequest(v);
-    expect(req).toEqual({ callsign: 'Ace', name: 'Alice', country: 'US', attributes: {} });
+    // vtx_types + attributes always go (both default-empty server-side).
+    expect(req).toEqual({
+      callsign: 'Ace',
+      name: 'Alice',
+      country: 'US',
+      vtx_types: [],
+      attributes: {}
+    });
     // Untouched optionals are absent (not empty strings).
     expect(req).not.toHaveProperty('team');
     expect(req).not.toHaveProperty('color');
-    expect(req).not.toHaveProperty('vtx_type');
   });
 
   it('carries the cleaned attributes bag', () => {
@@ -44,6 +52,31 @@ describe('buildCreateRequest', () => {
     v.attributes = { ' license ': 'FAA-9', '': 'dropped' };
     const req = buildCreateRequest(v);
     expect(req.attributes).toEqual({ license: 'FAA-9' });
+  });
+
+  it('sends the selected VTX set, deduped + in canonical order', () => {
+    const v = emptyForm();
+    v.callsign = 'Ace';
+    v.vtx_types = ['HDZero', 'Analog', 'HDZero']; // out of order + a duplicate
+    const req = buildCreateRequest(v);
+    expect(req.vtx_types).toEqual(['Analog', 'HDZero']);
+  });
+});
+
+describe('VTX set helpers', () => {
+  it('normalizeVtxTypes dedups and orders canonically', () => {
+    expect(normalizeVtxTypes(['Other', 'DJI', 'DJI', 'Analog'])).toEqual([
+      'Analog',
+      'DJI',
+      'Other'
+    ]);
+  });
+
+  it('toggleVtxType adds when absent and removes when present', () => {
+    expect(toggleVtxType(['Analog'], 'HDZero')).toEqual(['Analog', 'HDZero']);
+    expect(toggleVtxType(['Analog', 'HDZero'], 'Analog')).toEqual(['HDZero']);
+    // Re-adding keeps the canonical order regardless of click order.
+    expect(toggleVtxType(['HDZero'], 'Analog')).toEqual(['Analog', 'HDZero']);
   });
 });
 
@@ -76,11 +109,21 @@ describe('buildUpdateRequest — clear-via-null', () => {
     expect(req).toEqual({ name: 'Alicia' });
   });
 
-  it('clears the VTX type with null when set to None', () => {
-    const v = valuesFrom(FULL);
-    v.vtx = '';
-    const req = buildUpdateRequest(FULL, v);
-    expect(req.vtx_type).toBeNull();
+  it('sends the VTX set only when it differs (order-independent); empty array clears it', () => {
+    // Unchanged set (same members, any order) → omitted.
+    const same = valuesFrom(FULL);
+    same.vtx_types = ['DJI', 'Analog'];
+    expect(buildUpdateRequest(FULL, same)).not.toHaveProperty('vtx_types');
+
+    // Adding a type → the full replacement set (deduped, canonical order).
+    const added = valuesFrom(FULL);
+    added.vtx_types = [...added.vtx_types, 'Other'];
+    expect(buildUpdateRequest(FULL, added).vtx_types).toEqual(['Analog', 'DJI', 'Other']);
+
+    // Removing all → an empty array (clears the set; there is no null / "None").
+    const cleared = valuesFrom(FULL);
+    cleared.vtx_types = [];
+    expect(buildUpdateRequest(FULL, cleared).vtx_types).toEqual([]);
   });
 
   it('uppercases a changed country code and only sends it when it differs', () => {

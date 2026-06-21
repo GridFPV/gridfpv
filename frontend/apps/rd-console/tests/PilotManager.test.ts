@@ -11,9 +11,10 @@ const ACE: Pilot = {
   name: 'Alice',
   color: '#ff0000',
   country: 'US',
+  vtx_types: ['Analog', 'HDZero'],
   attributes: { bib: '7' }
 };
-const BEE: Pilot = { id: 'p2', callsign: 'Bee', attributes: {} };
+const BEE: Pilot = { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} };
 
 /** Open the Add form via the manager's exported `openAdd()` (the page button calls it). */
 async function openAdd(manager: { openAdd: () => void }) {
@@ -31,6 +32,64 @@ describe('PilotManager (#74)', () => {
     expect(screen.getByText('Alice')).toBeInTheDocument();
     const list = screen.getByRole('list', { name: 'Pilot directory' });
     expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+  });
+
+  it('renders every selected VTX type as a badge (and none when the set is empty)', async () => {
+    const listPilotsImpl = vi.fn(async () => [ACE, BEE]);
+    const { session } = makeTestSession({ noEnter: true, listPilotsImpl });
+    render(PilotManager, { session });
+
+    await screen.findByText('Ace');
+    const list = screen.getByRole('list', { name: 'Pilot directory' });
+    const [aceRow, beeRow] = within(list).getAllByRole('listitem');
+    // Ace has two VTX types → two badges.
+    expect(within(aceRow).getByText('Analog')).toBeInTheDocument();
+    expect(within(aceRow).getByText('HDZero')).toBeInTheDocument();
+    // Bee has none → no VTX badges at all.
+    expect(within(beeRow).queryByText('Analog')).not.toBeInTheDocument();
+    expect(within(beeRow).queryByText('HDZero')).not.toBeInTheDocument();
+    expect(within(beeRow).queryByText('DJI')).not.toBeInTheDocument();
+  });
+
+  it('toggles VTX chips and sends the selected set in the create body', async () => {
+    let calls = 0;
+    const created: Pilot = {
+      id: 'p9',
+      callsign: 'Neo',
+      vtx_types: ['Analog', 'DJI'],
+      attributes: {}
+    };
+    const listPilotsImpl = vi.fn(async () => (calls++ === 0 ? [] : [created]));
+    const createPilotImpl = vi.fn(async () => created);
+    const { session } = makeTestSession({ noEnter: true, listPilotsImpl, createPilotImpl });
+    const { component } = render(PilotManager, { session });
+    await screen.findByText(/No pilots/i);
+    await openAdd(component as unknown as { openAdd: () => void });
+
+    await fireEvent.input(screen.getByLabelText('Callsign'), { target: { value: 'Neo' } });
+
+    const vtxGroup = screen.getByRole('group', { name: 'VTX types' });
+    // Tick DJI then Analog (out of canonical order) — and tick HDZero then untick it.
+    await fireEvent.click(within(vtxGroup).getByRole('button', { name: 'DJI' }));
+    await fireEvent.click(within(vtxGroup).getByRole('button', { name: 'Analog' }));
+    await fireEvent.click(within(vtxGroup).getByRole('button', { name: 'HDZero' }));
+    await fireEvent.click(within(vtxGroup).getByRole('button', { name: 'HDZero' })); // toggled back off
+    expect(within(vtxGroup).getByRole('button', { name: 'DJI' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    expect(within(vtxGroup).getByRole('button', { name: 'HDZero' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add pilot' }));
+    await waitFor(() => expect(createPilotImpl).toHaveBeenCalledTimes(1));
+    expect(createPilotImpl).toHaveBeenCalledWith(
+      'http://d.local',
+      expect.objectContaining({ callsign: 'Neo', vtx_types: ['Analog', 'DJI'] }),
+      'tok'
+    );
   });
 
   it('shows the empty state when the directory has no pilots', async () => {
@@ -62,6 +121,7 @@ describe('PilotManager (#74)', () => {
       name: 'Thomas',
       country: 'US',
       color: '#00ff00',
+      vtx_types: [],
       attributes: { sponsor: 'Acme' }
     };
     const listPilotsImpl = vi.fn(async () => (calls++ === 0 ? [] : [created]));
