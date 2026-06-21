@@ -2,10 +2,17 @@
 import type { TimerId } from "./TimerId";
 
 /**
- * The body of `PUT /events/{id}/timers` — the timer ids an event selects (issue #73).
+ * The body of `PUT /events/{id}/timers` — the timer ids an event selects (issue #73), and
+ * optionally which of them is the **primary** (issue #112).
  */
 export type SetEventTimersRequest = { 
 /**
  * The timers this event uses, in selection order. Each must name a known timer.
  */
-ids: Array<TimerId>, };
+ids: Array<TimerId>, 
+/**
+ * The **primary** timer among `ids` (issue #112): the timer whose passes feed the log while
+ * healthy, the rest being hot-standby alternates. Optional and additive — omit it to leave the
+ * primary defaulting to the first selected timer. When given, it must be one of `ids`.
+ */
+primary?: TimerId, };

@@ -175,12 +175,31 @@ pub struct UpdateTimerRequest {
     pub kind: Option<TimerKind>,
 }
 
-/// The body of `PUT /events/{id}/timers` — the timer ids an event selects (issue #73).
+/// The body of `PUT /events/{id}/timers` — the timer ids an event selects (issue #73), and
+/// optionally which of them is the **primary** (issue #112).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SetEventTimersRequest {
     /// The timers this event uses, in selection order. Each must name a known timer.
     pub ids: Vec<TimerId>,
+    /// The **primary** timer among `ids` (issue #112): the timer whose passes feed the log while
+    /// healthy, the rest being hot-standby alternates. Optional and additive — omit it to leave the
+    /// primary defaulting to the first selected timer. When given, it must be one of `ids`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub primary: Option<TimerId>,
+}
+
+/// The body of `PUT /events/{id}/primary-timer` — designate which selected timer is the
+/// **primary** (issue #112), the rest being alternates. The `id` must be one of the event's
+/// currently-selected timers; `null` clears the override (the first selected timer becomes primary).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SetPrimaryTimerRequest {
+    /// The timer to make primary, or `null` to clear the override (default to the first selected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<TimerId>,
 }
 
 /// The application-level registry of all configured timers (issue #73).

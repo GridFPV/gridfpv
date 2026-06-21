@@ -71,6 +71,7 @@ export type * from '@bindings/ServerHello';
 export type * from '@bindings/SessionId';
 export type * from '@bindings/SetActiveEventRequest';
 export type * from '@bindings/SetEventTimersRequest';
+export type * from '@bindings/SetPrimaryTimerRequest';
 export type * from '@bindings/SignalContext';
 export type * from '@bindings/Snapshot';
 export type * from '@bindings/SourceTime';

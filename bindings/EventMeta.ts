@@ -57,4 +57,17 @@ organizer?: string,
  * box. The per-event source bridge runs the selected Sim timers; a selected RotorHazard is a
  * reserved no-op stub (2b / #65).
  */
-timers: Array<TimerId>, };
+timers: Array<TimerId>, 
+/**
+ * The **primary** timer among the selection (issue #112) — redundant timers at one gate, one
+ * designated **primary** and the rest **alternates**. The per-event source bridge feeds **only
+ * the active source's** passes into the log (the primary while it's healthy; on a primary drop
+ * it fails over to the first healthy alternate; on primary recovery it switches back), so two
+ * timers at the same gate give redundancy without double-counting the same crossing.
+ *
+ * Additive (`#[serde(default)]`) so an event persisted before #112 reads back with `None`.
+ * When unset, the **first** selected timer is the effective primary (see
+ * [`EventMeta::effective_primary`]). Must name a timer that is in [`timers`](Self::timers); a
+ * primary not in the selection is ignored (the first selected timer is used instead).
+ */
+primary_timer?: TimerId, };

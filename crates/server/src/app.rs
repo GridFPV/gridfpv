@@ -97,7 +97,8 @@ use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
 use crate::stream::Cursor;
 use crate::timers::{
-    CreateTimerRequest, SetEventTimersRequest, Timer, TimerId, UpdateTimerRequest,
+    CreateTimerRequest, SetEventTimersRequest, SetPrimaryTimerRequest, Timer, TimerId,
+    UpdateTimerRequest,
 };
 
 /// The object-safe slice of [`EventLog`] the protocol transport needs: read the whole
@@ -299,6 +300,11 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/timers/{timer_id}", put(update_timer).delete(delete_timer))
         // Per-event timer **selection** (issue #73): RD-gated; each id must name a known timer.
         .route("/events/{event_id}/timers", put(set_event_timers))
+        // Per-event **primary** timer (issue #112): RD-gated; the id must be in the selection.
+        .route(
+            "/events/{event_id}/primary-timer",
+            put(set_event_primary_timer),
+        )
         // Per-event read/realtime surface — `{event_id}` resolves to that event's log.
         .route(
             "/events/{event_id}/snapshot/event/{event}",
@@ -466,11 +472,13 @@ async fn delete_timer(
     Ok(StatusCode::OK)
 }
 
-/// `PUT /events/{event_id}/timers` — set an event's **selected timers**, RD-gated (issue #73).
+/// `PUT /events/{event_id}/timers` — set an event's **selected timers** (issue #73) and optionally
+/// the **primary** among them (issue #112), RD-gated.
 ///
 /// [`ControlAuth`] runs first. The event must exist (else a typed 404) and **each** id in the body
 /// must name a known timer in the registry (else a 404 naming the bad id) — so an event can never
-/// reference a deleted/unknown timer. On success the updated [`EventMeta`] is returned.
+/// reference a deleted/unknown timer. When a `primary` is given it must be one of `ids` (else a
+/// 400). On success the updated [`EventMeta`] is returned.
 async fn set_event_timers(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
@@ -487,9 +495,53 @@ async fn set_event_timers(
             ));
         }
     }
-    let meta = registry
+    // A primary, if given, must be one of the timers being selected (issue #112).
+    if let Some(primary) = &body.primary {
+        if !body.ids.contains(primary) {
+            return Err(ProtocolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "primary timer {:?} is not in the selected timers",
+                    primary.0
+                ),
+            ));
+        }
+    }
+    registry
         .set_timers(&event_id, body.ids)
         .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    // Record the primary in the same request (it is now guaranteed in the just-set selection).
+    let meta = registry
+        .set_primary_timer(&event_id, body.primary)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
+/// `PUT /events/{event_id}/primary-timer` — designate an event's **primary** timer, RD-gated
+/// (issue #112).
+///
+/// [`ControlAuth`] runs first. The event must exist (else a typed 404). When `id` is given it must
+/// be one of the event's **currently-selected** timers (else a 400); `null` clears the override so
+/// the first selected timer becomes the effective primary. On success the updated [`EventMeta`] is
+/// returned. The per-event source bridge reads the primary live, so a change fails over the active
+/// source on the next poll.
+async fn set_event_primary_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<SetPrimaryTimerRequest>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    let meta = registry
+        .set_primary_timer(&event_id, body.id)
+        .map_err(|e| {
+            // "not in the selection" is a bad request; an unknown event is a 404.
+            let code = if e.0.contains("not in the event's selected timers") {
+                ErrorCode::BadRequest
+            } else {
+                ErrorCode::UnknownScope
+            };
+            ProtocolError::new(code, e.to_string())
+        })?;
     Ok(Json(meta))
 }
 
@@ -1583,6 +1635,7 @@ mod tests {
         // Selecting a known timer succeeds and is reflected on the event meta.
         let req = SetEventTimersRequest {
             ids: vec![extra.id.clone()],
+            primary: None,
         };
         let response = router(registry.clone())
             .oneshot(
@@ -1603,6 +1656,7 @@ mod tests {
         // Selecting an UNKNOWN timer → 404 UnknownScope.
         let bad = SetEventTimersRequest {
             ids: vec![crate::timers::TimerId("no-such-timer".into())],
+            primary: None,
         };
         let response = router(registry)
             .oneshot(
