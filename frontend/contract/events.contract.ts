@@ -317,3 +317,119 @@ describe('seam 10: application-level timers + per-event selection (#73)', () => 
     expect((await setEventTimers(event.id, [timer.id])).status).toBe(401);
   });
 });
+
+/**
+ * Issue #112: **primary/alternate timer roles + failover** — redundant timers at one gate, one
+ * designated **primary**, the rest **alternates**. Only the role designation API is exercised on
+ * the wire here (the single-active-source feed + failover is proven by the Rust bridge/live tests).
+ *
+ * guards:
+ *  - a new event's `EventMeta.primary_timer` is absent (additive `#[serde(default)]`); the first
+ *    selected timer is the effective primary by default.
+ *  - `PUT /events/{id}/timers` accepts an optional `primary` (it must be one of `ids`), recorded on
+ *    `EventMeta.primary_timer`.
+ *  - `PUT /events/{id}/primary-timer` is **RD-gated**, designates a selected timer as primary,
+ *    rejects a primary not in the selection (400), and `null` clears the override.
+ */
+describe('seam 10b: primary/alternate timer roles (#112)', () => {
+  /** `PUT /events/{id}/timers` with `{ ids, primary? }` + optional token → raw status + parsed body. */
+  async function setEventTimersWithPrimary(
+    eventId: string,
+    ids: string[],
+    primary: string | undefined,
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/timers`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ ids, ...(primary !== undefined ? { primary } : {}) })
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** `PUT /events/{id}/primary-timer` with `{ id }` (or `{}`) + optional token → status + body. */
+  async function setPrimaryTimer(
+    eventId: string,
+    id: string | null | undefined,
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/primary-timer`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(id === undefined ? {} : { id })
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** Create two Mock timers + an event selecting both, returning their ids. */
+  async function eventWithTwoTimers(): Promise<{ event: string; a: string; b: string }> {
+    const create = async (name: string) => {
+      const res = await fetch(`${director.baseUrl}/timers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ name, kind: { Mock: { laps: 1, lap_ms: 50 } } })
+      });
+      return ((await res.json()) as Timer).id;
+    };
+    const a = await create('Primary Sim');
+    const b = await create('Alternate Sim');
+    const event = (await createEvent('Redundant Timers', TOKEN)).body as EventMeta;
+    return { event: event.id, a, b };
+  }
+
+  it('a new event has no explicit primary (additive default)', async () => {
+    const event = (await createEvent('No Primary Yet', TOKEN)).body as EventMeta;
+    expect(event.primary_timer).toBeUndefined();
+  });
+
+  it('PUT /events/{id}/timers records an optional primary among the selection', async () => {
+    const { event, a, b } = await eventWithTwoTimers();
+    const ok = await setEventTimersWithPrimary(event, [a, b], b, TOKEN);
+    expect(ok.status).toBe(200);
+    const meta = ok.body as EventMeta;
+    expect(meta.timers).toEqual([a, b]);
+    expect(meta.primary_timer).toBe(b);
+
+    // A primary NOT in the selection → 400 BadRequest.
+    const bad = await setEventTimersWithPrimary(event, [a, b], 'mock', TOKEN);
+    expect(bad.status).toBe(400);
+  });
+
+  it('PUT /events/{id}/primary-timer designates, rejects out-of-selection, and clears', async () => {
+    const { event, a, b } = await eventWithTwoTimers();
+    await setEventTimersWithPrimary(event, [a, b], undefined, TOKEN);
+
+    // Designate the alternate as primary.
+    const ok = await setPrimaryTimer(event, b, TOKEN);
+    expect(ok.status).toBe(200);
+    expect((ok.body as EventMeta).primary_timer).toBe(b);
+
+    // A primary not in the selection → 400 BadRequest.
+    const bad = await setPrimaryTimer(event, 'mock', TOKEN);
+    expect(bad.status).toBe(400);
+
+    // Clearing the override (`null`) → effective primary falls back to the first selected.
+    const cleared = await setPrimaryTimer(event, null, TOKEN);
+    expect(cleared.status).toBe(200);
+    expect((cleared.body as EventMeta).primary_timer).toBeUndefined();
+
+    // RD-gated: no token → 401.
+    expect((await setPrimaryTimer(event, a)).status).toBe(401);
+  });
+});

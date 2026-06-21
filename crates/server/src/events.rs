@@ -104,6 +104,36 @@ pub struct EventMeta {
     /// reserved no-op stub (2b / #65).
     #[serde(default)]
     pub timers: Vec<TimerId>,
+    /// The **primary** timer among the selection (issue #112) — redundant timers at one gate, one
+    /// designated **primary** and the rest **alternates**. The per-event source bridge feeds **only
+    /// the active source's** passes into the log (the primary while it's healthy; on a primary drop
+    /// it fails over to the first healthy alternate; on primary recovery it switches back), so two
+    /// timers at the same gate give redundancy without double-counting the same crossing.
+    ///
+    /// Additive (`#[serde(default)]`) so an event persisted before #112 reads back with `None`.
+    /// When unset, the **first** selected timer is the effective primary (see
+    /// [`EventMeta::effective_primary`]). Must name a timer that is in [`timers`](Self::timers); a
+    /// primary not in the selection is ignored (the first selected timer is used instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub primary_timer: Option<TimerId>,
+}
+
+impl EventMeta {
+    /// The event's **effective primary** timer (issue #112): the explicitly-set
+    /// [`primary_timer`](Self::primary_timer) when it is present *and still in the selection*,
+    /// else the **first** selected timer. `None` only when the event selects no timers at all.
+    ///
+    /// This is the single rule the source bridge and the API validation share so "the primary is
+    /// the first selected timer unless overridden" holds everywhere. A stale `primary_timer` (it
+    /// was deselected) gracefully degrades to the first selected timer rather than designating a
+    /// timer the event no longer uses.
+    pub fn effective_primary(&self) -> Option<TimerId> {
+        match &self.primary_timer {
+            Some(p) if self.timers.contains(p) => Some(p.clone()),
+            _ => self.timers.first().cloned(),
+        }
+    }
 }
 
 /// The wire shape of `GET /active-event` — the **Director's currently-active event**, or
@@ -239,6 +269,7 @@ impl EventRegistry {
                     description: None,
                     organizer: None,
                     timers: default_timer_selection(),
+                    primary_timer: None,
                 },
                 state: practice_state,
             },
@@ -323,7 +354,51 @@ impl EventRegistry {
             .get_mut(id)
             .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
         event.meta.timers = ids;
+        // Drop a now-stale primary (issue #112): if the previously-designated primary is no longer
+        // in the selection, clear it so [`EventMeta::effective_primary`] falls back to the first
+        // selected timer rather than pointing at a deselected timer.
+        if let Some(primary) = &event.meta.primary_timer {
+            if !event.meta.timers.contains(primary) {
+                event.meta.primary_timer = None;
+            }
+        }
         Ok(event.meta.clone())
+    }
+
+    /// Set an event's **primary** timer (issue #112), returning its updated [`EventMeta`].
+    ///
+    /// Designates which of the event's selected timers is the **primary** (the rest are
+    /// alternates); the source bridge feeds only the active source's passes, preferring the primary
+    /// (see [`EventMeta::effective_primary`]). Validates the event exists (else a [`RegistryError`]
+    /// the caller maps to a typed 404). Passing `Some(id)` requires that id to be **in the event's
+    /// current selection** (else a [`RegistryError`] — the caller maps it to a bad-request); passing
+    /// `None` clears the override (the first selected timer becomes the effective primary).
+    pub fn set_primary_timer(
+        &self,
+        id: &EventId,
+        primary: Option<TimerId>,
+    ) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+        if let Some(primary) = &primary {
+            if !event.meta.timers.contains(primary) {
+                return Err(RegistryError(format!(
+                    "primary timer {:?} is not in the event's selected timers",
+                    primary.0
+                )));
+            }
+        }
+        event.meta.primary_timer = primary;
+        Ok(event.meta.clone())
+    }
+
+    /// An event's full [`EventMeta`] (issue #112), or `None` if no such event — the source bridge
+    /// reads it live to learn the selection *and* the effective primary in one consistent snapshot.
+    pub fn meta_of(&self, id: &EventId) -> Option<EventMeta> {
+        self.read().events.get(id).map(|e| e.meta.clone())
     }
 
     /// An event's currently-**selected timer ids** (issue #73), or `None` if no such event.
@@ -418,6 +493,7 @@ impl EventRegistry {
             description: normalize_optional(&request.description),
             organizer: normalize_optional(&request.organizer),
             timers: default_timer_selection(),
+            primary_timer: None,
         };
         reg.events.insert(
             id,

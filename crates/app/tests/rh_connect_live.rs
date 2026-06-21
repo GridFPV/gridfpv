@@ -42,7 +42,7 @@ use gridfpv_events::{AdapterId, CompetitorRef, Event, HeatId, HeatTransition};
 use gridfpv_server::app::AppState;
 use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{CreateTimerRequest, TimerKind, TimerStatus};
+use gridfpv_server::timers::{CreateTimerRequest, MOCK_TIMER_ID, TimerId, TimerKind, TimerStatus};
 use gridfpv_testkit::{NodeCsv, RhContainer, node_csv};
 
 /// DISTINCT RH host port for the app's RH-connect e2e (server full-event 5041, engine 5040).
@@ -261,5 +261,152 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
         "app RH-drop-detection: timer left Connected after RH was stopped — status {dropped_status:?} \
          in {:?} (drop DETECTED)",
         drop_start.elapsed()
+    );
+}
+
+/// DISTINCT RH host port for the primary/alternate failover e2e (avoids the 5042 above).
+const RH_FAILOVER_PORT: u16 = 5043;
+
+/// Primary RH + alternate Mock **failover** over a live connection (issue #112).
+///
+/// The end-to-end proof of the single-active-source feed + failover: with a **primary RH** timer
+/// (live, dockerized) and an **alternate Mock** both selected for the running heat, only the RH
+/// primary's passes feed the log while it is healthy — the Mock alternate is hot standby (gated
+/// off). When the RH container is **stopped mid-heat** the Director fails over: the primary leaves
+/// `Connected`, and the Mock alternate's synthetic passes take over so laps keep landing. This is
+/// the redundancy guarantee — a dropped primary does not stop the race log.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker (primary RH + alternate Mock; stops the RH container mid-heat and asserts the Mock alternate takes over)"]
+async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
+    let scenario = vec![(
+        0usize,
+        node_csv(&NodeCsv {
+            ticks_per_lap: 2,
+            peak_rssi: 180,
+            baseline_rssi: 70,
+        }),
+    )];
+    let rh = RhContainer::start(RH_FAILOVER_PORT, TICK, &scenario);
+
+    let registry = EventRegistry::new(None).expect("event registry");
+    // A brisk, long-running Mock alternate so it still has passes to emit after the failover (a
+    // hot-standby Mock runs its emission in real time; failover catches the not-yet-emitted passes).
+    registry
+        .timers()
+        .update(
+            &TimerId(MOCK_TIMER_ID.to_string()),
+            &gridfpv_server::timers::UpdateTimerRequest {
+                name: None,
+                kind: Some(TimerKind::Mock {
+                    laps: 600,
+                    lap_ms: 100,
+                }),
+            },
+        )
+        .expect("retune the Mock alternate to a long, brisk run");
+    let rh_timer = registry
+        .timers()
+        .create(&CreateTimerRequest {
+            name: "Field RH".into(),
+            kind: TimerKind::Rotorhazard {
+                url: rh.url().to_string(),
+            },
+        })
+        .expect("create RH timer");
+
+    registry
+        .set_active(&practice())
+        .expect("make Practice active");
+    // Select [RH, Mock] with the RH as the explicit PRIMARY and the Mock as the alternate.
+    registry
+        .set_timers(
+            &practice(),
+            vec![rh_timer.id.clone(), TimerId(MOCK_TIMER_ID.to_string())],
+        )
+        .expect("select RH primary + Mock alternate");
+    registry
+        .set_primary_timer(&practice(), Some(rh_timer.id.clone()))
+        .expect("designate the RH timer primary");
+
+    let state = registry.resolve(&practice()).expect("Practice state");
+    let _bridge = spawn_registry_bridge(
+        registry.clone(),
+        SourceConfig::from_env(),
+        AdapterId(SIM_ADAPTER.to_string()),
+    );
+
+    // The RH primary connects on selection.
+    let timers = registry.timers();
+    let id = rh_timer.id.clone();
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            timers.get(&id).map(|t| t.status) == Some(TimerStatus::Connected)
+        })
+        .await,
+        "the RH primary should reach Connected on selection"
+    );
+
+    // Run the heat: while the RH primary is healthy, its passes feed (the Mock alternate is gated).
+    let heat = HeatId("q-fo-1".into());
+    let pilot = CompetitorRef("Ace".into());
+    state
+        .append(
+            Event::HeatScheduled {
+                heat: heat.clone(),
+                lineup: vec![pilot.clone()],
+            },
+            None,
+        )
+        .unwrap();
+    state
+        .append(
+            Event::HeatStateChanged {
+                heat: heat.clone(),
+                transition: HeatTransition::Running,
+            },
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        wait_for(Duration::from_secs(40), || count_passes(&read_all(&state))
+            >= 1)
+        .await,
+        "the RH primary's passes should feed while it is healthy"
+    );
+    let before_drop = count_passes(&read_all(&state));
+    eprintln!("app failover e2e: {before_drop} pass(es) from the RH primary before the drop");
+
+    // === Stop the RH container mid-heat: the primary drops and the Mock alternate takes over. ===
+    eprintln!("app failover e2e: stopping the RH primary container mid-heat…");
+    rh.stop();
+    assert!(
+        wait_for(Duration::from_secs(15), || {
+            matches!(
+                timers.get(&rh_timer.id).map(|t| t.status),
+                Some(TimerStatus::Disconnected)
+                    | Some(TimerStatus::Error)
+                    | Some(TimerStatus::Connecting)
+            )
+        })
+        .await,
+        "the Director must detect the dropped RH primary"
+    );
+
+    // The Mock alternate now feeds: the pass count keeps growing past the pre-drop total even though
+    // the RH primary is dead. This is the failover — a dropped primary does not stop the log.
+    let target = before_drop + 2;
+    assert!(
+        wait_for(Duration::from_secs(20), || count_passes(&read_all(&state))
+            >= target)
+        .await,
+        "the Mock alternate should take over and keep laps landing after the RH primary dropped; \
+         passes = {} (wanted ≥ {target})",
+        count_passes(&read_all(&state))
+    );
+    eprintln!(
+        "app failover e2e: Mock alternate took over after the RH primary dropped — {} total pass(es) \
+         (failover CONFIRMED)",
+        count_passes(&read_all(&state))
     );
 }

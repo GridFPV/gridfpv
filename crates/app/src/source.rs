@@ -45,7 +45,7 @@
 //! driving one timer.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use gridfpv_events::{
@@ -54,9 +54,12 @@ use gridfpv_events::{
 use gridfpv_server::app::AppState;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{TimerKind, TimerRegistry};
+use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry};
 use gridfpv_storage::Offset;
 use tokio::task::JoinHandle;
+
+pub mod failover;
+pub use failover::active_source;
 
 #[cfg(feature = "live")]
 mod rh_connections;
@@ -94,18 +97,93 @@ pub struct HeatRun {
     pub lineup: Vec<CompetitorRef>,
 }
 
+/// The shared **active-source gate** (issue #112): the single selected timer whose passes are
+/// currently fed into the log, the rest being hot-standby alternates whose passes are dropped.
+///
+/// The bridge re-evaluates the active source every poll (so a primary drop fails over to an
+/// alternate live, mid-heat) and stores it here; each source's [`PassSink`] is bound to its own
+/// owning timer id and only appends while it *is* the active source. Cloning shares the one cell
+/// (`Arc<RwLock<…>>`) across every source feeding one heat.
+#[derive(Clone, Default)]
+pub struct ActiveSourceGate {
+    inner: Arc<RwLock<Option<TimerId>>>,
+}
+
+impl ActiveSourceGate {
+    /// A gate with no active source yet (nothing feeds until [`set`](Self::set)).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the currently-active source (the bridge calls this each poll). `None` ⇒ no selected
+    /// timer is healthy, so nothing feeds.
+    pub fn set(&self, active: Option<TimerId>) {
+        *self.inner.write().expect("active-source gate poisoned") = active;
+    }
+
+    /// Whether `timer` is the active source right now — the sink's append gate.
+    pub fn is_active(&self, timer: &TimerId) -> bool {
+        self.inner
+            .read()
+            .expect("active-source gate poisoned")
+            .as_ref()
+            == Some(timer)
+    }
+}
+
 /// The append surface a [`LapSource`] pushes passes through. Wraps the shared
 /// [`AppState`] so every emitted pass lands in the one log and wakes `/stream`.
+///
+/// When bound to an [`ActiveSourceGate`] and an owning [`TimerId`] (issue #112), the sink only
+/// appends while its timer is the **active source** — a hot-standby alternate's passes are dropped
+/// so the same crossing is never double-counted. An unbound sink (`gate`/`timer` `None`) always
+/// feeds, preserving the pre-#112 single-timer behaviour exactly.
 #[derive(Clone)]
 pub struct PassSink {
     state: AppState,
     adapter: AdapterId,
+    /// The active-source gate this sink is bound to (issue #112), or `None` for an always-feeding
+    /// sink (single-timer events / non-failover callers).
+    gate: Option<ActiveSourceGate>,
+    /// The timer this sink feeds for; appends pass the gate only while it is the active source.
+    timer: Option<TimerId>,
 }
 
 impl PassSink {
-    /// A sink over `state` tagging passes with `adapter`.
+    /// A sink over `state` tagging passes with `adapter`, **always feeding** (no active-source
+    /// gate). Used where a single source owns the heat or by callers that don't fail over.
     pub fn new(state: AppState, adapter: AdapterId) -> Self {
-        Self { state, adapter }
+        Self {
+            state,
+            adapter,
+            gate: None,
+            timer: None,
+        }
+    }
+
+    /// A sink bound to an [`ActiveSourceGate`] and its owning `timer` (issue #112): it appends only
+    /// while `timer` is the active source, so an alternate's passes are dropped (hot standby).
+    pub fn gated(
+        state: AppState,
+        adapter: AdapterId,
+        gate: ActiveSourceGate,
+        timer: TimerId,
+    ) -> Self {
+        Self {
+            state,
+            adapter,
+            gate: Some(gate),
+            timer: Some(timer),
+        }
+    }
+
+    /// Whether this sink may append right now: an unbound sink always may; a gated sink may only
+    /// while its owning timer is the active source (issue #112).
+    fn feeds(&self) -> bool {
+        match (&self.gate, &self.timer) {
+            (Some(gate), Some(timer)) => gate.is_active(timer),
+            _ => true,
+        }
     }
 
     /// Emit one lap-gate pass for `competitor` at race-relative time `at` (ms since the
@@ -117,6 +195,11 @@ impl PassSink {
         at: SourceTime,
         sequence: u64,
     ) -> Result<(), SourceError> {
+        // Issue #112: a hot-standby alternate's passes are dropped — only the active source feeds.
+        // The source still runs (stays armed/draining) so a failover to it lands instantly.
+        if !self.feeds() {
+            return Ok(());
+        }
         let pass = Event::Pass(Pass {
             adapter: self.adapter.clone(),
             competitor: competitor.clone(),
@@ -138,6 +221,11 @@ impl PassSink {
     /// them through [`emit`](Self::emit). Returns the resulting [`Offset`] on success.
     #[cfg(feature = "live")]
     pub(crate) fn append_event(&self, event: Event) -> Result<(), SourceError> {
+        // Issue #112: drop an alternate RH connection's passes while it is not the active source.
+        // The connection stays live (hot standby) — only its appends are gated here.
+        if !self.feeds() {
+            return Ok(());
+        }
         self.state
             .append(event, None)
             .map_err(|e| SourceError(format!("{e:?}")))?;
@@ -438,6 +526,17 @@ pub(crate) async fn run_bridge(
             }
         }
 
+        // Issue #112 — live failover: while a heat is running, re-evaluate the **active source**
+        // each poll from the event's current selection + the live timer statuses, and update the
+        // gate. A primary drop (its RH connection leaves `Connected`) hands the feed to the first
+        // healthy alternate; a primary recovery takes it back — all without touching the running
+        // sources (they keep emitting; the gate decides whose passes land).
+        if let Some(running) = &active {
+            if let Some(meta) = registry.meta_of(&event_id) {
+                running.gate.set(active_source(&meta, &timers));
+            }
+        }
+
         let new_events = match read_tail(&state, cursor) {
             Ok(batch) => batch,
             // A poisoned lock (or a dropped log at shutdown) ends the bridge cleanly.
@@ -485,21 +584,21 @@ fn selected_sources(
     registry: &EventRegistry,
     timers: &TimerRegistry,
     event_id: &EventId,
-) -> Vec<Arc<dyn LapSource>> {
+) -> Vec<(TimerId, Arc<dyn LapSource>)> {
     let Some(selection) = registry.timers_of(event_id) else {
         return Vec::new();
     };
-    let mut sources: Vec<Arc<dyn LapSource>> = Vec::new();
+    let mut sources: Vec<(TimerId, Arc<dyn LapSource>)> = Vec::new();
     for id in selection {
         let Some(timer) = timers.get(&id) else {
             continue;
         };
         match timer.kind {
             TimerKind::Mock { laps, lap_ms } => {
-                sources.push(Arc::new(SimSource::new(
-                    laps,
-                    Duration::from_millis(lap_ms),
-                )));
+                sources.push((
+                    id,
+                    Arc::new(SimSource::new(laps, Duration::from_millis(lap_ms))),
+                ));
             }
             // RotorHazard is driven through its persistent connection (#105), not a per-heat source.
             TimerKind::Rotorhazard { .. } => {}
@@ -564,11 +663,21 @@ fn handle_transition(
             if lineup.is_empty() {
                 return;
             }
-            // Resolve the event's selected Mock timers to the synthetic source(s) to run.
+            // Issue #112: the **active-source gate** — only the active source's passes feed the log
+            // (the primary while healthy, else the first healthy alternate). All selected timers
+            // still run (hot standby); the gate drops a non-active source's passes. It is seeded
+            // immediately so the very first pass is gated correctly, then re-evaluated each poll in
+            // `run_bridge` so a primary drop fails over mid-heat.
+            let gate = ActiveSourceGate::new();
+            if let Some(meta) = registry.meta_of(event_id) {
+                gate.set(active_source(&meta, timers));
+            }
+            // Resolve the event's selected Mock timers to the synthetic source(s) to run — each
+            // bound to a gated sink for its own timer id, so only the active one feeds.
             let sources = selected_sources(registry, timers, event_id);
             let mut handles = Vec::with_capacity(sources.len());
-            for source in sources {
-                let sink = PassSink::new(state.clone(), adapter.clone());
+            for (timer_id, source) in sources {
+                let sink = PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id);
                 let run = HeatRun {
                     heat: heat.clone(),
                     lineup: lineup.clone(),
@@ -581,12 +690,19 @@ fn handle_transition(
             }
             // Arm the heat onto each selected RotorHazard timer's already-live persistent connection
             // (#105): the connection stages the race + drains its passes into THIS event's log. This
-            // reuses the connection opened on selection rather than dialing per heat.
+            // reuses the connection opened on selection rather than dialing per heat. Each arming's
+            // sink is gated on its own timer id (issue #112) so an alternate RH connection stays live
+            // but its passes are dropped while it is not the active source.
             #[cfg(feature = "live")]
             let armed_rh = {
                 let mut armed = Vec::new();
                 for timer_id in selected_rh_timers(registry, timers, event_id) {
-                    let sink = PassSink::new(state.clone(), adapter.clone());
+                    let sink = PassSink::gated(
+                        state.clone(),
+                        adapter.clone(),
+                        gate.clone(),
+                        timer_id.clone(),
+                    );
                     if connections.arm_heat(event_id, &timer_id, lineup.clone(), sink) {
                         armed.push(timer_id);
                     }
@@ -603,6 +719,7 @@ fn handle_transition(
             *active = Some(ActiveHeat {
                 heat,
                 handles,
+                gate,
                 #[cfg(feature = "live")]
                 armed_rh,
             });
@@ -639,6 +756,10 @@ fn handle_transition(
 struct ActiveHeat {
     heat: HeatId,
     handles: Vec<JoinHandle<()>>,
+    /// The active-source gate for this heat (issue #112): the bridge re-evaluates the active source
+    /// each poll and stores it here, and every source's sink reads it to gate its appends — so only
+    /// the active source feeds and a primary drop fails over live.
+    gate: ActiveSourceGate,
     /// The RotorHazard timers armed onto their live connections for this heat, disarmed when the
     /// heat leaves `Running` (the connection stays alive).
     #[cfg(feature = "live")]
@@ -713,7 +834,9 @@ mod tests {
 
     use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
     use gridfpv_server::live_state::live_state;
-    use gridfpv_server::timers::{MOCK_TIMER_ID, TimerId, TimerKind, UpdateTimerRequest};
+    use gridfpv_server::timers::{
+        CreateTimerRequest, MOCK_TIMER_ID, TimerId, TimerKind, TimerStatus, UpdateTimerRequest,
+    };
     use tokio::time::{Instant, sleep, timeout};
 
     /// The Practice event id every bridge test drives (its in-memory log + default `["mock"]`
@@ -1098,5 +1221,149 @@ mod tests {
         // Seed 0 is the nominal pace; later seeds are slower (so the order isn't a tie).
         assert!(sim.pilot_lap(1) > sim.pilot_lap(0));
         assert!(sim.pilot_lap(2) > sim.pilot_lap(1));
+    }
+
+    // --- issue #112: primary/alternate roles + single-active-source feed + failover -------------
+
+    /// Create a second fast **Mock** timer in `registry` and return its id (a redundant timer for
+    /// the failover/double-count tests).
+    fn create_mock(registry: &EventRegistry, name: &str, laps: u32, lap_ms: u64) -> TimerId {
+        registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: name.into(),
+                kind: TimerKind::Mock { laps, lap_ms },
+            })
+            .unwrap()
+            .id
+    }
+
+    /// Drive a Running heat for `lineup` on Practice's log and return its `HeatId`.
+    fn start_heat(state: &AppState, lineup: Vec<CompetitorRef>) -> HeatId {
+        let heat = HeatId("q-1".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup,
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition: HeatTransition::Running,
+                },
+                None,
+            )
+            .unwrap();
+        heat
+    }
+
+    #[tokio::test]
+    async fn two_healthy_timers_feed_only_the_primary_no_double_count() {
+        // The double-count fix (issue #112): two redundant Mock timers at the same gate are BOTH
+        // healthy, but only the **primary** feeds the log — so the same crossing is counted once,
+        // not twice. Before #112 every selected timer fed, doubling every pass.
+        let laps = 3u32;
+        let registry = fast_registry(laps, 1);
+        let primary = TimerId(MOCK_TIMER_ID.to_string());
+        let alternate = create_mock(&registry, "Backup", laps, 1);
+        // Select both; the first (the built-in Mock) is the default primary.
+        registry
+            .set_timers(&practice(), vec![primary.clone(), alternate])
+            .unwrap();
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        start_heat(&state, vec![CompetitorRef("A".into())]);
+
+        // One pilot, holeshot + `laps` = laps+1 passes — for ONE timer, even though two are healthy.
+        let expected = laps as usize + 1;
+        timeout(
+            Duration::from_secs(5),
+            wait_until(&state, Duration::from_secs(5), move |events| {
+                count_passes(events) >= expected
+            }),
+        )
+        .await
+        .expect("the primary should emit all its passes");
+        // Settle past several poll/lap cycles and assert the count never exceeded one timer's worth.
+        sleep(POLL_INTERVAL * 4).await;
+        assert_eq!(
+            count_passes(&read_all_events(&state)),
+            expected,
+            "only the primary feeds — two healthy timers must NOT double-count"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn fails_over_to_alternate_when_the_primary_drops_mid_heat() {
+        // Primary = an RH timer (its health is the Director-driven connection status, toggled here),
+        // alternate = a fast Mock. While the RH primary is `Connected` it is the active source — but
+        // a non-`live` build has no RH connection feeding, so NO passes land (the Mock alternate is
+        // gated off, hot standby). Dropping the RH primary fails over to the Mock alternate, whose
+        // synthetic passes then take over — exactly the "primary RH drops → Mock alternate takes
+        // over" scenario, proven in-process without Docker.
+        let registry = EventRegistry::new(None).unwrap();
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+            })
+            .unwrap()
+            .id;
+        // A long, slow Mock so it is still mid-emission (passes left to feed) when the primary drops
+        // — a hot-standby alternate runs its emission in real time, so a failover only catches the
+        // passes that have yet to be emitted.
+        let mock = create_mock(&registry, "Backup Mock", 200, 30);
+        registry
+            .set_timers(&practice(), vec![rh.clone(), mock.clone()])
+            .unwrap();
+        registry
+            .set_primary_timer(&practice(), Some(rh.clone()))
+            .unwrap();
+        // Bring the RH primary "up" — it is the active source, so the Mock alternate is gated off.
+        registry.timers().set_status(&rh, TimerStatus::Connected);
+
+        let (bridge, state) = spawn_bridge_for(&registry);
+        start_heat(&state, vec![CompetitorRef("A".into())]);
+
+        // While the RH primary is healthy, no passes land (no in-process RH feed; Mock is standby).
+        sleep(POLL_INTERVAL * 2).await;
+        assert_eq!(
+            count_passes(&read_all_events(&state)),
+            0,
+            "the healthy RH primary is the active source; the Mock alternate must stay gated off"
+        );
+
+        // Drop the RH primary: the bridge re-evaluates each poll and fails over to the Mock
+        // alternate, whose passes now take over.
+        registry.timers().set_status(&rh, TimerStatus::Disconnected);
+        timeout(
+            Duration::from_secs(5),
+            wait_until(&state, Duration::from_secs(5), |events| {
+                count_passes(events) >= 2
+            }),
+        )
+        .await
+        .expect("the Mock alternate should take over once the RH primary drops");
+
+        // Recovery (primary-preferred): bring the RH back and assert the Mock stops feeding.
+        registry.timers().set_status(&rh, TimerStatus::Connected);
+        sleep(POLL_INTERVAL * 2).await;
+        let settled = count_passes(&read_all_events(&state));
+        sleep(POLL_INTERVAL * 4).await;
+        assert_eq!(
+            count_passes(&read_all_events(&state)),
+            settled,
+            "on primary recovery the active source switches back; the Mock alternate stops feeding"
+        );
+        bridge.abort();
     }
 }
