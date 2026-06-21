@@ -13,7 +13,6 @@
    * the cards are large, high-contrast tap targets ("readable in sunlight?" is the gate).
    */
   import { Card } from '@gridfpv/components';
-  import logoUrl from '../assets/logo.png';
   import type { Timer } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -72,7 +71,16 @@
 <div class="hub">
   <div class="hub-inner">
     <header class="head">
-      <img class="logo" src={logoUrl} alt="GridFPV" width="48" height="48" />
+      <svg class="brand-mark" viewBox="20 20 60 60" role="img" aria-label="GridFPV">
+        <path
+          d="M71 33 H40 Q31 33 31 42 V58 Q31 67 40 67 H60 Q69 67 69 58 V51 H53"
+          fill="none"
+          stroke="var(--gf-brand-500)"
+          stroke-width="10"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
       <div class="brand-text">
         <span class="name">GridFPV</span>
         <span class="kicker">Race Director Console</span>
@@ -178,12 +186,11 @@
     align-items: center;
     gap: var(--gf-space-4);
   }
-  .logo {
+  .brand-mark {
     display: block;
     flex-shrink: 0;
     width: 48px;
     height: 48px;
-    object-fit: contain;
   }
   .brand-text {
     display: flex;
