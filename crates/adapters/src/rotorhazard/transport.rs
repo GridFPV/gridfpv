@@ -156,6 +156,15 @@ impl RotorHazardConnection {
         self.client.emit("discard_laps", Payload::Text(vec![]))
     }
 
+    /// Probe that the socket is still live without driving the race (#105). Re-requests the current
+    /// per-node data — a cheap, idempotent server query the adapter's dedup makes side-effect-free —
+    /// so a quiet-but-healthy idle link confirms it is up, while a dropped socket surfaces an emit
+    /// error the caller can treat as a disconnect. Used by the persistent connection's monitor.
+    pub fn probe_liveness(&self) -> Result<(), rust_socketio::Error> {
+        self.client
+            .emit("load_data", json!({ "load_types": ["node_data"] }))
+    }
+
     /// Disconnect from the server.
     pub fn disconnect(self) -> Result<(), rust_socketio::Error> {
         self.client.disconnect()

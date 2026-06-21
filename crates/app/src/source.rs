@@ -59,9 +59,11 @@ use gridfpv_storage::Offset;
 use tokio::task::JoinHandle;
 
 #[cfg(feature = "live")]
+mod rh_connections;
+#[cfg(feature = "live")]
 mod rotorhazard;
 #[cfg(feature = "live")]
-pub use rotorhazard::RhSource;
+pub use rh_connections::{RhConnections, spawn_rh_reconciler};
 
 /// How often the bridge polls the log tail for new heat-loop events. Short enough that a
 /// `Start` click feels instant (the first pass lands within a poll), long enough to be a
@@ -343,6 +345,17 @@ pub fn spawn_registry_bridge(
     _source: SourceConfig,
     adapter: AdapterId,
 ) -> JoinHandle<()> {
+    // Under the `live` feature, also spawn the persistent RotorHazard connection reconciler (#105):
+    // the active event's selected RH timers connect on selection and stay connected (status
+    // monitored continuously), and a running heat arms onto that *already-live* connection rather
+    // than dialing per heat. The per-event bridge shares the resulting connection set so it can
+    // arm/disarm heats on the live connections. A non-`live` build keeps RH a no-op stub.
+    #[cfg(feature = "live")]
+    let connections = {
+        let (connections, _reconciler) = spawn_rh_reconciler(registry.clone());
+        connections
+    };
+
     let timers = registry.timers();
     tokio::spawn(async move {
         // The set of events that already have a bridge, so each event is attached exactly once.
@@ -359,8 +372,19 @@ pub fn spawn_registry_bridge(
                     let timers = timers.clone();
                     let adapter = adapter.clone();
                     let event_id = meta.id.clone();
+                    #[cfg(feature = "live")]
+                    let connections = connections.clone();
                     tokio::spawn(async move {
-                        run_bridge(state, registry, timers, event_id, adapter).await;
+                        run_bridge(
+                            state,
+                            registry,
+                            timers,
+                            event_id,
+                            adapter,
+                            #[cfg(feature = "live")]
+                            connections,
+                        )
+                        .await;
                     });
                     attached.insert(meta.id);
                 }
@@ -384,6 +408,7 @@ pub(crate) async fn run_bridge(
     timers: TimerRegistry,
     event_id: EventId,
     adapter: AdapterId,
+    #[cfg(feature = "live")] connections: RhConnections,
 ) {
     let mut cursor: Offset = 0;
     // The in-flight heat task, if a heat is currently emitting. At most one at a time.
@@ -394,9 +419,21 @@ pub(crate) async fn run_bridge(
         ticker.tick().await;
 
         // Reap a finished/cancelled source task so a heat that ran to the end clears the
-        // slot (without it, a re-Start of the same heat would be ignored).
+        // slot (without it, a re-Start of the same heat would be ignored). A heat with an armed
+        // RotorHazard connection is NOT reaped on the Mock tasks finishing — the live connection
+        // keeps draining real passes until the heat leaves `Running` (it is disarmed there).
         if let Some(running) = &active {
-            if running.is_finished() {
+            let has_armed_rh = {
+                #[cfg(feature = "live")]
+                {
+                    !running.armed_rh.is_empty()
+                }
+                #[cfg(not(feature = "live"))]
+                {
+                    false
+                }
+            };
+            if running.is_finished() && !has_armed_rh {
                 active = None;
             }
         }
@@ -423,6 +460,8 @@ pub(crate) async fn run_bridge(
                     &event_id,
                     &adapter,
                     &mut active,
+                    #[cfg(feature = "live")]
+                    &connections,
                     heat,
                     transition,
                 );
@@ -431,17 +470,17 @@ pub(crate) async fn run_bridge(
     }
 }
 
-/// Resolve the event's selected timers into the [`LapSource`]s to run for this heat (issues #73,
-/// #65).
+/// Resolve the event's selected **Mock** timers into the [`SimSource`]s to run for this heat
+/// (issues #73, #105).
 ///
 /// Reads the event's current `timers` selection from `registry`, looks each id up in the app-level
 /// `timers` registry, and maps each **Mock** timer to a [`SimSource`] with that timer's
-/// `laps`/`lap_ms`. A selected **RotorHazard** timer maps to a live [`RhSource`] (under the `live`
-/// feature) that connects to its `url`, drives the race, feeds RH passes into the event log, and
-/// updates that timer's connection [`TimerStatus`](gridfpv_server::timers::TimerStatus) as it goes;
-/// in a **non-`live`** build a RotorHazard timer is a no-op stub (skipped). An id that no longer
-/// resolves (a since-deleted timer) is skipped too. Returns the sources to drive concurrently for
-/// the running heat — empty when the event selects no usable timer.
+/// `laps`/`lap_ms`. A selected **RotorHazard** timer is *not* a per-heat source here — under the
+/// `live` feature it is driven through its **persistent connection** (#105): the heat is armed onto
+/// the already-live connection (see [`selected_rh_timers`] + [`handle_transition`]) rather than a
+/// new socket dialed each heat. In a **non-`live`** build a RotorHazard timer is a no-op stub. An id
+/// that no longer resolves (a since-deleted timer) is skipped. Returns the synthetic sources to
+/// drive concurrently for the running heat — empty when the event selects no usable Mock timer.
 fn selected_sources(
     registry: &EventRegistry,
     timers: &TimerRegistry,
@@ -462,15 +501,34 @@ fn selected_sources(
                     Duration::from_millis(lap_ms),
                 )));
             }
-            // A live build connects the real RotorHazard; the default build keeps it a no-op stub.
-            TimerKind::Rotorhazard { url } => {
-                let _ = (&id, &url);
-                #[cfg(feature = "live")]
-                sources.push(Arc::new(RhSource::new(id, url, timers.clone())));
-            }
+            // RotorHazard is driven through its persistent connection (#105), not a per-heat source.
+            TimerKind::Rotorhazard { .. } => {}
         }
     }
     sources
+}
+
+/// The event's selected **RotorHazard** timer ids (issue #105) — the timers a running heat arms onto
+/// their already-live persistent connections (race driving decoupled from connecting). An id that no
+/// longer resolves, or is not a RotorHazard timer, is skipped.
+#[cfg(feature = "live")]
+fn selected_rh_timers(
+    registry: &EventRegistry,
+    timers: &TimerRegistry,
+    event_id: &EventId,
+) -> Vec<gridfpv_server::timers::TimerId> {
+    let Some(selection) = registry.timers_of(event_id) else {
+        return Vec::new();
+    };
+    selection
+        .into_iter()
+        .filter(|id| {
+            matches!(
+                timers.get(id).map(|t| t.kind),
+                Some(TimerKind::Rotorhazard { .. })
+            )
+        })
+        .collect()
 }
 
 /// React to a heat-loop transition: start emitting from the event's selected timers on `Running`,
@@ -483,6 +541,7 @@ fn handle_transition(
     event_id: &EventId,
     adapter: &AdapterId,
     active: &mut Option<ActiveHeat>,
+    #[cfg(feature = "live")] connections: &RhConnections,
     heat: HeatId,
     transition: HeatTransition,
 ) {
@@ -491,7 +550,12 @@ fn handle_transition(
             // A different heat taking the timer cancels the previous one (only one heat
             // emits at a time). Re-running the *same* heat also restarts cleanly.
             if let Some(running) = active.take() {
-                running.abort();
+                running.stop(
+                    #[cfg(feature = "live")]
+                    connections,
+                    #[cfg(feature = "live")]
+                    event_id,
+                );
             }
             let Some(lineup) = lineup_of(state, &heat) else {
                 // No HeatScheduled for this heat (or the log read failed): nothing to emit.
@@ -500,8 +564,7 @@ fn handle_transition(
             if lineup.is_empty() {
                 return;
             }
-            // Resolve the event's selected timers to the source(s) to run. With no usable timer
-            // selected (e.g. only a RotorHazard stub, or nothing) the heat emits nothing.
+            // Resolve the event's selected Mock timers to the synthetic source(s) to run.
             let sources = selected_sources(registry, timers, event_id);
             let mut handles = Vec::with_capacity(sources.len());
             for source in sources {
@@ -516,10 +579,33 @@ fn handle_transition(
                     }
                 }));
             }
-            if handles.is_empty() {
+            // Arm the heat onto each selected RotorHazard timer's already-live persistent connection
+            // (#105): the connection stages the race + drains its passes into THIS event's log. This
+            // reuses the connection opened on selection rather than dialing per heat.
+            #[cfg(feature = "live")]
+            let armed_rh = {
+                let mut armed = Vec::new();
+                for timer_id in selected_rh_timers(registry, timers, event_id) {
+                    let sink = PassSink::new(state.clone(), adapter.clone());
+                    if connections.arm_heat(event_id, &timer_id, lineup.clone(), sink) {
+                        armed.push(timer_id);
+                    }
+                }
+                armed
+            };
+            #[cfg(feature = "live")]
+            let nothing_armed = armed_rh.is_empty();
+            #[cfg(not(feature = "live"))]
+            let nothing_armed = true;
+            if handles.is_empty() && nothing_armed {
                 return;
             }
-            *active = Some(ActiveHeat { heat, handles });
+            *active = Some(ActiveHeat {
+                heat,
+                handles,
+                #[cfg(feature = "live")]
+                armed_rh,
+            });
         }
         // Any transition that takes the heat off `Running` stops its emission. The bridge
         // only emits while `Running`, mirroring `consumes_pass` (race-engine §2).
@@ -532,7 +618,12 @@ fn handle_transition(
             if let Some(running) = active.as_ref() {
                 if running.heat == heat {
                     if let Some(running) = active.take() {
-                        running.abort();
+                        running.stop(
+                            #[cfg(feature = "live")]
+                            connections,
+                            #[cfg(feature = "live")]
+                            event_id,
+                        );
                     }
                 }
             }
@@ -542,23 +633,40 @@ fn handle_transition(
     }
 }
 
-/// A heat currently emitting passes: which heat, and the task(s) driving its selected timer
-/// source(s) (issue #73 — an event may select several timers running concurrently).
+/// A heat currently emitting passes: which heat, the synthetic-source task(s) driving its selected
+/// **Mock** timers (issue #73 — an event may select several), and (under `live`) the selected
+/// **RotorHazard** timers armed onto their persistent connections for this heat (#105).
 struct ActiveHeat {
     heat: HeatId,
     handles: Vec<JoinHandle<()>>,
+    /// The RotorHazard timers armed onto their live connections for this heat, disarmed when the
+    /// heat leaves `Running` (the connection stays alive).
+    #[cfg(feature = "live")]
+    armed_rh: Vec<gridfpv_server::timers::TimerId>,
 }
 
 impl ActiveHeat {
-    /// Whether every source task has finished — the slot can be reaped.
+    /// Whether every synthetic-source task has finished — the slot can be reaped. RotorHazard
+    /// connections are persistent (not per-heat tasks), so they don't gate reaping; a finished
+    /// Mock run still leaves any armed RH connection live until the heat leaves `Running`.
     fn is_finished(&self) -> bool {
         self.handles.iter().all(|h| h.is_finished())
     }
 
-    /// Cancel every in-flight source task (a heat going off `Running`, or superseded).
-    fn abort(&self) {
+    /// Stop this heat's emission: abort every in-flight Mock source task, and **disarm** each armed
+    /// RotorHazard timer (stop/clear its race but keep the connection alive). Called when the heat
+    /// leaves `Running` or is superseded by a newer running heat.
+    fn stop(
+        &self,
+        #[cfg(feature = "live")] connections: &RhConnections,
+        #[cfg(feature = "live")] event_id: &EventId,
+    ) {
         for h in &self.handles {
             h.abort();
+        }
+        #[cfg(feature = "live")]
+        for timer_id in &self.armed_rh {
+            connections.disarm(event_id, timer_id);
         }
     }
 }
@@ -642,8 +750,19 @@ mod tests {
         let adapter = AdapterId(SIM_ADAPTER.to_string());
         let reg = registry.clone();
         let bridge_state = state.clone();
+        #[cfg(feature = "live")]
+        let connections = RhConnections::new();
         let handle = tokio::spawn(async move {
-            run_bridge(bridge_state, reg, timers, practice(), adapter).await
+            run_bridge(
+                bridge_state,
+                reg,
+                timers,
+                practice(),
+                adapter,
+                #[cfg(feature = "live")]
+                connections,
+            )
+            .await
         });
         (handle, state)
     }

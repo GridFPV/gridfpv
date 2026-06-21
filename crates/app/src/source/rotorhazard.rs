@@ -1,241 +1,333 @@
-//! The live **RotorHazard lap source** (#65, Slice 2b) — only compiled under `--features live`.
+//! The live **RotorHazard connection layer** (#65, #105) — only compiled under `--features live`.
 //!
-//! This is the real counterpart to the [`SimSource`](super::SimSource): when an event selects a
-//! [`Rotorhazard { url }`](gridfpv_server::timers::TimerKind::Rotorhazard) timer and a heat goes
-//! `Running`, the per-event bridge ([`run_bridge`](super::run_bridge)) drives an [`RhSource`] for
-//! it, exactly as it drives a `SimSource` for a Mock timer. The `RhSource`:
+//! A RotorHazard timer **connects when it is selected for the active event and stays connected**,
+//! so the Director monitors its live link continuously and a drop-off is visible *before and
+//! between* races — not only while a heat runs (#105). The earlier slice (#65) connected an RH
+//! timer only for the duration of a `Running` heat and tore the socket down when the heat left
+//! `Running`; that meant a selected-but-idle timer read `Configured` and a drop could not surface
+//! until a race was underway.
 //!
-//! 1. **Connects** to the RH server at `url` through the adapters crate's feature-gated
-//!    [`RotorHazardConnection`] (a Socket.IO transport behind the pure
-//!    [`RotorHazardAdapter`](gridfpv_adapters::rotorhazard::RotorHazardAdapter) translator).
-//! 2. **Drives the race**: resets RH to a clean state, stages it, then polls the connection's
-//!    translated [`Event`] stream and **feeds the passes into the event's log** (the same log the
-//!    Mock bridge appends to, so `/stream` wakes and the console animates). RH node seats
-//!    (`node-0`, `node-1`, …) are remapped onto the running heat's lineup by index, so passes
-//!    attribute to the heat's actual competitors.
-//! 3. **Tears down** on cancellation — when the heat leaves `Running` the bridge drops this
-//!    future; a cancel flag tells the driver thread to stop the RH race and disconnect.
+//! This module splits that responsibility into two pieces:
 //!
-//! Throughout, it updates the timer's **live connection status** in the
-//! [`TimerRegistry`](gridfpv_server::timers::TimerRegistry):
-//! [`Connecting`](gridfpv_server::timers::TimerStatus::Connecting) →
-//! [`Connected`](gridfpv_server::timers::TimerStatus::Connected) →
-//! [`Disconnected`](gridfpv_server::timers::TimerStatus::Disconnected) (clean teardown) or
-//! [`Error`](gridfpv_server::timers::TimerStatus::Error) (the connect failed). A fresh `GET /timers`
-//! reflects the current value, so the console can poll a drop-off.
+//! 1. **The persistent connection** ([`RhConnection`]). One per *(active event, RH timer)* pair.
+//!    A dedicated [`spawn_blocking`](tokio::task::spawn_blocking) driver thread connects to the RH
+//!    server, drives the timer's [`TimerStatus`](gridfpv_server::timers::TimerStatus) through its
+//!    lifecycle (`Connecting → Connected`), then **loops maintaining and monitoring** the link:
+//!    on a drop it sets `Disconnected`/`Error` and **reconnects with backoff**, updating the status
+//!    across attempts. While connected it continuously drains the translated event stream — when a
+//!    heat is "armed" on the connection (see below) it appends the translated passes (remapped onto
+//!    the heat lineup) into the event log; otherwise it discards them (idle monitoring). On cancel
+//!    (the timer is deselected, the active event changes, or the Director shuts down) it stops any
+//!    running race, disconnects, and leaves the timer [`Disconnected`].
+//!
+//! 2. **Race driving, decoupled from the connection.** A running heat does **not** open a socket
+//!    of its own — it *uses the already-live connection*. When a heat enters `Running` the bridge
+//!    [arms](RhConnection::arm_heat) the heat on each selected RH connection (stage the RH race +
+//!    remap its node seats onto the heat lineup); the driver thread then routes drained passes into
+//!    the event log. When the heat leaves `Running` the bridge [disarms](RhConnection::disarm) it —
+//!    the race is stopped/cleared but the **connection stays alive** (and keeps reporting status).
 //!
 //! # Why a dedicated driver thread
 //!
 //! The RotorHazard transport's emit/poll are **blocking** — they `block_on` an internal runtime —
 //! so they must never run on a tokio worker thread (that panics). The entire connection lifecycle
-//! (connect → reset → stage → drain → stop → disconnect) therefore runs on one dedicated
-//! [`spawn_blocking`](tokio::task::spawn_blocking) thread; the async `run_heat` future only awaits
-//! it and flips a shared **cancel flag** when the bridge drops it. The driver checks that flag each
-//! loop and tears down cleanly on its own thread, so an aborted future never emits on the runtime.
+//! (connect → monitor → reconnect → stage → drain → stop → disconnect) therefore runs on one
+//! dedicated `spawn_blocking` thread; the async side only holds a handle that flips shared atomics
+//! (a cancel flag, and an "armed heat" slot). The driver checks those each loop and reacts on its
+//! own thread, so nothing ever emits on a tokio worker.
 
-use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gridfpv_adapters::rotorhazard::RotorHazardAdapter;
 use gridfpv_adapters::rotorhazard::transport::RotorHazardConnection;
 use gridfpv_events::{AdapterId, CompetitorRef, Event};
 use gridfpv_server::timers::{TimerId, TimerRegistry, TimerStatus};
+use tokio::task::JoinHandle;
 
-use super::{HeatRun, LapSource, PassSink, SourceError};
+use super::PassSink;
 
-/// How often the driver thread drains the RotorHazard connection's translated-event queue and
-/// appends any new passes to the log.
+/// How often the driver thread drains the RotorHazard connection's translated-event queue.
 const DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 
-/// How long to wait, after staging, for the RH race to reach RACING before giving up on the wait
-/// (the drain loop still runs regardless — this only bounds the staging settle).
+/// How long to wait, after staging an armed heat, for the RH race to reach RACING before giving up
+/// on the wait (the drain loop still runs regardless — this only bounds the staging settle).
 const STAGE_SETTLE: Duration = Duration::from_secs(15);
 
-/// A live RotorHazard lap source (feature `live`): connects to one RH server and feeds its passes
-/// into the running heat's log, maintaining the timer's connection status. See the [module
-/// docs](self).
-pub struct RhSource {
-    /// The selected timer's id — the handle whose [`TimerStatus`] this source drives.
-    timer_id: TimerId,
-    /// The RH server base URL to dial (e.g. `http://rotorhazard.local:5000`).
-    url: String,
-    /// The app-level timer registry, so the source can publish its live connection status.
-    timers: TimerRegistry,
+/// The minimum backoff between reconnect attempts after a dropped/failed connection.
+const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(500);
+
+/// The maximum backoff between reconnect attempts (the backoff doubles up to this ceiling).
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+/// How long the connection can drain no events before it probes liveness with a fresh `load_data`.
+/// RH pushes asynchronously, so a healthy idle link is silent; the probe distinguishes "idle" from
+/// "dropped" without depending on transport-level disconnect callbacks.
+const IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// A heat armed onto a live RH connection: the lineup its node seats remap onto, and a flag the
+/// driver flips once it has staged the RH race for this arming (so a re-drain doesn't re-stage).
+struct ArmedHeat {
+    /// The running heat's lineup, in seeding order; node `n`'s passes attribute to `lineup[n]`.
+    lineup: Vec<CompetitorRef>,
+    /// The sink (the event's log) translated passes are appended through while armed.
+    sink: PassSink,
+    /// Set by the driver once it has staged the RH race for this arming.
+    staged: bool,
 }
 
-impl RhSource {
-    /// A live RH source for `timer_id` pointed at `url`, publishing status through `timers`.
-    pub fn new(timer_id: TimerId, url: String, timers: TimerRegistry) -> Self {
+/// One persistent live RotorHazard connection for a *(active event, RH timer)* pair (#105).
+///
+/// Owns a dedicated `spawn_blocking` driver thread that connects on construction, maintains and
+/// monitors the link (reconnecting with backoff on a drop), and drives a race onto the *existing*
+/// connection when a heat is armed. The async handle here only flips shared atomics the driver
+/// observes; dropping/[`cancel`](Self::cancel)ling it tears the connection down on the driver
+/// thread.
+pub struct RhConnection {
+    /// The cancel flag the driver polls; flipped on [`cancel`](Self::cancel) / drop.
+    cancel: Arc<AtomicBool>,
+    /// The armed-heat slot: `Some` while a heat is racing on this connection, else `None`.
+    armed: Arc<Mutex<Option<ArmedHeat>>>,
+    /// The driver thread's join handle, held so the spawned task is owned by this connection;
+    /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
+    /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
+    _driver: JoinHandle<()>,
+}
+
+impl RhConnection {
+    /// Open a persistent connection for `timer_id` at `url`, publishing status through `timers`.
+    ///
+    /// Spawns the driver thread immediately: it sets the timer `Connecting`, connects, then
+    /// `Connected`, and loops maintaining the link. The connection is idle (monitoring only) until
+    /// a heat is [armed](Self::arm_heat) onto it.
+    pub fn open(timer_id: TimerId, url: String, timers: TimerRegistry) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let armed: Arc<Mutex<Option<ArmedHeat>>> = Arc::new(Mutex::new(None));
+        let driver = {
+            let cancel = cancel.clone();
+            let armed = armed.clone();
+            tokio::task::spawn_blocking(move || {
+                drive(url, timer_id, timers, cancel, armed);
+            })
+        };
         Self {
-            timer_id,
-            url,
-            timers,
+            cancel,
+            armed,
+            _driver: driver,
         }
     }
 
-    /// The RH node index `node-{n}` encodes, if any. Passes from the adapter carry the stable node
-    /// seat handle; we remap it onto the running heat's lineup by this index.
-    fn node_index(competitor: &CompetitorRef) -> Option<usize> {
-        competitor.0.strip_prefix("node-")?.parse().ok()
+    /// Arm a running heat onto this live connection: the driver stages the RH race and routes its
+    /// translated passes (remapped onto `lineup`) into `sink`'s log. Replaces any previously armed
+    /// heat (a newer running heat supersedes the prior one).
+    pub fn arm_heat(&self, lineup: Vec<CompetitorRef>, sink: PassSink) {
+        let mut slot = self.armed.lock().expect("armed-heat lock poisoned");
+        *slot = Some(ArmedHeat {
+            lineup,
+            sink,
+            staged: false,
+        });
     }
 
-    /// Remap one canonical RH [`Event`] onto the heat's lineup and this source's adapter id, or
-    /// `None` to drop it. Only [`Event::Pass`]es feed the lap projection here; a pass on node `n`
-    /// is attributed to `lineup[n]` (its actual competitor) and re-stamped with `adapter`. Passes
-    /// for a node outside the lineup (an idle seat) are dropped. The adapter's lifecycle /
-    /// `CompetitorSeen` events are not appended — the heat's lineup is already established by the
-    /// control path, and the bridge owns the heat lifecycle.
-    fn remap(event: Event, lineup: &[CompetitorRef], adapter: &AdapterId) -> Option<Event> {
-        match event {
-            Event::Pass(mut pass) => {
-                let index = Self::node_index(&pass.competitor)?;
-                let competitor = lineup.get(index)?.clone();
-                pass.adapter = adapter.clone();
-                pass.competitor = competitor;
-                Some(Event::Pass(pass))
-            }
-            _ => None,
+    /// Disarm the current heat (it left `Running`): the driver stops/clears the RH race but the
+    /// **connection stays alive** (and keeps reporting status). A no-op if nothing is armed.
+    pub fn disarm(&self) {
+        let mut slot = self.armed.lock().expect("armed-heat lock poisoned");
+        *slot = None;
+    }
+
+    /// Tear the connection down: stop any race, disconnect, leave the timer `Disconnected`. Called
+    /// when the timer is deselected, the active event changes, or the Director shuts down.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for RhConnection {
+    fn drop(&mut self) {
+        // A dropped connection (the reconcile map removed it) must still tear down on its thread.
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The RH node index `node-{n}` encodes, if any. Passes from the adapter carry the stable node seat
+/// handle; we remap it onto the running heat's lineup by this index.
+fn node_index(competitor: &CompetitorRef) -> Option<usize> {
+    competitor.0.strip_prefix("node-")?.parse().ok()
+}
+
+/// Remap one canonical RH [`Event`] onto the heat's lineup and the source adapter id, or `None` to
+/// drop it. Only [`Event::Pass`]es feed the lap projection; a pass on node `n` is attributed to
+/// `lineup[n]` and re-stamped with `adapter`. Passes for a node outside the lineup (an idle seat)
+/// are dropped, as are the adapter's lifecycle / `CompetitorSeen` events (the heat lineup is already
+/// established by the control path).
+fn remap(event: Event, lineup: &[CompetitorRef], adapter: &AdapterId) -> Option<Event> {
+    match event {
+        Event::Pass(mut pass) => {
+            let index = node_index(&pass.competitor)?;
+            let competitor = lineup.get(index)?.clone();
+            pass.adapter = adapter.clone();
+            pass.competitor = competitor;
+            Some(Event::Pass(pass))
         }
+        _ => None,
     }
+}
 
-    /// The blocking driver: the whole connection lifecycle on one dedicated thread (see the module
-    /// docs on why this must not run on a tokio worker). Runs until `cancel` is set, then tears
-    /// the connection down and marks the timer `Disconnected`. Returns the last error, if any.
-    fn drive(
-        url: String,
-        timer_id: TimerId,
-        timers: TimerRegistry,
-        sink: PassSink,
-        lineup: Vec<CompetitorRef>,
-        cancel: Arc<AtomicBool>,
-    ) -> Result<(), SourceError> {
+/// The persistent driver: connect → `Connected` → maintain/monitor → reconnect on drop, until
+/// cancelled, then disconnect and leave `Disconnected` (#105). Runs on a dedicated blocking thread.
+fn drive(
+    url: String,
+    timer_id: TimerId,
+    timers: TimerRegistry,
+    cancel: Arc<AtomicBool>,
+    armed: Arc<Mutex<Option<ArmedHeat>>>,
+) {
+    let mut backoff = RECONNECT_BACKOFF_MIN;
+    while !cancel.load(Ordering::Relaxed) {
         timers.set_status(&timer_id, TimerStatus::Connecting);
-
         let conn = match RotorHazardConnection::connect(&url, RotorHazardAdapter::new()) {
             Ok(conn) => conn,
             Err(e) => {
+                // The connect attempt failed: surface Error, back off, and retry (unless cancelled).
+                eprintln!(
+                    "gridfpv: RotorHazard connect failed for {:?}: {e}",
+                    timer_id.0
+                );
                 timers.set_status(&timer_id, TimerStatus::Error);
-                return Err(SourceError(format!("RotorHazard connect failed: {e}")));
+                if sleep_unless_cancelled(backoff, &cancel) {
+                    break;
+                }
+                backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                continue;
             }
         };
         timers.set_status(&timer_id, TimerStatus::Connected);
+        backoff = RECONNECT_BACKOFF_MIN;
 
-        // From here the connection is up: whatever happens, leave the timer Disconnected and stop
-        // the RH race on the way out.
-        let result = Self::drive_connected(&conn, &sink, &lineup, &cancel);
+        // Maintain the live link until it drops or we are cancelled.
+        let dropped = maintain(&conn, &cancel, &armed);
 
+        // Stop any in-flight race and disconnect cleanly on the way out of this connection.
         conn.stop_race().ok();
         conn.disconnect().ok();
-        timers.set_status(&timer_id, TimerStatus::Disconnected);
-        result
-    }
 
-    /// The connected phase: reset → stage → drain passes into the log until cancelled.
-    fn drive_connected(
-        conn: &RotorHazardConnection,
-        sink: &PassSink,
-        lineup: &[CompetitorRef],
-        cancel: &AtomicBool,
-    ) -> Result<(), SourceError> {
-        // Reset RH to a clean READY state (a prior DONE race blocks staging), drop the reset-era
-        // event churn, then stage (RH auto-starts).
-        conn.stop_race().ok();
-        conn.discard_laps().ok();
-        Self::sleep_unless_cancelled(Duration::from_millis(400), cancel);
-        let _ = conn.events();
         if cancel.load(Ordering::Relaxed) {
-            return Ok(());
+            break;
         }
-        let _ = conn.stage_race();
-
-        // Wait (bounded) for RACING so the first passes are real race passes, but keep draining
-        // throughout so nothing is dropped while we wait.
-        let adapter = sink.adapter().clone();
-        let deadline = Instant::now() + STAGE_SETTLE;
-        let mut started = false;
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            for event in conn.events() {
-                if matches!(event, Event::SessionStarted { .. }) {
-                    started = true;
-                }
-                if let Some(remapped) = Self::remap(event, lineup, &adapter) {
-                    sink.append_event(remapped)?;
-                }
-            }
-            if started || Instant::now() >= deadline {
+        // The link dropped (not a cancel): mark Disconnected and reconnect after a short backoff.
+        if dropped {
+            eprintln!(
+                "gridfpv: RotorHazard connection lost for {:?}; reconnecting",
+                timer_id.0
+            );
+            timers.set_status(&timer_id, TimerStatus::Disconnected);
+            if sleep_unless_cancelled(backoff, &cancel) {
                 break;
             }
-            Self::sleep_unless_cancelled(DRAIN_INTERVAL, cancel);
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+        }
+    }
+    // Cancelled: leave the timer Disconnected (deselected / event changed / shutdown).
+    timers.set_status(&timer_id, TimerStatus::Disconnected);
+}
+
+/// Maintain one established connection: drain translated events each tick (routing passes into the
+/// armed heat's log, or discarding them while idle), stage a freshly-armed heat, and probe liveness
+/// when idle. Returns `true` if the link appears to have **dropped** (so the caller reconnects),
+/// `false` if it exited because of cancellation.
+fn maintain(
+    conn: &RotorHazardConnection,
+    cancel: &AtomicBool,
+    armed: &Mutex<Option<ArmedHeat>>,
+) -> bool {
+    let mut last_activity = Instant::now();
+    let mut probed_since_activity = false;
+    let mut stage_deadline: Option<Instant> = None;
+
+    while !cancel.load(Ordering::Relaxed) {
+        // Stage a freshly-armed heat once (reset RH to a clean READY state, then stage; RH
+        // auto-starts). Done lazily here so staging happens on the driver thread, not the caller.
+        let mut just_staged = false;
+        {
+            let mut slot = armed.lock().expect("armed-heat lock poisoned");
+            if let Some(heat) = slot.as_mut() {
+                if !heat.staged {
+                    conn.stop_race().ok();
+                    conn.discard_laps().ok();
+                    // Drop the reset-era event churn so it isn't remapped as race passes.
+                    let _ = conn.events();
+                    if conn.stage_race().is_err() {
+                        // A failed emit on a supposedly-live socket signals a drop.
+                        return true;
+                    }
+                    heat.staged = true;
+                    just_staged = true;
+                    stage_deadline = Some(Instant::now() + STAGE_SETTLE);
+                }
+            } else {
+                // Nothing armed: clear any stale stage wait.
+                stage_deadline = None;
+            }
+        }
+        if just_staged {
+            last_activity = Instant::now();
+            probed_since_activity = false;
         }
 
-        // Steady-state drain until the bridge cancels us (the heat left Running).
-        while !cancel.load(Ordering::Relaxed) {
-            for event in conn.events() {
-                if let Some(remapped) = Self::remap(event, lineup, &adapter) {
-                    sink.append_event(remapped)?;
+        // Drain whatever the transport has translated since the last tick.
+        let drained = conn.events();
+        if !drained.is_empty() {
+            last_activity = Instant::now();
+            probed_since_activity = false;
+            let mut slot = armed.lock().expect("armed-heat lock poisoned");
+            if let Some(heat) = slot.as_mut() {
+                let adapter = heat.sink.adapter().clone();
+                let mut saw_start = false;
+                for event in drained {
+                    if matches!(event, Event::SessionStarted { .. }) {
+                        saw_start = true;
+                    }
+                    if let Some(remapped) = remap(event, &heat.lineup, &adapter) {
+                        if heat.sink.append_event(remapped).is_err() {
+                            // The log went away (event dropped at shutdown): stop draining.
+                            return false;
+                        }
+                    }
+                }
+                if saw_start {
+                    stage_deadline = None;
                 }
             }
-            Self::sleep_unless_cancelled(DRAIN_INTERVAL, cancel);
-        }
-        Ok(())
-    }
-
-    /// Sleep `dur`, but wake early (in short slices) if `cancel` flips, so teardown is prompt.
-    fn sleep_unless_cancelled(dur: Duration, cancel: &AtomicBool) {
-        let deadline = Instant::now() + dur;
-        while Instant::now() < deadline {
-            if cancel.load(Ordering::Relaxed) {
-                return;
+            // While idle (nothing armed) the drained events are monitoring-only and discarded.
+        } else if stage_deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+            // Gave up waiting for RACING after staging; keep draining steady-state.
+            stage_deadline = None;
+        } else if last_activity.elapsed() >= IDLE_PROBE_INTERVAL && !probed_since_activity {
+            // A quiet link: probe liveness once. A failed emit means the socket has dropped.
+            if conn.probe_liveness().is_err() {
+                return true;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            probed_since_activity = true;
+        }
+
+        if sleep_unless_cancelled(DRAIN_INTERVAL, cancel) {
+            return false;
         }
     }
+    false
 }
 
-impl LapSource for RhSource {
-    fn run_heat(
-        &self,
-        run: HeatRun,
-        sink: PassSink,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), SourceError>> + Send>> {
-        let timer_id = self.timer_id.clone();
-        let url = self.url.clone();
-        let timers = self.timers.clone();
-        Box::pin(async move {
-            // A shared cancel flag: the driver runs on a blocking thread; this future flips the
-            // flag when it is dropped (the bridge aborts it on the heat leaving Running) so the
-            // driver tears down on its own thread — never emitting on a tokio worker.
-            let cancel = Arc::new(AtomicBool::new(false));
-            let _guard = CancelOnDrop(cancel.clone());
-
-            let lineup = run.lineup.clone();
-            let driver = tokio::task::spawn_blocking(move || {
-                Self::drive(url, timer_id, timers, sink, lineup, cancel)
-            });
-
-            // Await the driver. If THIS future is dropped (cancelled), `_guard` flips the flag and
-            // the detached driver thread tears down cleanly; we simply never observe its result.
-            match driver.await {
-                Ok(result) => result,
-                Err(join) => Err(SourceError(format!(
-                    "RotorHazard driver task failed: {join}"
-                ))),
-            }
-        })
+/// Sleep `dur`, but wake early (in short slices) if `cancel` flips. Returns `true` if it woke
+/// because of cancellation (so callers can stop promptly), `false` if it slept the full duration.
+fn sleep_unless_cancelled(dur: Duration, cancel: &AtomicBool) -> bool {
+    let deadline = Instant::now() + dur;
+    while Instant::now() < deadline {
+        if cancel.load(Ordering::Relaxed) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-}
-
-/// Flips a cancel flag when dropped — the async future's hook to stop the blocking driver thread
-/// on cancellation (the bridge aborting the heat task) without emitting on the runtime.
-struct CancelOnDrop(Arc<AtomicBool>);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
+    cancel.load(Ordering::Relaxed)
 }
