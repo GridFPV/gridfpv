@@ -21,10 +21,13 @@ import type {
   ActiveEvent,
   ChangeEnvelope,
   CreateEventRequest,
+  CreatePilotRequest,
   CreateTimerRequest,
   Cursor,
   EventId,
   EventMeta,
+  Pilot,
+  PilotId,
   ProjectionBody,
   ProtocolError,
   Scope,
@@ -32,6 +35,7 @@ import type {
   SubscribeRequest,
   Timer,
   TimerId,
+  UpdatePilotRequest,
   UpdateTimerRequest
 } from '@gridfpv/types';
 
@@ -445,6 +449,178 @@ export async function setPrimaryTimer(
     body: JSON.stringify({ id })
   });
   if (!resp.ok) throw new Error(`PUT /events/${eventId}/primary-timer failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta;
+}
+
+/**
+ * List every pilot in the directory (`GET /pilots`) — issue #74. Pilots are **application-level
+ * configuration**: the RD maintains a directory once (a persisted address book) and each event
+ * rosters which pilots race it. Reads are open on the LAN (no token needed; an optional token is
+ * sent when present). Resolves to the {@link Pilot}s (in id order), or rejects on a transport/HTTP
+ * failure.
+ */
+export async function listPilots(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<Pilot[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots`, { headers });
+  if (!resp.ok) throw new Error(`GET /pilots failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Pilot[];
+}
+
+/**
+ * Create a pilot (`POST /pilots`) — issue #74. RD-gated (full-trust by default). The body's
+ * `callsign` is required; everything else (`name`, `vtx_type`, `multigp_id`, `velocidrone_id`) is
+ * optional. The id is auto-generated server-side. Resolves to the new {@link Pilot}, or rejects on
+ * a non-2xx / transport failure (a missing/blank callsign is a **400**).
+ */
+export async function createPilot(
+  baseUrl: string,
+  request: CreatePilotRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Pilot> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) throw new Error(`POST /pilots failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Pilot;
+}
+
+/**
+ * Edit a pilot (`PUT /pilots/{id}`) — issue #74. RD-gated. Every field is optional (a partial
+ * edit); for the optional metadata, omit a field to leave it unchanged, or pass `null` to clear it.
+ * An unknown id answers **404**. Resolves to the updated {@link Pilot}, or rejects on a non-2xx /
+ * transport failure.
+ */
+export async function updatePilot(
+  baseUrl: string,
+  id: PilotId,
+  request: UpdatePilotRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Pilot> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) throw new Error(`PUT /pilots/${id} failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Pilot;
+}
+
+/**
+ * Delete a pilot (`DELETE /pilots/{id}`) — issue #74. RD-gated. An unknown id answers **404**.
+ * Resolves once the delete succeeds, or rejects on a non-2xx / transport failure (the HTTP status
+ * is in the message). A stale roster id on some event is harmless (rosters tolerate an unknown id).
+ */
+export async function deletePilot(
+  baseUrl: string,
+  id: PilotId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers
+  });
+  if (!resp.ok) throw new Error(`DELETE /pilots/${id} failed: HTTP ${resp.status}`);
+}
+
+/**
+ * Set an event's **roster** (`PUT /events/{id}/roster`) — issue #74. The per-event reference into
+ * the app-level pilot directory: an event rosters which directory pilots race it. RD-gated; the
+ * server validates the event exists and that **each** id names a known directory pilot (else
+ * **404**). Resolves to the updated event {@link EventMeta}, or rejects on a non-2xx / transport
+ * failure.
+ */
+export async function setEventRoster(
+  baseUrl: string,
+  eventId: EventId,
+  pilotIds: PilotId[],
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/roster`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ pilot_ids: pilotIds })
+  });
+  if (!resp.ok) throw new Error(`PUT /events/${eventId}/roster failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta;
+}
+
+/**
+ * Add one pilot to an event's roster (`POST /events/{id}/roster/{pilotId}`) — issue #74. RD-gated;
+ * the event must exist and the pilot must name a known directory pilot (else **404**). Idempotent.
+ * Resolves to the updated event {@link EventMeta}, or rejects on a non-2xx / transport failure.
+ */
+export async function addToRoster(
+  baseUrl: string,
+  eventId: EventId,
+  pilotId: PilotId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
+    { method: 'POST', headers }
+  );
+  if (!resp.ok)
+    throw new Error(`POST /events/${eventId}/roster/${pilotId} failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta;
+}
+
+/**
+ * Remove one pilot from an event's roster (`DELETE /events/{id}/roster/{pilotId}`) — issue #74.
+ * RD-gated; the event must exist (else **404**). Removing a pilot not on the roster is a no-op.
+ * Resolves to the updated event {@link EventMeta}, or rejects on a non-2xx / transport failure.
+ */
+export async function removeFromRoster(
+  baseUrl: string,
+  eventId: EventId,
+  pilotId: PilotId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
+    { method: 'DELETE', headers }
+  );
+  if (!resp.ok)
+    throw new Error(`DELETE /events/${eventId}/roster/${pilotId} failed: HTTP ${resp.status}`);
   return (await resp.json()) as EventMeta;
 }
 

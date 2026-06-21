@@ -39,7 +39,8 @@ use gridfpv_storage::{InMemoryLog, SqliteLog};
 
 use crate::app::AppState;
 use crate::auth::TokenStore;
-use crate::scope::EventId;
+use crate::pilots::PilotDirectory;
+use crate::scope::{EventId, PilotId};
 use crate::timers::{MOCK_TIMER_ID, TimerId, TimerRegistry};
 
 /// The reserved id of the always-present built-in **Practice** event.
@@ -126,6 +127,16 @@ pub struct EventMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub primary_timer: Option<TimerId>,
+    /// The event's **roster** (issue #74) — the application-level [`Pilot`](crate::pilots::Pilot)s
+    /// that race this event, by their [`PilotId`]. The per-event reference into the app-level
+    /// [`PilotDirectory`](crate::pilots::PilotDirectory): a Director maintains their pilots once,
+    /// and each event simply picks which of them race it (mirroring [`timers`](Self::timers)).
+    ///
+    /// Additive (`#[serde(default)]`) so an event persisted before #74 reads back with an empty
+    /// roster; new events and Practice default to an **empty** roster. Channels (which frequency a
+    /// roster pilot flies in a heat) are a separate concern (#117) and are not modelled here.
+    #[serde(default)]
+    pub roster: Vec<PilotId>,
 }
 
 impl EventMeta {
@@ -167,6 +178,16 @@ pub struct ActiveEvent {
 pub struct SetActiveEventRequest {
     /// The event to make active.
     pub id: EventId,
+}
+
+/// The body of `PUT /events/{id}/roster` — the directory pilot ids that make up an event's
+/// roster (issue #74). Each must name a pilot in the application-level
+/// [`PilotDirectory`](crate::pilots::PilotDirectory), else a typed 404.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SetEventRosterRequest {
+    /// The directory pilots this event rosters, in selection order. Each must name a known pilot.
+    pub pilot_ids: Vec<PilotId>,
 }
 
 /// The body of `POST /events` — the only thing a caller supplies when creating an event.
@@ -233,6 +254,11 @@ struct Registry {
     /// it lives here so the single router state ([`EventRegistry`]) exposes it to the Timers API
     /// handlers without a second axum state type. Cloning shares the one registry.
     timers: TimerRegistry,
+    /// The Director-wide application-level **pilot directory** (issue #74). Like the timer
+    /// registry, it is one app-level authority the per-event roster ([`EventMeta::roster`])
+    /// references; it lives here so the single router state ([`EventRegistry`]) exposes it to the
+    /// Pilots API handlers without a second axum state type. Cloning shares the one directory.
+    pilots: PilotDirectory,
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
@@ -262,6 +288,12 @@ impl EventRegistry {
         let timers = TimerRegistry::new(data_dir.clone(), sim_laps, sim_lap_ms)
             .map_err(|e| RegistryError(format!("could not build timer registry: {e}")))?;
 
+        // Build the Director-wide application-level pilot directory (issue #74): the pilots
+        // persisted to `<data_dir>/pilots.json` (empty on first boot — there is no built-in
+        // pilot). Shares the same data dir as the events and timers.
+        let pilots = PilotDirectory::new(data_dir.clone())
+            .map_err(|e| RegistryError(format!("could not build pilot directory: {e}")))?;
+
         // Seed Practice: an in-memory (non-persistent) log, sharing the one token store.
         let practice_id = EventId(PRACTICE_EVENT_ID.to_string());
         let practice_state = AppState::with_tokens(InMemoryLog::new(), tokens.clone());
@@ -279,6 +311,7 @@ impl EventRegistry {
                     organizer: None,
                     timers: default_timer_selection(),
                     primary_timer: None,
+                    roster: Vec::new(),
                 },
                 state: practice_state,
             },
@@ -311,6 +344,7 @@ impl EventRegistry {
                 events,
                 tokens,
                 timers,
+                pilots,
                 data_dir,
                 active_event,
             })),
@@ -322,6 +356,13 @@ impl EventRegistry {
     /// through. Cloning shares the one registry.
     pub fn timers(&self) -> TimerRegistry {
         self.read().timers.clone()
+    }
+
+    /// The Director-wide application-level **pilot directory** (issue #74) — the app-level
+    /// authority the Pilots API mutates and the per-event roster references. Cloning shares the one
+    /// directory.
+    pub fn pilots(&self) -> PilotDirectory {
+        self.read().pilots.clone()
     }
 
     /// The Director's currently-active event's [`EventMeta`] (issue #90), or `None` when no
@@ -416,6 +457,71 @@ impl EventRegistry {
         let meta = event.meta.clone();
         // Write the updated meta through to disk (issue #111) so a restart sees the latest
         // primary designation.
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(meta)
+    }
+
+    /// Set an event's **roster** (issue #74), returning its updated [`EventMeta`].
+    ///
+    /// Replaces the event's roster wholesale with `pilot_ids`. Validates the event exists (else a
+    /// [`RegistryError`] the caller maps to a typed 404); the caller is responsible for validating
+    /// each id names a directory pilot (the pilot directory is a separate authority). The roster is
+    /// recorded on the event's [`EventMeta`] and **written through** to the event's SQLite `meta`
+    /// table (issue #115) so it survives a Director restart.
+    pub fn set_roster(
+        &self,
+        id: &EventId,
+        pilot_ids: Vec<PilotId>,
+    ) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+        event.meta.roster = pilot_ids;
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(meta)
+    }
+
+    /// Add **one** pilot to an event's roster (issue #74), returning its updated [`EventMeta`].
+    ///
+    /// Idempotent — adding a pilot already on the roster is a no-op (no duplicate). Validates the
+    /// event exists (else a [`RegistryError`] → 404); the caller validates the pilot id exists in
+    /// the directory. Writes the updated meta through to disk (issue #115).
+    pub fn add_to_roster(&self, id: &EventId, pilot: PilotId) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+        if !event.meta.roster.contains(&pilot) {
+            event.meta.roster.push(pilot);
+        }
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(meta)
+    }
+
+    /// Remove **one** pilot from an event's roster (issue #74), returning its updated [`EventMeta`].
+    ///
+    /// Idempotent — removing a pilot not on the roster is a no-op. Validates the event exists (else
+    /// a [`RegistryError`] → 404). Writes the updated meta through to disk (issue #115).
+    pub fn remove_from_roster(
+        &self,
+        id: &EventId,
+        pilot: &PilotId,
+    ) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+        event.meta.roster.retain(|p| p != pilot);
+        let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
         Ok(meta)
@@ -520,6 +626,7 @@ impl EventRegistry {
             organizer: normalize_optional(&request.organizer),
             timers: default_timer_selection(),
             primary_timer: None,
+            roster: Vec::new(),
         };
         // Persist the freshly-built meta into the event's own SQLite `meta` table (issue
         // #111) so a Director restart can restore it. Only for a persistent (file-backed)
@@ -964,6 +1071,69 @@ mod tests {
         // And the active-event pointer restores to it (no longer degrades to the picker).
         assert_eq!(reopened.active().map(|m| m.id), Some(created_id));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn new_events_default_to_an_empty_roster_and_set_add_remove_work() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Roster Event")).unwrap();
+        assert!(event.roster.is_empty(), "a new event has an empty roster");
+
+        let a = PilotId("acroace-1".into());
+        let b = PilotId("zoom-2".into());
+
+        // set_roster replaces wholesale.
+        let meta = reg
+            .set_roster(&event.id, vec![a.clone(), b.clone()])
+            .unwrap();
+        assert_eq!(meta.roster, vec![a.clone(), b.clone()]);
+
+        // add is idempotent (no duplicate).
+        let meta = reg.add_to_roster(&event.id, a.clone()).unwrap();
+        assert_eq!(meta.roster, vec![a.clone(), b.clone()]);
+
+        // add a fresh pilot appends.
+        let c = PilotId("newbie-3".into());
+        let meta = reg.add_to_roster(&event.id, c.clone()).unwrap();
+        assert_eq!(meta.roster, vec![a.clone(), b.clone(), c.clone()]);
+
+        // remove drops one; removing an absent one is a no-op.
+        let meta = reg.remove_from_roster(&event.id, &b).unwrap();
+        assert_eq!(meta.roster, vec![a.clone(), c.clone()]);
+        let meta = reg.remove_from_roster(&event.id, &b).unwrap();
+        assert_eq!(meta.roster, vec![a.clone(), c.clone()]);
+
+        // unknown event → error.
+        assert!(reg.set_roster(&EventId("nope".into()), vec![]).is_err());
+        assert!(
+            reg.add_to_roster(&EventId("nope".into()), a.clone())
+                .is_err()
+        );
+        assert!(reg.remove_from_roster(&EventId("nope".into()), &a).is_err());
+    }
+
+    #[test]
+    fn an_events_roster_persists_across_a_restart() {
+        // The #115 meta mechanism must carry the additive roster through a Director restart.
+        let dir = std::env::temp_dir().join(format!("gridfpv-roster-test-{}", short_suffix()));
+        let created_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Persisted Roster")).unwrap();
+            created_id = created.id.clone();
+            reg.set_roster(
+                &created.id,
+                vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())],
+            )
+            .unwrap();
+        }
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        let restored = reopened.meta_of(&created_id).expect("event reloaded");
+        assert_eq!(
+            restored.roster,
+            vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

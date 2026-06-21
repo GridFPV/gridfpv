@@ -24,7 +24,8 @@ const EVENT: EventMeta = {
   name: 'Friday',
   created_at: 0,
   persistent: true,
-  timers: ['mock']
+  timers: ['mock'],
+  roster: []
 };
 
 /** A redundant-gate event with two selected timers, no explicit primary (first = effective). */
@@ -33,7 +34,8 @@ const EVENT_2: EventMeta = {
   name: 'Redundant',
   created_at: 0,
   persistent: true,
-  timers: ['mock', 'rh-1']
+  timers: ['mock', 'rh-1'],
+  roster: []
 };
 
 describe('EventTimers (in-event CRUD + selection)', () => {

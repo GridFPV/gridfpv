@@ -24,7 +24,8 @@ const PRACTICE: EventMeta = {
   name: 'Practice',
   created_at: 0,
   persistent: false,
-  timers: ['mock']
+  timers: ['mock'],
+  roster: []
 };
 
 /** The timer-registry seams a screen test can override (all optional; defaults are inert). */

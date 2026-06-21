@@ -63,6 +63,7 @@ pub mod control_handler;
 pub mod error;
 pub mod events;
 pub mod live_state;
+pub mod pilots;
 pub mod scope;
 pub mod snapshot;
 pub mod stream;
