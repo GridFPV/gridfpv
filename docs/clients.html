@@ -107,6 +107,17 @@ flowchart TB
     </div>
     <div class="callout">
       <p>
+        <strong>Built for the field — readable on a sunlit laptop.</strong> The RD console is
+        operated outdoors in direct sun, on a medium-size laptop, glanced at mid-race from a few
+        feet away — so it is designed for <strong>field readability</strong>: a <strong>larger base
+        text size</strong> than a typical desktop app, a <strong>dark-mode default</strong> (to cut
+        glare), and high contrast. &ldquo;Is this legible on a laptop in bright sunlight?&rdquo;
+        gates any console UI — favor bigger, high-contrast type over dense/small. (Bumping the
+        design-system base sizes is tracked as a follow-up.)
+      </p>
+    </div>
+    <div class="callout">
+      <p>
         The console is "just a co-located web client" (Architecture §2): once the Tauri shell
         lands it will load over the Tauri webview, but either way it talks to the same local
         <code>axum</code> server, over the same protocol, as everyone else. The Tauri shell will
