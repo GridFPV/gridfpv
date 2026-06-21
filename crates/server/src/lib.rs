@@ -58,6 +58,7 @@
 
 pub mod app;
 pub mod auth;
+pub mod classes;
 pub mod control;
 pub mod control_handler;
 pub mod error;

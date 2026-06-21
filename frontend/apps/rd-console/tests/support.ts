@@ -32,7 +32,8 @@ const PRACTICE: EventMeta = {
   created_at: 0,
   persistent: false,
   timers: ['mock'],
-  roster: []
+  roster: [],
+  classes: []
 };
 
 /** The registry seams a screen test can override (all optional; defaults are inert). */

@@ -87,11 +87,12 @@ use serde::Deserialize;
 use tokio::sync::Notify;
 
 use crate::auth::{JoinTokenResponse, TokenStore};
+use crate::classes::{Class, ClassError, ClassErrorKind, CreateClassRequest, UpdateClassRequest};
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
     ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, SetActiveEventRequest,
-    SetEventRosterRequest,
+    SetEventClassesRequest, SetEventRosterRequest,
 };
 use crate::live_state::live_state;
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
@@ -304,6 +305,16 @@ pub fn router(registry: EventRegistry) -> Router {
         // each event rosters from. `GET /pilots` is an open read; create/edit/delete are RD-gated.
         .route("/pilots", get(list_pilots).post(create_pilot))
         .route("/pilots/{pilot_id}", put(update_pilot).delete(delete_pilot))
+        // Application-level classes (issue #84): the persisted directory the RD maintains once and
+        // each event selects from. `GET /classes` is an open read; create/edit/delete are RD-gated.
+        .route("/classes", get(list_classes).post(create_class))
+        .route(
+            "/classes/{class_id}",
+            put(update_class).delete(delete_class),
+        )
+        // Per-event class **selection** (issue #84): RD-gated; each id must name a known directory
+        // class. Set the whole selection wholesale (mirrors the timer selection).
+        .route("/events/{event_id}/classes", put(set_event_classes))
         // Per-event **roster** (issue #74): RD-gated; each id must name a known directory pilot.
         // Set the whole roster, or add/remove a single pilot.
         .route("/events/{event_id}/roster", put(set_event_roster))
@@ -689,6 +700,103 @@ async fn remove_from_roster(
     Ok(Json(meta))
 }
 
+/// `GET /classes` — list every class in the directory, in id order (issue #84).
+///
+/// An **open read** (no token): a client renders the class directory / per-event selection picker
+/// without a credential, mirroring `GET /pilots`.
+async fn list_classes(State(registry): State<EventRegistry>) -> Json<Vec<Class>> {
+    Json(registry.classes().list())
+}
+
+/// `POST /classes` — create a class from a [`CreateClassRequest`], RD-gated (issue #84).
+///
+/// [`ControlAuth`] runs first (open in full-trust by default). The `name` is required; the id is
+/// auto-generated server-side (a name slug + suffix). The new [`Class`] is returned and the
+/// directory persisted. A missing/blank name is a `BadRequest`.
+async fn create_class(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Json(body): Json<CreateClassRequest>,
+) -> Result<Json<Class>, ProtocolError> {
+    let class = registry
+        .classes()
+        .create(&body)
+        .map_err(class_error_to_protocol)?;
+    Ok(Json(class))
+}
+
+/// `PUT /classes/{class_id}` — edit a class's name/source/metadata, RD-gated (issue #84).
+///
+/// An unknown id is a typed 404 (`UnknownScope`). On success the updated [`Class`] is returned and
+/// the directory persisted.
+async fn update_class(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(class_id): Path<ClassId>,
+    Json(body): Json<UpdateClassRequest>,
+) -> Result<Json<Class>, ProtocolError> {
+    let class = registry
+        .classes()
+        .update(&class_id, &body)
+        .map_err(class_error_to_protocol)?;
+    Ok(Json(class))
+}
+
+/// `DELETE /classes/{class_id}` — remove a class from the directory, RD-gated (issue #84).
+///
+/// An unknown id is a 404 (`UnknownScope`). On success an empty 200 is returned and the directory
+/// persisted. A stale selection id on some event is harmless (selections tolerate an unknown id).
+async fn delete_class(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(class_id): Path<ClassId>,
+) -> Result<StatusCode, ProtocolError> {
+    registry
+        .classes()
+        .delete(&class_id)
+        .map_err(class_error_to_protocol)?;
+    Ok(StatusCode::OK)
+}
+
+/// Map a [`ClassError`] to a typed [`ProtocolError`] (issue #84): a validation failure is a
+/// `BadRequest` (400), an unknown id is an `UnknownScope` (404), and a persistence failure is
+/// `Internal` (500) — mirroring [`pilot_error_to_protocol`].
+fn class_error_to_protocol(error: ClassError) -> ProtocolError {
+    let code = match error.kind {
+        ClassErrorKind::Invalid => ErrorCode::BadRequest,
+        ClassErrorKind::NotFound => ErrorCode::UnknownScope,
+        ClassErrorKind::Internal => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, error.to_string())
+}
+
+/// `PUT /events/{event_id}/classes` — set an event's **class selection** (issue #84), RD-gated.
+///
+/// [`ControlAuth`] runs first. The event must exist (else a typed 404) and **each** id in the body
+/// must name a known directory class (else a 404 naming the bad id) — so a selection can never
+/// reference a deleted/unknown class. On success the updated [`EventMeta`] is returned. Mirrors
+/// `set_event_timers` (a wholesale set with per-id validation).
+async fn set_event_classes(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<SetEventClassesRequest>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    let classes = registry.classes();
+    for id in &body.ids {
+        if !classes.exists(id) {
+            return Err(ProtocolError::new(
+                ErrorCode::UnknownScope,
+                format!("no class with id {:?}", id.0),
+            ));
+        }
+    }
+    let meta = registry
+        .set_classes(&event_id, body.ids)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
 /// `POST /events/{event_id}/auth/join-token` — mint a fresh **read-only** join token
 /// (protocol.html §5, §9.4) — issue #63, now event-rooted.
 ///
@@ -722,12 +830,13 @@ pub fn is_api_path(path: &str) -> bool {
     // `/events` is the one API tree that matters now; the bare `/snapshot|/stream|/control|/auth`
     // prefixes are kept so a *legacy* (pre-#72) mistyped call still 404s as a typed API error
     // rather than falling through to the SPA shell.
-    const API_PREFIXES: [&str; 9] = [
+    const API_PREFIXES: [&str; 10] = [
         "/health",
         "/events",
         "/active-event",
         "/timers",
         "/pilots",
+        "/classes",
         "/snapshot",
         "/stream",
         "/control",

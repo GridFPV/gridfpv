@@ -16,9 +16,18 @@ const EVENTS: EventMeta[] = [
     created_at: 0,
     persistent: false,
     timers: ['mock'],
-    roster: []
+    roster: [],
+    classes: []
   },
-  { id: 'e1', name: 'Friday', created_at: 1, persistent: true, timers: ['mock'], roster: [] }
+  {
+    id: 'e1',
+    name: 'Friday',
+    created_at: 1,
+    persistent: true,
+    timers: ['mock'],
+    roster: [],
+    classes: []
+  }
 ];
 const TIMERS: Timer[] = [
   { id: 'mock', name: 'Mock', kind: { Mock: { laps: 3, lap_ms: 30000 } }, status: 'Ready' },
