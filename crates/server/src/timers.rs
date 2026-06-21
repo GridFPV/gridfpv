@@ -81,18 +81,37 @@ pub enum TimerKind {
     },
 }
 
-/// Whether a timer is currently usable (issue #73).
+/// Whether a timer is currently usable, and — for a live source — the state of its connection
+/// (issues #73, #65).
 ///
-/// The Mock is always [`Ready`](TimerStatus::Ready) (it needs nothing external). A reserved
-/// RotorHazard timer reports [`Configured`](TimerStatus::Configured) — it has a URL on file but is
-/// not yet connected (2b wires the live connection and the `Connected`/`Unreachable` states).
+/// Two **static** states describe a timer's resting config: the Mock is always
+/// [`Ready`](TimerStatus::Ready) (it needs nothing external), and a configured-but-not-yet-dialed
+/// RotorHazard timer reports [`Configured`](TimerStatus::Configured). The remaining four are
+/// **dynamic** connection states the Director drives on a live (`live`-feature) RotorHazard timer
+/// as its connection comes and goes: [`Connecting`](TimerStatus::Connecting) while the socket is
+/// being established, [`Connected`](TimerStatus::Connected) once it is up,
+/// [`Disconnected`](TimerStatus::Disconnected) when it drops, and [`Error`](TimerStatus::Error)
+/// when the connection attempt fails. They are **additive on the wire** — a console that only knows
+/// `Ready`/`Configured` still parses the type; new variants surface richer status.
+///
+/// These dynamic states are **not persisted** (`timers.json` always restores a timer's resting
+/// status from its kind — see [`Timer::status_for`]); they are live, in-memory, and reset to
+/// `Configured` whenever the RH timer is reconfigured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum TimerStatus {
     /// Usable right now — the built-in Mock.
     Ready,
-    /// Configured but not connected (a reserved RotorHazard timer; 2b connects it).
+    /// Configured but not connected (a RotorHazard timer with a URL on file, not yet dialed).
     Configured,
+    /// A live RotorHazard timer whose connection is being established.
+    Connecting,
+    /// A live RotorHazard timer with an established connection (passes are flowing in).
+    Connected,
+    /// A live RotorHazard timer whose connection has dropped (was up, now down).
+    Disconnected,
+    /// A live RotorHazard timer whose connection attempt failed (could not reach the server).
+    Error,
 }
 
 /// One configured timer in the application-level registry (issue #73).
@@ -306,6 +325,18 @@ impl TimerRegistry {
         let updated = timer.clone();
         reg.persist()?;
         Ok(updated)
+    }
+
+    /// Set a timer's **live connection status** (issues #73, #65) — the Director drives an RH
+    /// timer's [`TimerStatus`] as its connection comes and goes (connecting → connected →
+    /// disconnected/error). A no-op for an unknown id. This is an **in-memory only** update: the
+    /// dynamic states are not persisted (a `persist` always re-derives the resting status from the
+    /// kind), so a restart starts a configured RH timer back at [`Configured`](TimerStatus::Configured).
+    pub fn set_status(&self, id: &TimerId, status: TimerStatus) {
+        let mut reg = self.write();
+        if let Some(timer) = reg.timers.get_mut(id) {
+            timer.status = status;
+        }
     }
 
     /// Delete a timer (issue #73). The built-in **Mock cannot be deleted** (it is always
@@ -568,6 +599,56 @@ mod tests {
                     laps: 7,
                     lap_ms: 1234
                 }
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_status_drives_an_rh_timers_live_connection_state() {
+        // The Director publishes an RH timer's connection lifecycle through `set_status` (#65):
+        // Configured (resting) → Connecting → Connected → Disconnected, all live in `GET /timers`.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&rh_req("Field RH", "http://rh.local:5000"))
+            .unwrap();
+        assert_eq!(reg.get(&rh.id).unwrap().status, TimerStatus::Configured);
+
+        for status in [
+            TimerStatus::Connecting,
+            TimerStatus::Connected,
+            TimerStatus::Disconnected,
+            TimerStatus::Error,
+        ] {
+            reg.set_status(&rh.id, status);
+            assert_eq!(reg.get(&rh.id).unwrap().status, status);
+            // The live status is reflected in the `GET /timers` listing too.
+            let listed = reg.list().into_iter().find(|t| t.id == rh.id).unwrap();
+            assert_eq!(listed.status, status);
+        }
+
+        // An unknown id is a no-op (no panic).
+        reg.set_status(&TimerId("nope".into()), TimerStatus::Connected);
+    }
+
+    #[test]
+    fn live_status_is_not_persisted_and_resets_to_configured_on_reopen() {
+        // Dynamic connection states are in-memory only: a reopen restores the RH timer at its
+        // resting `Configured`, never a stale `Connected`/`Error`.
+        let dir = std::env::temp_dir().join(format!("gridfpv-timers-status-{}", short_suffix()));
+        {
+            let reg = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
+            let rh = reg
+                .create(&rh_req("Field RH", "http://rh.local:5000"))
+                .unwrap();
+            reg.set_status(&rh.id, TimerStatus::Connected);
+            assert_eq!(reg.get(&rh.id).unwrap().status, TimerStatus::Connected);
+
+            let reopened = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
+            assert_eq!(
+                reopened.get(&rh.id).unwrap().status,
+                TimerStatus::Configured,
+                "a restored RH timer rests at Configured, not a persisted live state"
             );
         }
         std::fs::remove_dir_all(&dir).ok();
