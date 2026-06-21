@@ -33,10 +33,12 @@
   import EventPicker from './screens/EventPicker.svelte';
   import TimersPage from './screens/TimersPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
+  import ClassesPage from './screens/ClassesPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
   import SetupWizard from './screens/SetupWizard.svelte';
   import EventTimers from './screens/EventTimers.svelte';
   import EventRoster from './screens/EventRoster.svelte';
+  import EventClasses from './screens/EventClasses.svelte';
   import LiveRaceControl from './screens/LiveRaceControl.svelte';
   import Marshaling from './screens/Marshaling.svelte';
   import Results from './screens/Results.svelte';
@@ -121,7 +123,14 @@
     }
   });
 
-  type ScreenId = 'setup' | 'timers' | 'registration' | 'live' | 'marshaling' | 'results';
+  type ScreenId =
+    | 'setup'
+    | 'timers'
+    | 'registration'
+    | 'classes'
+    | 'live'
+    | 'marshaling'
+    | 'results';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
     { id: 'setup', label: 'Setup', key: '1', icon: 'M4 6h16M4 12h16M4 18h10' },
     {
@@ -130,13 +139,19 @@
       key: '2',
       icon: 'M16 11V7a4 4 0 1 0-8 0v4M5 11h14v9H5z'
     },
-    { id: 'live', label: 'Live control', key: '3', icon: 'M5 3l14 9-14 9V3z' },
-    { id: 'marshaling', label: 'Marshaling', key: '4', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
-    { id: 'results', label: 'Results', key: '5', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
+    {
+      id: 'classes',
+      label: 'Classes',
+      key: '3',
+      icon: 'M4 6h16M4 12h10M4 18h7M18 14l2 2 3-4'
+    },
+    { id: 'live', label: 'Live control', key: '4', icon: 'M5 3l14 9-14 9V3z' },
+    { id: 'marshaling', label: 'Marshaling', key: '5', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
+    { id: 'results', label: 'Results', key: '6', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
     {
       id: 'timers',
       label: 'Timers',
-      key: '6',
+      key: '7',
       icon: 'M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'
     }
   ];
@@ -227,6 +242,7 @@
       <HomeHub
         {session}
         onpilots={() => goPage('pilots')}
+        onclasses={() => goPage('classes')}
         onevents={() => goPage('events')}
         ontimers={() => goPage('timers')}
       />
@@ -236,6 +252,8 @@
       <TimersPage {session} onhome={goHome} />
     {:else if route$page === 'pilots'}
       <PilotsPage {session} onhome={goHome} />
+    {:else if route$page === 'classes'}
+      <ClassesPage {session} onhome={goHome} />
     {/if}
   </div>
 {:else if session.currentEvent}
@@ -339,6 +357,8 @@
           <EventTimers {session} />
         {:else if active === 'registration'}
           <EventRoster {session} />
+        {:else if active === 'classes'}
+          <EventClasses {session} />
         {:else if active === 'live'}
           <LiveRaceControl {session} />
         {:else if active === 'marshaling'}

@@ -20,7 +20,12 @@ import type {
   deletePilot,
   setEventRoster,
   addToRoster,
-  removeFromRoster
+  removeFromRoster,
+  listClasses,
+  createClass,
+  updateClass,
+  deleteClass,
+  setEventClasses
 } from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
@@ -54,6 +59,14 @@ export interface TimerImpls {
   setEventRosterImpl?: typeof setEventRoster;
   addToRosterImpl?: typeof addToRoster;
   removeFromRosterImpl?: typeof removeFromRoster;
+  /** The app-level class directory read (issue #84) — backs the hub + Classes page tests. */
+  listClassesImpl?: typeof listClasses;
+  /** The class-directory write seams (issue #84) — back the ClassManager tests. */
+  createClassImpl?: typeof createClass;
+  updateClassImpl?: typeof updateClass;
+  deleteClassImpl?: typeof deleteClass;
+  /** The per-event class-selection write seam (issue #84) — backs the EventClasses tests. */
+  setEventClassesImpl?: typeof setEventClasses;
 }
 
 export interface TestSession {
@@ -113,7 +126,13 @@ export function makeTestSession(
     // Per-event roster write seams (issue #74): inert unless a test overrides them.
     setEventRosterImpl: opts?.setEventRosterImpl,
     addToRosterImpl: opts?.addToRosterImpl,
-    removeFromRosterImpl: opts?.removeFromRosterImpl
+    removeFromRosterImpl: opts?.removeFromRosterImpl,
+    // Class-directory + per-event selection seams (issue #84): inert unless a test overrides them.
+    listClassesImpl: opts?.listClassesImpl,
+    createClassImpl: opts?.createClassImpl,
+    updateClassImpl: opts?.updateClassImpl,
+    deleteClassImpl: opts?.deleteClassImpl,
+    setEventClassesImpl: opts?.setEventClassesImpl
   });
   // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event,
   // unless the test wants the app-level (no-event) context.

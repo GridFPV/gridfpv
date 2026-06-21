@@ -19,11 +19,13 @@
   let {
     session,
     onpilots,
+    onclasses,
     onevents,
     ontimers
   }: {
     session: Session;
     onpilots: () => void;
+    onclasses: () => void;
     onevents: () => void;
     ontimers: () => void;
   } = $props();
@@ -31,6 +33,7 @@
   // Each summary loads independently and best-effort; `undefined` while loading, `null` on a
   // failed/unreachable read (rendered as a dash). The hub renders immediately regardless.
   let pilotCount = $state<number | undefined | null>(undefined);
+  let classCount = $state<number | undefined | null>(undefined);
   let eventCount = $state<number | undefined | null>(undefined);
   let timerCount = $state<number | undefined | null>(undefined);
   let connectedTimers = $state<number | undefined | null>(undefined);
@@ -45,6 +48,10 @@
       .listPilots()
       .then((pilots) => (pilotCount = pilots.length))
       .catch(() => (pilotCount = null));
+    void session
+      .listClasses()
+      .then((classes) => (classCount = classes.length))
+      .catch(() => (classCount = null));
     void session
       .listEvents()
       .then((events) => (eventCount = events.length))
@@ -106,6 +113,37 @@
             <p class="card-summary">
               <span class="count">{fmt(pilotCount)}</span>
               <span class="unit">{pilotCount === 1 ? 'pilot' : 'pilots'}</span>
+            </p>
+            <span class="card-go" aria-hidden="true">→</span>
+          </div>
+        </Card>
+      </button>
+
+      <button type="button" class="hub-card classes" onclick={onclasses}>
+        <Card elevation="md">
+          <div class="card-body">
+            <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 6h16M4 12h10M4 18h7"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M18 14l2 2 3-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <h2 class="card-title">Classes</h2>
+            <p class="card-summary">
+              <span class="count">{fmt(classCount)}</span>
+              <span class="unit">{classCount === 1 ? 'class' : 'classes'}</span>
             </p>
             <span class="card-go" aria-hidden="true">→</span>
           </div>

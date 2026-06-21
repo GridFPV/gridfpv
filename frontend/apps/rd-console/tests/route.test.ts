@@ -23,6 +23,7 @@ describe('parseHash', () => {
 
   it('parses each top-level page', () => {
     expect(parseHash('#/pilots')).toEqual({ kind: 'page', page: 'pilots' });
+    expect(parseHash('#/classes')).toEqual({ kind: 'page', page: 'classes' });
     expect(parseHash('#/events')).toEqual({ kind: 'page', page: 'events' });
     expect(parseHash('#/timers')).toEqual({ kind: 'page', page: 'timers' });
   });

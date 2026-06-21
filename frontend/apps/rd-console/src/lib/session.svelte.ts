@@ -55,14 +55,22 @@ import {
   setEventRoster,
   addToRoster,
   removeFromRoster,
+  listClasses,
+  createClass,
+  updateClass,
+  deleteClass,
+  setEventClasses,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
 import type {
+  Class,
+  ClassId,
   Command,
   CommandAck,
+  CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
@@ -76,6 +84,7 @@ import type {
   Scope,
   Timer,
   TimerId,
+  UpdateClassRequest,
   UpdatePilotRequest,
   UpdateTimerRequest
 } from '@gridfpv/types';
@@ -225,6 +234,11 @@ export class Session {
   #setEventRosterImpl: typeof setEventRoster;
   #addToRosterImpl: typeof addToRoster;
   #removeFromRosterImpl: typeof removeFromRoster;
+  #listClassesImpl: typeof listClasses;
+  #createClassImpl: typeof createClass;
+  #updateClassImpl: typeof updateClass;
+  #deleteClassImpl: typeof deleteClass;
+  #setEventClassesImpl: typeof setEventClasses;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -246,6 +260,11 @@ export class Session {
     setEventRosterImpl?: typeof setEventRoster;
     addToRosterImpl?: typeof addToRoster;
     removeFromRosterImpl?: typeof removeFromRoster;
+    listClassesImpl?: typeof listClasses;
+    createClassImpl?: typeof createClass;
+    updateClassImpl?: typeof updateClass;
+    deleteClassImpl?: typeof deleteClass;
+    setEventClassesImpl?: typeof setEventClasses;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -268,6 +287,11 @@ export class Session {
     this.#setEventRosterImpl = opts?.setEventRosterImpl ?? setEventRoster;
     this.#addToRosterImpl = opts?.addToRosterImpl ?? addToRoster;
     this.#removeFromRosterImpl = opts?.removeFromRosterImpl ?? removeFromRoster;
+    this.#listClassesImpl = opts?.listClassesImpl ?? listClasses;
+    this.#createClassImpl = opts?.createClassImpl ?? createClass;
+    this.#updateClassImpl = opts?.updateClassImpl ?? updateClass;
+    this.#deleteClassImpl = opts?.deleteClassImpl ?? deleteClass;
+    this.#setEventClassesImpl = opts?.setEventClassesImpl ?? setEventClasses;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -383,6 +407,59 @@ export class Session {
     });
   }
 
+  // ── Class registry (issue #84) ─────────────────────────────────────────────
+  //
+  // Classes are **application-level** configuration (a persisted directory the RD maintains once,
+  // selected per event), exactly like pilots and timers — so these live on the session, reachable
+  // from the home hub's **Classes** page. Reads are open; writes are control-gated and follow the
+  // same full-trust-first → lazy-token-prompt posture (see {@link #privilegedWrite}).
+
+  /**
+   * List every class in the application-level directory (`GET /classes`, open, no token) — issue
+   * #84. Like pilots, classes are app-level configuration (a persisted directory the RD maintains
+   * once, selected per event), so this lives on the session and backs the hub's **Classes** page +
+   * its count. Rejects on a transport/HTTP failure (the page surfaces it).
+   */
+  listClasses(): Promise<Class[]> {
+    return this.#listClassesImpl(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Create a directory class (`POST /classes`) — issue #84. RD-gated, full-trust first like the
+   * pilot writes: attempted tokenless, and only if the Director answers 401/403 does the lazy
+   * prompt fire once and the create retry. The `name` is required (server **400** on blank); the id
+   * is auto-generated. Returns the new {@link Class}, `undefined` on a cancelled prompt, or throws
+   * on a non-auth failure.
+   */
+  createClass(request: CreateClassRequest): Promise<Class | undefined> {
+    return this.#privilegedWrite((token) => this.#createClassImpl(this.baseUrl, request, token));
+  }
+
+  /**
+   * Edit a directory class (`PUT /classes/{id}`) — issue #84. RD-gated. The request carries only the
+   * fields that changed: a present `name`/`source` replaces it, an omitted optional field is left
+   * unchanged, a present **`null`** clears it (the way the form clears `reference`/`description`),
+   * and a present value sets it. Returns the updated {@link Class}, `undefined` on a cancelled
+   * prompt, or throws on a non-auth failure.
+   */
+  updateClass(id: ClassId, request: UpdateClassRequest): Promise<Class | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#updateClassImpl(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * Remove a directory class (`DELETE /classes/{id}`) — issue #84. RD-gated. Resolves to `true` once
+   * the delete succeeds, `undefined` on a cancelled token prompt, or throws on any other failure (an
+   * unknown id is a **404**). Mirrors {@link deletePilot}.
+   */
+  deleteClass(id: ClassId): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#deleteClassImpl(this.baseUrl, id, token);
+      return true as const;
+    });
+  }
+
   /**
    * Run a control-gated write with the full-trust-then-lazy-prompt retry: call `attempt` with
    * the currently-held token; if it fails for **auth** and no token is held yet, prompt once and
@@ -481,6 +558,24 @@ export class Session {
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
       this.#setEventRosterImpl(this.baseUrl, event.id, pilotIds, token)
+    );
+    if (updated) this.currentEvent = updated;
+    return updated;
+  }
+
+  /**
+   * Set the **current event's** class selection (`PUT /events/{id}/classes`) — issue #84. The
+   * per-event reference into the app-level class directory: the event runs which directory classes
+   * it selects. Pass the full set of class ids (replaces the selection wholesale). No-op (resolves
+   * `undefined`) when no event is selected. On success the updated {@link EventMeta} replaces
+   * {@link currentEvent} so the workspace's view of the selection stays in sync; returns it,
+   * `undefined` on a cancelled prompt, or throws. Mirrors {@link setEventRoster}.
+   */
+  async setEventClasses(classIds: ClassId[]): Promise<EventMeta | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const updated = await this.#privilegedWrite((token) =>
+      this.#setEventClassesImpl(this.baseUrl, event.id, classIds, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;

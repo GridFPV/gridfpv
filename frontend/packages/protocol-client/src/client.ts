@@ -20,6 +20,9 @@
 import type {
   ActiveEvent,
   ChangeEnvelope,
+  Class,
+  ClassId,
+  CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
@@ -35,6 +38,7 @@ import type {
   SubscribeRequest,
   Timer,
   TimerId,
+  UpdateClassRequest,
   UpdatePilotRequest,
   UpdateTimerRequest
 } from '@gridfpv/types';
@@ -621,6 +625,131 @@ export async function removeFromRoster(
   );
   if (!resp.ok)
     throw new Error(`DELETE /events/${eventId}/roster/${pilotId} failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventMeta;
+}
+
+/**
+ * List every class in the application-level directory (`GET /classes`) — issue #84. An open read
+ * (no token), mirroring `GET /pilots`: classes are app-level configuration the RD maintains once
+ * and each event selects from. Resolves to the classes in id order, or rejects on a non-2xx /
+ * transport failure.
+ */
+export async function listClasses(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<Class[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes`, { headers });
+  if (!resp.ok) throw new Error(`GET /classes failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Class[];
+}
+
+/**
+ * Create a class (`POST /classes`) — issue #84. RD-gated (full-trust by default). The body's
+ * `name` is required; everything else (`source`, `reference`, `description`) is optional. The id is
+ * auto-generated server-side. Resolves to the new {@link Class}, or rejects on a non-2xx / transport
+ * failure (a missing/blank name is a **400**).
+ */
+export async function createClass(
+  baseUrl: string,
+  request: CreateClassRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Class> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) throw new Error(`POST /classes failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Class;
+}
+
+/**
+ * Edit a class (`PUT /classes/{id}`) — issue #84. RD-gated. Every field is optional (a partial
+ * edit); a present `name`/`source` replaces it, and for the optional metadata (`reference`,
+ * `description`), omit a field to leave it unchanged, or pass `null` to clear it. An unknown id
+ * answers **404**. Resolves to the updated {@link Class}, or rejects on a non-2xx / transport
+ * failure.
+ */
+export async function updateClass(
+  baseUrl: string,
+  id: ClassId,
+  request: UpdateClassRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Class> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) throw new Error(`PUT /classes/${id} failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Class;
+}
+
+/**
+ * Delete a class (`DELETE /classes/{id}`) — issue #84. RD-gated. An unknown id answers **404**.
+ * Resolves once the delete succeeds, or rejects on a non-2xx / transport failure (the HTTP status
+ * is in the message). A stale selection id on some event is harmless (selections tolerate an
+ * unknown id).
+ */
+export async function deleteClass(
+  baseUrl: string,
+  id: ClassId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers
+  });
+  if (!resp.ok) throw new Error(`DELETE /classes/${id} failed: HTTP ${resp.status}`);
+}
+
+/**
+ * Set an event's **class selection** (`PUT /events/{id}/classes`) — issue #84. The per-event
+ * reference into the app-level class directory: an event runs which directory classes it selects.
+ * RD-gated; the server validates the event exists and that **each** id names a known directory class
+ * (else **404**). Mirrors {@link setEventTimers} (a wholesale set with per-id validation). Resolves
+ * to the updated event {@link EventMeta}, or rejects on a non-2xx / transport failure.
+ */
+export async function setEventClasses(
+  baseUrl: string,
+  eventId: EventId,
+  ids: ClassId[],
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/classes`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ ids })
+  });
+  if (!resp.ok) throw new Error(`PUT /events/${eventId}/classes failed: HTTP ${resp.status}`);
   return (await resp.json()) as EventMeta;
 }
 
