@@ -516,8 +516,13 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
         {
           callsign: 'Acro Ace',
           name: 'Ada Ace',
+          phonetic: 'AK-ro AYS',
+          team: 'Team Zoom',
+          color: '#1188ff',
+          country: 'gb', // normalized uppercase by the server
           vtx_type: 'HDZero',
-          multigp_id: 'mgp-42'
+          multigp_id: 'mgp-42',
+          attributes: { bib: '7', insurance: 'AMA-123' }
         },
         TOKEN
       )
@@ -525,8 +530,13 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
     expect(created.id).toMatch(/^acro-ace-/);
     expect(created.callsign).toBe('Acro Ace');
     expect(created.name).toBe('Ada Ace');
+    expect(created.phonetic).toBe('AK-ro AYS');
+    expect(created.team).toBe('Team Zoom');
+    expect(created.color).toBe('#1188FF'); // hex normalized uppercase
+    expect(created.country).toBe('GB'); // ISO alpha-2, uppercased
     expect(created.vtx_type).toBe('HDZero');
     expect(created.multigp_id).toBe('mgp-42');
+    expect(created.attributes).toEqual({ bib: '7', insurance: 'AMA-123' });
 
     const ids = (await listPilots()).map((p) => p.id);
     expect(ids).toContain(created.id);
@@ -534,6 +544,68 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
 
   it('POST /pilots rejects a missing/blank callsign with 400', async () => {
     expect((await createPilot({ callsign: '   ' }, TOKEN)).status).toBe(400);
+  });
+
+  it('POST /pilots validates color (hex) / country (2-letter) / attribute keys → 400', async () => {
+    // Bad hex color.
+    expect((await createPilot({ callsign: 'BadColor', color: 'red' }, TOKEN)).status).toBe(400);
+    // Bad country (not a 2-letter code).
+    expect((await createPilot({ callsign: 'BadCountry', country: 'USA' }, TOKEN)).status).toBe(400);
+    // Empty attribute key.
+    expect(
+      (await createPilot({ callsign: 'BadAttr', attributes: { '   ': 'x' } }, TOKEN)).status
+    ).toBe(400);
+  });
+
+  it('PUT /pilots/{id} edits the new fields (set / clear / replace attributes)', async () => {
+    const created = (
+      await createPilot(
+        { callsign: 'Editable', color: '#abcdef', country: 'de', attributes: { a: '1' } },
+        TOKEN
+      )
+    ).body as Pilot;
+
+    const put = async (id: string, body: unknown, token?: string) => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${director.baseUrl}/pilots/${id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(body)
+      });
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
+    };
+
+    // Set team/phonetic, change country (normalized), replace the attributes bag, leave color
+    // untouched (an absent field is left unchanged).
+    const updated = (
+      await put(
+        created.id,
+        {
+          team: 'Solo',
+          phonetic: 'ED it uh bull',
+          country: 'us', // set → normalized uppercase
+          attributes: { b: '2', c: '3' } // full replacement of the bag
+        },
+        TOKEN
+      )
+    ).body as Pilot;
+    expect(updated.team).toBe('Solo');
+    expect(updated.phonetic).toBe('ED it uh bull');
+    expect(updated.country).toBe('US');
+    expect(updated.color).toBe('#ABCDEF'); // unchanged (absent in the body)
+    expect(updated.attributes).toEqual({ b: '2', c: '3' });
+
+    // A present empty map clears the attributes bag.
+    const cleared = (await put(created.id, { attributes: {} }, TOKEN)).body as Pilot;
+    expect(cleared.attributes).toEqual({});
+
+    // A bad-hex color on update → 400 (and leaves the pilot untouched).
+    expect((await put(created.id, { color: 'nope' }, TOKEN)).status).toBe(400);
+    expect(((await put(created.id, {}, TOKEN)).body as Pilot).color).toBe('#ABCDEF');
+
+    // RD-gated.
+    expect((await put(created.id, { team: 'X' })).status).toBe(401);
   });
 
   it('PUT /events/{id}/roster validates ids and records the roster (empty default)', async () => {

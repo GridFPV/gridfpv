@@ -22,6 +22,23 @@ callsign?: string,
  */
 name?: OptionalEdit<string>, 
 /**
+ * A new pronunciation hint (set / clear / leave-unchanged, like [`name`](Self::name)).
+ */
+phonetic?: OptionalEdit<string>, 
+/**
+ * A new team / club (set / clear / leave-unchanged).
+ */
+team?: OptionalEdit<string>, 
+/**
+ * A new hex color `#RRGGBB` (set / clear / leave-unchanged; a set value is validated).
+ */
+color?: OptionalEdit<string>, 
+/**
+ * A new ISO 3166-1 alpha-2 country code (set / clear / leave-unchanged; a set value is
+ * validated and normalized uppercase).
+ */
+country?: OptionalEdit<string>, 
+/**
  * A new VTX type (set / clear / leave-unchanged, like [`name`](Self::name)).
  */
 vtx_type?: OptionalEdit<VtxType>, 
@@ -32,4 +49,9 @@ multigp_id?: OptionalEdit<string>,
 /**
  * A new Velocidrone id (set / clear / leave-unchanged).
  */
-velocidrone_id?: OptionalEdit<string>, };
+velocidrone_id?: OptionalEdit<string>, 
+/**
+ * A **full replacement** of the custom-attributes bag when present (absent leaves it
+ * unchanged; present `{}` clears it). Empty keys are rejected; keys/values trimmed.
+ */
+attributes?: { [key in string]: string }, };

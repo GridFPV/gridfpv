@@ -67,6 +67,16 @@ pub enum VtxType {
 /// so an entry with just a callsign serialises to a two-field object. Derives serde (its JSON *is*
 /// both the wire and the persisted form) and `ts_rs::TS` so the frontend reads a generated `Pilot`
 /// type.
+///
+/// # Directory fields (a survey of RotorHazard / MultiGP / FPVScores, #74/#120)
+///
+/// Beyond the core callsign + cloud-pull ids, the directory carries a small set of
+/// **display/organizer** fields those systems converge on: a [`phonetic`](Pilot::phonetic)
+/// pronunciation hint for voice callouts (RotorHazard), a [`team`](Pilot::team) / club name, a
+/// [`color`](Pilot::color) for overlays/leaderboards, and a [`country`](Pilot::country) code. The
+/// open [`attributes`](Pilot::attributes) bag then captures whatever event/region-specific data
+/// (insurance #, FAA/FCC license, bib, sponsor, …) an organizer needs without us hardcoding a
+/// column per use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct Pilot {
@@ -81,6 +91,26 @@ pub struct Pilot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub name: Option<String>,
+    /// A **pronunciation hint** for the callsign, for voice callouts (RotorHazard carries this).
+    /// Free-form (e.g. `"AK-ro AYS"`). Omitted from the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phonetic: Option<String>,
+    /// The pilot's **team / club** name, if recorded. Free-form. Omitted from the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub team: Option<String>,
+    /// A **hex color** `#RRGGBB` for overlays / leaderboards, if recorded. Stored as a plain
+    /// (normalized) string and lightly validated on create/update. Omitted from the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub color: Option<String>,
+    /// The pilot's **country** as an ISO 3166-1 alpha-2 code (e.g. `US`, `GB`), if recorded. The
+    /// **code only** — flags/names derive from it in the UI. Stored uppercase, lightly validated.
+    /// Omitted from the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub country: Option<String>,
     /// The pilot's video-transmitter type, if recorded (see [`VtxType`]). Omitted when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -95,6 +125,12 @@ pub struct Pilot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub velocidrone_id: Option<String>,
+    /// An **open custom-attributes** bag (insurance #, FAA/FCC license, bib, sponsor, …) so an
+    /// organizer can capture event/region-specific data without us hardcoding a field per use.
+    /// Keys are trimmed and non-empty; serializes to TS `Record<string, string>`. Defaults empty
+    /// (and, being a `BTreeMap`, an empty bag still serializes to `{}` — there is no `skip`).
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
 }
 
 /// The body of `POST /pilots` — the fields a caller supplies to create a pilot (issue #74).
@@ -102,7 +138,7 @@ pub struct Pilot {
 /// The `callsign` is required; everything else is optional. The **id is auto-generated**
 /// server-side (a slug of the callsign + a short random suffix), never user-entered, mirroring
 /// `POST /timers` / `POST /events`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct CreatePilotRequest {
     /// The required callsign for the new pilot.
@@ -111,6 +147,22 @@ pub struct CreatePilotRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub name: Option<String>,
+    /// Optional pronunciation hint, stored on [`Pilot::phonetic`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phonetic: Option<String>,
+    /// Optional team / club, stored on [`Pilot::team`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub team: Option<String>,
+    /// Optional hex color `#RRGGBB`, stored on [`Pilot::color`] (validated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub color: Option<String>,
+    /// Optional ISO 3166-1 alpha-2 country code, stored on [`Pilot::country`] (validated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub country: Option<String>,
     /// Optional video-transmitter type, stored on [`Pilot::vtx_type`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -123,6 +175,10 @@ pub struct CreatePilotRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub velocidrone_id: Option<String>,
+    /// Optional custom-attributes bag, stored on [`Pilot::attributes`]. Empty keys are rejected;
+    /// keys and values are trimmed. Defaults empty.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
 }
 
 /// The body of `PUT /pilots/{id}` — the editable fields of a pilot (issue #74).
@@ -133,7 +189,7 @@ pub struct CreatePilotRequest {
 /// (including with `null` to clear it); an absent field leaves it unchanged. The wire-level
 /// distinction between "field absent" and "field present and null" is what lets a caller both
 /// leave-alone and clear.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct UpdatePilotRequest {
     /// A new callsign, or `None`/blank to leave it unchanged.
@@ -144,6 +200,23 @@ pub struct UpdatePilotRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub name: Option<OptionalEdit<String>>,
+    /// A new pronunciation hint (set / clear / leave-unchanged, like [`name`](Self::name)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phonetic: Option<OptionalEdit<String>>,
+    /// A new team / club (set / clear / leave-unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub team: Option<OptionalEdit<String>>,
+    /// A new hex color `#RRGGBB` (set / clear / leave-unchanged; a set value is validated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub color: Option<OptionalEdit<String>>,
+    /// A new ISO 3166-1 alpha-2 country code (set / clear / leave-unchanged; a set value is
+    /// validated and normalized uppercase).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub country: Option<OptionalEdit<String>>,
     /// A new VTX type (set / clear / leave-unchanged, like [`name`](Self::name)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -156,6 +229,11 @@ pub struct UpdatePilotRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub velocidrone_id: Option<OptionalEdit<String>>,
+    /// A **full replacement** of the custom-attributes bag when present (absent leaves it
+    /// unchanged; present `{}` clears it). Empty keys are rejected; keys/values trimmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attributes: Option<BTreeMap<String, String>>,
 }
 
 /// An edit to an **optional** field that distinguishes *clear it* from *leave it unchanged*
@@ -203,7 +281,7 @@ impl PilotDirectory {
 
         if let Some(dir) = &data_dir {
             std::fs::create_dir_all(dir).map_err(|e| {
-                PilotError(format!("could not create data dir {}: {e}", dir.display()))
+                PilotError::internal(format!("could not create data dir {}: {e}", dir.display()))
             })?;
             if let Some(restored) = read_persisted_pilots(dir) {
                 for pilot in restored {
@@ -240,8 +318,11 @@ impl PilotDirectory {
     pub fn create(&self, request: &CreatePilotRequest) -> Result<Pilot, PilotError> {
         let callsign = request.callsign.trim();
         if callsign.is_empty() {
-            return Err(PilotError("a pilot callsign is required".to_string()));
+            return Err(PilotError::invalid("a pilot callsign is required"));
         }
+        let color = normalize_color(&request.color)?;
+        let country = normalize_country(&request.country)?;
+        let attributes = normalize_attributes(&request.attributes)?;
         let mut dir = self.write();
         let id = loop {
             let candidate = PilotId(format!("{}-{}", slugify(callsign), short_suffix()));
@@ -253,9 +334,14 @@ impl PilotDirectory {
             id: id.clone(),
             callsign: callsign.to_string(),
             name: normalize_optional(&request.name),
+            phonetic: normalize_optional(&request.phonetic),
+            team: normalize_optional(&request.team),
+            color,
+            country,
             vtx_type: request.vtx_type,
             multigp_id: normalize_optional(&request.multigp_id),
             velocidrone_id: normalize_optional(&request.velocidrone_id),
+            attributes,
         };
         dir.pilots.insert(id, pilot.clone());
         dir.persist()?;
@@ -269,11 +355,20 @@ impl PilotDirectory {
     /// set (trimmed; a blank string clears it); present `null` → cleared. An unknown id is a
     /// [`PilotError`]. The directory is **persisted** on success.
     pub fn update(&self, id: &PilotId, request: &UpdatePilotRequest) -> Result<Pilot, PilotError> {
+        // Validate the set-edits up front (before taking the lock / mutating) so a bad value is a
+        // clean rejection that leaves the stored pilot untouched.
+        let color_edit = validate_color_edit(&request.color)?;
+        let country_edit = validate_country_edit(&request.country)?;
+        let attributes = match &request.attributes {
+            Some(map) => Some(normalize_attributes(map)?),
+            None => None,
+        };
+
         let mut dir = self.write();
         let pilot = dir
             .pilots
             .get_mut(id)
-            .ok_or_else(|| PilotError(format!("no pilot with id {:?}", id.0)))?;
+            .ok_or_else(|| PilotError::not_found(format!("no pilot with id {:?}", id.0)))?;
         if let Some(callsign) = &request.callsign {
             let trimmed = callsign.trim();
             if !trimmed.is_empty() {
@@ -281,11 +376,22 @@ impl PilotDirectory {
             }
         }
         apply_string_edit(&mut pilot.name, &request.name);
+        apply_string_edit(&mut pilot.phonetic, &request.phonetic);
+        apply_string_edit(&mut pilot.team, &request.team);
+        if let Some(value) = color_edit {
+            pilot.color = value;
+        }
+        if let Some(value) = country_edit {
+            pilot.country = value;
+        }
         if let Some(edit) = &request.vtx_type {
             pilot.vtx_type = edit.0;
         }
         apply_string_edit(&mut pilot.multigp_id, &request.multigp_id);
         apply_string_edit(&mut pilot.velocidrone_id, &request.velocidrone_id);
+        if let Some(map) = attributes {
+            pilot.attributes = map;
+        }
         let updated = pilot.clone();
         dir.persist()?;
         Ok(updated)
@@ -297,7 +403,10 @@ impl PilotDirectory {
     pub fn delete(&self, id: &PilotId) -> Result<(), PilotError> {
         let mut dir = self.write();
         if dir.pilots.remove(id).is_none() {
-            return Err(PilotError(format!("no pilot with id {:?}", id.0)));
+            return Err(PilotError::not_found(format!(
+                "no pilot with id {:?}",
+                id.0
+            )));
         }
         dir.persist()?;
         Ok(())
@@ -320,9 +429,9 @@ impl Directory {
         };
         let pilots: Vec<&Pilot> = self.pilots.values().collect();
         let json = serde_json::to_string_pretty(&pilots)
-            .map_err(|e| PilotError(format!("could not serialize pilots: {e}")))?;
+            .map_err(|e| PilotError::internal(format!("could not serialize pilots: {e}")))?;
         std::fs::write(pilots_path(dir), json)
-            .map_err(|e| PilotError(format!("could not persist pilots: {e}")))
+            .map_err(|e| PilotError::internal(format!("could not persist pilots: {e}")))
     }
 }
 
@@ -350,13 +459,57 @@ fn read_persisted_pilots(dir: &Path) -> Option<Vec<Pilot>> {
     serde_json::from_str(&raw).ok()
 }
 
-/// An error mutating the pilot directory (a persistence failure, an unknown id, a missing callsign).
+/// An error mutating the pilot directory (a persistence failure, an unknown id, a missing callsign,
+/// an invalid field value). Carries a [`PilotErrorKind`] so the HTTP layer can map a *validation*
+/// failure to `400` and an *unknown id* to `404`.
 #[derive(Debug, Clone)]
-pub struct PilotError(pub String);
+pub struct PilotError {
+    /// What kind of failure this is (drives the HTTP status the handler picks).
+    pub kind: PilotErrorKind,
+    /// A human-readable message.
+    pub message: String,
+}
+
+/// The class of a [`PilotError`], so a handler can pick the right status (issue #74).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PilotErrorKind {
+    /// A bad request value (missing callsign, invalid color/country, empty attribute key, …) → 400.
+    Invalid,
+    /// The addressed pilot id does not exist → 404.
+    NotFound,
+    /// A server-side persistence failure → 500.
+    Internal,
+}
+
+impl PilotError {
+    /// A validation / bad-request error (HTTP 400).
+    fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            kind: PilotErrorKind::Invalid,
+            message: message.into(),
+        }
+    }
+
+    /// An unknown-id error (HTTP 404).
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            kind: PilotErrorKind::NotFound,
+            message: message.into(),
+        }
+    }
+
+    /// An internal / persistence error (HTTP 500).
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            kind: PilotErrorKind::Internal,
+            message: message.into(),
+        }
+    }
+}
 
 impl std::fmt::Display for PilotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "pilot directory error: {}", self.0)
+        write!(f, "pilot directory error: {}", self.message)
     }
 }
 
@@ -369,6 +522,92 @@ fn normalize_optional(value: &Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// Validate + normalize a **hex color** `#RRGGBB` (issue #74).
+///
+/// A blank/absent value is unset (`None`); otherwise the value must be a `#` followed by exactly six
+/// ASCII hex digits (case-insensitive), normalized to an uppercase `#RRGGBB`. Anything else is a
+/// validation [`PilotError`].
+fn normalize_color(value: &Option<String>) -> Result<Option<String>, PilotError> {
+    let Some(raw) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let hex = raw.strip_prefix('#').unwrap_or("");
+    if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(Some(format!("#{}", hex.to_ascii_uppercase())))
+    } else {
+        Err(PilotError::invalid(format!(
+            "invalid color {raw:?}: expected a hex color like #RRGGBB"
+        )))
+    }
+}
+
+/// Validate + normalize an **ISO 3166-1 alpha-2** country code (issue #74).
+///
+/// A blank/absent value is unset (`None`); otherwise the value must be exactly two ASCII letters,
+/// normalized to uppercase (e.g. `gb` → `GB`). We deliberately do **not** check the code against a
+/// full country table — that lives in the UI. Anything else is a validation [`PilotError`].
+fn normalize_country(value: &Option<String>) -> Result<Option<String>, PilotError> {
+    let Some(raw) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.len() == 2 && raw.bytes().all(|b| b.is_ascii_alphabetic()) {
+        Ok(Some(raw.to_ascii_uppercase()))
+    } else {
+        Err(PilotError::invalid(format!(
+            "invalid country {raw:?}: expected a two-letter ISO 3166-1 alpha-2 code"
+        )))
+    }
+}
+
+/// Validate + normalize the **custom-attributes** bag (issue #74).
+///
+/// Each key is trimmed and must be non-empty (an empty/whitespace-only key is a validation
+/// [`PilotError`]); each value is trimmed. A normalized `BTreeMap` is returned (deterministic key
+/// order), which may be empty.
+fn normalize_attributes(
+    attributes: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, PilotError> {
+    let mut out = BTreeMap::new();
+    for (key, value) in attributes {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(PilotError::invalid(
+                "a custom attribute key must not be empty",
+            ));
+        }
+        out.insert(key.to_string(), value.trim().to_string());
+    }
+    Ok(out)
+}
+
+/// Validate a *set-or-clear* edit of a validated optional field (color/country), returning the
+/// outer edit (issue #74): `None` ⇒ leave unchanged; `Some(None)` ⇒ clear; `Some(Some(v))` ⇒ set to
+/// the normalized `v`. A set value that fails `normalize` is a validation [`PilotError`].
+fn validate_edit_with(
+    edit: &Option<OptionalEdit<String>>,
+    normalize: impl Fn(&Option<String>) -> Result<Option<String>, PilotError>,
+) -> Result<Option<Option<String>>, PilotError> {
+    match edit {
+        None => Ok(None),
+        Some(OptionalEdit(None)) => Ok(Some(None)),
+        Some(OptionalEdit(Some(value))) => Ok(Some(normalize(&Some(value.clone()))?)),
+    }
+}
+
+/// Validate a color set-or-clear edit (see [`validate_edit_with`] / [`normalize_color`]).
+fn validate_color_edit(
+    edit: &Option<OptionalEdit<String>>,
+) -> Result<Option<Option<String>>, PilotError> {
+    validate_edit_with(edit, normalize_color)
+}
+
+/// Validate a country set-or-clear edit (see [`validate_edit_with`] / [`normalize_country`]).
+fn validate_country_edit(
+    edit: &Option<OptionalEdit<String>>,
+) -> Result<Option<Option<String>>, PilotError> {
+    validate_edit_with(edit, normalize_country)
 }
 
 /// Slugify a callsign into an id-friendly stem (the same rule as the event/timer registries):
@@ -413,10 +652,7 @@ mod tests {
     fn req(callsign: &str) -> CreatePilotRequest {
         CreatePilotRequest {
             callsign: callsign.to_string(),
-            name: None,
-            vtx_type: None,
-            multigp_id: None,
-            velocidrone_id: None,
+            ..Default::default()
         }
     }
 
@@ -456,6 +692,7 @@ mod tests {
                 vtx_type: Some(VtxType::HDZero),
                 multigp_id: Some("mgp-123".to_string()),
                 velocidrone_id: Some("  ".to_string()), // blank → unset
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(pilot.name.as_deref(), Some("Zoe Oom"));
@@ -472,8 +709,7 @@ mod tests {
                 callsign: "Old".to_string(),
                 name: Some("Real Name".to_string()),
                 vtx_type: Some(VtxType::Analog),
-                multigp_id: None,
-                velocidrone_id: None,
+                ..Default::default()
             })
             .unwrap();
 
@@ -484,9 +720,8 @@ mod tests {
                 &UpdatePilotRequest {
                     callsign: Some("New".to_string()),
                     name: Some(OptionalEdit(None)), // explicit clear
-                    vtx_type: None,                 // unchanged
                     multigp_id: Some(OptionalEdit(Some("mgp-9".to_string()))),
-                    velocidrone_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -501,10 +736,7 @@ mod tests {
                 &created.id,
                 &UpdatePilotRequest {
                     callsign: Some("   ".to_string()),
-                    name: None,
-                    vtx_type: None,
-                    multigp_id: None,
-                    velocidrone_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -520,10 +752,7 @@ mod tests {
                 &unknown,
                 &UpdatePilotRequest {
                     callsign: Some("X".into()),
-                    name: None,
-                    vtx_type: None,
-                    multigp_id: None,
-                    velocidrone_id: None,
+                    ..Default::default()
                 },
             )
             .is_err()
@@ -550,9 +779,17 @@ mod tests {
                 .create(&CreatePilotRequest {
                     callsign: "Persisted".to_string(),
                     name: Some("Per Sisted".to_string()),
+                    phonetic: Some("PER sis-ted".to_string()),
+                    team: Some("Team Zoom".to_string()),
+                    color: Some("#ff0000".to_string()),
+                    country: Some("gb".to_string()),
                     vtx_type: Some(VtxType::DJI),
                     multigp_id: Some("mgp-7".to_string()),
                     velocidrone_id: None,
+                    attributes: BTreeMap::from([
+                        ("bib".to_string(), "7".to_string()),
+                        ("insurance".to_string(), "AMA-123".to_string()),
+                    ]),
                 })
                 .unwrap();
 
@@ -560,11 +797,195 @@ mod tests {
             let got = reopened.get(&created.id).unwrap();
             assert_eq!(got.callsign, "Persisted");
             assert_eq!(got.name.as_deref(), Some("Per Sisted"));
+            assert_eq!(got.phonetic.as_deref(), Some("PER sis-ted"));
+            assert_eq!(got.team.as_deref(), Some("Team Zoom"));
+            assert_eq!(got.color.as_deref(), Some("#FF0000")); // normalized uppercase
+            assert_eq!(got.country.as_deref(), Some("GB")); // normalized uppercase
             assert_eq!(got.vtx_type, Some(VtxType::DJI));
             assert_eq!(got.multigp_id.as_deref(), Some("mgp-7"));
             assert_eq!(got.velocidrone_id, None);
+            assert_eq!(got.attributes.get("bib").map(String::as_str), Some("7"));
+            assert_eq!(
+                got.attributes.get("insurance").map(String::as_str),
+                Some("AMA-123")
+            );
         }
         std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[test]
+    fn color_validation_accepts_hex_and_rejects_garbage() {
+        let dir = PilotDirectory::new(None).unwrap();
+        // Accepts #RRGGBB (any case), normalizes to uppercase.
+        let ok = dir
+            .create(&CreatePilotRequest {
+                callsign: "Hexy".to_string(),
+                color: Some("#AbCdEf".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(ok.color.as_deref(), Some("#ABCDEF"));
+
+        // Rejects non-hex / wrong length / missing #.
+        for bad in ["red", "#12345", "#1234567", "1188ff", "#zzzzzz"] {
+            let err = dir
+                .create(&CreatePilotRequest {
+                    callsign: "Bad".to_string(),
+                    color: Some(bad.to_string()),
+                    ..Default::default()
+                })
+                .unwrap_err();
+            assert_eq!(err.kind, PilotErrorKind::Invalid, "should reject {bad:?}");
+        }
+
+        // An update with a bad color is rejected and leaves the stored value untouched.
+        let bad_update = dir
+            .update(
+                &ok.id,
+                &UpdatePilotRequest {
+                    color: Some(OptionalEdit(Some("nope".to_string()))),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(bad_update.kind, PilotErrorKind::Invalid);
+        assert_eq!(dir.get(&ok.id).unwrap().color.as_deref(), Some("#ABCDEF"));
+
+        // Clearing the color works.
+        let cleared = dir
+            .update(
+                &ok.id,
+                &UpdatePilotRequest {
+                    color: Some(OptionalEdit(None)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(cleared.color, None);
+    }
+
+    #[test]
+    fn country_validation_accepts_two_letters_and_rejects_others() {
+        let dir = PilotDirectory::new(None).unwrap();
+        let ok = dir
+            .create(&CreatePilotRequest {
+                callsign: "Yank".to_string(),
+                country: Some("us".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(ok.country.as_deref(), Some("US"));
+
+        for bad in ["USA", "U", "12", "U1", "g b"] {
+            let err = dir
+                .create(&CreatePilotRequest {
+                    callsign: "Bad".to_string(),
+                    country: Some(bad.to_string()),
+                    ..Default::default()
+                })
+                .unwrap_err();
+            assert_eq!(err.kind, PilotErrorKind::Invalid, "should reject {bad:?}");
+        }
+
+        // Update to a valid code (normalized) and then clear.
+        let updated = dir
+            .update(
+                &ok.id,
+                &UpdatePilotRequest {
+                    country: Some(OptionalEdit(Some("De".to_string()))),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.country.as_deref(), Some("DE"));
+    }
+
+    #[test]
+    fn attributes_set_replace_and_clear_with_empty_key_rejected() {
+        let dir = PilotDirectory::new(None).unwrap();
+        let created = dir
+            .create(&CreatePilotRequest {
+                callsign: "Attr".to_string(),
+                attributes: BTreeMap::from([
+                    (" bib ".to_string(), " 12 ".to_string()), // trimmed key + value
+                    ("sponsor".to_string(), "Acme".to_string()),
+                ]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            created.attributes.get("bib").map(String::as_str),
+            Some("12")
+        );
+        assert_eq!(
+            created.attributes.get("sponsor").map(String::as_str),
+            Some("Acme")
+        );
+
+        // An empty (whitespace-only) key is rejected on create.
+        let bad = dir
+            .create(&CreatePilotRequest {
+                callsign: "BadAttr".to_string(),
+                attributes: BTreeMap::from([("   ".to_string(), "x".to_string())]),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert_eq!(bad.kind, PilotErrorKind::Invalid);
+
+        // Update replaces the whole bag when present.
+        let replaced = dir
+            .update(
+                &created.id,
+                &UpdatePilotRequest {
+                    attributes: Some(BTreeMap::from([("faa".to_string(), "FA123".to_string())])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(replaced.attributes.len(), 1);
+        assert_eq!(
+            replaced.attributes.get("faa").map(String::as_str),
+            Some("FA123")
+        );
+
+        // An absent attributes field leaves the bag unchanged.
+        let unchanged = dir
+            .update(
+                &created.id,
+                &UpdatePilotRequest {
+                    name: Some(OptionalEdit(Some("Nom".to_string()))),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            unchanged.attributes.get("faa").map(String::as_str),
+            Some("FA123")
+        );
+
+        // A present empty map clears the bag.
+        let emptied = dir
+            .update(
+                &created.id,
+                &UpdatePilotRequest {
+                    attributes: Some(BTreeMap::new()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(emptied.attributes.is_empty());
+
+        // An empty key in an update is rejected and leaves the bag untouched.
+        let bad_update = dir
+            .update(
+                &created.id,
+                &UpdatePilotRequest {
+                    attributes: Some(BTreeMap::from([(" ".to_string(), "y".to_string())])),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(bad_update.kind, PilotErrorKind::Invalid);
     }
 
     #[test]

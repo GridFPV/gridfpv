@@ -11,6 +11,16 @@ import type { VtxType } from "./VtxType";
  * so an entry with just a callsign serialises to a two-field object. Derives serde (its JSON *is*
  * both the wire and the persisted form) and `ts_rs::TS` so the frontend reads a generated `Pilot`
  * type.
+ *
+ * # Directory fields (a survey of RotorHazard / MultiGP / FPVScores, #74/#120)
+ *
+ * Beyond the core callsign + cloud-pull ids, the directory carries a small set of
+ * **display/organizer** fields those systems converge on: a [`phonetic`](Pilot::phonetic)
+ * pronunciation hint for voice callouts (RotorHazard), a [`team`](Pilot::team) / club name, a
+ * [`color`](Pilot::color) for overlays/leaderboards, and a [`country`](Pilot::country) code. The
+ * open [`attributes`](Pilot::attributes) bag then captures whatever event/region-specific data
+ * (insurance #, FAA/FCC license, bib, sponsor, …) an organizer needs without us hardcoding a
+ * column per use.
  */
 export type Pilot = { 
 /**
@@ -29,6 +39,26 @@ callsign: string,
  */
 name?: string, 
 /**
+ * A **pronunciation hint** for the callsign, for voice callouts (RotorHazard carries this).
+ * Free-form (e.g. `"AK-ro AYS"`). Omitted from the wire when unset.
+ */
+phonetic?: string, 
+/**
+ * The pilot's **team / club** name, if recorded. Free-form. Omitted from the wire when unset.
+ */
+team?: string, 
+/**
+ * A **hex color** `#RRGGBB` for overlays / leaderboards, if recorded. Stored as a plain
+ * (normalized) string and lightly validated on create/update. Omitted from the wire when unset.
+ */
+color?: string, 
+/**
+ * The pilot's **country** as an ISO 3166-1 alpha-2 code (e.g. `US`, `GB`), if recorded. The
+ * **code only** — flags/names derive from it in the UI. Stored uppercase, lightly validated.
+ * Omitted from the wire when unset.
+ */
+country?: string, 
+/**
  * The pilot's video-transmitter type, if recorded (see [`VtxType`]). Omitted when unset.
  */
 vtx_type?: VtxType, 
@@ -41,4 +71,11 @@ multigp_id?: string,
  * The pilot's **Velocidrone** id, if known — a forward hook for matching a Velocidrone racer
  * (#74). A free-form string. Omitted from the wire when unset.
  */
-velocidrone_id?: string, };
+velocidrone_id?: string, 
+/**
+ * An **open custom-attributes** bag (insurance #, FAA/FCC license, bib, sponsor, …) so an
+ * organizer can capture event/region-specific data without us hardcoding a field per use.
+ * Keys are trimmed and non-empty; serializes to TS `Record<string, string>`. Defaults empty
+ * (and, being a `BTreeMap`, an empty bag still serializes to `{}` — there is no `skip`).
+ */
+attributes: { [key in string]: string }, };
