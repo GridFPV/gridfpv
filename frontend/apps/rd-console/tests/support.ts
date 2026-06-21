@@ -17,7 +17,10 @@ import type {
   listPilots,
   createPilot,
   updatePilot,
-  deletePilot
+  deletePilot,
+  setEventRoster,
+  addToRoster,
+  removeFromRoster
 } from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
@@ -46,6 +49,10 @@ export interface TimerImpls {
   createPilotImpl?: typeof createPilot;
   updatePilotImpl?: typeof updatePilot;
   deletePilotImpl?: typeof deletePilot;
+  /** The per-event roster write seams (issue #74) — back the EventRoster tests. */
+  setEventRosterImpl?: typeof setEventRoster;
+  addToRosterImpl?: typeof addToRoster;
+  removeFromRosterImpl?: typeof removeFromRoster;
 }
 
 export interface TestSession {
@@ -101,7 +108,11 @@ export function makeTestSession(
     // Pilot-directory write seams (issue #74): inert unless a test overrides them.
     createPilotImpl: opts?.createPilotImpl,
     updatePilotImpl: opts?.updatePilotImpl,
-    deletePilotImpl: opts?.deletePilotImpl
+    deletePilotImpl: opts?.deletePilotImpl,
+    // Per-event roster write seams (issue #74): inert unless a test overrides them.
+    setEventRosterImpl: opts?.setEventRosterImpl,
+    addToRosterImpl: opts?.addToRosterImpl,
+    removeFromRosterImpl: opts?.removeFromRosterImpl
   });
   // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event,
   // unless the test wants the app-level (no-event) context.

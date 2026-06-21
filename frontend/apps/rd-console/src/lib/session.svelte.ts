@@ -52,6 +52,9 @@ import {
   createPilot,
   updatePilot,
   deletePilot,
+  setEventRoster,
+  addToRoster,
+  removeFromRoster,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
@@ -219,6 +222,9 @@ export class Session {
   #createPilotImpl: typeof createPilot;
   #updatePilotImpl: typeof updatePilot;
   #deletePilotImpl: typeof deletePilot;
+  #setEventRosterImpl: typeof setEventRoster;
+  #addToRosterImpl: typeof addToRoster;
+  #removeFromRosterImpl: typeof removeFromRoster;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -237,6 +243,9 @@ export class Session {
     createPilotImpl?: typeof createPilot;
     updatePilotImpl?: typeof updatePilot;
     deletePilotImpl?: typeof deletePilot;
+    setEventRosterImpl?: typeof setEventRoster;
+    addToRosterImpl?: typeof addToRoster;
+    removeFromRosterImpl?: typeof removeFromRoster;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -256,6 +265,9 @@ export class Session {
     this.#createPilotImpl = opts?.createPilotImpl ?? createPilot;
     this.#updatePilotImpl = opts?.updatePilotImpl ?? updatePilot;
     this.#deletePilotImpl = opts?.deletePilotImpl ?? deletePilot;
+    this.#setEventRosterImpl = opts?.setEventRosterImpl ?? setEventRoster;
+    this.#addToRosterImpl = opts?.addToRosterImpl ?? addToRoster;
+    this.#removeFromRosterImpl = opts?.removeFromRosterImpl ?? removeFromRoster;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -451,6 +463,56 @@ export class Session {
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
       this.#setPrimaryTimerImpl(this.baseUrl, event.id, id, token)
+    );
+    if (updated) this.currentEvent = updated;
+    return updated;
+  }
+
+  /**
+   * Set the **current event's** roster (`PUT /events/{id}/roster`) — issue #74. The per-event
+   * reference into the app-level pilot directory: the event rosters which directory pilots race it.
+   * Pass the full set of pilot ids (replaces the roster wholesale). No-op (resolves `undefined`)
+   * when no event is selected. On success the updated {@link EventMeta} replaces
+   * {@link currentEvent} so the workspace's view of the roster stays in sync; returns it,
+   * `undefined` on a cancelled prompt, or throws.
+   */
+  async setEventRoster(pilotIds: PilotId[]): Promise<EventMeta | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const updated = await this.#privilegedWrite((token) =>
+      this.#setEventRosterImpl(this.baseUrl, event.id, pilotIds, token)
+    );
+    if (updated) this.currentEvent = updated;
+    return updated;
+  }
+
+  /**
+   * Add one pilot to the **current event's** roster (`POST /events/{id}/roster/{pilotId}`) — issue
+   * #74. Idempotent. No-op (resolves `undefined`) when no event is selected. On success the updated
+   * {@link EventMeta} replaces {@link currentEvent}; returns it, `undefined` on a cancelled prompt,
+   * or throws.
+   */
+  async addToRoster(pilotId: PilotId): Promise<EventMeta | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const updated = await this.#privilegedWrite((token) =>
+      this.#addToRosterImpl(this.baseUrl, event.id, pilotId, token)
+    );
+    if (updated) this.currentEvent = updated;
+    return updated;
+  }
+
+  /**
+   * Remove one pilot from the **current event's** roster (`DELETE /events/{id}/roster/{pilotId}`) —
+   * issue #74. Removing a pilot not on the roster is a no-op. Resolves `undefined` when no event is
+   * selected. On success the updated {@link EventMeta} replaces {@link currentEvent}; returns it,
+   * `undefined` on a cancelled prompt, or throws.
+   */
+  async removeFromRoster(pilotId: PilotId): Promise<EventMeta | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const updated = await this.#privilegedWrite((token) =>
+      this.#removeFromRosterImpl(this.baseUrl, event.id, pilotId, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
