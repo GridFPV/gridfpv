@@ -18,6 +18,10 @@
 //!    that already-live connection (real RH crossings, attributed to the heat's lineup).
 //! 6. Finishes the heat and asserts the connection **stays `Connected`** — the heat is disarmed but
 //!    the persistent connection is NOT torn down (#105), so status keeps reflecting the live link.
+//! 7. **Stops the RH container** out from under the live connection and asserts the Director
+//!    **detects the drop** — the timer leaves `Connected` (→ `Disconnected`/`Error`/`Connecting`)
+//!    within ~10s (#105). This is the regression guard: a buffering auto-reconnect used to hide a
+//!    real drop, so the timer read `Connected` indefinitely.
 //!
 //! Like every `*_live` test this is **structural / tolerant** — RH's mock interface reads its CSV
 //! continuously so lap *timing* is not controllable; we assert the connection state reached and
@@ -228,5 +232,34 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
     eprintln!(
         "app RH-persistent-connect e2e: connected ON SELECTION (before any heat), {pass_count} real \
          pass(es) into the event log while the heat ran, and STILL Connected after it finished"
+    );
+
+    // === Drop detection (#105): stop the RH container out from under the live connection and assert
+    // the Director observes the drop within ~10s. This is the regression the fix targets: with
+    // `rust_socketio`'s auto-reconnect the emit-buffering hid a real drop and the timer stayed
+    // Connected indefinitely. With `.reconnect(false)` + the `close`/`error` handlers flipping the
+    // alive flag, the driver's monitor now catches it and moves the timer off Connected. ===
+    eprintln!("app RH-drop-detection: stopping the RH container to simulate a timer drop-off…");
+    rh.stop();
+    let drop_start = Instant::now();
+    let dropped = wait_for(Duration::from_secs(10), || {
+        matches!(
+            timers.get(&rh_timer.id).map(|t| t.status),
+            Some(TimerStatus::Disconnected)
+                | Some(TimerStatus::Error)
+                | Some(TimerStatus::Connecting)
+        )
+    })
+    .await;
+    let dropped_status = timers.get(&rh_timer.id).map(|t| t.status);
+    assert!(
+        dropped,
+        "the Director must detect a stopped RotorHazard and move the timer off Connected within \
+         10s (the whole point of #105's drop detection); status = {dropped_status:?}"
+    );
+    eprintln!(
+        "app RH-drop-detection: timer left Connected after RH was stopped — status {dropped_status:?} \
+         in {:?} (drop DETECTED)",
+        drop_start.elapsed()
     );
 }

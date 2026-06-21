@@ -17,6 +17,7 @@
 // rather than box every signature in this thin wrapper.
 #![allow(clippy::result_large_err)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rust_socketio::client::Client;
@@ -59,6 +60,11 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
 pub struct RotorHazardConnection {
     client: Client,
     events: Arc<Mutex<Vec<Event>>>,
+    /// Liveness flag flipped to `false` by `rust_socketio`'s reserved `close`/`error` handlers when
+    /// the socket drops. With `.reconnect(false)` (see [`connect`](Self::connect)) a dropped link is
+    /// a real, final close — `rust_socketio` no longer silently buffers emits and auto-reconnects —
+    /// so the driver can read [`is_alive`](Self::is_alive) as the source of truth for a drop (#105).
+    alive: Arc<AtomicBool>,
 }
 
 impl RotorHazardConnection {
@@ -67,6 +73,17 @@ impl RotorHazardConnection {
     pub fn connect(url: &str, adapter: RotorHazardAdapter) -> Result<Self, rust_socketio::Error> {
         let adapter = Arc::new(Mutex::new(adapter));
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        // Starts alive; flipped to `false` by the `close`/`error` reserved-event handlers below.
+        let alive = Arc::new(AtomicBool::new(true));
+
+        // `rust_socketio`'s reserved events: on a dropped socket the poll loop fires `error`
+        // (the engine.io read failed) and, on a clean disconnect packet, `close`. Either way the
+        // link is no longer usable, so flip `alive` to `false` — the truth the driver monitors.
+        let drop_handler = |alive: Arc<AtomicBool>| {
+            move |_payload: Payload, _client: RawClient| {
+                alive.store(false, Ordering::Relaxed);
+            }
+        };
 
         // One handler per translated event: decode -> translate -> accumulate.
         let handler = |name: &'static str,
@@ -97,11 +114,18 @@ impl RotorHazardConnection {
 
         let client = ClientBuilder::new(url.to_string())
             .tls_config(tls)
-            // Resume after a dropped connection. On reconnect RotorHazard re-sends the
-            // full `current_laps` snapshot; the adapter's per-lap dedup makes that
-            // replay safe (no double-counted laps) — see the dedup module + the
-            // rh_signal snapshot-dedup assertion.
-            .reconnect(true)
+            // Do NOT let `rust_socketio` auto-reconnect (#105). With `.reconnect(true)` a dropped
+            // socket is invisible: the client buffers emits and returns `Ok` while silently
+            // reconnecting in the background, so `probe_liveness`'s emit never errors and a real
+            // drop is never detected. With `.reconnect(false)` a drop becomes a real, final close
+            // that fires the `close`/`error` reserved events below — and the *driver* owns
+            // reconnection (it has backoff and re-warms state). On its reconnect RotorHazard
+            // re-sends the full `current_laps` snapshot; the adapter's per-lap dedup makes that
+            // replay safe (no double-counted laps) — see the dedup module + the rh_signal
+            // snapshot-dedup assertion.
+            .reconnect(false)
+            .on("error", drop_handler(alive.clone()))
+            .on("close", drop_handler(alive.clone()))
             .on(
                 "race_status",
                 handler("race_status", adapter.clone(), events.clone()),
@@ -125,7 +149,19 @@ impl RotorHazardConnection {
         // and `race_status` arrive via the normal snapshot stream.
         let _ = client.emit("load_data", json!({ "load_types": ["node_data"] }));
 
-        Ok(Self { client, events })
+        Ok(Self {
+            client,
+            events,
+            alive,
+        })
+    }
+
+    /// Whether the socket is still live (#105). The reserved `close`/`error` handlers flip this to
+    /// `false` the moment `rust_socketio` observes the connection drop; with `.reconnect(false)`
+    /// that is final, so this is the driver's source of truth for detecting a drop — unlike an
+    /// emit, which a buffering client could still report as `Ok`.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
     }
 
     /// Take everything translated since the last call.
