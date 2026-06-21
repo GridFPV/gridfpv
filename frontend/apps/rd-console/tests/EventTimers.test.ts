@@ -27,6 +27,15 @@ const EVENT: EventMeta = {
   timers: ['mock']
 };
 
+/** A redundant-gate event with two selected timers, no explicit primary (first = effective). */
+const EVENT_2: EventMeta = {
+  id: 'e2',
+  name: 'Redundant',
+  created_at: 0,
+  persistent: true,
+  timers: ['mock', 'rh-1']
+};
+
 describe('EventTimers (in-event CRUD + selection)', () => {
   it('seeds the checkboxes from the event selection', async () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
@@ -116,5 +125,67 @@ describe('EventTimers (in-event CRUD + selection)', () => {
     expect(within(rows[0]).getByRole('button', { name: 'Edit' })).toBeInTheDocument();
     expect(within(rows[0]).queryByRole('button', { name: 'Remove' })).toBeNull();
     expect(within(rows[1]).getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+  });
+
+  it('hides timer roles when only one timer is selected', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    await screen.findByLabelText('Use Mock');
+    expect(screen.queryByRole('list', { name: 'Timer roles' })).toBeNull();
+  });
+
+  it('shows roles for 2+ timers: the first selected is the effective primary', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT_2 });
+    render(EventTimers, { session });
+
+    await screen.findByRole('list', { name: 'Timer roles' });
+    // No explicit primary → the first selected ('mock') is primary; the rest are alternates.
+    const primaryRadio = screen.getByLabelText('Make Mock the primary timer') as HTMLInputElement;
+    const altRadio = screen.getByLabelText('Make Track RH the primary timer') as HTMLInputElement;
+    expect(primaryRadio.checked).toBe(true);
+    expect(altRadio.checked).toBe(false);
+    // The role labels are legible.
+    const roles = screen.getByRole('list', { name: 'Timer roles' });
+    expect(within(roles).getByText('Primary')).toBeInTheDocument();
+    expect(within(roles).getByText('Alternate')).toBeInTheDocument();
+  });
+
+  it('reflects an explicit primary_timer as the current selection', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({
+      listTimersImpl,
+      event: { ...EVENT_2, primary_timer: 'rh-1' }
+    });
+    render(EventTimers, { session });
+
+    await screen.findByRole('list', { name: 'Timer roles' });
+    expect(
+      (screen.getByLabelText('Make Track RH the primary timer') as HTMLInputElement).checked
+    ).toBe(true);
+    expect((screen.getByLabelText('Make Mock the primary timer') as HTMLInputElement).checked).toBe(
+      false
+    );
+  });
+
+  it('designating a new primary calls setPrimaryTimer with the chosen id', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const setPrimaryTimerImpl = vi.fn(async () => ({ ...EVENT_2, primary_timer: 'rh-1' }));
+    const { session } = makeTestSession({ listTimersImpl, setPrimaryTimerImpl, event: EVENT_2 });
+    render(EventTimers, { session });
+
+    await screen.findByRole('list', { name: 'Timer roles' });
+    await fireEvent.click(screen.getByLabelText('Make Track RH the primary timer'));
+
+    await waitFor(() => expect(setPrimaryTimerImpl).toHaveBeenCalledTimes(1));
+    expect(setPrimaryTimerImpl).toHaveBeenCalledWith('http://d.local', 'e2', 'rh-1', 'tok');
+    // The radio reflects the re-homed event's new primary.
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText('Make Track RH the primary timer') as HTMLInputElement).checked
+      ).toBe(true)
+    );
   });
 });

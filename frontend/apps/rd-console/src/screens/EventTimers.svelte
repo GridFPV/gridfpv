@@ -93,6 +93,49 @@
   function reset() {
     syncFromEvent();
   }
+
+  // ── Primary / alternate roles (issue #112) ────────────────────────────────
+  //
+  // Roles are a property of the event's **saved** selection (the timers actually feeding the
+  // race), not the unsaved working set — `EventMeta.primary_timer` is server state keyed to the
+  // saved timers. So the role picker reflects `savedSelection`, in its saved order.
+  //
+  // Effective primary: the event's `primary_timer` when it's set and still in the selection;
+  // otherwise the **first** selected timer (the "first selected = primary when null" rule). Only
+  // surfaced when 2+ timers are selected — a lone timer is trivially the primary, no UI noise.
+
+  // The saved selection as registry rows (so we can show names), in saved order.
+  const roleTimers = $derived(
+    savedSelection
+      .map((id) => timers.find((t) => t.id === id))
+      .filter((t): t is Timer => t !== undefined)
+  );
+
+  const showRoles = $derived(roleTimers.length >= 2);
+
+  // The currently-effective primary id, applying the "first selected = primary when null" rule
+  // (shared with the context header via the session getter).
+  const effectivePrimary = $derived(session.primaryTimerId);
+
+  // Guards a primary change in flight so the radios don't double-fire mid-request.
+  let settingPrimary = $state(false);
+
+  async function choosePrimary(id: TimerId) {
+    if (settingPrimary || id === effectivePrimary) return;
+    settingPrimary = true;
+    try {
+      const updated = await session.setPrimaryTimer(id);
+      if (!updated) {
+        toast.info('A control token is required to set the primary timer.');
+        return;
+      }
+      toast.success('Primary timer updated.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      settingPrimary = false;
+    }
+  }
 </script>
 
 <section class="event-timers" aria-label="Event timers">
@@ -138,11 +181,105 @@
       {/snippet}
     </TimerManager>
   </Card>
+
+  {#if showRoles}
+    <Card
+      title="Timer roles"
+      subtitle="Primary feeds the race; alternates are hot standby and take over if the primary drops."
+    >
+      <ul class="roles" aria-label="Timer roles">
+        {#each roleTimers as timer (timer.id)}
+          {@const isPrimary = timer.id === effectivePrimary}
+          <li class="role-row" class:primary={isPrimary}>
+            <label class="role-label">
+              <input
+                type="radio"
+                name="primary-timer"
+                class="role-radio"
+                checked={isPrimary}
+                disabled={settingPrimary}
+                onchange={() => choosePrimary(timer.id)}
+                aria-label={`Make ${timer.name} the primary timer`}
+              />
+              <span class="role-name">{timer.name}</span>
+            </label>
+            <span
+              class="role-badge"
+              class:badge-primary={isPrimary}
+              class:badge-alternate={!isPrimary}
+            >
+              {isPrimary ? 'Primary' : 'Alternate'}
+            </span>
+          </li>
+        {/each}
+      </ul>
+    </Card>
+  {/if}
 </section>
 
 <style>
   .event-timers {
     max-width: 44rem;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-4);
+  }
+  .roles {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+  }
+  .role-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface-alt);
+  }
+  .role-row.primary {
+    border-color: var(--gf-success);
+  }
+  .role-label {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    cursor: pointer;
+    min-width: 0;
+  }
+  .role-radio {
+    width: 1.05rem;
+    height: 1.05rem;
+    accent-color: var(--gf-success);
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+  .role-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .role-badge {
+    flex-shrink: 0;
+    font-size: var(--gf-font-size-2xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.1rem var(--gf-space-2);
+    border-radius: var(--gf-radius-pill);
+  }
+  .badge-primary {
+    color: var(--gf-success);
+    background: var(--gf-success-soft);
+  }
+  .badge-alternate {
+    color: var(--gf-text-muted);
+    background: var(--gf-surface-sunken);
   }
   .select-box {
     width: 1.05rem;
