@@ -247,6 +247,13 @@ fn maintain(
     let mut stage_deadline: Option<Instant> = None;
 
     while !cancel.load(Ordering::Relaxed) {
+        // The source of truth for a drop (#105): `rust_socketio` runs with `.reconnect(false)`, so a
+        // dropped socket fires the transport's `close`/`error` handlers, which flip `is_alive` to
+        // false. (An emit alone can't be trusted — a buffering client returns `Ok` on a dead link.)
+        if !conn.is_alive() {
+            return true;
+        }
+
         // Stage a freshly-armed heat once (reset RH to a clean READY state, then stage; RH
         // auto-starts). Done lazily here so staging happens on the driver thread, not the caller.
         let mut just_staged = false;

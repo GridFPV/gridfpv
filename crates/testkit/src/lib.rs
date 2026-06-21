@@ -498,6 +498,21 @@ impl RhContainer {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    /// The container's docker name — so a test can drive its lifecycle directly (e.g. `docker stop`
+    /// it to simulate a RotorHazard drop-off). Final cleanup still happens via the RAII `Drop`.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Stop the container (a real RotorHazard drop-off) without removing it — the link the app holds
+    /// is severed, so the driver's liveness monitor should observe the drop. `Drop` still removes
+    /// the (now-stopped) container at end of test. Used by the drop-detection live test (#105).
+    pub fn stop(&self) {
+        let _ = Command::new("docker")
+            .args(["stop", "-t", "0", &self.name])
+            .output();
+    }
 }
 
 impl Drop for RhContainer {
