@@ -49,6 +49,9 @@ import {
   setEventTimers,
   setPrimaryTimer,
   listPilots,
+  createPilot,
+  updatePilot,
+  deletePilot,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
@@ -58,16 +61,19 @@ import type {
   Command,
   CommandAck,
   CreateEventRequest,
+  CreatePilotRequest,
   CreateTimerRequest,
   EventMeta,
   HeatId,
   HeatResult,
   LiveRaceState,
   Pilot,
+  PilotId,
   ProjectionBody,
   Scope,
   Timer,
   TimerId,
+  UpdatePilotRequest,
   UpdateTimerRequest
 } from '@gridfpv/types';
 
@@ -210,6 +216,9 @@ export class Session {
   #setEventTimersImpl: typeof setEventTimers;
   #setPrimaryTimerImpl: typeof setPrimaryTimer;
   #listPilotsImpl: typeof listPilots;
+  #createPilotImpl: typeof createPilot;
+  #updatePilotImpl: typeof updatePilot;
+  #deletePilotImpl: typeof deletePilot;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -225,6 +234,9 @@ export class Session {
     setEventTimersImpl?: typeof setEventTimers;
     setPrimaryTimerImpl?: typeof setPrimaryTimer;
     listPilotsImpl?: typeof listPilots;
+    createPilotImpl?: typeof createPilot;
+    updatePilotImpl?: typeof updatePilot;
+    deletePilotImpl?: typeof deletePilot;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -241,6 +253,9 @@ export class Session {
     this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
     this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
     this.#listPilotsImpl = opts?.listPilotsImpl ?? listPilots;
+    this.#createPilotImpl = opts?.createPilotImpl ?? createPilot;
+    this.#updatePilotImpl = opts?.updatePilotImpl ?? updatePilot;
+    this.#deletePilotImpl = opts?.deletePilotImpl ?? deletePilot;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -318,6 +333,42 @@ export class Session {
    */
   listPilots(): Promise<Pilot[]> {
     return this.#listPilotsImpl(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Create a directory pilot (`POST /pilots`) — issue #74. RD-gated, full-trust first like the
+   * timer writes: attempted tokenless, and only if the Director answers 401/403 does the lazy
+   * prompt fire once and the create retry. The `callsign` is required (server **400** on blank);
+   * the id is auto-generated. Returns the new {@link Pilot}, `undefined` on a cancelled prompt, or
+   * throws on a non-auth failure (a bad hex `color` / `country` is a **400** the form surfaces).
+   */
+  createPilot(request: CreatePilotRequest): Promise<Pilot | undefined> {
+    return this.#privilegedWrite((token) => this.#createPilotImpl(this.baseUrl, request, token));
+  }
+
+  /**
+   * Edit a directory pilot (`PUT /pilots/{id}`) — issue #74. RD-gated. The request carries only the
+   * fields that changed: an omitted optional field is left unchanged, a present **`null`** clears it
+   * (the way the form clears `color`/`country`), and a present value sets it. Returns the updated
+   * {@link Pilot}, `undefined` on a cancelled prompt, or throws on a non-auth failure.
+   */
+  updatePilot(id: PilotId, request: UpdatePilotRequest): Promise<Pilot | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#updatePilotImpl(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * Remove a directory pilot (`DELETE /pilots/{id}`) — issue #74. RD-gated. Resolves to `true` once
+   * the delete succeeds, `undefined` on a cancelled token prompt, or throws on any other failure
+   * (an unknown id is a **404**). (`true` lets callers tell success from a cancelled prompt — the
+   * `DELETE` has no body, mirroring {@link deleteTimer}.)
+   */
+  deletePilot(id: PilotId): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#deletePilotImpl(this.baseUrl, id, token);
+      return true as const;
+    });
   }
 
   /**

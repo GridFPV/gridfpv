@@ -86,4 +86,5 @@ export type * from '@bindings/TimerKind';
 export type * from '@bindings/TimerStatus';
 export type * from '@bindings/UpdatePilotRequest';
 export type * from '@bindings/UpdateTimerRequest';
+export type * from '@bindings/VtxType';
 export type * from '@bindings/WinCondition';

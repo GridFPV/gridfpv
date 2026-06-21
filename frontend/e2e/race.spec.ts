@@ -179,10 +179,11 @@ test('home hub navigates to each page and back, with working breadcrumbs', async
   await crumbs.getByRole('button', { name: 'Home' }).click();
   await expect(page.getByRole('heading', { name: 'Events' })).toBeVisible();
 
-  // Home → Pilots: the placeholder page with the "registration UI coming" note.
+  // Home → Pilots: the directory page hosting the shared PilotManager (#74) — its "+ Add pilot"
+  // action and the directory list are present.
   await page.getByRole('button', { name: /Pilots/ }).click();
   await expect(page.getByRole('heading', { name: 'Pilots', level: 1 })).toBeVisible();
-  await expect(page.getByText(/registration UI/i)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: '+ Add pilot' })).toBeVisible({ timeout: 15_000 });
   await page
     .getByRole('navigation', { name: 'Breadcrumb' })
     .getByRole('button', { name: 'Home' })

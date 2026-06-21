@@ -15,7 +15,8 @@
   "dependencies": {
     "@gridfpv/components": "*",
     "@gridfpv/protocol-client": "*",
-    "@gridfpv/types": "*"
+    "@gridfpv/types": "*",
+    "country-flag-icons": "^1.6.17"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
