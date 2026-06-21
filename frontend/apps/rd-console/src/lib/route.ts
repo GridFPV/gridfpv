@@ -96,11 +96,9 @@ export function formatHash(route: Route): string {
  *   - A `workspace` route with **no active event** → fall back to the Events page (`#/events`),
  *     since there is no event to show — never render a broken workspace.
  *   - A `page` route with an **active event** is fine as-is: the user explicitly navigated to a
- *     top-level page (e.g. via the breadcrumb) even though an event is active, so honour it.
- *
- * The caller composes this with the active-event resume (#90): an empty hash + active event still
- * lands in the workspace because the *default* for an empty hash, when an event is active, is the
- * workspace — handled by {@link resolveInitialRoute}.
+ *     top-level page (e.g. via the breadcrumb) even though an event is active, so honour it. This
+ *     includes the hub: an empty/hub hash stays on the hub even when an event is active — the hash
+ *     is authoritative, so being outside an event survives a reload.
  */
 export function reconcileRoute(route: Route, hasActiveEvent: boolean): Route {
   if (route.kind === 'workspace' && !hasActiveEvent) {
@@ -110,20 +108,19 @@ export function reconcileRoute(route: Route, hasActiveEvent: boolean): Route {
 }
 
 /**
- * Resolve the route to show on **initial load**, composing the hash with the active-event resume
- * (#90). The rule mirrors the legacy default while honouring an explicit hash:
+ * Resolve the route to show on **initial load**. The **hash is authoritative**: where you were
+ * survives a reload, and the shell never auto-enters an event from a bare/hub load.
  *
- *   - Empty/hub hash + active event → the workspace (resume into the active event's default tab),
- *     matching the pre-routing behaviour where a reload with an active event re-entered it.
- *   - Empty/hub hash + no active event → the hub.
+ *   - Empty/hub hash → the hub, **regardless of whether an event is active**. (This intentionally
+ *     supersedes the #90 "reload resumes into the active event" behaviour: being outside an event
+ *     stays outside; the user only enters an event by navigating in or loading a workspace URL.)
  *   - An explicit page hash (`#/pilots` etc.) → that page (honoured even if an event is active).
  *   - A workspace hash → the workspace on that tab if an event is active, else the Events page
  *     (via {@link reconcileRoute}).
+ *
+ * This is just the parse composed with {@link reconcileRoute}; there is no longer a special hub →
+ * workspace resume branch.
  */
 export function resolveInitialRoute(hash: string, hasActiveEvent: boolean): Route {
-  const parsed = parseHash(hash);
-  const isHub = parsed.kind === 'page' && parsed.page === 'home';
-  // The hub default, when an event is active, resumes into the workspace (legacy #90 behaviour).
-  if (isHub && hasActiveEvent) return { kind: 'workspace', tab: 'live' };
-  return reconcileRoute(parsed, hasActiveEvent);
+  return reconcileRoute(parseHash(hash), hasActiveEvent);
 }

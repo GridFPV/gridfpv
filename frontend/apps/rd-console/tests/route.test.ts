@@ -96,10 +96,12 @@ describe('reconcileRoute', () => {
   });
 });
 
-describe('resolveInitialRoute (hash composed with the active-event resume #90)', () => {
-  it('empty hash + active event resumes into the workspace (default live tab)', () => {
-    expect(resolveInitialRoute('', true)).toEqual({ kind: 'workspace', tab: 'live' });
-    expect(resolveInitialRoute('#/', true)).toEqual({ kind: 'workspace', tab: 'live' });
+describe('resolveInitialRoute (hash is authoritative; #118)', () => {
+  // Supersedes the #90 reload-resume: a bare/hub load never auto-enters the active event. Being
+  // outside an event survives a reload — staying on the hub keeps you on the hub.
+  it('empty/hub hash + active event stays on the hub (does NOT resume into the workspace)', () => {
+    expect(resolveInitialRoute('', true)).toEqual({ kind: 'page', page: 'home' });
+    expect(resolveInitialRoute('#/', true)).toEqual({ kind: 'page', page: 'home' });
   });
 
   it('empty hash + no active event lands on the hub', () => {
