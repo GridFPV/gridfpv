@@ -185,10 +185,12 @@ pub struct CreatePilotRequest {
 ///
 /// Every field is optional so a partial edit is a one-field body; the id is fixed (it is in the
 /// path). A present `callsign` replaces it (a blank one is ignored — the callsign is required and
-/// never cleared). For the optional metadata, a present field **replaces** the stored value
-/// (including with `null` to clear it); an absent field leaves it unchanged. The wire-level
-/// distinction between "field absent" and "field present and null" is what lets a caller both
-/// leave-alone and clear.
+/// never cleared). Each optional-metadata field is a three-state [`OptionalEdit`]: **absent** leaves
+/// it unchanged ([`Keep`](OptionalEdit::Keep)), present **`null`** clears it
+/// ([`Clear`](OptionalEdit::Clear)), and present **with a value** sets it ([`Set`](OptionalEdit::Set)).
+/// The wire-level distinction between "field absent" and "field present and `null`" is what lets a
+/// caller both leave-alone and clear — `#[serde(default)]` on each field maps an absent field to
+/// `Keep` while a present `null`/value runs [`OptionalEdit`]'s deserializer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct UpdatePilotRequest {
@@ -196,39 +198,39 @@ pub struct UpdatePilotRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub callsign: Option<String>,
-    /// A new real name (`Some(value)` to set, `Some(null)` to clear, absent to leave unchanged).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub name: Option<OptionalEdit<String>>,
+    /// A new real name: present value → set, present `null` → clear, absent → leave unchanged.
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub name: OptionalEdit<String>,
     /// A new pronunciation hint (set / clear / leave-unchanged, like [`name`](Self::name)).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub phonetic: Option<OptionalEdit<String>>,
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub phonetic: OptionalEdit<String>,
     /// A new team / club (set / clear / leave-unchanged).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub team: Option<OptionalEdit<String>>,
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub team: OptionalEdit<String>,
     /// A new hex color `#RRGGBB` (set / clear / leave-unchanged; a set value is validated).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub color: Option<OptionalEdit<String>>,
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub color: OptionalEdit<String>,
     /// A new ISO 3166-1 alpha-2 country code (set / clear / leave-unchanged; a set value is
     /// validated and normalized uppercase).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub country: Option<OptionalEdit<String>>,
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub country: OptionalEdit<String>,
     /// A new VTX type (set / clear / leave-unchanged, like [`name`](Self::name)).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub vtx_type: Option<OptionalEdit<VtxType>>,
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub vtx_type: OptionalEdit<VtxType>,
     /// A new MultiGP id (set / clear / leave-unchanged).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub multigp_id: Option<OptionalEdit<String>>,
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub multigp_id: OptionalEdit<String>,
     /// A new Velocidrone id (set / clear / leave-unchanged).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub velocidrone_id: Option<OptionalEdit<String>>,
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub velocidrone_id: OptionalEdit<String>,
     /// A **full replacement** of the custom-attributes bag when present (absent leaves it
     /// unchanged; present `{}` clears it). Empty keys are rejected; keys/values trimmed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,18 +238,129 @@ pub struct UpdatePilotRequest {
     pub attributes: Option<BTreeMap<String, String>>,
 }
 
-/// An edit to an **optional** field that distinguishes *clear it* from *leave it unchanged*
-/// (issue #74).
+/// A **three-state** edit to an optional field: *leave unchanged*, *clear*, or *set* (issue #74).
 ///
-/// In `PUT /pilots/{id}` an absent field means "leave unchanged"; a present field means "apply
-/// this", where the value can itself be `null` to **clear** the stored value. Wrapping each
-/// optional edit in this type makes that two-level optionality explicit (`Option<OptionalEdit<T>>`:
-/// the outer `Option` is absent/present, the inner is the new value or `null`). On the TS side it
-/// is just `T | null`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(transparent)]
-#[ts(export, export_to = "bindings/")]
-pub struct OptionalEdit<T>(pub Option<T>);
+/// `PUT /pilots/{id}` needs to tell three wire cases apart for each optional field:
+///
+/// - **field absent** ⇒ [`Keep`](OptionalEdit::Keep) — leave the stored value unchanged;
+/// - **field present and `null`** ⇒ [`Clear`](OptionalEdit::Clear) — clear the stored value (`None`);
+/// - **field present with a value** ⇒ [`Set`](OptionalEdit::Set) — set the stored value.
+///
+/// The naive `Option<Option<T>>` does **not** work over serde: a wire `null` deserializes the
+/// **same as an absent field** (both yield the outer `None`), so a field could never be *cleared* —
+/// only set or left alone. This enum fixes that by pairing a custom [`Deserialize`] (which only ever
+/// runs when the field is *present*, mapping `null` → `Clear` and a value → `Set`) with
+/// `#[serde(default)]` on each request field (an *absent* field never calls the deserializer and so
+/// defaults to [`Keep`](OptionalEdit::Keep)). On the TS side it renders as `T | null` (the field's
+/// own `?:` carries the absent/present distinction).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OptionalEdit<T> {
+    /// The field was **absent** from the request — leave the stored value unchanged.
+    #[default]
+    Keep,
+    /// The field was present and `null` — **clear** the stored value (set it to `None`).
+    Clear,
+    /// The field was present with a value — **set** the stored value to it.
+    Set(T),
+}
+
+impl<T> Serialize for OptionalEdit<T>
+where
+    T: Serialize,
+{
+    /// Serializes back to the wire shape `T | null`: [`Set`](OptionalEdit::Set) is its value,
+    /// [`Clear`](OptionalEdit::Clear) is `null`. [`Keep`](OptionalEdit::Keep) also serializes to
+    /// `null` here, but in practice a `Keep` field is *skipped* entirely (see
+    /// [`OptionalEdit::is_keep`]) so an absent field stays absent on round-trip.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            OptionalEdit::Set(value) => value.serialize(serializer),
+            OptionalEdit::Clear | OptionalEdit::Keep => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for OptionalEdit<T>
+where
+    T: Deserialize<'de>,
+{
+    /// Only ever called when the field is **present** (an absent field defaults to
+    /// [`Keep`](OptionalEdit::Keep) via `#[serde(default)]`), so this maps the two present cases:
+    /// a JSON `null` → [`Clear`](OptionalEdit::Clear); any value → [`Set`](OptionalEdit::Set).
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            Some(value) => OptionalEdit::Set(value),
+            None => OptionalEdit::Clear,
+        })
+    }
+}
+
+// A hand-written `TS` impl (rather than `#[derive(TS)]`) because the derive cannot render this
+// three-variant enum as the flat `T | null` the wire actually is. It mirrors what the previous
+// `#[serde(transparent)] struct OptionalEdit<T>(Option<T>)` derive emitted — the same
+// `bindings/OptionalEdit.ts` (`type OptionalEdit<T> = T | null;`) — so the TS shape is unchanged
+// and gen-drift stays clean. The matching `export_bindings_optionaledit` test (see the tests module)
+// stands in for the `#[ts(export)]`-generated export test the derive would otherwise produce.
+impl<T: TS> TS for OptionalEdit<T> {
+    type WithoutGenerics = OptionalEdit<ts_rs::Dummy>;
+    type OptionInnerType = Self;
+
+    fn name(cfg: &ts_rs::Config) -> String {
+        format!("OptionalEdit<{}>", T::name(cfg))
+    }
+
+    fn inline(cfg: &ts_rs::Config) -> String {
+        format!("{} | null", T::inline(cfg))
+    }
+
+    fn inline_flattened(cfg: &ts_rs::Config) -> String {
+        Self::inline(cfg)
+    }
+
+    fn decl(_cfg: &ts_rs::Config) -> String {
+        "type OptionalEdit<T> = T | null;".to_owned()
+    }
+
+    fn decl_concrete(cfg: &ts_rs::Config) -> String {
+        Self::decl(cfg)
+    }
+
+    fn visit_dependencies(v: &mut impl ts_rs::TypeVisitor)
+    where
+        Self: 'static,
+    {
+        <T as TS>::visit_dependencies(v);
+    }
+
+    fn visit_generics(v: &mut impl ts_rs::TypeVisitor)
+    where
+        Self: 'static,
+    {
+        <T as TS>::visit_generics(v);
+        v.visit::<T>();
+    }
+
+    fn output_path() -> Option<std::path::PathBuf> {
+        // Matches the `#[ts(export_to = "bindings/")]` the rest of the wire types use; combined with
+        // the workspace-root `TS_RS_EXPORT_DIR` (pinned by xtask), it lands at `bindings/OptionalEdit.ts`.
+        Some(std::path::PathBuf::from("bindings/OptionalEdit.ts"))
+    }
+}
+
+impl<T> OptionalEdit<T> {
+    /// Whether this edit is [`Keep`](OptionalEdit::Keep) (the field was absent) — used as the
+    /// per-field `skip_serializing_if` so an unchanged field stays *absent* on the wire rather than
+    /// round-tripping to a `null` (which would mean *clear*).
+    fn is_keep(&self) -> bool {
+        matches!(self, OptionalEdit::Keep)
+    }
+}
 
 /// The application-level directory of all configured pilots (issue #74).
 ///
@@ -384,8 +497,10 @@ impl PilotDirectory {
         if let Some(value) = country_edit {
             pilot.country = value;
         }
-        if let Some(edit) = &request.vtx_type {
-            pilot.vtx_type = edit.0;
+        match &request.vtx_type {
+            OptionalEdit::Keep => {}
+            OptionalEdit::Clear => pilot.vtx_type = None,
+            OptionalEdit::Set(value) => pilot.vtx_type = Some(*value),
         }
         apply_string_edit(&mut pilot.multigp_id, &request.multigp_id);
         apply_string_edit(&mut pilot.velocidrone_id, &request.velocidrone_id);
@@ -435,15 +550,16 @@ impl Directory {
     }
 }
 
-/// Apply an optional string edit to a stored field: absent → unchanged; present → set (trimmed,
-/// blank ⇒ cleared) or cleared (`null`).
-fn apply_string_edit(field: &mut Option<String>, edit: &Option<OptionalEdit<String>>) {
-    if let Some(OptionalEdit(value)) = edit {
-        *field = value
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+/// Apply an optional string edit to a stored field: [`Keep`](OptionalEdit::Keep) → unchanged;
+/// [`Clear`](OptionalEdit::Clear) → cleared; [`Set`](OptionalEdit::Set) → set (trimmed, with a blank
+/// value treated as a clear).
+fn apply_string_edit(field: &mut Option<String>, edit: &OptionalEdit<String>) {
+    match edit {
+        OptionalEdit::Keep => {}
+        OptionalEdit::Clear => *field = None,
+        OptionalEdit::Set(value) => {
+            *field = Some(value.trim().to_string()).filter(|s| !s.is_empty());
+        }
     }
 }
 
@@ -583,29 +699,29 @@ fn normalize_attributes(
 }
 
 /// Validate a *set-or-clear* edit of a validated optional field (color/country), returning the
-/// outer edit (issue #74): `None` ⇒ leave unchanged; `Some(None)` ⇒ clear; `Some(Some(v))` ⇒ set to
-/// the normalized `v`. A set value that fails `normalize` is a validation [`PilotError`].
+/// outer edit (issue #74): [`Keep`](OptionalEdit::Keep) ⇒ `None` (leave unchanged);
+/// [`Clear`](OptionalEdit::Clear) ⇒ `Some(None)` (clear); [`Set`](OptionalEdit::Set) ⇒
+/// `Some(normalized)` (set to the validated value). A set value that fails `normalize` is a
+/// validation [`PilotError`].
 fn validate_edit_with(
-    edit: &Option<OptionalEdit<String>>,
+    edit: &OptionalEdit<String>,
     normalize: impl Fn(&Option<String>) -> Result<Option<String>, PilotError>,
 ) -> Result<Option<Option<String>>, PilotError> {
     match edit {
-        None => Ok(None),
-        Some(OptionalEdit(None)) => Ok(Some(None)),
-        Some(OptionalEdit(Some(value))) => Ok(Some(normalize(&Some(value.clone()))?)),
+        OptionalEdit::Keep => Ok(None),
+        OptionalEdit::Clear => Ok(Some(None)),
+        OptionalEdit::Set(value) => Ok(Some(normalize(&Some(value.clone()))?)),
     }
 }
 
 /// Validate a color set-or-clear edit (see [`validate_edit_with`] / [`normalize_color`]).
-fn validate_color_edit(
-    edit: &Option<OptionalEdit<String>>,
-) -> Result<Option<Option<String>>, PilotError> {
+fn validate_color_edit(edit: &OptionalEdit<String>) -> Result<Option<Option<String>>, PilotError> {
     validate_edit_with(edit, normalize_color)
 }
 
 /// Validate a country set-or-clear edit (see [`validate_edit_with`] / [`normalize_country`]).
 fn validate_country_edit(
-    edit: &Option<OptionalEdit<String>>,
+    edit: &OptionalEdit<String>,
 ) -> Result<Option<Option<String>>, PilotError> {
     validate_edit_with(edit, normalize_country)
 }
@@ -719,8 +835,8 @@ mod tests {
                 &created.id,
                 &UpdatePilotRequest {
                     callsign: Some("New".to_string()),
-                    name: Some(OptionalEdit(None)), // explicit clear
-                    multigp_id: Some(OptionalEdit(Some("mgp-9".to_string()))),
+                    name: OptionalEdit::Clear, // explicit clear
+                    multigp_id: OptionalEdit::Set("mgp-9".to_string()),
                     ..Default::default()
                 },
             )
@@ -741,6 +857,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(again.callsign, "New");
+    }
+
+    #[test]
+    fn optional_edit_deserializes_the_three_wire_cases() {
+        // A present value → Set; a present `null` → Clear; an absent field → Keep (the default).
+        // This is the core of the fix: before, a wire `null` collapsed to the *absent* case and
+        // could never clear a field.
+        let set: UpdatePilotRequest = serde_json::from_str(r#"{"team":"X"}"#).unwrap();
+        assert_eq!(set.team, OptionalEdit::Set("X".to_string()));
+
+        let clear: UpdatePilotRequest = serde_json::from_str(r#"{"team":null}"#).unwrap();
+        assert_eq!(clear.team, OptionalEdit::Clear);
+
+        let absent: UpdatePilotRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.team, OptionalEdit::Keep);
+    }
+
+    /// Round-trip a JSON body through `update` (persisted to `pilots.json`) to prove the three wire
+    /// cases — set, clear-via-`null`, leave-via-absent — apply to the stored pilot. The headline:
+    /// **`color` and `country` can now be cleared** (their `#hex` / 2-letter validation rejects the
+    /// empty string, so a wire `null` is the only path to clear them).
+    #[test]
+    fn wire_null_clears_color_and_country_through_persistence() {
+        let data_dir =
+            std::env::temp_dir().join(format!("gridfpv-pilots-clear-{}", short_suffix()));
+        {
+            let dir = PilotDirectory::new(Some(data_dir.clone())).unwrap();
+            let created = dir
+                .create(&CreatePilotRequest {
+                    callsign: "Clearable".to_string(),
+                    team: Some("Team Zoom".to_string()),
+                    color: Some("#abcdef".to_string()),
+                    country: Some("de".to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+
+            // `{"color":"#112233","country":"US"}` → both *set* (normalized uppercase); team absent
+            // → unchanged.
+            let set_body: UpdatePilotRequest =
+                serde_json::from_str(r##"{"color":"#112233","country":"us"}"##).unwrap();
+            let set = dir.update(&created.id, &set_body).unwrap();
+            assert_eq!(set.color.as_deref(), Some("#112233"));
+            assert_eq!(set.country.as_deref(), Some("US"));
+            assert_eq!(set.team.as_deref(), Some("Team Zoom")); // absent → unchanged
+
+            // `{"color":null,"country":null}` → both *cleared* (the case the old code could not
+            // express for validated fields). team still absent → still unchanged.
+            let clear_body: UpdatePilotRequest =
+                serde_json::from_str(r#"{"color":null,"country":null}"#).unwrap();
+            let cleared = dir.update(&created.id, &clear_body).unwrap();
+            assert_eq!(cleared.color, None, "wire null must clear color");
+            assert_eq!(cleared.country, None, "wire null must clear country");
+            assert_eq!(cleared.team.as_deref(), Some("Team Zoom"));
+
+            // The clear survives a restart (it was persisted to pilots.json, not just held in mem).
+            let reopened = PilotDirectory::new(Some(data_dir.clone())).unwrap();
+            let got = reopened.get(&created.id).unwrap();
+            assert_eq!(got.color, None);
+            assert_eq!(got.country, None);
+            assert_eq!(got.team.as_deref(), Some("Team Zoom"));
+        }
+        std::fs::remove_dir_all(&data_dir).ok();
     }
 
     #[test]
@@ -843,7 +1022,7 @@ mod tests {
             .update(
                 &ok.id,
                 &UpdatePilotRequest {
-                    color: Some(OptionalEdit(Some("nope".to_string()))),
+                    color: OptionalEdit::Set("nope".to_string()),
                     ..Default::default()
                 },
             )
@@ -856,7 +1035,7 @@ mod tests {
             .update(
                 &ok.id,
                 &UpdatePilotRequest {
-                    color: Some(OptionalEdit(None)),
+                    color: OptionalEdit::Clear,
                     ..Default::default()
                 },
             )
@@ -892,7 +1071,7 @@ mod tests {
             .update(
                 &ok.id,
                 &UpdatePilotRequest {
-                    country: Some(OptionalEdit(Some("De".to_string()))),
+                    country: OptionalEdit::Set("De".to_string()),
                     ..Default::default()
                 },
             )
@@ -953,7 +1132,7 @@ mod tests {
             .update(
                 &created.id,
                 &UpdatePilotRequest {
-                    name: Some(OptionalEdit(Some("Nom".to_string()))),
+                    name: OptionalEdit::Set("Nom".to_string()),
                     ..Default::default()
                 },
             )
