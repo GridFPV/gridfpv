@@ -23,6 +23,7 @@ export {
   updateTimer,
   deleteTimer,
   setEventTimers,
+  setPrimaryTimer,
   PRACTICE_EVENT_ID
 } from './client.js';
 export type {

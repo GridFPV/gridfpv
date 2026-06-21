@@ -12,7 +12,8 @@ import type {
   createTimer,
   updateTimer,
   deleteTimer,
-  setEventTimers
+  setEventTimers,
+  setPrimaryTimer
 } from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
@@ -33,6 +34,7 @@ export interface TimerImpls {
   updateTimerImpl?: typeof updateTimer;
   deleteTimerImpl?: typeof deleteTimer;
   setEventTimersImpl?: typeof setEventTimers;
+  setPrimaryTimerImpl?: typeof setPrimaryTimer;
 }
 
 export interface TestSession {
@@ -76,7 +78,8 @@ export function makeTestSession(
     createTimerImpl: opts?.createTimerImpl,
     updateTimerImpl: opts?.updateTimerImpl,
     deleteTimerImpl: opts?.deleteTimerImpl,
-    setEventTimersImpl: opts?.setEventTimersImpl
+    setEventTimersImpl: opts?.setEventTimersImpl,
+    setPrimaryTimerImpl: opts?.setPrimaryTimerImpl
   });
   // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event.
   session.setToken('tok');
