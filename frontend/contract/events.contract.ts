@@ -21,7 +21,7 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Command, EventMeta, Timer } from '@gridfpv/types';
+import type { Command, EventMeta, Pilot, Timer } from '@gridfpv/types';
 
 import { type Director } from '../test-harness/director.ts';
 import { eventRoot, startContractDirector } from './harness.ts';
@@ -431,5 +431,166 @@ describe('seam 10b: primary/alternate timer roles (#112)', () => {
 
     // RD-gated: no token → 401.
     expect((await setPrimaryTimer(event, a)).status).toBe(401);
+  });
+});
+
+/**
+ * Issue #74: pilots are **application-level configuration** — a persisted directory the RD
+ * maintains once, and each event builds a **roster** of which directory pilots race it. Channels
+ * are a separate concern (#117) and are not exercised here.
+ *
+ * guards:
+ *  - `GET /pilots` is an **open read** → `Pilot[]` (empty on a fresh Director — no built-in pilot).
+ *  - `POST /pilots` is **RD-gated** (no/bad token → 401), requires a `callsign`, auto-generates an
+ *    id, carries optional metadata incl. the cloud-pull `vtx_type`/`multigp_id` hooks, and the new
+ *    pilot then appears in the listing.
+ *  - `PUT /events/{id}/roster` is **RD-gated**, validates each id names a directory pilot (unknown →
+ *    404 `UnknownScope`), and records the roster on the event's `EventMeta.roster` (empty default).
+ *  - `POST`/`DELETE /events/{id}/roster/{pilotId}` add/remove a single pilot (idempotent).
+ */
+describe('seam 11: application-level pilots + per-event roster (#74)', () => {
+  /** `GET /pilots` → the parsed `Pilot[]` (asserting a 200, open read). */
+  async function listPilots(): Promise<Pilot[]> {
+    const res = await fetch(`${director.baseUrl}/pilots`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as Pilot[];
+  }
+
+  /** `POST /pilots` with an optional bearer token → raw status + parsed body. */
+  async function createPilot(
+    body: unknown,
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${director.baseUrl}/pilots`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** `PUT /events/{id}/roster` with `{ pilot_ids }` + optional token → raw status + parsed body. */
+  async function setRoster(
+    eventId: string,
+    pilotIds: string[],
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/roster`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ pilot_ids: pilotIds })
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  it('GET /pilots is an open read (empty on a fresh Director — no built-in pilot)', async () => {
+    const pilots = await listPilots();
+    expect(Array.isArray(pilots)).toBe(true);
+  });
+
+  it('POST /pilots requires the RD token — no/bad token → 401', async () => {
+    const body = { callsign: 'No Auth' };
+    expect((await createPilot(body)).status).toBe(401);
+    expect((await createPilot(body, 'not-a-real-token')).status).toBe(401);
+  });
+
+  it('POST /pilots creates a pilot (with metadata) and it appears in the listing', async () => {
+    const created = (
+      await createPilot(
+        {
+          callsign: 'Acro Ace',
+          name: 'Ada Ace',
+          vtx_type: 'HDZero',
+          multigp_id: 'mgp-42'
+        },
+        TOKEN
+      )
+    ).body as Pilot;
+    expect(created.id).toMatch(/^acro-ace-/);
+    expect(created.callsign).toBe('Acro Ace');
+    expect(created.name).toBe('Ada Ace');
+    expect(created.vtx_type).toBe('HDZero');
+    expect(created.multigp_id).toBe('mgp-42');
+
+    const ids = (await listPilots()).map((p) => p.id);
+    expect(ids).toContain(created.id);
+  });
+
+  it('POST /pilots rejects a missing/blank callsign with 400', async () => {
+    expect((await createPilot({ callsign: '   ' }, TOKEN)).status).toBe(400);
+  });
+
+  it('PUT /events/{id}/roster validates ids and records the roster (empty default)', async () => {
+    // A new event has an empty roster by default.
+    const event = (await createEvent('Roster Event', TOKEN)).body as EventMeta;
+    expect(event.roster).toEqual([]);
+
+    // Create a directory pilot and roster it.
+    const pilot = (await createPilot({ callsign: 'Roster Me' }, TOKEN)).body as Pilot;
+    const ok = await setRoster(event.id, [pilot.id], TOKEN);
+    expect(ok.status).toBe(200);
+    expect((ok.body as EventMeta).roster).toEqual([pilot.id]);
+
+    // An UNKNOWN pilot id → 404 UnknownScope.
+    const bad = await setRoster(event.id, ['no-such-pilot'], TOKEN);
+    expect(bad.status).toBe(404);
+    expect((bad.body as { code?: string }).code).toBe('UnknownScope');
+
+    // RD-gated: no token → 401.
+    expect((await setRoster(event.id, [pilot.id])).status).toBe(401);
+  });
+
+  it('POST/DELETE /events/{id}/roster/{pilotId} add and remove one pilot (idempotent)', async () => {
+    const event = (await createEvent('Add Remove Event', TOKEN)).body as EventMeta;
+    const a = (await createPilot({ callsign: 'Pilot A' }, TOKEN)).body as Pilot;
+    const b = (await createPilot({ callsign: 'Pilot B' }, TOKEN)).body as Pilot;
+
+    const addOne = async (pilotId: string, token?: string) => {
+      const headers: Record<string, string> = {};
+      if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${eventRoot(director.baseUrl, event.id)}/roster/${pilotId}`, {
+        method: 'POST',
+        headers
+      });
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
+    };
+    const removeOne = async (pilotId: string) => {
+      const res = await fetch(`${eventRoot(director.baseUrl, event.id)}/roster/${pilotId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${TOKEN}` }
+      });
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
+    };
+
+    // RD-gated.
+    expect((await addOne(a.id)).status).toBe(401);
+
+    // Add two; adding a is idempotent.
+    expect(((await addOne(a.id, TOKEN)).body as EventMeta).roster).toEqual([a.id]);
+    expect(((await addOne(b.id, TOKEN)).body as EventMeta).roster).toEqual([a.id, b.id]);
+    expect(((await addOne(a.id, TOKEN)).body as EventMeta).roster).toEqual([a.id, b.id]);
+
+    // Unknown pilot add → 404.
+    expect((await addOne('no-such-pilot', TOKEN)).status).toBe(404);
+
+    // Remove one; removing an absent one is a no-op.
+    expect(((await removeOne(a.id)).body as EventMeta).roster).toEqual([b.id]);
+    expect(((await removeOne(a.id)).body as EventMeta).roster).toEqual([b.id]);
   });
 });

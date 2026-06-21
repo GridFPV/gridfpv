@@ -24,6 +24,13 @@ export {
   deleteTimer,
   setEventTimers,
   setPrimaryTimer,
+  listPilots,
+  createPilot,
+  updatePilot,
+  deletePilot,
+  setEventRoster,
+  addToRoster,
+  removeFromRoster,
   PRACTICE_EVENT_ID
 } from './client.js';
 export type {

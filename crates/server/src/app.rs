@@ -91,8 +91,10 @@ use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
     ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, SetActiveEventRequest,
+    SetEventRosterRequest,
 };
 use crate::live_state::live_state;
+use crate::pilots::{CreatePilotRequest, Pilot, UpdatePilotRequest};
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
 use crate::stream::Cursor;
@@ -298,6 +300,17 @@ pub fn router(registry: EventRegistry) -> Router {
         // delete are RD-gated. `DELETE` rejects the built-in Mock.
         .route("/timers", get(list_timers).post(create_timer))
         .route("/timers/{timer_id}", put(update_timer).delete(delete_timer))
+        // Application-level pilots (issue #74): the persisted directory the RD maintains once and
+        // each event rosters from. `GET /pilots` is an open read; create/edit/delete are RD-gated.
+        .route("/pilots", get(list_pilots).post(create_pilot))
+        .route("/pilots/{pilot_id}", put(update_pilot).delete(delete_pilot))
+        // Per-event **roster** (issue #74): RD-gated; each id must name a known directory pilot.
+        // Set the whole roster, or add/remove a single pilot.
+        .route("/events/{event_id}/roster", put(set_event_roster))
+        .route(
+            "/events/{event_id}/roster/{pilot_id}",
+            post(add_to_roster).delete(remove_from_roster),
+        )
         // Per-event timer **selection** (issue #73): RD-gated; each id must name a known timer.
         .route("/events/{event_id}/timers", put(set_event_timers))
         // Per-event **primary** timer (issue #112): RD-gated; the id must be in the selection.
@@ -545,6 +558,125 @@ async fn set_event_primary_timer(
     Ok(Json(meta))
 }
 
+/// `GET /pilots` — list every pilot in the directory, in id order (issue #74).
+///
+/// An **open read** (no token): a client renders the pilot directory / per-event roster picker
+/// without a credential, mirroring `GET /timers`.
+async fn list_pilots(State(registry): State<EventRegistry>) -> Json<Vec<Pilot>> {
+    Json(registry.pilots().list())
+}
+
+/// `POST /pilots` — create a pilot from a [`CreatePilotRequest`], RD-gated (issue #74).
+///
+/// [`ControlAuth`] runs first (open in full-trust by default). The `callsign` is required; the id
+/// is auto-generated server-side (a callsign slug + suffix). The new [`Pilot`] is returned and the
+/// directory persisted. A missing/blank callsign is a `BadRequest`.
+async fn create_pilot(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Json(body): Json<CreatePilotRequest>,
+) -> Result<Json<Pilot>, ProtocolError> {
+    let pilot = registry
+        .pilots()
+        .create(&body)
+        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    Ok(Json(pilot))
+}
+
+/// `PUT /pilots/{pilot_id}` — edit a pilot's callsign/metadata, RD-gated (issue #74).
+///
+/// An unknown id is a typed 404 (`UnknownScope`). On success the updated [`Pilot`] is returned and
+/// the directory persisted.
+async fn update_pilot(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(pilot_id): Path<PilotId>,
+    Json(body): Json<UpdatePilotRequest>,
+) -> Result<Json<Pilot>, ProtocolError> {
+    let pilot = registry
+        .pilots()
+        .update(&pilot_id, &body)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(pilot))
+}
+
+/// `DELETE /pilots/{pilot_id}` — remove a pilot from the directory, RD-gated (issue #74).
+///
+/// An unknown id is a 404 (`UnknownScope`). On success an empty 200 is returned and the directory
+/// persisted. A stale roster id on some event is harmless (rosters tolerate an unknown id).
+async fn delete_pilot(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(pilot_id): Path<PilotId>,
+) -> Result<StatusCode, ProtocolError> {
+    registry
+        .pilots()
+        .delete(&pilot_id)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(StatusCode::OK)
+}
+
+/// `PUT /events/{event_id}/roster` — set an event's **roster** (issue #74), RD-gated.
+///
+/// [`ControlAuth`] runs first. The event must exist (else a typed 404) and **each** id in the body
+/// must name a known directory pilot (else a 404 naming the bad id) — so a roster can never
+/// reference a deleted/unknown pilot. On success the updated [`EventMeta`] is returned.
+async fn set_event_roster(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<SetEventRosterRequest>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    let pilots = registry.pilots();
+    for id in &body.pilot_ids {
+        if !pilots.exists(id) {
+            return Err(ProtocolError::new(
+                ErrorCode::UnknownScope,
+                format!("no pilot with id {:?}", id.0),
+            ));
+        }
+    }
+    let meta = registry
+        .set_roster(&event_id, body.pilot_ids)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
+/// `POST /events/{event_id}/roster/{pilot_id}` — add one pilot to an event's roster (issue #74),
+/// RD-gated. The event must exist and the pilot must name a known directory pilot (else a 404).
+/// Idempotent. On success the updated [`EventMeta`] is returned.
+async fn add_to_roster(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path((event_id, pilot_id)): Path<(EventId, PilotId)>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    if !registry.pilots().exists(&pilot_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no pilot with id {:?}", pilot_id.0),
+        ));
+    }
+    let meta = registry
+        .add_to_roster(&event_id, pilot_id)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
+/// `DELETE /events/{event_id}/roster/{pilot_id}` — remove one pilot from an event's roster
+/// (issue #74), RD-gated. The event must exist (else a 404); removing a pilot not on the roster is
+/// a no-op (the pilot need not still exist in the directory). On success the updated [`EventMeta`]
+/// is returned.
+async fn remove_from_roster(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path((event_id, pilot_id)): Path<(EventId, PilotId)>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    let meta = registry
+        .remove_from_roster(&event_id, &pilot_id)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
 /// `POST /events/{event_id}/auth/join-token` — mint a fresh **read-only** join token
 /// (protocol.html §5, §9.4) — issue #63, now event-rooted.
 ///
@@ -578,11 +710,12 @@ pub fn is_api_path(path: &str) -> bool {
     // `/events` is the one API tree that matters now; the bare `/snapshot|/stream|/control|/auth`
     // prefixes are kept so a *legacy* (pre-#72) mistyped call still 404s as a typed API error
     // rather than falling through to the SPA shell.
-    const API_PREFIXES: [&str; 8] = [
+    const API_PREFIXES: [&str; 9] = [
         "/health",
         "/events",
         "/active-event",
         "/timers",
+        "/pilots",
         "/snapshot",
         "/stream",
         "/control",

@@ -9,14 +9,16 @@ const PRACTICE: EventMeta = {
   name: 'Practice',
   created_at: 0,
   persistent: false,
-  timers: ['mock']
+  timers: ['mock'],
+  roster: []
 };
 const EVENT_A: EventMeta = {
   id: 'evt-a',
   name: 'Friday Series',
   created_at: 1,
   persistent: true,
-  timers: ['mock']
+  timers: ['mock'],
+  roster: []
 };
 
 /** A mock ProtocolClient that lets a test push state into the session. */
