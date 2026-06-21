@@ -78,6 +78,13 @@
       over any event's truth (see §5, §6). A Director remains authoritative for its own events
       and can compute a fully-local season over them with no internet.</p>
     </div>
+    <p>
+      <strong>One Director &harr; one Cloud is an assumption, not a decision.</strong> Everything
+      below describes a Director relating to a <em>single</em> Cloud instance. Whether an RD can
+      <strong>federate one Director to several Cloud instances at once</strong> — given the Cloud is
+      FOSS and self-hostable — is an <a href="#open">open question (&sect;8)</a>: unresolved, and
+      flagged here so the single-Cloud framing throughout this doc is read as provisional.
+    </p>
 
     <pre class="mermaid">
 flowchart LR
@@ -467,6 +474,19 @@ sequenceDiagram
       how the account maps onto the protocol's read-authorization scopes, and which chapter data is
       private / pre-publication vs the open-data default (shared with the
       <a href="protocol.html">Protocol</a> spec).</li>
+      <li><span class="q">Open — Multi-cloud / federation (no decision yet).</span> &sect;1&ndash;&sect;7
+      assume a Director links to <strong>one</strong> Cloud. But the Cloud is FOSS and self-hostable,
+      so an RD may legitimately want to <strong>federate a single Director to several Cloud instances
+      at once</strong> — the project SaaS, a league/community-run instance, and a chapter's private
+      self-host — pushing and reading <em>selectively</em> per instance. This fits the project's FOSS
+      ethos and is <strong>unresolved &amp; deliberately deferred</strong>. It ripples through several
+      decisions above: the per-Director push credential (&sect;2) becomes <em>per-(Director, Cloud)</em>
+      with per-target selection, batching, and dedup; <strong>identity reconciliation</strong> (&sect;6)
+      and the global pilot registry must reconcile across <em>independent</em> clouds with <strong>no
+      single authority</strong>; <strong>season aggregation</strong> (&sect;5) and the
+      <strong>account model</strong> (&sect;7) may differ per instance, and a pilot/viewer may hold
+      accounts on several. Captured now so the single-Cloud assumptions baked into &sect;1&ndash;&sect;7
+      are known to be provisional; <strong>path forward to be designed in a future session.</strong></li>
     </ol>
 
     <footer class="doc-footer">
