@@ -10,10 +10,23 @@ rust-version.workspace = true
 name = "gridfpv"
 path = "src/main.rs"
 
+[features]
+# `live` compiles in the **real RotorHazard adapter** (the feature-gated Socket.IO transport)
+# so a selected `Rotorhazard { url }` timer actually connects and feeds its passes into the
+# event log (#65, #73). It pulls `gridfpv-adapters/live`, which pulls a TLS stack
+# (native-tls, OpenSSL-vendored on Linux). The **default build stays OpenSSL-free** — Mock/sim
+# only, no network/TLS in the dependency graph — so the stock Director carries no openssl. Build
+# the live variant with `cargo build -p gridfpv-app --features live`.
+live = ["dep:gridfpv-adapters", "gridfpv-adapters/live"]
+
 [dependencies]
 gridfpv-events.workspace = true
 gridfpv-storage.workspace = true
 gridfpv-projection.workspace = true
+# Only compiled in under `--features live` (the real RotorHazard adapter + its TLS stack); the
+# default build never pulls it (and so never pulls openssl). Also a dev-dependency below for the
+# default-feature tests that use the pure translator without the live transport.
+gridfpv-adapters = { workspace = true, optional = true }
 
 # The Director server: `main.rs` opens the log, builds `server::router(state)`, and
 # serves the protocol API + the built RD console SPA over axum. `tokio` runs the async
@@ -29,6 +42,9 @@ tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 [dev-dependencies]
 serde_json.workspace = true
 gridfpv-adapters.workspace = true
+# The dockerized-RotorHazard harness for the `live` Director RH-connect e2e
+# (`tests/rh_connect_live.rs`): spins up + tears down a disposable RH container.
+gridfpv-testkit.workspace = true
 # The Director integration test (#13) drives the served router with no real network via
 # `tower::ServiceExt::oneshot`, collecting the response body to assert on it.
 tower = { version = "0.5", features = ["util"] }
