@@ -48,6 +48,7 @@ import {
   deleteTimer,
   setEventTimers,
   setPrimaryTimer,
+  listPilots,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
@@ -62,6 +63,7 @@ import type {
   HeatId,
   HeatResult,
   LiveRaceState,
+  Pilot,
   ProjectionBody,
   Scope,
   Timer,
@@ -207,6 +209,7 @@ export class Session {
   #deleteTimerImpl: typeof deleteTimer;
   #setEventTimersImpl: typeof setEventTimers;
   #setPrimaryTimerImpl: typeof setPrimaryTimer;
+  #listPilotsImpl: typeof listPilots;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -221,6 +224,7 @@ export class Session {
     deleteTimerImpl?: typeof deleteTimer;
     setEventTimersImpl?: typeof setEventTimers;
     setPrimaryTimerImpl?: typeof setPrimaryTimer;
+    listPilotsImpl?: typeof listPilots;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -236,6 +240,7 @@ export class Session {
     this.#deleteTimerImpl = opts?.deleteTimerImpl ?? deleteTimer;
     this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
     this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
+    this.#listPilotsImpl = opts?.listPilotsImpl ?? listPilots;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -301,6 +306,18 @@ export class Session {
    */
   listTimers(): Promise<Timer[]> {
     return this.#listTimersImpl(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * List every pilot in the application-level directory (`GET /pilots`, open, no token) — issue
+   * #74. Like timers, pilots are app-level configuration (a persisted directory the RD maintains
+   * once, rostered per event), so this lives on the session and is reachable from the home hub's
+   * **Pilots** page. Rejects on a transport/HTTP failure (the page surfaces it). The full pilot
+   * directory management (`PilotManager`) is the next slice; for now this read backs the hub's
+   * Pilots count and the placeholder page's read-only callsign list.
+   */
+  listPilots(): Promise<Pilot[]> {
+    return this.#listPilotsImpl(this.baseUrl, { token: this.#token });
   }
 
   /**

@@ -1,13 +1,20 @@
 <script lang="ts">
   /**
-   * The RD console shell (#51; event-centric landing per #72, Slice 1b).
+   * The RD console shell (#51; two-level app IA per #118).
    *
-   * The event is the outer container, so the **event picker IS the landing screen**: with no
-   * event selected the shell shows {@link EventPicker}; selecting one opens the event
-   * workspace (the existing screens, now scoped to that event). The old Login screen is gone —
-   * the Director is the page's own origin, and the RD token is handled **lazily**: reads/browse
-   * need none, and a privileged action prompts for it via {@link TokenDialog} (registered as the
-   * session's token provider). A settings/gear lets the RD set or clear the token up front.
+   * The console is now a **home hub of pages** plus the in-event workspace (#118). With no event
+   * selected the shell shows an **app-level route**: the {@link HomeHub} (landing), or one of its
+   * three pages — {@link PilotsPage}, {@link EventPicker} (the Events page), {@link TimersPage}.
+   * Selecting an event from the Events page opens the **event workspace** (the existing in-event
+   * screens, scoped to that event); the workspace's sidebar + {@link ContextHeader} are unchanged.
+   * The old picker-as-landing and the Timers **modal** are retired — Timers is now its own page.
+   *
+   * Active-event resume (#90) is preserved: on load the session resolves the Director's active
+   * event and, if one is set, enters its workspace directly; otherwise the shell lands on the hub.
+   *
+   * The RD token is handled **lazily**: reads/browse need none, and a privileged action prompts for
+   * it via {@link TokenDialog} (registered as the session's token provider). A settings/gear lets
+   * the RD set or clear the token up front.
    *
    * The console is "just a co-located web client over the same protocol" (clients.html §1):
    * reads come through `@gridfpv/protocol-client`, writes through the control client — both held
@@ -18,8 +25,12 @@
   import { ToastHost, Dialog, Button, Field, Input, toast } from '@gridfpv/components';
   import { Session } from './lib/session.svelte.js';
   import ContextHeader from './ContextHeader.svelte';
+  import Breadcrumbs from './Breadcrumbs.svelte';
   import { emptyConfig, type EventConfig } from './lib/setup.js';
+  import HomeHub from './screens/HomeHub.svelte';
   import EventPicker from './screens/EventPicker.svelte';
+  import TimersPage from './screens/TimersPage.svelte';
+  import PilotsPage from './screens/PilotsPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
   import SetupWizard from './screens/SetupWizard.svelte';
   import EventTimers from './screens/EventTimers.svelte';
@@ -29,6 +40,14 @@
   import Results from './screens/Results.svelte';
 
   const session = new Session();
+
+  // ── App-level routing (#118) ───────────────────────────────────────────────
+  // The two-level IA: with no event selected the shell is on one of the app-level routes — the hub
+  // or one of its three pages. Entering an event switches to the workspace; leaving the workspace
+  // returns to the Events page (where the switch happened). `goHome` is the brand/breadcrumb root.
+  type AppRoute = 'home' | 'events' | 'timers' | 'pilots';
+  let route = $state<AppRoute>('home');
+  const goHome = () => (route = 'home');
 
   // The lazy token prompt: register a provider that opens the TokenDialog and resolves
   // with the entered token (or undefined if cancelled). This is the only auth surface left.
@@ -77,9 +96,20 @@
 
   function leaveToPicker() {
     session.leaveEvent();
-    // Reset the workspace's local view so re-entering starts clean.
+    // Reset the workspace's local view so re-entering starts clean, and land back on the Events
+    // page (the app route the "Switch event" action conceptually returns to).
     active = 'live';
     config = emptyConfig();
+    route = 'events';
+  }
+
+  // Leave the workspace straight to the **home hub** (#118) — the brand/logo and the breadcrumb's
+  // "Home" crumb both use this. Same teardown as a switch, but lands on the hub, not the picker.
+  function goToHubFromWorkspace() {
+    session.leaveEvent();
+    active = 'live';
+    config = emptyConfig();
+    route = 'home';
   }
 
   // A keyboard shortcut per screen (Alt+digit), keeping the console keyboard-driven.
@@ -126,13 +156,30 @@
     </div>
   </div>
 {:else if !session.currentEvent}
+  <!-- App-level routes (#118): the home hub, or one of its three pages. No event is selected,
+       so the in-event workspace is not shown; the page owns its own breadcrumb back to Home. -->
   <div class="gridfpv-root gridfpv-dense">
-    <EventPicker {session} />
+    {#if route === 'home'}
+      <HomeHub
+        {session}
+        onpilots={() => (route = 'pilots')}
+        onevents={() => (route = 'events')}
+        ontimers={() => (route = 'timers')}
+      />
+    {:else if route === 'events'}
+      <EventPicker {session} onhome={goHome} />
+    {:else if route === 'timers'}
+      <TimersPage {session} onhome={goHome} />
+    {:else if route === 'pilots'}
+      <PilotsPage {session} onhome={goHome} />
+    {/if}
   </div>
 {:else}
   <div class="gridfpv-root gridfpv-dense app">
     <aside class="sidebar">
-      <div class="brand">
+      <!-- The brand is the home root from inside the workspace (#118): it leaves the event and
+           returns to the hub, mirroring the breadcrumb's "Home" crumb. -->
+      <button type="button" class="brand" onclick={goToHubFromWorkspace} title="Home — GridFPV hub">
         <span class="logo" aria-hidden="true">
           <svg viewBox="0 0 32 32" width="28" height="28">
             <rect x="2" y="2" width="28" height="28" rx="8" fill="var(--gf-accent-soft)" />
@@ -150,7 +197,7 @@
           GridFPV
           <span class="sub">RD Console</span>
         </span>
-      </div>
+      </button>
 
       <nav aria-label="Screens">
         {#each SCREENS as s (s.id)}
@@ -183,6 +230,18 @@
     </aside>
 
     <div class="main-col">
+      <!-- The app-level trail above the in-event context bar (#118): Home › Events › <event>.
+           "Home" leaves to the hub; "Events" leaves to the picker; the event name is the leaf. -->
+      <div class="crumb-bar">
+        <Breadcrumbs
+          crumbs={[
+            { label: 'Home', onclick: goToHubFromWorkspace },
+            { label: 'Events', onclick: leaveToPicker },
+            { label: session.currentEvent?.name ?? 'Event' }
+          ]}
+        />
+      </div>
+
       <header class="topbar">
         <ContextHeader {session} ongolive={() => (active = 'live')} onswitchevent={leaveToPicker} />
         <div class="topbar-actions">
@@ -326,7 +385,23 @@
     display: flex;
     align-items: center;
     gap: var(--gf-space-3);
-    padding: 0 var(--gf-space-2);
+    padding: var(--gf-space-2);
+    margin: calc(-1 * var(--gf-space-2));
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    border-radius: var(--gf-radius-sm);
+    transition: background var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .brand:hover {
+    background: var(--gf-elevated);
+  }
+  .brand:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
   }
   .logo {
     display: inline-flex;
@@ -438,6 +513,9 @@
     flex-direction: column;
     min-width: 0;
     min-height: 100vh;
+  }
+  .crumb-bar {
+    padding: var(--gf-space-3) var(--gf-space-8) 0;
   }
   .topbar {
     position: sticky;
