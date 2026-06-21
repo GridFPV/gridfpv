@@ -1,20 +1,23 @@
-//! Dockerized-RotorHazard **Director connect** e2e (#65, #73 — Slice 2b backend).
+//! Dockerized-RotorHazard **Director persistent-connect** e2e (#65, #73, #105).
 //!
-//! The end-to-end proof that the Director's per-event source bridge *actually connects* a real
-//! RotorHazard and feeds its passes into the event's log — the live counterpart to the in-process
-//! Mock-bridge tests in `src/source.rs`. It:
+//! The end-to-end proof that the Director **connects a real RotorHazard on selection and keeps it
+//! connected** (#105) — the live counterpart to the in-process Mock-bridge tests in `src/source.rs`.
+//! It:
 //!
 //! 1. Spins up a disposable dockerized RotorHazard (mock node) via the shared
 //!    [`RhContainer`](gridfpv_testkit::RhContainer) harness.
 //! 2. Builds an [`EventRegistry`], creates a [`Rotorhazard { url }`] timer pointed at the
-//!    container, and **selects it for Practice** (the per-event selection the bridge reads).
+//!    container, **makes Practice the active event**, and **selects the RH timer for Practice** (the
+//!    selection the persistent-connection reconciler reads).
 //! 3. Spawns the **real** registry bridge ([`spawn_registry_bridge`]) — the same wiring `main`
-//!    runs — then drives Practice's heat to `Running` through its log (what the control path
-//!    appends).
-//! 4. Asserts the Director **connects**: the timer's [`TimerStatus`] advances to `Connected`, and
-//!    **passes flow** into Practice's log (real RH crossings, attributed to the heat's lineup).
-//! 5. Finishes the heat and asserts the bridge tears the connection down (status leaves
-//!    `Connected`).
+//!    runs (it also spawns the persistent-connection reconciler).
+//! 4. Asserts the Director **connects on selection, before any heat**: the timer's [`TimerStatus`]
+//!    advances to `Connected` *without* a heat being run (#105 — the whole point: a drop-off is
+//!    visible before/between races).
+//! 5. Then drives Practice's heat to `Running`, and asserts **passes flow** into Practice's log over
+//!    that already-live connection (real RH crossings, attributed to the heat's lineup).
+//! 6. Finishes the heat and asserts the connection **stays `Connected`** — the heat is disarmed but
+//!    the persistent connection is NOT torn down (#105), so status keeps reflecting the live link.
 //!
 //! Like every `*_live` test this is **structural / tolerant** — RH's mock interface reads its CSV
 //! continuously so lap *timing* is not controllable; we assert the connection state reached and
@@ -82,8 +85,8 @@ async fn wait_for(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Docker (spins up dockerized RotorHazard and drives a live heat through the Director bridge)"]
-async fn director_connects_rotorhazard_and_passes_flow_into_the_event_log() {
+#[ignore = "requires Docker (spins up dockerized RotorHazard, connects it on selection, then drives a live heat over the persistent connection)"]
+async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_through_a_heat() {
     // One busy node so several real passes land while the heat runs. `node-0` is the seat the
     // adapter reports; the bridge remaps it onto the heat's first lineup slot.
     let scenario = vec![(
@@ -108,25 +111,53 @@ async fn director_connects_rotorhazard_and_passes_flow_into_the_event_log() {
             },
         })
         .expect("create RH timer");
-    // A freshly-configured RH timer rests at `Configured` until the bridge connects it.
+    // A freshly-configured RH timer rests at `Configured` until the Director connects it.
     assert_eq!(
         registry.timers().get(&rh_timer.id).unwrap().status,
         TimerStatus::Configured
     );
+    // Make Practice the active event and select the RH timer for it — the reconciler connects the
+    // active event's selected RH timers (#105).
+    registry
+        .set_active(&practice())
+        .expect("make Practice active");
     registry
         .set_timers(&practice(), vec![rh_timer.id.clone()])
         .expect("select the RH timer for Practice");
 
     let state = registry.resolve(&practice()).expect("Practice state");
 
-    // === Spawn the REAL registry bridge — the same wiring `main` runs. ===
+    // === Spawn the REAL registry bridge — the same wiring `main` runs (it also spawns the
+    // persistent-connection reconciler). ===
     let _bridge = spawn_registry_bridge(
         registry.clone(),
         SourceConfig::from_env(),
         AdapterId(SIM_ADAPTER.to_string()),
     );
 
-    // === Drive Practice's heat to Running (what the control path appends). ===
+    // === The Director connects ON SELECTION — BEFORE any heat is run (#105). This is the crux:
+    // a selected-but-idle RH timer must reach Connected so a drop-off is visible before/between
+    // races, not only while a race is underway. ===
+    let timers = registry.timers();
+    let id = rh_timer.id.clone();
+    let connected = wait_for(Duration::from_secs(30), || {
+        timers.get(&id).map(|t| t.status) == Some(TimerStatus::Connected)
+    })
+    .await;
+    assert!(
+        connected,
+        "the Director should report the RH timer Connected on selection, before any heat; status = {:?}",
+        timers.get(&rh_timer.id).map(|t| t.status)
+    );
+    // No heat has run yet, yet the timer is live — there are no passes in the log at this point.
+    assert_eq!(
+        count_passes(&read_all(&state)),
+        0,
+        "no passes should exist before a heat — the connection is idle but live"
+    );
+
+    // === Now drive Practice's heat to Running (what the control path appends). It uses the
+    // ALREADY-LIVE connection rather than dialing a fresh socket. ===
     let heat = HeatId("q-rh-1".into());
     let pilot = CompetitorRef("Ace".into());
     state
@@ -148,19 +179,6 @@ async fn director_connects_rotorhazard_and_passes_flow_into_the_event_log() {
         )
         .unwrap();
 
-    // === The Director connects: status advances to Connected. ===
-    let timers = registry.timers();
-    let id = rh_timer.id.clone();
-    let connected = wait_for(Duration::from_secs(30), || {
-        timers.get(&id).map(|t| t.status) == Some(TimerStatus::Connected)
-    })
-    .await;
-    assert!(
-        connected,
-        "the Director should report the RH timer Connected once the socket is up; status = {:?}",
-        timers.get(&rh_timer.id).map(|t| t.status)
-    );
-
     // === Passes flow into Practice's log (real RH crossings, attributed to the lineup). ===
     let got_passes = wait_for(Duration::from_secs(40), || {
         count_passes(&read_all(&state)) >= 1
@@ -181,7 +199,7 @@ async fn director_connects_rotorhazard_and_passes_flow_into_the_event_log() {
     );
     let pass_count = count_passes(&events);
 
-    // === Finish the heat: the bridge tears the connection down. ===
+    // === Finish the heat: the heat is disarmed but the persistent connection STAYS UP (#105). ===
     state
         .append(
             Event::HeatStateChanged {
@@ -191,17 +209,24 @@ async fn director_connects_rotorhazard_and_passes_flow_into_the_event_log() {
             None,
         )
         .unwrap();
-    let torn_down = wait_for(Duration::from_secs(15), || {
+    // Give the bridge several poll cycles to observe the Finished transition and disarm the heat,
+    // then assert the connection is *still* Connected — not torn down. We can't prove a negative by
+    // waiting forever, so we wait a generous window and assert it never left Connected.
+    let stayed_connected = wait_for(Duration::from_secs(8), || {
+        // Invert the usual helper: succeed only if it ever LEFT Connected (a regression). If it
+        // never does, `wait_for` returns false after the window — which is what we want.
         timers.get(&rh_timer.id).map(|t| t.status) != Some(TimerStatus::Connected)
     })
     .await;
     assert!(
-        torn_down,
-        "the Director should leave Connected once the heat finishes (teardown); status = {:?}",
+        !stayed_connected,
+        "the persistent connection must STAY Connected after a heat finishes (the heat is disarmed, \
+         the socket is not torn down) — that is the whole point of #105; status = {:?}",
         timers.get(&rh_timer.id).map(|t| t.status)
     );
 
     eprintln!(
-        "app RH-connect e2e: connected, {pass_count} real pass(es) into the event log, then torn down"
+        "app RH-persistent-connect e2e: connected ON SELECTION (before any heat), {pass_count} real \
+         pass(es) into the event log while the heat ran, and STILL Connected after it finished"
     );
 }
