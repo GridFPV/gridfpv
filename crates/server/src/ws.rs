@@ -79,11 +79,12 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use gridfpv_events::{CompetitorRef, Event};
 use gridfpv_projection::{LapList, lap_list_marshaled};
+use gridfpv_storage::StoredEvent;
 
 use crate::app::{AppState, heat_window, resolve_event};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::EventRegistry;
-use crate::live_state::live_state;
+use crate::live_state::{live_state, with_heat_timing};
 use crate::scope::{EventId, Scope};
 use crate::snapshot::{ProjectionBody, ProjectionKind};
 use crate::stream::{Change, ChangeEnvelope, Cursor, StreamMessage};
@@ -174,14 +175,19 @@ impl ScopeProjection {
     /// unaffected (open practice is per channel, not per pilot).
     fn fold(
         scope: &Scope,
-        events: &[Event],
+        stored: &[StoredEvent],
         overlay: Option<&crate::open_practice::OpenPracticeLive>,
     ) -> Option<ProjectionBody> {
+        // The bare-event view the lap/phase fold consumes; the live-state clock timing is
+        // folded separately from `stored` (which carries the `recorded_at` server timestamps).
+        let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
+        let events = events.as_slice();
         match scope {
             Scope::Event { .. } | Scope::Class { .. } => {
                 // Phase/clock are the log's; the open-practice accumulator only splices its
                 // non-logged per-channel laps onto that base (a no-op when no op heat is active).
-                let mut live = live_state(events);
+                // `with_heat_timing` anchors the clock to the current heat's race-go (#62 follow-up).
+                let mut live = with_heat_timing(live_state(events), stored);
                 if let Some(op) = overlay {
                     live = op.merge_into(live);
                 }
@@ -196,10 +202,11 @@ impl ScopeProjection {
                 if !scheduled {
                     return None;
                 }
-                // The heat's phase/clock are its real log window; splice the open-practice laps onto
-                // it when this Heat scope addresses the active open-practice heat.
+                // The heat's phase/clock are its real log window; the race-go timing folds from the
+                // full stored log. Splice the open-practice laps on when this Heat scope addresses
+                // the active open-practice heat.
                 let window = heat_window(events, heat);
-                let mut live = live_state(&window);
+                let mut live = with_heat_timing(live_state(&window), stored);
                 if let Some(op) = overlay {
                     if op.active_heat().as_ref() == Some(heat) {
                         live = op.merge_into(live);
@@ -327,8 +334,9 @@ async fn run_stream(mut socket: WebSocket, state: AppState) {
         let mut wake = std::pin::pin!(appended.notified());
         wake.as_mut().enable();
 
-        // Pull the current log and fold any new events into envelopes.
-        let events = match state.read() {
+        // Pull the current log (with `recorded_at`, for the race-clock timing) and fold any
+        // new events into envelopes.
+        let events = match state.read_stored() {
             Ok((events, _)) => events,
             Err(err) => {
                 close_with(&mut socket, err).await;
@@ -408,7 +416,7 @@ impl Engine {
     /// frame.
     fn advance(
         &mut self,
-        events: &[Event],
+        events: &[StoredEvent],
         overlay: Option<&crate::open_practice::OpenPracticeLive>,
     ) -> Vec<StreamMessage> {
         let mut out = Vec::new();

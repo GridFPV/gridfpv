@@ -100,7 +100,7 @@ use crate::events::{
     SetActiveEventRequest, SetClassMembershipRequest, SetEventClassesRequest,
     SetEventRosterRequest, UpdateRoundReq,
 };
-use crate::live_state::{HeatSummary, heat_summaries, live_state};
+use crate::live_state::{HeatSummary, heat_summaries, live_state, with_heat_timing};
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::round_engine;
 use crate::scope::{ClassId, EventId, PilotId};
@@ -260,6 +260,14 @@ impl AppState {
     /// woken stream is guaranteed to see the new event when it re-reads the tail (no woken
     /// stream can observe a torn or not-yet-committed write).
     pub fn append(&self, event: Event, recorded_at: Option<i64>) -> Result<Offset, ProtocolError> {
+        // Server-authoritative race clock (#62 follow-up): a heat's `Armed → Running` and
+        // `Running → Unofficial` transitions are the race-start / race-end instants the live
+        // clock anchors to. The runtime/control paths append them with no caller timestamp, so
+        // stamp the server wall clock here (the single append choke point) when one is absent —
+        // making the transition's `recorded_at` the authoritative timing every client reads.
+        // A caller-supplied timestamp (a replay, a test pinning an instant) still wins.
+        let recorded_at = recorded_at
+            .or_else(|| matches!(event, Event::HeatStateChanged { .. }).then(now_micros));
         let offset = {
             let mut log = self.log.lock().map_err(|_| {
                 ProtocolError::new(ErrorCode::Internal, "the event log lock was poisoned")
@@ -313,6 +321,24 @@ impl AppState {
         );
         let events = stored.into_iter().map(|s| s.event).collect();
         Ok((events, cursor))
+    }
+
+    /// Read the whole log as [`StoredEvent`]s (carrying each entry's `recorded_at`) plus the
+    /// resume [`Cursor`]. Like [`read`](Self::read) but keeps the server timestamps the
+    /// live-state clock is anchored to (the `Running` / `Unofficial` transition instants —
+    /// see [`live_state::with_heat_timing`](crate::live_state::with_heat_timing)).
+    pub(crate) fn read_stored(&self) -> Result<(Vec<StoredEvent>, Cursor), ProtocolError> {
+        let log = self.log.lock().map_err(|_| {
+            ProtocolError::new(ErrorCode::Internal, "the event log lock was poisoned")
+        })?;
+        let stored = log
+            .read_all()
+            .map_err(|e| ProtocolError::new(ErrorCode::Internal, e.to_string()))?;
+        let cursor = Cursor::new(
+            log.len()
+                .map_err(|e| ProtocolError::new(ErrorCode::Internal, e.to_string()))?,
+        );
+        Ok((stored, cursor))
     }
 }
 
@@ -1349,13 +1375,18 @@ async fn snapshot_event(
     Path((event_id, _event)): Path<(EventId, EventId)>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
     let state = resolve_event(&registry, &event_id)?;
-    let (events, cursor) = state.read()?;
+    let (stored, cursor) = state.read_stored()?;
+    let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
     // Open-practice overlay (open-practice format, Slice 1): the live state's phase/clock are always
     // the **real log's** (folded here as for any heat); while an open-practice heat is active its
     // per-channel laps are in memory (NOT logged), so the accumulator splices those laps onto the log
     // base — "snapshot first, then subscribe" stays correct (the `/stream` fold applies the same
     // merge), so a client renders the live per-channel laps immediately atop a truthful phase/clock.
-    let body = state.open_practice().merge_into(live_state(&events));
+    // `with_heat_timing` folds the current heat's server-authoritative race-start/end instants
+    // (#62 follow-up) from the stored log's `recorded_at` so the clock is consistent everywhere.
+    let body = state
+        .open_practice()
+        .merge_into(with_heat_timing(live_state(&events), &stored));
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(body),
@@ -1374,11 +1405,14 @@ async fn snapshot_class(
     Path((event_id, _event, class)): Path<(EventId, EventId, ClassId)>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
     let state = resolve_event(&registry, &event_id)?;
-    let (events, cursor) = state.read()?;
+    let (stored, cursor) = state.read_stored()?;
+    let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
     let class_events = class_window(&events, &class);
+    // The window's `current_heat` resolves which heat is on the timer; its timing is folded
+    // from the *full* stored log (the heat's transition instants live there with `recorded_at`).
     Ok(Json(Snapshot {
         cursor,
-        body: ProjectionBody::LiveRaceState(live_state(&class_events)),
+        body: ProjectionBody::LiveRaceState(with_heat_timing(live_state(&class_events), &stored)),
     }))
 }
 
@@ -1436,7 +1470,8 @@ async fn snapshot_heat(
     Query(query): Query<HeatQuery>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
     let state = resolve_event(&registry, &event_id)?;
-    let (events, cursor) = state.read()?;
+    let (stored, cursor) = state.read_stored()?;
+    let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
 
     // The heat must exist in the log (a `HeatScheduled` for this id), else UnknownScope.
     let scheduled = events
@@ -1458,7 +1493,9 @@ async fn snapshot_heat(
             // its in-memory (NOT logged) per-channel laps on top. `merge_into` guards on the heat
             // matching the accumulator's, so a non-op heat folds its log window unchanged.
             ProjectionBody::LiveRaceState(
-                state.open_practice().merge_into(live_state(&heat_events)),
+                state
+                    .open_practice()
+                    .merge_into(with_heat_timing(live_state(&heat_events), &stored)),
             )
         }
         HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled(
@@ -1536,6 +1573,17 @@ async fn snapshot_pilot(
         cursor,
         body: ProjectionBody::LapList(LapList { competitors }),
     }))
+}
+
+/// Current server wall-clock time in **microseconds** since the Unix epoch — the basis the
+/// race clock is anchored to. Used to stamp a heat transition's `recorded_at` at append time
+/// (the `Running` / `Unofficial` instants the live `race_started_at` / `race_ended_at` fold
+/// from), so header and HUD count from the one authoritative race-go.
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
 }
 
 /// The `at` of an event if it is a lap-gate pass, for deriving a heat's race start.
