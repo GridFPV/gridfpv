@@ -255,15 +255,21 @@ describe('LiveRaceControl', () => {
       vi.unstubAllGlobals();
     });
 
-    it('fires once when Running is the FIRST observed phase (fast/batched start, no Armed seen)', async () => {
-      // The missed-edge bug: a fast or batched transition lands the screen on Running directly, with
-      // no prior Armed snapshot. The per-heat trigger must still fire (not gated on prevPhase=Armed).
+    it('does NOT fire when Running is the FIRST observed phase (late join / navigating to a running heat)', async () => {
+      // The late-join bug: the RD navigates to the Live page while a heat is already Running. The
+      // first phase the console observes for that heat is Running, with no pre-Running phase seen —
+      // this is NOT a race-go the RD watched, so the tone must stay silent (no oscillator built).
       const { started } = installAudioStub('running');
 
-      const { session } = makeTestSession({ live: liveAt('Running') });
+      const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
       render(LiveRaceControl, { session });
       await tick();
-      expect(started).toHaveLength(1);
+      expect(started).toHaveLength(0);
+
+      // Repeated Running snapshots (progress updates) for the same already-running heat stay silent.
+      pushLive(liveAt('Running'));
+      await tick();
+      expect(started).toHaveLength(0);
 
       vi.unstubAllGlobals();
     });
@@ -287,8 +293,11 @@ describe('LiveRaceControl', () => {
     it('does not re-fire on repeated Running snapshots for the same heat', async () => {
       const { started } = installAudioStub('running');
 
-      const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
+      // Start Staged (a pre-Running phase observed first) so the genuine race-go arms + fires once.
+      const { session, pushLive } = makeTestSession({ live: liveAt('Staged') });
       render(LiveRaceControl, { session });
+      await tick();
+      pushLive(liveAt('Running'));
       await tick();
       expect(started).toHaveLength(1);
 
@@ -305,12 +314,16 @@ describe('LiveRaceControl', () => {
     it('fires again for the NEXT heat (flag resets on heat change)', async () => {
       const { started } = installAudioStub('running');
 
-      const { session, pushLive } = makeTestSession({ live: liveAt('Running', 'heat-1') });
+      // heat-1 is watched through a genuine race-go (Staged → Running): its tone fires once.
+      const { session, pushLive } = makeTestSession({ live: liveAt('Staged', 'heat-1') });
       render(LiveRaceControl, { session });
+      await tick();
+      pushLive(liveAt('Running', 'heat-1'));
       await tick();
       expect(started).toHaveLength(1);
 
-      // The heat is swapped out (Scheduled, then a new heat goes Running) — a fresh tone fires.
+      // The heat is swapped out (Scheduled, then a new heat goes Running) — a fresh tone fires (the
+      // new heat had a pre-Running phase observed, so it's a genuine race-go, not a late join).
       pushLive(liveAt('Scheduled', 'heat-2'));
       await tick();
       pushLive(liveAt('Running', 'heat-2'));
@@ -320,25 +333,37 @@ describe('LiveRaceControl', () => {
       vi.unstubAllGlobals();
     });
 
-    it('the Enable/Test-tone button resumes the context and plays a confirmation beep', async () => {
-      const stub = installAudioStub('suspended');
+    it('does not play the start tone when navigating to a NEW heat already Running (late join)', async () => {
+      // A late join to a *different* heat than the one observed before: the new heat's first phase
+      // is Running, with no pre-Running phase seen for it, so the tone stays silent.
+      const { started } = installAudioStub('running');
+
+      // heat-1 watched Staged → Running (fires once).
+      const { session, pushLive } = makeTestSession({ live: liveAt('Staged', 'heat-1') });
+      render(LiveRaceControl, { session });
+      await tick();
+      pushLive(liveAt('Running', 'heat-1'));
+      await tick();
+      expect(started).toHaveLength(1);
+
+      // heat-2 appears already Running (never seen pre-Running) — suppressed.
+      pushLive(liveAt('Running', 'heat-2'));
+      await tick();
+      expect(started).toHaveLength(1);
+
+      vi.unstubAllGlobals();
+    });
+
+    it('does not render an inline Enable/Test-tone button (removed)', async () => {
+      installAudioStub('suspended');
 
       const { session } = makeTestSession({ live: liveAt('Staged') });
       render(LiveRaceControl, { session });
       await tick();
-      // Locked before any gesture: nothing has unlocked the suspended context.
-      const button = screen.getByRole('button', { name: /Enable sound/ });
-      expect(button).toBeInTheDocument();
-      expect(stub.calls().resumes).toBe(0);
-
-      await fireEvent.click(button);
-      await tick();
-      await tick();
-      // The click resumed the context AND played one confirmation beep.
-      expect(stub.calls().resumes).toBeGreaterThan(0);
-      expect(stub.started).toHaveLength(1);
-      // The indicator now reads enabled (context running) — the label flips to "Test tone".
-      expect(screen.getByRole('button', { name: /Test tone/ })).toBeInTheDocument();
+      // The test-tone affordance is gone; only the mute toggle remains in the audio toolbar.
+      expect(screen.queryByRole('button', { name: /Enable sound/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Test tone/ })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Tone on|Tone off/ })).toBeInTheDocument();
 
       vi.unstubAllGlobals();
     });
