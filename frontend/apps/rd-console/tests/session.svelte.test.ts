@@ -146,7 +146,7 @@ describe('Session', () => {
     expect(sendCommand).toHaveBeenCalledTimes(2); // initial reject + retry
 
     // A subsequent send reuses the held token — no second prompt.
-    await session.send({ Arm: { heat: 'heat-1' } });
+    await session.send({ Start: { heat: 'heat-1' } });
     expect(tokenProvider).toHaveBeenCalledOnce();
   });
 

@@ -78,8 +78,8 @@ describe('seam 8: a full race converges through the real protocol-client', () =>
         if (p.laps_completed >= 1) expect(typeof p.last_lap_micros).toBe('number');
       }
 
-      // Finish + Finalize; the client converges to the finalized phase.
-      await rdControl(director.baseUrl, TOKEN, { Finish: { heat: HEAT } });
+      // ForceEnd (the completion override) + Finalize; the client converges to the finalized phase.
+      await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: HEAT } });
       await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } });
       await waitForState(
         client,

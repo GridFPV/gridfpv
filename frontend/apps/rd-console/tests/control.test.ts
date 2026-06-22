@@ -39,7 +39,7 @@ describe('createControlClient', () => {
   it('omits the Authorization header when no token is given', async () => {
     const fetch = mockFetch(async () => jsonResponse(okAck));
     const client = createControlClient('http://d.local', undefined, { fetch });
-    await client.sendCommand({ Arm: { heat: 'h' } });
+    await client.sendCommand({ Start: { heat: 'h' } });
     const headers = fetch.mock.calls[0][1]?.headers as Record<string, string>;
     expect(headers.Authorization).toBeUndefined();
   });
@@ -57,7 +57,7 @@ describe('createControlClient', () => {
       jsonResponse({ code: 'Unauthorized', message: 'no' }, { ok: false, status: 401 })
     );
     const client = createControlClient('http://d.local', 't', { fetch });
-    const ack = await client.sendCommand({ Finish: { heat: 'h' } });
+    const ack = await client.sendCommand({ ForceEnd: { heat: 'h' } });
     expect(ack.ok).toBe(false);
     expect(ack.error?.code).toBe('Unauthorized');
   });

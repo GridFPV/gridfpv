@@ -105,7 +105,7 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
 
     const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
-    await rdControl(director.baseUrl, TOKEN, { Arm: { heat: HEAT } });
+    await rdControl(director.baseUrl, TOKEN, { Start: { heat: HEAT } });
     await waitForFrame(frames, (f) => f.length > 0);
 
     const seq = (frames[0] as { Change: { sequence: number } }).Change.sequence;
@@ -122,7 +122,8 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
     const client = connect({ baseUrl: director.baseUrl, scope: { Heat: { heat: HEAT } } });
     try {
       await waitForState(client, (s) => s.body !== undefined);
-      await rdControl(director.baseUrl, TOKEN, { Start: { heat: HEAT } });
+      // SkipCountdown forces Armed → Running (the override standing in for the runtime auto-start).
+      await rdControl(director.baseUrl, TOKEN, { SkipCountdown: { heat: HEAT } });
       await waitForState(
         client,
         (s) => {
@@ -159,7 +160,7 @@ describe('seam 7: contract-version negotiation', () => {
     const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
     // No contract_version field at all — treated as this build's version, streams fine.
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
-    await rdControl(director.baseUrl, TOKEN, { Finish: { heat: HEAT } });
+    await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: HEAT } });
     await waitForFrame(frames, (f) =>
       f.some((x) => (x as { Change?: unknown }).Change !== undefined)
     );

@@ -16,8 +16,9 @@
  *   2. a single `ScheduleHeat { heat, lineup: [<name>, …] }` — lays the heat down with the
  *      named field as its lineup.
  *
- * The RD then drives the heat loop (Stage → Arm → Start → …) from the live screen; on
- * `Running` the sim flies passes for exactly this lineup.
+ * The RD then drives the heat loop (Stage → Start → …) from the live screen; `Start` arms the heat
+ * and the runtime clock auto-advances it to `Running`, where the sim flies passes for exactly this
+ * lineup.
  */
 
 import type { AdapterId, Command, CompetitorRef, HeatId } from '@gridfpv/types';

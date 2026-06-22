@@ -1,17 +1,20 @@
 /**
- * The heat-loop transition model for live race control (#54).
+ * The heat-loop transition model for live race control (#54, heat-lifecycle Slice 2).
  *
  * The heat loop is a linear forward path with off-ramps (race-engine.html §2,
  * protocol.html §1):
  *
  *     Scheduled → Staged → Armed → Running → Unofficial → Final → (Advanced)
  *
- * `Command` exposes one variant per forward step (`Stage`/`Arm`/`Start`/`Finish`/
- * `Finalize`/`Advance`) and the off-ramps (`Revert`/`Abort`/`Restart`/`Discard`). Each
- * carries the same `{ heat }` payload and requests the matching `HeatTransition`; the
- * engine validates legality against the heat's *current* state — but the console
- * disables illegal actions up front so the RD never fires a command that can only fail
- * (clients.html §5: "reversible mistakes", progressive disclosure).
+ * The manual command set is `Stage`/`Start`/`Finalize`/`Advance` plus the off-ramps
+ * (`Revert`/`Abort`/`Restart`/`Discard`). `Start` *arms* the heat (Staged → Armed) and runs the
+ * start procedure; the `Armed → Running` and `Running → Unofficial` steps are then driven by the
+ * Director's **runtime clock**, not by a button. The two clock **overrides** `SkipCountdown`
+ * (force Armed → Running) and `ForceEnd` (force Running → Unofficial) remain for the race-day
+ * cases where the clock must be bypassed. Each command carries the same `{ heat }` payload and
+ * requests the matching `HeatTransition`; the engine validates legality against the heat's
+ * *current* state — but the console disables illegal actions up front so the RD never fires a
+ * command that can only fail (clients.html §5: "reversible mistakes", progressive disclosure).
  *
  * The phase the projection reports is `HeatPhase` (the folded view). This module is
  * the single source of truth for "given this phase, which actions are legal, and what
@@ -22,16 +25,16 @@
 import type { Command, HeatId, HeatPhase } from '@gridfpv/types';
 
 /**
- * The console-facing name of a heat-loop action. Mirrors the forward
- * `Command`/`HeatTransition` steps plus the off-ramps. (`Start` enters `Running`;
- * `Finish` enters the projected `Unofficial` phase; `Finalize` enters `Final`;
- * `Revert` re-opens a `Final` heat back to `Unofficial`.)
+ * The console-facing name of a heat-loop action. Mirrors the manual `Command` steps plus the
+ * off-ramps and the runtime-clock overrides. (`Start` arms the heat — the runtime then auto-starts
+ * the race; `SkipCountdown` forces the start; `ForceEnd` enters the projected `Unofficial` phase;
+ * `Finalize` enters `Final`; `Revert` re-opens a `Final` heat back to `Unofficial`.)
  */
 export type HeatAction =
   | 'Stage'
-  | 'Arm'
   | 'Start'
-  | 'Finish'
+  | 'SkipCountdown'
+  | 'ForceEnd'
   | 'Finalize'
   | 'Advance'
   | 'Revert'
@@ -47,12 +50,19 @@ export const DESTRUCTIVE_ACTIONS: ReadonlySet<HeatAction> = new Set<HeatAction>(
   'Discard'
 ]);
 
-/** The forward "primary" action for each phase (the obvious next step), if any. */
+/**
+ * The forward "primary" action for each phase (the obvious next step), if any.
+ *
+ * `Armed` and `Running` have **no** primary button: the runtime clock auto-advances them
+ * (`Armed → Running` after the start procedure, `Running → Unofficial` on the win condition +
+ * grace). The RD waits for the clock; `SkipCountdown`/`ForceEnd` are available as overrides but are
+ * not the obvious forward step.
+ */
 const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
   Scheduled: 'Stage',
-  Staged: 'Arm',
-  Armed: 'Start',
-  Running: 'Finish',
+  Staged: 'Start',
+  Armed: null,
+  Running: null,
   Unofficial: 'Finalize',
   Final: 'Advance'
 };
@@ -77,19 +87,20 @@ const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
  */
 const LEGAL_BY_PHASE: Record<HeatPhase, ReadonlySet<HeatAction>> = {
   Scheduled: new Set<HeatAction>(['Stage']),
-  Staged: new Set<HeatAction>(['Arm', 'Abort']),
-  Armed: new Set<HeatAction>(['Start', 'Abort', 'Restart']),
-  Running: new Set<HeatAction>(['Finish', 'Abort', 'Restart']),
+  Staged: new Set<HeatAction>(['Start', 'Abort']),
+  // Armed/Running auto-advance via the runtime clock; the overrides are the manual escape hatches.
+  Armed: new Set<HeatAction>(['SkipCountdown', 'Abort', 'Restart']),
+  Running: new Set<HeatAction>(['ForceEnd', 'Abort', 'Restart']),
   Unofficial: new Set<HeatAction>(['Finalize', 'Restart', 'Discard']),
   Final: new Set<HeatAction>(['Advance', 'Revert', 'Discard'])
 };
 
-/** The display order actions render in (forward steps first, then off-ramps). */
+/** The display order actions render in (forward steps first, then overrides, then off-ramps). */
 export const ACTION_ORDER: readonly HeatAction[] = [
   'Stage',
-  'Arm',
   'Start',
-  'Finish',
+  'SkipCountdown',
+  'ForceEnd',
   'Finalize',
   'Advance',
   'Revert',
@@ -127,12 +138,12 @@ export function commandForAction(action: HeatAction, heat: HeatId): Command {
   switch (action) {
     case 'Stage':
       return { Stage: { heat } };
-    case 'Arm':
-      return { Arm: { heat } };
     case 'Start':
       return { Start: { heat } };
-    case 'Finish':
-      return { Finish: { heat } };
+    case 'SkipCountdown':
+      return { SkipCountdown: { heat } };
+    case 'ForceEnd':
+      return { ForceEnd: { heat } };
     case 'Finalize':
       return { Finalize: { heat } };
     case 'Advance':
@@ -158,12 +169,12 @@ export function actionDescription(action: HeatAction): string {
   switch (action) {
     case 'Stage':
       return 'Call pilots to the line and stage the heat.';
-    case 'Arm':
-      return 'Arm the heat — pilots ready, timer armed.';
     case 'Start':
-      return 'Start the race. The clock begins.';
-    case 'Finish':
-      return 'End the race window. Pilots land.';
+      return 'Start the heat — arm it and run the start procedure. The race auto-starts after the countdown.';
+    case 'SkipCountdown':
+      return 'Skip the countdown — start the race now.';
+    case 'ForceEnd':
+      return 'End the race window now. Pilots land.';
     case 'Finalize':
       return 'Finalize the heat and lock in the result.';
     case 'Advance':

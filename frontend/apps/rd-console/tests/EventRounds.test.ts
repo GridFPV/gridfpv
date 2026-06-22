@@ -26,7 +26,10 @@ const QUAL: RoundDef = {
   params: {},
   win_condition: { Timed: { window_micros: 120_000_000 } },
   seeding: 'FromRoster',
-  channel_mode: 'Static'
+  channel_mode: 'Static',
+  staging_timer_secs: 300,
+  start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+  grace_window: { Duration: { micros: 3000000 } }
 };
 
 /** An event selecting both classes, with one existing round. */
@@ -106,7 +109,10 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       params: {},
       win_condition: 'BestLap',
       seeding: 'FromRoster',
-      channel_mode: 'PerHeat'
+      channel_mode: 'PerHeat',
+      staging_timer_secs: 300,
+      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+      grace_window: { Duration: { micros: 3000000 } }
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session } = makeTestSession({
@@ -525,7 +531,10 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
       params: {},
       win_condition: QUAL.win_condition,
       seeding: { FromRanking: { source_round: 'r1', top_n: 2 } },
-      channel_mode: 'PerHeat'
+      channel_mode: 'PerHeat',
+      staging_timer_secs: 300,
+      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+      grace_window: { Duration: { micros: 3000000 } }
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session, sendSpy } = makeTestSession({

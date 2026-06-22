@@ -60,11 +60,15 @@ describe('seam 5: control command shape + headers', () => {
 
   it('the heat-loop transitions each ack ok and append in order', async () => {
     await rdControl(director.baseUrl, TOKEN, { ScheduleHeat: { heat: 'h-loop', lineup: ['A'] } });
+    // Heat-lifecycle Slice 2 collapsed the manual middle steps: `Start` arms the heat, and the
+    // `Armed → Running` / `Running → Unofficial` transitions are runtime-clock-driven. This contract
+    // drives the FSM deterministically through the **overrides** (`SkipCountdown`/`ForceEnd`) that
+    // record the same transitions, so it doesn't depend on the start-delay / win-condition timers.
     const loop: Command[] = [
       { Stage: { heat: 'h-loop' } },
-      { Arm: { heat: 'h-loop' } },
       { Start: { heat: 'h-loop' } },
-      { Finish: { heat: 'h-loop' } },
+      { SkipCountdown: { heat: 'h-loop' } },
+      { ForceEnd: { heat: 'h-loop' } },
       { Finalize: { heat: 'h-loop' } },
       { Revert: { heat: 'h-loop' } },
       { Finalize: { heat: 'h-loop' } }
@@ -73,6 +77,25 @@ describe('seam 5: control command shape + headers', () => {
       const ack = await rdControl(director.baseUrl, TOKEN, command);
       expect(ack.ok, `command ${JSON.stringify(command)} should ack ok`).toBe(true);
     }
+  });
+
+  it('the runtime-clock overrides (SkipCountdown/ForceEnd) ack ok in their state', async () => {
+    // Heat-lifecycle Slice 2: SkipCountdown forces Armed → Running, ForceEnd forces Running →
+    // Unofficial. Drive Stage → Start to reach Armed, then exercise both overrides.
+    await rdControl(director.baseUrl, TOKEN, { ScheduleHeat: { heat: 'h-ovr', lineup: ['A'] } });
+    for (const command of [
+      { Stage: { heat: 'h-ovr' } },
+      { Start: { heat: 'h-ovr' } },
+      { SkipCountdown: { heat: 'h-ovr' } },
+      { ForceEnd: { heat: 'h-ovr' } }
+    ] as Command[]) {
+      const ack = await rdControl(director.baseUrl, TOKEN, command);
+      expect(ack.ok, `override ${JSON.stringify(command)} should ack ok`).toBe(true);
+    }
+    // An override out of its state is rejected (ForceEnd is only legal while Running).
+    const illegal = await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: 'h-ovr' } });
+    expect(illegal.ok).toBe(false);
+    expect(illegal.error?.code).toBe('BadRequest');
   });
 
   it('Register + the marshaling adjudications ack ok', async () => {
@@ -128,7 +151,7 @@ describe('seam 5: control command shape + headers', () => {
     await rdControl(director.baseUrl, TOKEN, {
       ScheduleHeat: { heat: 'h-illegal', lineup: ['A'] }
     });
-    // Start before Arm is illegal in the heat FSM.
+    // Start (Staged → Armed) is illegal straight from Scheduled — the heat must Stage first.
     const { status, body } = await postControl(
       director.baseUrl,
       { Start: { heat: 'h-illegal' } },

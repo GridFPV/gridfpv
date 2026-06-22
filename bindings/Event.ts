@@ -37,4 +37,13 @@ round?: RoundId,
  * Per-pilot frequency assignment in raw MHz (e.g. `5800`). Empty when none is
  * assigned (a simulator, or the free-text path that does not assign channels).
  */
-frequencies?: Array<[CompetitorRef, number]>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "HeatVoided": { heat: HeatId, } } | { "PenaltyApplied": { heat: HeatId, competitor: CompetitorRef, penalty: Penalty, } };
+frequencies?: Array<[CompetitorRef, number]>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "HeatStarting": { 
+/**
+ * The heat whose start procedure fired (it is in `Armed`).
+ */
+heat: HeatId, 
+/**
+ * The chosen randomized start delay, in **milliseconds**, from this event to the
+ * `Armed → Running` transition. Written once by the runtime; deterministic on replay.
+ */
+delay_ms: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "HeatVoided": { heat: HeatId, } } | { "PenaltyApplied": { heat: HeatId, competitor: CompetitorRef, penalty: Penalty, } };
