@@ -114,7 +114,7 @@ test('RD selects a built-in class onto the event and it persists', async ({ page
   // ── Open the Classes screen from the workspace sidebar ──────────────────────────────────────
   await page
     .getByRole('navigation', { name: 'Screens' })
-    .getByRole('button', { name: 'Classes' })
+    .getByRole('button', { name: 'Classes & Roster' })
     .click();
   await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
     timeout: 15_000
@@ -140,7 +140,7 @@ test('RD selects a built-in class onto the event and it persists', async ({ page
   await expect(liveNav).toBeVisible({ timeout: 15_000 });
   await page
     .getByRole('navigation', { name: 'Screens' })
-    .getByRole('button', { name: 'Classes' })
+    .getByRole('button', { name: 'Classes & Roster' })
     .click();
   const rowAfter = page
     .getByRole('list', { name: 'Class directory' })

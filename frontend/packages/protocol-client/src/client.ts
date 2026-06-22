@@ -33,6 +33,7 @@ import type {
   EventMeta,
   FormatSchema,
   HeatSummary,
+  MemberSlot,
   NewRoundReq,
   Pilot,
   PilotId,
@@ -764,17 +765,21 @@ export async function setEventClasses(
 
 /**
  * Set which roster pilots race a single class (`PUT /events/{id}/classes/{classId}/membership`) —
- * race redesign Slice 1a. Replaces *that class's* pilot list wholesale (an empty list clears it);
- * other classes' memberships are untouched. RD-gated; the server validates the event exists, the
- * class names a known directory class, and **each** pilot id names a known directory pilot (else
- * **404**). Resolves to the updated event {@link EventMeta}, or rejects on a non-2xx / transport
- * failure.
+ * race redesign Slice 1a / 7b. Replaces *that class's* member list wholesale (an empty list clears
+ * it); other classes' memberships are untouched. RD-gated; the server validates the event exists,
+ * the class names a known directory class, **each** pilot id names a known directory pilot, and each
+ * set channel is one of the event's **primary timer**'s `available_channels` (else **404 / 400**).
+ *
+ * `members` may be plain pilot ids (a channel-less membership, the legacy wire shape) or full
+ * {@link MemberSlot}s (`{ pilot, channel? }`) — the Classes & Roster picker passes slots so each
+ * member carries the fixed channel they fly in a *static*-channel-mode round. Resolves to the
+ * updated event {@link EventMeta}, or rejects on a non-2xx / transport failure.
  */
 export async function setClassMembership(
   baseUrl: string,
   eventId: EventId,
   classId: ClassId,
-  pilotIds: PilotId[],
+  members: (PilotId | MemberSlot)[],
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
@@ -790,9 +795,9 @@ export async function setClassMembership(
       method: 'PUT',
       headers,
       // The wire shape carries member **slots** (`{ pilot, channel? }`) — race redesign Slice 7a.
-      // The server accepts a bare pilot-id element too (legacy shim), so passing plain ids here
-      // sets a channel-less membership; per-pilot channels are the Classes & Roster follow-up.
-      body: JSON.stringify({ pilots: pilotIds })
+      // The server accepts a bare pilot-id element too (legacy shim), so a plain id here sets a
+      // channel-less slot while a `MemberSlot` carries the pilot's fixed channel (Slice 7b).
+      body: JSON.stringify({ pilots: members })
     }
   );
   if (!resp.ok)

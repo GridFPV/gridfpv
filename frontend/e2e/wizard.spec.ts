@@ -44,10 +44,16 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   await gotoHub(page);
 
   // ── Events page → New event with "Set up event" ticked ──────────────────────────────────────
+  // With a server-active event from a prior spec, clicking Events may auto-enter that event's
+  // workspace (the active event is resolved on load); "Switch event" then reaches the picker.
   await page.getByRole('heading', { name: 'Events' }).click();
-  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
-    timeout: 15_000
-  });
+  const picker = page.getByRole('heading', { name: 'Choose an event' });
+  const switchEvent = page.getByRole('button', { name: /Switch event/ });
+  await expect(picker.or(switchEvent).first()).toBeVisible({ timeout: 15_000 });
+  if (!(await picker.isVisible().catch(() => false))) {
+    await switchEvent.click();
+  }
+  await expect(picker).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: '+ New event' }).first().click();
   const newForm = page.getByRole('form', { name: 'New event' });
   await expect(newForm).toBeVisible();
@@ -57,13 +63,13 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   await expect(setupBox).toBeChecked();
   await page.getByRole('button', { name: 'Create & enter' }).click();
 
-  // ── The wizard overlay opens on its first step (Classes) ────────────────────────────────────
+  // ── The wizard overlay opens on its first step (Classes & Roster) ───────────────────────────
   const wizard = page.getByRole('dialog', { name: 'Event setup wizard' });
   await expect(wizard).toBeVisible({ timeout: 15_000 });
   await expect(wizard.getByText(`Set up · ${EVENT}`)).toBeVisible();
-  if (shots) await wizard.screenshot({ path: `${shots}/wizard-classes.png` });
+  if (shots) await wizard.screenshot({ path: `${shots}/wizard-classes-roster.png` });
 
-  // Step 1 — Classes: tick the built-in Open Class and save.
+  // Step 1 — Classes & Roster: tick the built-in Open Class and save…
   const classBox = wizard.getByRole('checkbox', { name: 'Select Open Class' });
   await expect(classBox).toBeVisible({ timeout: 15_000 });
   if (!(await classBox.isChecked())) await classBox.check();
@@ -72,16 +78,13 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
     timeout: 15_000
   });
 
-  // Step 2 — Roster: add a brand-new pilot, mark present, and place into the class.
-  await wizard.getByRole('button', { name: 'Next', exact: true }).click();
-  await expect(wizard.getByRole('heading', { name: 'Present pilots' })).toBeVisible();
+  // …then, in the same combined step, add a brand-new pilot, mark present, and save the roster.
   await wizard.getByRole('button', { name: '+ Add pilot' }).click();
   const addForm = page.getByRole('form', { name: 'Add pilot' });
   await expect(addForm).toBeVisible();
   await addForm.getByLabel('Callsign').fill(PILOT);
   // `exact` to pick the dialog's submit, not the header's "+ Add pilot".
   await page.getByRole('button', { name: 'Add pilot', exact: true }).click();
-  // The new pilot appears; mark them present (roster checkbox), then save the roster.
   const rosterBox = wizard.getByRole('checkbox', { name: `Roster ${PILOT}` });
   await expect(rosterBox).toBeVisible({ timeout: 15_000 });
   if (!(await rosterBox.isChecked())) await rosterBox.check();
@@ -89,13 +92,14 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   await expect(wizard.getByRole('button', { name: 'Save roster' })).toBeDisabled({
     timeout: 15_000
   });
-  // Place the pilot into the Open Class and save that class's membership.
-  const placeBox = wizard.getByRole('checkbox', { name: `Place ${PILOT} in Open Class` });
-  await expect(placeBox).toBeVisible({ timeout: 15_000 });
-  await placeBox.check();
-  await wizard.getByRole('button', { name: 'Save membership' }).click();
+  // With a single class the pilot is auto-placed (no "Place …" checkbox); save the placement.
+  await expect(wizard.getByLabel(`Channel for ${PILOT}`)).toBeVisible({ timeout: 15_000 });
+  await wizard.getByRole('button', { name: 'Save placement' }).click();
+  await expect(wizard.getByRole('button', { name: 'Save placement' })).toBeDisabled({
+    timeout: 15_000
+  });
 
-  // Step 3 — Timer & channels: the built-in Mock is selectable; ensure it's chosen.
+  // Step 2 — Timer & channels: the built-in Mock is selectable; ensure it's chosen.
   await wizard.getByRole('button', { name: 'Next', exact: true }).click();
   await expect(wizard.getByRole('heading', { name: 'Timers for this event' })).toBeVisible();
   const mockBox = wizard.getByRole('checkbox', { name: 'Use Mock' });
@@ -108,7 +112,7 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
     });
   }
 
-  // Step 4 — First round: the add-round form is pre-opened; define one and add it.
+  // Step 3 — First round: the add-round form is pre-opened; define one and add it.
   await wizard.getByRole('button', { name: 'Next', exact: true }).click();
   const roundForm = page.getByRole('form', { name: 'Add round' });
   await expect(roundForm).toBeVisible({ timeout: 15_000 });
@@ -121,7 +125,7 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
     wizard.getByRole('list').getByRole('listitem').filter({ hasText: ROUND })
   ).toBeVisible({ timeout: 15_000 });
 
-  // Step 5 — Review: the readiness summary shows all four checks met, then finish.
+  // Step 4 — Review: the readiness summary shows all four checks met, then finish.
   await wizard.getByRole('button', { name: 'Next', exact: true }).click();
   await expect(wizard.getByRole('heading', { name: 'Ready to race?' })).toBeVisible();
   await expect(wizard.getByText('This event is ready to race.')).toBeVisible({ timeout: 15_000 });
@@ -133,17 +137,15 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   const openTab = (name: string) =>
     page.getByRole('navigation', { name: 'Screens' }).getByRole('button', { name }).click();
 
-  // Classes tab: Open Class is selected for the event.
-  await openTab('Classes');
+  // Classes & Roster tab: Open Class is selected, the pilot is present, and (single class) the pilot
+  // is auto-placed with its channel selector present.
+  await openTab('Classes & Roster');
   await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
     timeout: 15_000
   });
   await expect(page.getByRole('checkbox', { name: 'Select Open Class' })).toBeChecked();
-
-  // Roster tab: the pilot is present and placed in the class.
-  await openTab('Roster');
   await expect(page.getByRole('checkbox', { name: `Roster ${PILOT}` })).toBeChecked();
-  await expect(page.getByRole('checkbox', { name: `Place ${PILOT} in Open Class` })).toBeChecked();
+  await expect(page.getByLabel(`Channel for ${PILOT}`)).toBeVisible();
 
   // Rounds & Heats tab: the round defined in the wizard lists.
   await openTab('Rounds & Heats');

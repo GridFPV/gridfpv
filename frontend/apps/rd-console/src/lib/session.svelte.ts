@@ -62,6 +62,7 @@ import {
   setEventClasses,
   setClassMembership,
   listFormats,
+  listFormatSchemas,
   listChannels,
   createRound,
   updateRound,
@@ -88,10 +89,12 @@ import type {
   CreatePilotRequest,
   CreateTimerRequest,
   EventMeta,
+  FormatSchema,
   HeatId,
   HeatResult,
   HeatSummary,
   LiveRaceState,
+  MemberSlot,
   Pilot,
   PilotId,
   NewRoundReq,
@@ -260,6 +263,7 @@ export class Session {
   #setEventClassesImpl: typeof setEventClasses;
   #setClassMembershipImpl: typeof setClassMembership;
   #listFormatsImpl: typeof listFormats;
+  #listFormatSchemasImpl: typeof listFormatSchemas;
   #listChannelsImpl: typeof listChannels;
   #createRoundImpl: typeof createRound;
   #updateRoundImpl: typeof updateRound;
@@ -295,6 +299,7 @@ export class Session {
     setEventClassesImpl?: typeof setEventClasses;
     setClassMembershipImpl?: typeof setClassMembership;
     listFormatsImpl?: typeof listFormats;
+    listFormatSchemasImpl?: typeof listFormatSchemas;
     listChannelsImpl?: typeof listChannels;
     createRoundImpl?: typeof createRound;
     updateRoundImpl?: typeof updateRound;
@@ -331,6 +336,7 @@ export class Session {
     this.#setEventClassesImpl = opts?.setEventClassesImpl ?? setEventClasses;
     this.#setClassMembershipImpl = opts?.setClassMembershipImpl ?? setClassMembership;
     this.#listFormatsImpl = opts?.listFormatsImpl ?? listFormats;
+    this.#listFormatSchemasImpl = opts?.listFormatSchemasImpl ?? listFormatSchemas;
     this.#listChannelsImpl = opts?.listChannelsImpl ?? listChannels;
     this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
@@ -637,11 +643,14 @@ export class Session {
    * the updated {@link EventMeta} replaces {@link currentEvent} so the workspace's view of
    * `classes_membership` stays in sync; returns it, `undefined` on a cancelled prompt, or throws.
    */
-  async setClassMembership(classId: ClassId, pilotIds: PilotId[]): Promise<EventMeta | undefined> {
+  async setClassMembership(
+    classId: ClassId,
+    members: (PilotId | MemberSlot)[]
+  ): Promise<EventMeta | undefined> {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setClassMembershipImpl(this.baseUrl, event.id, classId, pilotIds, token)
+      this.#setClassMembershipImpl(this.baseUrl, event.id, classId, members, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -659,6 +668,17 @@ export class Session {
    */
   listFormats(): Promise<string[]> {
     return this.#listFormatsImpl(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * List the valid **formats + their param schemas** (`GET /formats`, open, no token) — race redesign
+   * Slice 7b. Each production format with the param schema its generator reads
+   * (`{ name, params: [{ key, label, kind, options?, default? }] }`) — the single source of truth the
+   * Rounds UI's guided params editor reads to offer the chosen format's params and render the right
+   * typed control per knob. Rejects on a transport/HTTP failure.
+   */
+  listFormatSchemas(): Promise<FormatSchema[]> {
+    return this.#listFormatSchemasImpl(this.baseUrl, { token: this.#token });
   }
 
   /**

@@ -4,7 +4,7 @@
  *
  * The console's view used to live only in in-memory state, so a reload reset it (back to the active
  * event's workspace or the hub) — losing where you were. Now the view is reflected in
- * `location.hash` (e.g. `#/pilots`, `#/event/roster`), so a refresh restores it, bookmarks
+ * `location.hash` (e.g. `#/pilots`, `#/event/classes-roster`), so a refresh restores it, bookmarks
  * work, and the browser's back/forward navigate between views.
  *
  * Why a hash and not a path: `/pilots`, `/events`, `/timers` are already Director API routes — a
@@ -85,37 +85,37 @@ test('inside an event, a refresh stays on the open tab; browser back returns to 
   await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => new URL(page.url()).hash).toBe('#/event/live');
 
-  // Open the Roster tab from the sidebar → the hash becomes #/event/roster.
+  // Open the Classes & Roster tab from the sidebar → the hash becomes #/event/classes-roster.
   await page
     .getByRole('navigation', { name: 'Screens' })
-    .getByRole('button', { name: 'Roster' })
+    .getByRole('button', { name: 'Classes & Roster' })
     .click();
   await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
-  await expect.poll(() => new URL(page.url()).hash).toBe('#/event/roster');
+  await expect.poll(() => new URL(page.url()).hash).toBe('#/event/classes-roster');
 
-  // Reload — the key proof: we resume into the SAME event AND the SAME tab (Roster), not the
-  // workspace's default Live tab. The active event is server state (#90); the hash restores the tab.
+  // Reload — the key proof: we resume into the SAME event AND the SAME tab, not the workspace's
+  // default Live tab. The active event is server state (#90); the hash restores the tab.
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
-  expect(new URL(page.url()).hash).toBe('#/event/roster');
+  expect(new URL(page.url()).hash).toBe('#/event/classes-roster');
 
   // Browser BACK moves to the previous view (the Live tab) — driven by hashchange.
   await page.goBack();
   await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => new URL(page.url()).hash).toBe('#/event/live');
-  // The Roster heading is gone — we really moved off that tab.
+  // The Classes & Roster heading is gone — we really moved off that tab.
   await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeHidden();
 
-  // Browser FORWARD returns to Roster.
+  // Browser FORWARD returns to Classes & Roster.
   await page.goForward();
   await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
-  await expect.poll(() => new URL(page.url()).hash).toBe('#/event/roster');
+  await expect.poll(() => new URL(page.url()).hash).toBe('#/event/classes-roster');
 });
 
 test('on the hub with an active event, a refresh stays on the hub (no auto-resume into the event)', async ({

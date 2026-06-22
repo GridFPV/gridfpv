@@ -36,8 +36,7 @@
   import TokenDialog from './screens/TokenDialog.svelte';
   import EventSetupWizard from './screens/EventSetupWizard.svelte';
   import EventTimers from './screens/EventTimers.svelte';
-  import EventRoster from './screens/EventRoster.svelte';
-  import EventClasses from './screens/EventClasses.svelte';
+  import EventClassesRoster from './screens/EventClassesRoster.svelte';
   import EventRounds from './screens/EventRounds.svelte';
   import LiveRaceControl from './screens/LiveRaceControl.svelte';
   import Marshaling from './screens/Marshaling.svelte';
@@ -123,33 +122,27 @@
     }
   });
 
-  type ScreenId = 'timers' | 'roster' | 'classes' | 'rounds' | 'live' | 'marshaling' | 'results';
+  type ScreenId = 'timers' | 'classes-roster' | 'rounds' | 'live' | 'marshaling' | 'results';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
     {
-      id: 'roster',
-      label: 'Roster',
+      id: 'classes-roster',
+      label: 'Classes & Roster',
       key: '1',
       icon: 'M16 11V7a4 4 0 1 0-8 0v4M5 11h14v9H5z'
     },
     {
-      id: 'classes',
-      label: 'Classes',
-      key: '2',
-      icon: 'M4 6h16M4 12h10M4 18h7M18 14l2 2 3-4'
-    },
-    {
       id: 'rounds',
       label: 'Rounds & Heats',
-      key: '3',
+      key: '2',
       icon: 'M4 5h16M4 12h16M4 19h16M9 5v14'
     },
-    { id: 'live', label: 'Live control', key: '4', icon: 'M5 3l14 9-14 9V3z' },
-    { id: 'marshaling', label: 'Marshaling', key: '5', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
-    { id: 'results', label: 'Results', key: '6', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
+    { id: 'live', label: 'Live control', key: '3', icon: 'M5 3l14 9-14 9V3z' },
+    { id: 'marshaling', label: 'Marshaling', key: '4', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
+    { id: 'results', label: 'Results', key: '5', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
     {
       id: 'timers',
       label: 'Timers',
-      key: '7',
+      key: '6',
       icon: 'M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'
     }
   ];
@@ -369,10 +362,8 @@
       <main class="content">
         {#if active === 'timers'}
           <EventTimers {session} />
-        {:else if active === 'roster'}
-          <EventRoster {session} />
-        {:else if active === 'classes'}
-          <EventClasses {session} />
+        {:else if active === 'classes-roster'}
+          <EventClassesRoster {session} />
         {:else if active === 'rounds'}
           <EventRounds {session} />
         {:else if active === 'live'}
