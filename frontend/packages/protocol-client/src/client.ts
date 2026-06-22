@@ -29,6 +29,7 @@ import type {
   Cursor,
   EventId,
   EventMeta,
+  HeatSummary,
   NewRoundReq,
   Pilot,
   PilotId,
@@ -900,6 +901,26 @@ export async function deleteRound(
   if (!resp.ok)
     throw new Error(`DELETE /events/${eventId}/rounds/${roundId} failed: HTTP ${resp.status}`);
   return (await resp.json()) as EventMeta;
+}
+
+/**
+ * List an event's **scheduled heats** (`GET /events/{id}/heats`) — race redesign Slice 3b. A read
+ * (open, no token): the server folds the event log into one {@link HeatSummary} per scheduled heat —
+ * id, lineup, the round/class it was tagged with, its derived phase, and whether it is the current
+ * heat — in first-scheduled order. The Heats UI groups this by round to render each round's heats
+ * list. Resolves the list, or rejects on a non-2xx / transport failure; an unknown event is a 404.
+ */
+export async function listHeats(
+  baseUrl: string,
+  eventId: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<HeatSummary[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/heats`, { headers });
+  if (!resp.ok) throw new Error(`GET /events/${eventId}/heats failed: HTTP ${resp.status}`);
+  return (await resp.json()) as HeatSummary[];
 }
 
 /**

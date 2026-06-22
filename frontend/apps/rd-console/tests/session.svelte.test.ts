@@ -910,4 +910,61 @@ describe('Session', () => {
       expect(session.currentEvent?.classes).toEqual(['c1']);
     });
   });
+
+  describe('heats (race redesign Slice 3b)', () => {
+    function heatSession(overrides?: {
+      sendCommand?: ReturnType<typeof vi.fn>;
+      listHeatsImpl?: ReturnType<typeof vi.fn>;
+    }) {
+      const { connect } = mockConnect(connecting);
+      const sendCommand = overrides?.sendCommand ?? vi.fn(async () => okAck);
+      const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
+      const session = new Session({
+        connectImpl: connect,
+        controlFactory,
+        baseUrl: 'http://d.local',
+        autoRestore: false,
+        listHeatsImpl: overrides?.listHeatsImpl
+      });
+      return { session, sendCommand };
+    }
+
+    it('fillRound sends a FillRound command tagged with the round', async () => {
+      const sendCommand = vi.fn(async () => okAck);
+      const { session } = heatSession({ sendCommand });
+      session.setToken('tok');
+      session.selectEvent(PRACTICE);
+      const ack = await session.fillRound('r1');
+      expect(ack).toEqual(okAck);
+      expect(sendCommand).toHaveBeenCalledWith({ FillRound: { round: 'r1' } });
+    });
+
+    it('scheduleHeat sends a tagged ScheduleHeat with the lineup, class, and round', async () => {
+      const sendCommand = vi.fn(async () => okAck);
+      const { session } = heatSession({ sendCommand });
+      session.setToken('tok');
+      session.selectEvent(PRACTICE);
+      await session.scheduleHeat('q-1', ['p1', 'p2'], { class: 'c1', round: 'r1' });
+      expect(sendCommand).toHaveBeenCalledWith({
+        ScheduleHeat: { heat: 'q-1', lineup: ['p1', 'p2'], class: 'c1', round: 'r1' }
+      });
+    });
+
+    it('listHeats reads the round-tagged heats open (no token), [] with no event', async () => {
+      const heats = [
+        { heat: 'q-1', lineup: ['p1'], round: 'r1', phase: 'Scheduled', is_current: true } as const
+      ];
+      const listHeatsImpl = vi.fn(async () => heats);
+      const { session } = heatSession({ listHeatsImpl });
+      // No event selected → resolves [] without calling the impl.
+      await expect(session.listHeats()).resolves.toEqual([]);
+      expect(listHeatsImpl).not.toHaveBeenCalled();
+      // Inside an event → reads GET /events/{id}/heats.
+      session.selectEvent(PRACTICE);
+      await expect(session.listHeats()).resolves.toEqual(heats);
+      expect(listHeatsImpl).toHaveBeenCalledWith('http://d.local', 'practice', {
+        token: undefined
+      });
+    });
+  });
 });

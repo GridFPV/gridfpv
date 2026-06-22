@@ -41,6 +41,7 @@ export {
   createRound,
   updateRound,
   deleteRound,
+  listHeats,
   PRACTICE_EVENT_ID
 } from './client.js';
 export type {

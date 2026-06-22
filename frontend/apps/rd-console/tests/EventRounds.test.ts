@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
-import type { Class, EventMeta, RoundDef } from '@gridfpv/types';
+import type { Class, EventMeta, HeatSummary, Pilot, RoundDef } from '@gridfpv/types';
 import EventRounds from '../src/screens/EventRounds.svelte';
 import { makeTestSession } from './support.js';
 
 const OPEN: Class = { id: 'c1', name: 'Open', source: 'MultiGP' };
 const SPEC: Class = { id: 'c2', name: 'Spec', source: 'Custom' };
+
+const ACE: Pilot = { id: 'p1', callsign: 'AceOne', vtx_types: [], attributes: {} };
+const BOLT: Pilot = { id: 'p2', callsign: 'Bolt', vtx_types: [], attributes: {} };
 
 const QUAL: RoundDef = {
   id: 'r1',
@@ -44,14 +47,17 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     const { session } = makeTestSession({ ...baseImpls(), event: EVENT });
     render(EventRounds, { session });
 
-    await screen.findByText('Qualifying R1');
+    // The round label now appears both in the Rounds list and the Heats section, so scope the
+    // assertions to the Rounds card (the section whose heading is "Rounds").
+    const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
+    await within(roundsCard).findByText('Qualifying R1');
     // Format and the resolved class name show; FromRoster summarises as "From roster".
-    expect(screen.getByText('timed_qual')).toBeInTheDocument();
-    expect(screen.getByText('Open')).toBeInTheDocument();
-    expect(screen.getByText('From roster')).toBeInTheDocument();
-    expect(screen.getByText(/Timed · 120s/)).toBeInTheDocument();
+    expect(within(roundsCard).getByText('timed_qual')).toBeInTheDocument();
+    expect(within(roundsCard).getByText('Open')).toBeInTheDocument();
+    expect(within(roundsCard).getByText('From roster')).toBeInTheDocument();
+    expect(within(roundsCard).getByText(/Timed · 120s/)).toBeInTheDocument();
     // The round index renders.
-    expect(screen.getByText('1')).toBeInTheDocument();
+    expect(within(roundsCard).getByText('1')).toBeInTheDocument();
   });
 
   it('adds a round via createRound and reflects it immediately', async () => {
@@ -98,8 +104,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       win_condition: 'BestLap',
       seeding: 'FromRoster'
     });
-    // The new round appears in the list.
-    await screen.findByText('Open Practice');
+    // The new round appears in the Rounds list (its label also seeds the Heats section).
+    const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
+    await within(roundsCard).findByText('Open Practice');
   });
 
   it('reveals the FromRanking selector (source round + top N) and authors it', async () => {
@@ -167,10 +174,88 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(deleteRoundImpl.mock.calls[0][2]).toBe('r1');
     await waitFor(() => expect(session.currentEvent?.rounds).toEqual([]));
   });
+});
 
-  it('shows the Slice 3 Heats placeholder', async () => {
-    const { session } = makeTestSession({ ...baseImpls(), event: EVENT });
+describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
+  // An event whose Open class has two members, so a round can draw a field / a manual heat.
+  const EVENT_WITH_MEMBERS: EventMeta = {
+    ...EVENT,
+    roster: ['p1', 'p2'],
+    classes_membership: [{ class: 'c1', pilots: ['p1', 'p2'] }]
+  };
+
+  function heatsImpls(heats: HeatSummary[] = []) {
+    return {
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => heats)
+    };
+  }
+
+  it("lists a round's heats with lineup callsigns, status, and the current marker", async () => {
+    const heat: HeatSummary = {
+      heat: 'q-1',
+      lineup: ['p1', 'p2'],
+      class: 'c1',
+      round: 'r1',
+      phase: 'Running',
+      is_current: true
+    };
+    const { session } = makeTestSession({ ...heatsImpls([heat]), event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
-    await screen.findByText(/Heat building — Slice 3/i);
+
+    // The heat appears under its round with resolved callsigns, a Running status, and Current.
+    const heatRow = (await screen.findByText('q-1')).closest('.heat-row') as HTMLElement;
+    expect(within(heatRow).getByText('AceOne')).toBeInTheDocument();
+    expect(within(heatRow).getByText('Bolt')).toBeInTheDocument();
+    expect(within(heatRow).getByText('Running')).toBeInTheDocument();
+    expect(within(heatRow).getByText('Current')).toBeInTheDocument();
+  });
+
+  it('fills a round via FillRound and re-reads the heats list', async () => {
+    const impls = heatsImpls([]);
+    const newHeat: HeatSummary = {
+      heat: 'q-1',
+      lineup: ['p1', 'p2'],
+      class: 'c1',
+      round: 'r1',
+      phase: 'Scheduled',
+      is_current: true
+    };
+    // First read (on mount) is empty; after the fill, the engine has appended a heat.
+    impls.listHeatsImpl.mockResolvedValueOnce([]).mockResolvedValue([newHeat]);
+
+    const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Fill next heat' }));
+
+    // A FillRound command tagged with the round was sent.
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({ FillRound: { round: 'r1' } });
+    // The newly-scheduled heat shows up after the re-read.
+    await screen.findByText('q-1');
+  });
+
+  it('builds a heat by hand from the round’s eligible members (tagged, no free text)', async () => {
+    const impls = heatsImpls([]);
+    const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+
+    // The round defaults to the first; type a heat id and pick both eligible members.
+    await fireEvent.input(await screen.findByLabelText('Build heat id'), {
+      target: { value: 'q-1' }
+    });
+    await fireEvent.click(screen.getByLabelText('Select AceOne'));
+    await fireEvent.click(screen.getByLabelText('Select Bolt'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    // A ScheduleHeat tagged with the round + its single class, lineup of the chosen pilot refs.
+    expect(sendSpy.mock.calls[0][0]).toEqual({
+      ScheduleHeat: { heat: 'q-1', lineup: ['p1', 'p2'], class: 'c1', round: 'r1' }
+    });
   });
 });

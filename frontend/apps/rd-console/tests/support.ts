@@ -30,7 +30,8 @@ import type {
   listFormats,
   createRound,
   updateRound,
-  deleteRound
+  deleteRound,
+  listHeats
 } from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
@@ -80,6 +81,8 @@ export interface TimerImpls {
   createRoundImpl?: typeof createRound;
   updateRoundImpl?: typeof updateRound;
   deleteRoundImpl?: typeof deleteRound;
+  /** The scheduled-heats read (race redesign Slice 3b) — backs the EventRounds Heats UI tests. */
+  listHeatsImpl?: typeof listHeats;
 }
 
 export interface TestSession {
@@ -152,7 +155,9 @@ export function makeTestSession(
     listFormatsImpl: opts?.listFormatsImpl,
     createRoundImpl: opts?.createRoundImpl,
     updateRoundImpl: opts?.updateRoundImpl,
-    deleteRoundImpl: opts?.deleteRoundImpl
+    deleteRoundImpl: opts?.deleteRoundImpl,
+    // Scheduled-heats read seam (race redesign Slice 3b): inert unless a test overrides it.
+    listHeatsImpl: opts?.listHeatsImpl
   });
   // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event,
   // unless the test wants the app-level (no-event) context.
