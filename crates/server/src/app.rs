@@ -99,6 +99,7 @@ use crate::events::{
 };
 use crate::live_state::{HeatSummary, heat_summaries, live_state};
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
+use crate::round_engine;
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
 use crate::stream::Cursor;
@@ -347,6 +348,18 @@ pub fn router(registry: EventRegistry) -> Router {
         // Per-event scheduled **heats** (race redesign Slice 3b): the round-tagged heats list the
         // Heats UI reads — open, no token (a read), like the snapshot routes.
         .route("/events/{event_id}/heats", get(list_heats))
+        // A round's **ranking** (race redesign Slice 5/6a): the ordered per-pilot ranking the
+        // engine seeds `FromRanking` from — what the bracket-carry UI displays. Open, no token.
+        .route(
+            "/events/{event_id}/rounds/{round_id}/ranking",
+            get(round_ranking),
+        )
+        // A class's **standings** (race redesign Slice 5/6a): the per-pilot rows aggregated across
+        // the class's rounds (the season-join shape the Results UI reads). Open, no token.
+        .route(
+            "/events/{event_id}/classes/{class_id}/standings",
+            get(class_standings),
+        )
         // Per-event **roster** (issue #74): RD-gated; each id must name a known directory pilot.
         // Set the whole roster, or add/remove a single pilot.
         .route("/events/{event_id}/roster", put(set_event_roster))
@@ -970,6 +983,77 @@ async fn list_heats(
     Ok(Json(heat_summaries(&events)))
 }
 
+/// Map a [`round_engine::FillError`] to a typed [`ProtocolError`]: an unknown round (or seeding
+/// source round) is a **404** ([`ErrorCode::UnknownScope`]); an unscorable round (empty field,
+/// unknown format) is a **400** ([`ErrorCode::BadRequest`]) — mirroring the control handler's
+/// `FillRound` mapping so the read routes answer the same shape.
+fn fill_error(err: round_engine::FillError) -> ProtocolError {
+    use round_engine::FillError;
+    let code = match err {
+        FillError::UnknownRound(_) | FillError::UnknownSourceRound(_) => ErrorCode::UnknownScope,
+        FillError::EmptyField(_) | FillError::UnknownFormat(_) => ErrorCode::BadRequest,
+    };
+    ProtocolError::new(code, err.to_string())
+}
+
+/// `GET /events/{event_id}/rounds/{round_id}/ranking` — a round's **ranking** (race redesign
+/// Slice 5/6a).
+///
+/// The ordered per-pilot ranking the engine seeds `FromRanking` from ([`round_engine::round_ranking`])
+/// — the same provisional-or-final ordering a bracket carries — exposed as a read for the
+/// bracket-carry display. A read (open, no token, like the snapshot routes). An unknown event or
+/// round is a typed **404**; a round that cannot be ranked (unknown format, dangling seeding
+/// source) is a **400**.
+async fn round_ranking(
+    State(registry): State<EventRegistry>,
+    Path((event_id, round_id)): Path<(EventId, RoundId)>,
+) -> Result<Json<Vec<gridfpv_engine::format::RankEntry>>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
+    let meta = registry.meta_of(&event_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        )
+    })?;
+    let round = meta
+        .rounds
+        .iter()
+        .find(|r| r.id == round_id)
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::UnknownScope,
+                format!("no round with id {:?} in this event", round_id.0),
+            )
+        })?;
+    let (events, _cursor) = state.read()?;
+    let ranking = round_engine::round_ranking(&meta, round, &events).map_err(fill_error)?;
+    Ok(Json(ranking))
+}
+
+/// `GET /events/{event_id}/classes/{class_id}/standings` — a class's **standings** (race redesign
+/// Slice 5/6a).
+///
+/// The season-join projection the Results UI reads: [`round_engine::class_standings`] folds the
+/// event log + meta into one per-pilot row per competitor that raced the class, aggregated across
+/// the class's rounds (points, best lap, total laps), best standing first. A read (open, no token).
+/// An unknown event is a typed **404**; an unscorable class round is a **400**. A class with no
+/// rounds yields empty standings (a 200), not an error.
+async fn class_standings(
+    State(registry): State<EventRegistry>,
+    Path((event_id, class_id)): Path<(EventId, ClassId)>,
+) -> Result<Json<round_engine::ClassStandings>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
+    let meta = registry.meta_of(&event_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        )
+    })?;
+    let (events, _cursor) = state.read()?;
+    let standings = round_engine::class_standings(&meta, &class_id, &events).map_err(fill_error)?;
+    Ok(Json(standings))
+}
+
 /// `POST /events/{event_id}/auth/join-token` — mint a fresh **read-only** join token
 /// (protocol.html §5, §9.4) — issue #63, now event-rooted.
 ///
@@ -1133,19 +1217,65 @@ async fn snapshot_event(
 
 /// `GET /snapshot/class/{event}/{class}` — a class's live race-state (§4 class scope).
 ///
-/// Class-level *filtering* of the log is deferred (the log carries no class tag yet — see
-/// the module docs); this serves the whole-event live state under the class address so the
-/// scope is reachable now and tightens later without an addressing change.
+/// Now that [`Event::HeatScheduled`] carries the `class` it runs in (race redesign Slice 5/6a),
+/// the class scope is a **real filter**: [`class_window`] scopes the log to the heats tagged with
+/// `class` (their scheduling / state-change events plus the passes that fall while one of them is
+/// the active heat), and the live state is folded over that filtered view — so the body reflects
+/// only this class's racing, not the whole event. A class with no tagged heats folds an idle state.
 async fn snapshot_class(
     State(registry): State<EventRegistry>,
-    Path((event_id, _event, _class)): Path<(EventId, EventId, ClassId)>,
+    Path((event_id, _event, class)): Path<(EventId, EventId, ClassId)>,
 ) -> Result<Json<Snapshot>, ProtocolError> {
     let state = resolve_event(&registry, &event_id)?;
     let (events, cursor) = state.read()?;
+    let class_events = class_window(&events, &class);
     Ok(Json(Snapshot {
         cursor,
-        body: ProjectionBody::LiveRaceState(live_state(&events)),
+        body: ProjectionBody::LiveRaceState(live_state(&class_events)),
     }))
+}
+
+/// Filter the log to a single **class's** heats (race redesign Slice 5/6a): every event that
+/// belongs to a heat tagged `HeatScheduled { class: Some(class), .. }`, plus the passes and
+/// marshaling adjudications that fall *while one of the class's heats is the active one*.
+///
+/// The class's heats are first collected from the `HeatScheduled` tags; then the log is replayed
+/// once, opening the window on any heat-loop event for one of those heats and closing it on a
+/// heat-loop event for a heat *not* in the class — the same position-based pass attribution
+/// [`heat_window`] uses to scope a single heat, generalized to a set of heats. So a class's live
+/// state folds only its own heats and passes, with no other class's racing bleeding in.
+pub(crate) fn class_window(events: &[Event], class: &ClassId) -> Vec<Event> {
+    // The heat ids tagged with this class (a `HeatScheduled` whose `class` equals `class`).
+    let class_heats: std::collections::HashSet<&HeatId> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::HeatScheduled {
+                heat,
+                class: Some(c),
+                ..
+            } if c == class => Some(heat),
+            _ => None,
+        })
+        .collect();
+
+    let mut window = Vec::new();
+    // `active` tracks whether the cursor is currently inside one of the class's heats: it opens on
+    // a heat-loop event for a class heat and closes on a heat-loop event for any non-class heat.
+    let mut active = false;
+    for event in events {
+        match event {
+            Event::HeatScheduled { heat, .. } | Event::HeatStateChanged { heat, .. } => {
+                active = class_heats.contains(heat);
+                if active {
+                    window.push(event.clone());
+                }
+            }
+            // Passes and adjudications belong to whichever heat is currently active.
+            _ if active => window.push(event.clone()),
+            _ => {}
+        }
+    }
+    window
 }
 
 /// `GET /snapshot/heat/{heat}` — the tightest scope (§4 heat scope).
@@ -1576,6 +1706,72 @@ mod tests {
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(len));
         assert!(matches!(snap.body, ProjectionBody::LiveRaceState(_)));
+    }
+
+    #[tokio::test]
+    async fn class_scope_filters_to_the_class_heats() {
+        // Two heats in different classes; the class scope folds only its own class's heat.
+        // `open`'s heat ran A; `sport`'s heat ran B. The open class scope sees only A's racing.
+        let events = vec![
+            Event::HeatScheduled {
+                heat: HeatId("o-1".into()),
+                lineup: vec![CompetitorRef("A".into())],
+                class: Some(ClassId("open".into())),
+                round: Some(RoundId("q1".into())),
+                frequencies: vec![],
+            },
+            Event::HeatStateChanged {
+                heat: HeatId("o-1".into()),
+                transition: HeatTransition::Running,
+            },
+            pass("A", 1_000_000, 1),
+            pass("A", 4_000_000, 2), // open/A: one lap
+            Event::HeatScheduled {
+                heat: HeatId("s-1".into()),
+                lineup: vec![CompetitorRef("B".into())],
+                class: Some(ClassId("sport".into())),
+                round: Some(RoundId("q2".into())),
+                frequencies: vec![],
+            },
+            Event::HeatStateChanged {
+                heat: HeatId("s-1".into()),
+                transition: HeatTransition::Running,
+            },
+            pass("B", 10_000_000, 1),
+            pass("B", 13_000_000, 2),
+            pass("B", 15_000_000, 3), // sport/B: two laps
+        ];
+        let (registry, _state, _) = state_with(events);
+
+        // The open class scope: current heat is open's, B (sport) never appears.
+        let (status, snap) = get_snapshot(
+            registry.clone(),
+            "/events/practice/snapshot/class/spring-cup/open",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::LiveRaceState(ls) => {
+                assert_eq!(ls.current_heat, Some(HeatId("o-1".into())));
+                assert_eq!(ls.active_pilots, vec![CompetitorRef("A".into())]);
+                assert!(
+                    !ls.running_order.contains(&CompetitorRef("B".into())),
+                    "sport's pilot does not appear in the open class scope"
+                );
+            }
+            other => panic!("expected live state, got {other:?}"),
+        }
+
+        // And the sport scope sees only B.
+        let (_, snap) =
+            get_snapshot(registry, "/events/practice/snapshot/class/spring-cup/sport").await;
+        match snap.unwrap().body {
+            ProjectionBody::LiveRaceState(ls) => {
+                assert_eq!(ls.current_heat, Some(HeatId("s-1".into())));
+                assert_eq!(ls.active_pilots, vec![CompetitorRef("B".into())]);
+            }
+            other => panic!("expected live state, got {other:?}"),
+        }
     }
 
     #[tokio::test]

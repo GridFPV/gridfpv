@@ -43,14 +43,18 @@
 //! the bracket carry, where the *source* round's completed heats produce the ranking the
 //! bracket seeds from.
 
+use std::collections::BTreeMap;
+
 use gridfpv_engine::event::score_marshaled;
 use gridfpv_engine::format::{
     CompletedHeat, FormatConfig, FormatRegistry, GeneratorStep, RankEntry, advance_top_n,
 };
 use gridfpv_engine::heat::{HeatState, heat_state};
 use gridfpv_engine::schedule::{Frequency, FrequencyPool, allocate};
-use gridfpv_engine::scoring::HeatResult;
+use gridfpv_engine::scoring::{HeatResult, Metric};
 use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, Pass, RoundId, SourceTime};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::events::{EventMeta, RoundDef, SeedingRule};
 use crate::timers::{Timer, TimerRegistry};
@@ -387,6 +391,218 @@ pub fn round_ranking(
         .ok_or_else(|| FillError::UnknownFormat(round.format.clone()))?;
     let completed = completed_heats(round, events);
     Ok(generator.ranking(&completed))
+}
+
+// --- Per-class standings (race redesign Slice 5/6a) -----------------------------------------
+
+/// One pilot's **contribution to a class's standings** (race redesign Slice 5/6a) — the
+/// per-pilot / per-class row aggregated across that class's rounds (the season-join shape).
+///
+/// This is the row the Results UI renders per competitor: their final standing position, the
+/// total points they accrued across the class's rounds, and the headline lap metrics (best lap,
+/// total counted laps). It is a pure aggregate of the class's scored rounds, so it replays
+/// identically off the same log + meta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ClassStanding {
+    /// The competitor this standing is for (the pilot's source-local handle).
+    pub competitor: CompetitorRef,
+    /// 1-based overall standing position; tied competitors share a position with the same
+    /// dense, tie-aware "1, 2, 2, 4" convention as [`RankEntry`].
+    pub position: u32,
+    /// Total **points** across the class's rounds — the sum of each round's per-pilot points,
+    /// where a round awards `field_size - round_position + 1` points (a win in an N-pilot round
+    /// is worth N, last is worth 1). The headline metric the standings rank on.
+    pub points: u32,
+    /// The competitor's **best lap** across every heat of the class's rounds, in microseconds,
+    /// or `None` when they completed no lap. The qualifying-style tie-break / display metric.
+    #[ts(type = "number | null")]
+    pub best_lap_micros: Option<i64>,
+    /// The **total counted laps** the competitor completed across the class's rounds (each
+    /// round's laps under that round's win condition). A display / secondary metric.
+    pub total_laps: u32,
+    /// How many of the class's rounds this competitor appeared in (was ranked in) — context for
+    /// the points total (a pilot who skipped a round has fewer rounds to accrue from).
+    pub rounds_entered: u32,
+}
+
+/// A class's **standings** (race redesign Slice 5/6a): the ordered per-pilot rows aggregated
+/// across the class's rounds, plus the class id they are for.
+///
+/// The season-join projection the Results screen reads: [`class_standings`] folds the log + meta
+/// into one [`ClassStanding`] per competitor that raced the class, best standing first. Pure and
+/// deterministic — the same log + meta always yields the same ordered standings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ClassStandings {
+    /// The class these standings are for.
+    pub class: ClassId,
+    /// The per-pilot standings, best first (ties adjacent, sharing a position).
+    pub standings: Vec<ClassStanding>,
+}
+
+/// The per-competitor running totals accumulated while folding a class's rounds.
+#[derive(Default)]
+struct StandingAcc {
+    points: u32,
+    best_lap_micros: Option<i64>,
+    total_laps: u32,
+    rounds_entered: u32,
+}
+
+impl StandingAcc {
+    /// Fold one round's contribution for a competitor: their `points` from this round, their
+    /// counted `laps`, and their `best_lap` (µs) if any. `best_lap_micros` keeps the smaller.
+    fn add_round(&mut self, points: u32, laps: u32, best_lap: Option<i64>) {
+        self.points += points;
+        self.total_laps += laps;
+        self.rounds_entered += 1;
+        if let Some(lap) = best_lap {
+            self.best_lap_micros = Some(match self.best_lap_micros {
+                Some(existing) => existing.min(lap),
+                None => lap,
+            });
+        }
+    }
+}
+
+/// The rounds of `meta` whose eligible classes **include** `class` — the class's rounds, in the
+/// order they are defined on the event. A round shared by several classes (an open / practice
+/// round) contributes to each of its classes' standings.
+fn rounds_for_class<'a>(meta: &'a EventMeta, class: &ClassId) -> Vec<&'a RoundDef> {
+    // `crate::scope::ClassId` is a re-export of `gridfpv_events::ClassId`, so the round's eligible
+    // classes and the queried class are the one type — a direct membership test.
+    meta.rounds
+        .iter()
+        .filter(|r| r.classes.contains(class))
+        .collect()
+}
+
+/// One competitor's **best lap** (µs) across a heat's [`HeatResult`], read off the scored
+/// [`Metric`] each placement carries. Only [`Metric::BestLapMicros`] is a lap duration; the other
+/// metrics are completion *times*, not durations, so they contribute no lap metric (the lap totals
+/// still aggregate). `None` when the competitor has no placement or no lap.
+fn placement_best_lap(result: &HeatResult, competitor: &CompetitorRef) -> Option<i64> {
+    result
+        .places
+        .iter()
+        .find(|p| &p.competitor.competitor == competitor)
+        .and_then(|p| match p.metric {
+            Metric::BestLapMicros(lap) => lap,
+            _ => None,
+        })
+}
+
+/// One competitor's **counted laps** across a heat's [`HeatResult`] (0 when absent).
+fn placement_laps(result: &HeatResult, competitor: &CompetitorRef) -> u32 {
+    result
+        .places
+        .iter()
+        .find(|p| &p.competitor.competitor == competitor)
+        .map(|p| p.laps)
+        .unwrap_or(0)
+}
+
+/// Aggregate a **class's standings** across its rounds (race redesign Slice 5/6a) — the
+/// season-join projection the Results screen reads.
+///
+/// For every round whose eligible classes include `class`, this:
+///
+/// 1. Computes that round's **ranking** via [`round_ranking`] (the same provisional-or-final
+///    ranking the engine seeds `FromRanking` from), giving each entrant a round position over a
+///    field of `field_size`.
+/// 2. Awards **points** = `field_size - position + 1` (a win is worth the field size, last is
+///    worth 1), and reads each entrant's **laps** / **best lap** off the round's scored heats
+///    (each heat scored under the round's [`win_condition`](RoundDef::win_condition) via the same
+///    [`completed_heats`] the engine ranks from).
+/// 3. Accumulates per competitor: total points, the minimum best lap, total counted laps, and the
+///    count of rounds entered.
+///
+/// The accumulated rows are then ordered **by points (descending)**, ties broken by best lap
+/// (faster first, a competitor with no lap last), then by competitor ref for a total, deterministic
+/// order. `position` is assigned 1-based and tie-aware (equal points *and* best lap share a
+/// position). Pure and deterministic: the same log + meta always yields the same standings.
+///
+/// A `FromRanking` (bracket) round is included like any other — its ranking is its standings
+/// contribution, so a class's brackets feed the season totals alongside its qual rounds. Returns an
+/// error if any of the class's rounds is unscorable (an unknown format, a dangling seeding source).
+pub fn class_standings(
+    meta: &EventMeta,
+    class: &ClassId,
+    events: &[Event],
+) -> Result<ClassStandings, FillError> {
+    let mut acc: BTreeMap<CompetitorRef, StandingAcc> = BTreeMap::new();
+
+    for round in rounds_for_class(meta, class) {
+        let ranking = round_ranking(meta, round, events)?;
+        let field_size = ranking.len() as u32;
+        // The round's scored heats — the same view `round_ranking` ranked over — so the laps /
+        // best-lap a standing reports come from exactly the heats that decided the round position.
+        let completed = completed_heats(round, events);
+
+        for entry in &ranking {
+            // Points: a win (position 1) is worth the field size; last is worth 1.
+            let points = field_size.saturating_sub(entry.position).saturating_add(1);
+            // Laps / best lap for this competitor across the round's heats.
+            let mut laps = 0u32;
+            let mut best_lap: Option<i64> = None;
+            for heat in &completed {
+                laps += placement_laps(&heat.result, &entry.competitor);
+                if let Some(lap) = placement_best_lap(&heat.result, &entry.competitor) {
+                    best_lap = Some(match best_lap {
+                        Some(existing) => existing.min(lap),
+                        None => lap,
+                    });
+                }
+            }
+            acc.entry(entry.competitor.clone())
+                .or_default()
+                .add_round(points, laps, best_lap);
+        }
+    }
+
+    // Order the rows: most points first, then faster best lap (no-lap last), then competitor ref
+    // (the BTreeMap already yields ref order, the stable final tie-break).
+    let mut rows: Vec<(CompetitorRef, StandingAcc)> = acc.into_iter().collect();
+    rows.sort_by(|(a_ref, a), (b_ref, b)| {
+        b.points
+            .cmp(&a.points)
+            .then_with(|| best_lap_order(a.best_lap_micros).cmp(&best_lap_order(b.best_lap_micros)))
+            .then_with(|| a_ref.0.cmp(&b_ref.0))
+    });
+
+    // Assign dense, tie-aware positions: equal points *and* best lap share a position, the next
+    // distinct row skips past them (1, 2, 2, 4).
+    let mut standings = Vec::with_capacity(rows.len());
+    let mut position = 0u32;
+    let mut prev_key: Option<(u32, Option<i64>)> = None;
+    for (index, (competitor, a)) in rows.into_iter().enumerate() {
+        let key = (a.points, a.best_lap_micros);
+        if prev_key != Some(key) {
+            position = index as u32 + 1;
+            prev_key = Some(key);
+        }
+        standings.push(ClassStanding {
+            competitor,
+            position,
+            points: a.points,
+            best_lap_micros: a.best_lap_micros,
+            total_laps: a.total_laps,
+            rounds_entered: a.rounds_entered,
+        });
+    }
+
+    Ok(ClassStandings {
+        class: class.clone(),
+        standings,
+    })
+}
+
+/// A sort key that orders a best lap **faster-first**, with "no lap" ranked last: `Some(µs)` keeps
+/// its value, `None` becomes `i64::MAX` so a competitor who never completed a lap sinks below every
+/// competitor who did.
+fn best_lap_order(best: Option<i64>) -> i64 {
+    best.unwrap_or(i64::MAX)
 }
 
 /// Fill a round (race redesign Slice 3a): build its generator from the field + the round's
@@ -825,6 +1041,119 @@ mod tests {
             }
             other => panic!("expected a scheduled bracket heat, got {other:?}"),
         }
+    }
+
+    // --- Per-class standings (race redesign Slice 5/6a) ------------------------------------
+
+    /// A complete scored qual heat for a round + class with four pilots A>B>C>D on best lap,
+    /// returning the round-tagged schedule plus the run-to-Scored events.
+    fn scored_qual_heat(heat: &str, round: &str, class: &str, names: &[&str]) -> Vec<Event> {
+        let mut log = vec![scheduled(heat, round, class, names)];
+        // Holeshot for all, then a distinct lap per pilot so the best-lap order is A<B<C<D.
+        let mut passes = Vec::new();
+        for (i, n) in names.iter().enumerate() {
+            passes.push(pass(n, (i as i64) * 10, 0));
+        }
+        for (i, n) in names.iter().enumerate() {
+            // A lap of 1.0s + i*0.2s — A fastest, D slowest.
+            passes.push(pass(n, 1_000_000 + (i as i64) * 200_000, 1));
+        }
+        log.extend(run_heat_events(heat, passes));
+        log
+    }
+
+    #[test]
+    fn class_standings_aggregate_a_single_round() {
+        // One qual round over a four-pilot class: standings rank A>B>C>D, points = field-pos+1.
+        let round = qual_round("q1", "open");
+        let meta = meta_with(vec![round], vec![member("open", &["A", "B", "C", "D"])]);
+        let log = scored_qual_heat("q-1", "q1", "open", &["A", "B", "C", "D"]);
+
+        let standings = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        let order: Vec<&str> = standings
+            .standings
+            .iter()
+            .map(|s| s.competitor.0.as_str())
+            .collect();
+        assert_eq!(order, vec!["A", "B", "C", "D"], "best-lap order");
+        // 4-pilot field: 1st=4pts, 2nd=3, 3rd=2, 4th=1.
+        assert_eq!(standings.standings[0].points, 4);
+        assert_eq!(standings.standings[3].points, 1);
+        assert_eq!(standings.standings[0].position, 1);
+        assert_eq!(standings.standings[3].position, 4);
+        // A's best lap is the fastest (1.0s) and they ran the one round.
+        assert_eq!(standings.standings[0].best_lap_micros, Some(1_000_000));
+        assert_eq!(standings.standings[0].rounds_entered, 1);
+        assert_eq!(standings.standings[0].total_laps, 1);
+    }
+
+    #[test]
+    fn class_standings_aggregate_across_multiple_rounds() {
+        // Two qual rounds for the class; points accumulate across both. Same A>B>C>D each round,
+        // so A totals 8 points (4+4) and leads, D totals 2 (1+1) and trails.
+        let r1 = qual_round("q1", "open");
+        let r2 = qual_round("q2", "open");
+        let meta = meta_with(vec![r1, r2], vec![member("open", &["A", "B", "C", "D"])]);
+        let mut log = scored_qual_heat("q1-1", "q1", "open", &["A", "B", "C", "D"]);
+        log.extend(scored_qual_heat(
+            "q2-1",
+            "q2",
+            "open",
+            &["A", "B", "C", "D"],
+        ));
+
+        let standings = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        assert_eq!(standings.standings[0].competitor, CompetitorRef("A".into()));
+        assert_eq!(standings.standings[0].points, 8, "4 + 4 across two rounds");
+        assert_eq!(standings.standings[0].rounds_entered, 2);
+        assert_eq!(standings.standings[0].total_laps, 2, "one lap each round");
+        assert_eq!(
+            standings.standings.last().unwrap().competitor,
+            CompetitorRef("D".into())
+        );
+        assert_eq!(standings.standings.last().unwrap().points, 2);
+    }
+
+    #[test]
+    fn class_standings_exclude_other_classes_rounds() {
+        // Two classes each with their own round; the "open" standings cover only open's pilots.
+        let open = qual_round("q1", "open");
+        let mut sport = qual_round("q2", "sport");
+        sport.classes = vec![ScopeClassId("sport".into())];
+        let meta = meta_with(
+            vec![open, sport],
+            vec![member("open", &["A", "B"]), member("sport", &["X", "Y"])],
+        );
+        let mut log = scored_qual_heat("q1-1", "q1", "open", &["A", "B"]);
+        log.extend(scored_qual_heat("q2-1", "q2", "sport", &["X", "Y"]));
+
+        let standings = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        let names: Vec<&str> = standings
+            .standings
+            .iter()
+            .map(|s| s.competitor.0.as_str())
+            .collect();
+        assert_eq!(names, vec!["A", "B"], "only open's pilots, not X/Y");
+    }
+
+    #[test]
+    fn class_standings_are_deterministic_on_replay() {
+        let round = qual_round("q1", "open");
+        let meta = meta_with(vec![round], vec![member("open", &["A", "B", "C"])]);
+        let log = scored_qual_heat("q-1", "q1", "open", &["A", "B", "C"]);
+        let once = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        let twice = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn class_standings_for_a_class_with_no_rounds_are_empty() {
+        let round = qual_round("q1", "open");
+        let meta = meta_with(vec![round], vec![member("open", &["A", "B"])]);
+        // Query a class that has no round at all.
+        let standings = class_standings(&meta, &ClassId("nobody".into()), &[]).unwrap();
+        assert!(standings.standings.is_empty());
+        assert_eq!(standings.class, ClassId("nobody".into()));
     }
 
     #[test]

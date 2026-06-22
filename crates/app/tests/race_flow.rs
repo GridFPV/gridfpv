@@ -426,6 +426,67 @@ async fn round_driven_mock_race_flow_e2e() {
         blineup, expected_top2,
         "the bracket's first heat seeds from the qual ranking (top 2)"
     );
+
+    // --- Race redesign Slice 5/6a: the round-ranking + class-standings read routes. ---
+
+    // 1) GET …/rounds/{round}/ranking returns the round's ranking, in the SAME order the engine
+    //    seeds `FromRanking` from — so the served ranking == the bracket's seeding source.
+    let (status, body) = call(
+        &app,
+        "GET",
+        &format!("/events/{}/rounds/{}/ranking", event.0, qual.id.0),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "round ranking: {body}");
+    let served: Vec<gridfpv_engine::format::RankEntry> = serde_json::from_str(&body).unwrap();
+    let served_names: Vec<String> = served.iter().map(|e| e.competitor.0.clone()).collect();
+    let engine_names: Vec<String> = ranking.iter().map(|e| e.competitor.0.clone()).collect();
+    assert_eq!(
+        served_names, engine_names,
+        "the route's ranking matches the engine's FromRanking seeding order"
+    );
+    // The bracket's lineup (the top-2 carry) is exactly the served ranking's top-2.
+    assert_eq!(
+        blineup,
+        served_names.iter().take(2).cloned().collect::<Vec<_>>(),
+        "a FromRanking bracket's seeding equals the served round ranking"
+    );
+
+    // 2) GET …/classes/{class}/standings aggregates the class's rounds: one row per pilot, best
+    //    first, with the qual round's points (4-pilot field → 4..1). The class's two rounds
+    //    (qual + bracket) both feed the standings, so positions reflect the aggregate.
+    let (status, body) = call(
+        &app,
+        "GET",
+        &format!("/events/{}/classes/{}/standings", event.0, class_id.0),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "class standings: {body}");
+    let standings: gridfpv_server::round_engine::ClassStandings =
+        serde_json::from_str(&body).unwrap();
+    assert_eq!(standings.class.0, class_id.0);
+    assert_eq!(
+        standings.standings.len(),
+        pilots.len(),
+        "every class pilot has a standings row"
+    );
+    // The top of the standings is the qual winner (they also won/led the bracket carry).
+    assert_eq!(
+        standings.standings[0].competitor.0, engine_names[0],
+        "the standings leader is the qual ranking leader"
+    );
+    assert_eq!(standings.standings[0].position, 1);
+    // Standings are ordered by points (descending) — non-increasing down the list.
+    for pair in standings.standings.windows(2) {
+        assert!(
+            pair[0].points >= pair[1].points,
+            "standings are ordered by points descending"
+        );
+    }
 }
 
 /// Race redesign Slice 4a: a `FillRound` whose lineup exceeds the timer's node count is rejected
