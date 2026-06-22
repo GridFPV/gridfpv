@@ -181,6 +181,17 @@ impl RotorHazardConnection {
         self.client.emit("simulate_lap", json!({ "node": node }))
     }
 
+    /// **Tune** `node` (0-based) to `frequency` MHz (race redesign Slice 4a) — the engine allocates
+    /// the channel, the adapter applies it (RE §7.3). Emits RotorHazard's `set_frequency` handler
+    /// (`{ node, frequency }`); the server retunes that node's receiver. Best-effort: a failed emit
+    /// on a dropped socket surfaces as an `Err` the caller logs.
+    pub fn set_frequency(&self, node: u64, frequency: u16) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "set_frequency",
+            json!({ "node": node, "frequency": frequency }),
+        )
+    }
+
     /// Stop the current race — driving helper for tests.
     pub fn stop_race(&self) -> Result<(), rust_socketio::Error> {
         self.client.emit("stop_race", Payload::Text(vec![]))

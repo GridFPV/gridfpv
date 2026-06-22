@@ -54,6 +54,7 @@ fn fast_registry(laps: u32, lap_ms: u64) -> EventRegistry {
             &UpdateTimerRequest {
                 name: None,
                 kind: Some(TimerKind::Mock { laps, lap_ms }),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -329,6 +330,26 @@ async fn round_driven_mock_race_flow_e2e() {
         "the heat lineup matches the class members in membership order"
     );
 
+    // Race redesign Slice 4a: the IRL heat carries per-pilot channel assignments from the Mock
+    // timer's available set (8 nodes, seeded Raceband). Four pilots → R1..R4 in seed order.
+    let freqs = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::HeatScheduled {
+                heat, frequencies, ..
+            } if *heat == sched_heat && !frequencies.is_empty() => Some(frequencies.clone()),
+            _ => None,
+        })
+        .expect("the filled heat carries an assigned frequency set");
+    assert_eq!(freqs.len(), pilots.len(), "every pilot gets a channel");
+    assert_eq!(freqs[0].1, 5658, "top seed gets Raceband R1");
+    assert_eq!(freqs[1].1, 5695, "second seed gets Raceband R2");
+    // Each assigned competitor matches the lineup, in seed order.
+    for (i, p) in pilots.iter().enumerate() {
+        assert_eq!(freqs[i].0.0, p.0, "frequency assigned in seed order");
+    }
+
     // --- FillRound again: the 1-round qual is now Complete (acks ok, schedules nothing new). ---
     let before = read_log(&state).len();
     control_ok(
@@ -405,6 +426,114 @@ async fn round_driven_mock_race_flow_e2e() {
         blineup, expected_top2,
         "the bracket's first heat seeds from the qual ranking (top 2)"
     );
+}
+
+/// Race redesign Slice 4a: a `FillRound` whose lineup exceeds the timer's node count is rejected
+/// (the heat-size cap) and appends no heat, end to end against the Director router.
+#[tokio::test]
+async fn fill_round_rejects_an_oversized_heat_e2e() {
+    let registry = fast_registry(1, 2);
+
+    // Retune the Mock to a 2-node timer (the heat-size cap), keeping Raceband available.
+    registry
+        .timers()
+        .update(
+            &TimerId(MOCK_TIMER_ID.to_string()),
+            &UpdateTimerRequest {
+                node_count: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // A class with four pilots — over the 2-node cap.
+    let class_id = registry
+        .classes()
+        .create(&CreateClassRequest {
+            name: "Open".into(),
+            source: Default::default(),
+            reference: None,
+            description: None,
+        })
+        .unwrap()
+        .id;
+    let mut pilots = Vec::new();
+    for cs in ["a", "b", "c", "d"] {
+        pilots.push(
+            registry
+                .pilots()
+                .create(&CreatePilotRequest {
+                    callsign: cs.into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .id,
+        );
+    }
+    let token = registry.tokens().issue_rd_token();
+    let app = build_app(registry.clone(), &no_assets());
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/events",
+        Some(&token),
+        Some(serde_json::json!({ "name": "Oversized" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create event: {body}");
+    let event = EventId(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    );
+    let state = registry.resolve(&event).unwrap();
+
+    control_put(
+        &app,
+        &format!("/events/{}/classes", event.0),
+        &token,
+        serde_json::json!({ "ids": [class_id.0] }),
+    )
+    .await;
+    control_put(
+        &app,
+        &format!("/events/{}/classes/{}/membership", event.0, class_id.0),
+        &token,
+        serde_json::json!({ "pilot_ids": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
+    )
+    .await;
+    let round: RoundDef = add_round(
+        &app,
+        &event,
+        &token,
+        NewRoundReq {
+            label: "Qualifying".into(),
+            classes: vec![class_id.clone()],
+            format: "timed_qual".into(),
+            params: BTreeMap::from([("rounds".into(), "1".into())]),
+            win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
+            seeding: SeedingRule::FromRoster,
+        },
+    )
+    .await;
+
+    // FillRound: the 4-pilot field exceeds the 2-node cap → a rejected command, nothing appended.
+    let before = read_log(&state).len();
+    let (http, body) = call(
+        &app,
+        "POST",
+        &format!("/events/{}/control", event.0),
+        Some(&token),
+        Some(serde_json::to_value(Command::FillRound { round: round.id }).unwrap()),
+    )
+    .await;
+    assert_eq!(http, StatusCode::OK, "control HTTP: {body}");
+    let ack: CommandAck = serde_json::from_str(&body).unwrap();
+    assert!(!ack.ok, "an oversized heat must be rejected: {ack:?}");
+    let after = read_log(&state).len();
+    assert_eq!(before, after, "a rejected FillRound appends no heat");
 }
 
 /// A `PUT` JSON request asserted ok (used for class selection / membership / active-event).

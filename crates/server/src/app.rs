@@ -1996,6 +1996,9 @@ mod tests {
             kind: TimerKind::Rotorhazard {
                 url: "http://rh.local:5000".into(),
             },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
         };
         let (status, raw) = post_timer(registry.clone(), &body, None).await;
         assert_eq!(status, StatusCode::OK);
@@ -2016,6 +2019,9 @@ mod tests {
                 laps: 1,
                 lap_ms: 50,
             },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
         };
         let (status, _) = post_timer(registry, &body, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -2048,6 +2054,9 @@ mod tests {
                 laps: 1,
                 lap_ms: 50,
             },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
         };
         let (_, raw) = post_timer(registry.clone(), &body, None).await;
         let extra: Timer = serde_json::from_slice(&raw).unwrap();
@@ -2101,6 +2110,7 @@ mod tests {
                 laps: 9,
                 lap_ms: 100,
             }),
+            ..Default::default()
         };
         let response = router(registry.clone())
             .oneshot(

@@ -66,6 +66,11 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// "dropped" without depending on transport-level disconnect callbacks.
 const IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
+/// `(node_index, frequency_mhz)` assignment the engine allocated for the staging heat, shared from
+/// the async [`RhConnection::tune`] caller to the blocking driver thread. `None` ⇒ nothing pending.
+type TuneSlot = Arc<Mutex<Option<Vec<(u64, u16)>>>>;
+
 /// A heat armed onto a live RH connection: the lineup its node seats remap onto, and a flag the
 /// driver flips once it has staged the RH race for this arming (so a re-drain doesn't re-stage).
 struct ArmedHeat {
@@ -89,6 +94,11 @@ pub struct RhConnection {
     cancel: Arc<AtomicBool>,
     /// The armed-heat slot: `Some` while a heat is racing on this connection, else `None`.
     armed: Arc<Mutex<Option<ArmedHeat>>>,
+    /// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
+    /// `(node_index, frequency_mhz)` assignment the engine allocated for the staging heat. Set by
+    /// [`tune`](Self::tune) (called when a heat is Staged), drained + emitted on the driver thread
+    /// (`set_frequency` per node) so the device tunes its nodes to the assigned channels.
+    tune: TuneSlot,
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
@@ -104,18 +114,31 @@ impl RhConnection {
     pub fn open(timer_id: TimerId, url: String, timers: TimerRegistry) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let armed: Arc<Mutex<Option<ArmedHeat>>> = Arc::new(Mutex::new(None));
+        let tune: TuneSlot = Arc::new(Mutex::new(None));
         let driver = {
             let cancel = cancel.clone();
             let armed = armed.clone();
+            let tune = tune.clone();
             tokio::task::spawn_blocking(move || {
-                drive(url, timer_id, timers, cancel, armed);
+                drive(url, timer_id, timers, cancel, armed, tune);
             })
         };
         Self {
             cancel,
             armed,
+            tune,
             _driver: driver,
         }
+    }
+
+    /// **Tune** this connection's nodes to an assigned channel plan (race redesign Slice 4a): the
+    /// engine allocates the channels, the adapter applies them (RE §7.3). `assignment` is the
+    /// per-node `(node_index, frequency_mhz)` set for the staging heat; the driver thread emits a
+    /// `set_frequency` per node on its next loop (best-effort — a failed emit on a dropped link is
+    /// logged, not fatal). The bridge calls this when a heat is **Staged**, before it arms/runs.
+    pub fn tune(&self, assignment: Vec<(u64, u16)>) {
+        let mut slot = self.tune.lock().expect("tune lock poisoned");
+        *slot = Some(assignment);
     }
 
     /// Arm a running heat onto this live connection: the driver stages the RH race and routes its
@@ -177,12 +200,14 @@ fn remap(event: Event, lineup: &[CompetitorRef], adapter: &AdapterId) -> Option<
 
 /// The persistent driver: connect → `Connected` → maintain/monitor → reconnect on drop, until
 /// cancelled, then disconnect and leave `Disconnected` (#105). Runs on a dedicated blocking thread.
+#[allow(clippy::too_many_arguments)]
 fn drive(
     url: String,
     timer_id: TimerId,
     timers: TimerRegistry,
     cancel: Arc<AtomicBool>,
     armed: Arc<Mutex<Option<ArmedHeat>>>,
+    tune: TuneSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
     while !cancel.load(Ordering::Relaxed) {
@@ -207,7 +232,7 @@ fn drive(
         backoff = RECONNECT_BACKOFF_MIN;
 
         // Maintain the live link until it drops or we are cancelled.
-        let dropped = maintain(&conn, &cancel, &armed);
+        let dropped = maintain(&conn, &cancel, &armed, &tune);
 
         // Stop any in-flight race and disconnect cleanly on the way out of this connection.
         conn.stop_race().ok();
@@ -241,6 +266,7 @@ fn maintain(
     conn: &RotorHazardConnection,
     cancel: &AtomicBool,
     armed: &Mutex<Option<ArmedHeat>>,
+    tune: &Mutex<Option<Vec<(u64, u16)>>>,
 ) -> bool {
     let mut last_activity = Instant::now();
     let mut probed_since_activity = false;
@@ -252,6 +278,19 @@ fn maintain(
         // false. (An emit alone can't be trusted — a buffering client returns `Ok` on a dead link.)
         if !conn.is_alive() {
             return true;
+        }
+
+        // Apply a pending tune (race redesign Slice 4a): the bridge requested the device tune its
+        // nodes to the staging heat's assigned channels. Emit a `set_frequency` per node; this is
+        // best-effort (the engine has already allocated — applying is the adapter's half), so a
+        // failed emit on a supposedly-live socket signals a drop the caller reconnects from.
+        let pending_tune = tune.lock().expect("tune lock poisoned").take();
+        if let Some(assignment) = pending_tune {
+            for (node, mhz) in assignment {
+                if conn.set_frequency(node, mhz).is_err() {
+                    return true;
+                }
+            }
         }
 
         // Stage a freshly-armed heat once (reset RH to a clean READY state, then stage; RH

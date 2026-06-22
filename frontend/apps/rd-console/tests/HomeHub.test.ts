@@ -35,12 +35,23 @@ const EVENTS: EventMeta[] = [
   }
 ];
 const TIMERS: Timer[] = [
-  { id: 'mock', name: 'Mock', kind: { Mock: { laps: 3, lap_ms: 30000 } }, status: 'Ready' },
+  {
+    id: 'mock',
+    name: 'Mock',
+    kind: { Mock: { laps: 3, lap_ms: 30000 } },
+    status: 'Ready',
+    channel_capability: 'Flexible',
+    node_count: 8,
+    available_channels: []
+  },
   {
     id: 'rh-1',
     name: 'Track RH',
     kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
-    status: 'Configured'
+    status: 'Configured',
+    channel_capability: 'Flexible',
+    node_count: 8,
+    available_channels: []
   }
 ];
 

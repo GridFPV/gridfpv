@@ -113,6 +113,9 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
             kind: TimerKind::Rotorhazard {
                 url: rh.url().to_string(),
             },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
         })
         .expect("create RH timer");
     // A freshly-configured RH timer rests at `Configured` until the Director connects it.
@@ -304,6 +307,7 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
                     laps: 600,
                     lap_ms: 100,
                 }),
+                ..Default::default()
             },
         )
         .expect("retune the Mock alternate to a long, brisk run");
@@ -314,6 +318,9 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
             kind: TimerKind::Rotorhazard {
                 url: rh.url().to_string(),
             },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
         })
         .expect("create RH timer");
 

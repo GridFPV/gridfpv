@@ -914,8 +914,28 @@ fn handle_transition(
                 }
             }
         }
-        // Staged/Armed are pre-Running: nothing to cancel (the heat isn't emitting yet).
-        HeatTransition::Staged | HeatTransition::Armed => {}
+        // Staged is pre-Running: the heat isn't emitting yet, but it is the moment to **tune** the
+        // device to the heat's assigned channels (race redesign Slice 4a — "the engine allocates,
+        // the adapter applies"). The Mock has no tune (the sim source ignores channels — no-op);
+        // each selected RotorHazard timer's live connection emits `set_frequency` per node. The plan
+        // is read from the heat's `HeatScheduled.frequencies` (empty ⇒ nothing to tune).
+        HeatTransition::Staged => {
+            #[cfg(feature = "live")]
+            {
+                let plan = tune_plan_of(state, &heat);
+                if !plan.is_empty() {
+                    for timer_id in selected_rh_timers(registry, timers, event_id) {
+                        connections.tune(event_id, &timer_id, plan.clone());
+                    }
+                }
+            }
+            // Mock timers are a no-op: the synthetic source flies on no real channels. In a
+            // non-`live` build there is no RH connection at all, so `heat` is unused here.
+            #[cfg(not(feature = "live"))]
+            let _ = &heat;
+        }
+        // Armed is pre-Running too: nothing to cancel (the heat isn't emitting yet).
+        HeatTransition::Armed => {}
     }
 }
 
@@ -991,6 +1011,41 @@ fn lineup_of(state: &AppState, heat: &HeatId) -> Option<Vec<CompetitorRef>> {
     lineup
 }
 
+/// The per-pilot frequency assignment of `heat` from its most recent `HeatScheduled` (race redesign
+/// Slice 4a), mapped onto **node indices** for the RH `set_frequency` tune: node `n` runs
+/// `lineup[n]`, so a competitor's assigned MHz is applied to the node at its lineup position. A heat
+/// with no assigned frequencies (a sim/un-channelled heat) yields an empty plan (no tuning).
+#[cfg(feature = "live")]
+fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
+    let Some(stored) = state.log().lock().ok().and_then(|g| g.read_all().ok()) else {
+        return Vec::new();
+    };
+    let mut plan = Vec::new();
+    for s in stored {
+        if let Event::HeatScheduled {
+            heat: h,
+            lineup,
+            frequencies,
+            ..
+        } = s.event
+        {
+            if &h == heat {
+                // Map each (competitor, mhz) to the competitor's node seat (its lineup index).
+                plan = frequencies
+                    .into_iter()
+                    .filter_map(|(competitor, mhz)| {
+                        lineup
+                            .iter()
+                            .position(|c| *c == competitor)
+                            .map(|node| (node as u64, mhz))
+                    })
+                    .collect();
+            }
+        }
+    }
+    plan
+}
+
 fn parse_env_u32(key: &str) -> Option<u32> {
     std::env::var(key).ok()?.trim().parse().ok()
 }
@@ -1030,6 +1085,7 @@ mod tests {
                 &UpdateTimerRequest {
                     name: None,
                     kind: Some(TimerKind::Mock { laps, lap_ms }),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1311,6 +1367,9 @@ mod tests {
                 kind: TimerKind::Rotorhazard {
                     url: "http://rh.local:5000".into(),
                 },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
             })
             .unwrap();
         // Select only the RotorHazard timer for Practice.
@@ -1358,6 +1417,9 @@ mod tests {
             .create(&CreateTimerRequest {
                 name: "Fast Sim".into(),
                 kind: TimerKind::Mock { laps: 2, lap_ms: 1 },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
             })
             .unwrap();
         registry.set_timers(&practice(), vec![timer.id]).unwrap();
@@ -1556,6 +1618,9 @@ mod tests {
             .create(&CreateTimerRequest {
                 name: name.into(),
                 kind: TimerKind::Mock { laps, lap_ms },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
             })
             .unwrap()
             .id
@@ -1641,6 +1706,9 @@ mod tests {
                 kind: TimerKind::Rotorhazard {
                     url: "http://rh.local:5000".into(),
                 },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
             })
             .unwrap()
             .id;
