@@ -191,4 +191,106 @@ describe('StartTonePlayer', () => {
     expect(player.available).toBe(false);
     expect(() => player.play()).not.toThrow();
   });
+
+  // A mock whose resume() actually flips `state` to 'running' (a real browser does this on a user
+  // gesture). The base makeMockContext keeps `state` fixed; these enable()/locked cases need it to
+  // transition so they mirror the real autoplay-unlock behaviour.
+  function makeUnlockingContext(): {
+    ctx: ToneAudioContext;
+    oscillators: Array<{ freq: number; started: boolean }>;
+  } {
+    const oscillators: Array<{ freq: number; started: boolean }> = [];
+    const ctx = {
+      currentTime: 0,
+      state: 'suspended',
+      destination: {},
+      createOscillator() {
+        const rec = { freq: 0, started: false };
+        oscillators.push(rec);
+        return {
+          type: 'sine' as OscillatorType,
+          frequency: {
+            setValueAtTime(value: number) {
+              rec.freq = value;
+            }
+          },
+          connect() {},
+          start() {
+            rec.started = true;
+          },
+          stop() {}
+        };
+      },
+      createGain() {
+        return {
+          gain: { setValueAtTime() {}, linearRampToValueAtTime() {} },
+          connect() {}
+        };
+      },
+      async resume() {
+        ctx.state = 'running';
+      },
+      close: async () => {}
+    } as ToneAudioContext & { state: string };
+    return { ctx, oscillators };
+  }
+
+  describe('enable() — the Enable/Test-tone affordance', () => {
+    it('resumes a suspended context AND plays one confirmation beep', async () => {
+      const { ctx, oscillators } = makeUnlockingContext();
+      const player = new StartTonePlayer({ audioContextFactory: () => ctx, initialMuted: false });
+
+      const running = await player.enable();
+
+      // resume() flipped the context to 'running', so the beep emits.
+      expect(running).toBe(true);
+      expect(oscillators).toHaveLength(1);
+      expect(oscillators[0].started).toBe(true);
+    });
+
+    it('plays the confirmation beep even while muted (the RD asked to test it)', async () => {
+      // Mute suppresses the *automatic* race-go tone, not the explicit Enable/Test gesture.
+      const { ctx, oscillators } = makeMockContext('running');
+      const player = new StartTonePlayer({ audioContextFactory: () => ctx, initialMuted: true });
+
+      const running = await player.enable();
+
+      expect(running).toBe(true);
+      expect(oscillators).toHaveLength(1);
+    });
+
+    it('reports the context could not be unlocked (still locked) and does not throw', async () => {
+      // A context whose resume() never reaches 'running' (no real gesture) stays locked.
+      const { ctx, oscillators } = makeMockContext('suspended');
+      // Override resume to NOT flip the state (still suspended after the await).
+      (ctx as { resume: () => Promise<void> }).resume = async () => {};
+      const player = new StartTonePlayer({ audioContextFactory: () => ctx, initialMuted: false });
+
+      const running = await player.enable();
+      expect(running).toBe(false);
+      expect(oscillators).toHaveLength(0);
+    });
+
+    it('is a silent no-op (returns false) when Web Audio is unavailable', async () => {
+      const player = new StartTonePlayer({ audioContextFactory: undefined });
+      await expect(player.enable()).resolves.toBe(false);
+    });
+  });
+
+  describe('locked — the enabled/locked indicator', () => {
+    it('reads false when Web Audio is unavailable (nothing to unlock)', () => {
+      const player = new StartTonePlayer({ audioContextFactory: undefined });
+      expect(player.locked).toBe(false);
+    });
+
+    it('reads locked until the context is resumed, then enabled', async () => {
+      const { ctx } = makeUnlockingContext();
+      const player = new StartTonePlayer({ audioContextFactory: () => ctx, initialMuted: false });
+      // Before any use the context isn't even created → locked.
+      expect(player.locked).toBe(true);
+      await player.resume();
+      // resume() flips the context to 'running' → no longer locked.
+      expect(player.locked).toBe(false);
+    });
+  });
 });

@@ -209,21 +209,34 @@
     () => stagingSecs
   );
 
-  // ── Start tone synced to race-go (heat-lifecycle Slice 3) ────────────────────────────────────
-  // A short Web-Audio beep at the moment the heat crosses Armed → Running (race-go). The runtime
-  // logs `HeatStarting { delay_ms }` then auto-appends the Running transition after the (hidden)
-  // random hold; the console doesn't need the delay — it plays the tone when the *live phase* turns
-  // Running, which is exactly race-go and is robust to a late join. A mute toggle (persisted,
-  // default on) and an autoplay-policy resume on the first RD click guard the audio.
+  // ── Start tone synced to race-go (heat-lifecycle Slice 3; robustness fix) ────────────────────
+  // A short Web-Audio beep the moment a heat goes live (race-go). The runtime logs
+  // `HeatStarting { delay_ms }` then auto-appends the Running transition after the (hidden) random
+  // hold; the console plays the tone when the *live phase* turns Running.
+  //
+  // ── Why a per-heat "fired" flag, not the Armed → Running *edge* (the missed-tone fix) ─────────
+  // The original trigger fired only on the exact `prevPhase === 'Armed' && phase === 'Running'`
+  // transition. That edge is unreliable: an open-practice heat (or any heat with no start delay)
+  // can go Armed → Running near-instantly, and live-state snapshots batch — so the effect can first
+  // observe the heat *already* Running (prevPhase still Staged/Scheduled, the Armed snapshot never
+  // landed), and the tone never fires. Instead we play on the **first observation of `Running` for
+  // a given heat**, from any prior phase, tracked by a per-heat flag that resets on a heat change.
+  // A repeated Running snapshot (progress update) for the same heat is ignored, so it still fires
+  // exactly once per heat — robust to fast/batched transitions and late joins alike.
   const tone = new StartTonePlayer();
   $effect(() => () => tone.dispose());
-  // Fire the tone exactly on the Armed → Running edge: track the previous phase and play only on
-  // the transition into Running (not on every Running snapshot/progress update).
-  let prevPhase = $state<string | undefined>(undefined);
+  let toneFiredForHeat = $state<HeatId | undefined>(undefined);
   $effect(() => {
     const p = phase;
-    if (p === 'Running' && prevPhase === 'Armed') tone.play(toneCue);
-    prevPhase = p;
+    const h = heat;
+    if (p === 'Running' && h !== undefined && toneFiredForHeat !== h) {
+      toneFiredForHeat = h;
+      tone.play(toneCue);
+    } else if (p !== 'Running' && toneFiredForHeat !== undefined && h !== toneFiredForHeat) {
+      // Heat changed (or there's no heat) while not Running — clear the flag so the *next* heat that
+      // enters Running fires its own tone (e.g. a fresh practice run, or the next scheduled heat).
+      toneFiredForHeat = undefined;
+    }
   });
   let muted = $state(tone.muted);
   function toggleMute() {
@@ -231,6 +244,26 @@
     // ever touches the mute button (never a transition) still gets an audible race-go tone.
     void tone.resume();
     muted = tone.toggleMuted();
+  }
+
+  // ── Enable sound / Test tone (robustness fix) ────────────────────────────────────────────────
+  // The reliable escape hatch for the browser autoplay policy: an explicit, visible control whose
+  // click is a definite user gesture that unlocks the AudioContext AND plays one confirmation beep
+  // — so the RD can prime audio and *hear* that the race-go tone will actually sound. The indicator
+  // shows whether audio is enabled (running) or still locked. `audioLocked` is refreshed after the
+  // resume settles (and on mount) so the label tracks the real context state.
+  let audioLocked = $state(tone.locked);
+  let testing = $state(false);
+  async function enableSound() {
+    if (testing) return;
+    testing = true;
+    try {
+      // Plays a confirmation beep regardless of mute (the RD explicitly asked to test it).
+      await tone.enable(toneCue);
+    } finally {
+      audioLocked = tone.locked;
+      testing = false;
+    }
   }
 
   // A live, provisional leaderboard from the running order + per-pilot progress, so the
@@ -307,16 +340,39 @@
       </div>
     {/if}
 
-    <button
-      type="button"
-      class="mute-toggle"
-      onclick={toggleMute}
-      aria-pressed={muted}
-      title={muted ? 'Start tone muted — click to unmute' : 'Start tone on — click to mute'}
-    >
-      <span class="mute-icon" aria-hidden="true">{muted ? '🔇' : '🔊'}</span>
-      <span class="mute-text">{muted ? 'Tone off' : 'Tone on'}</span>
-    </button>
+    <div class="audio-tools">
+      <!-- Enable sound / Test tone (autoplay escape hatch): a definite user gesture that unlocks the
+           AudioContext AND plays one confirmation beep, with an enabled/locked indicator so the RD
+           can prime audio and hear that race-go will sound. -->
+      <button
+        type="button"
+        class="tone-test"
+        class:locked={audioLocked}
+        onclick={enableSound}
+        disabled={testing}
+        aria-busy={testing}
+        title={audioLocked
+          ? 'Audio is locked — click to enable sound and play a test tone'
+          : 'Audio enabled — click to replay the test tone'}
+      >
+        <span class="tone-test-icon" aria-hidden="true">{audioLocked ? '🔈' : '🔊'}</span>
+        <span class="tone-test-text">{audioLocked ? 'Enable sound' : 'Test tone'}</span>
+        <span class="tone-test-state" class:ok={!audioLocked}>
+          {audioLocked ? 'locked' : 'enabled'}
+        </span>
+      </button>
+
+      <button
+        type="button"
+        class="mute-toggle"
+        onclick={toggleMute}
+        aria-pressed={muted}
+        title={muted ? 'Start tone muted — click to unmute' : 'Start tone on — click to mute'}
+      >
+        <span class="mute-icon" aria-hidden="true">{muted ? '🔇' : '🔊'}</span>
+        <span class="mute-text">{muted ? 'Tone off' : 'Tone on'}</span>
+      </button>
+    </div>
   </header>
 
   {#if heat && phase === 'Staged'}
@@ -731,6 +787,66 @@
   .arming-sub {
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
+  }
+
+  /* ── Audio tools (Enable/Test tone + mute) ───────────────────────────────── */
+  .audio-tools {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+  }
+
+  /* Enable sound / Test tone — the autoplay escape hatch. Locked (suspended) reads as a clear
+     call-to-action; enabled reads as a quiet "audio is good" confirmation the RD can re-test. */
+  .tone-test {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface);
+    color: var(--gf-text-secondary);
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tone-test:hover {
+    border-color: var(--gf-accent);
+    color: var(--gf-text);
+  }
+  .tone-test:disabled {
+    cursor: progress;
+    opacity: 0.7;
+  }
+  /* Locked: draw attention — a warm warning border so the RD primes audio before race-go. */
+  .tone-test.locked {
+    border-color: color-mix(in srgb, var(--gf-warning, #d08700) 55%, var(--gf-border));
+    color: var(--gf-text);
+  }
+  .tone-test.locked:hover {
+    border-color: var(--gf-warning, #d08700);
+  }
+  .tone-test-icon {
+    font-size: var(--gf-font-size-md);
+    line-height: 1;
+  }
+  .tone-test-state {
+    font-size: var(--gf-font-size-2xs);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    font-weight: var(--gf-font-weight-bold);
+    padding: 0.05rem var(--gf-space-2);
+    border-radius: var(--gf-radius-pill);
+    background: color-mix(in srgb, var(--gf-warning, #d08700) 20%, transparent);
+    color: var(--gf-warning, #d08700);
+    border: 1px solid color-mix(in srgb, var(--gf-warning, #d08700) 40%, transparent);
+  }
+  .tone-test-state.ok {
+    background: color-mix(in srgb, var(--gf-success, #30a46c) 20%, transparent);
+    color: var(--gf-success, #30a46c);
+    border-color: color-mix(in srgb, var(--gf-success, #30a46c) 40%, transparent);
   }
 
   /* ── Mute toggle ─────────────────────────────────────────────────────────── */

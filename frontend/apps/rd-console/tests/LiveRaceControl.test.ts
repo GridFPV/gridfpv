@@ -187,15 +187,18 @@ describe('LiveRaceControl', () => {
       expect(arming).not.toHaveTextContent(/\d+\s*ms/);
     });
 
-    it('plays the start tone exactly on the Armed → Running edge', async () => {
-      // Stub the platform AudioContext so the screen's StartTonePlayer picks it up and we can
-      // observe an oscillator start at race-go (no real audio). Default-unmuted (no stored pref).
+    // A stub platform AudioContext the screen's StartTonePlayer picks up, recording oscillator
+    // starts + resume()/createOscillator calls so we can assert the tone path with no real audio.
+    function installAudioStub(state = 'running') {
       const started: number[] = [];
+      let resumes = 0;
+      let oscillators = 0;
       class MockAudioContext {
         currentTime = 0;
-        state = 'running';
+        state = state;
         destination = {};
         createOscillator() {
+          oscillators++;
           return {
             type: 'square',
             frequency: { setValueAtTime() {} },
@@ -212,7 +215,10 @@ describe('LiveRaceControl', () => {
             connect() {}
           };
         }
-        async resume() {}
+        async resume() {
+          resumes++;
+          this.state = 'running';
+        }
         async close() {}
       }
       vi.stubGlobal('AudioContext', MockAudioContext);
@@ -225,6 +231,14 @@ describe('LiveRaceControl', () => {
         key: () => null,
         length: 0
       } as unknown as Storage);
+      return {
+        started,
+        calls: () => ({ resumes, oscillators })
+      };
+    }
+
+    it('plays the start tone when the heat enters Running (from Armed)', async () => {
+      const { started } = installAudioStub('running');
 
       const { session, pushLive } = makeTestSession({ live: liveAt('Armed') });
       const { container } = render(LiveRaceControl, { session });
@@ -233,10 +247,98 @@ describe('LiveRaceControl', () => {
 
       pushLive(liveAt('Running'));
       await tick();
-      // The tone fired once on the edge; the arming panel is gone and the race clock has taken over.
+      // The tone fired once; the arming panel is gone and the race clock has taken over.
       expect(started).toHaveLength(1);
       expect(container.querySelector('.arming')).toBeNull();
       expect(screen.getByRole('timer')).toBeInTheDocument();
+
+      vi.unstubAllGlobals();
+    });
+
+    it('fires once when Running is the FIRST observed phase (fast/batched start, no Armed seen)', async () => {
+      // The missed-edge bug: a fast or batched transition lands the screen on Running directly, with
+      // no prior Armed snapshot. The per-heat trigger must still fire (not gated on prevPhase=Armed).
+      const { started } = installAudioStub('running');
+
+      const { session } = makeTestSession({ live: liveAt('Running') });
+      render(LiveRaceControl, { session });
+      await tick();
+      expect(started).toHaveLength(1);
+
+      vi.unstubAllGlobals();
+    });
+
+    it('fires once when Running is reached from a non-Armed prior phase (Staged → Running)', async () => {
+      const { started } = installAudioStub('running');
+
+      const { session, pushLive } = makeTestSession({ live: liveAt('Staged') });
+      render(LiveRaceControl, { session });
+      await tick();
+      expect(started).toHaveLength(0);
+
+      // Skip straight from Staged to Running (Armed snapshot never arrives).
+      pushLive(liveAt('Running'));
+      await tick();
+      expect(started).toHaveLength(1);
+
+      vi.unstubAllGlobals();
+    });
+
+    it('does not re-fire on repeated Running snapshots for the same heat', async () => {
+      const { started } = installAudioStub('running');
+
+      const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
+      render(LiveRaceControl, { session });
+      await tick();
+      expect(started).toHaveLength(1);
+
+      // Progress updates re-push the same Running heat — must NOT re-fire the tone.
+      pushLive(liveAt('Running'));
+      await tick();
+      pushLive(liveAt('Running'));
+      await tick();
+      expect(started).toHaveLength(1);
+
+      vi.unstubAllGlobals();
+    });
+
+    it('fires again for the NEXT heat (flag resets on heat change)', async () => {
+      const { started } = installAudioStub('running');
+
+      const { session, pushLive } = makeTestSession({ live: liveAt('Running', 'heat-1') });
+      render(LiveRaceControl, { session });
+      await tick();
+      expect(started).toHaveLength(1);
+
+      // The heat is swapped out (Scheduled, then a new heat goes Running) — a fresh tone fires.
+      pushLive(liveAt('Scheduled', 'heat-2'));
+      await tick();
+      pushLive(liveAt('Running', 'heat-2'));
+      await tick();
+      expect(started).toHaveLength(2);
+
+      vi.unstubAllGlobals();
+    });
+
+    it('the Enable/Test-tone button resumes the context and plays a confirmation beep', async () => {
+      const stub = installAudioStub('suspended');
+
+      const { session } = makeTestSession({ live: liveAt('Staged') });
+      render(LiveRaceControl, { session });
+      await tick();
+      // Locked before any gesture: nothing has unlocked the suspended context.
+      const button = screen.getByRole('button', { name: /Enable sound/ });
+      expect(button).toBeInTheDocument();
+      expect(stub.calls().resumes).toBe(0);
+
+      await fireEvent.click(button);
+      await tick();
+      await tick();
+      // The click resumed the context AND played one confirmation beep.
+      expect(stub.calls().resumes).toBeGreaterThan(0);
+      expect(stub.started).toHaveLength(1);
+      // The indicator now reads enabled (context running) — the label flips to "Test tone".
+      expect(screen.getByRole('button', { name: /Test tone/ })).toBeInTheDocument();
 
       vi.unstubAllGlobals();
     });

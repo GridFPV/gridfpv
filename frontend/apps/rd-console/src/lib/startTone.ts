@@ -127,6 +127,18 @@ export class StartTonePlayer {
     return this.#factory !== undefined;
   }
 
+  /**
+   * Whether the audio is currently **locked** — Web Audio is available but the context has not yet
+   * reached the `running` state (the browser autoplay policy still has it suspended, or it hasn't
+   * been created yet). Drives the toolbar's "audio enabled / locked" indicator so the RD can see at
+   * a glance whether a race-go tone will actually sound, and prime it before the race if not. When
+   * Web Audio is unavailable this reads `false` (nothing to unlock — the toolbar shows "no audio").
+   */
+  get locked(): boolean {
+    if (!this.#factory) return false;
+    return this.#ctx?.state !== 'running';
+  }
+
   /** Set the mute preference and persist it. */
   setMuted(muted: boolean): void {
     this.#muted = muted;
@@ -164,6 +176,22 @@ export class StartTonePlayer {
     } catch {
       /* resume can reject before a gesture — the next gesture retries */
     }
+  }
+
+  /**
+   * The explicit **"Enable sound / Test tone"** affordance: a definite user gesture that **unlocks
+   * the context and plays one confirmation beep** so the RD can prime audio and *hear* that it works
+   * before the race — the reliable escape hatch regardless of autoplay quirks. Unlike {@link play},
+   * the confirmation beep is **not** gated by mute (the RD asked to test it; muting only suppresses
+   * the automatic race-go tone). Resolves to `true` when the context is `running` afterwards (so the
+   * caller can refresh its enabled/locked indicator). Never throws.
+   */
+  async enable(cue?: ToneCue): Promise<boolean> {
+    await this.resume();
+    const ctx = this.#context();
+    if (!ctx) return false;
+    if (ctx.state === 'running') this.#emit(ctx, cue);
+    return ctx.state === 'running';
   }
 
   /**
