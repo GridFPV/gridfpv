@@ -4,10 +4,14 @@
  * from the list.
  *
  * The flow drives real clicks in headless chromium against the worker's real Director: open the
- * Events picker, create a uniquely-named event, open its Delete affordance, copy the name from the
- * copyable name box (Copy button → clipboard), and assert the red "Delete permanently" button stays
- * disabled until the exact event name is re-typed. Then confirm and assert the event row disappears
- * from the list (the delete really took effect server-side).
+ * Events picker, create a uniquely-named event, open its Delete affordance, and assert the red
+ * "Delete permanently" button stays disabled until the exact event name is re-typed into the
+ * confirm field. Then confirm and assert the event row disappears from the list (the delete really
+ * took effect server-side).
+ *
+ * The dialog shows the exact name in a selectable box (no copy button — the Clipboard API needs a
+ * secure context and isn't available over the plain-HTTP Director). The RD selects/types it by hand;
+ * the spec fills the confirm field directly.
  *
  * Importing `test`/`expect` from `./observability.js` means a failure carries the full-stack dump
  * (browser console, page errors, the Director's log).
@@ -75,17 +79,10 @@ test('create an event, then permanently delete it through the hard-confirm dialo
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('heading', { name: /Delete event permanently/ })).toBeVisible();
 
-  // The copyable name box shows the exact name; the Copy button writes it to the clipboard and
-  // flips to "Copied". Grant clipboard permission so navigator.clipboard.writeText resolves.
+  // The selectable name box shows the exact name (no copy button — the Clipboard API needs a secure
+  // context and isn't available over the plain-HTTP Director; the RD selects/types it by hand).
   await expect(dialog.getByLabel('Event name to copy')).toHaveText(name);
-  await page
-    .context()
-    .grantPermissions(['clipboard-read', 'clipboard-write'])
-    .catch(() => {});
-  const copyBtn = dialog.getByRole('button', { name: /Copy event name/ });
-  await copyBtn.click();
-  await expect(copyBtn).toHaveText(/Copied/);
-  const clip = await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
+  await expect(dialog.getByRole('button', { name: /Copy event name/ })).toHaveCount(0);
 
   // The red confirm button is DISABLED until the exact name is typed.
   const confirm = dialog.getByRole('button', { name: 'Delete permanently' });
@@ -96,9 +93,8 @@ test('create an event, then permanently delete it through the hard-confirm dialo
   await field.fill('not the name');
   await expect(confirm).toBeDisabled();
 
-  // Paste the copied name (falling back to the known name if clipboard read is unavailable),
-  // which is the exact name — that enables the gated red button.
-  await field.fill(clip || name);
+  // Typing the exact name into the confirm field enables the gated red button.
+  await field.fill(name);
   await expect(field).toHaveValue(name);
   await expect(confirm).toBeEnabled();
 

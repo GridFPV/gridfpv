@@ -62,52 +62,16 @@
     !!deleteTarget && deleteConfirmName.trim() === deleteTarget.name.trim()
   );
 
-  // Brief "Copied" feedback for the copy-name button (reverts after ~1.5s). Tracked so the button
-  // label can flip and back; the timer is cleared on re-copy / dialog close so it never lingers.
-  let nameCopied = $state(false);
-  let copyTimer: ReturnType<typeof setTimeout> | undefined;
-
   function openDelete(ev: EventMeta) {
     deleteTarget = ev;
     deleteConfirmName = '';
     deleteError = undefined;
-    resetCopied();
   }
 
   function closeDelete() {
     deleteTarget = undefined;
     deleteConfirmName = '';
     deleteError = undefined;
-    resetCopied();
-  }
-
-  function resetCopied() {
-    if (copyTimer) clearTimeout(copyTimer);
-    copyTimer = undefined;
-    nameCopied = false;
-  }
-
-  /**
-   * Copy the target event's name to the clipboard so the RD can paste it into the type-to-confirm
-   * field (the friction gate stays; we only make grabbing the exact name easy). Shows brief
-   * "Copied" feedback, reverting after ~1.5s. Gracefully no-ops if the Clipboard API is missing
-   * (e.g. an insecure context) — the selectable box still lets the RD copy by hand.
-   */
-  async function copyName() {
-    const name = deleteTarget?.name;
-    if (!name) return;
-    try {
-      await navigator.clipboard?.writeText(name);
-    } catch {
-      // No-op: clipboard unavailable/denied. The user-select:all box remains the manual fallback.
-      return;
-    }
-    if (copyTimer) clearTimeout(copyTimer);
-    nameCopied = true;
-    copyTimer = setTimeout(() => {
-      nameCopied = false;
-      copyTimer = undefined;
-    }, 1500);
   }
 
   async function confirmDelete() {
@@ -429,20 +393,12 @@
         registration, lap, result, and round. This <strong>cannot be undone</strong> and the data is
         <strong>unrecoverable</strong>.
       </p>
-      <!-- The exact name to type, in a dedicated selectable box with a copy button. `user-select:
-           all` means one click (or triple-click) highlights the WHOLE name; the button copies it
-           via the Clipboard API with brief "Copied" feedback. This only makes grabbing the name
-           easy — the type-to-confirm field + gated red button below are unchanged. -->
+      <!-- The exact name to type, in a dedicated selectable box. `user-select: all` means one click
+           (or triple-click) highlights the WHOLE name, so the RD can copy it by hand. This only makes
+           grabbing the name easy — the type-to-confirm field + gated red button below are unchanged.
+           (No copy button: the Clipboard API needs a secure context and fails over plain HTTP.) -->
       <div class="copy-name">
         <code class="copy-name-value" aria-label="Event name to copy">{deleteTarget.name}</code>
-        <button
-          type="button"
-          class="copy-name-btn"
-          onclick={copyName}
-          aria-label={`Copy event name “${deleteTarget.name}”`}
-        >
-          {nameCopied ? '✓ Copied' : '📋 Copy'}
-        </button>
       </div>
       <Field label="Type the event name to confirm:" error={deleteError}>
         <Input
@@ -592,8 +548,8 @@
     background: color-mix(in srgb, var(--gf-danger) 8%, var(--gf-surface));
   }
 
-  /* The copyable event-name box: a selectable mono value + a copy button, so the RD can grab the
-     exact name without hand-selecting it. Sized for field readability (laptops outdoors). */
+  /* The selectable event-name box: a mono value the RD can click/triple-click to select, then copy
+     by hand. Sized for field readability (laptops outdoors). */
   .copy-name {
     display: flex;
     align-items: stretch;
@@ -618,32 +574,6 @@
     /* Keep the whole name on one line but let it scroll if very long, so select-all stays clean. */
     white-space: nowrap;
     overflow-x: auto;
-  }
-  .copy-name-btn {
-    flex-shrink: 0;
-    padding: 0 var(--gf-space-4);
-    border: 1px solid var(--gf-border);
-    border-radius: var(--gf-radius-md);
-    background: var(--gf-surface);
-    color: var(--gf-text);
-    font-family: inherit;
-    font-size: var(--gf-font-size-sm);
-    font-weight: var(--gf-font-weight-medium);
-    white-space: nowrap;
-    cursor: pointer;
-    transition:
-      border-color var(--gf-motion-fast) var(--gf-ease-out),
-      background var(--gf-motion-fast) var(--gf-ease-out),
-      color var(--gf-motion-fast) var(--gf-ease-out);
-  }
-  .copy-name-btn:hover {
-    border-color: var(--gf-accent);
-    color: var(--gf-accent);
-    background: var(--gf-elevated);
-  }
-  .copy-name-btn:focus-visible {
-    outline: none;
-    box-shadow: var(--gf-focus-ring);
   }
 
   .event-row {
