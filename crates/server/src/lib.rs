@@ -65,6 +65,7 @@ pub mod control_handler;
 pub mod error;
 pub mod events;
 pub mod live_state;
+pub mod open_practice;
 pub mod pilots;
 pub mod round_engine;
 pub mod scope;

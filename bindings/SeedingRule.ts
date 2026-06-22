@@ -7,7 +7,8 @@ import type { RoundId } from "./RoundId";
  * A round either draws its field straight from the eligible classes' roster membership
  * ([`FromRoster`](Self::FromRoster) — practice / first qualifying), or from a **prior round's
  * ranking** ([`FromRanking`](Self::FromRanking) — the bracket / cut case, the issue-#84 carry that
- * a later slice consumes). Derives serde + `ts_rs::TS`.
+ * a later slice consumes), or — for the casual **open-practice** format — from a set of active
+ * **channels** ([`AllChannels`](Self::AllChannels)) rather than pilots. Derives serde + `ts_rs::TS`.
  */
 export type SeedingRule = "FromRoster" | { "FromRanking": { 
 /**
@@ -17,4 +18,9 @@ source_round: RoundId,
 /**
  * How many of the source ranking's top places advance into this round.
  */
-top_n: number, } };
+top_n: number, } } | { "AllChannels": { 
+/**
+ * The active channels as **node indices** (the timer-seat indices the RD made live), laid
+ * out as `node-{i}` competitor refs by the field builder, in this order.
+ */
+channels: Array<number>, } };

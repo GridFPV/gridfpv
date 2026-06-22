@@ -468,8 +468,9 @@ impl FormatRegistry {
     /// [`timed_qual`](crate::timed_qual::TimedQualifying), [`zippyq`](crate::zippyq::ZippyQ),
     /// [`single_elim`](crate::single_elim::SingleElim),
     /// [`double_elim`](crate::double_elim::DoubleElim),
-    /// [`round_robin`](crate::round_robin::RoundRobin), and
-    /// [`multi_main`](crate::multi_main::MultiMain).
+    /// [`round_robin`](crate::round_robin::RoundRobin),
+    /// [`multi_main`](crate::multi_main::MultiMain), and the casual
+    /// [`open_practice`](OpenPractice) format.
     ///
     /// This is the single authority for "which format names are valid": the server validates a
     /// round's configured format name against [`names`](Self::names) / [`contains`](Self::contains)
@@ -483,6 +484,7 @@ impl FormatRegistry {
         crate::double_elim::DoubleElim::register(&mut registry);
         crate::round_robin::RoundRobin::register(&mut registry);
         crate::multi_main::MultiMain::register(&mut registry);
+        OpenPractice::register(&mut registry);
         registry
     }
 
@@ -503,6 +505,8 @@ impl FormatRegistry {
     /// - `single_elim`: `heat_size` (number, 2).
     /// - `double_elim`: `bracket_reset` (bool, on).
     /// - `multi_main`: `main_size` (number, 4).
+    /// - `open_practice`: no params (the active channels are the field, carried by the round's
+    ///   `AllChannels` seeding).
     /// - `zippyq`: `rounds` (number, 0 — rounds are added on demand).
     pub fn standard_schemas() -> Vec<FormatSchema> {
         vec![
@@ -513,6 +517,14 @@ impl FormatRegistry {
             FormatSchema {
                 name: "multi_main".into(),
                 params: vec![FormatParam::number("main_size", "Main size", "4")],
+            },
+            // Open practice (open-practice format): one open heat over the active channels, no
+            // config knobs (the active channels are the field, carried by the round's seeding —
+            // see [`OpenPractice`]). Kept in sorted name order (after `multi_main`, before
+            // `round_robin`) to match [`names`](Self::names).
+            FormatSchema {
+                name: OpenPractice::NAME.into(),
+                params: Vec::new(),
             },
             FormatSchema {
                 name: "round_robin".into(),
@@ -589,6 +601,71 @@ pub fn rank_by<K: Ord + Clone>(rows: Vec<(CompetitorRef, K)>) -> Vec<RankEntry> 
         });
     }
     out
+}
+
+// --- Open practice (open-practice format) -----------------------------------
+
+/// The **open-practice** format (casual-practice mode): a round is **one open heat** over the
+/// active **channels**, run once.
+///
+/// Unlike the competitive formats, open practice is keyed on *channels*, not pilots: the RD picks
+/// which video channels are live, and the round's field is exactly those channels as source-local
+/// `node-{i}` [`CompetitorRef`]s (the seat handles the timer emits passes for). The generator emits
+/// a single heat lining up those channels, then declares the format
+/// [`Complete`](GeneratorStep::Complete) — there is no advancement, no ranking aggregation, no
+/// second heat. Laps are tracked **per channel, live and in memory** (not logged) by the Director's
+/// open-practice accumulator; this generator only decides the one heat that runs.
+///
+/// The field comes in via [`FormatConfig::field`] (the active channels, in node order). An empty
+/// field still emits the (empty) heat then completes — the server's field builder is what rejects
+/// an open-practice round with no active channels.
+pub struct OpenPractice {
+    /// The active channels as `node-{i}` competitor refs, in node order — the one heat's lineup.
+    channels: Vec<CompetitorRef>,
+}
+
+impl OpenPractice {
+    /// The format name this registers under (the `RoundDef::format` value an open-practice round
+    /// carries).
+    pub const NAME: &'static str = "open_practice";
+
+    /// The id of the single open heat this format emits.
+    const HEAT: &'static str = "open-practice";
+
+    /// Build over the active channels (the seeded field, in node order).
+    pub fn new(channels: Vec<CompetitorRef>) -> Self {
+        Self { channels }
+    }
+
+    /// The registry constructor: the active channels are the seeded field (the round's
+    /// `AllChannels` seeding laid them out as `node-{i}` refs); no params, no draw.
+    pub fn from_config(config: &FormatConfig) -> Box<dyn Generator> {
+        Box::new(Self::new(config.seeding.apply(&config.field)))
+    }
+
+    /// Register the open-practice format under [`NAME`](Self::NAME).
+    pub fn register(registry: &mut FormatRegistry) {
+        registry.register(Self::NAME, Self::from_config);
+    }
+}
+
+impl Generator for OpenPractice {
+    fn next(&mut self, completed: &[CompletedHeat]) -> GeneratorStep {
+        // Exactly one heat ever: emit it while nothing has been completed, otherwise the format is
+        // done. The open heat carries the active channels as its lineup.
+        if completed.is_empty() {
+            GeneratorStep::Run(vec![HeatPlan::new(Self::HEAT, self.channels.clone())])
+        } else {
+            GeneratorStep::Complete
+        }
+    }
+
+    fn ranking(&self, _completed: &[CompletedHeat]) -> Vec<RankEntry> {
+        // Open practice has no competitive ranking — it is casual per-channel lap practice. The
+        // channels are listed in node order so a caller reading a "ranking" gets a stable, if
+        // meaningless, ordering rather than nothing.
+        seed_ranking(&self.channels)
+    }
 }
 
 // --- Demo generators (exercise the contract) --------------------------------
@@ -1095,6 +1172,42 @@ mod tests {
         assert_eq!(g1.next(&[]), g2.next(&[]));
     }
 
+    // --- OpenPractice: one open heat over the active channels ----------------
+
+    #[test]
+    fn open_practice_emits_one_heat_with_the_active_channels_then_completes() {
+        // The active channels are the field, as `node-{i}` refs in node order.
+        let channels = field(&["node-0", "node-2", "node-5"]);
+        let mut generator = OpenPractice::new(channels.clone());
+
+        // First call: one open heat lining up exactly the active channels.
+        assert_eq!(
+            generator.next(&[]),
+            GeneratorStep::Run(vec![HeatPlan::new("open-practice", channels.clone())])
+        );
+
+        // Once that heat has completed, the format is done — no second heat, ever.
+        let done = CompletedHeat::new("open-practice", result(&[("node-0", 1, 5)]));
+        assert_eq!(
+            generator.next(std::slice::from_ref(&done)),
+            GeneratorStep::Complete
+        );
+    }
+
+    #[test]
+    fn open_practice_builds_its_heat_from_the_config_field() {
+        // The registry constructor reads the active channels off the config field.
+        let cfg = FormatConfig::new(field(&["node-0", "node-1"]));
+        let mut generator = OpenPractice::from_config(&cfg);
+        assert_eq!(
+            generator.next(&[]),
+            GeneratorStep::Run(vec![HeatPlan::new(
+                "open-practice",
+                field(&["node-0", "node-1"])
+            )])
+        );
+    }
+
     // --- FormatRegistry -----------------------------------------------------
 
     #[test]
@@ -1126,12 +1239,14 @@ mod tests {
             vec![
                 "double_elim",
                 "multi_main",
+                "open_practice",
                 "round_robin",
                 "single_elim",
                 "timed_qual",
                 "zippyq",
             ]
         );
+        assert!(registry.contains("open_practice"));
         // The validation surface the server uses.
         assert!(registry.contains("timed_qual"));
         assert!(!registry.contains("knockout-demo"));

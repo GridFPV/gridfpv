@@ -185,6 +185,13 @@ pub struct AppState {
     ///
     /// [`ControlAuth`]: crate::control_handler::ControlAuth
     tokens: TokenStore,
+    /// The event's **open-practice live accumulator** (open-practice format, Slice 1): the
+    /// per-channel, in-memory (NOT logged) laps for an active open-practice heat. The source bridge
+    /// writes the heat's passes here instead of the log; the `/stream` live-state fold overlays its
+    /// computed [`LiveRaceState`](crate::live_state::LiveRaceState) so the non-logged laps still
+    /// drive the live view. `None` when no open-practice heat is active. Shared per the `AppState`'s
+    /// `Arc`s, so the bridge and the stream see the one cell.
+    open_practice: crate::open_practice::OpenPracticeLive,
 }
 
 impl AppState {
@@ -196,6 +203,7 @@ impl AppState {
             log: Arc::new(Mutex::new(log)),
             appended: Arc::new(Notify::new()),
             tokens: TokenStore::new(),
+            open_practice: crate::open_practice::OpenPracticeLive::new(),
         }
     }
 
@@ -206,6 +214,7 @@ impl AppState {
             log,
             appended: Arc::new(Notify::new()),
             tokens: TokenStore::new(),
+            open_practice: crate::open_practice::OpenPracticeLive::new(),
         }
     }
 
@@ -219,6 +228,7 @@ impl AppState {
             log: Arc::new(Mutex::new(log)),
             appended: Arc::new(Notify::new()),
             tokens,
+            open_practice: crate::open_practice::OpenPracticeLive::new(),
         }
     }
 
@@ -262,6 +272,26 @@ impl AppState {
     /// on between log reads (see the type docs).
     pub(crate) fn appended(&self) -> Arc<Notify> {
         Arc::clone(&self.appended)
+    }
+
+    /// The event's **open-practice live accumulator** (open-practice format, Slice 1) — the shared
+    /// per-channel, in-memory (NOT logged) lap store. The source bridge writes an open-practice
+    /// heat's passes here (via [`OpenPracticeLive::record`](crate::open_practice::OpenPracticeLive::record));
+    /// the `/stream` live-state fold overlays its computed live state. Cloning shares the one cell.
+    pub fn open_practice(&self) -> crate::open_practice::OpenPracticeLive {
+        self.open_practice.clone()
+    }
+
+    /// **Wake every subscribed change stream** without appending to the log — the non-log push the
+    /// open-practice live delivery uses (open-practice format, Slice 1).
+    ///
+    /// An open-practice heat's laps are accumulated in memory (not logged), so they never reach the
+    /// log's append-notify; after mutating the [`open_practice`](Self::open_practice) accumulator the
+    /// bridge calls this so a parked stream re-folds and pushes a fresh-value
+    /// [`LiveRaceState`](crate::live_state::LiveRaceState) envelope reflecting the new per-channel
+    /// laps — reusing the exact same wakeup `append` uses, just without a log write.
+    pub fn wake_streams(&self) {
+        self.appended.notify_waiters();
     }
 
     /// Read the whole log into a `Vec<Event>` plus the resume [`Cursor`] (the log length
@@ -1274,9 +1304,17 @@ async fn snapshot_event(
 ) -> Result<Json<Snapshot>, ProtocolError> {
     let state = resolve_event(&registry, &event_id)?;
     let (events, cursor) = state.read()?;
+    // Open-practice overlay (open-practice format, Slice 1): while an open-practice heat is active
+    // its per-channel laps are in memory (NOT logged), so the snapshot serves the accumulator's live
+    // state in place of the log fold — "snapshot first, then subscribe" stays correct (the `/stream`
+    // fold applies the same overlay), so a client renders the live per-channel laps immediately.
+    let body = state
+        .open_practice()
+        .live_state()
+        .unwrap_or_else(|| live_state(&events));
     Ok(Json(Snapshot {
         cursor,
-        body: ProjectionBody::LiveRaceState(live_state(&events)),
+        body: ProjectionBody::LiveRaceState(body),
     }))
 }
 
@@ -1371,9 +1409,14 @@ async fn snapshot_heat(
 
     let body = match query.projection {
         HeatProjection::Live => {
-            // Fold the heat's window into live state (it is the only heat present, so it
-            // is the current one).
-            ProjectionBody::LiveRaceState(live_state(&heat_events))
+            // Open-practice overlay (open-practice format, Slice 1): when this *is* the active
+            // open-practice heat, its laps live in the in-memory accumulator (NOT the log), so serve
+            // the accumulator's live state; otherwise fold the heat's log window as usual.
+            let open = state
+                .open_practice()
+                .live_state()
+                .filter(|s| s.current_heat.as_ref() == Some(&heat));
+            ProjectionBody::LiveRaceState(open.unwrap_or_else(|| live_state(&heat_events)))
         }
         HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled(
             heat_events.iter().enumerate().map(|(i, e)| (i as u64, e)),

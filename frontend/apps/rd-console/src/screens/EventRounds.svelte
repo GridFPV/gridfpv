@@ -507,10 +507,14 @@
     const seed = round.seeding;
     if (typeof seed === 'string') {
       seedKind = 'FromRoster';
-    } else {
+    } else if ('FromRanking' in seed) {
       seedKind = 'FromRanking';
       seedSource = seed.FromRanking.source_round;
       seedTopN = seed.FromRanking.top_n;
+    } else {
+      // AllChannels (open-practice format) — its active-channels picker is Slice 2; the Rounds
+      // editor here just falls back to the roster-seeded view so it stays type-safe meanwhile.
+      seedKind = 'FromRoster';
     }
 
     // Heat-lifecycle config (Slice 3): staging timer (split mm:ss), the randomized start window, and
@@ -662,6 +666,10 @@
 
   function seedSummary(seed: SeedingRule): string {
     if (typeof seed === 'string') return 'From roster';
+    if ('AllChannels' in seed) {
+      // Open practice (open-practice format): seeded from the active channels (node indices).
+      return `Open practice · ${seed.AllChannels.channels.length} channel(s)`;
+    }
     const { source_round, top_n } = seed.FromRanking;
     return `Top ${top_n} from ${roundLabel(source_round)}`;
   }

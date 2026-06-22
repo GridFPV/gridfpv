@@ -149,6 +149,11 @@ pub struct PassSink {
     gate: Option<ActiveSourceGate>,
     /// The timer this sink feeds for; appends pass the gate only while it is the active source.
     timer: Option<TimerId>,
+    /// The **open-practice** heat this sink feeds, if any (open-practice format, Slice 1). When set,
+    /// the sink routes passes into the event's in-memory per-channel accumulator (NOT the log) and
+    /// wakes `/stream` to push the fresh per-channel live state — so an open-practice session's
+    /// passes are *never* appended to the durable log (only its `HeatScheduled` + start/stop are).
+    open_practice: Option<HeatId>,
 }
 
 impl PassSink {
@@ -160,6 +165,7 @@ impl PassSink {
             adapter,
             gate: None,
             timer: None,
+            open_practice: None,
         }
     }
 
@@ -176,7 +182,17 @@ impl PassSink {
             adapter,
             gate: Some(gate),
             timer: Some(timer),
+            open_practice: None,
         }
+    }
+
+    /// Mark this sink as feeding the **open-practice** `heat` (open-practice format, Slice 1):
+    /// passes are routed into the event's in-memory per-channel accumulator and `/stream` is woken,
+    /// rather than appended to the log. Builder style — applied to a gated/plain sink for an
+    /// open-practice heat so its laps are tracked live but never logged.
+    pub fn for_open_practice(mut self, heat: HeatId) -> Self {
+        self.open_practice = Some(heat);
+        self
     }
 
     /// Whether this sink may append right now: an unbound sink always may; a gated sink may only
@@ -202,16 +218,24 @@ impl PassSink {
         if !self.feeds() {
             return Ok(());
         }
-        let pass = Event::Pass(Pass {
+        let pass = Pass {
             adapter: self.adapter.clone(),
             competitor: competitor.clone(),
             at,
             sequence: Some(sequence),
             gate: GateIndex::LAP,
             signal: None,
-        });
+        };
+        // Open practice (open-practice format, Slice 1): route the pass into the in-memory
+        // per-channel accumulator and wake `/stream` — it is **never** appended to the log.
+        if self.open_practice.is_some() {
+            if self.state.open_practice().record(pass) {
+                self.state.wake_streams();
+            }
+            return Ok(());
+        }
         self.state
-            .append(pass, None)
+            .append(Event::Pass(pass), None)
             .map_err(|e| SourceError(format!("{e:?}")))?;
         Ok(())
     }
@@ -227,6 +251,16 @@ impl PassSink {
         // The connection stays live (hot standby) — only its appends are gated here.
         if !self.feeds() {
             return Ok(());
+        }
+        // Open practice (open-practice format, Slice 1): a lap-gate pass from a live RH source is
+        // routed into the in-memory accumulator (not logged); any non-pass event still appends.
+        if self.open_practice.is_some() {
+            if let Event::Pass(pass) = event {
+                if pass.gate.is_lap_gate() && self.state.open_practice().record(pass) {
+                    self.state.wake_streams();
+                }
+                return Ok(());
+            }
         }
         self.state
             .append(event, None)
@@ -827,7 +861,8 @@ fn handle_transition(
     match transition {
         HeatTransition::Running => {
             // A different heat taking the timer cancels the previous one (only one heat
-            // emits at a time). Re-running the *same* heat also restarts cleanly.
+            // emits at a time). Re-running the *same* heat also restarts cleanly. A superseded
+            // open-practice heat's accumulator is cleared below by `begin`/the clear-on-stop.
             if let Some(running) = active.take() {
                 running.stop(
                     #[cfg(feature = "live")]
@@ -843,6 +878,17 @@ fn handle_transition(
             if lineup.is_empty() {
                 return;
             }
+            // Open practice (open-practice format, Slice 1): an open-practice heat's passes are
+            // tracked **in memory, per channel — never logged**. Begin the accumulator over the
+            // heat's channel lineup (this also clears any prior open-practice state, e.g. a
+            // superseded heat) and mark each source's sink so its passes route there + wake
+            // `/stream`. A non-open-practice heat leaves the accumulator untouched.
+            let open_practice = is_open_practice_heat(state, registry, event_id, &heat);
+            if open_practice {
+                state.open_practice().begin(heat.clone(), lineup.clone());
+                // Push the cleared/initial live state so a subscriber sees the fresh empty heat.
+                state.wake_streams();
+            }
             // Issue #112: the **active-source gate** — only the active source's passes feed the log
             // (the primary while healthy, else the first healthy alternate). All selected timers
             // still run (hot standby); the gate drops a non-active source's passes. It is seeded
@@ -857,7 +903,11 @@ fn handle_transition(
             let sources = selected_sources(registry, timers, event_id);
             let mut handles = Vec::with_capacity(sources.len());
             for (timer_id, source) in sources {
-                let sink = PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id);
+                let mut sink =
+                    PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id);
+                if open_practice {
+                    sink = sink.for_open_practice(heat.clone());
+                }
                 let run = HeatRun {
                     heat: heat.clone(),
                     lineup: lineup.clone(),
@@ -877,12 +927,15 @@ fn handle_transition(
             let armed_rh = {
                 let mut armed = Vec::new();
                 for timer_id in selected_rh_timers(registry, timers, event_id) {
-                    let sink = PassSink::gated(
+                    let mut sink = PassSink::gated(
                         state.clone(),
                         adapter.clone(),
                         gate.clone(),
                         timer_id.clone(),
                     );
+                    if open_practice {
+                        sink = sink.for_open_practice(heat.clone());
+                    }
                     if connections.arm_heat(event_id, &timer_id, lineup.clone(), sink) {
                         armed.push(timer_id);
                     }
@@ -932,6 +985,17 @@ fn handle_transition(
                         );
                     }
                 }
+            }
+            // Open practice (open-practice format, Slice 1): **clear on stop**. Drop the in-memory
+            // per-channel accumulator when the open-practice heat reaches a terminal / abort / restart
+            // transition and push the now-idle live state. The `Finished` (Running → Unofficial) step
+            // is *kept* so the RD still sees the final practice laps before finalizing; the true
+            // terminals below clear it. A new heat/round becoming active also clears it (via `begin`).
+            if !matches!(transition, HeatTransition::Finished)
+                && state.open_practice().is_active(&heat)
+                && state.open_practice().clear()
+            {
+                state.wake_streams();
             }
         }
         // Staged is pre-Running: the heat isn't emitting yet, but it is the moment to **tune** the
@@ -1183,6 +1247,27 @@ fn default_sim_win_condition() -> gridfpv_engine::scoring::WinCondition {
     }
 }
 
+/// Whether `heat` is an **open-practice** heat (open-practice format, Slice 1): its most-recent
+/// `HeatScheduled.round` resolves to a round that [`is_open_practice`](gridfpv_server::round_engine::is_open_practice).
+///
+/// The bridge uses this on a `Running` transition to decide whether to route the heat's passes into
+/// the in-memory per-channel accumulator (open practice) rather than the log. A heat with no round
+/// tag, or a round that is not open-practice, returns `false` (the normal logged path).
+fn is_open_practice_heat(
+    state: &AppState,
+    registry: &EventRegistry,
+    event_id: &EventId,
+    heat: &HeatId,
+) -> bool {
+    let Some(round_id) = round_of_heat(state, heat) else {
+        return false;
+    };
+    registry
+        .rounds_of(event_id)
+        .and_then(|rounds| rounds.into_iter().find(|r| r.id == round_id))
+        .is_some_and(|r| gridfpv_server::round_engine::is_open_practice(&r))
+}
+
 /// The `RoundId` tag on `heat`'s most-recent `HeatScheduled`, if any.
 fn round_of_heat(state: &AppState, heat: &HeatId) -> Option<gridfpv_events::RoundId> {
     let stored = state.log().lock().ok()?.read_all().ok()?;
@@ -1390,6 +1475,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use gridfpv_events::RoundId;
     use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
     use gridfpv_server::live_state::live_state;
     use gridfpv_server::timers::{
@@ -1920,6 +2006,150 @@ mod tests {
             "an unmatched seen player must not be bound"
         );
         reconciler.abort();
+    }
+
+    // --- open practice (open-practice format, Slice 1): laps in memory, not logged ----------------
+
+    /// Add an **open-practice** round to Practice (open-practice format) over `channels` (node
+    /// indices) and return its `RoundId`. Uses the registry's `add_round` so the bridge resolves the
+    /// round through `rounds_of` exactly as it does in production.
+    fn add_open_practice_round(registry: &EventRegistry, channels: Vec<usize>) -> RoundId {
+        use gridfpv_server::events::{NewRoundReq, SeedingRule};
+        use gridfpv_server::scope::EventId as ScopeEventId;
+        let req = NewRoundReq {
+            label: "Open Practice".into(),
+            classes: vec![],
+            format: "open_practice".into(),
+            params: std::collections::BTreeMap::new(),
+            win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
+            seeding: SeedingRule::AllChannels { channels },
+            channel_mode: None,
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
+        };
+        registry
+            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .expect("open-practice round added")
+            .id
+    }
+
+    /// Schedule an open-practice heat (tagged with `round`, the channel lineup) and drive it to
+    /// `Running` on Practice's log — exactly what `FillRound` + the control path append.
+    fn start_open_practice_heat(state: &AppState, round: &RoundId, channels: &[usize]) -> HeatId {
+        let heat = HeatId("open-practice".into());
+        let lineup: Vec<CompetitorRef> = channels
+            .iter()
+            .map(|i| CompetitorRef(format!("node-{i}")))
+            .collect();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup,
+                    class: None,
+                    round: Some(round.clone()),
+                    frequencies: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition: HeatTransition::Running,
+                },
+                None,
+            )
+            .unwrap();
+        heat
+    }
+
+    #[tokio::test]
+    async fn open_practice_laps_are_in_memory_not_logged_and_drive_live_state() {
+        // An open-practice heat's passes go to the in-memory per-channel accumulator, NOT the log:
+        // the log carries the heat's HeatScheduled + start/stop and ZERO Pass events, while the live
+        // state shows per-channel laps with no pilot bound; the accumulator clears on stop.
+        let laps = 3u32;
+        let registry = fast_registry(laps, 1);
+        let round = add_open_practice_round(&registry, vec![0, 1]);
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        let heat = start_open_practice_heat(&state, &round, &[0, 1]);
+        let op = state.open_practice();
+
+        // Wait until both channels have accumulated their laps in memory (holeshot + `laps`).
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ls) = op.live_state() {
+                    if ls.progress.len() == 2
+                        && ls.progress.iter().all(|p| p.laps_completed >= laps)
+                    {
+                        return;
+                    }
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the open-practice accumulator should fill from the sim");
+
+        // (a) The LOG has the heat's HeatScheduled + start/stop, but ZERO Pass events.
+        let events = read_all_events(&state);
+        assert_eq!(
+            count_passes(&events),
+            0,
+            "an open-practice heat appends NO Pass events to the log"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::HeatScheduled { round: Some(r), .. } if *r == round)),
+            "the heat's HeatScheduled (the session) is logged"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::HeatStateChanged {
+                    transition: HeatTransition::Running,
+                    ..
+                }
+            )),
+            "the session start is logged"
+        );
+
+        // (b) The live state shows per-channel laps, each channel unbound (pilot: None).
+        let ls = op.live_state().expect("an active open-practice live state");
+        assert_eq!(ls.progress.len(), 2);
+        assert!(ls.progress.iter().all(|p| p.pilot.is_none()));
+        assert!(ls.progress.iter().all(|p| p.laps_completed >= laps));
+        assert_eq!(ls.current_heat, Some(heat.clone()));
+
+        // (c) Clear on stop: a terminal transition drops the accumulator.
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition: HeatTransition::Aborted,
+                },
+                None,
+            )
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if op.live_state().is_none() {
+                    return;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the accumulator should clear on the terminal transition");
+
+        // Still no Pass events ever reached the log.
+        assert_eq!(count_passes(&read_all_events(&state)), 0);
+        bridge.abort();
     }
 
     #[test]

@@ -512,7 +512,8 @@ impl ChannelMode {
 /// A round either draws its field straight from the eligible classes' roster membership
 /// ([`FromRoster`](Self::FromRoster) — practice / first qualifying), or from a **prior round's
 /// ranking** ([`FromRanking`](Self::FromRanking) — the bracket / cut case, the issue-#84 carry that
-/// a later slice consumes). Derives serde + `ts_rs::TS`.
+/// a later slice consumes), or — for the casual **open-practice** format — from a set of active
+/// **channels** ([`AllChannels`](Self::AllChannels)) rather than pilots. Derives serde + `ts_rs::TS`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum SeedingRule {
@@ -529,6 +530,19 @@ pub enum SeedingRule {
         source_round: RoundId,
         /// How many of the source ranking's top places advance into this round.
         top_n: usize,
+    },
+    /// Seed from a set of active **channels** rather than pilots — the **open-practice** seeding
+    /// (open-practice format). The field builder lays each node index out as a `node-{i}`
+    /// [`CompetitorRef`](gridfpv_events::CompetitorRef) (the timer-seat handle the timer emits
+    /// passes for), and the one open heat runs over those channels with per-channel laps tracked
+    /// **live in memory, not logged**. An open-practice round is `format: "open_practice"` +
+    /// `seeding: AllChannels { channels }`; its [`classes`](RoundDef::classes) may be empty (it is
+    /// not a class round). Additive variant — pre-existing rounds (`FromRoster`/`FromRanking`) read
+    /// back unchanged.
+    AllChannels {
+        /// The active channels as **node indices** (the timer-seat indices the RD made live), laid
+        /// out as `node-{i}` competitor refs by the field builder, in this order.
+        channels: Vec<usize>,
     },
 }
 
