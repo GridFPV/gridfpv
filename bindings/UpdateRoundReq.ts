@@ -29,13 +29,19 @@ format: string,
  */
 params: { [key in string]: string }, 
 /**
- * The new win condition.
+ * The new win condition. **Optional** (open-practice refinement): omit it to store the inert
+ * [`default_win_condition`] (an open-practice round does no scoring).
  */
-win_condition: WinCondition, 
+win_condition?: WinCondition, 
 /**
  * The new seeding rule; defaults to [`SeedingRule::FromRoster`] when omitted.
  */
 seeding: SeedingRule, 
+/**
+ * The new practice duration in seconds (open-practice refinement). Optional — omit for **no
+ * time limit**. Stored on [`RoundDef::time_limit_secs`].
+ */
+time_limit_secs?: number, 
 /**
  * The new channel mode (race redesign Slice 7a). Optional — **omit it** to take the format's
  * default ([`ChannelMode::default_for_format`]); supply it to override.

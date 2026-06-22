@@ -56,6 +56,14 @@ params: { [key in string]: string },
 /**
  * How a heat in this round is won — the per-round scoring rule (the existing wire
  * [`WinCondition`](gridfpv_engine::scoring::WinCondition)).
+ *
+ * **Open practice does no scoring**, so a win condition is not *required* for an open-practice
+ * round: the create/update requests make this field optional ([`NewRoundReq::win_condition`])
+ * and an omitted condition stores an inert [`default_win_condition`] here. The field stays a
+ * plain [`WinCondition`] (not an `Option`) so every scoring path is unchanged — for a
+ * non-open-practice round the stored condition is the one the RD chose; for an open-practice
+ * round it is never consulted (the heat ends on the [`time_limit_secs`](Self::time_limit_secs)
+ * or the RD's `ForceEnd`).
  */
 win_condition: WinCondition, 
 /**
@@ -94,4 +102,16 @@ start_procedure: StartProcedure,
  * Defaults to [`default_grace_window`] (a bounded few seconds — *not* `UntilScored`, so the
  * auto-completion actually fires). Additive.
  */
-grace_window: GraceWindow, };
+grace_window: GraceWindow, 
+/**
+ * The **practice duration** for an open-practice round, in seconds (open-practice refinement).
+ * When set, the runtime clock **auto-ends the practice** (`Running → Unofficial`) once the
+ * heat's elapsed running time reaches this limit — independent of any win condition (the time is
+ * the *only* end condition for an open-practice heat). When unset (`None`), the practice runs
+ * until the RD ends it (`ForceEnd`). E.g. `3600` ends a one-hour practice on its own.
+ *
+ * Additive (`#[serde(default)]`, omitted from the wire when unset) so a round persisted before
+ * this field reads back with `None`. Only consulted for an open-practice heat; a normal round
+ * keeps ending on its win condition.
+ */
+time_limit_secs?: number, };

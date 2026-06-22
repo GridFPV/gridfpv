@@ -33,13 +33,23 @@ format: string,
  */
 params: { [key in string]: string }, 
 /**
- * How a heat in this round is won.
+ * How a heat in this round is won. **Optional** (open-practice refinement): an open-practice
+ * round does no scoring, so the form is not forced to supply one — **omit it** to store the
+ * inert [`default_win_condition`] ([`WinCondition::BestLap`]). A normal round supplies its
+ * chosen condition. Additive on the wire (a pre-existing client always sends it).
  */
-win_condition: WinCondition, 
+win_condition?: WinCondition, 
 /**
  * How the round's field is seeded; defaults to [`SeedingRule::FromRoster`] when omitted.
  */
 seeding: SeedingRule, 
+/**
+ * The **practice duration** in seconds for an open-practice round (open-practice refinement).
+ * Optional — omit (or leave blank) for **no time limit** (the RD ends the practice with
+ * `ForceEnd`); supply it to have the runtime auto-end the practice at the limit. Stored on
+ * [`RoundDef::time_limit_secs`]. Additive on the wire.
+ */
+time_limit_secs?: number, 
 /**
  * How this round assigns channels (race redesign Slice 7a). Optional — **omit it** to take the
  * format's default ([`ChannelMode::default_for_format`]); supply it to override (e.g. force a

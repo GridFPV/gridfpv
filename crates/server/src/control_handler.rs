@@ -384,7 +384,7 @@ fn apply_schedule_heat(
 ///   states — typed oks, not errors).
 /// - A fill error (unknown round, empty field, unknown format) acks failed with a
 ///   [`ProtocolError`] — `UnknownScope` for a missing round, `BadRequest` otherwise.
-fn apply_fill_round(
+pub fn apply_fill_round(
     registry: &EventRegistry,
     event_id: &EventId,
     state: &AppState,
@@ -971,8 +971,9 @@ mod tests {
                     classes: vec![class.clone()],
                     format: "timed_qual".into(),
                     params: BTreeMap::from([("rounds".into(), "1".into())]),
-                    win_condition: WinCondition::BestLap,
+                    win_condition: Some(WinCondition::BestLap),
                     seeding: SeedingRule::FromRoster,
+                    time_limit_secs: None,
                     // Per-heat: this test asserts the whole-field single heat (the bracket path).
                     channel_mode: Some(ChannelMode::PerHeat),
                     staging_timer_secs: None,
@@ -1109,8 +1110,9 @@ mod tests {
                     classes: vec![class],
                     format: "timed_qual".into(),
                     params: BTreeMap::from([("rounds".into(), "1".into())]),
-                    win_condition: WinCondition::BestLap,
+                    win_condition: Some(WinCondition::BestLap),
                     seeding: SeedingRule::FromRoster,
+                    time_limit_secs: None,
                     // Per-heat: this test asserts first-fit channel assignment from the timer pool.
                     channel_mode: Some(ChannelMode::PerHeat),
                     staging_timer_secs: None,

@@ -31,6 +31,7 @@ import type {
   Timer
 } from '@gridfpv/types';
 
+import { listHeats } from '../packages/protocol-client/dist/index.js';
 import { type Director } from '../test-harness/director.ts';
 import { eventRoot, startContractDirector } from './harness.ts';
 
@@ -1285,6 +1286,45 @@ describe('race Slice 2a: rounds', () => {
     const meta = list.find((e) => e.id === event.id)!;
     const stored = (meta.rounds ?? []).find((r) => r.id === round.id)!;
     expect(stored.seeding).toEqual({ AllChannels: { channels: [0, 1, 2] } });
+  });
+
+  it('POST /rounds open_practice with NO win condition + a time limit auto-creates one heat', async () => {
+    // Open-practice refinement: the request may omit `win_condition` (open practice does no scoring)
+    // and carry a `time_limit_secs`; creating the round auto-creates its single channel heat (no
+    // manual FillRound). Re-filling is idempotent — there is still exactly one heat for the round.
+    const event = (await createEvent('Open Practice Auto', TOKEN)).body as EventMeta;
+    const created = await addRound(
+      event.id,
+      {
+        label: 'Open Practice',
+        classes: [],
+        format: 'open_practice',
+        // No `win_condition` field at all — additive on the wire.
+        seeding: { AllChannels: { channels: [0, 1] } },
+        time_limit_secs: 3600
+      },
+      TOKEN
+    );
+    expect(created.status).toBe(200);
+    const round = created.body as RoundDef;
+    // The inert default win condition is stored; the time limit round-trips.
+    expect(round.win_condition).toBe('BestLap');
+    expect(round.time_limit_secs).toBe(3600);
+
+    // The single channel heat was auto-created on round creation (no FillRound was sent).
+    const heats = await listHeats(director.baseUrl, event.id);
+    const forRound = heats.filter((h) => h.round === round.id);
+    expect(forRound).toHaveLength(1);
+    expect(forRound[0].lineup).toEqual(['node-0', 'node-1']);
+
+    // Idempotent: re-running the round's FillRound over the control path adds no second heat.
+    await fetch(`${eventRoot(director.baseUrl, event.id)}/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ FillRound: { round: round.id } })
+    });
+    const after = (await listHeats(director.baseUrl, event.id)).filter((h) => h.round === round.id);
+    expect(after).toHaveLength(1);
   });
 
   it('POST /rounds validates format, class selection, and seeding source → 400', async () => {

@@ -56,10 +56,13 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   await expect(form).toBeVisible();
   await form.getByLabel('Label').fill(LABEL);
 
-  // Picking open_practice swaps the eligible-classes picker for the active-channels picker.
+  // Picking open_practice swaps the eligible-classes picker for the active-channels picker, hides
+  // the win-condition input (open practice does no scoring), and reveals the optional Time limit.
   await form.getByLabel('Format').selectOption('open_practice');
   await expect(form.getByRole('group', { name: 'Active channels' })).toBeVisible();
   await expect(form.getByLabel('Eligible Open Class')).toBeHidden();
+  await expect(form.getByLabel('Win condition')).toBeHidden();
+  await expect(form.getByLabel('Time limit hours')).toBeVisible();
 
   // The primary timer's Raceband seats label by band + channel · MHz (node 0 → R1 · 5658).
   const r1 = form.getByLabel('Channel Raceband R1 · 5658');
@@ -67,24 +70,27 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   await expect(r1).toBeVisible();
   await expect(r2).toBeVisible();
 
-  // Activate two channels and screenshot the picker.
+  // Activate two channels, set a short (1-minute) practice time limit, and screenshot the picker.
   await r1.check();
   await r2.check();
+  await form.getByLabel('Time limit minutes').fill('1');
   await page.screenshot({ path: `${SHOTS}open-practice-picker.png`, fullPage: true });
 
   await page.getByRole('button', { name: 'Add round', exact: true }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
 
-  // The round lists as an open-practice round seeded from 2 channels.
+  // The round lists as an open-practice round seeded from 2 channels, showing its time limit.
   const row = page.getByRole('listitem').filter({ hasText: LABEL });
   await expect(row).toBeVisible({ timeout: 15_000 });
   await expect(row.getByText('open_practice')).toBeVisible();
   await expect(row.getByText(/Open practice · 2 channel/)).toBeVisible();
+  await expect(row.getByText('1m', { exact: true })).toBeVisible();
 
-  // ── Fill the round to mint the open-practice heat ───────────────────────────────────────────
+  // ── The heat is auto-created (no manual Fill) ───────────────────────────────────────────────
   const heatSection = page.getByRole('region', { name: `Heats for ${LABEL}` });
-  await heatSection.getByRole('button', { name: 'Fill next heat' }).click();
-  // The heat lands (its node lineup shows in the heats list).
+  // An open-practice round drops the manual "Fill next heat" control — its heat is created for it.
+  await expect(heatSection.getByRole('button', { name: 'Fill next heat' })).toHaveCount(0);
+  // The auto-created heat lands (its node lineup shows in the heats list).
   await expect(heatSection.getByText(/node-0/).first()).toBeVisible({ timeout: 15_000 });
 
   // ── Live control → the per-channel practice board ───────────────────────────────────────────

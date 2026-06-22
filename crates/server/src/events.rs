@@ -352,6 +352,14 @@ pub struct RoundDef {
     pub params: BTreeMap<String, String>,
     /// How a heat in this round is won — the per-round scoring rule (the existing wire
     /// [`WinCondition`](gridfpv_engine::scoring::WinCondition)).
+    ///
+    /// **Open practice does no scoring**, so a win condition is not *required* for an open-practice
+    /// round: the create/update requests make this field optional ([`NewRoundReq::win_condition`])
+    /// and an omitted condition stores an inert [`default_win_condition`] here. The field stays a
+    /// plain [`WinCondition`] (not an `Option`) so every scoring path is unchanged — for a
+    /// non-open-practice round the stored condition is the one the RD chose; for an open-practice
+    /// round it is never consulted (the heat ends on the [`time_limit_secs`](Self::time_limit_secs)
+    /// or the RD's `ForceEnd`).
     pub win_condition: WinCondition,
     /// How this round's field is **seeded** (drawn). Defaults to [`SeedingRule::FromRoster`] (the
     /// eligible classes' membership, in roster order); a bracket round seeds from a prior round's
@@ -384,6 +392,29 @@ pub struct RoundDef {
     /// auto-completion actually fires). Additive.
     #[serde(default = "default_grace_window")]
     pub grace_window: GraceWindow,
+    /// The **practice duration** for an open-practice round, in seconds (open-practice refinement).
+    /// When set, the runtime clock **auto-ends the practice** (`Running → Unofficial`) once the
+    /// heat's elapsed running time reaches this limit — independent of any win condition (the time is
+    /// the *only* end condition for an open-practice heat). When unset (`None`), the practice runs
+    /// until the RD ends it (`ForceEnd`). E.g. `3600` ends a one-hour practice on its own.
+    ///
+    /// Additive (`#[serde(default)]`, omitted from the wire when unset) so a round persisted before
+    /// this field reads back with `None`. Only consulted for an open-practice heat; a normal round
+    /// keeps ending on its win condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub time_limit_secs: Option<u32>,
+}
+
+/// The **inert default win condition** stored on a round whose create/update request omitted one
+/// (open-practice refinement): a [`WinCondition::BestLap`].
+///
+/// Open practice does no scoring, so the stored condition is never consulted for an open-practice
+/// round — it ends on its [`time_limit_secs`](RoundDef::time_limit_secs) or the RD's `ForceEnd`.
+/// Keeping [`RoundDef::win_condition`] a plain (non-`Option`) [`WinCondition`] means every scoring
+/// path is unchanged; this just gives the field a harmless value when the form supplies none.
+pub fn default_win_condition() -> WinCondition {
+    WinCondition::BestLap
 }
 
 /// The default [`RoundDef::staging_timer_secs`] — **300s (5 minutes)** of staging (heat-lifecycle
@@ -565,11 +596,23 @@ pub struct NewRoundReq {
     /// The format's config knobs, stored verbatim.
     #[serde(default)]
     pub params: BTreeMap<String, String>,
-    /// How a heat in this round is won.
-    pub win_condition: WinCondition,
+    /// How a heat in this round is won. **Optional** (open-practice refinement): an open-practice
+    /// round does no scoring, so the form is not forced to supply one — **omit it** to store the
+    /// inert [`default_win_condition`] ([`WinCondition::BestLap`]). A normal round supplies its
+    /// chosen condition. Additive on the wire (a pre-existing client always sends it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub win_condition: Option<WinCondition>,
     /// How the round's field is seeded; defaults to [`SeedingRule::FromRoster`] when omitted.
     #[serde(default)]
     pub seeding: SeedingRule,
+    /// The **practice duration** in seconds for an open-practice round (open-practice refinement).
+    /// Optional — omit (or leave blank) for **no time limit** (the RD ends the practice with
+    /// `ForceEnd`); supply it to have the runtime auto-end the practice at the limit. Stored on
+    /// [`RoundDef::time_limit_secs`]. Additive on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub time_limit_secs: Option<u32>,
     /// How this round assigns channels (race redesign Slice 7a). Optional — **omit it** to take the
     /// format's default ([`ChannelMode::default_for_format`]); supply it to override (e.g. force a
     /// qual round per-heat). Additive on the wire.
@@ -608,11 +651,19 @@ pub struct UpdateRoundReq {
     /// The new format config knobs, stored verbatim.
     #[serde(default)]
     pub params: BTreeMap<String, String>,
-    /// The new win condition.
-    pub win_condition: WinCondition,
+    /// The new win condition. **Optional** (open-practice refinement): omit it to store the inert
+    /// [`default_win_condition`] (an open-practice round does no scoring).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub win_condition: Option<WinCondition>,
     /// The new seeding rule; defaults to [`SeedingRule::FromRoster`] when omitted.
     #[serde(default)]
     pub seeding: SeedingRule,
+    /// The new practice duration in seconds (open-practice refinement). Optional — omit for **no
+    /// time limit**. Stored on [`RoundDef::time_limit_secs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub time_limit_secs: Option<u32>,
     /// The new channel mode (race redesign Slice 7a). Optional — **omit it** to take the format's
     /// default ([`ChannelMode::default_for_format`]); supply it to override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1146,7 +1197,8 @@ impl EventRegistry {
             classes: req.classes,
             format: req.format,
             params: req.params,
-            win_condition: req.win_condition,
+            // An omitted win condition stores the inert default (open practice does no scoring).
+            win_condition: req.win_condition.unwrap_or_else(default_win_condition),
             seeding: req.seeding,
             channel_mode,
             // Heat-lifecycle Slice 2 configs: omitted request fields take their documented defaults.
@@ -1155,6 +1207,8 @@ impl EventRegistry {
                 .unwrap_or_else(default_staging_timer_secs),
             start_procedure: req.start_procedure.unwrap_or_default(),
             grace_window: req.grace_window.unwrap_or_else(default_grace_window),
+            // The optional open-practice duration (open-practice refinement): carried through as-is.
+            time_limit_secs: req.time_limit_secs,
         };
         event.meta.rounds.push(round.clone());
         let meta = event.meta.clone();
@@ -1208,7 +1262,8 @@ impl EventRegistry {
             classes: req.classes,
             format: req.format,
             params: req.params,
-            win_condition: req.win_condition,
+            // An omitted win condition stores the inert default (open practice does no scoring).
+            win_condition: req.win_condition.unwrap_or_else(default_win_condition),
             seeding: req.seeding,
             channel_mode,
             // Heat-lifecycle Slice 2 configs: replaced wholesale, defaulting an omitted field.
@@ -1217,6 +1272,8 @@ impl EventRegistry {
                 .unwrap_or_else(default_staging_timer_secs),
             start_procedure: req.start_procedure.unwrap_or_default(),
             grace_window: req.grace_window.unwrap_or_else(default_grace_window),
+            // The optional open-practice duration (open-practice refinement): replaced wholesale.
+            time_limit_secs: req.time_limit_secs,
         };
         if let Some(slot) = event.meta.rounds.iter_mut().find(|r| &r.id == round_id) {
             *slot = round.clone();
@@ -2400,8 +2457,9 @@ mod tests {
             classes,
             format: "timed_qual".to_string(),
             params: BTreeMap::new(),
-            win_condition: WinCondition::BestLap,
+            win_condition: Some(WinCondition::BestLap),
             seeding: SeedingRule::FromRoster,
+            time_limit_secs: None,
             channel_mode: None,
             staging_timer_secs: None,
             start_procedure: None,
@@ -2441,6 +2499,48 @@ mod tests {
             .unwrap();
         assert_ne!(round.id, round2.id);
         assert_eq!(reg.rounds_of(&event.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn open_practice_round_saves_with_no_win_condition_and_a_time_limit() {
+        // Open-practice refinement: an open-practice round needs **no win condition** (the request
+        // omits it — `win_condition: None`) and carries an optional `time_limit_secs`. The round
+        // saves: the inert default win condition is stored (never consulted), the seeding is
+        // AllChannels, and the time limit round-trips.
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Practice Event")).unwrap();
+
+        let round = reg
+            .add_round(
+                &event.id,
+                NewRoundReq {
+                    label: "Open Practice".into(),
+                    classes: vec![],
+                    format: "open_practice".into(),
+                    params: BTreeMap::new(),
+                    // No win condition — the form is not forced to supply one for open practice.
+                    win_condition: None,
+                    seeding: SeedingRule::AllChannels {
+                        channels: vec![0, 1, 2],
+                    },
+                    time_limit_secs: Some(3600),
+                    channel_mode: None,
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                },
+            )
+            .expect("an open-practice round with no win condition saves");
+
+        // The inert default win condition is stored (BestLap), never consulted for open practice.
+        assert_eq!(round.win_condition, default_win_condition());
+        assert_eq!(round.time_limit_secs, Some(3600));
+        assert!(matches!(round.seeding, SeedingRule::AllChannels { .. }));
+
+        // It round-trips through the event meta with the time limit intact.
+        let rounds = reg.rounds_of(&event.id).unwrap();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].time_limit_secs, Some(3600));
     }
 
     #[test]
@@ -2500,8 +2600,9 @@ mod tests {
                     classes: vec![open.clone(), spec.clone()],
                     format: "single_elim".to_string(),
                     params: BTreeMap::from([("advance".to_string(), "2".to_string())]),
-                    win_condition: WinCondition::FirstToLaps { n: 5 },
+                    win_condition: Some(WinCondition::FirstToLaps { n: 5 }),
                     seeding: SeedingRule::FromRoster,
+                    time_limit_secs: None,
                     channel_mode: None,
                     staging_timer_secs: None,
                     start_procedure: None,
@@ -2609,11 +2710,12 @@ mod tests {
                 classes: bracket.classes.clone(),
                 format: bracket.format.clone(),
                 params: BTreeMap::new(),
-                win_condition: bracket.win_condition,
+                win_condition: Some(bracket.win_condition),
                 seeding: SeedingRule::FromRanking {
                     source_round: bracket.id.clone(),
                     top_n: 2,
                 },
+                time_limit_secs: None,
                 channel_mode: None,
                 staging_timer_secs: None,
                 start_procedure: None,

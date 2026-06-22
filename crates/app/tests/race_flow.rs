@@ -321,7 +321,8 @@ async fn round_driven_mock_race_flow_e2e() {
             classes: vec![class_id.clone()],
             format: "timed_qual".into(),
             params: BTreeMap::from([("rounds".into(), "1".into())]),
-            win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
+            win_condition: Some(gridfpv_engine::scoring::WinCondition::BestLap),
+            time_limit_secs: None,
             seeding: SeedingRule::FromRoster,
             // Per-heat: this flow asserts the whole-field heat + first-fit channel assignment.
             channel_mode: Some(ChannelMode::PerHeat),
@@ -420,7 +421,8 @@ async fn round_driven_mock_race_flow_e2e() {
             classes: vec![class_id.clone()],
             format: "single_elim".into(),
             params: BTreeMap::new(),
-            win_condition: gridfpv_engine::scoring::WinCondition::FirstToLaps { n: laps },
+            win_condition: Some(gridfpv_engine::scoring::WinCondition::FirstToLaps { n: laps }),
+            time_limit_secs: None,
             seeding: SeedingRule::FromRanking {
                 source_round: qual.id.clone(),
                 top_n: 2,
@@ -615,7 +617,8 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
             classes: vec![class_id.clone()],
             format: "timed_qual".into(),
             params: BTreeMap::from([("rounds".into(), "1".into())]),
-            win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
+            win_condition: Some(gridfpv_engine::scoring::WinCondition::BestLap),
+            time_limit_secs: None,
             seeding: SeedingRule::FromRoster,
             // Per-heat: this flow asserts the node-cap rejection of an oversized whole-field heat.
             channel_mode: Some(ChannelMode::PerHeat),
@@ -740,7 +743,8 @@ async fn static_channel_balanced_qual_flow_e2e() {
             classes: vec![class_id.clone()],
             format: "timed_qual".into(),
             params: BTreeMap::from([("rounds".into(), "1".into())]),
-            win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
+            win_condition: Some(gridfpv_engine::scoring::WinCondition::BestLap),
+            time_limit_secs: None,
             seeding: SeedingRule::FromRoster,
             channel_mode: Some(ChannelMode::Static),
             staging_timer_secs: None,
@@ -962,7 +966,8 @@ async fn fast_auto_event(
             format: "timed_qual".into(),
             params: BTreeMap::from([("rounds".into(), "1".into())]),
             // FirstToLaps gives the completion clock an intrinsic end (the leader reaching `win_laps`).
-            win_condition: gridfpv_engine::scoring::WinCondition::FirstToLaps { n: win_laps },
+            win_condition: Some(gridfpv_engine::scoring::WinCondition::FirstToLaps { n: win_laps }),
+            time_limit_secs: None,
             seeding: SeedingRule::FromRoster,
             channel_mode: Some(ChannelMode::PerHeat),
             staging_timer_secs: None,
@@ -1152,6 +1157,119 @@ async fn the_logged_clock_events_replay_deterministically() {
             gridfpv_events::HeatTransition::Finalized,
         ],
         "the runtime-driven log folds the full forward path, once each"
+    );
+}
+
+/// Open-practice refinement e2e: creating an **open-practice** round auto-creates its single channel
+/// heat (no manual `FillRound`), idempotently (re-creating doesn't duplicate it), and a short
+/// `time_limit_secs` auto-ends the running practice (Running → Unofficial) with no `ForceEnd`.
+#[tokio::test]
+async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e() {
+    let registry = fast_registry(3, 1);
+    let token = registry.tokens().issue_rd_token();
+    let _bridge = spawn_registry_bridge(
+        registry.clone(),
+        SourceConfig::Sim(SimSource::new(3, Duration::from_millis(1))),
+        AdapterId(SIM_ADAPTER.to_string()),
+    );
+    std::mem::forget(_bridge);
+    let app = build_app(registry.clone(), &no_assets());
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/events",
+        Some(&token),
+        Some(serde_json::json!({ "name": "Practice" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create event: {body}");
+    let event_meta: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let event = EventId(event_meta["id"].as_str().unwrap().to_string());
+
+    // Define an open-practice round: NO win condition, a 1s time limit, AllChannels seeding over two
+    // node-seats. Creating it must auto-build the single open heat (the channels are the lineup).
+    let open_req = || NewRoundReq {
+        label: "Open Practice".into(),
+        classes: vec![],
+        format: "open_practice".into(),
+        params: BTreeMap::new(),
+        win_condition: None,
+        time_limit_secs: Some(1),
+        seeding: SeedingRule::AllChannels {
+            channels: vec![0, 1],
+        },
+        channel_mode: None,
+        staging_timer_secs: None,
+        start_procedure: Some(StartProcedure::RandomizedDelay {
+            min_delay_ms: 0,
+            max_delay_ms: 1,
+            tone: None,
+        }),
+        grace_window: None,
+    };
+    let round: RoundDef = add_round(&app, &event, &token, open_req()).await;
+    let state = registry.resolve(&event).unwrap();
+
+    // (a) The heat was auto-created: exactly one HeatScheduled tagged with the round, no FillRound.
+    let scheduled_for_round = |events: &[Event]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::HeatScheduled { round: Some(r), .. } if *r == round.id))
+            .count()
+    };
+    assert_eq!(
+        scheduled_for_round(&read_log(&state)),
+        1,
+        "creating an open-practice round auto-creates exactly one heat"
+    );
+
+    // (b) Idempotent: re-running the auto-fill (the same round's FillRound) appends no second heat.
+    control_ok(
+        &app,
+        &event,
+        &token,
+        &Command::FillRound {
+            round: round.id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(
+        scheduled_for_round(&read_log(&state)),
+        1,
+        "a re-fill of the open-practice round does not duplicate its heat"
+    );
+
+    let (heat, _class, _lineup) =
+        round_heat(&read_log(&state), &round.id.0).expect("the auto-created open-practice heat");
+
+    // (c) The time limit auto-ends the running practice. Make active, Stage, Start — then the runtime
+    // drives Armed → Running (instant start hold) and, ~1s later, the time-limit Running → Unofficial.
+    control_put(
+        &app,
+        "/active-event",
+        &token,
+        serde_json::json!({ "id": event.0 }),
+    )
+    .await;
+    control_ok(&app, &event, &token, &Command::Stage { heat: heat.clone() }).await;
+    control_ok(&app, &event, &token, &Command::Start { heat: heat.clone() }).await;
+
+    let target = heat.clone();
+    wait_until(&state, Duration::from_secs(6), move |events| {
+        heat_state_of(events, &target) == Some(gridfpv_engine::heat::HeatState::Unofficial)
+    })
+    .await;
+
+    // Exactly one auto Finished (the Running → Unofficial step) was appended by the time-limit driver.
+    let events = read_log(&state);
+    let finished = events
+        .iter()
+        .filter(|e| matches!(e, Event::HeatStateChanged { heat: h, transition: gridfpv_events::HeatTransition::Finished } if *h == heat))
+        .count();
+    assert_eq!(
+        finished, 1,
+        "the time limit auto-ends the practice exactly once"
     );
 }
 

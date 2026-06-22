@@ -1023,6 +1023,24 @@ async fn add_round(
     Json(body): Json<NewRoundReq>,
 ) -> Result<Json<RoundDef>, ProtocolError> {
     let round = registry.add_round(&event_id, body).map_err(round_error)?;
+    // Open-practice refinement: an open-practice round has no class/pilots, so the normal manual
+    // `FillRound` flow can't run — but its **channels are the lineup**, so the single open heat can
+    // be built immediately. Auto-run the equivalent of `FillRound` here so the RD can Stage/Start the
+    // practice with no manual fill. Idempotent for free: `fill_round` dedups against already-scheduled
+    // heats, so re-creating/editing never double-schedules — one open heat per round. A non-open
+    // round is left to the RD's manual `FillRound` as before.
+    if crate::round_engine::is_open_practice(&round) {
+        let state = resolve_event(&registry, &event_id)?;
+        let ack = crate::control_handler::apply_fill_round(
+            &registry,
+            &event_id,
+            &state,
+            round.id.clone(),
+        );
+        if let Some(err) = ack.error {
+            return Err(err);
+        }
+    }
     Ok(Json(round))
 }
 

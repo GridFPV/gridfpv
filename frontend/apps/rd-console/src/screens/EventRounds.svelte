@@ -182,6 +182,11 @@
 
   const heatsByRound = (id: RoundId): HeatSummary[] => heats.filter((h) => h.round === id);
 
+  // Whether a saved round is an **open-practice** round (open-practice refinement): its heat is
+  // auto-created on round creation, so the Heats area drops the manual Fill / Standings / Advance
+  // controls for it and shows the practice heat as ready to Start.
+  const isOpenPracticeRound = (round: RoundDef): boolean => round.format === OPEN_PRACTICE;
+
   // A heat's per-pilot channel assignment, resolved to a band+channel label (race redesign Slice
   // 4b). `HeatScheduled.frequencies` pairs each ref with a raw MHz; map ref → label so the lineup
   // can show it. A sim/free-text heat carries no frequencies, so a ref resolves to `undefined` ("—").
@@ -428,6 +433,13 @@
   let startMinMs = $state(2000); // randomized start hold: shortest
   let startMaxMs = $state(5000); // randomized start hold: longest
   let graceSeconds = $state(3); // grace window after the win condition, in seconds
+  // ── Open-practice duration (open-practice refinement) ────────────────────────
+  // The **time limit** for an open-practice round — the practice duration, entered as hours:minutes.
+  // Blank / both zero = no limit (the RD ends the practice manually). When set, the runtime auto-ends
+  // the practice once the elapsed running time reaches it. Only shown / sent for the open-practice
+  // format (it has no win condition; the time limit is its only auto-end).
+  let timeLimitHours = $state(0);
+  let timeLimitMinutes = $state(0);
 
   // Open-practice format (open-practice Slice 2): swaps the class/seeding inputs for the
   // active-channels picker, and is submittable on a label + at least one active channel (no classes).
@@ -519,6 +531,8 @@
     startMinMs = 2000;
     startMaxMs = 5000;
     graceSeconds = 3;
+    timeLimitHours = 0;
+    timeLimitMinutes = 0;
   }
 
   export function openAdd() {
@@ -573,6 +587,12 @@
     const grace = round.grace_window;
     graceSeconds =
       grace && typeof grace !== 'string' ? Math.round(grace.Duration.micros / 1_000_000) : 3;
+
+    // Open-practice duration (open-practice refinement): reflect an existing time limit into the
+    // hours:minutes inputs. Unset (no limit) reads back as blank (both zero).
+    const limit = round.time_limit_secs ?? 0;
+    timeLimitHours = Math.floor(limit / 3600);
+    timeLimitMinutes = Math.floor((limit % 3600) / 60);
 
     formOpen = true;
   }
@@ -644,6 +664,17 @@
     return { Duration: { micros: Math.max(0, Math.round(graceSeconds || 0)) * 1_000_000 } };
   }
 
+  /**
+   * The open-practice **time limit** in whole seconds from the hours:minutes inputs, or `undefined`
+   * when blank / zero (no limit — the RD ends the practice manually). Open-practice refinement.
+   */
+  function buildTimeLimitSecs(): number | undefined {
+    const hours = Math.max(0, Math.round(timeLimitHours || 0));
+    const mins = Math.max(0, Math.round(timeLimitMinutes || 0));
+    const total = hours * 3600 + mins * 60;
+    return total > 0 ? total : undefined;
+  }
+
   // The form is submittable once it has a label, at least one eligible class, a format, and — when
   // seeding from a ranking — a chosen source round.
   const canSubmit = $derived(
@@ -665,7 +696,11 @@
       classes: isOpenPractice ? [] : eventClassIds.filter((id) => selectedClasses.has(id)),
       format,
       params: buildParams(),
-      win_condition: buildWinCondition(),
+      // Open practice does no scoring (open-practice refinement): send NO win condition — the backend
+      // stores its inert default — and the optional time limit instead. A normal round sends its
+      // chosen win condition and no time limit.
+      win_condition: isOpenPractice ? undefined : buildWinCondition(),
+      time_limit_secs: isOpenPractice ? buildTimeLimitSecs() : undefined,
       seeding: isOpenPractice
         ? { AllChannels: { channels: [...selectedNodes].sort((a, b) => a - b) } }
         : buildSeeding(),
@@ -713,6 +748,17 @@
     if ('FirstToLaps' in wc) return `First to ${wc.FirstToLaps.n} laps`;
     if ('BestConsecutive' in wc) return `Best ${wc.BestConsecutive.n} consecutive`;
     return 'Best lap';
+  }
+
+  // The open-practice time-limit summary (open-practice refinement): "1h 30m" / "45m" / "No limit".
+  function timeLimitSummary(secs: number | undefined | null): string {
+    if (!secs || secs <= 0) return 'No limit';
+    const hours = Math.floor(secs / 3600);
+    const mins = Math.floor((secs % 3600) / 60);
+    const parts: string[] = [];
+    if (hours > 0) parts.push(`${hours}h`);
+    if (mins > 0) parts.push(`${mins}m`);
+    return parts.length > 0 ? parts.join(' ') : 'No limit';
   }
 
   function seedSummary(seed: SeedingRule): string {
@@ -767,7 +813,13 @@
                     ? 'All classes'
                     : round.classes.map(className).join(', ') || '—'}
                 </span>
-                <span class="meta-chip">{winSummary(round.win_condition)}</span>
+                <!-- Open practice does no scoring (open-practice refinement): show its time limit (or
+                     "No limit") in place of the win condition, which it stores only as an inert default. -->
+                {#if isOpenPracticeRound(round)}
+                  <span class="meta-chip">{timeLimitSummary(round.time_limit_secs)}</span>
+                {:else}
+                  <span class="meta-chip">{winSummary(round.win_condition)}</span>
+                {/if}
                 <span class="meta-chip">{seedSummary(round.seeding)}</span>
               </div>
             </div>
@@ -822,22 +874,49 @@
             </Select>
           </Field>
 
-          <Field label="Win condition">
-            <Select bind:value={winKind} aria-label="Win condition">
-              <option value="Timed">Timed window</option>
-              <option value="FirstToLaps">First to N laps</option>
-              <option value="BestLap">Best lap</option>
-              <option value="BestConsecutive">Best N consecutive</option>
-            </Select>
-          </Field>
-
-          {#if winKind === 'Timed'}
-            <Field label="Window (seconds)">
-              <Input type="number" min="1" bind:value={winSeconds} aria-label="Window seconds" />
+          <!-- Open practice does no scoring (open-practice refinement): hide the win-condition input
+               and offer the practice **Time limit** instead. A normal round keeps its win condition. -->
+          {#if !isOpenPractice}
+            <Field label="Win condition">
+              <Select bind:value={winKind} aria-label="Win condition">
+                <option value="Timed">Timed window</option>
+                <option value="FirstToLaps">First to N laps</option>
+                <option value="BestLap">Best lap</option>
+                <option value="BestConsecutive">Best N consecutive</option>
+              </Select>
             </Field>
-          {:else if winKind === 'FirstToLaps' || winKind === 'BestConsecutive'}
-            <Field label="Laps">
-              <Input type="number" min="1" bind:value={winLaps} aria-label="Laps" />
+
+            {#if winKind === 'Timed'}
+              <Field label="Window (seconds)">
+                <Input type="number" min="1" bind:value={winSeconds} aria-label="Window seconds" />
+              </Field>
+            {:else if winKind === 'FirstToLaps' || winKind === 'BestConsecutive'}
+              <Field label="Laps">
+                <Input type="number" min="1" bind:value={winLaps} aria-label="Laps" />
+              </Field>
+            {/if}
+          {:else}
+            <Field
+              label="Time limit"
+              hint="Optional — blank or 0:00 = no limit (end the practice manually). When set, the practice auto-ends at this duration."
+            >
+              <div class="mmss" role="group" aria-label="Time limit">
+                <Input
+                  type="number"
+                  min="0"
+                  bind:value={timeLimitHours}
+                  aria-label="Time limit hours"
+                />
+                <span class="mmss-sep" aria-hidden="true">h</span>
+                <Input
+                  type="number"
+                  min="0"
+                  max="59"
+                  bind:value={timeLimitMinutes}
+                  aria-label="Time limit minutes"
+                />
+                <span class="mmss-sep" aria-hidden="true">m</span>
+              </div>
             </Field>
           {/if}
         </div>
@@ -1115,31 +1194,36 @@
                 </span>
               {/snippet}
               {#snippet actions()}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onclick={() => toggleStandings(round)}
-                  aria-pressed={standingsRound === round.id}
-                >
-                  {standingsRound === round.id ? 'Hide standings' : 'Standings'}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onclick={() => openAdvance(round)}
-                  disabled={advanceRoundId !== undefined}
-                >
-                  Advance to bracket
-                </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onclick={() => fillRound(round)}
-                  loading={fillingRound === round.id}
-                  disabled={fillingRound !== undefined}
-                >
-                  Fill next heat
-                </Button>
+                <!-- Open practice (open-practice refinement): its single channel heat is auto-created
+                     on round creation — there is nothing to Fill, no scoring to rank, and no bracket
+                     to advance to. So the Heats controls collapse to just the ready-to-Start heat. -->
+                {#if !isOpenPracticeRound(round)}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onclick={() => toggleStandings(round)}
+                    aria-pressed={standingsRound === round.id}
+                  >
+                    {standingsRound === round.id ? 'Hide standings' : 'Standings'}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onclick={() => openAdvance(round)}
+                    disabled={advanceRoundId !== undefined}
+                  >
+                    Advance to bracket
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onclick={() => fillRound(round)}
+                    loading={fillingRound === round.id}
+                    disabled={fillingRound !== undefined}
+                  >
+                    Fill next heat
+                  </Button>
+                {/if}
               {/snippet}
 
               <div class="heat-round-body">
@@ -1220,11 +1304,24 @@
                 {/if}
 
                 {#if heatsByRound(round.id).length === 0}
-                  <p class="empty small" role="status">
-                    No heats yet — <strong>Fill next heat</strong> to draw the first from this round’s
-                    field.
-                  </p>
+                  {#if isOpenPracticeRound(round)}
+                    <p class="empty small" role="status">
+                      The practice heat is being prepared — it is created automatically for an
+                      open-practice round.
+                    </p>
+                  {:else}
+                    <p class="empty small" role="status">
+                      No heats yet — <strong>Fill next heat</strong> to draw the first from this round’s
+                      field.
+                    </p>
+                  {/if}
                 {:else}
+                  {#if isOpenPracticeRound(round)}
+                    <p class="inline-note small" role="status">
+                      This practice heat is ready — open <strong>Live control</strong> to
+                      <strong>Stage</strong> then <strong>Start</strong> it.
+                    </p>
+                  {/if}
                   <ol class="heat-list">
                     {#each heatsByRound(round.id) as h (h.heat)}
                       {@const channels = channelByRef(h)}
