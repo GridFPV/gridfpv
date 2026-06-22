@@ -224,9 +224,7 @@ test('RD hides a class on the Classes page; it drops out of the event picker; un
     timeout: 15_000
   });
   // …while a visible class is still offered.
-  await expect(
-    pickerList.getByRole('listitem').filter({ hasText: 'Open Class' })
-  ).toBeVisible();
+  await expect(pickerList.getByRole('listitem').filter({ hasText: 'Open Class' })).toBeVisible();
   // Screenshot: the picker with the hidden class excluded.
   await page.screenshot({ path: 'e2e-artifacts/event-picker-hidden-excluded.png', fullPage: true });
 
