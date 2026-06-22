@@ -164,12 +164,32 @@ impl ScopeProjection {
     /// and comparing tells the engine whether offset `n` *changed* the projection (and thus
     /// whether to emit an envelope). Reuses the same fold helpers as the snapshot path so a
     /// subscriber and a snapshot of the same scope converge to the same value.
-    fn fold(scope: &Scope, events: &[Event]) -> Option<ProjectionBody> {
+    ///
+    /// `overlay` is the event's **open-practice live state** (open-practice format, Slice 1) when an
+    /// open-practice heat is active, else `None`. An open-practice heat's laps are accumulated in
+    /// memory (NOT logged), so the log fold can't see them; while the overlay is present, the
+    /// live-state scopes return it instead of the log fold — for a Heat scope only when it is *that*
+    /// heat. The lap-list (pilot) scope is unaffected (open practice is per channel, not per pilot).
+    fn fold(
+        scope: &Scope,
+        events: &[Event],
+        overlay: Option<&crate::live_state::LiveRaceState>,
+    ) -> Option<ProjectionBody> {
         match scope {
             Scope::Event { .. } | Scope::Class { .. } => {
-                Some(ProjectionBody::LiveRaceState(live_state(events)))
+                // While an open-practice heat is active, the (non-logged) per-channel live state
+                // replaces the log fold for the whole-event scopes.
+                let live = overlay.cloned().unwrap_or_else(|| live_state(events));
+                Some(ProjectionBody::LiveRaceState(live))
             }
             Scope::Heat { heat } => {
+                // An open-practice heat's live state lives in the overlay, not the log — so serve it
+                // when this Heat scope addresses the active open-practice heat.
+                if let Some(open) = overlay {
+                    if open.current_heat.as_ref() == Some(heat) {
+                        return Some(ProjectionBody::LiveRaceState(open.clone()));
+                    }
+                }
                 // Only fold once the heat exists in the log; before that the scope has no
                 // value to stream (the snapshot would 404).
                 let scheduled = events
@@ -309,7 +329,12 @@ async fn run_stream(mut socket: WebSocket, state: AppState) {
                 return;
             }
         };
-        for message in engine.advance(&events) {
+        // The event's open-practice overlay (open-practice format, Slice 1): the per-channel,
+        // in-memory (NOT logged) live state when an open-practice heat is active, else `None`. The
+        // fold serves it in place of the log fold for the live-state scopes so the non-logged laps
+        // drive the stream. `wake_streams` after a pass / clear is what re-enters this loop.
+        let overlay = state.open_practice().live_state();
+        for message in engine.advance(&events, overlay.as_ref()) {
             if send_message(&mut socket, &message).await.is_err() {
                 return; // client gone
             }
@@ -367,7 +392,17 @@ impl Engine {
     /// `0..=offset`; when the folded body differs from the last one emitted it produces one
     /// envelope (fresh value, the next sequence). Walking offset by offset keeps the
     /// per-stream sequence a faithful "one bump per projection change" and the order total.
-    fn advance(&mut self, events: &[Event]) -> Vec<StreamMessage> {
+    ///
+    /// `overlay` is the event's open-practice live state (open-practice format, Slice 1) when an
+    /// open-practice heat is active. The per-offset walk folds the **pure log** (overlay-free) so
+    /// logged changes stay gap-free; then, when the overlay is active, a final overlay-applied fold
+    /// of the current prefix is emitted if it differs — that is the non-logged per-channel live
+    /// re-snapshot. Each `wake_streams` after a pass / clear re-enters this with a fresh `overlay`.
+    fn advance(
+        &mut self,
+        events: &[Event],
+        overlay: Option<&crate::live_state::LiveRaceState>,
+    ) -> Vec<StreamMessage> {
         let mut out = Vec::new();
         let len = events.len() as u64;
 
@@ -377,14 +412,29 @@ impl Engine {
         // (`from == 0`) there is nothing prior, so the first non-empty fold is emitted.
         if self.last_emitted.is_none() && self.applied_offset > 0 {
             let prefix = &events[..(self.applied_offset as usize).min(events.len())];
-            self.last_emitted = ScopeProjection::fold(&self.scope, prefix);
+            self.last_emitted = ScopeProjection::fold(&self.scope, prefix, None);
         }
 
         while self.applied_offset < len {
             self.applied_offset += 1;
             let prefix = &events[..self.applied_offset as usize];
-            let body = ScopeProjection::fold(&self.scope, prefix);
+            // The per-offset walk is over the pure log (no overlay) so logged-change sequencing is
+            // unaffected; the overlay re-snapshot is emitted once after the walk, below.
+            let body = ScopeProjection::fold(&self.scope, prefix, None);
             if let Some(body) = body {
+                if self.last_emitted.as_ref() != Some(&body) {
+                    out.push(StreamMessage::Change(self.envelope(body.clone())));
+                    self.last_emitted = Some(body);
+                }
+            }
+        }
+
+        // The open-practice live re-snapshot (open-practice format, Slice 1): with an active
+        // overlay, fold the current prefix *with* it and emit when it differs from the last value —
+        // the non-logged per-channel laps reach the stream as a fresh-value `LiveRaceState`. When the
+        // overlay clears, the next pure-log fold (above, on the next wake) restores the logged value.
+        if overlay.is_some() {
+            if let Some(body) = ScopeProjection::fold(&self.scope, events, overlay) {
                 if self.last_emitted.as_ref() != Some(&body) {
                     out.push(StreamMessage::Change(self.envelope(body.clone())));
                     self.last_emitted = Some(body);

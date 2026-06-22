@@ -1256,6 +1256,37 @@ describe('race Slice 2a: rounds', () => {
     expect((gone.body as { code?: string }).code).toBe('UnknownScope');
   });
 
+  it('POST /rounds accepts an open_practice round seeded AllChannels (open-practice format)', async () => {
+    // Open practice (open-practice format, Slice 1): a round is `format: "open_practice"` +
+    // `seeding: AllChannels { channels }` (node indices), with no eligible classes — it is keyed on
+    // active *channels*, not pilots. The round round-trips through the meta with its seeding intact.
+    const event = (await createEvent('Open Practice Round', TOKEN)).body as EventMeta;
+    // No class selection needed — an open-practice round has an empty classes list.
+    const created = await addRound(
+      event.id,
+      {
+        label: 'Open Practice',
+        classes: [],
+        format: 'open_practice',
+        params: {},
+        win_condition: 'BestLap',
+        seeding: { AllChannels: { channels: [0, 1, 2] } }
+      },
+      TOKEN
+    );
+    expect(created.status).toBe(200);
+    const round = created.body as RoundDef;
+    expect(round.format).toBe('open_practice');
+    expect(round.classes).toEqual([]);
+    expect(round.seeding).toEqual({ AllChannels: { channels: [0, 1, 2] } });
+
+    // It round-trips through the event meta (the seeding + format survive the persist).
+    const list = (await fetch(`${director.baseUrl}/events`).then((r) => r.json())) as EventMeta[];
+    const meta = list.find((e) => e.id === event.id)!;
+    const stored = (meta.rounds ?? []).find((r) => r.id === round.id)!;
+    expect(stored.seeding).toEqual({ AllChannels: { channels: [0, 1, 2] } });
+  });
+
   it('POST /rounds validates format, class selection, and seeding source → 400', async () => {
     const event = (await createEvent('Rounds Validation', TOKEN)).body as EventMeta;
     await selectOpen(event.id);
@@ -1309,15 +1340,19 @@ describe('race Slice 2a: rounds', () => {
     const res = await fetch(`${director.baseUrl}/formats`);
     expect(res.status).toBe(200);
     const schemas = (await res.json()) as FormatSchema[];
-    // The 6 production formats, in sorted name order (the same set `POST /rounds` validates against).
+    // The production formats, in sorted name order (the same set `POST /rounds` validates against),
+    // including the casual `open_practice` (open-practice format) with no param knobs.
     expect(schemas.map((s) => s.name)).toEqual([
       'double_elim',
       'multi_main',
+      'open_practice',
       'round_robin',
       'single_elim',
       'timed_qual',
       'zippyq'
     ]);
+    // open_practice declares no params (its active channels are the field, via AllChannels seeding).
+    expect(schemas.find((s) => s.name === 'open_practice')!.params).toEqual([]);
     // timed_qual declares `rounds` (number, default 3) and an enum `metric` with its options.
     const tq = schemas.find((s) => s.name === 'timed_qual')!;
     const rounds = tq.params.find((p) => p.key === 'rounds')!;

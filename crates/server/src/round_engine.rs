@@ -334,7 +334,26 @@ fn round_field(
             let ranking = round_ranking(meta, source, events)?;
             Ok(advance_top_n(&ranking, *top_n))
         }
+        // Open practice (open-practice format): the field is the active **channels**, each node
+        // index laid out as a `node-{i}` competitor ref (the timer-seat handle) in the given order.
+        // No pilots, no membership — laps are tracked per channel live in memory (not logged).
+        SeedingRule::AllChannels { channels } => Ok(channels
+            .iter()
+            .map(|i| CompetitorRef(format!("node-{i}")))
+            .collect()),
     }
+}
+
+/// Whether `round` is an **open-practice** round (open-practice format): `format ==
+/// "open_practice"` with [`SeedingRule::AllChannels`] seeding (race redesign open-practice Slice 1).
+///
+/// The source bridge resolves a running heat's round through this so it routes the heat's passes to
+/// the in-memory per-channel accumulator (not the log); the field builder lays the channels out as
+/// `node-{i}` refs. The format name *and* the seeding are both checked so a mis-tagged round (one or
+/// the other but not both) is treated as a normal round, never half-open-practice.
+pub fn is_open_practice(round: &RoundDef) -> bool {
+    round.format == gridfpv_engine::format::OpenPractice::NAME
+        && matches!(round.seeding, SeedingRule::AllChannels { .. })
 }
 
 /// Build a [`FormatConfig`] for a round over `field`: the round's
@@ -720,12 +739,18 @@ fn fill_round_per_heat(
             // FillRound before the prior heat is scored does not double-schedule it.
             let already: Vec<HeatId> = scheduled_round_heats(events, round_id);
             let next = plans.into_iter().find(|p| !already.contains(&p.heat));
+            // Open practice (open-practice format): the heat carries **empty** frequencies — its
+            // lineup is the active *channels* themselves (`node-{i}` seats), so there is nothing to
+            // allocate. Force `Some(empty)` so the handler appends the logged `HeatScheduled` with no
+            // frequencies regardless of the timer's channel pool.
+            let open_practice_frequencies = is_open_practice(round).then(Vec::new);
             match next {
                 Some(plan) => Ok(FillOutcome::Scheduled {
                     heat: plan.heat,
                     lineup: plan.lineup,
-                    // Per-heat: the handler assigns channels from the timer pool (first-fit).
-                    frequencies: None,
+                    // Per-heat: the handler assigns channels from the timer pool (first-fit), except
+                    // for open practice which carries empty frequencies (the lineup is channels).
+                    frequencies: open_practice_frequencies,
                 }),
                 // Every plan the generator wants this step is already scheduled (the RD
                 // re-issued FillRound before scoring the outstanding heat): nothing new to
@@ -1271,6 +1296,88 @@ mod tests {
             fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]),
             Err(FillError::EmptyField(_))
         ));
+    }
+
+    /// An **open-practice** round fixture (open-practice format, Slice 1): `format: "open_practice"`
+    /// + `seeding: AllChannels { channels }`, with no eligible classes (it is not a class round).
+    fn open_practice_round(id: &str, channels: &[usize]) -> RoundDef {
+        RoundDef {
+            id: RoundId(id.into()),
+            label: id.into(),
+            classes: vec![],
+            format: "open_practice".into(),
+            params: BTreeMap::new(),
+            win_condition: WinCondition::BestLap,
+            seeding: SeedingRule::AllChannels {
+                channels: channels.to_vec(),
+            },
+            channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
+        }
+    }
+
+    #[test]
+    fn open_practice_round_emits_one_heat_over_the_channels_with_empty_frequencies() {
+        // The active channels (node indices) become `node-{i}` lineup refs; the one open heat
+        // carries them with EMPTY frequencies (the lineup *is* the channels — nothing to allocate).
+        let round = open_practice_round("op1", &[0, 2, 5]);
+        let meta = meta_with(vec![round], vec![]);
+        match fill_round(&meta, &no_timers(), &RoundId("op1".into()), &[]).unwrap() {
+            FillOutcome::Scheduled {
+                heat,
+                lineup,
+                frequencies,
+            } => {
+                assert_eq!(heat.0, "open-practice");
+                assert_eq!(
+                    lineup,
+                    vec![
+                        CompetitorRef("node-0".into()),
+                        CompetitorRef("node-2".into()),
+                        CompetitorRef("node-5".into()),
+                    ]
+                );
+                assert_eq!(
+                    frequencies,
+                    Some(Vec::new()),
+                    "an open-practice heat carries empty frequencies"
+                );
+            }
+            other => panic!("expected a scheduled open-practice heat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_practice_round_completes_after_its_one_heat() {
+        // After the single open heat is scheduled + driven to Final, the next FillRound is Complete
+        // (open practice is one heat, ever — no advancement).
+        let round = open_practice_round("op1", &[0, 1]);
+        let meta = meta_with(vec![round], vec![]);
+        let mut log = vec![scheduled(
+            "open-practice",
+            "op1",
+            "open",
+            &["node-0", "node-1"],
+        )];
+        // The schedule above tags a class for the test helper; re-tag without a class is unnecessary
+        // — `finalized_heat_ids` keys on the round, not the class.
+        log.extend(run_heat_events("open-practice", vec![]));
+        let next = fill_round(&meta, &no_timers(), &RoundId("op1".into()), &log).unwrap();
+        assert_eq!(next, FillOutcome::Complete);
+    }
+
+    #[test]
+    fn is_open_practice_recognizes_only_the_open_practice_format_plus_allchannels() {
+        // Both the format name AND AllChannels seeding are required.
+        assert!(is_open_practice(&open_practice_round("op", &[0])));
+        // A normal qual round is not open-practice.
+        assert!(!is_open_practice(&qual_round("q", "open")));
+        // The format name alone (with FromRoster) is not enough.
+        let mut mis = open_practice_round("op", &[0]);
+        mis.seeding = SeedingRule::FromRoster;
+        assert!(!is_open_practice(&mis));
     }
 
     #[test]
