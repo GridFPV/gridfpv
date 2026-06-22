@@ -127,9 +127,43 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 
+  // ── The race clock must FREEZE at Unofficial (the rename-regression fix) ───────────────
+  // The race has ended (only the result isn't finalized yet), so the heat clock stops at the
+  // race-end instant instead of free-running. Read the HUD clock right after the transition, wait,
+  // and assert it has NOT advanced. The persistent header clock (#85) mirrors the same source.
+  const hudClock = page.locator('.hud-clock .gridfpv-race-clock');
+  const headerClock = page.locator('.ctx-clock .gridfpv-race-clock');
+  await expect(hudClock).toBeVisible();
+  // The header clock stays VISIBLE on end too — it no longer vanishes the instant the race closes
+  // (the bug fix #2). Both are independent `useRaceClock` instances, so each must FREEZE on its own.
+  await expect(headerClock).toBeVisible();
+  const frozenHud = await hudClock.textContent();
+  const frozenHeader = await headerClock.textContent();
+  // Both read a near-identical race-end time (they share the phase-driven freeze logic) — within a
+  // few ms, since each captured its Running start independently.
+  const toMs = (t: string | null) => {
+    const m = /(\d+):(\d+)\.(\d+)/.exec(t ?? '');
+    return m ? (+m[1] * 60 + +m[2]) * 1000 + +m[3] : NaN;
+  };
+  expect(Math.abs(toMs(frozenHud) - toMs(frozenHeader))).toBeLessThan(100);
+  await page.waitForTimeout(1500);
+  // The bug: the clock free-ran. The fix: each clock STOPS at its race-end value and does not tick.
+  expect(await hudClock.textContent()).toBe(frozenHud);
+  expect(await headerClock.textContent()).toBe(frozenHeader);
+
+  // Screenshot the frozen clock in Unofficial for the PR.
+  const shots = process.env.GRIDFPV_SHOTS;
+  if (shots) {
+    await page.screenshot({ path: `${shots}/race-clock-frozen-unofficial.png`, fullPage: true });
+  }
+
   // ── Finalize the heat ────────────────────────────────────────────────────────────────
   await page.getByRole('button', { name: 'Finalize', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Final');
+
+  // The clock stays frozen through Final (finalize does not restart it).
+  await page.waitForTimeout(1000);
+  expect(await hudClock.textContent()).toBe(frozenHud);
 
   // ── Revert re-opens the finalized heat, then Finalize locks it back in ────────────────
   await page.getByRole('button', { name: 'Revert', exact: true }).click();
