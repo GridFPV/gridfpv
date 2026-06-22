@@ -1182,3 +1182,123 @@ describe('race Slice 2a: rounds', () => {
     ]);
   });
 });
+
+/**
+ * Race redesign Slice 3a: the **round-driven engine** — `Command::FillRound`. Building the round's
+ * format generator from the eligible classes' membership (the field) and the round's completed heats
+ * read off the log, it schedules the **next** heat tagged with the round (and the class when
+ * single-class). A round whose generator has no more heats is **complete** — a successful ack, not an
+ * error. The Heats UI is Slice 3b; this guards the backend wire only.
+ *
+ * guards:
+ *  - `FillRound` over `POST /events/{id}/control` (RD-gated) acks `{ ok: true }` and the
+ *    round-scheduled heat becomes snapshot-able, tagged with the round + the single class, lineup =
+ *    the class membership.
+ *  - `FillRound` on a round with no membership (empty field) is a well-formed `{ ok: false }`
+ *    (BadRequest), NOT an HTTP error; on an unknown round it is `{ ok: false, UnknownScope }`.
+ */
+describe('race Slice 3a: FillRound (round-driven engine)', () => {
+  /** `POST /events/{id}/control` a command with an optional token → raw status + parsed body. */
+  async function control(
+    eventId: string,
+    command: Command,
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/control`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(command)
+    });
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = undefined;
+    }
+    return { status: res.status, body };
+  }
+
+  /** Create a pilot, returning its id. */
+  async function makePilot(callsign: string): Promise<string> {
+    const res = await fetch(`${director.baseUrl}/pilots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ callsign })
+    });
+    return ((await res.json()) as Pilot).id;
+  }
+
+  /** Select `mgp-open`, set its membership to `pilotIds`, add a 1-round timed_qual; return ids. */
+  async function setupQualRound(
+    eventName: string,
+    pilotIds: string[]
+  ): Promise<{ eventId: string; roundId: string }> {
+    const event = (await createEvent(eventName, TOKEN)).body as EventMeta;
+    await fetch(`${eventRoot(director.baseUrl, event.id)}/classes`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ ids: ['mgp-open'] })
+    });
+    await fetch(`${eventRoot(director.baseUrl, event.id)}/classes/mgp-open/membership`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ pilot_ids: pilotIds })
+    });
+    const created = await fetch(`${eventRoot(director.baseUrl, event.id)}/rounds`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        label: 'Qualifying',
+        classes: ['mgp-open'],
+        format: 'timed_qual',
+        params: { rounds: '1' },
+        win_condition: 'BestLap'
+      })
+    });
+    const round = (await created.json()) as RoundDef;
+    return { eventId: event.id, roundId: round.id };
+  }
+
+  it('FillRound acks ok and the round-scheduled heat is snapshot-able (tagged round + class)', async () => {
+    const a = await makePilot('Fill A');
+    const b = await makePilot('Fill B');
+    const { eventId, roundId } = await setupQualRound('FillRound Event', [a, b]);
+
+    // FillRound draws the field from the class membership and schedules the first heat.
+    const ack = await control(eventId, { FillRound: { round: roundId } }, TOKEN);
+    expect(ack.status).toBe(200);
+    expect(ack.body).toEqual({ ok: true });
+
+    // The class snapshot now resolves (the round-tagged heat folded into the class scope).
+    const classSnap = await fetch(
+      `${eventRoot(director.baseUrl, eventId)}/snapshot/class/${eventId}/mgp-open`
+    );
+    expect(classSnap.status).toBe(200);
+  });
+
+  it('FillRound on an empty-field round → CommandAck{ok:false} (BadRequest), HTTP 200', async () => {
+    // A round whose class has no membership has no field to schedule.
+    const { eventId, roundId } = await setupQualRound('FillRound Empty', []);
+    const ack = await control(eventId, { FillRound: { round: roundId } }, TOKEN);
+    expect(ack.status).toBe(200); // the failure rides in the ack body, not the HTTP status
+    const body = ack.body as { ok: boolean; error?: { code: string } };
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('BadRequest');
+  });
+
+  it('FillRound on an unknown round → CommandAck{ok:false, UnknownScope}', async () => {
+    const event = (await createEvent('FillRound Unknown', TOKEN)).body as EventMeta;
+    const ack = await control(event.id, { FillRound: { round: 'no-such-round' } }, TOKEN);
+    const body = ack.body as { ok: boolean; error?: { code: string } };
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('UnknownScope');
+  });
+
+  it('FillRound is RD-gated — no token → 401', async () => {
+    const { eventId, roundId } = await setupQualRound('FillRound Auth', []);
+    const res = await control(eventId, { FillRound: { round: roundId } });
+    expect(res.status).toBe(401);
+  });
+});
