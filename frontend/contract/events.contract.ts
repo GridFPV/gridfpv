@@ -82,6 +82,23 @@ async function createEvent(
   return { status: res.status, body };
 }
 
+/** `DELETE /events/{id}` with an optional bearer token → the raw status + parsed body. */
+async function deleteEvent(id: string, token?: string): Promise<{ status: number; body: unknown }> {
+  const headers: Record<string, string> = {};
+  if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${director.baseUrl}/events/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers
+  });
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    body = undefined;
+  }
+  return { status: res.status, body };
+}
+
 describe('seam 9: events lifecycle API', () => {
   it('GET /events lists the built-in Practice event first (in-memory, non-persistent)', async () => {
     const events = await listEvents();
@@ -145,6 +162,49 @@ describe('seam 9: events lifecycle API', () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as { code?: string };
     expect(body.code).toBe('UnknownScope');
+  });
+
+  it('DELETE /events/{id} permanently removes a created event and ALL its data', async () => {
+    // Create an event, give it a fact (a scheduled heat), then delete it.
+    const created = (await createEvent('Doomed Event', TOKEN)).body as EventMeta;
+    const scheduled = await fetch(`${eventRoot(director.baseUrl, created.id)}/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ ScheduleHeat: { heat: 'd-1', lineup: ['A'] } } as Command)
+    });
+    expect(scheduled.status).toBe(200);
+
+    // The delete is RD-gated and a 200 with no error body.
+    const del = await deleteEvent(created.id, TOKEN);
+    expect(del.status).toBe(200);
+
+    // It is gone from the listing, and every per-event surface 404s (the data is gone too).
+    const ids = (await listEvents()).map((e) => e.id);
+    expect(ids).not.toContain(created.id);
+    const snap = await fetch(`${eventRoot(director.baseUrl, created.id)}/snapshot/event/x`);
+    expect(snap.status).toBe(404);
+    const heat = await fetch(`${eventRoot(director.baseUrl, created.id)}/snapshot/heat/d-1`);
+    expect(heat.status).toBe(404);
+  });
+
+  it('DELETE /events/{id} is RD-gated, rejects Practice (400), and unknown ids (404)', async () => {
+    // Create a fresh event to attempt an unauthenticated delete against (it must survive).
+    const created = (await createEvent('Gated Delete', TOKEN)).body as EventMeta;
+    expect((await deleteEvent(created.id)).status).toBe(401);
+    expect((await deleteEvent(created.id, 'not-a-real-token')).status).toBe(401);
+    // Still present after the rejected deletes.
+    expect((await listEvents()).map((e) => e.id)).toContain(created.id);
+
+    // The built-in Practice cannot be deleted → a typed BadRequest (400).
+    const practice = await deleteEvent('practice', TOKEN);
+    expect(practice.status).toBe(400);
+    expect((practice.body as { code?: string }).code).toBe('BadRequest');
+    expect((await listEvents())[0].id).toBe('practice');
+
+    // An unknown id → a typed 404 (UnknownScope).
+    const unknown = await deleteEvent('no-such-event', TOKEN);
+    expect(unknown.status).toBe(404);
+    expect((unknown.body as { code?: string }).code).toBe('UnknownScope');
   });
 });
 

@@ -265,6 +265,31 @@ export async function createEvent(
 }
 
 /**
+ * **Permanently delete** an event and ALL of its data (`DELETE /events/{id}`) — the papercut fix.
+ * RD-gated like {@link createEvent} (full-trust by default: an open Director accepts it tokenless;
+ * a gated one answers **401/403** and the caller obtains a token and retries). The delete is total
+ * and irreversible server-side: the event's registry entry, its persisted state, and the active
+ * pointer if it pointed here are all removed. The built-in **Practice** event cannot be deleted
+ * (the Director answers **400**); an unknown id is a **404**. Resolves on a 2xx, or rejects with an
+ * `Error` whose message carries the HTTP status (so the caller can branch on 401/403/400/404).
+ */
+export async function deleteEvent(
+  baseUrl: string,
+  id: EventId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers
+  });
+  if (!resp.ok) throw new Error(`DELETE /events/${id} failed: HTTP ${resp.status}`);
+}
+
+/**
  * Read the Director's **active event** (`GET /active-event`) — issue #90. The active event is
  * Director (server-side) state: there is exactly one Race Director on one event, so every client
  * resolves this on connect/reload to resume into the selected event (the returned `event` is its

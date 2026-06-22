@@ -40,6 +40,7 @@ import {
   connect,
   listEvents,
   createEvent,
+  deleteEvent,
   getActiveEvent,
   setActiveEvent,
   listTimers,
@@ -241,6 +242,7 @@ export class Session {
   #controlFactory: typeof createControlClient;
   #listEventsImpl: typeof listEvents;
   #createEventImpl: typeof createEvent;
+  #deleteEventImpl: typeof deleteEvent;
   #getActiveEventImpl: typeof getActiveEvent;
   #setActiveEventImpl: typeof setActiveEvent;
   #listTimersImpl: typeof listTimers;
@@ -277,6 +279,7 @@ export class Session {
     controlFactory?: typeof createControlClient;
     listEventsImpl?: typeof listEvents;
     createEventImpl?: typeof createEvent;
+    deleteEventImpl?: typeof deleteEvent;
     getActiveEventImpl?: typeof getActiveEvent;
     setActiveEventImpl?: typeof setActiveEvent;
     listTimersImpl?: typeof listTimers;
@@ -314,6 +317,7 @@ export class Session {
     this.#controlFactory = opts?.controlFactory ?? createControlClient;
     this.#listEventsImpl = opts?.listEventsImpl ?? listEvents;
     this.#createEventImpl = opts?.createEventImpl ?? createEvent;
+    this.#deleteEventImpl = opts?.deleteEventImpl ?? deleteEvent;
     this.#getActiveEventImpl = opts?.getActiveEventImpl ?? getActiveEvent;
     this.#setActiveEventImpl = opts?.setActiveEventImpl ?? setActiveEvent;
     this.#listTimersImpl = opts?.listTimersImpl ?? listTimers;
@@ -936,6 +940,31 @@ export class Session {
     }
     this.selectEvent(meta);
     return meta;
+  }
+
+  /**
+   * **Permanently delete** an event and all of its data (`DELETE /events/{id}`) — the papercut
+   * fix. Called from the Events page only after the RD confirms an unmissable, irreversible
+   * warning dialog. RD-gated, full-trust first (like {@link chooseEvent}): the delete is
+   * attempted with whatever token is held; only if a gated Director answers **401/403** does the
+   * lazy prompt fire once and the delete retry.
+   *
+   * If the deleted event is the one this console is currently inside, the local seams are torn
+   * down ({@link leaveEvent}) so the workspace doesn't dangle on a now-gone event. Resolves to
+   * `true` once the delete succeeds, `undefined` if a gated Director's token prompt was cancelled,
+   * or throws on any other failure (Practice is a **400**, an unknown id a **404**).
+   */
+  async deleteEvent(id: EventMeta['id']): Promise<true | undefined> {
+    try {
+      await this.#deleteEventImpl(this.baseUrl, id, this.#token);
+    } catch (e) {
+      if (this.#token || !isAuthFailure(e)) throw e;
+      if (!(await this.#promptForToken())) return undefined;
+      await this.#deleteEventImpl(this.baseUrl, id, this.#token);
+    }
+    // If we were inside the just-deleted event, leave it so the workspace doesn't dangle.
+    if (this.currentEvent?.id === id) this.leaveEvent();
+    return true as const;
   }
 
   /**

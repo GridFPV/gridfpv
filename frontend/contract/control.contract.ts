@@ -93,16 +93,33 @@ describe('seam 5: control command shape + headers', () => {
     expect(voidHeat.ok).toBe(true);
   });
 
-  it('a missing Content-Type is rejected (the Json extractor refuses it)', async () => {
-    const { status } = await postControl(
+  it('a missing Content-Type → a JSON ProtocolError(BadRequest), not a bare-text 4xx', async () => {
+    const { status, body } = await postControl(
       director.baseUrl,
       { ScheduleHeat: { heat: 'h-noct', lineup: [] } },
       { token: TOKEN, contentType: false }
     );
-    // axum's `Json` extractor requires `application/json`; without it the request is rejected
-    // (HTTP 4xx — 415 Unsupported Media Type in practice), NOT silently accepted.
-    expect(status).toBeGreaterThanOrEqual(400);
-    expect(status).toBeLessThan(500);
+    // The control endpoint now answers the uniform `ProtocolError` JSON shape every other API
+    // surface uses (the papercut fix) — a typed `BadRequest` (HTTP 400) with a message — instead
+    // of axum's bare-text rejection a client can't parse.
+    expect(status).toBe(400);
+    const err = body as { code?: string; message?: string };
+    expect(err.code).toBe('BadRequest');
+    expect(typeof err.message).toBe('string');
+    expect(err.message && err.message.length).toBeGreaterThan(0);
+  });
+
+  it('a malformed JSON body (with the right Content-Type) → a JSON ProtocolError(BadRequest)', async () => {
+    // Even with `Content-Type: application/json`, an unparseable body is the same uniform typed
+    // error — not a bare-text 4xx. Posted raw so the body really is invalid JSON.
+    const res = await fetch(`${eventRoot(director.baseUrl)}/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: '{ not valid json'
+    });
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as { code?: string };
+    expect(err.code).toBe('BadRequest');
   });
 
   it('an illegal transition → CommandAck{ok:false, error: ProtocolError(BadRequest)}, HTTP 200', async () => {

@@ -199,6 +199,24 @@ impl RotorHazardConnection {
         )
     }
 
+    /// Set RotorHazard's **minimum lap time** (general setting `MIN_LAP_TIME`, in **seconds**) —
+    /// a driving helper so the sim/test harness does not trip RH's "Pass record under lap
+    /// minimum" filter.
+    ///
+    /// RotorHazard defaults `MIN_LAP_TIME` to **10s** and logs `Pass record under lap minimum (10)`
+    /// for any crossing closer than that to the previous one — which the test harness's rapid
+    /// `simulate_lap` injections (and short-lap sim CSVs) routinely are, so RH spams the warning.
+    /// Emitting RotorHazard's `set_option` handler with `{ option: "MIN_LAP_TIME", value: "<sec>" }`
+    /// persists the setting server-side; passing `0` disables the minimum entirely so every
+    /// short sim lap records cleanly. Best-effort (a failed emit on a dropped socket is the
+    /// caller's to log); intended for the disposable test RH only, never a production timer.
+    pub fn set_min_lap_time(&self, seconds: u64) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "set_option",
+            json!({ "option": "MIN_LAP_TIME", "value": seconds.to_string() }),
+        )
+    }
+
     /// Stop the current race — driving helper for tests.
     pub fn stop_race(&self) -> Result<(), rust_socketio::Error> {
         self.client.emit("stop_race", Payload::Text(vec![]))

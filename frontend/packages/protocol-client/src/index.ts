@@ -16,6 +16,7 @@ export {
   connect,
   listEvents,
   createEvent,
+  deleteEvent,
   getActiveEvent,
   setActiveEvent,
   listTimers,

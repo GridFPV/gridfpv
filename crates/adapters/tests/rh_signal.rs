@@ -95,6 +95,11 @@ fn emulated_signal_multi_node_race() {
     let mut events: Vec<Event> = Vec::new();
     std::thread::sleep(Duration::from_secs(2));
 
+    // Disable RH's lap minimum for the sim: the mock CSVs drive short laps that would otherwise
+    // trip RH's 10s default `MIN_LAP_TIME` ("Pass record under lap minimum (10)"). `0` lets every
+    // emulated-signal crossing record cleanly.
+    conn.set_min_lap_time(0).ok();
+
     // Clean state, then start a race; the mock CSVs drive the laps (no simulate_lap).
     conn.stop_race().ok();
     conn.discard_laps().expect("discard_laps");

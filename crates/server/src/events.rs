@@ -1262,6 +1262,56 @@ impl EventRegistry {
         Ok(meta)
     }
 
+    /// **Permanently delete** an event and all of its data (the headline papercut fix).
+    ///
+    /// Removes the registry entry, deletes the event's on-disk state (its `<id>.sqlite` log plus
+    /// the WAL/SHM sidecars under the data dir), and — if it was the Director's active event —
+    /// clears the active pointer (persisting the cleared pointer so the picker is shown after a
+    /// restart). The deletion is complete: nothing of the event survives a restart (the boot scan
+    /// finds no `<id>.sqlite` to restore).
+    ///
+    /// The built-in **Practice** event ([`PRACTICE_EVENT_ID`]) cannot be deleted — it is the
+    /// always-present in-memory scratch event — so an attempt is a [`RegistryError`] the caller
+    /// maps to a `BadRequest`. An unknown id is a [`RegistryError`] the caller maps to a typed 404.
+    ///
+    /// The on-disk file removal is best-effort *after* the in-memory drop: dropping the
+    /// [`RegisteredEvent`] closes the live SQLite connection (its `AppState` is the only holder),
+    /// so the files are then free to unlink. A missing file is not an error (idempotent cleanup);
+    /// a genuine unlink failure is surfaced as a [`RegistryError`] so the caller can report it.
+    pub fn delete(&self, id: &EventId) -> Result<(), RegistryError> {
+        let mut reg = self.write();
+
+        if id.0 == PRACTICE_EVENT_ID {
+            return Err(RegistryError(
+                "the built-in Practice event cannot be deleted".to_string(),
+            ));
+        }
+        // Drop the in-memory entry first; this closes the event's own SQLite connection (its
+        // `AppState` is the sole holder) so the on-disk files are unlocked for removal below.
+        let removed = reg.events.remove(id);
+        if removed.is_none() {
+            return Err(RegistryError(format!("no event with id {:?}", id.0)));
+        }
+        drop(removed);
+
+        // If it was the active event, clear the pointer (and persist the cleared state) so a
+        // reload/restart lands on the picker rather than dangling at a now-gone event.
+        if reg.active_event.as_ref() == Some(id) {
+            reg.active_event = None;
+            if let Some(dir) = reg.data_dir.clone() {
+                // Best-effort: removing the pointer file degrades a stale read to `None` anyway.
+                let _ = std::fs::remove_file(active_event_path(&dir));
+            }
+        }
+
+        // Permanently remove the event's persisted state: the `<id>.sqlite` log plus its WAL/SHM
+        // sidecars. A missing file is fine (idempotent); a real unlink error is reported.
+        if let Some(dir) = reg.data_dir.clone() {
+            remove_event_files(&dir, id)?;
+        }
+        Ok(())
+    }
+
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Registry> {
         self.inner.read().expect("event registry lock poisoned")
     }
@@ -1274,6 +1324,31 @@ impl EventRegistry {
 /// The SQLite file an event's log lives in under `dir`: `<dir>/<id>.sqlite`.
 fn event_db_path(dir: &Path, id: &EventId) -> PathBuf {
     dir.join(format!("{}{}", id.0, EVENT_DB_SUFFIX))
+}
+
+/// Permanently remove an event's on-disk state under `dir`: its `<id>.sqlite` log and the
+/// WAL/SHM sidecars SQLite leaves alongside it in WAL journal mode (`<id>.sqlite-wal`,
+/// `<id>.sqlite-shm`). Each removal is best-effort against a *missing* file (already gone is
+/// success — the cleanup is idempotent), but a genuine unlink failure (e.g. a permission error)
+/// on the main log file is surfaced as a [`RegistryError`] so a partial delete is not silent.
+fn remove_event_files(dir: &Path, id: &EventId) -> Result<(), RegistryError> {
+    let main = event_db_path(dir, id);
+    // The WAL/SHM sidecars share the main path with a suffix appended to the full file name.
+    let wal = dir.join(format!("{}{}-wal", id.0, EVENT_DB_SUFFIX));
+    let shm = dir.join(format!("{}{}-shm", id.0, EVENT_DB_SUFFIX));
+    // Sidecars are pure cache/journal — a removal failure there is not fatal (SQLite recreates
+    // them), so they are unlinked best-effort. The main log file is the durable state; a real
+    // failure to remove it (not just "already absent") is reported.
+    let _ = std::fs::remove_file(&wal);
+    let _ = std::fs::remove_file(&shm);
+    match std::fs::remove_file(&main) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(RegistryError(format!(
+            "could not delete event log {}: {e}",
+            main.display()
+        ))),
+    }
 }
 
 /// Persist an event's [`EventMeta`] into its own SQLite file's sidecar `meta` table (issue
@@ -1785,6 +1860,81 @@ mod tests {
         assert_eq!(reopened.active().map(|m| m.id), Some(created_id));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_removes_the_event_and_all_its_data_and_survives_restart() {
+        // The headline papercut: deleting an event must remove the registry entry, its persisted
+        // SQLite log (+ wal/shm), clear it as the active event, and stay gone after a restart.
+        let dir = std::env::temp_dir().join(format!("gridfpv-delete-test-{}", short_suffix()));
+        let created_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Doomed Event")).unwrap();
+            created_id = created.id.clone();
+            // Give it a log fact and make it the active event so deletion must clear that too.
+            reg.set_active(&created.id).unwrap();
+            reg.resolve(&created.id)
+                .unwrap()
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("q-1".into()),
+                        lineup: vec![CompetitorRef("A".into())],
+                        class: None,
+                        round: None,
+                        frequencies: vec![],
+                    },
+                    None,
+                )
+                .unwrap();
+
+            // The SQLite file exists on disk before the delete.
+            let db = event_db_path(&dir, &created_id);
+            assert!(
+                db.exists(),
+                "the event's SQLite file should exist pre-delete"
+            );
+
+            // Delete it.
+            reg.delete(&created_id).unwrap();
+
+            // Gone from the registry, from the list, and as the active event.
+            assert!(reg.resolve(&created_id).is_none());
+            assert!(!reg.list().iter().any(|m| m.id == created_id));
+            assert!(
+                reg.active().is_none(),
+                "deleting the active event clears it"
+            );
+
+            // And the on-disk state is gone (no orphan log / wal / shm files).
+            assert!(!db.exists(), "the event's SQLite file is removed");
+            assert!(!dir.join(format!("{}.sqlite-wal", created_id.0)).exists());
+            assert!(!dir.join(format!("{}.sqlite-shm", created_id.0)).exists());
+        }
+
+        // Survives a restart: a fresh registry over the same data dir does not re-list it.
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        assert!(
+            reopened.resolve(&created_id).is_none(),
+            "a deleted event must not reappear after a restart"
+        );
+        assert!(reopened.active().is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_rejects_practice_and_an_unknown_event() {
+        let reg = EventRegistry::new(None).unwrap();
+        // Practice (the built-in in-memory event) cannot be deleted.
+        let practice = EventId(PRACTICE_EVENT_ID.into());
+        assert!(reg.delete(&practice).is_err());
+        assert!(
+            reg.resolve(&practice).is_some(),
+            "Practice survives a delete attempt"
+        );
+        // An unknown id is an error and removes nothing.
+        assert!(reg.delete(&EventId("no-such-event".into())).is_err());
     }
 
     #[test]
