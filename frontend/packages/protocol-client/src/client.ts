@@ -23,6 +23,7 @@ import type {
   ChannelCatalogEntry,
   Class,
   ClassId,
+  ClassStandings,
   CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
@@ -36,6 +37,7 @@ import type {
   PilotId,
   ProjectionBody,
   ProtocolError,
+  RankEntry,
   RoundDef,
   RoundId,
   Scope,
@@ -941,6 +943,59 @@ export async function listHeats(
   const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/heats`, { headers });
   if (!resp.ok) throw new Error(`GET /events/${eventId}/heats failed: HTTP ${resp.status}`);
   return (await resp.json()) as HeatSummary[];
+}
+
+/**
+ * Read a round's **ranking** (`GET /events/{id}/rounds/{round}/ranking`) — race redesign Slice 5/6a.
+ * A read (open, no token): the ordered per-pilot {@link RankEntry} list the engine seeds
+ * `FromRanking` from — the same provisional-or-final ordering a bracket carries — for the
+ * bracket-carry display. Resolves the ranking (best first), or rejects on a non-2xx / transport
+ * failure; an unknown event or round is a 404, an unscorable round a 400.
+ */
+export async function roundRanking(
+  baseUrl: string,
+  eventId: EventId,
+  roundId: RoundId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<RankEntry[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/ranking`,
+    { headers }
+  );
+  if (!resp.ok)
+    throw new Error(`GET /events/${eventId}/rounds/${roundId}/ranking failed: HTTP ${resp.status}`);
+  return (await resp.json()) as RankEntry[];
+}
+
+/**
+ * Read a class's **standings** (`GET /events/{id}/classes/{class}/standings`) — race redesign
+ * Slice 5/6a. A read (open, no token): the season-join {@link ClassStandings} the Results UI reads —
+ * one per-pilot row per competitor that raced the class, aggregated across the class's rounds
+ * (points, best lap, total laps), best standing first. Resolves the standings, or rejects on a
+ * non-2xx / transport failure; an unknown event is a 404, an unscorable class round a 400. A class
+ * with no rounds resolves to empty standings.
+ */
+export async function classStandings(
+  baseUrl: string,
+  eventId: EventId,
+  classId: ClassId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<ClassStandings> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/standings`,
+    { headers }
+  );
+  if (!resp.ok)
+    throw new Error(
+      `GET /events/${eventId}/classes/${classId}/standings failed: HTTP ${resp.status}`
+    );
+  return (await resp.json()) as ClassStandings;
 }
 
 /**

@@ -35,6 +35,8 @@ export type * from '@bindings/Class';
 export type * from '@bindings/ClassId';
 export type * from '@bindings/ClassMembership';
 export type * from '@bindings/ClassSource';
+export type * from '@bindings/ClassStanding';
+export type * from '@bindings/ClassStandings';
 export type * from '@bindings/Command';
 export type * from '@bindings/CommandAck';
 export type * from '@bindings/CompetitorKey';
