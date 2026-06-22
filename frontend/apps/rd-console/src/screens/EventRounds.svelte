@@ -21,6 +21,7 @@
    */
   import { Button, Card, Field, Input, Select, toast } from '@gridfpv/components';
   import type {
+    ChannelCatalogEntry,
     Class,
     ClassId,
     CompetitorRef,
@@ -34,6 +35,7 @@
     SeedingRule,
     WinCondition
   } from '@gridfpv/types';
+  import { channelLabel } from '../lib/channels.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -42,6 +44,10 @@
   // engine's `FormatRegistry::standard()`, via `GET /formats`). Both are open reads, loaded once.
   let classes = $state<Class[]>([]);
   let formats = $state<string[]>([]);
+  // The standard channel catalog (race redesign Slice 4b): resolves a heat's assigned raw-MHz
+  // frequency back to a band+channel label. An open read, loaded once; an empty catalog degrades
+  // labels to raw "5800 MHz".
+  let catalog = $state<ChannelCatalogEntry[]>([]);
 
   // The event's rounds, read straight off `currentEvent` (the session re-homes it after each write
   // so this stays live). Display order is definition order.
@@ -68,6 +74,10 @@
       .listPilots()
       .then((list) => (pilots = list))
       .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
+    session
+      .listChannels()
+      .then((list) => (catalog = list))
+      .catch(() => (catalog = []));
   });
 
   // --- The Heats half of the stage (race redesign Slice 3b) --------------------------------------
@@ -101,6 +111,15 @@
   const callsign = (ref: CompetitorRef): string => pilotByRef.get(ref)?.callsign ?? ref;
 
   const heatsByRound = (id: RoundId): HeatSummary[] => heats.filter((h) => h.round === id);
+
+  // A heat's per-pilot channel assignment, resolved to a band+channel label (race redesign Slice
+  // 4b). `HeatScheduled.frequencies` pairs each ref with a raw MHz; map ref → label so the lineup
+  // can show it. A sim/free-text heat carries no frequencies, so a ref resolves to `undefined` ("—").
+  function channelByRef(h: HeatSummary): Map<CompetitorRef, string> {
+    const map = new Map<CompetitorRef, string>();
+    for (const [ref, mhz] of h.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
+    return map;
+  }
 
   function statusLabel(h: HeatSummary): string {
     if (h.phase === 'Scored') return 'Scored';
@@ -649,6 +668,7 @@
             {:else}
               <ol class="heat-list">
                 {#each heatsByRound(round.id) as h (h.heat)}
+                  {@const channels = channelByRef(h)}
                   <li class="heat-row" class:current={h.is_current}>
                     <div class="heat-main">
                       <div class="heat-head">
@@ -659,9 +679,11 @@
                       <div class="lineup">
                         {#each h.lineup as ref, i (ref)}
                           <span class="lineup-pilot">
-                            <span class="lineup-num" aria-hidden="true">{i + 1}</span>{callsign(
-                              ref
-                            )}
+                            <span class="lineup-num" aria-hidden="true">{i + 1}</span>
+                            <span class="lineup-call">{callsign(ref)}</span>
+                            <span class="lineup-chan" class:none={!channels.get(ref)}>
+                              {channels.get(ref) ?? '—'}
+                            </span>
                           </span>
                         {/each}
                         {#if h.lineup.length === 0}<span class="lineup-empty">— no pilots —</span
@@ -1008,6 +1030,21 @@
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-xs);
     font-variant-numeric: tabular-nums;
+  }
+  .lineup-call {
+    font-weight: var(--gf-font-weight-medium);
+  }
+  .lineup-chan {
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-accent);
+    font-variant-numeric: tabular-nums;
+    padding-left: var(--gf-space-1);
+    border-left: 1px solid var(--gf-border-subtle);
+  }
+  .lineup-chan.none {
+    color: var(--gf-text-faint);
+    font-weight: var(--gf-font-weight-regular);
   }
   .lineup-empty {
     font-size: var(--gf-font-size-sm);

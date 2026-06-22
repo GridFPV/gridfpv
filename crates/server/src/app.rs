@@ -88,6 +88,7 @@ use serde::Deserialize;
 use tokio::sync::Notify;
 
 use crate::auth::{JoinTokenResponse, TokenStore};
+use crate::channels::ChannelCatalogEntry;
 use crate::classes::{Class, ClassError, ClassErrorKind, CreateClassRequest, UpdateClassRequest};
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
@@ -319,6 +320,11 @@ pub fn router(registry: EventRegistry) -> Router {
         // Rounds UI's format dropdown reads, straight from [`FormatRegistry::standard`]. An open
         // read (no token) — it is static configuration, not event state.
         .route("/formats", get(list_formats))
+        // The standard **FPV channel catalog** (race redesign Slice 4b): the shared band/channel ↔
+        // raw-MHz vocabulary the Channels UI offers (a timer's available-channels picker) and reads
+        // back to label a heat's assigned frequencies. An open read (no token) — static, compiled-in
+        // configuration like `/formats`, not per-event state.
+        .route("/channels", get(list_channels))
         // Per-event class **selection** (issue #84): RD-gated; each id must name a known directory
         // class. Set the whole selection wholesale (mirrors the timer selection).
         .route("/events/{event_id}/classes", put(set_event_classes))
@@ -746,6 +752,16 @@ async fn list_formats() -> Json<Vec<String>> {
         .map(String::from)
         .collect();
     Json(formats)
+}
+
+/// `GET /channels` — the standard **FPV channel catalog** (race redesign Slice 4b).
+///
+/// The shared band/channel ↔ raw-MHz vocabulary the Channels UI reads: it offers these
+/// human-readable labels when a Race Director picks a Flexible timer's available channels, and
+/// resolves a heat's assigned raw frequency back to a band+channel label. An open read (no token) —
+/// static, compiled-in configuration straight from [`crate::channels::catalog`], not event state.
+async fn list_channels() -> Json<Vec<ChannelCatalogEntry>> {
+    Json(crate::channels::catalog())
 }
 
 /// `POST /classes` — create a class from a [`CreateClassRequest`], RD-gated (issue #84).

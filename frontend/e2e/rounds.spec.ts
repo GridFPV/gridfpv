@@ -223,3 +223,124 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
 });
+
+/**
+ * The **Channels** UI (race redesign Slice 4b) — the deliverable proof for the channel config +
+ * per-heat channel labels.
+ *
+ * A real click-through: open the **Timers** page, edit the built-in **Mock** timer's channel config
+ * (Flexible: pick a couple of catalog channels + add a **custom raw-MHz** entry, set the node
+ * count), and save. Then set up a class + two members + a round over the real write paths, fill a
+ * heat, and assert each pilot's lineup row shows a resolved **channel label** (a band+channel from
+ * the catalog) — the assignment the primary (Mock) timer's available channels drive. Nothing mocked.
+ */
+test('RD configures a timer’s channels and a filled heat shows channel labels', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  const SUFFIX = Date.now();
+  const ACE = `E2E-Chan-Ace-${SUFFIX}`;
+  const BEE = `E2E-Chan-Bee-${SUFFIX}`;
+  const ROUND_LABEL = `E2E-ChanRound-${SUFFIX}`;
+
+  await page.goto('/');
+  await enterPractice(page);
+
+  // ── Timers tab → edit the built-in Mock's channel config (Flexible + custom MHz + node count) ──
+  await openTab(page, 'Timers');
+  const mockRow = page
+    .getByRole('list', { name: 'Configured timers' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Mock' })
+    .first();
+  await expect(mockRow).toBeVisible({ timeout: 15_000 });
+  await mockRow.getByRole('button', { name: 'Edit' }).click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  // Flexible capability, a 4-node cap, two catalog channels + one custom raw-MHz entry.
+  await dialog.getByLabel('Channel capability').selectOption('Flexible');
+  await dialog.getByLabel('Node count').fill('4');
+  await dialog.getByLabel('Raceband R1, 5658 MHz').check();
+  await dialog.getByLabel('Raceband R2, 5695 MHz').check();
+  // A truly non-catalog frequency, so it lands as a custom chip (not a catalog checkbox).
+  const custom = dialog.getByLabel('Custom channel MHz');
+  await custom.fill('5670');
+  await dialog.getByRole('button', { name: 'Add' }).click();
+  await expect(dialog.getByText('5670 MHz')).toBeVisible();
+  if (process.env.GRIDFPV_SHOTS)
+    await dialog.screenshot({ path: `${process.env.GRIDFPV_SHOTS}/timer-channel-config.png` });
+  await dialog.getByRole('button', { name: 'Save changes' }).click();
+  await expect(page.getByRole('dialog')).toBeHidden({ timeout: 15_000 });
+
+  // ── Set up a class + two members + a round over the real write paths ──────────────────────────
+  const classes = (await (await page.request.get(`${base}/classes`)).json()) as Array<{
+    id: string;
+    name: string;
+  }>;
+  const classId = classes.find((c) => c.name === 'Open Class')!.id;
+  const mkPilot = async (callsign: string) => {
+    const p = (await (
+      await page.request.post(`${base}/pilots`, { ...json, data: { callsign } })
+    ).json()) as { id: string };
+    return p.id;
+  };
+  const aceId = await mkPilot(ACE);
+  const beeId = await mkPilot(BEE);
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [classId] } });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [aceId, beeId] } });
+  await page.request.put(`${ev}/classes/${classId}/membership`, {
+    ...json,
+    data: { pilot_ids: [aceId, beeId] }
+  });
+  const round = (await (
+    await page.request.post(`${ev}/rounds`, {
+      ...json,
+      data: {
+        label: ROUND_LABEL,
+        classes: [classId],
+        format: 'timed_qual',
+        params: {},
+        win_condition: 'BestLap',
+        seeding: 'FromRoster'
+      }
+    })
+  ).json()) as { id: string };
+
+  // ── Into the Heats UI → fill a heat and assert each pilot shows a resolved channel label ───────
+  await page.goto('/');
+  await enterPractice(page);
+  await openTab(page, 'Rounds & Heats');
+  const heatRound = page.getByRole('region', { name: `Heats for ${ROUND_LABEL}` });
+  await expect(heatRound).toBeVisible({ timeout: 15_000 });
+  await heatRound.getByRole('button', { name: 'Fill next heat' }).click();
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+  const filledRow = heatRound.locator('.heat-row').first();
+  await expect(filledRow).toBeVisible({ timeout: 15_000 });
+  // The two pilots are assigned the first two available channels (Raceband R1, R2) and the lineup
+  // shows their band+channel labels — the per-heat channel display resolving the raw MHz.
+  await expect(filledRow.locator('.lineup-chan').filter({ hasText: 'Raceband R1' })).toBeVisible();
+  await expect(filledRow.locator('.lineup-chan').filter({ hasText: 'Raceband R2' })).toBeVisible();
+  if (process.env.GRIDFPV_SHOTS)
+    await heatRound.screenshot({ path: `${process.env.GRIDFPV_SHOTS}/heat-channel-labels.png` });
+
+  // ── Clean up: round, membership, roster, class selection, and reset the Mock's channels. ──────
+  await page.request.delete(`${ev}/rounds/${round.id}`);
+  await page.request.put(`${ev}/classes/${classId}/membership`, {
+    ...json,
+    data: { pilot_ids: [] }
+  });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
+  await page.request.put(`${base}/timers/mock`, {
+    ...json,
+    data: {
+      channel_capability: 'Flexible',
+      node_count: 8,
+      available_channels: [5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917]
+    }
+  });
+});

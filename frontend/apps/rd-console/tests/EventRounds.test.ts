@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
-import type { Class, EventMeta, HeatSummary, Pilot, RoundDef } from '@gridfpv/types';
+import type {
+  ChannelCatalogEntry,
+  Class,
+  EventMeta,
+  HeatSummary,
+  Pilot,
+  RoundDef
+} from '@gridfpv/types';
 import EventRounds from '../src/screens/EventRounds.svelte';
 import { makeTestSession } from './support.js';
 
@@ -34,6 +41,11 @@ const EVENT: EventMeta = {
 };
 
 const FORMATS = ['double_elim', 'multi_main', 'round_robin', 'single_elim', 'timed_qual', 'zippyq'];
+
+const CATALOG: ChannelCatalogEntry[] = [
+  { band: 'Raceband', channel: 'R1', mhz: 5658 },
+  { band: 'Fatshark', channel: 'F4', mhz: 5800 }
+];
 
 function baseImpls() {
   return {
@@ -210,6 +222,55 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     expect(within(heatRow).getByText('Bolt')).toBeInTheDocument();
     expect(within(heatRow).getByText('Running')).toBeInTheDocument();
     expect(within(heatRow).getByText('Current')).toBeInTheDocument();
+  });
+
+  it("renders each pilot's assigned channel as a band+channel label, custom MHz, or — (Slice 4b)", async () => {
+    const heat: HeatSummary = {
+      heat: 'q-1',
+      lineup: ['p1', 'p2'],
+      class: 'c1',
+      round: 'r1',
+      // p1 → a catalog channel (Raceband R1); p2 → a custom raw MHz with no catalog entry.
+      frequencies: [
+        ['p1', 5658],
+        ['p2', 5685]
+      ],
+      phase: 'Scheduled',
+      is_current: false
+    };
+    const { session } = makeTestSession({
+      ...heatsImpls([heat]),
+      listChannelsImpl: vi.fn(async () => CATALOG),
+      event: EVENT_WITH_MEMBERS
+    });
+    render(EventRounds, { session });
+
+    const heatRow = (await screen.findByText('q-1')).closest('.heat-row') as HTMLElement;
+    // The catalog frequency resolves to its band+channel; the custom one falls back to raw MHz.
+    await waitFor(() => expect(within(heatRow).getByText('Raceband R1')).toBeInTheDocument());
+    expect(within(heatRow).getByText('5685 MHz')).toBeInTheDocument();
+  });
+
+  it('shows — for a sim/free-text heat that carries no frequencies (Slice 4b)', async () => {
+    const heat: HeatSummary = {
+      heat: 'q-2',
+      lineup: ['p1', 'p2'],
+      class: 'c1',
+      round: 'r1',
+      phase: 'Scheduled',
+      is_current: false
+    };
+    const { session } = makeTestSession({
+      ...heatsImpls([heat]),
+      listChannelsImpl: vi.fn(async () => CATALOG),
+      event: EVENT_WITH_MEMBERS
+    });
+    render(EventRounds, { session });
+
+    const heatRow = (await screen.findByText('q-2')).closest('.heat-row') as HTMLElement;
+    // Both pilots show the dash (no channel assigned).
+    const dashes = within(heatRow).getAllByText('—');
+    expect(dashes.length).toBe(2);
   });
 
   it('fills a round via FillRound and re-reads the heats list', async () => {
