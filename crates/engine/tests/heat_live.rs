@@ -75,7 +75,7 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
             HeatTransition::Armed,
             HeatTransition::Running,
             HeatTransition::Finished,
-            HeatTransition::Scored,
+            HeatTransition::Finalized,
         ],
         "the recorded transitions must be the forward heat loop, in order"
     );

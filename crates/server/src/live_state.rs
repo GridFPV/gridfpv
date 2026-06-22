@@ -197,7 +197,7 @@ fn phase_of(state: HeatState) -> HeatPhase {
         HeatState::Staged => HeatPhase::Staged,
         HeatState::Armed => HeatPhase::Armed,
         HeatState::Running => HeatPhase::Running,
-        HeatState::Finished => HeatPhase::Finished,
+        HeatState::Unofficial => HeatPhase::Unofficial,
         HeatState::Final => HeatPhase::Final,
     }
 }
@@ -459,13 +459,13 @@ mod tests {
 
     #[test]
     fn phase_tracks_the_heat_loop_through_final() {
-        // Scheduled → Staged → Armed → Running → Finished → Final.
+        // Scheduled → Staged → Armed → Running → Unofficial → Final.
         let steps = [
             (HeatTransition::Staged, HeatPhase::Staged),
             (HeatTransition::Armed, HeatPhase::Armed),
             (HeatTransition::Running, HeatPhase::Running),
-            (HeatTransition::Finished, HeatPhase::Finished),
-            (HeatTransition::Scored, HeatPhase::Final),
+            (HeatTransition::Finished, HeatPhase::Unofficial),
+            (HeatTransition::Finalized, HeatPhase::Final),
         ];
         let mut events = vec![scheduled("q-1", &["A", "B"])];
         assert_eq!(live_state(&events).phase, HeatPhase::Scheduled);
@@ -542,7 +542,7 @@ mod tests {
             changed("q-1", HeatTransition::Armed),
             changed("q-1", HeatTransition::Running),
             changed("q-1", HeatTransition::Finished),
-            changed("q-1", HeatTransition::Scored),
+            changed("q-1", HeatTransition::Finalized),
             scheduled("q-2", &["C", "D"]),
         ];
         let s = live_state(&events);
@@ -640,7 +640,7 @@ mod tests {
             changed("q-1", HeatTransition::Armed),
             changed("q-1", HeatTransition::Running),
             changed("q-1", HeatTransition::Finished),
-            changed("q-1", HeatTransition::Scored),
+            changed("q-1", HeatTransition::Finalized),
             scheduled_tagged("q-2", &["C", "D"], "open", "r1"),
             scheduled("q-x", &["E"]),
         ];

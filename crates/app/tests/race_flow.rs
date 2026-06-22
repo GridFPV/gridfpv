@@ -164,7 +164,7 @@ fn passes_in_running_window(events: &[Event]) -> usize {
             Event::HeatStateChanged { transition, .. } => match transition {
                 gridfpv_events::HeatTransition::Running => running = true,
                 gridfpv_events::HeatTransition::Finished
-                | gridfpv_events::HeatTransition::Scored
+                | gridfpv_events::HeatTransition::Finalized
                 | gridfpv_events::HeatTransition::Aborted
                 | gridfpv_events::HeatTransition::Restarted => running = false,
                 _ => {}
@@ -216,7 +216,7 @@ async fn run_one_heat(
     .await;
 
     control_ok(app, event, token, &Command::Finish { heat: heat.clone() }).await;
-    control_ok(app, event, token, &Command::Score { heat: heat.clone() }).await;
+    control_ok(app, event, token, &Command::Finalize { heat: heat.clone() }).await;
     heat
 }
 
@@ -738,7 +738,7 @@ async fn static_channel_balanced_qual_flow_e2e() {
             Event::HeatScheduled {
                 heat, frequencies, ..
             } => {
-                let scored = events.iter().any(|x| matches!(x, Event::HeatStateChanged { heat: h, transition: gridfpv_events::HeatTransition::Scored } if h == heat));
+                let scored = events.iter().any(|x| matches!(x, Event::HeatStateChanged { heat: h, transition: gridfpv_events::HeatTransition::Finalized } if h == heat));
                 if scored {
                     None
                 } else {
@@ -775,7 +775,7 @@ async fn static_channel_balanced_qual_flow_e2e() {
             &Command::Finish { heat: heat.clone() },
         )
         .await;
-        control_ok(&app, &event, &token, &Command::Score { heat }).await;
+        control_ok(&app, &event, &token, &Command::Finalize { heat }).await;
     }
 
     // Every one of the six members flew, across channel-balanced heats of ≤2 distinct channels.

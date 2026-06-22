@@ -16,8 +16,9 @@ import type { SourceTime } from "./SourceTime";
  * The variants fall into four groups:
  *
  * - **Heat-loop transitions** — [`Stage`](Command::Stage), [`Arm`](Command::Arm),
- *   [`Start`](Command::Start), [`Finish`](Command::Finish), [`Score`](Command::Score),
- *   [`Advance`](Command::Advance), and the off-ramps [`Abort`](Command::Abort),
+ *   [`Start`](Command::Start), [`Finish`](Command::Finish),
+ *   [`Finalize`](Command::Finalize), [`Advance`](Command::Advance), and the off-ramps
+ *   [`Revert`](Command::Revert), [`Abort`](Command::Abort),
  *   [`Restart`](Command::Restart), [`Discard`](Command::Discard). Each requests the
  *   matching [`HeatTransition`](gridfpv_events::HeatTransition); the engine validates
  *   it against the heat's current state (race-engine.html §2).
@@ -47,11 +48,15 @@ heat: HeatId, } } | { "Finish": {
 /**
  * The heat to transition.
  */
-heat: HeatId, } } | { "Score": { 
+heat: HeatId, } } | { "Finalize": { 
 /**
  * The heat to transition.
  */
 heat: HeatId, } } | { "Advance": { 
+/**
+ * The heat to transition.
+ */
+heat: HeatId, } } | { "Revert": { 
 /**
  * The heat to transition.
  */

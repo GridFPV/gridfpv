@@ -3,9 +3,10 @@
 /**
  * A transition of the heat-loop state machine (race-engine.html §2). The recorded
  * transition is named for the state it enters on the forward path (Staged → Armed →
- * Running → Finished → Scored), with the off-ramps (abort/restart/discard) named for
- * the action so they stay distinct even when they land on the same state. The engine
- * validates legality against the current state. Heat *creation* is a separate event
- * ([`Event::HeatScheduled`]) — it carries the lineup, which a transition does not.
+ * Running → Finished → Finalized), with the off-ramps (revert/abort/restart/discard)
+ * named for the action so they stay distinct even when they land on the same state.
+ * The engine validates legality against the current state. Heat *creation* is a
+ * separate event ([`Event::HeatScheduled`]) — it carries the lineup, which a
+ * transition does not.
  */
-export type HeatTransition = "Staged" | "Armed" | "Running" | "Finished" | "Scored" | "Advanced" | "Aborted" | "Restarted" | "Discarded";
+export type HeatTransition = "Staged" | "Armed" | "Running" | "Finished" | "Finalized" | "Advanced" | "Reverted" | "Aborted" | "Restarted" | "Discarded";
