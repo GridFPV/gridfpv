@@ -16,7 +16,8 @@
     HeatId,
     HeatResult,
     HeatSummary,
-    LiveRaceState
+    LiveRaceState,
+    RoundDef
   } from '@gridfpv/types';
   import { channelLabel } from '../lib/channels.js';
   import {
@@ -25,11 +26,14 @@
     commandForAction,
     isActionLegal,
     isDestructive,
+    isOverride,
     primaryAction,
     type HeatAction
   } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
   import { useRaceClock } from '../lib/raceClock.svelte.js';
+  import { useStagingClock, formatStaging } from '../lib/stagingClock.svelte.js';
+  import { StartTonePlayer } from '../lib/startTone.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
 
@@ -79,6 +83,52 @@
   const clock = useRaceClock(() => phase);
   const elapsedMs = $derived(clock.elapsedMs);
 
+  // ── The current heat's round config (heat-lifecycle Slice 3) ─────────────────────────────────
+  // The staging countdown length, the start procedure, and the start-tone cue are per-round config
+  // (`RoundDef`), not on the live `LiveRaceState`. Resolve them by joining the current heat to its
+  // round: heat → `HeatSummary.round` → `RoundDef` off `currentEvent.rounds`. Absent (a sim / free-
+  // text heat with no round tag, or pre-Slice-2 meta) ⇒ the engine defaults (5:00 staging, default
+  // tone) apply, which is exactly what an absent round yields below.
+  const currentRound = $derived.by<RoundDef | undefined>(() => {
+    const summary = heats.find((h) => h.heat === heat);
+    const roundId = summary?.round;
+    if (!roundId) return undefined;
+    return session.currentEvent?.rounds?.find((r) => r.id === roundId);
+  });
+  // The round's staging window in seconds (default 5:00) — the staging countdown counts down from it.
+  const stagingSecs = $derived(currentRound?.staging_timer_secs ?? 300);
+  // The round's start-tone cue (pitch/length), when configured; else the player's default tone.
+  const toneCue = $derived(currentRound?.start_procedure?.tone);
+
+  // ── Staging countdown (heat-lifecycle Slice 3) ───────────────────────────────────────────────
+  // While the heat is Staged, count down from the round's staging window. Informational only — no
+  // auto-advance; it goes negative (over-time) past zero so the RD sees a field that isn't ready.
+  const staging = useStagingClock(
+    () => phase,
+    () => stagingSecs
+  );
+
+  // ── Start tone synced to race-go (heat-lifecycle Slice 3) ────────────────────────────────────
+  // A short Web-Audio beep at the moment the heat crosses Armed → Running (race-go). The runtime
+  // logs `HeatStarting { delay_ms }` then auto-appends the Running transition after the (hidden)
+  // random hold; the console doesn't need the delay — it plays the tone when the *live phase* turns
+  // Running, which is exactly race-go and is robust to a late join. A mute toggle (persisted,
+  // default on) and an autoplay-policy resume on the first RD click guard the audio.
+  const tone = new StartTonePlayer();
+  $effect(() => () => tone.dispose());
+  // Fire the tone exactly on the Armed → Running edge: track the previous phase and play only on
+  // the transition into Running (not on every Running snapshot/progress update).
+  let prevPhase = $state<string | undefined>(undefined);
+  $effect(() => {
+    const p = phase;
+    if (p === 'Running' && prevPhase === 'Armed') tone.play(toneCue);
+    prevPhase = p;
+  });
+  let muted = $state(tone.muted);
+  function toggleMute() {
+    muted = tone.toggleMuted();
+  }
+
   // A live, provisional leaderboard from the running order + per-pilot progress, so the
   // RD sees standings before the heat is scored. Built into a `HeatResult` so we reuse
   // the shared `Leaderboard` component (laps + last-lap-time as the metric).
@@ -106,6 +156,9 @@
 
   async function fire(action: HeatAction) {
     if (!heat) return;
+    // Unlock the audio context on this user gesture (autoplay policy) so the later race-go tone is
+    // audible — every transition click counts, well before the heat reaches Running.
+    void tone.resume();
     const ack = await session.send(commandForAction(action, heat));
     // Finalizing locks in the heat result; pull it so the Results screen has it to show. The
     // live stream only carries `LiveRaceState`, so the scored `HeatResult` is a separate
@@ -149,7 +202,55 @@
         <span class="value">{live.on_deck}</span>
       </div>
     {/if}
+
+    <button
+      type="button"
+      class="mute-toggle"
+      onclick={toggleMute}
+      aria-pressed={muted}
+      title={muted ? 'Start tone muted — click to unmute' : 'Start tone on — click to mute'}
+    >
+      <span class="mute-icon" aria-hidden="true">{muted ? '🔇' : '🔊'}</span>
+      <span class="mute-text">{muted ? 'Tone off' : 'Tone on'}</span>
+    </button>
   </header>
+
+  {#if heat && phase === 'Staged'}
+    <!-- Staging countdown (Slice 3): informational only — no auto-advance. Counts down from the
+         round's staging window; turns red and shows "−M:SS" once over-time so the RD sees a field
+         that isn't ready. -->
+    <div
+      class="staging"
+      class:overtime={staging.overtime}
+      role="status"
+      aria-label="Staging countdown"
+    >
+      <div class="staging-head">
+        <span class="staging-label">{staging.overtime ? 'Staging — over time' : 'Staging'}</span>
+        <span class="staging-sub">
+          {staging.overtime
+            ? 'Pilots are over their staging slot. Call the line.'
+            : 'Pilots to the line. Informational — Start when ready.'}
+        </span>
+      </div>
+      <div class="staging-clock" aria-label="Staging time remaining">
+        {formatStaging(staging.remainingMs)}
+      </div>
+    </div>
+  {/if}
+
+  {#if heat && phase === 'Armed'}
+    <!-- Arming state (Slice 3): the runtime ran the start procedure and will auto-advance to
+         Running after a HIDDEN random hold. We deliberately show a generic "stand by" — not a
+         precise countdown — so the randomness that the delay is meant to provide isn't defeated. -->
+    <div class="arming" role="status" aria-label="Arming">
+      <span class="arming-pulse" aria-hidden="true"></span>
+      <div class="arming-copy">
+        <span class="arming-title">Arming… stand by</span>
+        <span class="arming-sub">The race starts on its own — listen for the tone.</span>
+      </div>
+    </div>
+  {/if}
 
   {#if session.lastCommandError}
     <ErrorBanner error={session.lastCommandError} ondismiss={() => session.clearCommandError()} />
@@ -167,7 +268,10 @@
           variant={action === primary ? 'primary' : isDestructive(action) ? 'danger' : 'default'}
           title={actionDescription(action)}
         >
-          {action}
+          <span class="action-btn" class:override={isOverride(action)}>
+            {#if isOverride(action)}<span class="override-tag" aria-hidden="true">override</span
+              >{/if}{action}
+          </span>
         </ConfirmButton>
       {/each}
     </div>
@@ -220,7 +324,7 @@
   .hud {
     --_phase: var(--gf-phase-scheduled);
     display: grid;
-    grid-template-columns: 1fr auto auto auto;
+    grid-template-columns: 1fr auto auto auto auto;
     align-items: center;
     gap: var(--gf-space-8);
     padding: var(--gf-space-5) var(--gf-space-6);
@@ -343,6 +447,166 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--gf-space-3);
+  }
+  .action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  /* Override actions (SkipCountdown/ForceEnd): a clear, smaller "override" tag prefixes the label
+     so they read as secondary escape hatches, not the obvious forward step. */
+  .override-tag {
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-bold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    padding: 0.05rem var(--gf-space-2);
+    border-radius: var(--gf-radius-pill);
+    background: color-mix(in srgb, var(--gf-warning, #d08700) 22%, transparent);
+    color: var(--gf-warning, #d08700);
+    border: 1px solid color-mix(in srgb, var(--gf-warning, #d08700) 45%, transparent);
+  }
+
+  /* ── Staging countdown ───────────────────────────────────────────────────── */
+  .staging {
+    --_stage: var(--gf-phase-staged);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gf-space-5);
+    padding: var(--gf-space-4) var(--gf-space-6);
+    border: 1px solid color-mix(in srgb, var(--_stage) 45%, var(--gf-border));
+    border-radius: var(--gf-radius-lg);
+    background: linear-gradient(
+      100deg,
+      color-mix(in srgb, var(--_stage) 12%, var(--gf-elevated)),
+      var(--gf-elevated) 60%
+    );
+  }
+  .staging.overtime {
+    --_stage: var(--gf-danger, #e5484d);
+    animation: staging-flash 1.1s var(--gf-ease-out) infinite;
+  }
+  @keyframes staging-flash {
+    0%,
+    100% {
+      border-color: color-mix(in srgb, var(--_stage) 55%, var(--gf-border));
+    }
+    50% {
+      border-color: var(--_stage);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .staging.overtime {
+      animation: none;
+    }
+  }
+  .staging-head {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-1);
+    min-width: 0;
+  }
+  .staging-label {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-bold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-wide);
+    color: color-mix(in srgb, var(--_stage) 90%, var(--gf-text));
+  }
+  .staging-sub {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .staging-clock {
+    font-size: var(--gf-font-size-3xl, 2.5rem);
+    font-weight: var(--gf-font-weight-bold);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: var(--gf-tracking-tight);
+    color: color-mix(in srgb, var(--_stage) 92%, var(--gf-text));
+    white-space: nowrap;
+  }
+
+  /* ── Arming state ────────────────────────────────────────────────────────── */
+  .arming {
+    --_arm: var(--gf-phase-armed);
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-4);
+    padding: var(--gf-space-5) var(--gf-space-6);
+    border: 1px solid color-mix(in srgb, var(--_arm) 45%, var(--gf-border));
+    border-radius: var(--gf-radius-lg);
+    background: linear-gradient(
+      100deg,
+      color-mix(in srgb, var(--_arm) 14%, var(--gf-elevated)),
+      var(--gf-elevated) 60%
+    );
+  }
+  .arming-pulse {
+    flex-shrink: 0;
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    background: var(--_arm);
+    animation: arming-pulse 1s var(--gf-ease-out) infinite;
+  }
+  @keyframes arming-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--_arm) 70%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 0.8em transparent;
+    }
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .arming-pulse {
+      animation: none;
+    }
+  }
+  .arming-copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-1);
+  }
+  .arming-title {
+    font-size: var(--gf-font-size-xl);
+    font-weight: var(--gf-font-weight-bold);
+    letter-spacing: var(--gf-tracking-tight);
+    color: color-mix(in srgb, var(--_arm) 90%, var(--gf-text));
+  }
+  .arming-sub {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+
+  /* ── Mute toggle ─────────────────────────────────────────────────────────── */
+  .mute-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface);
+    color: var(--gf-text-secondary);
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .mute-toggle:hover {
+    border-color: var(--gf-accent);
+    color: var(--gf-text);
+  }
+  .mute-toggle[aria-pressed='true'] {
+    color: var(--gf-text-faint);
+  }
+  .mute-icon {
+    font-size: var(--gf-font-size-md);
+    line-height: 1;
   }
 
   .channels {

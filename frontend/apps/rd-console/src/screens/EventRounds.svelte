@@ -28,6 +28,7 @@
     CompetitorRef,
     FormatParam,
     FormatSchema,
+    GraceWindow,
     HeatPhase,
     HeatSummary,
     NewRoundReq,
@@ -37,6 +38,7 @@
     RoundDef,
     RoundId,
     SeedingRule,
+    StartProcedure,
     WinCondition
   } from '@gridfpv/types';
   import { channelLabel } from '../lib/channels.js';
@@ -380,6 +382,15 @@
   let channelMode = $state<ChannelMode>('PerHeat');
   // Which param to add next (the `<select>`'s bound value), reset after each add.
   let addParamKey = $state('');
+  // ── Heat-lifecycle config (Slice 3) ─────────────────────────────────────────
+  // The staging timer (entered as mm:ss, the field-friendly form), the randomized start-procedure
+  // window (min/max ms), and the completion grace (seconds). All map to the `RoundDef` fields the
+  // runtime + console read; sane defaults match the engine (5:00 staging, 2000–5000ms start, 3s grace).
+  let stagingMinutes = $state(5); // staging timer minutes part
+  let stagingSeconds = $state(0); // staging timer seconds part
+  let startMinMs = $state(2000); // randomized start hold: shortest
+  let startMaxMs = $state(5000); // randomized start hold: longest
+  let graceSeconds = $state(3); // grace window after the win condition, in seconds
 
   // Whether the eligible-classes pick reads as open/practice (all selected) or a class round (one).
   const classHint = $derived(
@@ -457,6 +468,12 @@
     params = [];
     channelMode = 'PerHeat';
     addParamKey = '';
+    // Heat-lifecycle config defaults — match the engine (5:00 staging, 2000–5000ms, 3s grace).
+    stagingMinutes = 5;
+    stagingSeconds = 0;
+    startMinMs = 2000;
+    startMaxMs = 5000;
+    graceSeconds = 3;
   }
 
   export function openAdd() {
@@ -495,6 +512,18 @@
       seedSource = seed.FromRanking.source_round;
       seedTopN = seed.FromRanking.top_n;
     }
+
+    // Heat-lifecycle config (Slice 3): staging timer (split mm:ss), the randomized start window, and
+    // the grace. Each falls back to the engine default when the round predates these fields.
+    const stagingTotal = round.staging_timer_secs ?? 300;
+    stagingMinutes = Math.floor(stagingTotal / 60);
+    stagingSeconds = stagingTotal % 60;
+    startMinMs = round.start_procedure?.min_delay_ms ?? 2000;
+    startMaxMs = round.start_procedure?.max_delay_ms ?? 5000;
+    const grace = round.grace_window;
+    graceSeconds =
+      grace && typeof grace !== 'string' ? Math.round(grace.Duration.micros / 1_000_000) : 3;
+
     formOpen = true;
   }
 
@@ -542,6 +571,29 @@
     return out;
   }
 
+  // ── Heat-lifecycle config builders (Slice 3) ─────────────────────────────────
+  /** The staging timer in whole seconds, from the mm:ss inputs (≥ 0; minutes/seconds clamped). */
+  function buildStagingSecs(): number {
+    const mins = Math.max(0, Math.round(stagingMinutes || 0));
+    const secs = Math.min(59, Math.max(0, Math.round(stagingSeconds || 0)));
+    return mins * 60 + secs;
+  }
+
+  /**
+   * The randomized-delay start procedure. The min is clamped ≥ 0 and the max ≥ min (a mis-ordered
+   * pair becomes a point delay — the same defensive rule the runtime applies).
+   */
+  function buildStartProcedure(): StartProcedure {
+    const min = Math.max(0, Math.round(startMinMs || 0));
+    const max = Math.max(min, Math.round(startMaxMs || 0));
+    return { mode: 'randomized-delay', min_delay_ms: min, max_delay_ms: max };
+  }
+
+  /** The completion grace window as a bounded `Duration` (seconds → micros). */
+  function buildGraceWindow(): GraceWindow {
+    return { Duration: { micros: Math.max(0, Math.round(graceSeconds || 0)) * 1_000_000 } };
+  }
+
   // The form is submittable once it has a label, at least one eligible class, a format, and — when
   // seeding from a ranking — a chosen source round.
   const canSubmit = $derived(
@@ -562,7 +614,10 @@
       params: buildParams(),
       win_condition: buildWinCondition(),
       seeding: buildSeeding(),
-      channel_mode: channelMode
+      channel_mode: channelMode,
+      staging_timer_secs: buildStagingSecs(),
+      start_procedure: buildStartProcedure(),
+      grace_window: buildGraceWindow()
     };
     try {
       const result = editing
@@ -732,6 +787,61 @@
             <option value="PerHeat">Per-heat</option>
           </Select>
         </Field>
+
+        <fieldset class="config-group">
+          <legend class="config-legend">Start &amp; timing</legend>
+          <div class="form-grid">
+            <Field label="Staging timer" hint="Informational only — no auto-advance.">
+              <div class="mmss" role="group" aria-label="Staging timer">
+                <Input
+                  type="number"
+                  min="0"
+                  bind:value={stagingMinutes}
+                  aria-label="Staging minutes"
+                />
+                <span class="mmss-sep" aria-hidden="true">:</span>
+                <Input
+                  type="number"
+                  min="0"
+                  max="59"
+                  bind:value={stagingSeconds}
+                  aria-label="Staging seconds"
+                />
+              </div>
+            </Field>
+            <Field label="Grace window (seconds)" hint="Late crossings count after the win.">
+              <Input
+                type="number"
+                min="0"
+                bind:value={graceSeconds}
+                aria-label="Grace window seconds"
+              />
+            </Field>
+          </div>
+          <Field
+            label="Start procedure"
+            hint="Randomized hold before race-go (ms) — the “arm… and… go”. Max is held ≥ min."
+          >
+            <div class="form-grid">
+              <Field label="Min delay (ms)">
+                <Input
+                  type="number"
+                  min="0"
+                  bind:value={startMinMs}
+                  aria-label="Start min delay ms"
+                />
+              </Field>
+              <Field label="Max delay (ms)">
+                <Input
+                  type="number"
+                  min="0"
+                  bind:value={startMaxMs}
+                  aria-label="Start max delay ms"
+                />
+              </Field>
+            </div>
+          </Field>
+        </fieldset>
 
         <Field
           label="Seeding"
@@ -1200,6 +1310,34 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
     gap: var(--gf-space-3);
+  }
+  .config-group {
+    margin: 0;
+    padding: var(--gf-space-3) var(--gf-space-4) var(--gf-space-4);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+  }
+  .config-legend {
+    padding: 0 var(--gf-space-2);
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+  }
+  .mmss {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  .mmss-sep {
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-bold);
+    color: var(--gf-text-muted);
   }
   .class-picker {
     display: flex;

@@ -1,11 +1,48 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, waitFor } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
 import { tick } from 'svelte';
-import type { LiveRaceState } from '@gridfpv/types';
+import type { EventMeta, HeatSummary, LiveRaceState, RoundDef } from '@gridfpv/types';
 import LiveRaceControl from '../src/screens/LiveRaceControl.svelte';
 import { makeTestSession } from './support.js';
 import { liveRunning, failAck } from './fixtures.js';
+
+// A round with a short staging window so the over-time path is reachable in a fake-timer test, and
+// a heat tagged with it so the screen resolves the round from the live current heat.
+const ROUND: RoundDef = {
+  id: 'r1',
+  label: 'Qualifying R1',
+  classes: ['c1'],
+  format: 'timed_qual',
+  params: {},
+  win_condition: { Timed: { window_micros: 120_000_000 } },
+  seeding: 'FromRoster',
+  channel_mode: 'Static',
+  staging_timer_secs: 5, // 0:05 so the test can run it over-time quickly
+  start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+  grace_window: { Duration: { micros: 3_000_000 } }
+};
+const EVENT_WITH_ROUND: EventMeta = {
+  id: 'e1',
+  name: 'Friday',
+  created_at: 0,
+  persistent: true,
+  timers: ['mock'],
+  roster: [],
+  classes: ['c1'],
+  rounds: [ROUND]
+};
+const HEAT_IN_ROUND: HeatSummary = {
+  heat: 'heat-1',
+  lineup: ['ALICE', 'BOB'],
+  round: 'r1',
+  class: 'c1',
+  frequencies: [],
+  phase: 'Staged',
+  is_current: true
+};
+const liveAt = (phase: LiveRaceState['phase'], heat: string | undefined = 'heat-1') =>
+  ({ current_heat: heat, phase }) as LiveRaceState;
 
 describe('LiveRaceControl', () => {
   it('enables only the phase-legal transitions (Running → ForceEnd/Abort/Restart)', () => {
@@ -62,6 +99,140 @@ describe('LiveRaceControl', () => {
     render(LiveRaceControl, { session });
     // Heat sheet + live standing both list the lineup.
     expect(screen.getAllByText('ALICE').length).toBeGreaterThan(0);
+  });
+
+  it('styles the runtime-clock overrides as secondary "override" buttons (legality intact)', () => {
+    // In Armed the legal actions are the override SkipCountdown + the off-ramps Abort/Restart.
+    const { session } = makeTestSession({ live: liveAt('Armed') });
+    render(LiveRaceControl, { session });
+    const btn = (label: string) => screen.getByRole('button', { name: label }) as HTMLButtonElement;
+    expect(btn('SkipCountdown').disabled).toBe(false);
+    expect(btn('Abort').disabled).toBe(false);
+    expect(btn('Restart').disabled).toBe(false);
+    // Forward steps are illegal in Armed (the runtime clock drives Armed → Running).
+    expect(btn('Stage').disabled).toBe(true);
+    expect(btn('Start').disabled).toBe(true);
+    expect(btn('ForceEnd').disabled).toBe(true);
+    expect(btn('Finalize').disabled).toBe(true);
+    // Both clock overrides (SkipCountdown + ForceEnd) carry the "override" tag that distinguishes
+    // them from forward/off-ramp buttons; the forward/off-ramp buttons do not.
+    const tags = screen.getAllByText('override');
+    const taggedButtons = tags.map((t) => t.closest('button'));
+    expect(taggedButtons).toContain(btn('SkipCountdown'));
+    expect(taggedButtons).toContain(btn('ForceEnd'));
+    expect(taggedButtons).not.toContain(btn('Abort'));
+    expect(taggedButtons).not.toContain(btn('Start'));
+  });
+
+  describe('staging countdown (Slice 3)', () => {
+    const stagingClock = () => screen.getByLabelText('Staging time remaining').textContent?.trim();
+
+    afterEach(() => vi.useRealTimers());
+
+    it('counts down from the round staging window while Staged, then goes over-time (red)', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const { session } = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: liveAt('Staged'),
+        listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND])
+      });
+      render(LiveRaceControl, { session });
+      // The heats list (round resolution) is fetched async; let it settle.
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+
+      // The countdown is shown and starts near the 0:05 window.
+      const region = await screen.findByRole('status', { name: 'Staging countdown' });
+      expect(region).toBeInTheDocument();
+      await waitFor(() => expect(stagingClock()).toBe('0:05'));
+
+      // After ~3s it has counted down…
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(stagingClock()).toBe('0:02');
+
+      // …and past zero it goes over-time: negative reading + the over-time (red) styling.
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(stagingClock()).toMatch(/^−0:0[01]$/);
+      expect(region.className).toContain('overtime');
+    });
+
+    it('shows no staging countdown once the heat leaves Staged', async () => {
+      const { session } = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: liveAt('Running'),
+        listHeatsImpl: vi.fn(async () => [{ ...HEAT_IN_ROUND, phase: 'Running' as const }])
+      });
+      render(LiveRaceControl, { session });
+      await tick();
+      expect(screen.queryByRole('status', { name: 'Staging countdown' })).not.toBeInTheDocument();
+    });
+  });
+
+  describe('start-procedure UX + tone (Slice 3)', () => {
+    it('shows the generic "arming… stand by" state in Armed (no precise countdown)', async () => {
+      const { session } = makeTestSession({ live: liveAt('Armed') });
+      render(LiveRaceControl, { session });
+      await tick();
+      const arming = await screen.findByRole('status', { name: 'Arming' });
+      expect(arming).toHaveTextContent(/Arming… stand by/);
+      // The randomness is hidden: no precise ms/seconds countdown is rendered.
+      expect(arming).not.toHaveTextContent(/\d+\s*ms/);
+    });
+
+    it('plays the start tone exactly on the Armed → Running edge', async () => {
+      // Stub the platform AudioContext so the screen's StartTonePlayer picks it up and we can
+      // observe an oscillator start at race-go (no real audio). Default-unmuted (no stored pref).
+      const started: number[] = [];
+      class MockAudioContext {
+        currentTime = 0;
+        state = 'running';
+        destination = {};
+        createOscillator() {
+          return {
+            type: 'square',
+            frequency: { setValueAtTime() {} },
+            connect() {},
+            start() {
+              started.push(1);
+            },
+            stop() {}
+          };
+        }
+        createGain() {
+          return {
+            gain: { setValueAtTime() {}, linearRampToValueAtTime() {} },
+            connect() {}
+          };
+        }
+        async resume() {}
+        async close() {}
+      }
+      vi.stubGlobal('AudioContext', MockAudioContext);
+      // Ensure the mute pref reads unmuted regardless of any leaked storage.
+      vi.stubGlobal('localStorage', {
+        getItem: () => null,
+        setItem: () => {},
+        removeItem: () => {},
+        clear: () => {},
+        key: () => null,
+        length: 0
+      } as unknown as Storage);
+
+      const { session, pushLive } = makeTestSession({ live: liveAt('Armed') });
+      const { container } = render(LiveRaceControl, { session });
+      await tick();
+      expect(started).toHaveLength(0); // nothing plays while merely Armed
+
+      pushLive(liveAt('Running'));
+      await tick();
+      // The tone fired once on the edge; the arming panel is gone and the race clock has taken over.
+      expect(started).toHaveLength(1);
+      expect(container.querySelector('.arming')).toBeNull();
+      expect(screen.getByRole('timer')).toBeInTheDocument();
+
+      vi.unstubAllGlobals();
+    });
   });
 
   describe('race clock (#62)', () => {

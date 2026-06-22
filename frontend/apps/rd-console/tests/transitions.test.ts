@@ -5,6 +5,7 @@ import {
   commandForAction,
   isActionLegal,
   isDestructive,
+  isOverride,
   legalActions,
   primaryAction,
   type HeatAction
@@ -92,6 +93,33 @@ describe('transitions: phase → legal actions', () => {
       const idx = legal.map((a) => ACTION_ORDER.indexOf(a));
       expect(idx).toEqual([...idx].sort((x, y) => x - y));
     }
+  });
+
+  it('marks exactly the two runtime-clock overrides (SkipCountdown/ForceEnd) as overrides', () => {
+    // The override styling in the console keys off this set; it must be exactly the two clock
+    // escape hatches — and an override is never also a forward primary or an off-ramp.
+    expect(isOverride('SkipCountdown')).toBe(true);
+    expect(isOverride('ForceEnd')).toBe(true);
+    for (const a of [
+      'Stage',
+      'Start',
+      'Finalize',
+      'Advance',
+      'Revert',
+      'Abort',
+      'Restart',
+      'Discard'
+    ] as HeatAction[]) {
+      expect(isOverride(a)).toBe(false);
+    }
+    // An override is legal exactly in its one phase (Armed for SkipCountdown, Running for ForceEnd)
+    // and is never the phase's primary forward step.
+    expect(
+      isActionLegal('Armed', 'SkipCountdown') && primaryAction('Armed') !== 'SkipCountdown'
+    ).toBe(true);
+    expect(isActionLegal('Running', 'ForceEnd') && primaryAction('Running') !== 'ForceEnd').toBe(
+      true
+    );
   });
 
   it('marks exactly the four off-ramps destructive', () => {
