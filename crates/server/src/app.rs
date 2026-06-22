@@ -79,7 +79,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use gridfpv_engine::format::FormatRegistry;
+use gridfpv_engine::format::{FormatRegistry, FormatSchema};
 use gridfpv_engine::scoring::{WinCondition, score_events};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{LapList, lap_list_marshaled, registrations};
@@ -753,18 +753,15 @@ async fn list_classes(State(registry): State<EventRegistry>) -> Json<Vec<Class>>
     Json(registry.classes().list())
 }
 
-/// `GET /formats` — the valid **format names** (race redesign Slice 2b).
+/// `GET /formats` — the valid **formats + their param schemas** (race redesign Slice 2b / 7a).
 ///
-/// The single source of truth the Rounds UI's format dropdown reads: the production formats
-/// registered in [`FormatRegistry::standard`], in sorted order. An open read (no token) — these
-/// are static, compiled-in configuration, not per-event state, so no registry state is touched.
-async fn list_formats() -> Json<Vec<String>> {
-    let formats = FormatRegistry::standard()
-        .names()
-        .into_iter()
-        .map(String::from)
-        .collect();
-    Json(formats)
+/// The single source of truth the Rounds UI reads: each production format
+/// ([`FormatRegistry::standard`]) with the **param schema** its generator consumes
+/// ([`FormatRegistry::standard_schemas`]) — `{ name, params: [{ key, label, kind, options?,
+/// default? }] }` — so the UI renders both the format dropdown and a per-format params editor. An
+/// open read (no token) — static, compiled-in configuration, not per-event state.
+async fn list_formats() -> Json<Vec<FormatSchema>> {
+    Json(FormatRegistry::standard_schemas())
 }
 
 /// `GET /channels` — the standard **FPV channel catalog** (race redesign Slice 4b).
@@ -889,16 +886,50 @@ async fn set_class_membership(
         ));
     }
     let pilots = registry.pilots();
-    for id in &body.pilot_ids {
-        if !pilots.exists(id) {
+    for slot in &body.pilots {
+        if !pilots.exists(&slot.pilot) {
             return Err(ProtocolError::new(
                 ErrorCode::UnknownScope,
-                format!("no pilot with id {:?}", id.0),
+                format!("no pilot with id {:?}", slot.pilot.0),
             ));
         }
     }
+    // Validate each assigned channel (race redesign Slice 7a) against the event's **primary**
+    // timer's available-channels pool — the GQ-style fixed channel must be one the timer offers.
+    // The pool may exceed the timer's `node_count` (node_count caps only pilots-per-heat), so any
+    // channel in the pool is valid; we never cap the number of distinct channels at node_count.
+    let assigned: Vec<u16> = body.pilots.iter().filter_map(|s| s.channel).collect();
+    if !assigned.is_empty() {
+        let meta = registry.meta_of(&event_id).ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::UnknownScope,
+                format!("no event with id {:?}", event_id.0),
+            )
+        })?;
+        let timer = meta
+            .effective_primary()
+            .and_then(|id| registry.timers().get(&id));
+        let Some(timer) = timer else {
+            return Err(ProtocolError::new(
+                ErrorCode::BadRequest,
+                "cannot assign per-pilot channels: the event has no resolvable primary timer"
+                    .to_string(),
+            ));
+        };
+        for channel in &assigned {
+            if !timer.available_channels.contains(channel) {
+                return Err(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    format!(
+                        "channel {channel} is not in the primary timer {:?}'s available channels",
+                        timer.id.0
+                    ),
+                ));
+            }
+        }
+    }
     let meta = registry
-        .set_class_membership(&event_id, class_id, body.pilot_ids)
+        .set_class_membership(&event_id, class_id, body.pilots)
         .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
     Ok(Json(meta))
 }
@@ -991,7 +1022,9 @@ fn fill_error(err: round_engine::FillError) -> ProtocolError {
     use round_engine::FillError;
     let code = match err {
         FillError::UnknownRound(_) | FillError::UnknownSourceRound(_) => ErrorCode::UnknownScope,
-        FillError::EmptyField(_) | FillError::UnknownFormat(_) => ErrorCode::BadRequest,
+        FillError::EmptyField(_) | FillError::UnknownFormat(_) | FillError::MissingChannel(_) => {
+            ErrorCode::BadRequest
+        }
     };
     ProtocolError::new(code, err.to_string())
 }

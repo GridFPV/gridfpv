@@ -126,7 +126,7 @@ describe('EventRoster — per-class membership', () => {
     const listClassesImpl = vi.fn(async () => [OPEN]);
     const setClassMembershipImpl = vi.fn(async () => ({
       ...EV_CLASS,
-      classes_membership: [{ class: 'open', pilots: ['p1'] }]
+      classes_membership: [{ class: 'open', pilots: [{ pilot: 'p1' }] }]
     }));
     const { session } = makeTestSession({
       listPilotsImpl,
@@ -172,7 +172,7 @@ describe('EventRoster — per-class membership', () => {
     const { session } = makeTestSession({
       listPilotsImpl,
       listClassesImpl,
-      event: { ...EV_CLASS, classes_membership: [{ class: 'open', pilots: ['p2'] }] }
+      event: { ...EV_CLASS, classes_membership: [{ class: 'open', pilots: [{ pilot: 'p2' }] }] }
     });
     render(EventRoster, { session });
 

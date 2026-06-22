@@ -123,7 +123,8 @@
   const classCount = $derived(ev?.classes?.length ?? 0);
   const memberCount = $derived(
     (ev?.classes_membership ?? []).reduce((set, m) => {
-      for (const p of m.pilots) set.add(p);
+      // Membership entries are member slots (`{ pilot, channel? }`) — Slice 7a; count distinct pilots.
+      for (const s of m.pilots) set.add(s.pilot);
       return set;
     }, new Set<string>()).size
   );

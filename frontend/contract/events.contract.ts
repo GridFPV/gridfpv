@@ -21,7 +21,15 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Class, Command, EventMeta, Pilot, RoundDef, Timer } from '@gridfpv/types';
+import type {
+  Class,
+  Command,
+  EventMeta,
+  FormatSchema,
+  Pilot,
+  RoundDef,
+  Timer
+} from '@gridfpv/types';
 
 import { type Director } from '../test-harness/director.ts';
 import { eventRoot, startContractDirector } from './harness.ts';
@@ -910,18 +918,22 @@ describe('seam 12: application-level classes + per-event selection (#84)', () =>
  *  - an empty `pilot_ids` clears the class's membership entry.
  */
 describe('race Slice 1a: per-class membership', () => {
-  /** `PUT /events/{id}/classes/{classId}/membership` with `{ pilot_ids }` + optional token. */
+  /**
+   * `PUT /events/{id}/classes/{classId}/membership` with `{ pilots }` + optional token. Each element
+   * may be a bare pilot-id string (the legacy/channel-less shape, accepted by the server's serde
+   * shim) or a full `{ pilot, channel? }` slot (race redesign Slice 7a).
+   */
   async function setMembership(
     eventId: string,
     classId: string,
-    pilotIds: string[],
+    pilots: Array<string | { pilot: string; channel?: number }>,
     token?: string
   ): Promise<{ status: number; body: unknown }> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token !== undefined) headers.Authorization = `Bearer ${token}`;
     const res = await fetch(
       `${eventRoot(director.baseUrl, eventId)}/classes/${classId}/membership`,
-      { method: 'PUT', headers, body: JSON.stringify({ pilot_ids: pilotIds }) }
+      { method: 'PUT', headers, body: JSON.stringify({ pilots }) }
     );
     let parsed: unknown;
     try {
@@ -952,17 +964,19 @@ describe('race Slice 1a: per-class membership', () => {
     const a = await makePilot('Member A');
     const b = await makePilot('Member B');
 
-    // Set the Open built-in class's membership.
+    // Set the Open built-in class's membership (bare ids → channel-less slots, via the serde shim).
     const ok = await setMembership(event.id, 'mgp-open', [a, b], TOKEN);
     expect(ok.status).toBe(200);
     const meta = ok.body as EventMeta;
     const entry = (meta.classes_membership ?? []).find((m) => m.class === 'mgp-open');
-    expect(entry?.pilots).toEqual([a, b]);
+    // The wire shape is now member slots: `{ pilot, channel? }` (race redesign Slice 7a).
+    expect(entry?.pilots.map((s) => s.pilot)).toEqual([a, b]);
+    expect(entry?.pilots.every((s) => s.channel === undefined)).toBe(true);
 
     // Replacing that class's list is wholesale.
     const replaced = (await setMembership(event.id, 'mgp-open', [a], TOKEN)).body as EventMeta;
     const replacedEntry = (replaced.classes_membership ?? []).find((m) => m.class === 'mgp-open');
-    expect(replacedEntry?.pilots).toEqual([a]);
+    expect(replacedEntry?.pilots.map((s) => s.pilot)).toEqual([a]);
 
     // An empty list clears the class's entry.
     const cleared = (await setMembership(event.id, 'mgp-open', [], TOKEN)).body as EventMeta;
@@ -980,6 +994,38 @@ describe('race Slice 1a: per-class membership', () => {
 
     // RD-gated: no token → 401.
     expect((await setMembership(event.id, 'mgp-open', [a])).status).toBe(401);
+  });
+
+  it('per-pilot channels (Slice 7a) are set when valid and rejected when not in the primary timer pool', async () => {
+    const event = (await createEvent('Channel Membership', TOKEN)).body as EventMeta;
+    const a = await makePilot('Chan A');
+    const b = await makePilot('Chan B');
+
+    // The event's default primary is the built-in Mock, whose available channels include Raceband
+    // R1/R2 (5658 / 5695). Assigning those is accepted and round-trips on the slot's `channel`.
+    const ok = await setMembership(
+      event.id,
+      'mgp-open',
+      [
+        { pilot: a, channel: 5658 },
+        { pilot: b, channel: 5695 }
+      ],
+      TOKEN
+    );
+    expect(ok.status).toBe(200);
+    const entry = ((ok.body as EventMeta).classes_membership ?? []).find(
+      (m) => m.class === 'mgp-open'
+    );
+    expect(entry?.pilots).toEqual([
+      { pilot: a, channel: 5658 },
+      { pilot: b, channel: 5695 }
+    ]);
+
+    // A channel NOT in the primary timer's available pool → 400 BadRequest (node_count does not
+    // cap the channel set; only the pool membership is validated).
+    const bad = await setMembership(event.id, 'mgp-open', [{ pilot: a, channel: 1234 }], TOKEN);
+    expect(bad.status).toBe(400);
+    expect((bad.body as { code?: string }).code).toBe('BadRequest');
   });
 });
 
@@ -1093,6 +1139,37 @@ describe('race Slice 2a: rounds', () => {
     expect(round.label).toBe('Qualifying R1');
     expect(round.format).toBe('timed_qual');
     expect(round.seeding).toBe('FromRoster'); // default
+    // Race redesign Slice 7a: channel_mode defaults by format — timed_qual → 'Static'.
+    expect(round.channel_mode).toBe('Static');
+
+    // A bracket format defaults to 'PerHeat'; an explicit channel_mode overrides the default.
+    const bracket = (
+      await addRound(
+        event.id,
+        {
+          label: 'Bracket',
+          classes: ['mgp-open'],
+          format: 'single_elim',
+          win_condition: 'BestLap'
+        },
+        TOKEN
+      )
+    ).body as RoundDef;
+    expect(bracket.channel_mode).toBe('PerHeat');
+    const forced = (
+      await addRound(
+        event.id,
+        {
+          label: 'Forced',
+          classes: ['mgp-open'],
+          format: 'timed_qual',
+          channel_mode: 'PerHeat',
+          win_condition: 'BestLap'
+        },
+        TOKEN
+      )
+    ).body as RoundDef;
+    expect(forced.channel_mode).toBe('PerHeat');
 
     // The round is recorded on the event meta (re-create returns the current snapshot via list).
     const list = (await fetch(`${director.baseUrl}/events`).then((r) => r.json())) as EventMeta[];
@@ -1165,14 +1242,15 @@ describe('race Slice 2a: rounds', () => {
     expect((badEvent.body as { code?: string }).code).toBe('UnknownScope');
   });
 
-  it('GET /formats is an open read of the standard format names (the round dropdown source)', async () => {
-    // The Rounds UI sources its format dropdown here rather than hard-coding the list — the single
-    // source of truth is the engine's `FormatRegistry::standard()`. An open read (no token).
+  it('GET /formats is an open read of the standard formats + their param schemas (the round dropdown / params editor source)', async () => {
+    // The Rounds UI sources its format dropdown AND per-format params editor here rather than
+    // hard-coding the list — the single source of truth is the engine's `FormatRegistry`. An open
+    // read (no token). Race redesign Slice 7a: each entry is `{ name, params: [...] }`.
     const res = await fetch(`${director.baseUrl}/formats`);
     expect(res.status).toBe(200);
-    const names = (await res.json()) as string[];
-    // The 6 production formats, in sorted order (the same set `POST /rounds` validates against).
-    expect(names).toEqual([
+    const schemas = (await res.json()) as FormatSchema[];
+    // The 6 production formats, in sorted name order (the same set `POST /rounds` validates against).
+    expect(schemas.map((s) => s.name)).toEqual([
       'double_elim',
       'multi_main',
       'round_robin',
@@ -1180,6 +1258,17 @@ describe('race Slice 2a: rounds', () => {
       'timed_qual',
       'zippyq'
     ]);
+    // timed_qual declares `rounds` (number, default 3) and an enum `metric` with its options.
+    const tq = schemas.find((s) => s.name === 'timed_qual')!;
+    const rounds = tq.params.find((p) => p.key === 'rounds')!;
+    expect(rounds.kind).toBe('number');
+    expect(rounds.default).toBe('3');
+    const metric = tq.params.find((p) => p.key === 'metric')!;
+    expect(metric.kind).toBe('enum');
+    expect(metric.options).toContain('best-lap');
+    // double_elim declares a bool `bracket_reset`.
+    const de = schemas.find((s) => s.name === 'double_elim')!;
+    expect(de.params.find((p) => p.key === 'bracket_reset')?.kind).toBe('bool');
   });
 });
 
@@ -1244,7 +1333,9 @@ describe('race Slice 3a: FillRound (round-driven engine)', () => {
     await fetch(`${eventRoot(director.baseUrl, event.id)}/classes/mgp-open/membership`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ pilot_ids: pilotIds })
+      // Bare pilot-id elements (channel-less slots, via the serde shim) — this seam exercises the
+      // per-heat path (whole-field heat + first-fit channels), so the round is forced PerHeat.
+      body: JSON.stringify({ pilots: pilotIds })
     });
     const created = await fetch(`${eventRoot(director.baseUrl, event.id)}/rounds`, {
       method: 'POST',
@@ -1254,7 +1345,10 @@ describe('race Slice 3a: FillRound (round-driven engine)', () => {
         classes: ['mgp-open'],
         format: 'timed_qual',
         params: { rounds: '1' },
-        win_condition: 'BestLap'
+        win_condition: 'BestLap',
+        // timed_qual defaults to Static (Slice 7a); these FillRound seams assert the per-heat
+        // whole-field path, so force PerHeat (the static path is covered by the app-level e2e).
+        channel_mode: 'PerHeat'
       })
     });
     const round = (await created.json()) as RoundDef;

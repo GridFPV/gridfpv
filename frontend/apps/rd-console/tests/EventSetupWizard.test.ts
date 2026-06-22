@@ -51,7 +51,7 @@ const READY_EVENT: EventMeta = {
   timers: ['mock'],
   roster: ['p1'],
   classes: ['c1'],
-  classes_membership: [{ class: 'c1', pilots: ['p1'] }],
+  classes_membership: [{ class: 'c1', pilots: [{ pilot: 'p1' }] }],
   rounds: [{ id: 'r1', label: 'Qual', classes: ['c1'] }]
 } as unknown as EventMeta;
 

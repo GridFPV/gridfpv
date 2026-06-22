@@ -146,7 +146,9 @@
   const savedMembership = $derived.by(() => {
     const map = new Map<ClassId, Set<PilotId>>();
     for (const m of session.currentEvent?.classes_membership ?? []) {
-      map.set(m.class, new Set(m.pilots));
+      // Membership entries are member **slots** (`{ pilot, channel? }`) — Slice 7a; key on the
+      // pilot id (the channel picker is the Classes & Roster follow-up).
+      map.set(m.class, new Set(m.pilots.map((s) => s.pilot)));
     }
     return map;
   });
@@ -156,7 +158,7 @@
   let membership = $state<Map<ClassId, Set<PilotId>>>(new Map());
   const membershipKey = $derived(
     (session.currentEvent?.classes_membership ?? [])
-      .map((m) => `${m.class}:${[...m.pilots].join('.')}`)
+      .map((m) => `${m.class}:${m.pilots.map((s) => s.pilot).join('.')}`)
       .join('|')
   );
   let lastMembershipKey = $state('');

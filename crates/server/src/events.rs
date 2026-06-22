@@ -195,9 +195,122 @@ pub struct EventMeta {
 pub struct ClassMembership {
     /// The class these pilots race — one of the event's selected [`classes`](EventMeta::classes).
     pub class: ClassId,
-    /// The roster pilots racing this class, in selection order. Each is a directory pilot that is
-    /// also on the event's [`roster`](EventMeta::roster).
-    pub pilots: Vec<PilotId>,
+    /// The roster pilots racing this class, in selection order, **each with an optional assigned
+    /// channel** (race redesign Slice 7a). Each entry is a directory pilot that is also on the
+    /// event's [`roster`](EventMeta::roster); its [`channel`](MemberSlot::channel) is the raw-MHz
+    /// frequency the pilot flies in a *static*-channel-mode round (a fixed, per-membership channel,
+    /// GQ-style).
+    ///
+    /// **Legacy-compatible:** older events persisted this as a bare `Vec<PilotId>`; the
+    /// [`MemberSlot`] (de)serialises through a serde shim ([`member_slots`]) that accepts either
+    /// shape — a plain pilot-id string (legacy) reads back as a [`MemberSlot`] with no channel — so
+    /// pre-Slice-7a meta still loads and restart round-trips.
+    #[serde(with = "member_slots")]
+    #[ts(as = "Vec<MemberSlot>")]
+    pub pilots: Vec<MemberSlot>,
+}
+
+/// One pilot's **slot** within a class's membership (race redesign Slice 7a): the directory pilot
+/// plus the optional raw-MHz channel they fly in a *static*-channel-mode round.
+///
+/// The channel is the GQ-style **fixed, per-membership** assignment: in a [`ChannelMode::Static`]
+/// round (time-trial / qualifying), every member flies their own channel and qual heats are
+/// channel-balanced (one pilot per channel per heat). It is `None` until set, and is unused by a
+/// [`ChannelMode::PerHeat`] round (the bracket path assigns channels per heat). Validated on set
+/// against the event's **primary timer**'s `available_channels` — and that pool **can exceed** the
+/// timer's `node_count`, so any channel in the pool is valid (node_count caps only pilots-per-heat).
+///
+/// Derives serde + `ts_rs::TS` so the frontend reads a generated `MemberSlot` for the Classes &
+/// Roster channel picker (the UI is the Slice-7b follow-up).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct MemberSlot {
+    /// The directory pilot racing this class.
+    pub pilot: PilotId,
+    /// The pilot's **fixed assigned channel** (raw MHz) for *static*-channel-mode rounds, or `None`
+    /// when unassigned. Must be one of the event's **primary timer**'s `available_channels`
+    /// (validated on set) — the pool may be larger than `node_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel: Option<u16>,
+}
+
+impl MemberSlot {
+    /// A slot for `pilot` with no channel assigned yet (the legacy / freshly-added shape).
+    pub fn new(pilot: PilotId) -> Self {
+        Self {
+            pilot,
+            channel: None,
+        }
+    }
+}
+
+/// Serde shim letting [`ClassMembership::pilots`] (de)serialise as **either** the current
+/// `Vec<MemberSlot>` *or* the legacy `Vec<PilotId>` (race redesign Slice 7a).
+///
+/// On read, each element is accepted as either a full `MemberSlot` object (`{ "pilot": …, "channel":
+/// … }`) **or** a bare pilot-id string — a legacy `["acroace-1", …]` array loads as channel-less
+/// slots, so pre-Slice-7a persisted meta round-trips. On write, the canonical `MemberSlot` form is
+/// always emitted (a freshly-saved event is never legacy-shaped). Kept restart-safe for free since
+/// it rides the existing meta JSON.
+mod member_slots {
+    use super::{MemberSlot, PilotId};
+    use serde::Deserialize;
+    use serde::de::{Deserializer, SeqAccess, Visitor};
+    use serde::ser::Serializer;
+    use std::fmt;
+
+    /// One element of the legacy-or-current membership list: a bare pilot id (legacy) or a full slot.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SlotOrId {
+        /// The legacy shape — a bare pilot-id string; reads back as a channel-less slot.
+        Id(PilotId),
+        /// The current shape — a full `{ pilot, channel? }` object.
+        Slot(MemberSlot),
+    }
+
+    impl From<SlotOrId> for MemberSlot {
+        fn from(value: SlotOrId) -> Self {
+            match value {
+                SlotOrId::Id(pilot) => MemberSlot::new(pilot),
+                SlotOrId::Slot(slot) => slot,
+            }
+        }
+    }
+
+    /// Always serialise the canonical `Vec<MemberSlot>` form.
+    pub fn serialize<S: Serializer>(
+        slots: &[MemberSlot],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(slots)
+    }
+
+    /// Deserialise a sequence whose elements are each a bare id (legacy) or a full slot.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<MemberSlot>, D::Error> {
+        struct SlotsVisitor;
+
+        impl<'de> Visitor<'de> for SlotsVisitor {
+            type Value = Vec<MemberSlot>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a list of member slots or bare pilot ids")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(element) = seq.next_element::<SlotOrId>()? {
+                    out.push(element.into());
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_seq(SlotsVisitor)
+    }
 }
 
 /// One **round** within an event (race redesign Slice 2a): an event-level, class-tagged, *dynamic*
@@ -243,6 +356,53 @@ pub struct RoundDef {
     /// eligible classes' membership, in roster order); a bracket round seeds from a prior round's
     /// ranking ([`SeedingRule::FromRanking`], consumed in a later slice).
     pub seeding: SeedingRule,
+    /// How this round assigns **video channels** to its heats (race redesign Slice 7a). A
+    /// [`ChannelMode::Static`] round (time-trial / qual, GQ-style) uses each member's *fixed*
+    /// per-membership channel ([`MemberSlot::channel`]) and forms channel-balanced heats; a
+    /// [`ChannelMode::PerHeat`] round (brackets) assigns channels per heat from the timer's pool
+    /// (first-fit). Defaulted **by format** on create (`#[serde(default)]` so pre-Slice-7a meta
+    /// reads back as [`ChannelMode::PerHeat`], the prior behaviour); RD-overridable.
+    #[serde(default)]
+    pub channel_mode: ChannelMode,
+}
+
+/// How a [`RoundDef`] assigns **video channels** to its heats (race redesign Slice 7a).
+///
+/// Two models, chosen by the round's competition shape:
+///
+/// - [`Static`](Self::Static) — **time-trial / qualifying** (GQ-style): every member has a *fixed*
+///   channel assigned at membership ([`MemberSlot::channel`], drawn from the event's **primary
+///   timer**'s `available_channels`). Heats are **channel-balanced** — one pilot per channel per
+///   heat, ≤ `node_count` pilots per heat — so every member flies across the format's rounds.
+/// - [`PerHeat`](Self::PerHeat) — **brackets**: the bracket decides matchups, so channels are
+///   assigned **per heat** from the timer's pool (the existing first-fit allocation), each heat ≤
+///   `node_count` pilots.
+///
+/// Defaulted by format on round-create (`timed_qual` / `round_robin` → [`Static`](Self::Static);
+/// the elimination / multi-main formats → [`PerHeat`](Self::PerHeat)); the default `Default` impl is
+/// [`PerHeat`](Self::PerHeat) so a round persisted before this field existed reads back with the
+/// prior per-heat behaviour. Derives serde + `ts_rs::TS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum ChannelMode {
+    /// Channel-balanced heats from each member's fixed, per-membership channel (time-trial / qual).
+    Static,
+    /// Per-heat channel assignment (brackets) — the default and the pre-Slice-7a behaviour.
+    #[default]
+    PerHeat,
+}
+
+impl ChannelMode {
+    /// The **default channel mode for a format** (race redesign Slice 7a): the static, fixed-channel
+    /// qualifying formats (`timed_qual`, `round_robin`) default to [`Static`](Self::Static); every
+    /// other format (the elimination brackets, multi-main, zippyq) defaults to
+    /// [`PerHeat`](Self::PerHeat). The RD can override the default per round.
+    pub fn default_for_format(format: &str) -> Self {
+        match format {
+            "timed_qual" | "round_robin" => ChannelMode::Static,
+            _ => ChannelMode::PerHeat,
+        }
+    }
 }
 
 /// How a [`RoundDef`]'s field is **seeded** (race redesign Slice 2a).
@@ -294,6 +454,12 @@ pub struct NewRoundReq {
     /// How the round's field is seeded; defaults to [`SeedingRule::FromRoster`] when omitted.
     #[serde(default)]
     pub seeding: SeedingRule,
+    /// How this round assigns channels (race redesign Slice 7a). Optional — **omit it** to take the
+    /// format's default ([`ChannelMode::default_for_format`]); supply it to override (e.g. force a
+    /// qual round per-heat). Additive on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel_mode: Option<ChannelMode>,
 }
 
 /// The body of `PUT /events/{id}/rounds/{round}` — the editable fields of an existing round (race
@@ -316,6 +482,11 @@ pub struct UpdateRoundReq {
     /// The new seeding rule; defaults to [`SeedingRule::FromRoster`] when omitted.
     #[serde(default)]
     pub seeding: SeedingRule,
+    /// The new channel mode (race redesign Slice 7a). Optional — **omit it** to take the format's
+    /// default ([`ChannelMode::default_for_format`]); supply it to override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel_mode: Option<ChannelMode>,
 }
 
 impl EventMeta {
@@ -386,8 +557,16 @@ pub struct SetEventClassesRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SetClassMembershipRequest {
-    /// The roster pilots that race this class, in selection order. Each must name a known pilot.
-    pub pilot_ids: Vec<PilotId>,
+    /// The roster pilots that race this class, in selection order, **each with an optional assigned
+    /// channel** (race redesign Slice 7a). Each must name a known pilot; each set
+    /// [`channel`](MemberSlot::channel) must be one of the event's **primary timer**'s
+    /// `available_channels` (which may exceed the timer's `node_count`).
+    ///
+    /// **Legacy-compatible:** an element may be a bare pilot-id string (the pre-Slice-7a wire shape),
+    /// read as a channel-less slot — so an old client / persisted body still sets membership.
+    #[serde(with = "member_slots")]
+    #[ts(as = "Vec<MemberSlot>")]
+    pub pilots: Vec<MemberSlot>,
 }
 
 /// The body of `POST /events` — the only thing a caller supplies when creating an event.
@@ -732,19 +911,21 @@ impl EventRegistry {
     /// Set the **per-class membership** for one class (race redesign Slice 1a), returning the
     /// event's updated [`EventMeta`].
     ///
-    /// Replaces *that class's* pilot list wholesale with `pilot_ids` (other classes' memberships
-    /// are untouched). An empty `pilot_ids` removes the class's membership entry entirely (no empty
-    /// entries are persisted). Validates the event exists (else a [`RegistryError`] the caller maps
-    /// to a typed 404); the caller is responsible for validating that `class` names a directory
-    /// class and each id names a directory pilot (the class/pilot directories are separate
-    /// authorities). The membership is recorded on the event's [`EventMeta`] and **written through**
+    /// Replaces *that class's* slot list wholesale with `pilots` (other classes' memberships are
+    /// untouched), each [`MemberSlot`] carrying the pilot and its optional fixed channel (Slice 7a).
+    /// An empty `pilots` removes the class's membership entry entirely (no empty entries are
+    /// persisted). Validates the event exists (else a [`RegistryError`] the caller maps to a typed
+    /// 404); the caller is responsible for validating that `class` names a directory class, each
+    /// pilot id names a directory pilot, and each set channel is in the event's primary timer's
+    /// available channels (the class/pilot/timer registries are separate authorities). The membership
+    /// is recorded on the event's [`EventMeta`] and **written through**
     /// to the event's SQLite `meta` table (issue #115) so it survives a Director restart — exactly
     /// the roster/classes path.
     pub fn set_class_membership(
         &self,
         id: &EventId,
         class: ClassId,
-        pilot_ids: Vec<PilotId>,
+        pilots: Vec<MemberSlot>,
     ) -> Result<EventMeta, RegistryError> {
         let mut reg = self.write();
         let event = reg
@@ -754,11 +935,11 @@ impl EventRegistry {
         // Last-write-wins, set-membership semantics: replace the class's entry, drop it when the
         // new list is empty, so re-applying the same membership is idempotent.
         event.meta.classes_membership.retain(|m| m.class != class);
-        if !pilot_ids.is_empty() {
-            event.meta.classes_membership.push(ClassMembership {
-                class,
-                pilots: pilot_ids,
-            });
+        if !pilots.is_empty() {
+            event
+                .meta
+                .classes_membership
+                .push(ClassMembership { class, pilots });
         }
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
@@ -807,6 +988,12 @@ impl EventRegistry {
             }
         };
 
+        // Default the channel mode **by format** when the request omits it (Slice 7a):
+        // `timed_qual`/`round_robin` → Static, the bracket formats → PerHeat; an explicit
+        // request value overrides.
+        let channel_mode = req
+            .channel_mode
+            .unwrap_or_else(|| ChannelMode::default_for_format(&req.format));
         let round = RoundDef {
             id: round_id,
             label: req.label,
@@ -815,6 +1002,7 @@ impl EventRegistry {
             params: req.params,
             win_condition: req.win_condition,
             seeding: req.seeding,
+            channel_mode,
         };
         event.meta.rounds.push(round.clone());
         let meta = event.meta.clone();
@@ -857,6 +1045,11 @@ impl EventRegistry {
             Some(round_id),
         )?;
 
+        // As with add: an omitted channel mode defaults by the (new) format; an explicit value
+        // overrides. The round is replaced wholesale, so the mode is re-derived each update.
+        let channel_mode = req
+            .channel_mode
+            .unwrap_or_else(|| ChannelMode::default_for_format(&req.format));
         let round = RoundDef {
             id: round_id.clone(),
             label: req.label,
@@ -865,6 +1058,7 @@ impl EventRegistry {
             params: req.params,
             win_condition: req.win_condition,
             seeding: req.seeding,
+            channel_mode,
         };
         if let Some(slot) = event.meta.rounds.iter_mut().find(|r| &r.id == round_id) {
             *slot = round.clone();
@@ -1371,6 +1565,12 @@ mod tests {
     use gridfpv_events::{CompetitorRef, Event, HeatId};
 
     /// A name-only create request (the common one-click path) for the tests.
+    /// Wrap bare pilot ids into channel-less [`MemberSlot`]s — the membership shape the registry now
+    /// takes (race redesign Slice 7a).
+    fn slots(pilots: Vec<PilotId>) -> Vec<MemberSlot> {
+        pilots.into_iter().map(MemberSlot::new).collect()
+    }
+
     fn req(name: &str) -> CreateEventRequest {
         CreateEventRequest {
             name: name.to_string(),
@@ -1716,18 +1916,18 @@ mod tests {
 
         // Set the Open class's membership.
         let meta = reg
-            .set_class_membership(&event.id, open.clone(), vec![a.clone(), b.clone()])
+            .set_class_membership(&event.id, open.clone(), slots(vec![a.clone(), b.clone()]))
             .unwrap();
         assert_eq!(meta.classes_membership.len(), 1);
         assert_eq!(meta.classes_membership[0].class, open);
         assert_eq!(
             meta.classes_membership[0].pilots,
-            vec![a.clone(), b.clone()]
+            slots(vec![a.clone(), b.clone()])
         );
 
         // A second class gets its own entry; the first is untouched.
         let meta = reg
-            .set_class_membership(&event.id, spec.clone(), vec![c.clone()])
+            .set_class_membership(&event.id, spec.clone(), slots(vec![c.clone()]))
             .unwrap();
         assert_eq!(meta.classes_membership.len(), 2);
         let open_entry = meta
@@ -1735,11 +1935,11 @@ mod tests {
             .iter()
             .find(|m| m.class == open)
             .unwrap();
-        assert_eq!(open_entry.pilots, vec![a.clone(), b.clone()]);
+        assert_eq!(open_entry.pilots, slots(vec![a.clone(), b.clone()]));
 
         // Re-setting one class replaces only that class's list (last-write-wins, no duplicate entry).
         let meta = reg
-            .set_class_membership(&event.id, open.clone(), vec![a.clone()])
+            .set_class_membership(&event.id, open.clone(), slots(vec![a.clone()]))
             .unwrap();
         assert_eq!(
             meta.classes_membership
@@ -1753,7 +1953,7 @@ mod tests {
             .iter()
             .find(|m| m.class == open)
             .unwrap();
-        assert_eq!(open_entry.pilots, vec![a.clone()]);
+        assert_eq!(open_entry.pilots, slots(vec![a.clone()]));
 
         // An empty list clears the class's membership entry entirely.
         let meta = reg
@@ -1770,6 +1970,66 @@ mod tests {
     }
 
     #[test]
+    fn legacy_bare_pilot_id_membership_deserializes_as_channelless_slots() {
+        // A pre-Slice-7a `classes_membership` persisted `pilots` as a bare `["acroace-1", …]`
+        // array; it must still load (each as a channel-less MemberSlot), and re-serialize in the
+        // canonical slot form — so an old event round-trips through restart.
+        let legacy = r#"{"class":"open-1","pilots":["acroace-1","zoom-2"]}"#;
+        let parsed: ClassMembership = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed.pilots,
+            vec![
+                MemberSlot::new(PilotId("acroace-1".into())),
+                MemberSlot::new(PilotId("zoom-2".into())),
+            ]
+        );
+
+        // A mixed array (a bare id + a full slot with a channel) also loads.
+        let mixed =
+            r#"{"class":"open-1","pilots":["acroace-1",{"pilot":"zoom-2","channel":5658}]}"#;
+        let parsed: ClassMembership = serde_json::from_str(mixed).unwrap();
+        assert_eq!(parsed.pilots[0].channel, None);
+        assert_eq!(parsed.pilots[1].channel, Some(5658));
+
+        // Canonical re-serialization is the slot form; it round-trips back to the same value.
+        let json = serde_json::to_string(&parsed).unwrap();
+        let again: ClassMembership = serde_json::from_str(&json).unwrap();
+        assert_eq!(again, parsed);
+    }
+
+    #[test]
+    fn member_channels_persist_across_a_restart() {
+        // A membership carrying per-pilot channels round-trips through the #115 meta mechanism.
+        let dir = std::env::temp_dir().join(format!("gridfpv-member-chan-{}", short_suffix()));
+        let created_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Persisted Channels")).unwrap();
+            created_id = created.id.clone();
+            reg.set_class_membership(
+                &created.id,
+                ClassId("open-1".into()),
+                vec![
+                    MemberSlot {
+                        pilot: PilotId("acroace-1".into()),
+                        channel: Some(5658),
+                    },
+                    MemberSlot {
+                        pilot: PilotId("zoom-2".into()),
+                        channel: Some(5695),
+                    },
+                ],
+            )
+            .unwrap();
+        }
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        let restored = reopened.meta_of(&created_id).expect("event reloaded");
+        assert_eq!(restored.classes_membership[0].pilots[0].channel, Some(5658));
+        assert_eq!(restored.classes_membership[0].pilots[1].channel, Some(5695));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn class_membership_persists_across_a_restart() {
         // The #115 meta mechanism must carry the additive per-class membership through a restart.
         let dir = std::env::temp_dir().join(format!("gridfpv-membership-{}", short_suffix()));
@@ -1781,7 +2041,7 @@ mod tests {
             reg.set_class_membership(
                 &created.id,
                 ClassId("open-1".into()),
-                vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())],
+                slots(vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())]),
             )
             .unwrap();
         }
@@ -1794,7 +2054,7 @@ mod tests {
         );
         assert_eq!(
             restored.classes_membership[0].pilots,
-            vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())]
+            slots(vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())])
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1834,6 +2094,7 @@ mod tests {
             params: BTreeMap::new(),
             win_condition: WinCondition::BestLap,
             seeding: SeedingRule::FromRoster,
+            channel_mode: None,
         }
     }
 
@@ -1872,6 +2133,40 @@ mod tests {
     }
 
     #[test]
+    fn round_channel_mode_defaults_by_format_and_is_overridable() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Modes Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+
+        // timed_qual / round_robin → Static; the bracket formats → PerHeat (RD-overridable).
+        let cases = [
+            ("timed_qual", ChannelMode::Static),
+            ("round_robin", ChannelMode::Static),
+            ("single_elim", ChannelMode::PerHeat),
+            ("double_elim", ChannelMode::PerHeat),
+            ("multi_main", ChannelMode::PerHeat),
+            ("zippyq", ChannelMode::PerHeat),
+        ];
+        for (format, expected) in cases {
+            assert_eq!(ChannelMode::default_for_format(format), expected);
+            let mut req = round_req(format, vec![open.clone()]);
+            req.format = format.to_string();
+            let round = reg.add_round(&event.id, req).unwrap();
+            assert_eq!(
+                round.channel_mode, expected,
+                "{format} should default to {expected:?}"
+            );
+        }
+
+        // An explicit channel_mode overrides the format default (force a qual round per-heat).
+        let mut req = round_req("timed_qual", vec![open]);
+        req.channel_mode = Some(ChannelMode::PerHeat);
+        let round = reg.add_round(&event.id, req).unwrap();
+        assert_eq!(round.channel_mode, ChannelMode::PerHeat);
+    }
+
+    #[test]
     fn update_and_remove_a_round() {
         let reg = EventRegistry::new(None).unwrap();
         let event = reg.create(&req("Rounds Event")).unwrap();
@@ -1896,6 +2191,7 @@ mod tests {
                     params: BTreeMap::from([("advance".to_string(), "2".to_string())]),
                     win_condition: WinCondition::FirstToLaps { n: 5 },
                     seeding: SeedingRule::FromRoster,
+                    channel_mode: None,
                 },
             )
             .unwrap();
@@ -2004,6 +2300,7 @@ mod tests {
                     source_round: bracket.id.clone(),
                     top_n: 2,
                 },
+                channel_mode: None,
             },
         );
         assert!(matches!(self_ref, Err(RoundError::Invalid(_))));

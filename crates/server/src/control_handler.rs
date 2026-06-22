@@ -368,15 +368,38 @@ fn apply_fill_round(
         Err(err) => return CommandAck::failed(err),
     };
 
-    match round_engine::fill_round(&meta, &round, &events) {
-        Ok(FillOutcome::Scheduled { heat, lineup }) => {
+    match round_engine::fill_round(&meta, &registry.timers(), &round, &events) {
+        Ok(FillOutcome::Scheduled {
+            heat,
+            lineup,
+            frequencies: static_freqs,
+        }) => {
             let class = round_engine::round_class(&meta, &round);
-            // Assign channels from the event's effective primary timer's available set (race
-            // redesign Slice 4a): the heat-size cap (lineup ≤ node count) is enforced here, and the
-            // engine's first-fit allocator fills `frequencies` in seed order. A pure-sim event (no
-            // resolvable timer / no available channels) assigns none — an un-channelled heat.
-            let frequencies =
-                match round_engine::assign_for_event(&meta, &registry.timers(), &lineup) {
+            // Channel assignment differs by the round's channel mode (race redesign Slice 7a):
+            //
+            // - **Static** (`static_freqs` is `Some`): the channel-balanced builder already chose
+            //   each pilot's fixed membership channel; use them directly. The heat-size cap was
+            //   honoured by the builder (heats are ≤ node_count), but re-check defensively against
+            //   the timer node count so an oversized heat never slips through.
+            // - **Per-heat** (`static_freqs` is `None`): first-fit from the timer's pool (Slice 4a),
+            //   which also enforces the node-count cap.
+            let frequencies = match static_freqs {
+                Some(freqs) => {
+                    if let Some(timer) = round_engine::assignment_timer(&meta, &registry.timers()) {
+                        if lineup.len() > timer.node_count as usize {
+                            return CommandAck::failed(ProtocolError::new(
+                                ErrorCode::BadRequest,
+                                round_engine::AssignError::TooManyForNodes {
+                                    lineup: lineup.len(),
+                                    nodes: timer.node_count as usize,
+                                }
+                                .to_string(),
+                            ));
+                        }
+                    }
+                    freqs
+                }
+                None => match round_engine::assign_for_event(&meta, &registry.timers(), &lineup) {
                     Ok(freqs) => freqs,
                     Err(err) => {
                         return CommandAck::failed(ProtocolError::new(
@@ -384,7 +407,8 @@ fn apply_fill_round(
                             err.to_string(),
                         ));
                     }
-                };
+                },
+            };
             let event = Event::HeatScheduled {
                 heat,
                 lineup,
@@ -843,7 +867,9 @@ mod tests {
     #[test]
     fn fill_round_schedules_a_tagged_heat_from_membership() {
         use crate::classes::CreateClassRequest;
-        use crate::events::{CreateEventRequest, NewRoundReq, SeedingRule};
+        use crate::events::{
+            ChannelMode, CreateEventRequest, MemberSlot, NewRoundReq, SeedingRule,
+        };
         use crate::pilots::CreatePilotRequest;
         use crate::scope::EventId;
         use gridfpv_engine::scoring::WinCondition;
@@ -888,7 +914,11 @@ mod tests {
             .id;
         registry.set_classes(&event, vec![class.clone()]).unwrap();
         registry
-            .set_class_membership(&event, class.clone(), pilots.clone())
+            .set_class_membership(
+                &event,
+                class.clone(),
+                pilots.iter().cloned().map(MemberSlot::new).collect(),
+            )
             .unwrap();
         let round = registry
             .add_round(
@@ -900,6 +930,8 @@ mod tests {
                     params: BTreeMap::from([("rounds".into(), "1".into())]),
                     win_condition: WinCondition::BestLap,
                     seeding: SeedingRule::FromRoster,
+                    // Per-heat: this test asserts the whole-field single heat (the bracket path).
+                    channel_mode: Some(ChannelMode::PerHeat),
                 },
             )
             .unwrap();
@@ -972,7 +1004,9 @@ mod tests {
         pilots: &[&str],
     ) -> (EventRegistry, EventId, gridfpv_events::RoundId) {
         use crate::classes::CreateClassRequest;
-        use crate::events::{CreateEventRequest, NewRoundReq, SeedingRule};
+        use crate::events::{
+            ChannelMode, CreateEventRequest, MemberSlot, NewRoundReq, SeedingRule,
+        };
         use crate::pilots::CreatePilotRequest;
         use gridfpv_engine::scoring::WinCondition;
         use std::collections::BTreeMap;
@@ -1014,7 +1048,11 @@ mod tests {
             .id;
         registry.set_classes(&event, vec![class.clone()]).unwrap();
         registry
-            .set_class_membership(&event, class.clone(), pilot_ids)
+            .set_class_membership(
+                &event,
+                class.clone(),
+                pilot_ids.into_iter().map(MemberSlot::new).collect(),
+            )
             .unwrap();
         registry.set_timers(&event, vec![timer.id]).unwrap();
         let round = registry
@@ -1027,6 +1065,8 @@ mod tests {
                     params: BTreeMap::from([("rounds".into(), "1".into())]),
                     win_condition: WinCondition::BestLap,
                     seeding: SeedingRule::FromRoster,
+                    // Per-heat: this test asserts first-fit channel assignment from the timer pool.
+                    channel_mode: Some(ChannelMode::PerHeat),
                 },
             )
             .unwrap();
