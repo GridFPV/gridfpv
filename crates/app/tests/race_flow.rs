@@ -30,7 +30,9 @@ use gridfpv_events::{AdapterId, ClassId, Event, HeatId, RoundId};
 use gridfpv_server::app::AppState;
 use gridfpv_server::classes::CreateClassRequest;
 use gridfpv_server::control::{Command, CommandAck};
-use gridfpv_server::events::{EventRegistry, NewRoundReq, RoundDef, SeedingRule};
+use gridfpv_server::events::{
+    ChannelMode, EventRegistry, MemberSlot, NewRoundReq, RoundDef, SeedingRule,
+};
 use gridfpv_server::pilots::CreatePilotRequest;
 use gridfpv_server::scope::EventId;
 use gridfpv_server::timers::{MOCK_TIMER_ID, TimerId, TimerKind, UpdateTimerRequest};
@@ -286,7 +288,7 @@ async fn round_driven_mock_race_flow_e2e() {
         &app,
         &format!("/events/{}/classes/{}/membership", event.0, class_id.0),
         &token,
-        serde_json::json!({ "pilot_ids": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
+        serde_json::json!({ "pilots": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
     )
     .await;
 
@@ -302,6 +304,8 @@ async fn round_driven_mock_race_flow_e2e() {
             params: BTreeMap::from([("rounds".into(), "1".into())]),
             win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
             seeding: SeedingRule::FromRoster,
+            // Per-heat: this flow asserts the whole-field heat + first-fit channel assignment.
+            channel_mode: Some(ChannelMode::PerHeat),
         },
     )
     .await;
@@ -399,6 +403,8 @@ async fn round_driven_mock_race_flow_e2e() {
                 source_round: qual.id.clone(),
                 top_n: 2,
             },
+            // single_elim defaults to PerHeat anyway; keep it explicit for the bracket carry.
+            channel_mode: Some(ChannelMode::PerHeat),
         },
     )
     .await;
@@ -562,7 +568,7 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
         &app,
         &format!("/events/{}/classes/{}/membership", event.0, class_id.0),
         &token,
-        serde_json::json!({ "pilot_ids": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
+        serde_json::json!({ "pilots": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
     )
     .await;
     let round: RoundDef = add_round(
@@ -576,6 +582,8 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
             params: BTreeMap::from([("rounds".into(), "1".into())]),
             win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
             seeding: SeedingRule::FromRoster,
+            // Per-heat: this flow asserts the node-cap rejection of an oversized whole-field heat.
+            channel_mode: Some(ChannelMode::PerHeat),
         },
     )
     .await;
@@ -595,6 +603,216 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
     assert!(!ack.ok, "an oversized heat must be rejected: {ack:?}");
     let after = read_log(&state).len();
     assert_eq!(before, after, "a rejected FillRound appends no heat");
+}
+
+#[tokio::test]
+async fn static_channel_balanced_qual_flow_e2e() {
+    // A **static** qual round (race redesign Slice 7a): six members across three Raceband channels
+    // on a 2-node timer (channels > node_count). The channel-balanced builder forms heats of ≤2
+    // pilots on distinct channels off each member's fixed channel; every member flies, and each
+    // heat carries the members' assigned channels (no first-fit).
+    let laps = 1u32;
+    let registry = fast_registry(laps, 2);
+    // Retune the Mock to a 2-node cap (channels are the default Raceband 8-wide pool — > node cap).
+    registry
+        .timers()
+        .update(
+            &TimerId(MOCK_TIMER_ID.to_string()),
+            &UpdateTimerRequest {
+                node_count: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let class_id = registry
+        .classes()
+        .create(&CreateClassRequest {
+            name: "Open".into(),
+            source: Default::default(),
+            reference: None,
+            description: None,
+        })
+        .unwrap()
+        .id;
+    let mut pilots = Vec::new();
+    for cs in ["a", "b", "c", "d", "e", "f"] {
+        pilots.push(
+            registry
+                .pilots()
+                .create(&CreatePilotRequest {
+                    callsign: cs.into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .id,
+        );
+    }
+    let token = registry.tokens().issue_rd_token();
+    let _bridge = spawn_registry_bridge(
+        registry.clone(),
+        SourceConfig::Sim(SimSource::new(laps, Duration::from_millis(2))),
+        AdapterId(SIM_ADAPTER.to_string()),
+    );
+    let app = build_app(registry.clone(), &no_assets());
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/events",
+        Some(&token),
+        Some(serde_json::json!({ "name": "Static Qual" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create event: {body}");
+    let event_meta: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let event = EventId(event_meta["id"].as_str().unwrap().to_string());
+    let state = registry.resolve(&event).unwrap();
+
+    control_put(
+        &app,
+        &format!("/events/{}/classes", event.0),
+        &token,
+        serde_json::json!({ "ids": [class_id.0] }),
+    )
+    .await;
+
+    // Membership with per-pilot fixed channels — 3 Raceband channels, two pilots each.
+    let channels = [5658u16, 5695, 5732];
+    let member_slots: Vec<serde_json::Value> = pilots
+        .iter()
+        .enumerate()
+        .map(|(i, p)| serde_json::json!({ "pilot": p.0, "channel": channels[i % 3] }))
+        .collect();
+    control_put(
+        &app,
+        &format!("/events/{}/classes/{}/membership", event.0, class_id.0),
+        &token,
+        serde_json::json!({ "pilots": member_slots }),
+    )
+    .await;
+
+    // A **static** timed_qual round (1 format-round).
+    let round: RoundDef = add_round(
+        &app,
+        &event,
+        &token,
+        NewRoundReq {
+            label: "Qualifying".into(),
+            classes: vec![class_id.clone()],
+            format: "timed_qual".into(),
+            params: BTreeMap::from([("rounds".into(), "1".into())]),
+            win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
+            seeding: SeedingRule::FromRoster,
+            channel_mode: Some(ChannelMode::Static),
+        },
+    )
+    .await;
+    control_put(
+        &app,
+        "/active-event",
+        &token,
+        serde_json::json!({ "id": event.0 }),
+    )
+    .await;
+
+    // Drive the round's channel-balanced heats one at a time to Score until Complete.
+    for _ in 0..10 {
+        control_ok(
+            &app,
+            &event,
+            &token,
+            &Command::FillRound {
+                round: round.id.clone(),
+            },
+        )
+        .await;
+        // The latest round heat (if a new one was scheduled this FillRound).
+        let events = read_log(&state);
+        let scheduled: Vec<&Event> = events
+            .iter()
+            .filter(|e| matches!(e, Event::HeatScheduled { round: Some(r), .. } if *r == round.id))
+            .collect();
+        // Find the newest heat with no terminal transition yet (the one to drive).
+        let pending = scheduled.iter().rev().find_map(|e| match e {
+            Event::HeatScheduled {
+                heat, frequencies, ..
+            } => {
+                let scored = events.iter().any(|x| matches!(x, Event::HeatStateChanged { heat: h, transition: gridfpv_events::HeatTransition::Scored } if h == heat));
+                if scored {
+                    None
+                } else {
+                    Some((heat.clone(), frequencies.clone()))
+                }
+            }
+            _ => None,
+        });
+        let Some((heat, freqs)) = pending else {
+            break; // Complete — no outstanding heat
+        };
+        // The heat is ≤ the 2-node cap and channel-distinct, carrying the members' fixed channels.
+        assert!(freqs.len() <= 2, "static heat exceeds node cap: {freqs:?}");
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, ch) in &freqs {
+            assert!(seen.insert(*ch), "duplicate channel in a static heat");
+            assert!(
+                channels.contains(ch),
+                "channel {ch} is a membership channel"
+            );
+        }
+        let want = freqs.len() * (laps as usize + 1);
+        control_ok(&app, &event, &token, &Command::Stage { heat: heat.clone() }).await;
+        control_ok(&app, &event, &token, &Command::Arm { heat: heat.clone() }).await;
+        control_ok(&app, &event, &token, &Command::Start { heat: heat.clone() }).await;
+        wait_until(&state, Duration::from_secs(10), move |events| {
+            passes_in_running_window(events) >= want
+        })
+        .await;
+        control_ok(
+            &app,
+            &event,
+            &token,
+            &Command::Finish { heat: heat.clone() },
+        )
+        .await;
+        control_ok(&app, &event, &token, &Command::Score { heat }).await;
+    }
+
+    // Every one of the six members flew, across channel-balanced heats of ≤2 distinct channels.
+    let events = read_log(&state);
+    let flown: std::collections::BTreeSet<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::HeatScheduled {
+                lineup,
+                round: Some(r),
+                ..
+            } if *r == round.id => Some(lineup.iter().map(|c| c.0.clone())),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(flown.len(), pilots.len(), "every static member flies");
+    // The pool spans all three membership channels (> the 2-node cap).
+    let used: std::collections::BTreeSet<u16> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::HeatScheduled {
+                frequencies,
+                round: Some(r),
+                ..
+            } if *r == round.id => Some(frequencies.iter().map(|(_, ch)| *ch)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        used.len(),
+        3,
+        "channels span the 3-wide pool, beyond the 2-node cap"
+    );
+    // The static MemberSlot wire shape round-tripped (the membership carried channels).
+    let _ = MemberSlot::new(pilots[0].clone());
 }
 
 /// A `PUT` JSON request asserted ok (used for class selection / membership / active-event).

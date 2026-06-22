@@ -259,7 +259,8 @@
     const out: PilotId[] = [];
     for (const cls of round.classes) {
       const m = membership.find((mm) => mm.class === cls);
-      for (const pid of m?.pilots ?? []) if (!out.includes(pid)) out.push(pid);
+      // Membership entries are member slots (`{ pilot, channel? }`) — Slice 7a; field is the pilots.
+      for (const s of m?.pilots ?? []) if (!out.includes(s.pilot)) out.push(s.pilot);
     }
     return out;
   }

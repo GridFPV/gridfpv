@@ -31,6 +31,7 @@ import type {
   Cursor,
   EventId,
   EventMeta,
+  FormatSchema,
   HeatSummary,
   NewRoundReq,
   Pilot,
@@ -788,7 +789,10 @@ export async function setClassMembership(
     {
       method: 'PUT',
       headers,
-      body: JSON.stringify({ pilot_ids: pilotIds })
+      // The wire shape carries member **slots** (`{ pilot, channel? }`) — race redesign Slice 7a.
+      // The server accepts a bare pilot-id element too (legacy shim), so passing plain ids here
+      // sets a channel-less membership; per-pilot channels are the Classes & Roster follow-up.
+      body: JSON.stringify({ pilots: pilotIds })
     }
   );
   if (!resp.ok)
@@ -799,21 +803,36 @@ export async function setClassMembership(
 }
 
 /**
- * List the valid **format names** (`GET /formats`) — race redesign Slice 2b. An open read (no
- * token): the production formats registered in the engine's `FormatRegistry::standard()`, the
- * single source of truth the Rounds UI's format dropdown reads. Resolves to the names in sorted
- * order, or rejects on a non-2xx / transport failure.
+ * List the valid **formats + their param schemas** (`GET /formats`) — race redesign Slice 2b / 7a.
+ * An open read (no token): each production format (`FormatRegistry::standard()`) with the param
+ * schema its generator reads (`{ name, params: [{ key, label, kind, options?, default? }] }`) — the
+ * single source of truth the Rounds UI reads for the format dropdown and a per-format params editor.
+ * Resolves to the schemas in sorted name order, or rejects on a non-2xx / transport failure.
  */
-export async function listFormats(
+export async function listFormatSchemas(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
-): Promise<string[]> {
+): Promise<FormatSchema[]> {
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/formats`, { headers });
   if (!resp.ok) throw new Error(`GET /formats failed: HTTP ${resp.status}`);
-  return (await resp.json()) as string[];
+  return (await resp.json()) as FormatSchema[];
+}
+
+/**
+ * List the valid **format names** (`GET /formats`) — the names-only convenience over
+ * {@link listFormatSchemas} the Rounds UI's format dropdown reads. Resolves to the schema names in
+ * sorted order, or rejects on a non-2xx / transport failure. The full per-format param schema (for
+ * a params editor) is {@link listFormatSchemas}.
+ */
+export async function listFormats(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<string[]> {
+  const schemas = await listFormatSchemas(baseUrl, options);
+  return schemas.map((s) => s.name);
 }
 
 /**

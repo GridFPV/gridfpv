@@ -346,6 +346,95 @@ impl FormatConfig {
     }
 }
 
+/// The **kind** of a format parameter (race redesign Slice 7a) — how a UI renders / validates it.
+///
+/// A `number` is a free integer/decimal input; an `enum` is a fixed choice from
+/// [`options`](FormatParam::options); a `bool` is a toggle. Externally tagged so it maps to a TS
+/// discriminated-union-friendly string literal. Derives serde + `ts_rs::TS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "bindings/")]
+pub enum ParamKind {
+    /// A numeric input (e.g. `rounds`, `heat_size`).
+    Number,
+    /// A fixed choice from [`options`](FormatParam::options) (e.g. a `metric`).
+    Enum,
+    /// A boolean toggle (e.g. `bracket_reset`).
+    Bool,
+}
+
+/// One **parameter schema** entry for a format (race redesign Slice 7a) — the declared shape of a
+/// config knob the format's generator reads.
+///
+/// The Rounds UI's params editor reads these to render the right control per knob (a number field,
+/// an enum dropdown, a toggle) with its default; the server declares one per param each generator
+/// actually consumes. Derives serde (its JSON *is* the `GET /formats` wire shape) + `ts_rs::TS`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct FormatParam {
+    /// The param key as it appears in a round's `params` map (e.g. `"rounds"`).
+    pub key: String,
+    /// A human-readable label for the param (e.g. `"Rounds"`).
+    pub label: String,
+    /// How the param is rendered / validated.
+    pub kind: ParamKind,
+    /// For an [`Enum`](ParamKind::Enum) param, the allowed values (the raw strings stored in
+    /// `params`); empty for `number` / `bool`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// The default value (the raw string the format falls back to when the param is unset), or
+    /// `None` when the format has no default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default: Option<String>,
+}
+
+impl FormatParam {
+    /// A numeric param with a default.
+    fn number(key: &str, label: &str, default: &str) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: ParamKind::Number,
+            options: Vec::new(),
+            default: Some(default.into()),
+        }
+    }
+
+    /// An enum param with its allowed `options` and a default.
+    fn enumerated(key: &str, label: &str, options: &[&str], default: &str) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: ParamKind::Enum,
+            options: options.iter().map(|s| s.to_string()).collect(),
+            default: Some(default.into()),
+        }
+    }
+
+    /// A boolean param with a default (`"1"` / `"0"`).
+    fn boolean(key: &str, label: &str, default: &str) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: ParamKind::Bool,
+            options: Vec::new(),
+            default: Some(default.into()),
+        }
+    }
+}
+
+/// A format's **declared param schema** (race redesign Slice 7a): the format name plus the params
+/// its generator reads. The shape `GET /formats` returns so the Rounds UI renders a params editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct FormatSchema {
+    /// The format name (a [`FormatRegistry::standard`] name).
+    pub name: String,
+    /// The params this format's generator reads, in display order.
+    pub params: Vec<FormatParam>,
+}
+
 /// A constructor that builds a boxed [`Generator`] from a [`FormatConfig`].
 pub type FormatCtor = fn(&FormatConfig) -> Box<dyn Generator>;
 
@@ -400,6 +489,65 @@ impl FormatRegistry {
     /// The format names registered, in sorted order.
     pub fn names(&self) -> Vec<&str> {
         self.ctors.keys().map(String::as_str).collect()
+    }
+
+    /// The **param schema** for every production format (race redesign Slice 7a), in the same sorted
+    /// name order as [`names`](Self::names) over [`standard`](Self::standard).
+    ///
+    /// Each entry declares the params that format's generator actually reads (with kind, options,
+    /// and default), the single source of truth `GET /formats` returns so the Rounds UI renders a
+    /// per-format params editor. Kept in lock-step with the generators' `from_config` readers:
+    ///
+    /// - `timed_qual`: `rounds` (number, 3), `metric` (enum: best-lap/best-consecutive/most-laps).
+    /// - `round_robin`: `rounds` (3), `heat_size` (4), `metric` (enum: points/total-laps).
+    /// - `single_elim`: `heat_size` (number, 2).
+    /// - `double_elim`: `bracket_reset` (bool, on).
+    /// - `multi_main`: `main_size` (number, 4).
+    /// - `zippyq`: `rounds` (number, 0 — rounds are added on demand).
+    pub fn standard_schemas() -> Vec<FormatSchema> {
+        vec![
+            FormatSchema {
+                name: "double_elim".into(),
+                params: vec![FormatParam::boolean("bracket_reset", "Bracket reset", "1")],
+            },
+            FormatSchema {
+                name: "multi_main".into(),
+                params: vec![FormatParam::number("main_size", "Main size", "4")],
+            },
+            FormatSchema {
+                name: "round_robin".into(),
+                params: vec![
+                    FormatParam::number("rounds", "Rounds", "3"),
+                    FormatParam::number("heat_size", "Heat size", "4"),
+                    FormatParam::enumerated(
+                        "metric",
+                        "Ranking metric",
+                        &["points", "total-laps"],
+                        "points",
+                    ),
+                ],
+            },
+            FormatSchema {
+                name: "single_elim".into(),
+                params: vec![FormatParam::number("heat_size", "Heat size", "2")],
+            },
+            FormatSchema {
+                name: "timed_qual".into(),
+                params: vec![
+                    FormatParam::number("rounds", "Rounds", "3"),
+                    FormatParam::enumerated(
+                        "metric",
+                        "Qualifying metric",
+                        &["best-lap", "best-consecutive", "most-laps"],
+                        "best-lap",
+                    ),
+                ],
+            },
+            FormatSchema {
+                name: "zippyq".into(),
+                params: vec![FormatParam::number("rounds", "Initial rounds", "0")],
+            },
+        ]
     }
 
     /// Whether a format is registered under `name`.

@@ -56,7 +56,7 @@ use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, Pass, RoundId, Sourc
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::events::{EventMeta, RoundDef, SeedingRule};
+use crate::events::{ChannelMode, EventMeta, RoundDef, SeedingRule};
 use crate::timers::{Timer, TimerRegistry};
 
 /// The hard guard against a generator that never completes (mirrors
@@ -81,6 +81,13 @@ pub enum FillOutcome {
         heat: HeatId,
         /// The heat lineup, in the generator's seeding order.
         lineup: Vec<CompetitorRef>,
+        /// **Static-mode** per-pilot channel assignment (race redesign Slice 7a): `Some` for a
+        /// [`ChannelMode::Static`](crate::events::ChannelMode::Static) round (the channel-balanced
+        /// builder picks each pilot's *fixed* membership channel), `None` for a
+        /// [`PerHeat`](crate::events::ChannelMode::PerHeat) round (the handler then assigns channels
+        /// from the timer's pool via [`assign_for_event`], the prior behaviour). The handler still
+        /// enforces the node-count cap either way.
+        frequencies: Option<Vec<(CompetitorRef, u16)>>,
     },
     /// The round is complete — the generator returned
     /// [`GeneratorStep::Complete`](gridfpv_engine::format::GeneratorStep::Complete). No
@@ -110,6 +117,10 @@ pub enum FillError {
     /// A [`SeedingRule::FromRanking`] names a `source_round` that does not exist in this
     /// event.
     UnknownSourceRound(String),
+    /// A [`ChannelMode::Static`](crate::events::ChannelMode::Static) round has a member with **no
+    /// assigned channel** (race redesign Slice 7a): static channel-balanced formation needs every
+    /// member to carry a fixed channel. The inner `String` names the pilot missing one.
+    MissingChannel(String),
 }
 
 impl std::fmt::Display for FillError {
@@ -127,6 +138,12 @@ impl std::fmt::Display for FillError {
                 write!(
                     f,
                     "seeding source round {id:?} does not exist in this event"
+                )
+            }
+            FillError::MissingChannel(pilot) => {
+                write!(
+                    f,
+                    "static-channel round member {pilot:?} has no assigned channel"
                 )
             }
         }
@@ -297,8 +314,8 @@ fn round_field(
             for class in &round.classes {
                 if let Some(membership) = meta.classes_membership.iter().find(|m| &m.class == class)
                 {
-                    for pilot in &membership.pilots {
-                        let competitor = CompetitorRef(pilot.0.clone());
+                    for slot in &membership.pilots {
+                        let competitor = CompetitorRef(slot.pilot.0.clone());
                         if !field.contains(&competitor) {
                             field.push(competitor);
                         }
@@ -613,10 +630,30 @@ fn best_lap_order(best: Option<i64>) -> i64 {
 /// `meta`, exactly like [`Generator::next`](gridfpv_engine::format::Generator::next).
 pub fn fill_round(
     meta: &EventMeta,
+    timers: &TimerRegistry,
     round_id: &RoundId,
     events: &[Event],
 ) -> Result<FillOutcome, FillError> {
     let round = round_of(meta, round_id)?;
+
+    // Mode-aware heat formation (race redesign Slice 7a). A **static** round (time-trial / qual)
+    // forms channel-balanced heats off each member's fixed channel; a **per-heat** round (brackets)
+    // runs the format generator's heats and lets the handler first-fit channels (the prior path).
+    match round.channel_mode {
+        ChannelMode::Static => fill_round_static(meta, timers, round, events),
+        ChannelMode::PerHeat => fill_round_per_heat(meta, round, round_id, events),
+    }
+}
+
+/// Fill a **per-heat** (bracket) round (race redesign Slice 7a / the original Slice 3a path): run
+/// the format generator and emit the next not-yet-scheduled heat, channels assigned later by the
+/// handler's first-fit. Unchanged behaviour — only extracted from [`fill_round`].
+fn fill_round_per_heat(
+    meta: &EventMeta,
+    round: &RoundDef,
+    round_id: &RoundId,
+    events: &[Event],
+) -> Result<FillOutcome, FillError> {
     let field = round_field(meta, round, events)?;
     if field.is_empty() {
         return Err(FillError::EmptyField(round_id.0.clone()));
@@ -645,6 +682,8 @@ pub fn fill_round(
                 Some(plan) => Ok(FillOutcome::Scheduled {
                     heat: plan.heat,
                     lineup: plan.lineup,
+                    // Per-heat: the handler assigns channels from the timer pool (first-fit).
+                    frequencies: None,
                 }),
                 // Every plan the generator wants this step is already scheduled (the RD
                 // re-issued FillRound before scoring the outstanding heat): nothing new to
@@ -654,6 +693,189 @@ pub fn fill_round(
             }
         }
         GeneratorStep::Complete => Ok(FillOutcome::Complete),
+    }
+}
+
+/// Fill a **static** (time-trial / qual) round with **channel-balanced** heats (race redesign Slice
+/// 7a).
+///
+/// Static rounds give each member a *fixed* channel at membership; this builds the round's full,
+/// deterministic plan of channel-balanced heats — each heat draws pilots on **distinct channels**,
+/// **≤ `node_count` pilots** (the node cap is the only per-heat size limit; the channel pool may be
+/// larger) — then emits the next not-yet-scheduled one (one per FillRound), or
+/// [`Complete`](FillOutcome::Complete) once every planned heat is scheduled. Each emitted heat
+/// carries its pilots' assigned channels as `frequencies` (no first-fit).
+///
+/// A member with no assigned channel is a [`FillError::MissingChannel`]. An empty field is a
+/// [`FillError::EmptyField`], as for per-heat.
+fn fill_round_static(
+    meta: &EventMeta,
+    timers: &TimerRegistry,
+    round: &RoundDef,
+    events: &[Event],
+) -> Result<FillOutcome, FillError> {
+    // Gather the round's members + their fixed channels (de-duplicated across eligible classes,
+    // first occurrence wins — a member in two eligible classes flies once on their channel).
+    let members = static_members(meta, round)?;
+    if members.is_empty() {
+        return Err(FillError::EmptyField(round.id.0.clone()));
+    }
+
+    // The node cap is the event's primary timer's node count (the only per-heat size limit); with
+    // no resolvable timer, fall back to seating every distinct channel in one heat (a pure-sim
+    // event still channel-balances by the distinct-channel rule, just without a node cap).
+    let node_cap = assignment_timer(meta, timers)
+        .map(|t| t.node_count as usize)
+        .filter(|n| *n > 0)
+        .unwrap_or(usize::MAX);
+
+    // How many times the whole field flies — the format's round count (e.g. `timed_qual` runs
+    // `rounds` rounds). Channel-balanced heats are built per format-round so every member flies
+    // each round, across the configured round count.
+    let format_rounds = static_round_count(round);
+
+    let plans = channel_balanced_plan(round, &members, node_cap, format_rounds);
+
+    // One heat per FillRound: emit the first plan not already scheduled (dedup like per-heat).
+    let already: Vec<HeatId> = scheduled_round_heats(events, &round.id);
+    let next = plans.into_iter().find(|(heat, _)| !already.contains(heat));
+    match next {
+        Some((heat, assignment)) => {
+            let lineup = assignment.iter().map(|(c, _)| c.clone()).collect();
+            Ok(FillOutcome::Scheduled {
+                heat,
+                lineup,
+                frequencies: Some(assignment),
+            })
+        }
+        // Every planned channel-balanced heat is already scheduled → the static round is complete.
+        None => Ok(FillOutcome::Complete),
+    }
+}
+
+/// The round's members as `(competitor, channel)` for **static** formation (race redesign Slice 7a):
+/// each member's fixed channel, de-duplicated across the round's eligible classes (first occurrence
+/// wins). A member with no assigned channel is a [`FillError::MissingChannel`].
+fn static_members(
+    meta: &EventMeta,
+    round: &RoundDef,
+) -> Result<Vec<(CompetitorRef, u16)>, FillError> {
+    let mut out: Vec<(CompetitorRef, u16)> = Vec::new();
+    for class in &round.classes {
+        let Some(membership) = meta.classes_membership.iter().find(|m| &m.class == class) else {
+            continue;
+        };
+        for slot in &membership.pilots {
+            let competitor = CompetitorRef(slot.pilot.0.clone());
+            if out.iter().any(|(c, _)| c == &competitor) {
+                continue;
+            }
+            let channel = slot
+                .channel
+                .ok_or_else(|| FillError::MissingChannel(slot.pilot.0.clone()))?;
+            out.push((competitor, channel));
+        }
+    }
+    Ok(out)
+}
+
+/// Build the full, deterministic **channel-balanced** heat plan for a static round (race redesign
+/// Slice 7a): for each of `format_rounds` rounds, partition the members into heats where every heat
+/// has **distinct channels** and **≤ `node_cap` pilots**.
+///
+/// The builder groups members by channel (preserving membership order within a channel), then draws
+/// one pilot per distinct channel into each heat, capped at `node_cap`, until a round's members are
+/// exhausted — so two pilots sharing a channel land in *different* heats and every heat is
+/// channel-distinct. Heat ids are `"<round-slug>-r<round>-h<heat>"`, stable across replays.
+fn channel_balanced_plan(
+    round: &RoundDef,
+    members: &[(CompetitorRef, u16)],
+    node_cap: usize,
+    format_rounds: usize,
+) -> Vec<(HeatId, Vec<(CompetitorRef, u16)>)> {
+    // Group members by channel, preserving order. `groups` is the distinct channels in first-seen
+    // order; each holds that channel's pilots as a FIFO queue to draw from.
+    let mut channels: Vec<u16> = Vec::new();
+    let mut groups: BTreeMap<u16, Vec<CompetitorRef>> = BTreeMap::new();
+    for (competitor, channel) in members {
+        if !channels.contains(channel) {
+            channels.push(*channel);
+        }
+        groups.entry(*channel).or_default().push(competitor.clone());
+    }
+
+    let mut plans: Vec<(HeatId, Vec<(CompetitorRef, u16)>)> = Vec::new();
+    for r in 0..format_rounds.max(1) {
+        // Per format-round, redraw the same channel queues so every member flies once this round.
+        let mut queues: BTreeMap<u16, std::collections::VecDeque<CompetitorRef>> = groups
+            .iter()
+            .map(|(ch, pilots)| (*ch, pilots.iter().cloned().collect()))
+            .collect();
+        let mut heat_index = 0usize;
+        loop {
+            // One heat: draw the next available pilot from each distinct channel, in channel order,
+            // up to the node cap. Channels with an empty queue are skipped.
+            let mut heat: Vec<(CompetitorRef, u16)> = Vec::new();
+            for channel in &channels {
+                if heat.len() >= node_cap {
+                    break;
+                }
+                if let Some(queue) = queues.get_mut(channel) {
+                    if let Some(pilot) = queue.pop_front() {
+                        heat.push((pilot, *channel));
+                    }
+                }
+            }
+            if heat.is_empty() {
+                break; // this format-round's members are exhausted
+            }
+            let heat_id = HeatId(format!(
+                "{}-r{}-h{}",
+                slugify(&round.id.0),
+                r + 1,
+                heat_index + 1
+            ));
+            plans.push((heat_id, heat));
+            heat_index += 1;
+        }
+    }
+    plans
+}
+
+/// The number of times a static round's field flies (its format round count, race redesign Slice
+/// 7a): the `rounds` param, defaulting to the qualifying formats' defaults (`timed_qual` 3,
+/// `round_robin` 3), else 1. Read off the round's params verbatim.
+fn static_round_count(round: &RoundDef) -> usize {
+    let default = match round.format.as_str() {
+        "timed_qual" | "round_robin" => 3,
+        _ => 1,
+    };
+    round
+        .params
+        .get("rounds")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+        .max(1)
+}
+
+/// Slugify a round id into a heat-id-safe stem (lowercase alnum, other runs → single `-`).
+fn slugify(id: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "round".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -730,7 +952,9 @@ fn heat_passes(events: &[Event], heat: &HeatId) -> Vec<Pass> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{ClassMembership, EventMeta, RoundDef, SeedingRule};
+    use crate::events::{
+        ChannelMode, ClassMembership, EventMeta, MemberSlot, RoundDef, SeedingRule,
+    };
     use crate::scope::{ClassId as ScopeClassId, EventId, PilotId};
     use gridfpv_engine::scoring::WinCondition;
     use gridfpv_events::{AdapterId, GateIndex, HeatTransition, SourceTime};
@@ -840,6 +1064,36 @@ mod tests {
         );
     }
 
+    /// A timer registry with **no resolvable primary** for the per-heat tests (the meta selects no
+    /// timers, so `assignment_timer` resolves `None` and static formation falls back to no node cap).
+    fn no_timers() -> TimerRegistry {
+        TimerRegistry::new(None, 1, 1).unwrap()
+    }
+
+    /// An event meta selecting a primary timer with `node_count` nodes and a Raceband channel pool —
+    /// for the static channel-balanced formation tests (race redesign Slice 7a).
+    fn meta_with_timer(
+        rounds: Vec<RoundDef>,
+        membership: Vec<ClassMembership>,
+        node_count: u32,
+    ) -> (EventMeta, TimerRegistry) {
+        let timers = TimerRegistry::new(None, 1, 1).unwrap();
+        let timer = timers
+            .update(
+                &TimerId(crate::timers::MOCK_TIMER_ID.into()),
+                &crate::timers::UpdateTimerRequest {
+                    node_count: Some(node_count),
+                    available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut meta = meta_with(rounds, membership);
+        meta.timers = vec![timer.id.clone()];
+        meta.primary_timer = Some(timer.id);
+        (meta, timers)
+    }
+
     fn meta_with(rounds: Vec<RoundDef>, membership: Vec<ClassMembership>) -> EventMeta {
         EventMeta {
             id: EventId("e".into()),
@@ -862,10 +1116,30 @@ mod tests {
     fn member(class: &str, pilots: &[&str]) -> ClassMembership {
         ClassMembership {
             class: ScopeClassId(class.into()),
-            pilots: pilots.iter().map(|p| PilotId((*p).into())).collect(),
+            pilots: pilots
+                .iter()
+                .map(|p| MemberSlot::new(PilotId((*p).into())))
+                .collect(),
         }
     }
 
+    /// A class membership where each pilot carries a fixed channel: `(pilot, channel)` pairs — for
+    /// the static channel-balanced formation tests (race redesign Slice 7a).
+    fn member_chan(class: &str, pilots: &[(&str, u16)]) -> ClassMembership {
+        ClassMembership {
+            class: ScopeClassId(class.into()),
+            pilots: pilots
+                .iter()
+                .map(|(p, ch)| MemberSlot {
+                    pilot: PilotId((*p).into()),
+                    channel: Some(*ch),
+                })
+                .collect(),
+        }
+    }
+
+    /// The existing per-heat (bracket-path) qual fixture — explicitly `PerHeat` so the whole-field
+    /// single-heat behaviour the Slice-3 tests assert is preserved.
     fn qual_round(id: &str, class: &str) -> RoundDef {
         RoundDef {
             id: RoundId(id.into()),
@@ -875,6 +1149,7 @@ mod tests {
             params: BTreeMap::from([("rounds".into(), "1".into())]),
             win_condition: WinCondition::BestLap,
             seeding: SeedingRule::FromRoster,
+            channel_mode: ChannelMode::PerHeat,
         }
     }
 
@@ -925,7 +1200,7 @@ mod tests {
         let round = qual_round("q1", "open");
         let meta = meta_with(vec![round], vec![member("open", &["A", "B", "C"])]);
         // Nothing run yet → the generator emits round 1 over the whole class membership.
-        let outcome = fill_round(&meta, &RoundId("q1".into()), &[]).unwrap();
+        let outcome = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
         match outcome {
             FillOutcome::Scheduled { lineup, .. } => {
                 assert_eq!(
@@ -946,7 +1221,7 @@ mod tests {
         let round = qual_round("q1", "open");
         let meta = meta_with(vec![round], vec![]);
         assert!(matches!(
-            fill_round(&meta, &RoundId("q1".into()), &[]),
+            fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]),
             Err(FillError::EmptyField(_))
         ));
     }
@@ -958,7 +1233,7 @@ mod tests {
         let meta = meta_with(vec![round], vec![member("open", &["A", "B"])]);
 
         // The first heat the generator emits is `round-1`.
-        let first = fill_round(&meta, &RoundId("q1".into()), &[]).unwrap();
+        let first = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
         let heat_id = match first {
             FillOutcome::Scheduled { heat, .. } => heat.0,
             other => panic!("expected scheduled, got {other:?}"),
@@ -977,7 +1252,7 @@ mod tests {
         ));
 
         // Now the round is complete (1 round configured, 1 scored).
-        let next = fill_round(&meta, &RoundId("q1".into()), &log).unwrap();
+        let next = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &log).unwrap();
         assert_eq!(next, FillOutcome::Complete);
 
         // And the round has a final ranking — A (faster lap) ahead of B.
@@ -1002,6 +1277,7 @@ mod tests {
                 source_round: RoundId("q1".into()),
                 top_n: 2,
             },
+            channel_mode: ChannelMode::PerHeat,
         };
         let meta = meta_with(
             vec![qual, bracket],
@@ -1009,7 +1285,7 @@ mod tests {
         );
 
         // Run the qual heat to Scored: A fastest, then B, C, D.
-        let first = fill_round(&meta, &RoundId("q1".into()), &[]).unwrap();
+        let first = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
         let qheat = match first {
             FillOutcome::Scheduled { heat, .. } => heat.0,
             other => panic!("expected scheduled, got {other:?}"),
@@ -1030,7 +1306,7 @@ mod tests {
         ));
 
         // FillRound the bracket: the field is the top-2 of the qual ranking — A and B.
-        let outcome = fill_round(&meta, &RoundId("b1".into()), &log).unwrap();
+        let outcome = fill_round(&meta, &no_timers(), &RoundId("b1".into()), &log).unwrap();
         match outcome {
             FillOutcome::Scheduled { lineup, .. } => {
                 assert_eq!(
@@ -1042,6 +1318,145 @@ mod tests {
             other => panic!("expected a scheduled bracket heat, got {other:?}"),
         }
     }
+
+    // --- Static channel-balanced formation (race redesign Slice 7a) ------------------------
+
+    /// A `timed_qual` round in **Static** channel mode (one format-round) over `class`.
+    fn static_qual_round(id: &str, class: &str) -> RoundDef {
+        RoundDef {
+            id: RoundId(id.into()),
+            label: id.into(),
+            classes: vec![ScopeClassId(class.into())],
+            format: "timed_qual".into(),
+            params: BTreeMap::from([("rounds".into(), "1".into())]),
+            win_condition: WinCondition::BestLap,
+            seeding: SeedingRule::FromRoster,
+            channel_mode: ChannelMode::Static,
+        }
+    }
+
+    #[test]
+    fn static_round_forms_channel_balanced_heats_over_node_cap() {
+        // 20 members spread across 8 Raceband channels on a 4-node timer (channels > node_count):
+        // every heat has ≤ 4 pilots on DISTINCT channels, and every member flies. The channel pool
+        // (8) exceeds the node cap (4) — node_count caps only pilots/heat, never the channel count.
+        let r1 = RACEBAND_MHZ[0];
+        let r2 = RACEBAND_MHZ[1];
+        let r3 = RACEBAND_MHZ[2];
+        let r4 = RACEBAND_MHZ[3];
+        let r5 = RACEBAND_MHZ[4];
+        let r6 = RACEBAND_MHZ[5];
+        let r7 = RACEBAND_MHZ[6];
+        let r8 = RACEBAND_MHZ[7];
+        let channels = [r1, r2, r3, r4, r5, r6, r7, r8];
+        // 20 pilots, 2-3 per channel.
+        let members: Vec<(&str, u16)> =
+            (0..20).map(|i| (PILOT_NAMES[i], channels[i % 8])).collect();
+        let round = static_qual_round("q1", "open");
+        let (meta, timers) = meta_with_timer(
+            vec![round],
+            vec![member_chan("open", &members)],
+            4, // node cap
+        );
+
+        // Drive every static heat the round wants, collecting each scheduled heat's assignment.
+        let mut log: Vec<Event> = Vec::new();
+        let mut heats: Vec<Vec<(CompetitorRef, u16)>> = Vec::new();
+        for _ in 0..50 {
+            match fill_round(&meta, &timers, &RoundId("q1".into()), &log).unwrap() {
+                FillOutcome::Scheduled {
+                    heat,
+                    lineup,
+                    frequencies,
+                } => {
+                    let freqs = frequencies.expect("static round assigns channels itself");
+                    // Each heat is ≤ node cap and channel-distinct.
+                    assert!(lineup.len() <= 4, "heat exceeds the 4-node cap: {lineup:?}");
+                    let mut seen = std::collections::BTreeSet::new();
+                    for (_, ch) in &freqs {
+                        assert!(seen.insert(*ch), "duplicate channel {ch} in one heat");
+                    }
+                    // Lineup matches the assignment competitors.
+                    let lineup_set: Vec<&str> = lineup.iter().map(|c| c.0.as_str()).collect();
+                    let freq_set: Vec<&str> = freqs.iter().map(|(c, _)| c.0.as_str()).collect();
+                    assert_eq!(lineup_set, freq_set);
+                    heats.push(freqs.clone());
+                    // Schedule + score the heat so the next FillRound advances.
+                    let names: Vec<String> = lineup.iter().map(|c| c.0.clone()).collect();
+                    log.push(Event::HeatScheduled {
+                        heat: heat.clone(),
+                        lineup,
+                        class: Some(ClassId("open".into())),
+                        round: Some(RoundId("q1".into())),
+                        frequencies: freqs,
+                    });
+                    let mut passes = Vec::new();
+                    for (i, n) in names.iter().enumerate() {
+                        passes.push(pass(n, i as i64, 0));
+                        passes.push(pass(n, 1_000_000 + i as i64, 1));
+                    }
+                    log.extend(run_heat_events(&heat.0, passes));
+                }
+                FillOutcome::Complete => break,
+                other => panic!("unexpected static outcome {other:?}"),
+            }
+        }
+
+        // Every one of the 20 members flew exactly once across the round.
+        let flown: std::collections::BTreeSet<&str> = heats
+            .iter()
+            .flat_map(|h| h.iter().map(|(c, _)| c.0.as_str()))
+            .collect();
+        assert_eq!(flown.len(), 20, "every member flies");
+        // The channel pool used spans all 8 channels (> the 4-node cap).
+        let used_channels: std::collections::BTreeSet<u16> = heats
+            .iter()
+            .flat_map(|h| h.iter().map(|(_, ch)| *ch))
+            .collect();
+        assert_eq!(used_channels.len(), 8, "channels span the full 8-wide pool");
+    }
+
+    #[test]
+    fn static_round_missing_channel_is_a_typed_error() {
+        // A Static round with a member lacking a channel is a clear MissingChannel error.
+        let round = static_qual_round("q1", "open");
+        let (meta, timers) = meta_with_timer(
+            vec![round],
+            vec![ClassMembership {
+                class: ScopeClassId("open".into()),
+                pilots: vec![
+                    MemberSlot {
+                        pilot: PilotId("A".into()),
+                        channel: Some(RACEBAND_MHZ[0]),
+                    },
+                    MemberSlot::new(PilotId("B".into())), // no channel
+                ],
+            }],
+            4,
+        );
+        assert!(matches!(
+            fill_round(&meta, &timers, &RoundId("q1".into()), &[]),
+            Err(FillError::MissingChannel(_))
+        ));
+    }
+
+    #[test]
+    fn static_round_is_deterministic_on_replay() {
+        let members: Vec<(&str, u16)> = (0..6)
+            .map(|i| (PILOT_NAMES[i], RACEBAND_MHZ[i % 3]))
+            .collect();
+        let round = static_qual_round("q1", "open");
+        let (meta, timers) = meta_with_timer(vec![round], vec![member_chan("open", &members)], 4);
+        let once = fill_round(&meta, &timers, &RoundId("q1".into()), &[]).unwrap();
+        let twice = fill_round(&meta, &timers, &RoundId("q1".into()), &[]).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    /// Twenty stable pilot callsigns for the static formation tests.
+    const PILOT_NAMES: [&str; 20] = [
+        "p00", "p01", "p02", "p03", "p04", "p05", "p06", "p07", "p08", "p09", "p10", "p11", "p12",
+        "p13", "p14", "p15", "p16", "p17", "p18", "p19",
+    ];
 
     // --- Per-class standings (race redesign Slice 5/6a) ------------------------------------
 
@@ -1160,8 +1575,8 @@ mod tests {
     fn fill_round_is_deterministic_on_replay() {
         let round = qual_round("q1", "open");
         let meta = meta_with(vec![round], vec![member("open", &["A", "B", "C"])]);
-        let once = fill_round(&meta, &RoundId("q1".into()), &[]).unwrap();
-        let twice = fill_round(&meta, &RoundId("q1".into()), &[]).unwrap();
+        let once = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
+        let twice = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
         assert_eq!(once, twice);
     }
 
@@ -1181,9 +1596,9 @@ mod tests {
             let mut log: Vec<Event> = Vec::new();
             let mut outcomes = Vec::new();
             for _ in 0..4 {
-                let outcome = fill_round(&meta, &RoundId("q1".into()), &log).unwrap();
+                let outcome = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &log).unwrap();
                 outcomes.push(outcome.clone());
-                if let FillOutcome::Scheduled { heat, lineup } = outcome {
+                if let FillOutcome::Scheduled { heat, lineup, .. } = outcome {
                     let heat_id = heat.0.clone();
                     log.push(Event::HeatScheduled {
                         heat,

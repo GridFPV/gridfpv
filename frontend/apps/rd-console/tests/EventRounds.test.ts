@@ -25,7 +25,8 @@ const QUAL: RoundDef = {
   format: 'timed_qual',
   params: {},
   win_condition: { Timed: { window_micros: 120_000_000 } },
-  seeding: 'FromRoster'
+  seeding: 'FromRoster',
+  channel_mode: 'Static'
 };
 
 /** An event selecting both classes, with one existing round. */
@@ -81,7 +82,8 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       format: 'zippyq',
       params: {},
       win_condition: 'BestLap',
-      seeding: 'FromRoster'
+      seeding: 'FromRoster',
+      channel_mode: 'PerHeat'
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session } = makeTestSession({
@@ -193,7 +195,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   const EVENT_WITH_MEMBERS: EventMeta = {
     ...EVENT,
     roster: ['p1', 'p2'],
-    classes_membership: [{ class: 'c1', pilots: ['p1', 'p2'] }]
+    classes_membership: [{ class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }] }]
   };
 
   function heatsImpls(heats: HeatSummary[] = []) {
@@ -326,7 +328,7 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
   const EVENT_WITH_MEMBERS: EventMeta = {
     ...EVENT,
     roster: ['p1', 'p2'],
-    classes_membership: [{ class: 'c1', pilots: ['p1', 'p2'] }]
+    classes_membership: [{ class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }] }]
   };
 
   function baseHeatsImpls() {
@@ -378,7 +380,9 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
     const EVENT_3: EventMeta = {
       ...EVENT_WITH_MEMBERS,
       roster: ['p1', 'p2', 'p3'],
-      classes_membership: [{ class: 'c1', pilots: ['p1', 'p2', 'p3'] }]
+      classes_membership: [
+        { class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }, { pilot: 'p3' }] }
+      ]
     };
     const created: RoundDef = {
       id: 'r2',
@@ -387,7 +391,8 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
       format: 'single_elim',
       params: {},
       win_condition: QUAL.win_condition,
-      seeding: { FromRanking: { source_round: 'r1', top_n: 2 } }
+      seeding: { FromRanking: { source_round: 'r1', top_n: 2 } },
+      channel_mode: 'PerHeat'
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session, sendSpy } = makeTestSession({
