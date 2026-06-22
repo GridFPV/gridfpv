@@ -190,15 +190,29 @@ stateDiagram-v2
     </p>
     <p>
       <strong>Multi-class scheduling.</strong> Several classes can be live at once, each with
-      its own format, sharing scarce resources — the timer and, for IRL, the frequency pool.
+      its own format, sharing scarce resources — the timer and, for IRL, its channels.
       The engine interleaves heats <strong>round-robin</strong> across classes in a fixed
       rotation (so no class starves; a format that emits several heats at once has them buffered
       and drained one per turn rather than monopolising the serialized timer), and
-      <strong>allocates</strong> each IRL heat's video channels from a shared frequency pool by
-      deterministic first-fit in seed order — the engine's half of the split (§7.3): it decides
-      who flies on what channel, the adapter applies the tuning. Sim classes have no frequency
-      step and get an empty allocation. Both interleaving and allocation are pure functions of
+      <strong>allocates</strong> each IRL heat's video channels by deterministic first-fit in seed
+      order — the engine's half of the split (§7.3): it decides who flies on what channel, the
+      adapter applies the tuning. The channel set is <strong>defined by the selected timer</strong>,
+      not a free-floating event pool — the standard FPV catalog plus the adapter's fixed-or-flexible
+      capability (custom raw-MHz where allowed) — and the timer's <strong>node/slot count caps the
+      heat field</strong> (<a href="pipeline-setup.html">Setup</a>,
+      <a href="timer-adapters.html">Timer Adapters</a> §5). At race time the adapter
+      <strong>dynamically tunes</strong> its nodes to the allocation. Sim timers declare no channel
+      capability and get an empty allocation. Both interleaving and allocation are pure functions of
       the log (§6).
+    </p>
+    <p>
+      <strong>Rounds are event-level and class-tagged (planned).</strong> The engine's rounds-and-heats
+      are promoted to the <em>event</em> level and each round is tagged with the class(es) it is
+      eligible for; rounds are added dynamically (practice / quali as-you-go), and the quali→bracket
+      step <strong>generates the full bracket from the top-N quali ranking</strong> as a set of
+      editable event-level rounds (the #84 carry, reusing <code>run_event</code>'s existing
+      quali→bracket logic). The generator interface (§3) and advancement above are unchanged — the
+      redesign wires them per-event and tags the log entries with class/round.
     </p>
     <p>
       <strong>Manual adjustments.</strong> Re-seeding, moving a pilot between heats before

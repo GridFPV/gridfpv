@@ -98,6 +98,36 @@ flowchart TB
     </p>
     <div class="callout">
       <p>
+        <strong>As built (v0.4) — the console information architecture: a home hub of pages, then an
+        event workspace.</strong> The console opens on a <strong>home hub</strong> whose top-level
+        navigation is four <em>pages</em> (not modals): <strong>Pilots</strong>, <strong>Classes</strong>,
+        <strong>Events</strong>, and <strong>Timers</strong>. The first three of those — pilots,
+        classes, and timers — are <strong>app-level registries</strong> you configure once and
+        <em>select</em> from per event (the &ldquo;configure once, select per event&rdquo; model;
+        <a href="pipeline-setup.html">Setup</a>). Navigation is <strong>hash-based</strong>, so a
+        browser refresh preserves the current page and the hub stays the hub. The header carries the
+        GridFPV monogram logo and the colored wordmark. The <strong>event workspace</strong> — the
+        live race-running surface — is entered from the <strong>Events</strong> page by opening one
+        event.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Planned — the event workspace is a sequence of editable stage-pages, not a
+        &ldquo;Setup&rdquo; tab.</strong> Inside an event the workspace is a left-to-right sequence of
+        <em>stage-pages</em> you can revisit and edit at any time:
+        <strong>Classes&nbsp;· Roster&nbsp;· Rounds+Heats&nbsp;· Live&nbsp;control&nbsp;·
+        Marshaling&nbsp;· Results</strong> (Rounds and Heats are <em>combined</em> on one page). There
+        is no separate &ldquo;Setup&rdquo; phase or tab — setting an event up is just visiting its
+        early stage-pages. A <strong>guided setup wizard</strong> is a thin first-pass <em>over</em>
+        those same pages for the common path, and is built <strong>last</strong> (v0.4 Slice&nbsp;7) so
+        the pages exist before the wizard that walks them. One event flies <strong>one track</strong>.
+        (The race-running redesign; <a href="pipeline-setup.html">Setup</a>,
+        <a href="pipeline-mains.html">Mains</a>, <em>Roadmap</em> v0.4.)
+      </p>
+    </div>
+    <div class="callout">
+      <p>
         <strong>No local auth UI.</strong> Loopback-trust means there is nothing to log into on the
         RD's own machine — no login screen before the event picker, no token to paste. The earlier
         "RD token" is not a local login; it survives only as the <em>remote-access passphrase</em>
