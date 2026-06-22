@@ -29,7 +29,14 @@
     toast
   } from '@gridfpv/components';
   import type { Snippet } from 'svelte';
-  import type { CreateTimerRequest, Timer, TimerKind, UpdateTimerRequest } from '@gridfpv/types';
+  import type {
+    ChannelCapability,
+    ChannelCatalogEntry,
+    CreateTimerRequest,
+    Timer,
+    TimerKind,
+    UpdateTimerRequest
+  } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import {
     DEFAULT_MOCK_LAPS,
@@ -41,6 +48,14 @@
     kindTone,
     type TimerKindTag
   } from '../lib/timers.js';
+  import {
+    capabilityTag,
+    channelLabel,
+    fixedAllowed,
+    groupByBand,
+    isPlausibleMhz,
+    type CapabilityTag
+  } from '../lib/channels.js';
 
   let {
     session,
@@ -89,6 +104,28 @@
     void load();
   });
 
+  // ── The standard channel catalog (race redesign Slice 4b) ───────────────────
+  // Loaded once from `GET /channels` (open read); the channel picker offers it grouped by band, and
+  // the row summary resolves a timer's available raw-MHz set back to band+channel labels. A failed
+  // load degrades to an empty catalog — custom raw-MHz entry still works, labels fall back to MHz.
+  let catalog = $state<ChannelCatalogEntry[]>([]);
+  const bands = $derived(groupByBand(catalog));
+  $effect(() => {
+    session
+      .listChannels()
+      .then((c) => (catalog = c))
+      .catch(() => (catalog = []));
+  });
+
+  /** A timer's available channels, summarised as band+channel labels (e.g. "Raceband R1, F4 …"). */
+  function channelSummary(timer: Timer): string {
+    const list = timer.available_channels ?? [];
+    if (list.length === 0) return 'No channels available';
+    const labels = list.map((mhz) => channelLabel(mhz, catalog));
+    const shown = labels.slice(0, 4).join(', ');
+    return labels.length > 4 ? `${shown} +${labels.length - 4} more` : shown;
+  }
+
   /**
    * The rows to render: the loaded registry, but with each timer's **status** overlaid from the
    * session's live-polled {@link Session.timers} when available (#73, Slice 2b). The load fetches
@@ -125,6 +162,41 @@
   let saving = $state(false);
   let formError = $state<string | undefined>(undefined);
 
+  // ── Channel config (race redesign Slice 4b) ──────────────────────────────────
+  // The capability (Fixed | Flexible), node count, and the chosen available channels. The chosen set
+  // is held as a `Set<number>` of raw MHz (catalog picks + custom entries); for a Fixed timer it is
+  // limited to the timer's built-in allowed set (`Fixed.channels`); a Flexible timer can add custom.
+  const DEFAULT_NODE_COUNT = 8;
+  let formCapability = $state<CapabilityTag>('Flexible');
+  let formNodeCount = $state(String(DEFAULT_NODE_COUNT));
+  let formChannels = $state<Set<number>>(new Set());
+  // A Fixed timer's built-in allowed set (its physically-supported channels); the picker offers
+  // exactly these, and `formChannels` is the subset the RD makes available. Empty ⇒ all catalog.
+  let formFixedAllowed = $state<number[]>([]);
+  let formCustomMhz = $state('');
+
+  /** The catalog entries the picker offers: a Fixed timer's allowed set, else the whole catalog. */
+  const offeredBands = $derived.by(() => {
+    if (formCapability === 'Flexible' || formFixedAllowed.length === 0) return bands;
+    const allowed = new Set(formFixedAllowed);
+    return bands
+      .map((b) => ({ band: b.band, entries: b.entries.filter((e) => allowed.has(e.mhz)) }))
+      .filter((b) => b.entries.length > 0);
+  });
+
+  /** Custom (non-catalog) MHz the RD has added — only meaningful for a Flexible timer. */
+  const customChannels = $derived(
+    [...formChannels].filter((mhz) => !catalog.some((e) => e.mhz === mhz)).sort((a, b) => a - b)
+  );
+
+  function resetChannelForm(timer?: Timer) {
+    formCapability = capabilityTag(timer?.channel_capability);
+    formNodeCount = String(timer?.node_count ?? DEFAULT_NODE_COUNT);
+    formChannels = new Set(timer?.available_channels ?? []);
+    formFixedAllowed = fixedAllowed(timer?.channel_capability);
+    formCustomMhz = '';
+  }
+
   export function openAdd() {
     editing = undefined;
     formName = '';
@@ -132,6 +204,7 @@
     formLaps = String(DEFAULT_MOCK_LAPS);
     formLapMs = String(DEFAULT_MOCK_LAP_MS);
     formUrl = '';
+    resetChannelForm();
     formError = undefined;
     formOpen = true;
   }
@@ -149,8 +222,73 @@
       formLapMs = String(DEFAULT_MOCK_LAP_MS);
       formUrl = timer.kind.Rotorhazard.url;
     }
+    resetChannelForm(timer);
     formError = undefined;
     formOpen = true;
+  }
+
+  /** Toggle a catalog channel in/out of the available set. */
+  function toggleChannel(mhz: number) {
+    const next = new Set(formChannels);
+    if (next.has(mhz)) next.delete(mhz);
+    else next.add(mhz);
+    formChannels = next;
+  }
+
+  /** Add a custom raw-MHz channel (Flexible only). Validates a plausible 5.8 GHz centre. */
+  function addCustomMhz() {
+    // The number Input may bind a number or a string depending on the value typed; coerce safely.
+    const mhz = Math.round(Number(String(formCustomMhz).trim()));
+    if (!isPlausibleMhz(mhz)) {
+      formError = 'Enter a channel frequency between 5300 and 6000 MHz.';
+      return;
+    }
+    formError = undefined;
+    formChannels = new Set(formChannels).add(mhz);
+    formCustomMhz = '';
+  }
+
+  function removeChannel(mhz: number) {
+    const next = new Set(formChannels);
+    next.delete(mhz);
+    formChannels = next;
+  }
+
+  /** Enter in the custom-MHz field adds the channel rather than submitting the dialog. */
+  function onCustomKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addCustomMhz();
+    }
+  }
+
+  /**
+   * Build the typed {@link ChannelCapability} the request carries from the form. A **Flexible**
+   * timer is `"Flexible"` (any channel). A **Fixed** timer keeps its built-in allowed set when it
+   * had one, else its allowed set is exactly the catalog channels the RD chose (no custom).
+   */
+  function buildCapability(): ChannelCapability {
+    if (formCapability === 'Flexible') return 'Flexible';
+    // A Fixed timer's allowed set: its pre-existing built-in set, or — if none was declared — the
+    // catalog channels the RD picked (custom raw MHz are not allowed on a Fixed timer).
+    const allowed =
+      formFixedAllowed.length > 0
+        ? formFixedAllowed
+        : [...formChannels].filter((mhz) => catalog.some((e) => e.mhz === mhz));
+    return { Fixed: { channels: allowed } };
+  }
+
+  /** The available channels the request carries, ordered by the catalog then custom ascending. */
+  function buildAvailable(): number[] {
+    const order = new Map(catalog.map((e, i) => [e.mhz, i]));
+    return [...formChannels].sort((a, b) => {
+      const ai = order.get(a);
+      const bi = order.get(b);
+      if (ai !== undefined && bi !== undefined) return ai - bi;
+      if (ai !== undefined) return -1; // catalog channels before custom
+      if (bi !== undefined) return 1;
+      return a - b; // both custom: ascending MHz
+    });
   }
 
   /** Build the typed `TimerKind` from the form, or a problem string if a field is invalid. */
@@ -181,11 +319,25 @@
       formError = built.problem;
       return;
     }
+    const nodeCount = Number(formNodeCount);
+    if (!Number.isFinite(nodeCount) || nodeCount < 1) {
+      formError = 'Node count must be at least 1.';
+      return;
+    }
+    const channel_capability = buildCapability();
+    const available_channels = buildAvailable();
+    const node_count = Math.round(nodeCount);
     saving = true;
     formError = undefined;
     try {
       if (editing) {
-        const req: UpdateTimerRequest = { name, kind: built.kind };
+        const req: UpdateTimerRequest = {
+          name,
+          kind: built.kind,
+          channel_capability,
+          node_count,
+          available_channels
+        };
         const updated = await session.updateTimer(editing.id, req);
         if (!updated) {
           formError = 'A control token is required to edit a timer.';
@@ -193,7 +345,13 @@
         }
         toast.success(`Updated “${updated.name}”.`);
       } else {
-        const req: CreateTimerRequest = { name, kind: built.kind };
+        const req: CreateTimerRequest = {
+          name,
+          kind: built.kind,
+          channel_capability,
+          node_count,
+          available_channels
+        };
         const created = await session.createTimer(req);
         if (!created) {
           formError = 'A control token is required to add a timer.';
@@ -268,6 +426,15 @@
                 >{/if}
             </div>
             <span class="timer-sub">{kindSummary(timer.kind)}</span>
+            <div class="timer-channels">
+              <Badge tone="neutral" variant="outline"
+                >{capabilityTag(timer.channel_capability)}</Badge
+              >
+              <span class="nodes" title="Node count — the heat-size cap">
+                {timer.node_count ?? DEFAULT_NODE_COUNT} nodes
+              </span>
+              <span class="channel-summary">{channelSummary(timer)}</span>
+            </div>
           </div>
           <StatusPill status={timer.status} label={timer.status} size="sm" />
           <div class="timer-actions">
@@ -334,6 +501,95 @@
           autocomplete="off"
         />
       </Field>
+    {/if}
+
+    <!-- Channels (race redesign Slice 4b): capability + node count + the available-channels picker. -->
+    <hr class="form-rule" />
+    <div class="kind-grid">
+      <Field
+        label="Channel capability"
+        hint={formCapability === 'Flexible'
+          ? 'Tunes any channel — catalog or custom.'
+          : 'Limited to its built-in channels.'}
+      >
+        <Select bind:value={formCapability} aria-label="Channel capability">
+          <option value="Flexible">Flexible (any channel)</option>
+          <option value="Fixed">Fixed (built-in set)</option>
+        </Select>
+      </Field>
+      <Field label="Node count" hint="Slots on the timer — caps a heat's size.">
+        <Input type="number" min="1" step="1" bind:value={formNodeCount} aria-label="Node count" />
+      </Field>
+    </div>
+
+    <Field
+      label="Available channels"
+      hint={formCapability === 'Fixed'
+        ? 'Pick from this timer’s built-in channels.'
+        : 'Pick catalog channels, and add custom raw-MHz entries below.'}
+    >
+      <div class="channel-picker" role="group" aria-label="Available channels">
+        {#if offeredBands.length === 0}
+          <p class="channel-empty" role="status">
+            {catalog.length === 0
+              ? 'Channel catalog unavailable.'
+              : 'This Fixed timer has no built-in channels to offer.'}
+          </p>
+        {:else}
+          {#each offeredBands as group (group.band)}
+            <div class="channel-band">
+              <span class="band-name">{group.band}</span>
+              <div class="band-channels">
+                {#each group.entries as entry (entry.mhz + '-' + entry.channel)}
+                  <label class="channel-chip" class:on={formChannels.has(entry.mhz)}>
+                    <input
+                      type="checkbox"
+                      checked={formChannels.has(entry.mhz)}
+                      onchange={() => toggleChannel(entry.mhz)}
+                      aria-label={`${group.band} ${entry.channel}, ${entry.mhz} MHz`}
+                    />
+                    <span class="chip-chan">{entry.channel}</span>
+                    <span class="chip-mhz">{entry.mhz}</span>
+                  </label>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        {/if}
+      </div>
+    </Field>
+
+    {#if formCapability === 'Flexible'}
+      <Field label="Custom channel (MHz)" hint="A raw centre frequency not in the catalog.">
+        <div class="custom-row">
+          <Input
+            type="number"
+            min="5300"
+            max="6000"
+            step="1"
+            bind:value={formCustomMhz}
+            placeholder="e.g. 5685"
+            aria-label="Custom channel MHz"
+            onkeydown={onCustomKeydown}
+          />
+          <Button type="button" variant="secondary" onclick={addCustomMhz}>Add</Button>
+        </div>
+      </Field>
+      {#if customChannels.length > 0}
+        <div class="custom-list" aria-label="Custom channels">
+          {#each customChannels as mhz (mhz)}
+            <span class="custom-chip">
+              {mhz} MHz
+              <button
+                type="button"
+                class="chip-x"
+                onclick={() => removeChannel(mhz)}
+                aria-label={`Remove ${mhz} MHz`}>×</button
+              >
+            </span>
+          {/each}
+        </div>
+      {/if}
     {/if}
   </form>
   {#snippet footer()}
@@ -474,5 +730,133 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: var(--gf-space-3);
+  }
+
+  /* ── Channel config (Slice 4b) ───────────────────────────────────────────── */
+  .timer-channels {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+    margin-top: 2px;
+    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
+  }
+  .timer-channels .nodes {
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text);
+  }
+  .channel-summary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .form-rule {
+    border: none;
+    border-top: 1px solid var(--gf-border-subtle);
+    margin: var(--gf-space-2) 0 0;
+  }
+
+  .channel-picker {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+    max-height: 18rem;
+    overflow-y: auto;
+    padding: var(--gf-space-2);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface-alt);
+  }
+  .channel-empty {
+    margin: 0;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+  .channel-band {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+  }
+  .band-name {
+    font-size: var(--gf-font-size-xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    color: var(--gf-text-muted);
+  }
+  .band-channels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+  }
+  .channel-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--gf-space-1);
+    padding: var(--gf-space-1) var(--gf-space-2);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface);
+    cursor: pointer;
+    font-size: var(--gf-font-size-sm);
+    user-select: none;
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      background var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .channel-chip.on {
+    border-color: var(--gf-accent);
+    background: var(--gf-accent-soft);
+  }
+  .channel-chip input {
+    margin: 0;
+  }
+  .chip-chan {
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .chip-mhz {
+    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .custom-row {
+    display: flex;
+    gap: var(--gf-space-2);
+    align-items: stretch;
+  }
+  .custom-row :global(input) {
+    flex: 1;
+  }
+  .custom-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+  }
+  .custom-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-1);
+    padding: var(--gf-space-1) var(--gf-space-2);
+    border: 1px solid var(--gf-accent);
+    border-radius: var(--gf-radius-pill);
+    background: var(--gf-accent-soft);
+    font-size: var(--gf-font-size-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .chip-x {
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-md);
+    line-height: 1;
+    padding: 0;
+  }
+  .chip-x:hover {
+    color: var(--gf-danger);
   }
 </style>

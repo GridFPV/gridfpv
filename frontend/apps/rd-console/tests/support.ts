@@ -28,6 +28,7 @@ import type {
   setEventClasses,
   setClassMembership,
   listFormats,
+  listChannels,
   createRound,
   updateRound,
   deleteRound,
@@ -77,6 +78,8 @@ export interface TimerImpls {
   setClassMembershipImpl?: typeof setClassMembership;
   /** The valid format-names read (race redesign Slice 2b) — backs the EventRounds tests. */
   listFormatsImpl?: typeof listFormats;
+  /** The standard channel-catalog read (race redesign Slice 4b) — backs the Channels UI tests. */
+  listChannelsImpl?: typeof listChannels;
   /** The per-event round write seams (race redesign Slice 2b) — back the EventRounds tests. */
   createRoundImpl?: typeof createRound;
   updateRoundImpl?: typeof updateRound;
@@ -153,6 +156,8 @@ export function makeTestSession(
     setClassMembershipImpl: opts?.setClassMembershipImpl,
     // Round read/write seams (race redesign Slice 2b): inert unless a test overrides them.
     listFormatsImpl: opts?.listFormatsImpl,
+    // Channel-catalog read seam (race redesign Slice 4b): inert unless a test overrides it.
+    listChannelsImpl: opts?.listChannelsImpl,
     createRoundImpl: opts?.createRoundImpl,
     updateRoundImpl: opts?.updateRoundImpl,
     deleteRoundImpl: opts?.deleteRoundImpl,

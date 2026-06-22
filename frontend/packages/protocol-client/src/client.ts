@@ -20,6 +20,7 @@
 import type {
   ActiveEvent,
   ChangeEnvelope,
+  ChannelCatalogEntry,
   Class,
   ClassId,
   CreateClassRequest,
@@ -811,6 +812,25 @@ export async function listFormats(
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/formats`, { headers });
   if (!resp.ok) throw new Error(`GET /formats failed: HTTP ${resp.status}`);
   return (await resp.json()) as string[];
+}
+
+/**
+ * List the standard **FPV channel catalog** (`GET /channels`) — race redesign Slice 4b. An open
+ * read (no token): the band/channel ↔ raw-MHz vocabulary the server compiles in, the single source
+ * of truth the Channels UI offers when picking a timer's available channels and reads back to label
+ * a heat's assigned frequencies. Resolves to the catalog in its stable order, or rejects on a
+ * non-2xx / transport failure.
+ */
+export async function listChannels(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<ChannelCatalogEntry[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/channels`, { headers });
+  if (!resp.ok) throw new Error(`GET /channels failed: HTTP ${resp.status}`);
+  return (await resp.json()) as ChannelCatalogEntry[];
 }
 
 /**

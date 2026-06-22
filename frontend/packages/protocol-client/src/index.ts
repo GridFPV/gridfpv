@@ -38,6 +38,7 @@ export {
   setEventClasses,
   setClassMembership,
   listFormats,
+  listChannels,
   createRound,
   updateRound,
   deleteRound,

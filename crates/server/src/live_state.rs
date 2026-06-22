@@ -294,6 +294,13 @@ pub struct HeatSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub round: Option<RoundId>,
+    /// The per-pilot **frequency assignment** of this heat, in raw MHz, paired with the competitor
+    /// it is assigned to — taken from the most recent `HeatScheduled` (race redesign Slice 4b). The
+    /// Heats/Live UI resolves each raw MHz back to a band+channel label via the channel catalog.
+    /// Empty when none was assigned (a sim heat, or the free-text path), in which case the UI shows
+    /// "—". Additive — defaults empty so older logs round-trip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frequencies: Vec<(CompetitorRef, u16)>,
     /// The heat's folded loop phase (its derived status: scheduled / running / scored / …).
     pub phase: HeatPhase,
     /// Whether this heat is the one currently on the timer (the live `current_heat`).
@@ -324,7 +331,7 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
     order
         .into_iter()
         .map(|heat| {
-            let (lineup, class, round) = latest_schedule(events, &heat);
+            let (lineup, class, round, frequencies) = latest_schedule(events, &heat);
             let phase = heat_state(events, &heat)
                 .map(phase_of)
                 .unwrap_or(HeatPhase::Scheduled);
@@ -334,6 +341,7 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
                 lineup,
                 class,
                 round,
+                frequencies,
                 phase,
                 is_current,
             }
@@ -343,22 +351,33 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
 
 /// The lineup + class/round tag a heat carries, taken from its **most recent** `HeatScheduled`
 /// (a re-schedule of the same id supersedes the earlier one).
+#[allow(clippy::type_complexity)]
 fn latest_schedule(
     events: &[Event],
     heat: &HeatId,
-) -> (Vec<CompetitorRef>, Option<ClassId>, Option<RoundId>) {
-    let mut out = (Vec::new(), None, None);
+) -> (
+    Vec<CompetitorRef>,
+    Option<ClassId>,
+    Option<RoundId>,
+    Vec<(CompetitorRef, u16)>,
+) {
+    let mut out = (Vec::new(), None, None, Vec::new());
     for event in events {
         if let Event::HeatScheduled {
             heat: h,
             lineup,
             class,
             round,
-            ..
+            frequencies,
         } = event
         {
             if h == heat {
-                out = (lineup.clone(), class.clone(), round.clone());
+                out = (
+                    lineup.clone(),
+                    class.clone(),
+                    round.clone(),
+                    frequencies.clone(),
+                );
             }
         }
     }
@@ -662,5 +681,33 @@ mod tests {
     #[test]
     fn heat_summaries_empty_log_is_empty() {
         assert!(heat_summaries(&[]).is_empty());
+    }
+
+    #[test]
+    fn heat_summaries_carry_the_frequency_assignment_and_default_empty() {
+        // Race redesign Slice 4b: a heat scheduled with per-pilot frequencies surfaces them on the
+        // summary (so the Heats UI can label them); a sim/free-text heat with none reads back empty.
+        let assigned = Event::HeatScheduled {
+            heat: HeatId("q-1".into()),
+            lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+            class: None,
+            round: None,
+            frequencies: vec![
+                (CompetitorRef("A".into()), 5658),
+                (CompetitorRef("B".into()), 5800),
+            ],
+        };
+        let summaries = heat_summaries(&[assigned, scheduled("q-2", &["C"])]);
+        assert_eq!(
+            summaries[0].frequencies,
+            vec![
+                (CompetitorRef("A".into()), 5658),
+                (CompetitorRef("B".into()), 5800),
+            ]
+        );
+        assert!(
+            summaries[1].frequencies.is_empty(),
+            "a heat scheduled with no frequencies has an empty assignment"
+        );
     }
 }

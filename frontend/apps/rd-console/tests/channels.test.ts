@@ -1,0 +1,104 @@
+/**
+ * Channel helper unit tests (race redesign Slice 4b): the catalog grouping/labelling the channel
+ * picker and the per-heat channel display rely on.
+ */
+import { describe, expect, it } from 'vitest';
+import type { ChannelCapability, ChannelCatalogEntry } from '@gridfpv/types';
+import {
+  capabilityTag,
+  catalogEntryFor,
+  channelLabel,
+  fixedAllowed,
+  groupByBand,
+  isCatalogChannel,
+  isPlausibleMhz,
+  offeredCatalog
+} from '../src/lib/channels.js';
+
+const CATALOG: ChannelCatalogEntry[] = [
+  { band: 'Raceband', channel: 'R1', mhz: 5658 },
+  { band: 'Raceband', channel: 'R2', mhz: 5695 },
+  { band: 'Fatshark', channel: 'F4', mhz: 5800 },
+  { band: 'DJI', channel: 'R1', mhz: 5660 }
+];
+
+describe('groupByBand', () => {
+  it('groups entries into bands, preserving catalog order across and within bands', () => {
+    const bands = groupByBand(CATALOG);
+    expect(bands.map((b) => b.band)).toEqual(['Raceband', 'Fatshark', 'DJI']);
+    expect(bands[0].entries.map((e) => e.channel)).toEqual(['R1', 'R2']);
+    expect(bands[1].entries).toHaveLength(1);
+  });
+
+  it('is empty for an empty catalog', () => {
+    expect(groupByBand([])).toEqual([]);
+  });
+});
+
+describe('channelLabel', () => {
+  it('resolves a known MHz to its band + channel', () => {
+    expect(channelLabel(5658, CATALOG)).toBe('Raceband R1');
+    expect(channelLabel(5800, CATALOG)).toBe('Fatshark F4');
+  });
+
+  it('falls back to a raw "<mhz> MHz" for a custom/unknown frequency', () => {
+    expect(channelLabel(5685, CATALOG)).toBe('5685 MHz');
+  });
+
+  it('falls back to raw MHz when the catalog is unavailable', () => {
+    expect(channelLabel(5800, [])).toBe('5800 MHz');
+  });
+
+  it('prefers the first catalog match (stable order) for a coincident frequency', () => {
+    // Two bands could share a frequency; the earlier (Raceband) wins.
+    const dupe: ChannelCatalogEntry[] = [
+      { band: 'Raceband', channel: 'R1', mhz: 5658 },
+      { band: 'HDZero', channel: 'R1', mhz: 5658 }
+    ];
+    expect(channelLabel(5658, dupe)).toBe('Raceband R1');
+  });
+});
+
+describe('catalogEntryFor / isCatalogChannel', () => {
+  it('finds the entry for a known MHz, and reports catalog membership', () => {
+    expect(catalogEntryFor(5695, CATALOG)?.channel).toBe('R2');
+    expect(isCatalogChannel(5695, CATALOG)).toBe(true);
+    expect(catalogEntryFor(5685, CATALOG)).toBeUndefined();
+    expect(isCatalogChannel(5685, CATALOG)).toBe(false);
+  });
+});
+
+describe('capabilityTag / fixedAllowed', () => {
+  it('reads Flexible and Fixed capabilities', () => {
+    expect(capabilityTag('Flexible')).toBe('Flexible');
+    expect(capabilityTag(undefined)).toBe('Flexible');
+    const fixed: ChannelCapability = { Fixed: { channels: [5658, 5695] } };
+    expect(capabilityTag(fixed)).toBe('Fixed');
+    expect(fixedAllowed(fixed)).toEqual([5658, 5695]);
+    expect(fixedAllowed('Flexible')).toEqual([]);
+  });
+});
+
+describe('offeredCatalog', () => {
+  it('offers the whole catalog for a Flexible timer', () => {
+    expect(offeredCatalog('Flexible', CATALOG)).toHaveLength(CATALOG.length);
+  });
+
+  it('limits a Fixed timer to its built-in allowed set, in catalog order', () => {
+    const fixed: ChannelCapability = { Fixed: { channels: [5800, 5658] } };
+    const offered = offeredCatalog(fixed, CATALOG);
+    expect(offered.map((e) => e.mhz)).toEqual([5658, 5800]); // catalog order, not allowed order
+  });
+});
+
+describe('isPlausibleMhz', () => {
+  it('accepts a 5.8 GHz centre and rejects out-of-band / non-integer values', () => {
+    expect(isPlausibleMhz(5685)).toBe(true);
+    expect(isPlausibleMhz(5300)).toBe(true);
+    expect(isPlausibleMhz(6000)).toBe(true);
+    expect(isPlausibleMhz(1234)).toBe(false);
+    expect(isPlausibleMhz(6500)).toBe(false);
+    expect(isPlausibleMhz(5800.5)).toBe(false);
+    expect(isPlausibleMhz(Number.NaN)).toBe(false);
+  });
+});

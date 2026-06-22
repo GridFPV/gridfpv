@@ -62,6 +62,7 @@ import {
   setEventClasses,
   setClassMembership,
   listFormats,
+  listChannels,
   createRound,
   updateRound,
   deleteRound,
@@ -73,6 +74,7 @@ import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
 import type {
   AdapterId,
+  ChannelCatalogEntry,
   Class,
   ClassId,
   Command,
@@ -254,6 +256,7 @@ export class Session {
   #setEventClassesImpl: typeof setEventClasses;
   #setClassMembershipImpl: typeof setClassMembership;
   #listFormatsImpl: typeof listFormats;
+  #listChannelsImpl: typeof listChannels;
   #createRoundImpl: typeof createRound;
   #updateRoundImpl: typeof updateRound;
   #deleteRoundImpl: typeof deleteRound;
@@ -286,6 +289,7 @@ export class Session {
     setEventClassesImpl?: typeof setEventClasses;
     setClassMembershipImpl?: typeof setClassMembership;
     listFormatsImpl?: typeof listFormats;
+    listChannelsImpl?: typeof listChannels;
     createRoundImpl?: typeof createRound;
     updateRoundImpl?: typeof updateRound;
     deleteRoundImpl?: typeof deleteRound;
@@ -319,6 +323,7 @@ export class Session {
     this.#setEventClassesImpl = opts?.setEventClassesImpl ?? setEventClasses;
     this.#setClassMembershipImpl = opts?.setClassMembershipImpl ?? setClassMembership;
     this.#listFormatsImpl = opts?.listFormatsImpl ?? listFormats;
+    this.#listChannelsImpl = opts?.listChannelsImpl ?? listChannels;
     this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
@@ -644,6 +649,16 @@ export class Session {
    */
   listFormats(): Promise<string[]> {
     return this.#listFormatsImpl(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * List the standard **FPV channel catalog** (`GET /channels`, open, no token) — race redesign
+   * Slice 4b. The band/channel ↔ raw-MHz vocabulary the server compiles in: the Channels UI offers
+   * it when picking a Flexible timer's available channels, and reads it back to label a heat's
+   * assigned frequencies. Rejects on a transport/HTTP failure.
+   */
+  listChannels(): Promise<ChannelCatalogEntry[]> {
+    return this.#listChannelsImpl(this.baseUrl, { token: this.#token });
   }
 
   /**

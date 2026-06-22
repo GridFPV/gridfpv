@@ -10,7 +10,15 @@
    * `CommandAck` surfaces through the shared `ErrorBanner`.
    */
   import { HeatSheet, RaceClock, Leaderboard, Card } from '@gridfpv/components';
-  import type { HeatId, HeatResult, LiveRaceState } from '@gridfpv/types';
+  import type {
+    ChannelCatalogEntry,
+    CompetitorRef,
+    HeatId,
+    HeatResult,
+    HeatSummary,
+    LiveRaceState
+  } from '@gridfpv/types';
+  import { channelLabel } from '../lib/channels.js';
   import {
     ACTION_ORDER,
     actionDescription,
@@ -31,6 +39,38 @@
   const phase = $derived(live?.phase ?? 'Scheduled');
   const heat = $derived<HeatId | undefined>(live?.current_heat);
   const primary = $derived(primaryAction(phase));
+
+  // ── Per-heat channels (race redesign Slice 4b) ───────────────────────────────
+  // The live stream carries only `LiveRaceState` (no frequencies), so resolve the current heat's
+  // channel assignment by joining `current_heat` against the heats list (which carries the
+  // `HeatScheduled.frequencies`), labelled through the standard catalog. Both are open reads,
+  // re-fetched whenever the live state advances (so a freshly-staged heat's channels appear).
+  let catalog = $state<ChannelCatalogEntry[]>([]);
+  let heats = $state<HeatSummary[]>([]);
+  $effect(() => {
+    session
+      .listChannels()
+      .then((c) => (catalog = c))
+      .catch(() => (catalog = []));
+  });
+  $effect(() => {
+    void session.liveState;
+    session
+      .listHeats()
+      .then((h) => (heats = h))
+      .catch(() => (heats = []));
+  });
+
+  // The current heat's ref → channel-label map (race redesign Slice 4b). Empty for a sim/free-text
+  // heat (no frequencies assigned), in which case the channels panel shows "—".
+  const currentChannels = $derived.by(() => {
+    const summary = heats.find((h) => h.heat === heat);
+    const map = new Map<CompetitorRef, string>();
+    for (const [ref, mhz] of summary?.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
+    return map;
+  });
+  const lineup = $derived<CompetitorRef[]>(live?.active_pilots ?? []);
+  const hasChannels = $derived(currentChannels.size > 0);
 
   // ── Race clock (#62) ────────────────────────────────────────────────────────────────
   // The phase-driven elapsed clock now lives in the shared `useRaceClock` helper so the
@@ -132,6 +172,24 @@
       {/each}
     </div>
   </div>
+
+  {#if heat && lineup.length > 0}
+    <Card title="Channels">
+      <ul class="channels" aria-label="Heat channels">
+        {#each lineup as ref (ref)}
+          <li class="channel-row">
+            <span class="channel-pilot">{names[ref] ?? ref}</span>
+            <span class="channel-label" class:none={!currentChannels.get(ref)}>
+              {currentChannels.get(ref) ?? '—'}
+            </span>
+          </li>
+        {/each}
+      </ul>
+      {#if !hasChannels}
+        <p class="channels-note">No channels assigned (a sim heat tunes none).</p>
+      {/if}
+    </Card>
+  {/if}
 
   <div class="panels">
     <Card title="Heat sheet" pad={false}>
@@ -285,6 +343,50 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--gf-space-3);
+  }
+
+  .channels {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+    gap: var(--gf-space-3);
+  }
+  .channel-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface);
+  }
+  .channel-pilot {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
+    letter-spacing: var(--gf-tracking-tight);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .channel-label {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-bold);
+    color: var(--gf-accent);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .channel-label.none {
+    color: var(--gf-text-faint);
+    font-weight: var(--gf-font-weight-regular);
+  }
+  .channels-note {
+    margin: var(--gf-space-3) 0 0;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
   }
 
   .panels {

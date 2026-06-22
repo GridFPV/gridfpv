@@ -34,6 +34,14 @@ class?: ClassId,
  */
 round?: RoundId, 
 /**
+ * The per-pilot **frequency assignment** of this heat, in raw MHz, paired with the competitor
+ * it is assigned to — taken from the most recent `HeatScheduled` (race redesign Slice 4b). The
+ * Heats/Live UI resolves each raw MHz back to a band+channel label via the channel catalog.
+ * Empty when none was assigned (a sim heat, or the free-text path), in which case the UI shows
+ * "—". Additive — defaults empty so older logs round-trip.
+ */
+frequencies?: Array<[CompetitorRef, number]>, 
+/**
  * The heat's folded loop phase (its derived status: scheduled / running / scored / …).
  */
 phase: HeatPhase, 
