@@ -119,7 +119,57 @@ fn live_rotorhazard_race_translates_to_laps() {
     conn.stop_race().expect("emit stop_race");
     std::thread::sleep(Duration::from_millis(800));
     events.extend(conn.events());
+
+    // Second heat on the SAME persistent connection/adapter (#105 cross-heat regression).
+    // RotorHazard resets lap_number to 0 at each race start; without resetting the per-lap
+    // dedup on the RACING transition, heat 2's laps would collide with heat 1's and be
+    // suppressed (zero laps ingested past the first heat). Reset, re-stage, and assert
+    // heat 2 produces its own fresh laps.
+    conn.discard_laps().expect("emit discard_laps (heat 2)");
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = conn.events();
+    let mut heat2: Vec<Event> = Vec::new();
+
+    conn.stage_race().expect("emit stage_race (heat 2)");
+    let started2 = wait_until(&conn, &mut heat2, Duration::from_secs(20), |evs| {
+        evs.iter()
+            .any(|e| matches!(e, Event::SessionStarted { .. }))
+    });
+    assert!(started2, "heat 2 never reached RACING (no SessionStarted)");
+
+    for node in [0u64, 0, 1, 0] {
+        conn.simulate_lap(node).expect("emit simulate_lap (heat 2)");
+        std::thread::sleep(Duration::from_millis(1200));
+        heat2.extend(conn.events());
+    }
+    let got_laps2 = wait_until(&conn, &mut heat2, Duration::from_secs(10), |evs| {
+        lap_list(evs)
+            .competitors
+            .iter()
+            .any(|c| c.competitor.competitor.0 == "node-0" && c.lap_count() >= 1)
+    });
+
+    conn.stop_race().expect("emit stop_race (heat 2)");
+    std::thread::sleep(Duration::from_millis(800));
+    heat2.extend(conn.events());
     conn.disconnect().ok();
+
+    assert!(
+        got_laps2,
+        "heat 2 ingested no completed lap for node-0 \
+         (cross-heat dedup regression: lap_number reset collided with heat 1)"
+    );
+    let laps2 = lap_list(&heat2);
+    let node0_h2 = laps2
+        .competitors
+        .iter()
+        .find(|c| c.competitor.competitor.0 == "node-0")
+        .expect("node-0 present in heat 2 lap list");
+    assert!(
+        node0_h2.lap_count() >= 1,
+        "expected >= 1 lap for node-0 in heat 2, got {}",
+        node0_h2.lap_count()
+    );
 
     // The live stream produced lifecycle + competitor sightings + real laps.
     assert!(

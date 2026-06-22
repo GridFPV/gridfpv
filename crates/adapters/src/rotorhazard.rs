@@ -368,10 +368,31 @@ impl RotorHazardAdapter {
         }
 
         match status.race_status {
-            race_status::RACING => out.push(Event::SessionStarted {
-                adapter: self.id.clone(),
-                session: Self::session_id(status.race_heat_id),
-            }),
+            race_status::RACING => {
+                // A genuinely new race starts here (this arm only runs on a real
+                // transition *into* RACING — `previous != Some(RACING)`). RotorHazard
+                // resets each node's `lap_number` to 0 at the start of every race, and
+                // the per-lap dedup is keyed on that `(competitor, sequence=lap_number)`.
+                // Without a reset, heat 2's lap 0–N collide with heat 1's already-seen
+                // lap 0–N over a persistent connection and every lap past the first heat
+                // is suppressed (#105 cross-heat bug). Reset the per-race dedup + seat
+                // state on the RACING edge so each heat starts fresh.
+                //
+                // This is safe for the reconnect-dedup guarantee: a re-sent
+                // `current_laps` snapshot carries *no* status transition, so it never
+                // reaches this arm; and a *mid-race* reconnect keeps
+                // `last_race_status == RACING` (so this arm does NOT fire — no reset),
+                // leaving the replayed snapshot suppressed. (In the persistent driver a
+                // reconnect additionally builds a fresh `RotorHazardAdapter`, so its
+                // dedup starts empty regardless; this reset only ever fires on a true
+                // new-race edge within one adapter's lifetime.)
+                self.dedup = Deduplicator::new();
+                self.seen_seats.clear();
+                out.push(Event::SessionStarted {
+                    adapter: self.id.clone(),
+                    session: Self::session_id(status.race_heat_id),
+                });
+            }
             race_status::DONE => out.push(Event::SessionEnded {
                 adapter: self.id.clone(),
                 session: Self::session_id(status.race_heat_id),
@@ -711,6 +732,96 @@ mod tests {
                     race_heat_id: Some(3),
                 }))
                 .is_empty()
+        );
+    }
+
+    /// Count the `Pass`es in a slice of events.
+    fn pass_count(events: &[Event]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Pass(_)))
+            .count()
+    }
+
+    /// The cross-heat regression (#105): over one persistent connection RotorHazard
+    /// resets each node's `lap_number` to 0 at the start of every race, so heat 2's
+    /// laps reuse heat 1's sequences. Resetting dedup on the RACING transition makes
+    /// heat 2 ingest its laps; pre-fix all four were suppressed (0 passes).
+    #[test]
+    fn cross_heat_laps_are_not_deduped_against_the_previous_heat() {
+        let mut adapter = RotorHazardAdapter::new();
+
+        // Heat 1: RACING, then node-0 laps 0..=3.
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        }));
+        let heat1 = adapter.translate(snapshot(
+            0,
+            0,
+            vec![
+                lap(0, 1_000.0),
+                lap(1, 2_000.0),
+                lap(2, 3_000.0),
+                lap(3, 4_000.0),
+            ],
+        ));
+        assert_eq!(pass_count(&heat1), 4, "heat 1 emits all four laps");
+
+        // Heat 1 finishes.
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(1),
+        }));
+
+        // Heat 2: a fresh RACING transition — RH restarts lap_number at 0.
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(2),
+        }));
+        let heat2 = adapter.translate(snapshot(
+            0,
+            0,
+            vec![
+                lap(0, 1_000.0),
+                lap(1, 2_000.0),
+                lap(2, 3_000.0),
+                lap(3, 4_000.0),
+            ],
+        ));
+        assert_eq!(
+            pass_count(&heat2),
+            4,
+            "heat 2 must emit four fresh passes (pre-fix: 0 — all deduped against heat 1)"
+        );
+    }
+
+    /// The #105 reconnect invariant still holds within a race: a re-sent `current_laps`
+    /// snapshot with **no** status transition must remain deduped (the RACING reset only
+    /// fires on a genuine new-race edge, not on a snapshot replay).
+    #[test]
+    fn resent_snapshot_within_a_race_is_still_deduped() {
+        let mut adapter = RotorHazardAdapter::new();
+
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        }));
+        let laps = vec![
+            lap(0, 1_000.0),
+            lap(1, 2_000.0),
+            lap(2, 3_000.0),
+            lap(3, 4_000.0),
+        ];
+        let first = adapter.translate(snapshot(0, 0, laps.clone()));
+        assert_eq!(pass_count(&first), 4, "first snapshot emits all four laps");
+
+        // The same snapshot re-sent (e.g. a reconnect replays it) — no status edge.
+        let resent = adapter.translate(snapshot(0, 0, laps));
+        assert_eq!(
+            pass_count(&resent),
+            0,
+            "a re-sent snapshot within the same race emits no new passes"
         );
     }
 
