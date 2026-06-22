@@ -1054,6 +1054,18 @@ export class Session {
     return ids[0];
   }
 
+  /**
+   * The current event's effective **primary timer** ({@link Timer}), resolving
+   * {@link primaryTimerId} against the polled {@link timers} registry. `undefined` when no event /
+   * selection, or until the first timer poll lands. Open practice reads its `node_count` +
+   * `available_channels` off this to lay out the active-channels picker / per-channel live board.
+   */
+  get primaryTimer(): Timer | undefined {
+    const id = this.primaryTimerId;
+    if (!id) return undefined;
+    return this.timers.find((t) => t.id === id);
+  }
+
   /** Re-scope the live read client within the current event (e.g. to a heat scope). */
   resubscribe(scope: Scope): void {
     const event = this.currentEvent;

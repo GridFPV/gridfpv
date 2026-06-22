@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
 import { tick } from 'svelte';
-import type { EventMeta, HeatSummary, LiveRaceState, RoundDef } from '@gridfpv/types';
+import type {
+  ChannelCatalogEntry,
+  EventMeta,
+  HeatSummary,
+  LiveRaceState,
+  RoundDef,
+  Timer
+} from '@gridfpv/types';
 import LiveRaceControl from '../src/screens/LiveRaceControl.svelte';
 import { makeTestSession } from './support.js';
 import { liveRunning, failAck } from './fixtures.js';
@@ -347,5 +354,144 @@ describe('LiveRaceControl', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(clockText()).toBe('0:03.000');
     });
+  });
+});
+
+// ── Open-practice per-channel board + reset (open-practice Slice 2) ────────────────────────────
+
+const OP_TIMER: Timer = {
+  id: 'mock',
+  name: 'Mock',
+  kind: { Mock: { laps: 3, lap_ms: 30000 } },
+  status: 'Ready',
+  channel_capability: 'Flexible',
+  node_count: 2,
+  available_channels: [5658, 5800]
+};
+const OP_CATALOG: ChannelCatalogEntry[] = [
+  { band: 'Raceband', channel: 'R1', mhz: 5658 },
+  { band: 'Fatshark', channel: 'F4', mhz: 5800 }
+];
+const OP_ROUND: RoundDef = {
+  id: 'rp',
+  label: 'Open Practice',
+  classes: [],
+  format: 'open_practice',
+  params: {},
+  win_condition: 'BestLap',
+  seeding: { AllChannels: { channels: [0, 1] } },
+  channel_mode: 'Static',
+  staging_timer_secs: 300,
+  start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+  grace_window: { Duration: { micros: 3_000_000 } }
+};
+const OP_EVENT: EventMeta = {
+  id: 'e1',
+  name: 'Friday',
+  created_at: 0,
+  persistent: true,
+  timers: ['mock'],
+  roster: [],
+  classes: [],
+  rounds: [OP_ROUND]
+};
+const OP_HEAT: HeatSummary = {
+  heat: 'practice-1',
+  lineup: ['node-0', 'node-1'],
+  round: 'rp',
+  class: undefined,
+  frequencies: [],
+  phase: 'Running',
+  is_current: true
+};
+// A live open-practice state: two channels, node-0 with 3 laps (last 28.0s), node-1 quiet.
+const opLive: LiveRaceState = {
+  current_heat: 'practice-1',
+  phase: 'Running',
+  active_pilots: ['node-0', 'node-1'],
+  progress: [
+    { competitor: 'node-0', laps_completed: 3, last_lap_micros: 28_000_000 },
+    { competitor: 'node-1', laps_completed: 0 }
+  ],
+  running_order: ['node-0', 'node-1']
+};
+
+describe('LiveRaceControl — open-practice per-channel board', () => {
+  function renderBoard(extra?: Parameters<typeof makeTestSession>[0]) {
+    return makeTestSession({
+      event: OP_EVENT,
+      live: opLive,
+      listHeatsImpl: vi.fn(async () => [OP_HEAT]),
+      listChannelsImpl: vi.fn(async () => OP_CATALOG),
+      listTimersImpl: vi.fn(async () => [OP_TIMER]),
+      ...extra
+    });
+  }
+
+  it('renders a per-channel board labelling each node by its timer channel, with laps + best lap', async () => {
+    const { session } = renderBoard();
+    render(LiveRaceControl, { session });
+
+    // The board replaces the pilot-keyed panels; rows are keyed by channel.
+    const r1 = await screen.findByLabelText('Channel Raceband R1 · 5658');
+    expect(r1).toBeInTheDocument();
+    expect(screen.getByLabelText('Channel Fatshark F4 · 5800')).toBeInTheDocument();
+
+    // node-0 shows 3 laps and a best lap of 28.0s (formatMicros), tracked from the last lap.
+    expect(within(r1).getByText('3')).toBeInTheDocument();
+    expect(within(r1).getAllByText('28.000').length).toBeGreaterThan(0);
+  });
+
+  it('tracks best lap as the min last-lap across the run', async () => {
+    const { session, pushLive } = renderBoard();
+    render(LiveRaceControl, { session });
+    const r1 = await screen.findByLabelText('Channel Raceband R1 · 5658');
+    // Both Last and Best read 28.0s on the first snapshot (best seeds from the only lap).
+    await within(r1).findAllByText('28.000');
+
+    // A faster lap arrives → best updates to 25.0s while last shows 25.0s too.
+    pushLive({
+      ...opLive,
+      progress: [
+        { competitor: 'node-0', laps_completed: 4, last_lap_micros: 25_000_000 },
+        { competitor: 'node-1', laps_completed: 0 }
+      ]
+    });
+    // Last + Best both now read 25.0s.
+    await waitFor(() => expect(within(r1).getAllByText('25.000')).toHaveLength(2));
+
+    // A slower lap must NOT regress the best (still 25.0s), though last becomes 30.0s.
+    pushLive({
+      ...opLive,
+      progress: [
+        { competitor: 'node-0', laps_completed: 5, last_lap_micros: 30_000_000 },
+        { competitor: 'node-1', laps_completed: 0 }
+      ]
+    });
+    await within(r1).findByText('30.000');
+    // Best lap (25.0s) is still present in the row.
+    expect(within(r1).getByText('25.000')).toBeInTheDocument();
+  });
+
+  it('the New run control fills the open-practice round to clear the board', async () => {
+    const { session, sendSpy } = renderBoard();
+    render(LiveRaceControl, { session });
+
+    const reset = await screen.findByRole('button', { name: /New run/ });
+    await fireEvent.click(reset);
+
+    await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
+    expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
+      FillRound: { round: 'rp' }
+    });
+  });
+
+  it('does not show the pilot-keyed panels for an open-practice heat', async () => {
+    const { session } = renderBoard();
+    render(LiveRaceControl, { session });
+    await screen.findByLabelText('Channel Raceband R1 · 5658');
+    // The normal Heat sheet / Live standing panels are replaced by the practice board.
+    expect(screen.queryByText('Heat sheet')).not.toBeInTheDocument();
+    expect(screen.queryByText('Live standing')).not.toBeInTheDocument();
   });
 });
