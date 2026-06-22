@@ -22,14 +22,34 @@
    *
    * Field-readable (large text, dark) and consistent with the other stage screens.
    */
-  import { Badge, Button, Card, Select, toast } from '@gridfpv/components';
+  import { Badge, Button, Card, Collapsible, Select, toast } from '@gridfpv/components';
   import type { Class, ClassId, MemberSlot, Pilot, PilotId, TimerId } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import { channelLabel } from '../lib/channels.js';
+  import { collapseStore } from '../lib/collapse.svelte.js';
   import ClassManager from './ClassManager.svelte';
   import PilotManager from './PilotManager.svelte';
 
   let { session }: { session: Session } = $props();
+
+  // ── Collapse persistence ────────────────────────────────────────────────────
+  // The roster block and each class's placement block can be collapsed to tame the density of a
+  // 20-pilots-across-classes event. The choice is persisted per stable section id, namespaced by the
+  // event (gf.collapse.<event>.<section>), so it sticks across navigation/reload. The event id is
+  // stable for the workspace; an absent event (the picker) is never on this screen.
+  const eventId = $derived(session.currentEvent?.id ?? 'event');
+  // One persisted store per section, created lazily and cached so the same section keeps one store
+  // across re-renders. A finished/placed class can default collapsed; active sections default open.
+  const collapseStores = new Map<string, ReturnType<typeof collapseStore>>();
+  function collapse(sectionId: string, defaultOpen = true): ReturnType<typeof collapseStore> {
+    const key = `${eventId}:${sectionId}`;
+    let s = collapseStores.get(key);
+    if (!s) {
+      s = collapseStore(eventId, sectionId, defaultOpen);
+      collapseStores.set(key, s);
+    }
+    return s;
+  }
 
   let classManager = $state<ClassManager | undefined>(undefined);
   let pilotManager = $state<PilotManager | undefined>(undefined);
@@ -386,47 +406,56 @@
       </Button>
     {/snippet}
 
-    <p class="count-line" aria-live="polite">
-      <strong>{orderedRoster.length}</strong> of {pilots.length}
-      {pilots.length === 1 ? 'pilot' : 'pilots'} present at this event
-    </p>
-
-    <PilotManager
-      bind:this={pilotManager}
-      {session}
-      bind:pilots
-      onchange={onPilotDirectoryChange}
-      rowChecked={(p) => selectedPilots.has(p.id)}
-    >
-      {#snippet rowLead(pilot)}
-        <input
-          type="checkbox"
-          class="select-box"
-          checked={selectedPilots.has(pilot.id)}
-          onchange={() => togglePilot(pilot.id)}
-          aria-label={`Roster ${pilot.callsign}`}
-        />
+    {@const rosterCollapse = collapse('roster')}
+    <Collapsible title="Roster" bind:open={rosterCollapse.open}>
+      {#snippet summary()}
+        <Badge tone="neutral">
+          {orderedRoster.length} of {pilots.length} present
+        </Badge>
       {/snippet}
 
-      {#snippet listFooter()}
-        <div class="foot">
-          <span class="count" aria-live="polite">{orderedRoster.length} present</span>
-          <div class="foot-actions">
-            {#if rosterChanged}
-              <Button variant="ghost" onclick={resetRoster} disabled={savingRoster}>Reset</Button>
-            {/if}
-            <Button
-              variant="primary"
-              onclick={saveRoster}
-              loading={savingRoster}
-              disabled={!rosterChanged}
-            >
-              Save roster
-            </Button>
+      <p class="count-line" aria-live="polite">
+        <strong>{orderedRoster.length}</strong> of {pilots.length}
+        {pilots.length === 1 ? 'pilot' : 'pilots'} present at this event
+      </p>
+
+      <PilotManager
+        bind:this={pilotManager}
+        {session}
+        bind:pilots
+        onchange={onPilotDirectoryChange}
+        rowChecked={(p) => selectedPilots.has(p.id)}
+      >
+        {#snippet rowLead(pilot)}
+          <input
+            type="checkbox"
+            class="select-box"
+            checked={selectedPilots.has(pilot.id)}
+            onchange={() => togglePilot(pilot.id)}
+            aria-label={`Roster ${pilot.callsign}`}
+          />
+        {/snippet}
+
+        {#snippet listFooter()}
+          <div class="foot">
+            <span class="count" aria-live="polite">{orderedRoster.length} present</span>
+            <div class="foot-actions">
+              {#if rosterChanged}
+                <Button variant="ghost" onclick={resetRoster} disabled={savingRoster}>Reset</Button>
+              {/if}
+              <Button
+                variant="primary"
+                onclick={saveRoster}
+                loading={savingRoster}
+                disabled={!rosterChanged}
+              >
+                Save roster
+              </Button>
+            </div>
           </div>
-        </div>
-      {/snippet}
-    </PilotManager>
+        {/snippet}
+      </PilotManager>
+    </Collapsible>
   </Card>
 
   <!-- ── 3. Placement + channels ──────────────────────────────────────────── -->
@@ -475,114 +504,120 @@
       {/if}
 
       {#if singleClass}
+        {@const sc = collapse(`place:${singleClass}`)}
         <!-- Single-class auto-fill: every present pilot is a member; just assign channels. -->
-        <fieldset class="class-grid" aria-label={`Placement for ${classNameOf(singleClass)}`}>
-          <legend class="class-legend">
-            <span class="class-name">{classNameOf(singleClass)}</span>
-            <Badge tone="neutral">{rosterPilots.length} pilots</Badge>
-            <span class="auto-tag">all present pilots (single class)</span>
-          </legend>
-          <ul class="member-list">
-            {#each rosterPilots as pilot (pilot.id)}
-              <li class="member-row">
-                <span class="member-callsign">{pilot.callsign}</span>
-                <div class="member-chan">
-                  <Select
-                    value={String(channelOf(singleClass, pilot.id) ?? '')}
-                    size="sm"
-                    disabled={!hasChannelPool}
-                    aria-label={`Channel for ${pilot.callsign}`}
-                    onchange={(e: Event) =>
-                      setChannel(
-                        singleClass,
-                        pilot.id,
-                        (e.currentTarget as HTMLSelectElement).value
-                      )}
-                  >
-                    <option value="">No channel</option>
-                    {#each channelOptions as opt (opt.mhz)}
-                      <option value={String(opt.mhz)}>{opt.label} · {opt.mhz} MHz</option>
-                    {/each}
-                  </Select>
-                </div>
-              </li>
-            {/each}
-          </ul>
-          <div class="class-foot">
-            <Button
-              variant="primary"
-              size="sm"
-              onclick={() => saveMembership(singleClass)}
-              loading={savingClass === singleClass}
-              disabled={!membershipChanged(singleClass) || savingClass !== undefined}
-            >
-              Save placement
-            </Button>
-          </div>
-        </fieldset>
+        <Collapsible
+          title={classNameOf(singleClass)}
+          id={`place-${singleClass}`}
+          bind:open={sc.open}
+        >
+          {#snippet summary()}
+            <Badge tone="neutral">{rosterPilots.length} placed</Badge>
+          {/snippet}
+          <fieldset class="class-grid" aria-label={`Placement for ${classNameOf(singleClass)}`}>
+            <p class="auto-tag">all present pilots (single class)</p>
+            <ul class="member-list">
+              {#each rosterPilots as pilot (pilot.id)}
+                <li class="member-row">
+                  <span class="member-callsign">{pilot.callsign}</span>
+                  <div class="member-chan">
+                    <Select
+                      value={String(channelOf(singleClass, pilot.id) ?? '')}
+                      size="sm"
+                      disabled={!hasChannelPool}
+                      aria-label={`Channel for ${pilot.callsign}`}
+                      onchange={(e: Event) =>
+                        setChannel(
+                          singleClass,
+                          pilot.id,
+                          (e.currentTarget as HTMLSelectElement).value
+                        )}
+                    >
+                      <option value="">No channel</option>
+                      {#each channelOptions as opt (opt.mhz)}
+                        <option value={String(opt.mhz)}>{opt.label} · {opt.mhz} MHz</option>
+                      {/each}
+                    </Select>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+            <div class="class-foot">
+              <Button
+                variant="primary"
+                size="sm"
+                onclick={() => saveMembership(singleClass)}
+                loading={savingClass === singleClass}
+                disabled={!membershipChanged(singleClass) || savingClass !== undefined}
+              >
+                Save placement
+              </Button>
+            </div>
+          </fieldset>
+        </Collapsible>
       {:else}
         <!-- ≥2 classes: a per-class placement grid (checkbox per roster pilot + a channel). -->
         <div class="class-grids">
           {#each eventClasses as classId (classId)}
             {@const dirty = membershipChanged(classId)}
-            <fieldset class="class-grid" aria-label={`Placement for ${classNameOf(classId)}`}>
-              <legend class="class-legend">
-                <span class="class-name">{classNameOf(classId)}</span>
-                <Badge tone="neutral">
-                  {membersOf(classId).size}
-                  {membersOf(classId).size === 1 ? 'pilot' : 'pilots'}
-                </Badge>
-              </legend>
-              <ul class="member-list">
-                {#each rosterPilots as pilot (pilot.id)}
-                  {@const member = isMember(classId, pilot.id)}
-                  <li class="member-row">
-                    <label class="member-label">
-                      <input
-                        type="checkbox"
-                        class="select-box"
-                        checked={member}
-                        onchange={() => toggleMember(classId, pilot.id)}
-                        aria-label={`Place ${pilot.callsign} in ${classNameOf(classId)}`}
-                      />
-                      <span class="member-callsign">{pilot.callsign}</span>
-                    </label>
-                    {#if member}
-                      <div class="member-chan">
-                        <Select
-                          value={String(channelOf(classId, pilot.id) ?? '')}
-                          size="sm"
-                          disabled={!hasChannelPool}
-                          aria-label={`Channel for ${pilot.callsign} in ${classNameOf(classId)}`}
-                          onchange={(e: Event) =>
-                            setChannel(
-                              classId,
-                              pilot.id,
-                              (e.currentTarget as HTMLSelectElement).value
-                            )}
-                        >
-                          <option value="">No channel</option>
-                          {#each channelOptions as opt (opt.mhz)}
-                            <option value={String(opt.mhz)}>{opt.label} · {opt.mhz} MHz</option>
-                          {/each}
-                        </Select>
-                      </div>
-                    {/if}
-                  </li>
-                {/each}
-              </ul>
-              <div class="class-foot">
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onclick={() => saveMembership(classId)}
-                  loading={savingClass === classId}
-                  disabled={!dirty || savingClass !== undefined}
-                >
-                  Save placement
-                </Button>
-              </div>
-            </fieldset>
+            {@const cc = collapse(`place:${classId}`)}
+            <Collapsible title={classNameOf(classId)} id={`place-${classId}`} bind:open={cc.open}>
+              {#snippet summary()}
+                <Badge tone="neutral">{membersOf(classId).size} placed</Badge>
+                {#if dirty}<span class="dirty-tag">unsaved</span>{/if}
+              {/snippet}
+              <fieldset class="class-grid" aria-label={`Placement for ${classNameOf(classId)}`}>
+                <ul class="member-list">
+                  {#each rosterPilots as pilot (pilot.id)}
+                    {@const member = isMember(classId, pilot.id)}
+                    <li class="member-row">
+                      <label class="member-label">
+                        <input
+                          type="checkbox"
+                          class="select-box"
+                          checked={member}
+                          onchange={() => toggleMember(classId, pilot.id)}
+                          aria-label={`Place ${pilot.callsign} in ${classNameOf(classId)}`}
+                        />
+                        <span class="member-callsign">{pilot.callsign}</span>
+                      </label>
+                      {#if member}
+                        <div class="member-chan">
+                          <Select
+                            value={String(channelOf(classId, pilot.id) ?? '')}
+                            size="sm"
+                            disabled={!hasChannelPool}
+                            aria-label={`Channel for ${pilot.callsign} in ${classNameOf(classId)}`}
+                            onchange={(e: Event) =>
+                              setChannel(
+                                classId,
+                                pilot.id,
+                                (e.currentTarget as HTMLSelectElement).value
+                              )}
+                          >
+                            <option value="">No channel</option>
+                            {#each channelOptions as opt (opt.mhz)}
+                              <option value={String(opt.mhz)}>{opt.label} · {opt.mhz} MHz</option>
+                            {/each}
+                          </Select>
+                        </div>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+                <div class="class-foot">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onclick={() => saveMembership(classId)}
+                    loading={savingClass === classId}
+                    disabled={!dirty || savingClass !== undefined}
+                  >
+                    Save placement
+                  </Button>
+                </div>
+              </fieldset>
+            </Collapsible>
           {/each}
         </div>
       {/if}
@@ -685,26 +720,19 @@
     flex-direction: column;
     gap: var(--gf-space-3);
     margin: 0;
-    padding: var(--gf-space-4);
-    border: 1px solid var(--gf-border);
-    border-radius: var(--gf-radius-lg);
-    background: var(--gf-surface);
-  }
-  .class-legend {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--gf-space-2);
     padding: 0;
-  }
-  .class-name {
-    font-size: var(--gf-font-size-md);
-    font-weight: var(--gf-font-weight-semibold);
-    letter-spacing: var(--gf-tracking-tight);
+    border: none;
+    min-inline-size: 0;
   }
   .auto-tag {
+    margin: 0;
     font-size: var(--gf-font-size-xs);
     color: var(--gf-text-muted);
+  }
+  .dirty-tag {
+    font-size: var(--gf-font-size-xs);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-warn);
   }
   .member-list {
     list-style: none;

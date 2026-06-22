@@ -19,7 +19,7 @@
    *
    * Field-readable: large text, dark surfaces, consistent with the other stage screens.
    */
-  import { Button, Card, Field, Input, Select, toast } from '@gridfpv/components';
+  import { Button, Card, Collapsible, Field, Input, Select, toast } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
     ChannelMode,
@@ -40,10 +40,33 @@
     WinCondition
   } from '@gridfpv/types';
   import { channelLabel } from '../lib/channels.js';
+  import { collapseStore } from '../lib/collapse.svelte.js';
   import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
+
+  // ── Collapse persistence ────────────────────────────────────────────────────
+  // Each round's heats block can be collapsed so the RD can manage a multi-round / many-heat event.
+  // The choice persists per stable round id, namespaced by the event (gf.collapse.<event>.<section>),
+  // sticking across navigation/reload. A *finished* round (all its heats Final) defaults collapsed;
+  // an active/incomplete round defaults open.
+  const eventId = $derived(session.currentEvent?.id ?? 'event');
+  const collapseStores = new Map<string, ReturnType<typeof collapseStore>>();
+  function collapse(sectionId: string, defaultOpen: boolean): ReturnType<typeof collapseStore> {
+    const key = `${eventId}:${sectionId}`;
+    let s = collapseStores.get(key);
+    if (!s) {
+      s = collapseStore(eventId, sectionId, defaultOpen);
+      collapseStores.set(key, s);
+    }
+    return s;
+  }
+  // A round reads "finished" when it has heats and every one is Final — a sensible default-collapsed.
+  function roundFinished(roundId: RoundId): boolean {
+    const hs = heatsByRound(roundId);
+    return hs.length > 0 && hs.every((h) => h.phase === 'Final');
+  }
 
   // The app-level class directory (to resolve class ids → names) and the valid format **schemas**
   // (the engine's `FormatRegistry::standard()` + each format's declared param schema, via
@@ -852,17 +875,22 @@
     {:else}
       <div class="heat-rounds">
         {#each rounds as round (round.id)}
+          {@const heatCount = heatsByRound(round.id).length}
+          {@const rc = collapse(`round:${round.id}`, !roundFinished(round.id))}
           <section class="heat-round" aria-label={`Heats for ${round.label}`}>
-            <header class="heat-round-head">
-              <div class="heat-round-title">
-                <span class="round-label">{round.label}</span>
+            <Collapsible title={round.label} id={`round-${round.id}`} bind:open={rc.open}>
+              {#snippet summary()}
                 <span class="meta-chip">
                   {round.classes.length === eventClasses.length && eventClasses.length > 1
                     ? 'All classes'
                     : round.classes.map(className).join(', ') || '—'}
                 </span>
-              </div>
-              <div class="heat-round-actions">
+                <span class="heat-count-chip">
+                  {heatCount}
+                  {heatCount === 1 ? 'heat' : 'heats'}
+                </span>
+              {/snippet}
+              {#snippet actions()}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -888,118 +916,124 @@
                 >
                   Fill next heat
                 </Button>
-              </div>
-            </header>
+              {/snippet}
 
-            {#if standingsRound === round.id}
-              <div class="round-standings" aria-label={`Standings for ${round.label}`}>
-                <h4 class="standings-title">Standings — seeds the bracket</h4>
-                {#if standingsLoading}
-                  <p class="empty small" role="status">Loading standings…</p>
-                {:else if standingsError}
+              <div class="heat-round-body">
+                {#if standingsRound === round.id}
+                  <div class="round-standings" aria-label={`Standings for ${round.label}`}>
+                    <h4 class="standings-title">Standings — seeds the bracket</h4>
+                    {#if standingsLoading}
+                      <p class="empty small" role="status">Loading standings…</p>
+                    {:else if standingsError}
+                      <p class="empty small" role="status">
+                        No ranking yet — score this round's heats first.
+                      </p>
+                    {:else if standingsRows.length === 0}
+                      <p class="empty small" role="status">No ranked competitors yet.</p>
+                    {:else}
+                      <ol class="standings-list">
+                        {#each standingsRows as entry (entry.competitor)}
+                          <li class="standings-row">
+                            <span class="standings-pos">{entry.position}</span>
+                            <span class="standings-call">{callsign(entry.competitor)}</span>
+                          </li>
+                        {/each}
+                      </ol>
+                    {/if}
+                  </div>
+                {/if}
+
+                {#if advanceRoundId === round.id}
+                  <form
+                    class="advance-form"
+                    aria-label={`Advance ${round.label} to bracket`}
+                    onsubmit={(e) => {
+                      e.preventDefault();
+                      submitAdvance(round);
+                    }}
+                  >
+                    <h4 class="standings-title">Advance to bracket</h4>
+                    <p class="advance-note">
+                      Creates a <strong>single_elim</strong> round seeded from
+                      <strong>{round.label}</strong>'s ranking, then fills the seeded bracket heats.
+                      The bracket is editable afterward.
+                    </p>
+                    <div class="form-grid">
+                      <Field label="Bracket label" required>
+                        <Input bind:value={advanceLabel} aria-label="Bracket label" />
+                      </Field>
+                      <Field
+                        label="Top N advance"
+                        hint="Defaults to the largest power-of-two that fits the field."
+                      >
+                        <Input
+                          type="number"
+                          min="1"
+                          bind:value={advanceTopN}
+                          aria-label="Top N advance"
+                        />
+                      </Field>
+                    </div>
+                    <div class="form-actions">
+                      <Button
+                        variant="ghost"
+                        type="button"
+                        onclick={cancelAdvance}
+                        disabled={advancing}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="primary"
+                        type="submit"
+                        loading={advancing}
+                        disabled={advanceLabel.trim().length === 0}
+                      >
+                        Create &amp; fill bracket
+                      </Button>
+                    </div>
+                  </form>
+                {/if}
+
+                {#if heatsByRound(round.id).length === 0}
                   <p class="empty small" role="status">
-                    No ranking yet — score this round's heats first.
+                    No heats yet — <strong>Fill next heat</strong> to draw the first from this round’s
+                    field.
                   </p>
-                {:else if standingsRows.length === 0}
-                  <p class="empty small" role="status">No ranked competitors yet.</p>
                 {:else}
-                  <ol class="standings-list">
-                    {#each standingsRows as entry (entry.competitor)}
-                      <li class="standings-row">
-                        <span class="standings-pos">{entry.position}</span>
-                        <span class="standings-call">{callsign(entry.competitor)}</span>
+                  <ol class="heat-list">
+                    {#each heatsByRound(round.id) as h (h.heat)}
+                      {@const channels = channelByRef(h)}
+                      <li class="heat-row" class:current={h.is_current}>
+                        <div class="heat-main">
+                          <div class="heat-head">
+                            <span class="heat-id">{h.heat}</span>
+                            {#if h.is_current}<span class="current-pill">Current</span>{/if}
+                            <span class={`status-pill ${statusKind(h.phase)}`}
+                              >{statusLabel(h)}</span
+                            >
+                          </div>
+                          <div class="lineup">
+                            {#each h.lineup as ref, i (ref)}
+                              <span class="lineup-pilot">
+                                <span class="lineup-num" aria-hidden="true">{i + 1}</span>
+                                <span class="lineup-call">{callsign(ref)}</span>
+                                <span class="lineup-chan" class:none={!channels.get(ref)}>
+                                  {channels.get(ref) ?? '—'}
+                                </span>
+                              </span>
+                            {/each}
+                            {#if h.lineup.length === 0}<span class="lineup-empty"
+                                >— no pilots —</span
+                              >{/if}
+                          </div>
+                        </div>
                       </li>
                     {/each}
                   </ol>
                 {/if}
               </div>
-            {/if}
-
-            {#if advanceRoundId === round.id}
-              <form
-                class="advance-form"
-                aria-label={`Advance ${round.label} to bracket`}
-                onsubmit={(e) => {
-                  e.preventDefault();
-                  submitAdvance(round);
-                }}
-              >
-                <h4 class="standings-title">Advance to bracket</h4>
-                <p class="advance-note">
-                  Creates a <strong>single_elim</strong> round seeded from
-                  <strong>{round.label}</strong>'s ranking, then fills the seeded bracket heats. The
-                  bracket is editable afterward.
-                </p>
-                <div class="form-grid">
-                  <Field label="Bracket label" required>
-                    <Input bind:value={advanceLabel} aria-label="Bracket label" />
-                  </Field>
-                  <Field
-                    label="Top N advance"
-                    hint="Defaults to the largest power-of-two that fits the field."
-                  >
-                    <Input
-                      type="number"
-                      min="1"
-                      bind:value={advanceTopN}
-                      aria-label="Top N advance"
-                    />
-                  </Field>
-                </div>
-                <div class="form-actions">
-                  <Button
-                    variant="ghost"
-                    type="button"
-                    onclick={cancelAdvance}
-                    disabled={advancing}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    variant="primary"
-                    type="submit"
-                    loading={advancing}
-                    disabled={advanceLabel.trim().length === 0}
-                  >
-                    Create &amp; fill bracket
-                  </Button>
-                </div>
-              </form>
-            {/if}
-
-            {#if heatsByRound(round.id).length === 0}
-              <p class="empty small" role="status">
-                No heats yet — <strong>Fill next heat</strong> to draw the first from this round’s field.
-              </p>
-            {:else}
-              <ol class="heat-list">
-                {#each heatsByRound(round.id) as h (h.heat)}
-                  {@const channels = channelByRef(h)}
-                  <li class="heat-row" class:current={h.is_current}>
-                    <div class="heat-main">
-                      <div class="heat-head">
-                        <span class="heat-id">{h.heat}</span>
-                        {#if h.is_current}<span class="current-pill">Current</span>{/if}
-                        <span class={`status-pill ${statusKind(h.phase)}`}>{statusLabel(h)}</span>
-                      </div>
-                      <div class="lineup">
-                        {#each h.lineup as ref, i (ref)}
-                          <span class="lineup-pilot">
-                            <span class="lineup-num" aria-hidden="true">{i + 1}</span>
-                            <span class="lineup-call">{callsign(ref)}</span>
-                            <span class="lineup-chan" class:none={!channels.get(ref)}>
-                              {channels.get(ref) ?? '—'}
-                            </span>
-                          </span>
-                        {/each}
-                        {#if h.lineup.length === 0}<span class="lineup-empty">— no pilots —</span
-                          >{/if}
-                      </div>
-                    </div>
-                  </li>
-                {/each}
-              </ol>
-            {/if}
+            </Collapsible>
           </section>
         {/each}
       </div>
@@ -1250,29 +1284,17 @@
   .heat-round {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-2);
-    padding: var(--gf-space-3);
-    border: 1px solid var(--gf-border-subtle);
-    border-radius: var(--gf-radius-sm);
-    background: var(--gf-surface-sunken);
   }
-  .heat-round-head {
+  .heat-count-chip {
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-medium);
+    color: var(--gf-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .heat-round-body {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
     gap: var(--gf-space-3);
-  }
-  .heat-round-title {
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: var(--gf-space-2);
-  }
-  .heat-round-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-2);
-    flex-wrap: wrap;
   }
   .round-standings {
     padding: var(--gf-space-3);
