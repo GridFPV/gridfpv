@@ -88,7 +88,11 @@ round?: RoundId,
  * Per-pilot frequency assignment in raw MHz (e.g. `5800`); empty when none is
  * assigned (a sim race, or the free-text path).
  */
-frequencies?: Array<[CompetitorRef, number]>, } } | { "Register": { 
+frequencies?: Array<[CompetitorRef, number]>, } } | { "FillRound": { 
+/**
+ * The round to fill — one of the event's [`rounds`](crate::events::EventMeta::rounds).
+ */
+round: RoundId, } } | { "Register": { 
 /**
  * The timing source the competitor belongs to.
  */
