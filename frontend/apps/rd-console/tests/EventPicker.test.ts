@@ -1,12 +1,12 @@
 /**
- * EventPicker delete-dialog **copyable name box** proof (the small UX papercut). The hard-delete
+ * EventPicker delete-dialog **selectable name box** proof (the small UX papercut). The hard-delete
  * dialog must make the exact event name easy to grab without weakening the type-to-confirm gate:
- *  - the name renders in a dedicated selectable box (`user-select: all`), and
- *  - a copy button writes the name to the clipboard and shows brief "Copied" feedback.
+ * the name renders in a dedicated selectable box (`user-select: all`) the RD can click/triple-click
+ * to select, then copy by hand. (There's no copy button: the Clipboard API needs a secure context
+ * and fails over plain HTTP, which is how the Director is reached on a field laptop.)
  *
  * These render EventPicker against a mocked Session (the event seams resolve a single deletable
- * event) and drive the dialog. `navigator.clipboard` is mocked so the copy path is observable
- * without a real clipboard.
+ * event) and drive the dialog.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
@@ -55,7 +55,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('EventPicker — copyable event-name box in the delete dialog', () => {
+describe('EventPicker — selectable event-name box in the delete dialog', () => {
   it('renders the event name in a user-select:all box', async () => {
     const dialog = await openDeleteDialog();
     const box = dialog.getByLabelText('Event name to copy');
@@ -71,30 +71,20 @@ describe('EventPicker — copyable event-name box in the delete dialog', () => {
     expect(rule![0].replace(/\s+/g, '')).toContain('user-select:all');
   });
 
-  it('copies the name to the clipboard and shows "Copied" feedback', async () => {
-    const writeText = vi.fn(async () => undefined);
-    vi.stubGlobal('navigator', { clipboard: { writeText } });
-
+  it('has no copy button (Clipboard API needs a secure context, unavailable over plain HTTP)', async () => {
     const dialog = await openDeleteDialog();
-    const copyBtn = dialog.getByRole('button', { name: `Copy event name “${EVENT.name}”` });
-    expect(copyBtn).toHaveTextContent('Copy');
-
-    await fireEvent.click(copyBtn);
-
-    expect(writeText).toHaveBeenCalledTimes(1);
-    expect(writeText).toHaveBeenCalledWith(EVENT.name);
-    await waitFor(() => expect(copyBtn).toHaveTextContent('Copied'));
+    expect(dialog.queryByRole('button', { name: /Copy event name/ })).toBeNull();
   });
 
-  it('keeps the type-to-confirm gate: the copy box does not enable delete on its own', async () => {
-    vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn(async () => undefined) } });
-
+  it('keeps the type-to-confirm gate: only typing the exact name enables delete', async () => {
     const dialog = await openDeleteDialog();
     const confirm = dialog.getByRole('button', { name: 'Delete permanently' });
     expect(confirm).toBeDisabled();
 
-    // Copying alone must NOT enable the red button.
-    await fireEvent.click(dialog.getByRole('button', { name: /Copy event name/ }));
+    // A wrong name keeps it disabled.
+    await fireEvent.input(dialog.getByRole('textbox', { name: 'Confirm event name' }), {
+      target: { value: 'not the name' }
+    });
     expect(confirm).toBeDisabled();
 
     // Only typing the exact name enables it.
@@ -102,16 +92,5 @@ describe('EventPicker — copyable event-name box in the delete dialog', () => {
       target: { value: EVENT.name }
     });
     await waitFor(() => expect(confirm).toBeEnabled());
-  });
-
-  it('gracefully no-ops when the clipboard API is unavailable', async () => {
-    vi.stubGlobal('navigator', {});
-
-    const dialog = await openDeleteDialog();
-    const copyBtn = dialog.getByRole('button', { name: /Copy event name/ });
-    // Must not throw, and stays in its default state (no "Copied").
-    await fireEvent.click(copyBtn);
-    expect(copyBtn).toHaveTextContent('Copy');
-    expect(copyBtn).not.toHaveTextContent('Copied');
   });
 });
