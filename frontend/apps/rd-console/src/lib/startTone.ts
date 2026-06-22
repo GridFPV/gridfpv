@@ -168,26 +168,50 @@ export class StartTonePlayer {
 
   /**
    * Play the start tone now. Muted ⇒ no-op; no Web Audio ⇒ no-op. The cue's `hz`/`ms` fall back to
-   * the {@link DEFAULT_HZ}/{@link DEFAULT_MS} defaults. Resumes the context first (best-effort) so a
-   * gesture-unlocked context that drifted back to suspended still sounds. Never throws.
+   * the {@link DEFAULT_HZ}/{@link DEFAULT_MS} defaults. Never throws.
+   *
+   * ── Why this resumes-then-schedules (the audible-tone fix) ──────────────────────────────────
+   * Race-go (`Armed → Running`) is an **auto** transition the runtime drives — there's no click on
+   * that edge — so the `AudioContext` may still be **suspended** by the browser autoplay policy. A
+   * suspended context has a **frozen** `currentTime`; scheduling a note against that frozen clock and
+   * only resuming afterwards means the note's start time is already in the past when audio actually
+   * begins, so it never sounds (the original "no tone" bug). We therefore **`resume()` first and
+   * schedule the note from the resumed clock**. The console also unlocks on the earlier `Start`
+   * gesture ({@link resume}) so the context is usually already running and this path is instant.
    */
   play(cue?: ToneCue): void {
     if (this.#muted) return;
     const ctx = this.#context();
     if (!ctx) return;
+    if (ctx.state === 'running') {
+      this.#emit(ctx, cue);
+      return;
+    }
+    // Suspended (autoplay policy): resume, then schedule against the *resumed* clock. Re-check mute
+    // at fire time in case it was toggled during the (brief) resume.
+    void ctx
+      .resume()
+      .then(() => {
+        if (!this.#muted) this.#emit(ctx, cue);
+      })
+      .catch(() => {
+        /* still locked (no gesture yet) — nothing to play; the next gesture unlocks it */
+      });
+  }
+
+  /** Build and fire the oscillator → gain → destination burst on a running context. Never throws. */
+  #emit(ctx: ToneAudioContext, cue?: ToneCue): void {
     const hz = cue?.hz ?? DEFAULT_HZ;
     const ms = cue?.ms ?? DEFAULT_MS;
     try {
-      // Best-effort unlock; if it's still suspended the scheduled note simply won't sound, but we
-      // never block race-go on the promise.
-      if (ctx.state !== 'running') void ctx.resume();
       const now = ctx.currentTime;
       const dur = Math.max(0.05, ms / 1000);
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'square';
       osc.frequency.setValueAtTime(hz, now);
-      // A short attack + release so the burst reads as a clean beep, not a click.
+      // A short attack + release so the burst reads as a clean beep, not a click. The audible
+      // sustain level is 0.25 (non-zero — the bug would be a zero envelope or a missing connect).
       gain.gain.setValueAtTime(0.0001, now);
       gain.gain.linearRampToValueAtTime(0.25, now + 0.01);
       gain.gain.linearRampToValueAtTime(0.0001, now + dur);

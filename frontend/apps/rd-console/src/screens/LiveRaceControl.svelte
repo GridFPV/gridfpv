@@ -126,6 +126,9 @@
   });
   let muted = $state(tone.muted);
   function toggleMute() {
+    // The toggle is itself a user gesture — unlock the audio context here too so an RD who only
+    // ever touches the mute button (never a transition) still gets an audible race-go tone.
+    void tone.resume();
     muted = tone.toggleMuted();
   }
 
