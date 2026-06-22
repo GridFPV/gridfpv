@@ -86,10 +86,16 @@
   const hasChannels = $derived(currentChannels.size > 0);
 
   // ── Race clock (#62) ────────────────────────────────────────────────────────────────
-  // The phase-driven elapsed clock now lives in the shared `useRaceClock` helper so the
-  // persistent ContextHeader (#85) and this screen drive the *same* clock from one place
-  // (ticks while Running, freezes on Unofficial/Final, resets otherwise). See raceClock.svelte.ts.
-  const clock = useRaceClock(() => phase);
+  // The phase-driven elapsed clock lives in the shared `useRaceClock` helper so the persistent
+  // ContextHeader (#85) and this screen drive the *same* clock from one place. It is
+  // server-time-authoritative (#62 follow-up): it counts from the live state's `race_started_at`
+  // / `race_ended_at` (the server's race-go / race-end instants), so this HUD and the header
+  // agree exactly and the frozen value is the precise server-side duration. See raceClock.svelte.ts.
+  const clock = useRaceClock(
+    () => phase,
+    () => live?.race_started_at,
+    () => live?.race_ended_at
+  );
   const elapsedMs = $derived(clock.elapsedMs);
 
   // ── The current heat's round config (heat-lifecycle Slice 3) ─────────────────────────────────

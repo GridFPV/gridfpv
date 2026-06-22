@@ -42,4 +42,25 @@ running_order?: Array<CompetitorRef>,
  * The next heat to run after the current one (the earliest still-`Scheduled` heat
  * that is not on the timer), if one is known.
  */
-on_deck?: HeatId, };
+on_deck?: HeatId, 
+/**
+ * The **server-authoritative race-start instant** of the current heat: the
+ * `recorded_at` (microseconds, server wall clock) of the `Armed → Running`
+ * transition that put it on the timer (the real race-go). `None` before the heat
+ * has started (or for an older log whose transition carried no timestamp).
+ *
+ * This is the anchor every client clock counts from — header and HUD alike — so the
+ * elapsed reads identically and accurately *regardless of when the client mounted*
+ * (the #62 follow-up: kill the per-client wall-clock drift). Renders as a plain TS
+ * `number` (microseconds, bounded far below 2^53).
+ */
+race_started_at?: number, 
+/**
+ * The **server-authoritative race-end instant** of the current heat: the
+ * `recorded_at` (microseconds, server wall clock) of the `Running → Unofficial`
+ * transition that closed it. `None` while the heat is still running (or has not
+ * started). When set, `race_ended_at - race_started_at` is the **exact** race
+ * duration a frozen clock reads (so a 60s limit reads `1:00.000`, not `1:00.100`).
+ * Renders as a plain TS `number` (microseconds).
+ */
+race_ended_at?: number, };

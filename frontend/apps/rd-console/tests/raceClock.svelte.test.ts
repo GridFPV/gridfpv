@@ -3,98 +3,154 @@ import { flushSync } from 'svelte';
 import { useRaceClock } from '../src/lib/raceClock.svelte.js';
 
 /**
- * Unit tests for the shared phase-driven race clock (#62, #85). Pins the freeze regression
- * the Finished→Unofficial rename introduced: the clock must FREEZE on `Unofficial` (the race
- * has ended; only the result isn't finalized yet) and stay frozen through `Final`, ticking only
- * while `Running` and resetting to 0 on a fresh/idle heat or a heat change.
+ * Unit tests for the shared, **server-time-authoritative** race clock (#62, #85, #62 follow-up).
  *
- * The rune helper owns an internal `$effect`, so it's driven inside an `$effect.root` with a
- * reactive `$state` phase and `flushSync()` to settle the effect after each phase change. Fake
- * timers advance the wall clock the helper reads.
+ * The clock no longer counts from a per-instance wall-clock start; it counts from the server's
+ * `race_started_at` / `race_ended_at` (µs) carried on `LiveRaceState`. These tests pin:
+ *   • the same `race_started_at` yields the same elapsed regardless of when the clock mounts
+ *     (a mount *after* race-go still reads the real elapsed, not 0) — the header↔HUD agreement;
+ *   • the frozen value equals exactly `race_ended_at - race_started_at` (no poll-late overshoot);
+ *   • Running ticks, Unofficial/Final freeze, Scheduled/idle reset.
+ *
+ * The rune helper owns an internal `$effect`, driven inside an `$effect.root` with reactive
+ * `$state` for phase + the two server instants, and `flushSync()` to settle after each change.
+ * Fake timers drive both the helper's `setInterval` and `Date.now()`.
  */
-describe('useRaceClock', () => {
-  beforeEach(() => vi.useFakeTimers());
+describe('useRaceClock (server-time-authoritative)', () => {
+  // Anchor the fake clock at a fixed wall time so `Date.now()` and the µs anchors are comparable.
+  const T0 = 1_000_000_000_000; // ms
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+  });
   afterEach(() => vi.useRealTimers());
 
-  /** Run `fn` with a reactive phase setter inside an owned effect root; returns a cleanup. */
-  function harness() {
-    let phase = $state<string | undefined>('Scheduled');
+  /** Run inside an owned effect root with reactive phase + server instants; returns a handle. */
+  function harness(initial?: {
+    phase?: string;
+    startedAtMicros?: number | null;
+    endedAtMicros?: number | null;
+  }) {
+    let phase = $state<string | undefined>(initial?.phase ?? 'Scheduled');
+    let startedAt = $state<number | null | undefined>(initial?.startedAtMicros ?? null);
+    let endedAt = $state<number | null | undefined>(initial?.endedAtMicros ?? null);
     let clock!: ReturnType<typeof useRaceClock>;
     const cleanup = $effect.root(() => {
-      clock = useRaceClock(() => phase);
+      clock = useRaceClock(
+        () => phase,
+        () => startedAt,
+        () => endedAt
+      );
     });
     flushSync();
     return {
       get elapsedMs() {
         return clock.elapsedMs;
       },
-      setPhase(p: string | undefined) {
-        phase = p;
+      set(next: {
+        phase?: string;
+        startedAtMicros?: number | null;
+        endedAtMicros?: number | null;
+      }) {
+        if ('phase' in next) phase = next.phase;
+        if ('startedAtMicros' in next) startedAt = next.startedAtMicros;
+        if ('endedAtMicros' in next) endedAt = next.endedAtMicros;
         flushSync();
       },
       cleanup
     };
   }
 
-  it('ticks up while Running', () => {
-    const h = harness();
-    h.setPhase('Running');
+  it('ticks up while Running, anchored to the server race-start', () => {
+    const h = harness({ phase: 'Running', startedAtMicros: T0 * 1000 });
     expect(h.elapsedMs).toBe(0);
     vi.advanceTimersByTime(3000);
     expect(h.elapsedMs).toBeGreaterThanOrEqual(2900);
+    expect(h.elapsedMs).toBeLessThanOrEqual(3100);
     h.cleanup();
   });
 
-  it('freezes at the race-end value on Unofficial and does not keep counting', () => {
-    const h = harness();
-    h.setPhase('Running');
-    vi.advanceTimersByTime(5000);
-    const atEnd = h.elapsedMs;
-    expect(atEnd).toBeGreaterThanOrEqual(4900);
+  it('mounting AFTER race-go reads the real elapsed, not 0 (header == HUD)', () => {
+    // The race started 7s before this clock mounts (the bug: a late-joining live page used to
+    // count from arrival and disagree with the always-mounted header). Both now anchor to the
+    // same server `race_started_at`, so a fresh mount immediately reads ~7s.
+    const startedAtMicros = (T0 - 7000) * 1000; // 7s ago
+    const h = harness({ phase: 'Running', startedAtMicros });
+    expect(h.elapsedMs).toBeGreaterThanOrEqual(6900);
+    expect(h.elapsedMs).toBeLessThanOrEqual(7100);
 
-    // The time limit fires → Running transitions to Unofficial. The clock must STOP.
-    h.setPhase('Unofficial');
-    const frozen = h.elapsedMs;
-    expect(frozen).toBe(atEnd);
+    // A second clock mounting at the same instant with the same anchor reads the SAME value.
+    const h2 = harness({ phase: 'Running', startedAtMicros });
+    expect(h2.elapsedMs).toBe(h.elapsedMs);
+    h.cleanup();
+    h2.cleanup();
+  });
 
-    // Wall clock keeps moving, but the frozen reading must not advance (the bug: it free-ran).
+  it('freezes at EXACTLY race_ended_at - race_started_at on Unofficial', () => {
+    const startedAtMicros = T0 * 1000;
+    // A clean 60.000s race window from the server.
+    const endedAtMicros = (T0 + 60_000) * 1000;
+    const h = harness({ phase: 'Running', startedAtMicros });
+    vi.advanceTimersByTime(60_100); // poll a tenth late, as the real bug did
+
+    h.set({ phase: 'Unofficial', endedAtMicros });
+    // Exactly 60_000 ms — not 60_100 (no overshoot), not a short late-join value.
+    expect(h.elapsedMs).toBe(60_000);
+
+    // The frozen value must not advance as the wall clock keeps moving.
     vi.advanceTimersByTime(10_000);
-    expect(h.elapsedMs).toBe(frozen);
+    expect(h.elapsedMs).toBe(60_000);
     h.cleanup();
   });
 
-  it('stays frozen through Final (finalize does not restart the clock)', () => {
-    const h = harness();
-    h.setPhase('Running');
-    vi.advanceTimersByTime(4000);
-    h.setPhase('Unofficial');
-    const frozen = h.elapsedMs;
+  it('stays frozen at the exact duration through Final', () => {
+    const startedAtMicros = T0 * 1000;
+    const endedAtMicros = (T0 + 42_000) * 1000;
+    const h = harness({ phase: 'Running', startedAtMicros });
+    vi.advanceTimersByTime(42_000);
+    h.set({ phase: 'Unofficial', endedAtMicros });
+    expect(h.elapsedMs).toBe(42_000);
 
-    h.setPhase('Final');
+    h.set({ phase: 'Final' });
     vi.advanceTimersByTime(5000);
-    expect(h.elapsedMs).toBe(frozen);
+    expect(h.elapsedMs).toBe(42_000);
     h.cleanup();
   });
 
   it('resets to 0 on a new/idle heat (Scheduled) after a frozen race', () => {
-    const h = harness();
-    h.setPhase('Running');
-    vi.advanceTimersByTime(4000);
-    h.setPhase('Unofficial');
-    expect(h.elapsedMs).toBeGreaterThan(0);
+    const startedAtMicros = T0 * 1000;
+    const endedAtMicros = (T0 + 30_000) * 1000;
+    const h = harness({ phase: 'Running', startedAtMicros });
+    vi.advanceTimersByTime(30_000);
+    h.set({ phase: 'Unofficial', endedAtMicros });
+    expect(h.elapsedMs).toBe(30_000);
 
-    // A fresh heat is Scheduled again → reset.
-    h.setPhase('Scheduled');
+    // A fresh heat: phase Scheduled, server timing cleared → reset.
+    h.set({ phase: 'Scheduled', startedAtMicros: null, endedAtMicros: null });
     expect(h.elapsedMs).toBe(0);
     h.cleanup();
   });
 
   it('resets to 0 when the heat goes idle (no heat / undefined phase)', () => {
-    const h = harness();
-    h.setPhase('Running');
+    const h = harness({ phase: 'Running', startedAtMicros: T0 * 1000 });
     vi.advanceTimersByTime(2000);
-    h.setPhase(undefined);
+    h.set({ phase: undefined, startedAtMicros: null });
     expect(h.elapsedMs).toBe(0);
+    h.cleanup();
+  });
+
+  it('holds at 0 while Running before the server race-start has propagated', () => {
+    // A brief window: phase is Running but `race_started_at` has not arrived yet. Holding at 0
+    // is correct — counting from an unknown anchor would be wrong.
+    const h = harness({ phase: 'Running', startedAtMicros: null });
+    expect(h.elapsedMs).toBe(0);
+    vi.advanceTimersByTime(1000);
+    expect(h.elapsedMs).toBe(0);
+    // Once the anchor lands, it counts.
+    h.set({ startedAtMicros: T0 * 1000 });
+    vi.advanceTimersByTime(2000);
+    expect(h.elapsedMs).toBeGreaterThanOrEqual(1900);
     h.cleanup();
   });
 });

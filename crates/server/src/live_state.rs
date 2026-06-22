@@ -41,8 +41,9 @@
 use std::collections::BTreeMap;
 
 use gridfpv_engine::heat::{HeatState, heat_state};
-use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, PilotId, RoundId};
+use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, HeatTransition, PilotId, RoundId};
 use gridfpv_projection::{CompetitorKey, lap_list_marshaled, registrations};
+use gridfpv_storage::StoredEvent;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -82,6 +83,27 @@ pub struct LiveRaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub on_deck: Option<HeatId>,
+    /// The **server-authoritative race-start instant** of the current heat: the
+    /// `recorded_at` (microseconds, server wall clock) of the `Armed → Running`
+    /// transition that put it on the timer (the real race-go). `None` before the heat
+    /// has started (or for an older log whose transition carried no timestamp).
+    ///
+    /// This is the anchor every client clock counts from — header and HUD alike — so the
+    /// elapsed reads identically and accurately *regardless of when the client mounted*
+    /// (the #62 follow-up: kill the per-client wall-clock drift). Renders as a plain TS
+    /// `number` (microseconds, bounded far below 2^53).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub race_started_at: Option<i64>,
+    /// The **server-authoritative race-end instant** of the current heat: the
+    /// `recorded_at` (microseconds, server wall clock) of the `Running → Unofficial`
+    /// transition that closed it. `None` while the heat is still running (or has not
+    /// started). When set, `race_ended_at - race_started_at` is the **exact** race
+    /// duration a frozen clock reads (so a 60s limit reads `1:00.000`, not `1:00.100`).
+    /// Renders as a plain TS `number` (microseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub race_ended_at: Option<i64>,
 }
 
 impl Default for LiveRaceState {
@@ -94,6 +116,8 @@ impl Default for LiveRaceState {
             progress: Vec::new(),
             running_order: Vec::new(),
             on_deck: None,
+            race_started_at: None,
+            race_ended_at: None,
         }
     }
 }
@@ -187,7 +211,63 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
         progress,
         running_order,
         on_deck: on_deck(events, &current_heat),
+        // Timing is set by [`with_heat_timing`] from the *stored* log (which carries the
+        // `recorded_at` server timestamps the bare `Event` slice lacks). The plain fold over
+        // `&[Event]` — the open-practice synthetic path and the unit tests — leaves it `None`.
+        race_started_at: None,
+        race_ended_at: None,
     }
+}
+
+/// Fold a heat's **server-authoritative race timing** out of the stored log: the
+/// `recorded_at` of its `Armed → Running` transition (the race-start) and of its
+/// `Running → Unofficial` transition (the race-end), if each has occurred.
+///
+/// Pure and recomputable like [`live_state`]: it reads the timestamps the log already
+/// records (the runtime stamps each heat transition at append time), so a replayed session
+/// folds the same instants. The last matching transition wins (a heat re-run after an
+/// abort uses its latest `Running`).
+pub fn heat_timing(stored: &[StoredEvent], heat: &HeatId) -> (Option<i64>, Option<i64>) {
+    let mut started_at = None;
+    let mut ended_at = None;
+    for entry in stored {
+        if let Event::HeatStateChanged {
+            heat: h,
+            transition,
+        } = &entry.event
+        {
+            if h != heat {
+                continue;
+            }
+            match transition {
+                // `Armed → Running` is the real race-go; a re-run after an abort restamps it,
+                // so clear any prior end too — the new run hasn't ended yet.
+                HeatTransition::Running => {
+                    started_at = entry.recorded_at;
+                    ended_at = None;
+                }
+                // `Running → Unofficial` (the engine names it `Finished`) is the race-end.
+                HeatTransition::Finished => ended_at = entry.recorded_at,
+                _ => {}
+            }
+        }
+    }
+    (started_at, ended_at)
+}
+
+/// Set a folded [`LiveRaceState`]'s server-authoritative timing from the stored log.
+///
+/// The plain [`live_state`] fold (over `&[Event]`) cannot see `recorded_at`; the snapshot
+/// and change-stream paths hold the full [`StoredEvent`] log, so they finish the live state
+/// by folding the current heat's race-start / race-end instants in here. A no-op when there
+/// is no current heat. Idempotent and order-independent — just a finishing fold.
+pub fn with_heat_timing(mut live: LiveRaceState, stored: &[StoredEvent]) -> LiveRaceState {
+    if let Some(heat) = live.current_heat.clone() {
+        let (started, ended) = heat_timing(stored, &heat);
+        live.race_started_at = started;
+        live.race_ended_at = ended;
+    }
+    live
 }
 
 /// Map a folded [`HeatState`] to the projected [`HeatPhase`] the live view reports.
@@ -681,6 +761,90 @@ mod tests {
     #[test]
     fn heat_summaries_empty_log_is_empty() {
         assert!(heat_summaries(&[]).is_empty());
+    }
+
+    /// Wrap an event as a stored log entry with an explicit `recorded_at` (µs).
+    fn stored_at(event: Event, recorded_at: i64) -> StoredEvent {
+        StoredEvent {
+            offset: 0,
+            recorded_at: Some(recorded_at),
+            event,
+        }
+    }
+
+    /// Wrap an event as a stored log entry with no `recorded_at` (an older / untimed entry).
+    fn stored(event: Event) -> StoredEvent {
+        StoredEvent {
+            offset: 0,
+            recorded_at: None,
+            event,
+        }
+    }
+
+    #[test]
+    fn heat_timing_folds_from_running_and_finished_transitions() {
+        // The race-start is the `Running` transition's `recorded_at`; the race-end is the
+        // `Finished` (→ Unofficial) transition's. Other transitions carry no timing.
+        let log = vec![
+            stored(scheduled("q-1", &["A", "B"])),
+            stored_at(changed("q-1", HeatTransition::Staged), 100),
+            stored_at(changed("q-1", HeatTransition::Armed), 200),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 61_000_000),
+        ];
+        let (started, ended) = heat_timing(&log, &HeatId("q-1".into()));
+        assert_eq!(started, Some(1_000_000));
+        assert_eq!(ended, Some(61_000_000));
+        // Exactly a 60s duration — the value a frozen clock reads.
+        assert_eq!(ended.unwrap() - started.unwrap(), 60_000_000);
+    }
+
+    #[test]
+    fn heat_timing_running_only_has_no_end_yet() {
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 5_000_000),
+        ];
+        let (started, ended) = heat_timing(&log, &HeatId("q-1".into()));
+        assert_eq!(started, Some(5_000_000));
+        assert_eq!(ended, None);
+    }
+
+    #[test]
+    fn heat_timing_rerun_after_abort_restamps_start_and_clears_end() {
+        // A run, an abort, then a fresh run: the latest `Running` is the start and the
+        // earlier end is cleared (the new run has not finished).
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 2_000_000),
+            stored_at(changed("q-1", HeatTransition::Aborted), 2_500_000),
+            stored_at(changed("q-1", HeatTransition::Running), 9_000_000),
+        ];
+        let (started, ended) = heat_timing(&log, &HeatId("q-1".into()));
+        assert_eq!(started, Some(9_000_000));
+        assert_eq!(ended, None);
+    }
+
+    #[test]
+    fn with_heat_timing_sets_the_current_heats_instants() {
+        let log = vec![
+            stored(scheduled("q-1", &["A", "B"])),
+            stored_at(changed("q-1", HeatTransition::Running), 7_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 67_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(live.current_heat, Some(HeatId("q-1".into())));
+        assert_eq!(live.race_started_at, Some(7_000_000));
+        assert_eq!(live.race_ended_at, Some(67_000_000));
+    }
+
+    #[test]
+    fn with_heat_timing_no_current_heat_leaves_timing_none() {
+        let live = with_heat_timing(live_state(&[]), &[]);
+        assert_eq!(live.race_started_at, None);
+        assert_eq!(live.race_ended_at, None);
     }
 
     #[test]

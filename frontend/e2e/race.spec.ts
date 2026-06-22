@@ -123,6 +123,33 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
     .poll(totalLaps, { timeout: 30_000, message: 'live lap counts should climb in the DOM' })
     .toBeGreaterThan(early);
 
+  // ── Mid-race: the header clock and the HUD clock AGREE (the #62 follow-up fix) ──────────
+  // Both are independent `useRaceClock` instances, now anchored to the server's `race_started_at`
+  // rather than to whenever each mounted. Navigating AWAY from Live and BACK remounts the HUD clock
+  // mid-race (the exact late-join the bug mis-handled — it used to count from arrival and read ~7s
+  // behind the always-mounted header). After the remount, the two must read the same elapsed.
+  const parseClock = (t: string | null) => {
+    const m = /(\d+):(\d+)\.(\d+)/.exec(t ?? '');
+    return m ? (+m[1] * 60 + +m[2]) * 1000 + +m[3] : NaN;
+  };
+  const hudClockLive = page.locator('.hud-clock .gridfpv-race-clock');
+  const headerClockLive = page.locator('.ctx-clock .gridfpv-race-clock');
+  await expect(hudClockLive).toBeVisible();
+  await expect(headerClockLive).toBeVisible();
+  // Leave Live (remounting nothing in the header — it is persistent), then return so the HUD clock
+  // mounts fresh well after race-go.
+  await page.getByRole('button', { name: /Results/ }).click();
+  await page.waitForTimeout(1200);
+  await page.getByRole('button', { name: /Live control/ }).click();
+  await expect(hudClockLive).toBeVisible();
+  // Sample both in the same tick: the freshly-mounted HUD must agree with the long-lived header
+  // (within one 50ms tick of sampling jitter), NOT lag by the time we were away. This is the bug.
+  const hudMid = parseClock(await hudClockLive.textContent());
+  const headerMid = parseClock(await headerClockLive.textContent());
+  expect(Math.abs(hudMid - headerMid)).toBeLessThan(150);
+  // And it must read the REAL elapsed (well past 0), proving it counted from race-go not arrival.
+  expect(hudMid).toBeGreaterThan(1000);
+
   // ── End the window: ForceEnd is the runtime-clock override (the old manual "Finish") ──
   await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
@@ -139,13 +166,10 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   await expect(headerClock).toBeVisible();
   const frozenHud = await hudClock.textContent();
   const frozenHeader = await headerClock.textContent();
-  // Both read a near-identical race-end time (they share the phase-driven freeze logic) — within a
-  // few ms, since each captured its Running start independently.
-  const toMs = (t: string | null) => {
-    const m = /(\d+):(\d+)\.(\d+)/.exec(t ?? '');
-    return m ? (+m[1] * 60 + +m[2]) * 1000 + +m[3] : NaN;
-  };
-  expect(Math.abs(toMs(frozenHud) - toMs(frozenHeader))).toBeLessThan(100);
+  // Both freeze at the EXACT server-side duration (`race_ended_at - race_started_at`), so they read
+  // the IDENTICAL value — not merely "within a few ms". This is the #62 follow-up: no per-client
+  // drift and no poll-late overshoot (the frozen reading is the precise server race length).
+  expect(frozenHud).toBe(frozenHeader);
   await page.waitForTimeout(1500);
   // The bug: the clock free-ran. The fix: each clock STOPS at its race-end value and does not tick.
   expect(await hudClock.textContent()).toBe(frozenHud);

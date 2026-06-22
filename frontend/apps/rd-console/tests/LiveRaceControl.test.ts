@@ -371,18 +371,34 @@ describe('LiveRaceControl', () => {
 
   describe('race clock (#62)', () => {
     // The pure `RaceClock` renders `M:SS.mmm` into a `role="timer"`; we read that text to
-    // assert the client-side ticking driven from the live `phase` in LiveRaceControl.
+    // assert the SERVER-TIME-ANCHORED clock (#62 follow-up): the elapsed counts from the live
+    // state's `race_started_at` (µs) and freezes at `race_ended_at - race_started_at`.
     const clockText = () => screen.getByRole('timer').textContent?.trim();
 
-    // A bare `LiveRaceState` at the given phase (with/without a heat on the timer).
-    const liveAt = (phase: LiveRaceState['phase'], heat: string | undefined = 'heat-1') =>
-      ({ current_heat: heat, phase }) as LiveRaceState;
+    // A `LiveRaceState` at the given phase, carrying server timing in **microseconds** (the wire
+    // unit). `startedAtMs` / `endedAtMs` are the server's race-go / race-end instants in ms.
+    const liveAt = (
+      phase: LiveRaceState['phase'],
+      opts: {
+        heat?: string | undefined;
+        startedAtMs?: number | null;
+        endedAtMs?: number | null;
+      } = {}
+    ) => {
+      const heat = 'heat' in opts ? opts.heat : 'heat-1';
+      return {
+        current_heat: heat,
+        phase,
+        race_started_at: opts.startedAtMs == null ? undefined : opts.startedAtMs * 1000,
+        race_ended_at: opts.endedAtMs == null ? undefined : opts.endedAtMs * 1000
+      } as LiveRaceState;
+    };
 
     afterEach(() => {
       vi.useRealTimers();
     });
 
-    it('starts ticking when the phase becomes Running', async () => {
+    it('starts ticking when the phase becomes Running, anchored to the server race-start', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(0);
       const { session, pushLive } = makeTestSession({ live: liveAt('Armed') });
@@ -390,9 +406,10 @@ describe('LiveRaceControl', () => {
       // Idle/pre-race: clock sits at zero.
       expect(clockText()).toBe('0:00.000');
 
-      pushLive(liveAt('Running'));
+      // The server stamps race-go at t=0 (the current wall time).
+      pushLive(liveAt('Running', { startedAtMs: 0 }));
       await tick();
-      // Advance wall-clock + the tick interval; the clock reflects the elapsed time. The
+      // Advance wall-clock + the tick interval; the clock reflects now - race_started_at. The
       // display only updates on a 50ms tick, so we advance by exact tick multiples.
       await vi.advanceTimersByTimeAsync(1_250);
       expect(clockText()).toBe('0:01.250');
@@ -401,18 +418,35 @@ describe('LiveRaceControl', () => {
       expect(clockText()).toBe('1:01.250');
     });
 
-    it('freezes the clock when the phase becomes Unofficial, and stops ticking', async () => {
+    it('reads the real elapsed when Running is observed AFTER race-go (late join)', async () => {
+      // The bug: navigating to Live mid-race used to count from arrival (0), lagging the header.
+      // Anchored to the server `race_started_at`, the first Running snapshot already reads the
+      // real elapsed regardless of when this screen mounted.
+      vi.useFakeTimers();
+      vi.setSystemTime(7_000); // the race started 7s ago (race_started_at = 0)
+      const { session, pushLive } = makeTestSession({ live: liveAt('Armed') });
+      render(LiveRaceControl, { session });
+
+      pushLive(liveAt('Running', { startedAtMs: 0 }));
+      await tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(clockText()).toBe('0:07.000');
+    });
+
+    it('freezes at the EXACT server duration on Unofficial, and stops ticking', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(0);
-      const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
+      const { session, pushLive } = makeTestSession({
+        live: liveAt('Running', { startedAtMs: 0 })
+      });
       render(LiveRaceControl, { session });
       await tick();
 
       await vi.advanceTimersByTimeAsync(2_500);
       expect(clockText()).toBe('0:02.500');
 
-      // Finishing freezes the displayed value…
-      pushLive(liveAt('Unofficial'));
+      // The server closed the race at exactly 2.500s — freeze at race_ended_at - race_started_at.
+      pushLive(liveAt('Unofficial', { startedAtMs: 0, endedAtMs: 2_500 }));
       await tick();
       expect(clockText()).toBe('0:02.500');
 
@@ -421,17 +455,19 @@ describe('LiveRaceControl', () => {
       expect(clockText()).toBe('0:02.500');
     });
 
-    it('keeps the frozen value through Final', async () => {
+    it('keeps the exact frozen value through Final', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(0);
-      const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
+      const { session, pushLive } = makeTestSession({
+        live: liveAt('Running', { startedAtMs: 0 })
+      });
       render(LiveRaceControl, { session });
       await tick();
       await vi.advanceTimersByTimeAsync(3_000);
 
-      pushLive(liveAt('Unofficial'));
+      pushLive(liveAt('Unofficial', { startedAtMs: 0, endedAtMs: 3_000 }));
       await tick();
-      pushLive(liveAt('Final'));
+      pushLive(liveAt('Final', { startedAtMs: 0, endedAtMs: 3_000 }));
       await tick();
       await vi.advanceTimersByTimeAsync(4_000);
       expect(clockText()).toBe('0:03.000');
@@ -440,14 +476,16 @@ describe('LiveRaceControl', () => {
     it('resets the clock to zero when the heat goes back to Scheduled (e.g. after an abort)', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(0);
-      const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
+      const { session, pushLive } = makeTestSession({
+        live: liveAt('Running', { startedAtMs: 0 })
+      });
       render(LiveRaceControl, { session });
       await tick();
       await vi.advanceTimersByTimeAsync(2_000);
       expect(clockText()).toBe('0:02.000');
 
-      // An Abort/Restart folds the phase back to Scheduled → reset to zero.
-      pushLive(liveAt('Scheduled'));
+      // An Abort/Restart folds the phase back to Scheduled (timing cleared) → reset to zero.
+      pushLive(liveAt('Scheduled', { startedAtMs: null }));
       await tick();
       expect(clockText()).toBe('0:00.000');
     });
@@ -455,13 +493,15 @@ describe('LiveRaceControl', () => {
     it('resets to zero when there is no heat on the timer', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(0);
-      const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
+      const { session, pushLive } = makeTestSession({
+        live: liveAt('Running', { startedAtMs: 0 })
+      });
       render(LiveRaceControl, { session });
       await tick();
       await vi.advanceTimersByTimeAsync(1_500);
 
       // No current heat → phase defaults to Scheduled → reset.
-      pushLive(liveAt('Scheduled', undefined));
+      pushLive(liveAt('Scheduled', { heat: undefined, startedAtMs: null }));
       await tick();
       expect(clockText()).toBe('0:00.000');
     });
@@ -469,14 +509,16 @@ describe('LiveRaceControl', () => {
     it('does not restart the clock on a repeated Running push (rapid same-phase flips)', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(0);
-      const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
+      const { session, pushLive } = makeTestSession({
+        live: liveAt('Running', { startedAtMs: 0 })
+      });
       render(LiveRaceControl, { session });
       await tick();
       await vi.advanceTimersByTimeAsync(2_000);
       expect(clockText()).toBe('0:02.000');
 
-      // Another Running snapshot (e.g. progress update) must not reset the start.
-      pushLive(liveAt('Running'));
+      // Another Running snapshot (same server anchor) must not reset the start.
+      pushLive(liveAt('Running', { startedAtMs: 0 }));
       await tick();
       await vi.advanceTimersByTimeAsync(1_000);
       expect(clockText()).toBe('0:03.000');
