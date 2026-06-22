@@ -43,6 +43,28 @@ const EVENT: EventMeta = {
 
 const FORMATS = ['double_elim', 'multi_main', 'round_robin', 'single_elim', 'timed_qual', 'zippyq'];
 
+// The guided-params schemas the screen reads (`GET /formats`). `timed_qual` declares a couple of
+// typed params (a number `rounds` + an enum `tiebreak`); the rest declare none, so they offer no
+// params editor. Keeps the existing add/edit tests green (they don't touch params) and backs the
+// guided-params test below.
+const SCHEMAS = FORMATS.map((name) =>
+  name === 'timed_qual'
+    ? {
+        name,
+        params: [
+          { key: 'rounds', label: 'Rounds', kind: 'number' as const, default: '3' },
+          {
+            key: 'tiebreak',
+            label: 'Tiebreak',
+            kind: 'enum' as const,
+            options: ['best_lap', 'count_back'],
+            default: 'best_lap'
+          }
+        ]
+      }
+    : { name, params: [] }
+);
+
 const CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
   { band: 'Fatshark', channel: 'F4', mhz: 5800 }
@@ -51,7 +73,8 @@ const CATALOG: ChannelCatalogEntry[] = [
 function baseImpls() {
   return {
     listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
-    listFormatsImpl: vi.fn(async () => FORMATS)
+    listFormatsImpl: vi.fn(async () => FORMATS),
+    listFormatSchemasImpl: vi.fn(async () => SCHEMAS)
   };
 }
 
@@ -174,6 +197,116 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     const [, , roundId, req] = updateRoundImpl.mock.calls[0];
     expect(roundId).toBe('r1');
     expect(req.label).toBe('Qualifying R2');
+  });
+
+  it('offers only the chosen format’s params via "+ Add param", typed by kind, and removes them', async () => {
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Q' } });
+    await fireEvent.click(screen.getByLabelText('Eligible Open'));
+    // timed_qual declares the `rounds` (number) + `tiebreak` (enum) params; zippyq declares none.
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+
+    // The add-param dropdown offers exactly this format's params.
+    const adder = (await screen.findByLabelText('Add param')) as HTMLSelectElement;
+    const offered = within(adder)
+      .getAllByRole('option')
+      .map((o) => o.textContent?.trim());
+    expect(offered).toEqual(expect.arrayContaining(['+ Add param…', 'Rounds', 'Tiebreak']));
+
+    // Add the `rounds` param → a typed number input seeded from its default ("3").
+    await fireEvent.change(adder, { target: { value: 'rounds' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const roundsInput = (await screen.findByLabelText('Rounds value')) as HTMLInputElement;
+    expect(roundsInput.type).toBe('number');
+    expect(roundsInput.value).toBe('3');
+    await fireEvent.input(roundsInput, { target: { value: '5' } });
+
+    // Add the `tiebreak` enum param → a <select> of its options, seeded from its default.
+    await fireEvent.change(screen.getByLabelText('Add param'), { target: { value: 'tiebreak' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const tb = (await screen.findByLabelText('Tiebreak value')) as HTMLSelectElement;
+    expect(tb.value).toBe('best_lap');
+    await fireEvent.change(tb, { target: { value: 'count_back' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    expect(req.params).toEqual({ rounds: '5', tiebreak: 'count_back' });
+
+    // Re-open the form: a format with no declared params offers no add-param control.
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add round' }));
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'zippyq' } });
+    await waitFor(() => expect(screen.queryByLabelText('Add param')).not.toBeInTheDocument());
+  });
+
+  it('removing a guided param unsets it', async () => {
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Q' } });
+    await fireEvent.click(screen.getByLabelText('Eligible Open'));
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+
+    await fireEvent.change(await screen.findByLabelText('Add param'), {
+      target: { value: 'rounds' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(await screen.findByLabelText('Rounds value')).toBeInTheDocument();
+
+    // Remove it → the input is gone; the submitted params are empty.
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove Rounds' }));
+    await waitFor(() => expect(screen.queryByLabelText('Rounds value')).not.toBeInTheDocument());
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    expect(createRoundImpl.mock.calls[0][2].params).toEqual({});
+  });
+
+  it('defaults the channel-mode toggle to Per-heat on a new round and carries the choice', async () => {
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    const mode = (await screen.findByLabelText('Channel mode')) as HTMLSelectElement;
+    expect(mode.value).toBe('PerHeat');
+    await fireEvent.input(screen.getByLabelText('Label'), { target: { value: 'Q' } });
+    await fireEvent.click(screen.getByLabelText('Eligible Open'));
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    await fireEvent.change(mode, { target: { value: 'Static' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    expect(createRoundImpl.mock.calls[0][2].channel_mode).toBe('Static');
+  });
+
+  it('seeds the channel-mode toggle from the round being edited', async () => {
+    const { session } = makeTestSession({ ...baseImpls(), event: EVENT });
+    render(EventRounds, { session });
+
+    // QUAL persists with channel_mode: 'Static' — editing it seeds the toggle to Static.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const editMode = (await screen.findByLabelText('Channel mode')) as HTMLSelectElement;
+    expect(editMode.value).toBe('Static');
   });
 
   it('removes a round via deleteRound', async () => {

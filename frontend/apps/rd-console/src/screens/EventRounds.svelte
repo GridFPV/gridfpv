@@ -22,9 +22,12 @@
   import { Button, Card, Field, Input, Select, toast } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
+    ChannelMode,
     Class,
     ClassId,
     CompetitorRef,
+    FormatParam,
+    FormatSchema,
     HeatPhase,
     HeatSummary,
     NewRoundReq,
@@ -42,10 +45,13 @@
 
   let { session }: { session: Session } = $props();
 
-  // The app-level class directory (to resolve class ids → names) and the valid format names (the
-  // engine's `FormatRegistry::standard()`, via `GET /formats`). Both are open reads, loaded once.
+  // The app-level class directory (to resolve class ids → names) and the valid format **schemas**
+  // (the engine's `FormatRegistry::standard()` + each format's declared param schema, via
+  // `GET /formats`). Both are open reads, loaded once. The schema backs both the format dropdown and
+  // the guided params editor (which offers only the chosen format's params, each typed by its kind).
   let classes = $state<Class[]>([]);
-  let formats = $state<string[]>([]);
+  let formatSchemas = $state<FormatSchema[]>([]);
+  const formats = $derived(formatSchemas.map((s) => s.name));
   // The standard channel catalog (race redesign Slice 4b): resolves a heat's assigned raw-MHz
   // frequency back to a band+channel label. An open read, loaded once; an empty catalog degrades
   // labels to raw "5800 MHz".
@@ -69,8 +75,8 @@
       .then((list) => (classes = list))
       .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
     session
-      .listFormats()
-      .then((list) => (formats = list))
+      .listFormatSchemas()
+      .then((list) => (formatSchemas = list))
       .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
     session
       .listPilots()
@@ -322,6 +328,8 @@
 
   type WinKind = 'Timed' | 'FirstToLaps' | 'BestLap' | 'BestConsecutive';
   type SeedKind = 'FromRoster' | 'FromRanking';
+  // A guided param the RD has added — the schema `key` it targets + the chosen raw `value` (the
+  // wire shape). The matching `FormatParam` schema (label/kind/options) is looked up by `key`.
   interface ParamRow {
     key: string;
     value: string;
@@ -340,7 +348,15 @@
   let seedKind = $state<SeedKind>('FromRoster');
   let seedSource = $state<RoundId | ''>('');
   let seedTopN = $state(8);
+  // The guided params the RD has added (a subset of the chosen format's schema), each with its
+  // typed value. `addParam` (a dropdown of the format's not-yet-added params) appends one seeded
+  // from its default; `removeParam` unsets it. Stored as `key → value` strings, the wire shape.
   let params = $state<ParamRow[]>([]);
+  // The round's channel mode (Static = fixed channels / channel-balanced heats; Per-heat = assigned
+  // per heat, for brackets). Defaulted by format on the backend; the toggle overrides it.
+  let channelMode = $state<ChannelMode>('PerHeat');
+  // Which param to add next (the `<select>`'s bound value), reset after each add.
+  let addParamKey = $state('');
 
   // Whether the eligible-classes pick reads as open/practice (all selected) or a class round (one).
   const classHint = $derived(
@@ -356,6 +372,54 @@
   // The other rounds a FromRanking seed may draw from (every round but the one being edited).
   const sourceCandidates = $derived(rounds.filter((r) => r.id !== editing));
 
+  // The chosen format's declared params (its schema), keyed for lookup, and the ones not yet added
+  // (what the "+ Add param" dropdown offers). Only the chosen format's params are ever offered.
+  const formatParams = $derived<FormatParam[]>(
+    formatSchemas.find((s) => s.name === format)?.params ?? []
+  );
+  const paramByKey = $derived(new Map(formatParams.map((p) => [p.key, p] as const)));
+  const addableParams = $derived(formatParams.filter((p) => !params.some((r) => r.key === p.key)));
+
+  /** The seed value for a freshly-added param: its schema default, else a kind-appropriate blank. */
+  function defaultValueFor(p: FormatParam): string {
+    if (p.default !== undefined && p.default !== null) return p.default;
+    if (p.kind === 'bool') return 'false';
+    if (p.kind === 'enum') return p.options?.[0] ?? '';
+    return '';
+  }
+
+  // When the format changes, drop any added param that the new format doesn't declare (only the
+  // chosen format's params are offered). Tracked so it fires on a real format switch, not on every
+  // keystroke; the initial open/edit seed runs before this settles, then this reconciles to it.
+  let lastParamFormat = $state('');
+  $effect(() => {
+    // Only reconcile once the schemas have loaded and the chosen format is among them — otherwise an
+    // edit whose params load before the schemas would prune valid params against an empty schema.
+    const known = formatSchemas.some((s) => s.name === format);
+    if (known && format !== lastParamFormat) {
+      lastParamFormat = format;
+      const valid = new Set(formatParams.map((p) => p.key));
+      const pruned = params.filter((r) => valid.has(r.key));
+      if (pruned.length !== params.length) params = pruned;
+      addParamKey = '';
+    }
+  });
+
+  function addParam() {
+    const key = addParamKey;
+    if (!key) return;
+    const schema = paramByKey.get(key);
+    if (!schema || params.some((r) => r.key === key)) return;
+    params = [...params, { key, value: defaultValueFor(schema) }];
+    addParamKey = '';
+  }
+  function removeParam(key: string) {
+    params = params.filter((r) => r.key !== key);
+  }
+  function setParamValue(key: string, value: string) {
+    params = params.map((r) => (r.key === key ? { ...r, value } : r));
+  }
+
   function resetForm() {
     editing = undefined;
     label = '';
@@ -368,6 +432,8 @@
     seedSource = '';
     seedTopN = 8;
     params = [];
+    channelMode = 'PerHeat';
+    addParamKey = '';
   }
 
   export function openAdd() {
@@ -381,6 +447,8 @@
     selectedClasses = new Set(round.classes);
     format = round.format;
     params = Object.entries(round.params ?? {}).map(([key, value]) => ({ key, value }));
+    channelMode = round.channel_mode ?? 'PerHeat';
+    addParamKey = '';
 
     const wc = round.win_condition;
     if (typeof wc === 'string') {
@@ -417,13 +485,6 @@
     if (next.has(id)) next.delete(id);
     else next.add(id);
     selectedClasses = next;
-  }
-
-  function addParamRow() {
-    params = [...params, { key: '', value: '' }];
-  }
-  function removeParamRow(i: number) {
-    params = params.filter((_, idx) => idx !== i);
   }
 
   function buildWinCondition(): WinCondition {
@@ -477,7 +538,8 @@
       format,
       params: buildParams(),
       win_condition: buildWinCondition(),
-      seeding: buildSeeding()
+      seeding: buildSeeding(),
+      channel_mode: channelMode
     };
     try {
       const result = editing
@@ -637,6 +699,18 @@
         </div>
 
         <Field
+          label="Channel mode"
+          hint={channelMode === 'Static'
+            ? 'Static = each pilot’s fixed channel; heats are channel-balanced (time-trial / qualifying).'
+            : 'Per-heat = channels assigned per heat from the timer’s pool (for brackets).'}
+        >
+          <Select bind:value={channelMode} aria-label="Channel mode">
+            <option value="Static">Static</option>
+            <option value="PerHeat">Per-heat</option>
+          </Select>
+        </Field>
+
+        <Field
           label="Seeding"
           hint={seedKind === 'FromRanking'
             ? 'Draw this round from a prior round’s ranking (the bracket / cut case).'
@@ -670,31 +744,84 @@
 
         <Field
           label="Format params"
-          hint="Optional format knobs (e.g. rounds, advance, heat_size)."
+          hint={formatParams.length === 0
+            ? 'This format has no configurable params.'
+            : 'Add only the knobs this format declares; each value is typed by the param. Remove one to unset it.'}
         >
           <div class="params">
-            {#each params as row, i (i)}
+            {#each params as row (row.key)}
+              {@const schema = paramByKey.get(row.key)}
               <div class="param-row">
-                <Input bind:value={row.key} placeholder="key" aria-label={`Param ${i + 1} key`} />
-                <Input
-                  bind:value={row.value}
-                  placeholder="value"
-                  aria-label={`Param ${i + 1} value`}
-                />
+                <span class="param-name">{schema?.label ?? row.key}</span>
+                <div class="param-input">
+                  {#if schema?.kind === 'bool'}
+                    <label class="param-toggle">
+                      <input
+                        type="checkbox"
+                        checked={row.value === 'true'}
+                        aria-label={`${schema?.label ?? row.key} value`}
+                        onchange={(e) =>
+                          setParamValue(
+                            row.key,
+                            (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false'
+                          )}
+                      />
+                      <span>{row.value === 'true' ? 'On' : 'Off'}</span>
+                    </label>
+                  {:else if schema?.kind === 'enum'}
+                    <Select
+                      value={row.value}
+                      aria-label={`${schema?.label ?? row.key} value`}
+                      onchange={(e: Event) =>
+                        setParamValue(row.key, (e.currentTarget as HTMLSelectElement).value)}
+                    >
+                      {#each schema.options ?? [] as opt (opt)}
+                        <option value={opt}>{opt}</option>
+                      {/each}
+                    </Select>
+                  {:else}
+                    <Input
+                      type="number"
+                      value={row.value}
+                      aria-label={`${schema?.label ?? row.key} value`}
+                      oninput={(e: Event) =>
+                        setParamValue(row.key, (e.currentTarget as HTMLInputElement).value)}
+                    />
+                  {/if}
+                </div>
                 <Button
                   variant="ghost"
                   size="sm"
                   type="button"
-                  onclick={() => removeParamRow(i)}
-                  aria-label={`Remove param ${i + 1}`}
+                  onclick={() => removeParam(row.key)}
+                  aria-label={`Remove ${schema?.label ?? row.key}`}
                 >
                   ✕
                 </Button>
               </div>
             {/each}
-            <Button variant="ghost" size="sm" type="button" onclick={addParamRow}>
-              + Add param
-            </Button>
+
+            {#if addableParams.length > 0}
+              <div class="param-add">
+                <Select bind:value={addParamKey} aria-label="Add param">
+                  <option value="">+ Add param…</option>
+                  {#each addableParams as p (p.key)}
+                    <option value={p.key}>{p.label}</option>
+                  {/each}
+                </Select>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  type="button"
+                  onclick={addParam}
+                  disabled={addParamKey === ''}
+                >
+                  Add
+                </Button>
+              </div>
+            {:else if formatParams.length > 0}
+              <p class="inline-note">All of this format’s params are added.</p>
+            {/if}
           </div>
         </Field>
 
@@ -1070,7 +1197,35 @@
   }
   .param-row {
     display: grid;
-    grid-template-columns: 1fr 1fr auto;
+    grid-template-columns: minmax(8rem, 1fr) 1fr auto;
+    gap: var(--gf-space-2);
+    align-items: center;
+  }
+  .param-name {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-medium);
+    color: var(--gf-text);
+  }
+  .param-input {
+    min-width: 0;
+  }
+  .param-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    font-size: var(--gf-font-size-md);
+    color: var(--gf-text);
+    cursor: pointer;
+  }
+  .param-toggle input {
+    width: 1.05rem;
+    height: 1.05rem;
+    accent-color: var(--gf-accent);
+    cursor: pointer;
+  }
+  .param-add {
+    display: grid;
+    grid-template-columns: 1fr auto;
     gap: var(--gf-space-2);
     align-items: center;
   }

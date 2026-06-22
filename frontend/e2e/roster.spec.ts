@@ -43,7 +43,7 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
   // ── Open the Roster stage (the EventRoster) from the workspace sidebar ───────────────
   await page
     .getByRole('navigation', { name: 'Screens' })
-    .getByRole('button', { name: 'Roster' })
+    .getByRole('button', { name: 'Classes & Roster' })
     .click();
   await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
@@ -80,7 +80,7 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
   await expect(liveNav).toBeVisible({ timeout: 15_000 });
   await page
     .getByRole('navigation', { name: 'Screens' })
-    .getByRole('button', { name: 'Roster' })
+    .getByRole('button', { name: 'Classes & Roster' })
     .click();
   const rowAfter = page
     .getByRole('list', { name: 'Pilot directory' })
@@ -110,19 +110,17 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
 });
 
 /**
- * The Roster stage's **per-class membership** (race redesign Slice 1b) + a manual **bind**, end to
- * end against a real Director.
+ * The combined **Classes & Roster** stage (race redesign Slice 7b): single-class **auto-fill** + the
+ * per-pilot **channel** (the static binding), end to end against a real Director.
  *
- * Enter an event (Practice), select the built-in **Open Class** onto it (so the Roster stage has a
- * class to place into), then on the Roster stage: register a pilot inline, mark them present, and
- * **place them into the Open Class** — the key proof, which we assert **persists across a reload**
- * (the class checkbox seeds checked off `EventMeta.classes_membership`). Then exercise the manual
- * binding form (`Command::Register`). Cleans up after itself (the worker's Director is shared):
- * empties the membership, unticks the class, and removes the pilot.
+ * Enter an event (Practice), select the built-in **Open Class** onto it, then in the same combined
+ * stage: register a pilot inline and mark them present. Because exactly one class is selected the
+ * pilot is **auto-placed** (no per-class checkbox); the RD assigns them a **channel** drawn from the
+ * primary timer's available channels and saves the placement — the key proof, which we assert
+ * **persists across a reload** (the channel seeds off `EventMeta.classes_membership`'s `MemberSlot`).
+ * Cleans up after itself (the worker's Director is shared): unticks the class and removes the pilot.
  */
-test('RD places a present pilot into a class (membership persists) and binds a competitor', async ({
-  page
-}) => {
+test('RD auto-fills a single class and assigns a pilot a channel (persists)', async ({ page }) => {
   const CS = `E2E-Member-${Date.now()}`;
   const nav = page.getByRole('navigation', { name: 'Screens' });
   await page.goto('/');
@@ -146,7 +144,7 @@ test('RD places a present pilot into a class (membership persists) and binds a c
 
   // ── Select the built-in "Open Class" onto the event (the Classes tab) so the Roster stage has a
   //    class to place pilots into. ──
-  await nav.getByRole('button', { name: 'Classes' }).click();
+  await nav.getByRole('button', { name: 'Classes & Roster' }).click();
   await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
     timeout: 15_000
   });
@@ -163,7 +161,7 @@ test('RD places a present pilot into a class (membership persists) and binds a c
   });
 
   // ── Roster stage: register a pilot inline + mark present ──────────────────────────────────────
-  await nav.getByRole('button', { name: 'Roster' }).click();
+  await nav.getByRole('button', { name: 'Classes & Roster' }).click();
   await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
@@ -181,39 +179,32 @@ test('RD places a present pilot into a class (membership persists) and binds a c
   await page.getByRole('button', { name: 'Save roster' }).click();
   await expect(page.getByRole('button', { name: 'Save roster' })).toBeDisabled({ timeout: 15_000 });
 
-  // ── Place the present pilot into the Open Class and save that class's membership ───────────────
-  const memberBox = page.getByRole('checkbox', { name: `Place ${CS} in Open Class` });
-  await expect(memberBox).toBeVisible({ timeout: 15_000 });
-  await expect(memberBox).not.toBeChecked();
-  await memberBox.check();
-  const saveMembership = page.getByRole('button', { name: 'Save membership' });
-  await saveMembership.click();
+  // ── Single class → auto-fill: the present pilot is automatically placed (no checkbox); assign it
+  //    a channel from the primary timer and save the placement. The channel IS the static binding. ──
+  const channelSel = page.getByLabel(`Channel for ${CS}`);
+  await expect(channelSel).toBeVisible({ timeout: 15_000 });
+  // Pick the first real channel option (skip the "No channel" sentinel).
+  const firstChannel = await channelSel.locator('option').nth(1).getAttribute('value');
+  await channelSel.selectOption(firstChannel!);
+  if (process.env.GRIDFPV_SHOTS)
+    await page
+      .getByRole('region', { name: 'Classes and roster' })
+      .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/classes-roster-stage.png` });
+  const savePlacement = page.getByRole('button', { name: 'Save placement' });
+  await savePlacement.click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
-  await expect(saveMembership).toBeDisabled({ timeout: 15_000 });
+  await expect(savePlacement).toBeDisabled({ timeout: 15_000 });
 
-  // ── The membership persisted: a reload seeds the class checkbox checked off
-  //    `EventMeta.classes_membership`. ──
+  // ── The placement + channel persisted: a reload seeds the channel off
+  //    `EventMeta.classes_membership` (the MemberSlot's channel). ──
   await page.reload();
   await expect(liveNav).toBeVisible({ timeout: 15_000 });
-  await nav.getByRole('button', { name: 'Roster' }).click();
-  const memberAfter = page.getByRole('checkbox', { name: `Place ${CS} in Open Class` });
-  await expect(memberAfter).toBeChecked({ timeout: 15_000 });
+  await nav.getByRole('button', { name: 'Classes & Roster' }).click();
+  const channelAfter = page.getByLabel(`Channel for ${CS}`);
+  await expect(channelAfter).toHaveValue(firstChannel!, { timeout: 15_000 });
 
-  // ── Manual bind: bind a source-local competitor to the present pilot via Command::Register ────
-  await page.getByLabel('Bind competitor').fill('node-7');
-  await page.getByLabel('Bind pilot').selectOption({ label: CS });
-  await page.getByRole('button', { name: 'Bind', exact: true }).click();
-  // An open Director accepts the Register tokenless — no token prompt, no error toast.
-  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
-
-  // ── Clean up (shared Director): empty the membership, untick the class, remove the pilot ───────
-  await memberAfter.uncheck();
-  await page.getByRole('button', { name: 'Save membership' }).click();
-  await expect(page.getByRole('button', { name: 'Save membership' })).toBeDisabled({
-    timeout: 15_000
-  });
-
-  await nav.getByRole('button', { name: 'Classes' }).click();
+  // ── Clean up (shared Director): untick the class (which clears its membership), remove the pilot ─
+  await nav.getByRole('button', { name: 'Classes & Roster' }).click();
   const classRowAfter = page
     .getByRole('list', { name: 'Class directory' })
     .getByRole('listitem')
@@ -227,7 +218,7 @@ test('RD places a present pilot into a class (membership persists) and binds a c
     });
   }
 
-  await nav.getByRole('button', { name: 'Roster' }).click();
+  await nav.getByRole('button', { name: 'Classes & Roster' }).click();
   const cleanupRow = page
     .getByRole('list', { name: 'Pilot directory' })
     .getByRole('listitem')

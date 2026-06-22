@@ -29,6 +29,7 @@ function impls() {
     listPilotsImpl: vi.fn(async () => [ACE]),
     listTimersImpl: vi.fn(async () => [MOCK]),
     listFormatsImpl: vi.fn(async () => ['timed_qual']),
+    listFormatSchemasImpl: vi.fn(async () => [{ name: 'timed_qual', params: [] }]),
     listChannelsImpl: vi.fn(async () => []),
     listHeatsImpl: vi.fn(async () => [])
   };
@@ -56,17 +57,18 @@ const READY_EVENT: EventMeta = {
 } as unknown as EventMeta;
 
 describe('EventSetupWizard (guided first-pass stepper)', () => {
-  it('opens on the first step (Classes) and shows the event name', async () => {
+  it('opens on the first step (Classes & Roster) and shows the event name', async () => {
     const { session } = makeTestSession({ ...impls(), event: EMPTY_EVENT });
     render(EventSetupWizard, { session, open: true });
 
-    // The header names the event being set up and the first step is Classes.
+    // The header names the event being set up and the first step is the combined Classes & Roster.
     expect(screen.getByText(/Set up · Spring Cup/)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Classes', level: 2 })).toBeInTheDocument();
-    // It embeds the real EventClasses stage (its card heading), not a reimplementation.
+    expect(screen.getByRole('heading', { name: 'Classes & Roster', level: 2 })).toBeInTheDocument();
+    // It embeds the real combined stage (its card headings), not a reimplementation.
     expect(
       await screen.findByRole('heading', { name: 'Classes for this event' })
     ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Present pilots' })).toBeInTheDocument();
   });
 
   it('walks Next through the stages to Review, then Back', async () => {
@@ -74,9 +76,7 @@ describe('EventSetupWizard (guided first-pass stepper)', () => {
     render(EventSetupWizard, { session, open: true });
 
     const nextBtn = () => screen.getByRole('button', { name: 'Next' });
-    // Classes → Roster → Timer & channels → First round → Review.
-    await fireEvent.click(nextBtn());
-    expect(await screen.findByRole('heading', { name: 'Present pilots' })).toBeInTheDocument();
+    // Classes & Roster → Timer & channels → First round → Review.
     await fireEvent.click(nextBtn());
     expect(
       await screen.findByRole('heading', { name: 'Timers for this event' })
@@ -99,7 +99,9 @@ describe('EventSetupWizard (guided first-pass stepper)', () => {
     render(EventSetupWizard, { session, open: true });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
-    expect(await screen.findByRole('heading', { name: 'Present pilots' })).toBeInTheDocument();
+    expect(
+      await screen.findByRole('heading', { name: 'Timers for this event' })
+    ).toBeInTheDocument();
   });
 
   it('the progress indicator jumps directly to a step', async () => {

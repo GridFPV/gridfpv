@@ -20,8 +20,7 @@
    */
   import { Button } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
-  import EventClasses from './EventClasses.svelte';
-  import EventRoster from './EventRoster.svelte';
+  import EventClassesRoster from './EventClassesRoster.svelte';
   import EventTimers from './EventTimers.svelte';
   import EventRounds from './EventRounds.svelte';
 
@@ -37,17 +36,13 @@
 
   // The ordered steps. Each reuses an existing stage component (or, for Review, reads the live
   // event) — the wizard is pure orchestration, it reimplements none of the stage logic.
-  type StepId = 'classes' | 'roster' | 'timers' | 'rounds' | 'review';
+  type StepId = 'classes-roster' | 'timers' | 'rounds' | 'review';
   const STEPS: { id: StepId; label: string; blurb: string }[] = [
     {
-      id: 'classes',
-      label: 'Classes',
-      blurb: 'Pick the classes this event runs. New classes you add here join the directory.'
-    },
-    {
-      id: 'roster',
-      label: 'Roster',
-      blurb: 'Mark who is present, then place pilots into each class. Add new pilots inline.'
+      id: 'classes-roster',
+      label: 'Classes & Roster',
+      blurb:
+        'Pick the classes this event runs, mark who is present, and place pilots into each class with their channel. Add new classes or pilots inline.'
     },
     {
       id: 'timers',
@@ -191,10 +186,8 @@
       </ol>
 
       <div class="wizard-body">
-        {#if current.id === 'classes'}
-          <EventClasses {session} />
-        {:else if current.id === 'roster'}
-          <EventRoster {session} />
+        {#if current.id === 'classes-roster'}
+          <EventClassesRoster {session} />
         {:else if current.id === 'timers'}
           <EventTimers {session} />
         {:else if current.id === 'rounds'}

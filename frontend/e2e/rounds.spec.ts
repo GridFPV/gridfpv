@@ -46,7 +46,7 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   await enterPractice(page);
 
   // ── Make sure the event has an eligible class: select the built-in Open Class. ──────────────
-  await openTab(page, 'Classes');
+  await openTab(page, 'Classes & Roster');
   await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
     timeout: 15_000
   });
@@ -110,7 +110,7 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   ).toHaveCount(0, { timeout: 15_000 });
 
   // ── Clean up: deselect the class so the shared Director's event goes back to empty. ─────────
-  await openTab(page, 'Classes');
+  await openTab(page, 'Classes & Roster');
   const cleanupBox = page
     .getByRole('list', { name: 'Class directory' })
     .getByRole('listitem')
@@ -123,6 +123,93 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
       timeout: 15_000
     });
   }
+});
+
+/**
+ * **Guided round params + channel-mode toggle** (race redesign Slice 7b) — the deliverable proof.
+ *
+ * Enter Practice, select the Open Class, open Rounds & Heats and add a `timed_qual` round driving
+ * the *guided* params editor: "+ Add param" offers only that format's params (`Rounds`, a number;
+ * `metric`, an enum); add `Rounds` (a typed number input, seeded from its default) and set it, pick
+ * the **Static** channel mode, and add the round. Assert it persisted on the Director with the
+ * chosen `params.rounds` + `channel_mode: "Static"`. Cleans up after itself.
+ */
+test('RD adds a round with a guided param and a Static channel mode', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  const LABEL = `E2E-Guided-${Date.now()}`;
+  await page.goto('/');
+  await enterPractice(page);
+
+  // Select the Open Class so a round has an eligible class.
+  await openTab(page, 'Classes & Roster');
+  const classBox = page
+    .getByRole('list', { name: 'Class directory' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Open Class' })
+    .getByRole('checkbox', { name: 'Select Open Class' });
+  if (!(await classBox.isChecked())) await classBox.check();
+  await page.getByRole('button', { name: 'Save classes' }).click();
+  await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
+    timeout: 15_000
+  });
+
+  // Rounds & Heats → add a timed_qual round with a guided param + Static channel mode.
+  await openTab(page, 'Rounds & Heats');
+  await page.getByRole('button', { name: '+ Add round' }).click();
+  const form = page.getByRole('form', { name: 'Add round' });
+  await expect(form).toBeVisible();
+  await form.getByLabel('Label').fill(LABEL);
+  await form.getByLabel('Eligible Open Class').check();
+  await form.getByLabel('Format').selectOption('timed_qual');
+
+  // The channel-mode toggle defaults from the format; force Static.
+  await form.getByLabel('Channel mode').selectOption('Static');
+
+  // The guided params dropdown offers only this format's params; add Rounds and set it to 5.
+  await form.getByLabel('Add param').selectOption('rounds');
+  await form.getByRole('button', { name: 'Add', exact: true }).click();
+  const roundsInput = form.getByLabel('Rounds value');
+  await expect(roundsInput).toHaveValue('3'); // seeded from the schema default
+  await roundsInput.fill('5');
+  if (process.env.GRIDFPV_SHOTS)
+    await form.screenshot({ path: `${process.env.GRIDFPV_SHOTS}/guided-params.png` });
+
+  await page.getByRole('button', { name: 'Add round', exact: true }).click();
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+  await expect(page.getByRole('list').getByRole('listitem').filter({ hasText: LABEL })).toBeVisible(
+    { timeout: 15_000 }
+  );
+
+  // It persisted on the Director with the guided param + Static channel mode.
+  const practiceRound = async () => {
+    const events = (await (await page.request.get(`${base}/events`)).json()) as Array<{
+      id: string;
+      rounds?: Array<{ label: string; params: Record<string, string>; channel_mode?: string }>;
+    }>;
+    return events.find((e) => e.id === 'practice')?.rounds?.find((r) => r.label === LABEL);
+  };
+  await expect
+    .poll(async () => (await practiceRound())?.params?.rounds, { timeout: 15_000 })
+    .toBe('5');
+  expect((await practiceRound())?.channel_mode).toBe('Static');
+
+  // ── Clean up: remove the round + deselect the class. ──────────────────────────────────────────
+  const created = await practiceRound();
+  const rounds = (await (await page.request.get(`${base}/events`)).json()) as Array<{
+    id: string;
+    rounds?: Array<{ id: string; label: string }>;
+  }>;
+  const roundId = rounds
+    .find((e) => e.id === 'practice')
+    ?.rounds?.find((r) => r.label === LABEL)?.id;
+  expect(created).toBeTruthy();
+  if (roundId) await page.request.delete(`${ev}/rounds/${roundId}`);
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
 });
 
 /**
@@ -166,7 +253,7 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [aceId, beeId] } });
   await page.request.put(`${ev}/classes/${classId}/membership`, {
     ...json,
-    data: { pilot_ids: [aceId, beeId] }
+    data: { pilots: [aceId, beeId] }
   });
   // Add a single-class round (FromRoster) so FillRound can draw the two members.
   const round = (await (
@@ -178,7 +265,8 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
         format: 'timed_qual',
         params: {},
         win_condition: 'BestLap',
-        seeding: 'FromRoster'
+        seeding: 'FromRoster',
+        channel_mode: 'PerHeat'
       }
     })
   ).json()) as { id: string };
@@ -218,7 +306,7 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   await page.request.delete(`${ev}/rounds/${round.id}`);
   await page.request.put(`${ev}/classes/${classId}/membership`, {
     ...json,
-    data: { pilot_ids: [] }
+    data: { pilots: [] }
   });
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
@@ -294,7 +382,7 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [aceId, beeId] } });
   await page.request.put(`${ev}/classes/${classId}/membership`, {
     ...json,
-    data: { pilot_ids: [aceId, beeId] }
+    data: { pilots: [aceId, beeId] }
   });
   const round = (await (
     await page.request.post(`${ev}/rounds`, {
@@ -305,7 +393,8 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
         format: 'timed_qual',
         params: {},
         win_condition: 'BestLap',
-        seeding: 'FromRoster'
+        seeding: 'FromRoster',
+        channel_mode: 'PerHeat'
       }
     })
   ).json()) as { id: string };
@@ -331,7 +420,7 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
   await page.request.delete(`${ev}/rounds/${round.id}`);
   await page.request.put(`${ev}/classes/${classId}/membership`, {
     ...json,
-    data: { pilot_ids: [] }
+    data: { pilots: [] }
   });
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
@@ -388,7 +477,7 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [aceId, beeId] } });
   await page.request.put(`${ev}/classes/${classId}/membership`, {
     ...json,
-    data: { pilot_ids: [aceId, beeId] }
+    data: { pilots: [aceId, beeId] }
   });
   const round = (await (
     await page.request.post(`${ev}/rounds`, {
@@ -399,7 +488,8 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
         format: 'timed_qual',
         params: { rounds: '1' },
         win_condition: 'BestLap',
-        seeding: 'FromRoster'
+        seeding: 'FromRoster',
+        channel_mode: 'PerHeat'
       }
     })
   ).json()) as { id: string };
@@ -506,7 +596,7 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
   for (const r of await practiceRounds()) await page.request.delete(`${ev}/rounds/${r.id}`);
   await page.request.put(`${ev}/classes/${classId}/membership`, {
     ...json,
-    data: { pilot_ids: [] }
+    data: { pilots: [] }
   });
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
