@@ -410,6 +410,153 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
   });
 });
 
+describe('EventRounds (open practice — no win condition + time limit)', () => {
+  // The open-practice format + a primary timer with two channel seats (so the active-channels picker
+  // is populated). The format dropdown reads from the schemas, so `open_practice` must be among them.
+  const OP_FORMATS = [...FORMATS, 'open_practice'];
+  const OP_SCHEMAS = OP_FORMATS.map((name) =>
+    name === 'open_practice'
+      ? { name, params: [] }
+      : (SCHEMAS.find((s) => s.name === name) ?? { name, params: [] })
+  );
+  const TIMER: Timer = {
+    id: 'mock',
+    name: 'Mock',
+    kind: { Mock: { laps: 3, lap_ms: 1000 } },
+    status: 'Ready',
+    channel_capability: 'Flexible',
+    node_count: 2,
+    available_channels: [5658, 5800]
+  };
+
+  function opImpls() {
+    return {
+      ...baseImpls(),
+      listFormatsImpl: vi.fn(async () => OP_FORMATS),
+      listFormatSchemasImpl: vi.fn(async () => OP_SCHEMAS),
+      listTimersImpl: vi.fn(async () => [TIMER]),
+      listChannelsImpl: vi.fn(async () => CATALOG)
+    };
+  }
+
+  it('hides the win condition, shows a Time limit, and submits open practice with no win condition', async () => {
+    const created: RoundDef = {
+      id: 'op1',
+      label: 'Open Practice',
+      classes: [],
+      format: 'open_practice',
+      params: {},
+      win_condition: 'BestLap',
+      seeding: { AllChannels: { channels: [0, 1] } },
+      channel_mode: 'PerHeat',
+      staging_timer_secs: 300,
+      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+      grace_window: { Duration: { micros: 3000000 } },
+      time_limit_secs: 5400
+    };
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
+    const { session } = makeTestSession({
+      ...opImpls(),
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), {
+      target: { value: 'Open Practice' }
+    });
+    await fireEvent.change(screen.getByLabelText('Format'), {
+      target: { value: 'open_practice' }
+    });
+
+    // The win-condition input is gone; the Time limit appears instead.
+    await waitFor(() => expect(screen.queryByLabelText('Win condition')).toBeNull());
+    expect(screen.getByLabelText('Time limit hours')).toBeInTheDocument();
+
+    // Pick both active channels (the picker is driven by the primary timer's node seats).
+    await fireEvent.click(await screen.findByLabelText(/Channel .*5658/));
+    await fireEvent.click(screen.getByLabelText(/Channel .*5800/));
+
+    // Set a 1h 30m practice duration.
+    await fireEvent.input(screen.getByLabelText('Time limit hours'), { target: { value: '1' } });
+    await fireEvent.input(screen.getByLabelText('Time limit minutes'), { target: { value: '30' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    // No win condition is sent; the AllChannels seeding + the time limit (in seconds) are.
+    expect(req.win_condition).toBeUndefined();
+    expect(req.classes).toEqual([]);
+    expect(req.seeding).toEqual({ AllChannels: { channels: [0, 1] } });
+    expect(req.time_limit_secs).toBe(5400); // 1h30m
+  });
+
+  it('reflects an open-practice round: shows its time-limit summary and no Fill control', async () => {
+    const op: RoundDef = {
+      id: 'op1',
+      label: 'Free Practice',
+      classes: [],
+      format: 'open_practice',
+      params: {},
+      win_condition: 'BestLap',
+      seeding: { AllChannels: { channels: [0, 1] } },
+      channel_mode: 'PerHeat',
+      staging_timer_secs: 300,
+      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+      grace_window: { Duration: { micros: 3000000 } },
+      time_limit_secs: 3600
+    };
+    const { session } = makeTestSession({
+      ...opImpls(),
+      listHeatsImpl: vi.fn(async () => []),
+      event: { ...EVENT, rounds: [op] }
+    });
+    render(EventRounds, { session });
+
+    // The Rounds list shows the time-limit summary ("1h") in place of a win condition.
+    const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
+    await within(roundsCard).findByText('Free Practice');
+    expect(within(roundsCard).getByText('1h')).toBeInTheDocument();
+
+    // The Heats area drops the manual "Fill next heat" control for the open-practice round.
+    const heatsCard = screen.getByRole('heading', { name: 'Heats' }).closest('section')!;
+    expect(within(heatsCard).queryByRole('button', { name: 'Fill next heat' })).toBeNull();
+  });
+
+  it('round-trips an open-practice time limit through edit', async () => {
+    const op: RoundDef = {
+      id: 'op1',
+      label: 'Free Practice',
+      classes: [],
+      format: 'open_practice',
+      params: {},
+      win_condition: 'BestLap',
+      seeding: { AllChannels: { channels: [0] } },
+      channel_mode: 'PerHeat',
+      staging_timer_secs: 300,
+      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+      grace_window: { Duration: { micros: 3000000 } },
+      time_limit_secs: 5400
+    };
+    const updateRoundImpl = vi.fn(async (_b, _e, _id, req) => ({ ...op, ...req }));
+    const { session } = makeTestSession({
+      ...opImpls(),
+      updateRoundImpl,
+      event: { ...EVENT, rounds: [op] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    // The time limit seeds back into the hours:minutes inputs (5400s = 1h 30m).
+    await waitFor(() =>
+      expect((screen.getByLabelText('Time limit hours') as HTMLInputElement).value).toBe('1')
+    );
+    expect((screen.getByLabelText('Time limit minutes') as HTMLInputElement).value).toBe('30');
+  });
+});
+
 describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   // An event whose Open class has two members, so a round can draw a field / a manual heat.
   const EVENT_WITH_MEMBERS: EventMeta = {

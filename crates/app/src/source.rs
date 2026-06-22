@@ -1202,6 +1202,12 @@ struct HeatClockConfig {
     start_procedure: StartProcedure,
     win_condition: gridfpv_engine::scoring::WinCondition,
     grace_window: GraceWindow,
+    /// The round's optional **time limit** in seconds (open-practice refinement): when set, the
+    /// completion driver auto-ends the heat (`Running → Unofficial`) once its elapsed running time
+    /// reaches this — independent of the win condition. `None` ⇒ the heat ends only on its win
+    /// condition (or the RD's `ForceEnd`). Carried for every heat but acted on for the open-practice
+    /// case (a practice with no win condition relies on it).
+    time_limit_secs: Option<u32>,
 }
 
 /// Resolve the clock config for `heat`: find the heat's most-recent `HeatScheduled.round`, look that
@@ -1225,14 +1231,17 @@ fn heat_clock_config(
             start_procedure: r.start_procedure,
             win_condition: r.win_condition,
             grace_window: r.grace_window,
+            time_limit_secs: r.time_limit_secs,
         },
         // No round (sim/free-text): default the start procedure + grace so the auto-start still
         // fires; the win condition defaults to the sim's `FirstToLaps` over the sim lap count so a
-        // round-less sim heat still auto-completes (the sim emits a fixed number of laps).
+        // round-less sim heat still auto-completes (the sim emits a fixed number of laps). No time
+        // limit (a round-less heat has no practice duration).
         None => HeatClockConfig {
             start_procedure: StartProcedure::default(),
             win_condition: default_sim_win_condition(),
             grace_window: gridfpv_server::events::default_grace_window(),
+            time_limit_secs: None,
         },
     }
 }
@@ -1396,6 +1405,15 @@ fn spawn_start_driver(
 /// `Running` first (an abort / restart / a manual `ForceEnd`), so a superseded heat never appends a
 /// stale `Finished`. A round whose win condition has no intrinsic end (a bare qual — see
 /// [`race_end_reached`]) simply never fires here; the RD ends it with `ForceEnd`.
+///
+/// **Open-practice time limit (open-practice refinement):** when the round carries a
+/// [`time_limit_secs`](gridfpv_server::events::RoundDef::time_limit_secs), the driver auto-ends the
+/// heat once its elapsed running time reaches the limit — **independent of the win condition** (an
+/// open-practice heat does no scoring and its passes are never logged, so the win-condition path
+/// never fires for it; the time limit is the only end condition). The elapsed clock starts when the
+/// heat enters `Running` (this driver's spawn), so it is the same deterministic, logged transition
+/// the other autos key off — a 1-hour practice ends itself an hour after Start. With no limit set,
+/// only the win-condition path can fire (the RD ends an open practice manually).
 fn spawn_completion_driver(
     state: &AppState,
     registry: &EventRegistry,
@@ -1404,10 +1422,37 @@ fn spawn_completion_driver(
 ) -> JoinHandle<()> {
     let config = heat_clock_config(state, registry, event_id, &heat);
     let state = state.clone();
+    // The running clock origin: the moment the heat entered `Running` (this spawn). The time-limit
+    // deadline, when set, is measured from here — a deterministic wall-clock span (a test drives it
+    // with a short limit; production with the practice duration).
+    let running_since = tokio::time::Instant::now();
+    let time_limit = config
+        .time_limit_secs
+        .map(|secs| Duration::from_secs(secs as u64));
     let mut ticker = tokio::time::interval(COMPLETION_POLL);
     tokio::spawn(async move {
         loop {
             ticker.tick().await;
+            // Time-limit auto-end (open-practice refinement): once the elapsed running time reaches
+            // the practice duration, close the heat regardless of any win condition or passes — the
+            // only end condition for an open-practice heat (whose passes are never logged, so the
+            // win-condition branch below never fires for it). Logged like the other autos.
+            if let Some(limit) = time_limit {
+                if running_since.elapsed() >= limit {
+                    if let Err(e) = state.append(
+                        Event::HeatStateChanged {
+                            heat,
+                            transition: HeatTransition::Finished,
+                        },
+                        None,
+                    ) {
+                        eprintln!(
+                            "gridfpv: completion driver could not append time-limit Finished: {e:?}"
+                        );
+                    }
+                    return;
+                }
+            }
             let passes = heat_running_passes(&state, &heat);
             let Some(race_start) = race_start_of(&passes) else {
                 continue; // no crossing yet — the race clock hasn't opened
@@ -2014,6 +2059,17 @@ mod tests {
     /// indices) and return its `RoundId`. Uses the registry's `add_round` so the bridge resolves the
     /// round through `rounds_of` exactly as it does in production.
     fn add_open_practice_round(registry: &EventRegistry, channels: Vec<usize>) -> RoundId {
+        add_open_practice_round_with_limit(registry, channels, None)
+    }
+
+    /// As [`add_open_practice_round`], but with an optional **time limit** (open-practice refinement)
+    /// — an open-practice round that has **no win condition** (the form omits it; the inert default is
+    /// stored) and whose only end condition is the `time_limit_secs` practice duration.
+    fn add_open_practice_round_with_limit(
+        registry: &EventRegistry,
+        channels: Vec<usize>,
+        time_limit_secs: Option<u32>,
+    ) -> RoundId {
         use gridfpv_server::events::{NewRoundReq, SeedingRule};
         use gridfpv_server::scope::EventId as ScopeEventId;
         let req = NewRoundReq {
@@ -2021,7 +2077,10 @@ mod tests {
             classes: vec![],
             format: "open_practice".into(),
             params: std::collections::BTreeMap::new(),
-            win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
+            // No win condition supplied — an open-practice round does no scoring (the inert default
+            // is stored by `add_round`). The practice ends on the time limit (or the RD's ForceEnd).
+            win_condition: None,
+            time_limit_secs,
             seeding: SeedingRule::AllChannels { channels },
             channel_mode: None,
             staging_timer_secs: None,
@@ -2149,6 +2208,65 @@ mod tests {
 
         // Still no Pass events ever reached the log.
         assert_eq!(count_passes(&read_all_events(&state)), 0);
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn open_practice_time_limit_auto_ends_the_running_heat() {
+        // Open-practice refinement: an open-practice round with **no win condition** but a
+        // `time_limit_secs` auto-ends its running heat (Running → Unofficial / a `Finished`
+        // transition) once the elapsed running time reaches the limit — independent of any win
+        // condition, and even though an open-practice heat logs NO passes (so the win-condition path
+        // never fires). The completion driver's time-limit branch is the only end condition here.
+        let registry = fast_registry(3, 1);
+        // A 1s practice duration (the minimum the seconds field allows): short enough for a test,
+        // long enough that we can assert it does NOT fire immediately.
+        let round = add_open_practice_round_with_limit(&registry, vec![0, 1], Some(1));
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        let heat = start_open_practice_heat(&state, &round, &[0, 1]);
+
+        // The heat must still be Running shortly after Start — the limit has not elapsed yet, so no
+        // premature `Finished` is appended.
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&read_all_events(&state), &heat),
+            Some(gridfpv_engine::heat::HeatState::Running),
+            "the practice must keep running before its time limit elapses"
+        );
+
+        // Within a little over the 1s limit, the runtime auto-appends exactly one `Finished` (the
+        // Running → Unofficial step) with no `ForceEnd` ever sent.
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(4),
+            wait_until(&state, Duration::from_secs(4), move |events| {
+                gridfpv_engine::heat::heat_state(events, &target)
+                    == Some(gridfpv_engine::heat::HeatState::Unofficial)
+            }),
+        )
+        .await
+        .expect("the time limit should auto-end the open-practice heat");
+
+        let events = read_all_events(&state);
+        let finished = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::HeatStateChanged {
+                        heat: h,
+                        transition: HeatTransition::Finished,
+                    } if *h == heat
+                )
+            })
+            .count();
+        assert_eq!(
+            finished, 1,
+            "the time limit auto-appends exactly one Finished (Running → Unofficial)"
+        );
+        // No passes were ever logged for the open-practice heat (the time limit, not scoring, ended it).
+        assert_eq!(count_passes(&events), 0);
         bridge.abort();
     }
 
