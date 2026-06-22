@@ -78,8 +78,9 @@
 //! this: after a control append, a `/stream` subscriber observes the change.
 
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequest, FromRequestParts, Path, Request, State};
 use axum::http::request::Parts;
 use axum::response::Response;
 use axum::routing::get;
@@ -92,6 +93,40 @@ use crate::control::{Command, CommandAck};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::EventRegistry;
 use crate::scope::EventId;
+
+/// A JSON body extractor that fails with the shared [`ProtocolError`] shape instead of axum's
+/// bare-text rejection — the papercut fix for `POST /events/{id}/control`.
+///
+/// Wrapping [`axum::Json`] inherits its parsing, but its default [`JsonRejection`] renders as a
+/// plain-text 4xx (e.g. `Expected request with Content-Type: application/json`) that a client
+/// cannot parse as the uniform [`ProtocolError`] every other API surface returns. This newtype
+/// maps **every** rejection cause — a missing/wrong `Content-Type`, malformed JSON, a schema
+/// mismatch, an oversized/unreadable body — to a typed [`ProtocolError`] of
+/// [`ErrorCode::BadRequest`] (HTTP 400) carrying the cause as its message, so the control endpoint
+/// answers the same JSON error shape as the rest of the API. Generic over the body type so any
+/// JSON handler can opt in.
+pub struct JsonBody<T>(pub T);
+
+impl<S, T> FromRequest<S> for JsonBody<T>
+where
+    S: Send + Sync,
+    Json<T>: FromRequest<S, Rejection = JsonRejection>,
+{
+    type Rejection = ProtocolError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(JsonBody(value)),
+            // Every `JsonRejection` cause (missing/wrong Content-Type, malformed/unreadable body,
+            // schema mismatch) is a malformed request → a typed `BadRequest` JSON error, not a
+            // bare-text 4xx. The rejection's own message is the human-readable detail.
+            Err(rejection) => Err(ProtocolError::new(
+                ErrorCode::BadRequest,
+                rejection.body_text(),
+            )),
+        }
+    }
+}
 
 /// The **auth chokepoint** for the privileged control path (protocol.html §5, §9.4) — #44.
 ///
@@ -160,7 +195,7 @@ async fn control_post(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
     Path(event_id): Path<EventId>,
-    Json(command): Json<Command>,
+    JsonBody(command): JsonBody<Command>,
 ) -> Result<Json<CommandAck>, ProtocolError> {
     // Resolve the event first (an unknown id → typed 404) so the command applies to THAT
     // event's log only — commands never cross event boundaries.

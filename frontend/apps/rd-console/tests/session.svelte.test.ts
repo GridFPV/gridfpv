@@ -278,6 +278,65 @@ describe('Session', () => {
     expect(meta?.id).toBe('evt-a');
   });
 
+  // ── deleteEvent: permanent delete + all data (the papercut fix) ──────────────────────
+
+  it('deleteEvent calls DELETE with the held token and resolves true', async () => {
+    const deleteEventImpl = vi.fn(async () => undefined as unknown as void);
+    const session = new Session({ deleteEventImpl, autoRestore: false });
+    session.setToken('tok');
+
+    const ok = await session.deleteEvent('evt-a');
+    expect(deleteEventImpl).toHaveBeenCalledWith(session.baseUrl, 'evt-a', 'tok');
+    expect(ok).toBe(true);
+  });
+
+  it('deleteEvent leaves the event locally when deleting the current one', async () => {
+    const { connect } = mockConnect(connecting);
+    const controlFactory = vi.fn(() => ({
+      baseUrl: 'http://d.local',
+      sendCommand: vi.fn(async () => okAck)
+    }));
+    const deleteEventImpl = vi.fn(async () => undefined as unknown as void);
+    const session = new Session({
+      connectImpl: connect,
+      controlFactory,
+      deleteEventImpl,
+      autoRestore: false
+    });
+    session.selectEvent(EVENT_A);
+    expect(session.currentEvent?.id).toBe('evt-a');
+
+    await session.deleteEvent('evt-a');
+    // The just-deleted current event is torn down → back to the picker.
+    expect(session.currentEvent).toBeUndefined();
+  });
+
+  it('deleteEvent prompts + retries when the Director gates delete with a 401', async () => {
+    let calls = 0;
+    const deleteEventImpl = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('DELETE /events/evt-a failed: HTTP 401');
+      return undefined as unknown as void;
+    });
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+    const session = new Session({ deleteEventImpl, autoRestore: false });
+    session.setTokenProvider(tokenProvider);
+
+    const ok = await session.deleteEvent('evt-a');
+    expect(tokenProvider).toHaveBeenCalledOnce();
+    expect(deleteEventImpl).toHaveBeenCalledTimes(2);
+    expect(ok).toBe(true);
+  });
+
+  it('deleteEvent re-throws a non-auth (400/404) failure for the UI to surface', async () => {
+    const deleteEventImpl = vi.fn(async () => {
+      throw new Error('DELETE /events/practice failed: HTTP 400');
+    });
+    const session = new Session({ deleteEventImpl, autoRestore: false });
+    session.setToken('tok');
+    await expect(session.deleteEvent('practice')).rejects.toThrow(/400/);
+  });
+
   // ── #90: the active event is Director state — resume across reloads ──────────────────
 
   it('resolveActiveEvent resumes into the Director active event on load', async () => {

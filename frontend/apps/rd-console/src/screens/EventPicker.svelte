@@ -49,6 +49,55 @@
    */
   let activeEventId = $state<string | undefined>(undefined);
 
+  // The **hard delete** confirmation dialog (the papercut fix). Deleting an event is permanent
+  // and unrecoverable — it wipes the event and ALL its data — so the RD must re-type the event's
+  // exact name before the red "Delete permanently" button enables. This is a deliberate friction
+  // gate, not a one-click confirm.
+  let deleteTarget = $state<EventMeta | undefined>(undefined);
+  let deleteConfirmName = $state('');
+  let deleting = $state(false);
+  let deleteError = $state<string | undefined>(undefined);
+  // The typed name must match the target's name exactly (trimmed) before delete is allowed.
+  const deleteNameMatches = $derived(
+    !!deleteTarget && deleteConfirmName.trim() === deleteTarget.name.trim()
+  );
+
+  function openDelete(ev: EventMeta) {
+    deleteTarget = ev;
+    deleteConfirmName = '';
+    deleteError = undefined;
+  }
+
+  function closeDelete() {
+    deleteTarget = undefined;
+    deleteConfirmName = '';
+    deleteError = undefined;
+  }
+
+  async function confirmDelete() {
+    const target = deleteTarget;
+    if (!target || !deleteNameMatches || deleting) return;
+    deleting = true;
+    deleteError = undefined;
+    try {
+      const ok = await session.deleteEvent(target.id);
+      if (!ok) {
+        // A gated Director's token prompt was cancelled — keep the dialog open, hint why.
+        deleteError = 'A control token is required to delete an event.';
+        return;
+      }
+      closeDelete();
+      toast.success(`Deleted “${target.name}” and all of its data.`);
+      // If the deleted event was the active one, clear the local pill, then refresh the list.
+      if (activeEventId === target.id) activeEventId = undefined;
+      await load();
+    } catch (e) {
+      deleteError = e instanceof Error ? e.message : String(e);
+    } finally {
+      deleting = false;
+    }
+  }
+
   // The "new event" dialog. Name-only is the one-click default (#72, Slice 1b C); the
   // optional descriptive fields live behind a collapsible "Add details" section.
   let newOpen = $state(false);
@@ -214,7 +263,7 @@
         {:else}
           <ul class="event-list">
             {#each others as ev (ev.id)}
-              <li>
+              <li class="event-item">
                 <button type="button" class="event-row" onclick={() => enter(ev)}>
                   <span class="event-icon" aria-hidden="true">●</span>
                   <span class="event-main">
@@ -225,6 +274,15 @@
                     <span class="active-pill"><Badge tone="success" dot>Active</Badge></span>
                   {/if}
                   <span class="event-go" aria-hidden="true">→</span>
+                </button>
+                <button
+                  type="button"
+                  class="event-delete"
+                  title={`Delete “${ev.name}” permanently`}
+                  aria-label={`Delete ${ev.name}`}
+                  onclick={() => openDelete(ev)}
+                >
+                  Delete
                 </button>
               </li>
             {/each}
@@ -324,6 +382,35 @@
   {/snippet}
 </Dialog>
 
+<!-- The HARD delete confirmation (the papercut fix). An unmissable, irreversible warning: the RD
+     must re-type the event's exact name before the red "Delete permanently" button enables. -->
+<Dialog open={deleteTarget !== undefined} title="Delete event permanently?" onclose={closeDelete}>
+  {#if deleteTarget}
+    <div class="delete-body" aria-label="Delete event confirmation">
+      <p class="delete-warning">
+        This <strong>permanently deletes</strong> the event
+        <strong>“{deleteTarget.name}”</strong> and <strong>all of its data</strong> — every heat,
+        registration, lap, result, and round. This <strong>cannot be undone</strong> and the data is
+        <strong>unrecoverable</strong>.
+      </p>
+      <Field label={`Type the event name to confirm: ${deleteTarget.name}`} error={deleteError}>
+        <Input
+          bind:value={deleteConfirmName}
+          placeholder={deleteTarget.name}
+          aria-label="Confirm event name"
+          autocomplete="off"
+        />
+      </Field>
+    </div>
+  {/if}
+  {#snippet footer()}
+    <Button variant="ghost" onclick={closeDelete} disabled={deleting}>Cancel</Button>
+    <Button variant="danger" onclick={confirmDelete} disabled={!deleteNameMatches || deleting}>
+      {deleting ? 'Deleting…' : 'Delete permanently'}
+    </Button>
+  {/snippet}
+</Dialog>
+
 <style>
   .picker {
     display: grid;
@@ -401,6 +488,59 @@
   }
 
   /* ── Event rows ──────────────────────────────────────────────────────────── */
+  /* A row + its delete affordance sit side by side; the row flexes, delete is fixed. */
+  .event-item {
+    display: flex;
+    align-items: stretch;
+    gap: var(--gf-space-2);
+  }
+  .event-item .event-row {
+    flex: 1;
+    min-width: 0;
+  }
+  .event-delete {
+    flex-shrink: 0;
+    padding: 0 var(--gf-space-4);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    background: var(--gf-surface);
+    color: var(--gf-text-muted);
+    font-family: inherit;
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-medium);
+    cursor: pointer;
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      background var(--gf-motion-fast) var(--gf-ease-out),
+      color var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .event-delete:hover {
+    border-color: var(--gf-danger);
+    color: var(--gf-danger);
+    background: color-mix(in srgb, var(--gf-danger) 8%, var(--gf-surface));
+  }
+  .event-delete:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
+  }
+
+  /* The hard-delete dialog body: an unmissable warning + the type-to-confirm field. */
+  .delete-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-4);
+  }
+  .delete-warning {
+    margin: 0;
+    font-size: var(--gf-font-size-sm);
+    line-height: var(--gf-line-height-relaxed, 1.5);
+    color: var(--gf-text);
+    padding: var(--gf-space-3) var(--gf-space-4);
+    border: 1px solid color-mix(in srgb, var(--gf-danger) 40%, var(--gf-border));
+    border-radius: var(--gf-radius-md);
+    background: color-mix(in srgb, var(--gf-danger) 8%, var(--gf-surface));
+  }
+
   .event-row {
     display: flex;
     align-items: center;

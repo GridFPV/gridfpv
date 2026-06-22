@@ -79,6 +79,11 @@ fn live_rotorhazard_race_translates_to_laps() {
     // Let the connection settle and the server register us before driving it.
     std::thread::sleep(Duration::from_secs(2));
 
+    // Disable RH's lap minimum for the sim: our rapid `simulate_lap` injections are far closer
+    // together than RH's 10s default `MIN_LAP_TIME`, which otherwise logs "Pass record under lap
+    // minimum (10)" for every short lap. `0` lets every sim lap record cleanly.
+    conn.set_min_lap_time(0).ok();
+
     // Reset to a clean READY state (a prior DONE race blocks staging), then ignore
     // any events that reset produced — we only assert on the fresh race below.
     conn.stop_race().ok();
@@ -224,6 +229,10 @@ fn mid_race_reconnect_does_not_double_count_laps() {
 
     let mut events: Vec<Event> = Vec::new();
     std::thread::sleep(Duration::from_secs(2));
+
+    // Disable RH's lap minimum for the sim (see the first test) so the short `simulate_lap`
+    // crossings below don't trip "Pass record under lap minimum (10)".
+    conn.set_min_lap_time(0).ok();
 
     conn.stop_race().ok();
     conn.discard_laps().expect("emit discard_laps");

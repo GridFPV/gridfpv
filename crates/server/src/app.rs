@@ -298,6 +298,11 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/health", get(|| async { "ok" }))
         // Events lifecycle (issue #72): list (Practice first) and RD-gated create.
         .route("/events", get(list_events).post(create_event))
+        // RD-gated **permanent** delete of an event + ALL its data (the papercut fix): the
+        // registry entry, the persisted `<id>.sqlite`(+wal/shm), and the active pointer if it
+        // pointed here. The built-in Practice event cannot be deleted (a `BadRequest`); an
+        // unknown id is a typed 404.
+        .route("/events/{event_id}", axum::routing::delete(delete_event))
         // The Director's active event (issue #90): an open read so any client resumes into the
         // selected event on connect/reload, and an RD-gated write to set it.
         .route("/active-event", get(get_active_event).put(set_active_event))
@@ -444,6 +449,33 @@ async fn create_event(
         .create(&body)
         .map_err(|e| ProtocolError::new(ErrorCode::Internal, e.to_string()))?;
     Ok(Json(meta))
+}
+
+/// `DELETE /events/{event_id}` — **permanently** delete an event and ALL of its data, RD-gated
+/// (the papercut fix).
+///
+/// [`ControlAuth`] runs first (the same gate as create; open in full-trust by default). The
+/// delete is total and irreversible: the registry entry, the event's persisted state (its
+/// `<id>.sqlite` log plus the WAL/SHM sidecars under the data dir), and the active-event pointer
+/// if it pointed at this event are all removed — so nothing of it survives a restart. The
+/// built-in **Practice** event cannot be deleted (a `BadRequest`); an unknown id is a typed 404
+/// (`UnknownScope`). On success an empty 200 is returned (no body — like the other deletes).
+async fn delete_event(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<StatusCode, ProtocolError> {
+    registry.delete(&event_id).map_err(|e| {
+        // A protected-Practice delete is a client error (BadRequest); a genuinely unknown id is a
+        // 404. Distinguish by whether the event still resolves (it does not after a real delete).
+        let code = if registry.resolve(&event_id).is_some() {
+            ErrorCode::BadRequest
+        } else {
+            ErrorCode::UnknownScope
+        };
+        ProtocolError::new(code, e.to_string())
+    })?;
+    Ok(StatusCode::OK)
 }
 
 /// `GET /active-event` — the Director's currently-active event, or `null` (issue #90).
@@ -2091,6 +2123,144 @@ mod tests {
         let _rd = state.tokens().issue_rd_token();
         let (status, _) = put_active(registry, PRACTICE_EVENT_ID, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- DELETE /events/{id}: permanent delete of an event + all its data (papercut) ----
+
+    /// `DELETE /events/{id}` with an optional bearer token → status + raw body bytes.
+    async fn delete_event_req(
+        registry: EventRegistry,
+        id: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/events/{id}"));
+        if let Some(token) = token {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = router(registry)
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn delete_event_removes_a_created_event() {
+        let (registry, _state, _) = state_with(recorded_heat());
+        // Create a real event, then delete it through the route.
+        let created = registry
+            .create(&crate::events::CreateEventRequest {
+                name: "Doomed".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap();
+        assert!(registry.resolve(&created.id).is_some());
+
+        let (status, _) = delete_event_req(registry.clone(), &created.id.0, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Gone from the registry and the listing.
+        assert!(registry.resolve(&created.id).is_none());
+        assert!(!registry.list().iter().any(|m| m.id == created.id));
+    }
+
+    #[tokio::test]
+    async fn delete_event_rejects_practice_and_unknown() {
+        let (registry, _state, _) = state_with(recorded_heat());
+        // Practice cannot be deleted → BadRequest (400), and it still resolves.
+        let (status, raw) = delete_event_req(registry.clone(), PRACTICE_EVENT_ID, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let err: ProtocolError = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(
+            registry
+                .resolve(&EventId(PRACTICE_EVENT_ID.into()))
+                .is_some()
+        );
+
+        // An unknown id → a typed 404 (UnknownScope).
+        let (status, raw) = delete_event_req(registry, "no-such-event", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let err: ProtocolError = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(err.code, ErrorCode::UnknownScope);
+    }
+
+    #[tokio::test]
+    async fn delete_event_requires_an_rd_token_once_configured() {
+        let (registry, state, _) = state_with(recorded_heat());
+        let _rd = state.tokens().issue_rd_token();
+        let created = registry
+            .create(&crate::events::CreateEventRequest {
+                name: "Gated".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap();
+        let (status, _) = delete_event_req(registry.clone(), &created.id.0, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // The event is untouched after the rejected delete.
+        assert!(registry.resolve(&created.id).is_some());
+    }
+
+    // --- POST /events/{id}/control: a missing/wrong Content-Type → JSON ProtocolError ----
+
+    #[tokio::test]
+    async fn control_missing_content_type_is_a_json_protocol_error() {
+        // A control POST whose body is valid JSON but lacks the `Content-Type: application/json`
+        // header used to return a bare-text 4xx; it must now be the uniform `ProtocolError` JSON.
+        let (registry, _state, _) = state_with(recorded_heat());
+        let command = serde_json::to_string(&crate::control::Command::Stage {
+            heat: HeatId("q-1".into()),
+        })
+        .unwrap();
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/events/practice/control")
+                    // No Content-Type header on purpose.
+                    .body(Body::from(command))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // A 400 with a parseable ProtocolError(BadRequest) body — not a bare-text 4xx.
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let err: ProtocolError =
+            serde_json::from_slice(&bytes).expect("the body is a JSON ProtocolError");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(!err.message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_malformed_json_body_is_a_json_protocol_error() {
+        // A correct Content-Type but an unparseable body is likewise a typed JSON error.
+        let (registry, _state, _) = state_with(recorded_heat());
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/events/practice/control")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{ not valid json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let err: ProtocolError =
+            serde_json::from_slice(&bytes).expect("the body is a JSON ProtocolError");
+        assert_eq!(err.code, ErrorCode::BadRequest);
     }
 
     // --- #63: minting a read-only join token over HTTP ----------------------------------
