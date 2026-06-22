@@ -67,6 +67,8 @@ import {
   updateRound,
   deleteRound,
   listHeats,
+  roundRanking,
+  classStandings,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
@@ -77,6 +79,7 @@ import type {
   ChannelCatalogEntry,
   Class,
   ClassId,
+  ClassStandings,
   Command,
   CommandAck,
   CompetitorRef,
@@ -93,6 +96,7 @@ import type {
   PilotId,
   NewRoundReq,
   ProjectionBody,
+  RankEntry,
   RoundDef,
   RoundId,
   Scope,
@@ -261,6 +265,8 @@ export class Session {
   #updateRoundImpl: typeof updateRound;
   #deleteRoundImpl: typeof deleteRound;
   #listHeatsImpl: typeof listHeats;
+  #roundRankingImpl: typeof roundRanking;
+  #classStandingsImpl: typeof classStandings;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -294,6 +300,8 @@ export class Session {
     updateRoundImpl?: typeof updateRound;
     deleteRoundImpl?: typeof deleteRound;
     listHeatsImpl?: typeof listHeats;
+    roundRankingImpl?: typeof roundRanking;
+    classStandingsImpl?: typeof classStandings;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -328,6 +336,8 @@ export class Session {
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
     this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
+    this.#roundRankingImpl = opts?.roundRankingImpl ?? roundRanking;
+    this.#classStandingsImpl = opts?.classStandingsImpl ?? classStandings;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -761,6 +771,38 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
     return this.#listHeatsImpl(this.baseUrl, event.id, { token: this.#token });
+  }
+
+  // --- Rankings & standings (race redesign Slice 5/6a + 5/6b) -----------------------------------
+  // The season-join reads the Results screen + the Rounds stage's per-round standings render, and
+  // the source the bracket seeds `FromRanking` from. Both are open reads (no token); they resolve
+  // empty / reject (e.g. an unscored round 400s) for the screen to surface.
+
+  /**
+   * Read a **round's ranking** (`GET /events/{id}/rounds/{round}/ranking`) — race redesign Slice
+   * 5/6a. The ordered per-competitor {@link RankEntry} list (best first, 1-based tie-aware
+   * positions) the bracket seeds `FromRanking` from, shown as a round's compact "Standings" view.
+   * No-op (resolves `[]`) when no event is selected; rejects on a non-2xx / transport failure (an
+   * unscorable round is a 400 the stage surfaces).
+   */
+  roundRanking(roundId: RoundId): Promise<RankEntry[]> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve([]);
+    return this.#roundRankingImpl(this.baseUrl, event.id, roundId, { token: this.#token });
+  }
+
+  /**
+   * Read a **class's standings** (`GET /events/{id}/classes/{class}/standings`) — race redesign
+   * Slice 5/6a. The season-join {@link ClassStandings} the Results screen reads: one per-pilot row
+   * per competitor that raced the class, aggregated across the class's rounds (points, best lap,
+   * total laps, rounds entered), best first. No-op (resolves empty standings for the class) when no
+   * event is selected; rejects on a non-2xx / transport failure (a class with no rounds resolves to
+   * empty standings server-side).
+   */
+  classStandings(classId: ClassId): Promise<ClassStandings> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve({ class: classId, standings: [] });
+    return this.#classStandingsImpl(this.baseUrl, event.id, classId, { token: this.#token });
   }
 
   /**

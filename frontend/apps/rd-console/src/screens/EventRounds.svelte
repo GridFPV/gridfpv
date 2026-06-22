@@ -30,12 +30,14 @@
     NewRoundReq,
     Pilot,
     PilotId,
+    RankEntry,
     RoundDef,
     RoundId,
     SeedingRule,
     WinCondition
   } from '@gridfpv/types';
   import { channelLabel } from '../lib/channels.js';
+  import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -151,6 +153,88 @@
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       fillingRound = undefined;
+    }
+  }
+
+  // --- Per-round ranking ("Standings") + advance-to-bracket (race redesign Slice 5/6b) ----------
+  // Each round can show a compact ordered ranking (`session.roundRanking`) — the seeding source a
+  // bracket draws `FromRanking` from — and offers "Advance to bracket": create a new single_elim
+  // round seeded from this round's ranking, top-N defaulting to the largest power-of-two ≤ the
+  // round's field, then Fill it to generate the seeded bracket heats (which the heats list shows).
+
+  // The expanded-standings round, its loaded ranking, and the in-flight load. Toggling reloads, so a
+  // freshly-scored heat re-aggregates the ranking.
+  let standingsRound = $state<RoundId | undefined>(undefined);
+  let standingsRows = $state<RankEntry[]>([]);
+  let standingsLoading = $state(false);
+  let standingsError = $state<string | undefined>(undefined);
+
+  async function toggleStandings(round: RoundDef) {
+    if (standingsRound === round.id) {
+      standingsRound = undefined;
+      return;
+    }
+    standingsRound = round.id;
+    standingsRows = [];
+    standingsError = undefined;
+    standingsLoading = true;
+    try {
+      standingsRows = await session.roundRanking(round.id);
+    } catch (e) {
+      // An unscored / unscorable round 400s — surface it inline rather than as a row list.
+      standingsError = e instanceof Error ? e.message : String(e);
+    } finally {
+      standingsLoading = false;
+    }
+  }
+
+  // The round's field size — the union of its eligible classes' membership (what the bracket cut is
+  // taken from). Drives the top_n default when advancing.
+  function roundFieldSize(round: RoundDef): number {
+    return buildEligibleMembers(round.id).length;
+  }
+
+  // The advance-to-bracket confirm: which round, its proposed label + top_n (editable), in-flight.
+  let advanceRoundId = $state<RoundId | undefined>(undefined);
+  let advanceLabel = $state('');
+  let advanceTopN = $state(8);
+  let advancing = $state(false);
+
+  function openAdvance(round: RoundDef) {
+    advanceRoundId = round.id;
+    advanceLabel = advanceRoundLabel(round);
+    advanceTopN = bracketTopNDefault(roundFieldSize(round));
+  }
+  function cancelAdvance() {
+    advanceRoundId = undefined;
+    advancing = false;
+  }
+
+  // Create the seeded single_elim round, then immediately Fill its first bracket heat so the heats
+  // list shows the ranking-seeded matchups. The bracket is editable thereafter (manual build).
+  async function submitAdvance(source: RoundDef) {
+    if (advancing) return;
+    advancing = true;
+    try {
+      const req: NewRoundReq = advanceRoundReq(
+        source,
+        advanceTopN,
+        advanceLabel.trim() || advanceRoundLabel(source)
+      );
+      const created = await session.createRound(req);
+      if (!created) {
+        toast.info('A control token is required to manage rounds.');
+        return;
+      }
+      // Generate the seeded bracket heats from the ranking.
+      const ack = await session.fillRound(created.id);
+      if (ack.ok) await refreshHeats();
+      toast.success(`Bracket “${created.label}” created, seeded from ${source.label}.`);
+      advanceRoundId = undefined;
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      advancing = false;
     }
   }
 
@@ -650,16 +734,110 @@
                     : round.classes.map(className).join(', ') || '—'}
                 </span>
               </div>
-              <Button
-                variant="primary"
-                size="sm"
-                onclick={() => fillRound(round)}
-                loading={fillingRound === round.id}
-                disabled={fillingRound !== undefined}
-              >
-                Fill next heat
-              </Button>
+              <div class="heat-round-actions">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onclick={() => toggleStandings(round)}
+                  aria-pressed={standingsRound === round.id}
+                >
+                  {standingsRound === round.id ? 'Hide standings' : 'Standings'}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onclick={() => openAdvance(round)}
+                  disabled={advanceRoundId !== undefined}
+                >
+                  Advance to bracket
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onclick={() => fillRound(round)}
+                  loading={fillingRound === round.id}
+                  disabled={fillingRound !== undefined}
+                >
+                  Fill next heat
+                </Button>
+              </div>
             </header>
+
+            {#if standingsRound === round.id}
+              <div class="round-standings" aria-label={`Standings for ${round.label}`}>
+                <h4 class="standings-title">Standings — seeds the bracket</h4>
+                {#if standingsLoading}
+                  <p class="empty small" role="status">Loading standings…</p>
+                {:else if standingsError}
+                  <p class="empty small" role="status">
+                    No ranking yet — score this round's heats first.
+                  </p>
+                {:else if standingsRows.length === 0}
+                  <p class="empty small" role="status">No ranked competitors yet.</p>
+                {:else}
+                  <ol class="standings-list">
+                    {#each standingsRows as entry (entry.competitor)}
+                      <li class="standings-row">
+                        <span class="standings-pos">{entry.position}</span>
+                        <span class="standings-call">{callsign(entry.competitor)}</span>
+                      </li>
+                    {/each}
+                  </ol>
+                {/if}
+              </div>
+            {/if}
+
+            {#if advanceRoundId === round.id}
+              <form
+                class="advance-form"
+                aria-label={`Advance ${round.label} to bracket`}
+                onsubmit={(e) => {
+                  e.preventDefault();
+                  submitAdvance(round);
+                }}
+              >
+                <h4 class="standings-title">Advance to bracket</h4>
+                <p class="advance-note">
+                  Creates a <strong>single_elim</strong> round seeded from
+                  <strong>{round.label}</strong>'s ranking, then fills the seeded bracket heats. The
+                  bracket is editable afterward.
+                </p>
+                <div class="form-grid">
+                  <Field label="Bracket label" required>
+                    <Input bind:value={advanceLabel} aria-label="Bracket label" />
+                  </Field>
+                  <Field
+                    label="Top N advance"
+                    hint="Defaults to the largest power-of-two that fits the field."
+                  >
+                    <Input
+                      type="number"
+                      min="1"
+                      bind:value={advanceTopN}
+                      aria-label="Top N advance"
+                    />
+                  </Field>
+                </div>
+                <div class="form-actions">
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    onclick={cancelAdvance}
+                    disabled={advancing}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="primary"
+                    type="submit"
+                    loading={advancing}
+                    disabled={advanceLabel.trim().length === 0}
+                  >
+                    Create &amp; fill bracket
+                  </Button>
+                </div>
+              </form>
+            {/if}
 
             {#if heatsByRound(round.id).length === 0}
               <p class="empty small" role="status">
@@ -933,6 +1111,76 @@
     align-items: baseline;
     flex-wrap: wrap;
     gap: var(--gf-space-2);
+  }
+  .heat-round-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+  }
+  .round-standings {
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface);
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+  }
+  .standings-title {
+    margin: 0;
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+  }
+  .standings-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-1);
+  }
+  .standings-row {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    font-size: var(--gf-font-size-md);
+    color: var(--gf-text);
+  }
+  .standings-pos {
+    display: inline-grid;
+    place-items: center;
+    min-width: 1.7rem;
+    height: 1.7rem;
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text-secondary);
+    font-weight: var(--gf-font-weight-bold);
+    font-variant-numeric: tabular-nums;
+  }
+  .standings-call {
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .advance-form {
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-accent);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface);
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+  }
+  .advance-note {
+    margin: 0;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+    line-height: 1.5;
+  }
+  .advance-note strong {
+    color: var(--gf-text);
   }
   .empty.small {
     font-size: var(--gf-font-size-sm);
