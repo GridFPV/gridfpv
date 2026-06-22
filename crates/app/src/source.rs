@@ -991,11 +991,21 @@ fn handle_transition(
             // transition and push the now-idle live state. The `Finished` (Running → Unofficial) step
             // is *kept* so the RD still sees the final practice laps before finalizing; the true
             // terminals below clear it. A new heat/round becoming active also clears it (via `begin`).
-            if !matches!(transition, HeatTransition::Finished)
-                && state.open_practice().is_active(&heat)
-                && state.open_practice().clear()
-            {
-                state.wake_streams();
+            //
+            // Open-practice overlay-phase fix: the kept `Finished` step must also move the overlay's
+            // phase. Thread the real transition into the accumulator so its synthetic slice reports
+            // `Unofficial` (not a hardcoded `Running`) — which freezes the console race clock at the
+            // practice duration while the per-channel laps stay visible. The true terminals below
+            // clear the accumulator outright, so they need no phase threading.
+            if state.open_practice().is_active(&heat) {
+                let woke = if matches!(transition, HeatTransition::Finished) {
+                    state.open_practice().transition(&heat, transition)
+                } else {
+                    state.open_practice().clear()
+                };
+                if woke {
+                    state.wake_streams();
+                }
             }
         }
         // Staged is pre-Running: the heat isn't emitting yet, but it is the moment to **tune** the

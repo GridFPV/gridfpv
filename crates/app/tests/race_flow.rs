@@ -1271,6 +1271,58 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         finished, 1,
         "the time limit auto-ends the practice exactly once"
     );
+
+    // (d) Open-practice overlay-phase fix — the clock-freeze precondition. The served/overlay live
+    // state (the same accumulator the snapshot/stream serve in place of the log fold for an active
+    // open-practice heat) must report **`Unofficial`** once the time limit closes the race — *not*
+    // the old hardcoded `Running` — so the console race clock freezes at the practice duration. The
+    // bridge threads the heat's real `Finished` transition into the accumulator, which keeps the
+    // per-channel laps (the accumulator is only cleared on a true terminal / abort / restart).
+    //
+    // The bridge processes the `Finished` it observes one poll after the log carries it, so wait for
+    // the overlay to settle on `Unofficial` rather than reading immediately.
+    let target = heat.clone();
+    let practice_overlay = registry.resolve(&event).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let overlay = practice_overlay.open_practice().live_state();
+        if overlay
+            .as_ref()
+            .is_some_and(|s| s.phase == gridfpv_server::snapshot::HeatPhase::Unofficial)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the open-practice overlay never reported Unofficial after the time limit (was {:?})",
+            overlay.map(|s| s.phase)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let overlay = practice_overlay
+        .open_practice()
+        .live_state()
+        .expect("the open-practice overlay survives the Running → Unofficial step");
+    assert_eq!(
+        overlay.current_heat.as_ref(),
+        Some(&target),
+        "the overlay still reports the practice heat"
+    );
+    assert_eq!(
+        overlay.phase,
+        gridfpv_server::snapshot::HeatPhase::Unofficial,
+        "the overlay reports the heat's real phase (Unofficial) so the console clock freezes"
+    );
+    // The per-channel laps are still carried through Unofficial (the clear-on-stop kept them).
+    assert!(
+        !overlay.progress.is_empty(),
+        "the per-channel laps stay visible through Unofficial"
+    );
+    assert!(
+        overlay.progress.iter().all(|p| p.pilot.is_none()),
+        "open-practice rows stay unbound (per channel)"
+    );
 }
 
 /// `POST …/rounds` asserted ok, returning the created [`RoundDef`].
