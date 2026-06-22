@@ -36,4 +36,14 @@ reference?: string,
 /**
  * An optional free-text description / notes for the class. Omitted from the wire when unset.
  */
-description?: string, };
+description?: string, 
+/**
+ * Whether this is a **code-defined built-in** class (issue #84) — one of the canonical
+ * standard FPV classes seeded into every directory with a fixed id, so cross-event /
+ * cross-Director standings aggregate with zero reconciliation. Built-ins are **read-only**:
+ * they cannot be edited or deleted, and are **not** persisted to `classes.json` (they are
+ * re-seeded on every boot). A user-created [`Custom`](ClassSource::Custom) class is never a
+ * built-in. Defaults to `false` and is omitted from the wire / disk when false, so a custom
+ * class's JSON is unchanged.
+ */
+builtin?: boolean, };

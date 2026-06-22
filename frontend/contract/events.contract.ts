@@ -694,12 +694,15 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
  * the `ClassId`/`OptionalEdit` types are reused). Rounds / the phase engine are NOT in this slice.
  *
  * guards:
- *  - `GET /classes` is an **open read** → `Class[]` (empty on a fresh Director — no built-in class).
+ *  - `GET /classes` is an **open read** → `Class[]` carrying the 9 locked, fixed-id **built-in**
+ *    classes (present on every Director, flagged `builtin`, carrying their real org as `source`).
  *  - `POST /classes` is **RD-gated** (no/bad token → 401), requires a `name`, auto-generates an id,
  *    carries the `source`/`reference`/`description` metadata, and the new class appears in the listing.
- *  - `PUT /classes/{id}` edits (set / clear via wire-`null` — the `OptionalEdit` three-state).
+ *  - `PUT/DELETE /classes/{id}` on a **built-in** id is rejected (read-only); user/Custom classes are
+ *    full CRUD (set / clear via wire-`null` — the `OptionalEdit` three-state).
  *  - `PUT /events/{id}/classes` is **RD-gated**, validates each id names a directory class (unknown →
- *    404 `UnknownScope`), and records the selection on the event's `EventMeta.classes` (empty default).
+ *    404 `UnknownScope`), and records the selection on the event's `EventMeta.classes` (empty default);
+ *    a built-in id is selectable like any class.
  */
 describe('seam 12: application-level classes + per-event selection (#84)', () => {
   /** `GET /classes` → the parsed `Class[]` (asserting a 200, open read). */
@@ -752,9 +755,54 @@ describe('seam 12: application-level classes + per-event selection (#84)', () =>
     return { status: res.status, body: parsed };
   }
 
-  it('GET /classes is an open read (empty on a fresh Director — no built-in class)', async () => {
+  it('GET /classes is an open read carrying the 9 fixed-id built-ins (org-sourced, flagged builtin)', async () => {
     const classes = await listClasses();
     expect(Array.isArray(classes)).toBe(true);
+
+    // The 9 canonical built-ins are present with their fixed ids — identical on every Director.
+    const byId = new Map(classes.map((c) => [c.id, c]));
+    const fixedIds = [
+      'mgp-open',
+      'mgp-pro-spec',
+      'mgp-whoop',
+      'mgp-micro',
+      'five33-tiny-trainer',
+      'freedom-spec',
+      'street-league',
+      'udl-igniter',
+      'udl-shrieker'
+    ];
+    for (const id of fixedIds) {
+      const cls = byId.get(id);
+      expect(cls, `built-in ${id} present`).toBeDefined();
+      expect(cls?.builtin).toBe(true);
+    }
+    // They carry their real org as the source (a badge), not Custom.
+    expect(byId.get('mgp-open')?.source).toBe('MultiGP');
+    expect(byId.get('five33-tiny-trainer')?.source).toBe('Five33');
+    expect(byId.get('freedom-spec')?.source).toBe('FreedomSpec');
+    expect(byId.get('street-league')?.source).toBe('StreetLeague');
+    expect(byId.get('udl-igniter')?.source).toBe('UDL');
+  });
+
+  it('PUT/DELETE on a built-in class is rejected — built-ins are read-only', async () => {
+    const put = await fetch(`${director.baseUrl}/classes/mgp-open`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ name: 'Hacked' })
+    });
+    expect(put.status).toBe(400);
+
+    const del = await fetch(`${director.baseUrl}/classes/mgp-open`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${TOKEN}` }
+    });
+    expect(del.status).toBe(400);
+
+    // The built-in is untouched.
+    const stillThere = (await listClasses()).find((c) => c.id === 'mgp-open');
+    expect(stillThere?.name).toBe('Open Class');
+    expect(stillThere?.builtin).toBe(true);
   });
 
   it('POST /classes requires the RD token — no/bad token → 401', async () => {

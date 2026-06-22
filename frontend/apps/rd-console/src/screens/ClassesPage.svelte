@@ -3,8 +3,9 @@
    * ClassesPage — the app-level **Classes** page (#118 / #84).
    *
    * A real route in the two-level IA's home hub (Home › Classes). It hosts the shared
-   * {@link ClassManager} (directory CRUD: the add / edit / remove form, with the MultiGP quick-pick),
-   * mirroring how {@link PilotsPage} hosts {@link PilotManager} — the manager is reusable; only its
+   * {@link ClassManager} (directory CRUD: the add / edit / remove form for Custom classes, plus the
+   * locked, read-only built-ins the Director seeds), mirroring how {@link PilotsPage} hosts
+   * {@link PilotManager} — the manager is reusable; only its
    * host differs (a routed page here; the in-event {@link EventClasses} embeds the same component
    * with per-event selection layered on). `Breadcrumbs` + the brand root get you home from here.
    */
@@ -31,9 +32,9 @@
       <div class="page-titles">
         <h1 class="page-title">Classes</h1>
         <p class="lead">
-          The application-level class directory — maintained once here, selected per event. Each
-          class needs only a <strong>name</strong>; the rest (source, reference, description) is
-          optional. Add a standard <strong>MultiGP</strong> class with one tap from the add form.
+          The application-level class directory — maintained once here, selected per event. The
+          standard FPV classes are <strong>built in</strong> (locked, identical on every Director);
+          add your own <strong>Custom</strong> classes, which need only a <strong>name</strong>.
         </p>
       </div>
       <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add class</Button>

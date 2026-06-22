@@ -1,70 +1,83 @@
 /**
  * Class presentation + form helpers (issue #84).
  *
- * Pure mappers shared by the directory list and the add/edit form: the selectable class sources,
- * the Badge tone for a {@link ClassSource}, the **clear-via-null** diff that turns a form's working
- * values into an {@link UpdateClassRequest} (omit unchanged, `null` to clear, value to set), and a
- * static **MultiGP quick-pick** list that pre-fills the create form with `source = MultiGP` plus a
- * reference URL for one of the standard MultiGP classes. No I/O — the {@link Session} owns the
- * protocol calls; these only shape data for the UI and the wire. Mirrors `lib/pilots.ts`.
+ * Pure mappers shared by the directory list and the add/edit form: the Badge tone for a
+ * {@link ClassSource}, whether a {@link Class} is a read-only **built-in**, and the
+ * **clear-via-null** diff that turns a form's working values into an {@link UpdateClassRequest}
+ * (omit unchanged, `null` to clear, value to set). No I/O — the {@link Session} owns the protocol
+ * calls; these only shape data for the UI and the wire. Mirrors `lib/pilots.ts`.
+ *
+ * Users only ever create **`Custom`** classes (the create form fixes the source to Custom). The
+ * canonical org classes (MultiGP, Five33, FreedomSpec, StreetLeague, UDL) ship as locked,
+ * fixed-id **built-ins** seeded by the Director — so the old "Add from MultiGP" quick-pick is gone.
  */
 import type { Class, ClassSource, CreateClassRequest, UpdateClassRequest } from '@gridfpv/types';
 
-/**
- * The selectable class sources in the form, in display order. A class records **one** provenance,
- * so the form picks one (a `<select>`). `Custom` is the default (a class the RD typed in); `Other`
- * is the catch-all.
- */
-export const CLASS_SOURCES: readonly ClassSource[] = ['MultiGP', 'Custom', 'Other'];
+/** The Badge tones used for class sources (a subset of the Badge component's `tone` union). */
+type SourceTone = 'accent' | 'info' | 'success' | 'warn' | 'danger' | 'neutral';
 
-/** The Badge `tone` for each class source — a quiet, consistent palette across the directory. */
-const SOURCE_TONES: Record<ClassSource, 'accent' | 'info' | 'neutral'> = {
+/**
+ * The Badge `tone` for each class source — a distinct tone per org so the built-in classes read at
+ * a glance, plus `Custom`/`Other` for user classes.
+ */
+const SOURCE_TONES: Record<ClassSource, SourceTone> = {
   MultiGP: 'accent',
-  Custom: 'info',
+  Five33: 'success',
+  FreedomSpec: 'info',
+  StreetLeague: 'warn',
+  UDL: 'danger',
+  Custom: 'neutral',
   Other: 'neutral'
 };
 
 /** The Badge `tone` for a class source. */
-export function sourceTone(source: ClassSource): 'accent' | 'info' | 'neutral' {
+export function sourceTone(source: ClassSource): SourceTone {
   return SOURCE_TONES[source];
 }
 
 /**
+ * Whether a class is a read-only **built-in** (issue #84): a canonical, fixed-id class the Director
+ * seeds and that cannot be edited or removed. The server flags these with `builtin: true`.
+ */
+export function isBuiltin(c: Class): boolean {
+  return c.builtin === true;
+}
+
+/**
  * The editable shape the form holds while open — every text field a string (the form binds plain
- * inputs) plus the `source` provenance. The form diffs this against the class being edited to build
- * the {@link UpdateClassRequest}, or maps it straight to a {@link CreateClassRequest}.
+ * inputs). New classes are always `Custom`, so the create form carries no source picker; the form
+ * diffs this against the class being edited to build the {@link UpdateClassRequest}, or maps it
+ * straight to a {@link CreateClassRequest} (with `source = Custom`).
  */
 export interface ClassFormValues {
   name: string;
-  source: ClassSource;
   reference: string;
   description: string;
 }
 
-/** Blank form values for the **Add** flow — defaults to the `Custom` provenance. */
+/** Blank form values for the **Add** flow. */
 export function emptyForm(): ClassFormValues {
-  return { name: '', source: 'Custom', reference: '', description: '' };
+  return { name: '', reference: '', description: '' };
 }
 
-/** Seed the form from an existing class for the **Edit** flow. */
+/** Seed the form from an existing class for the **Edit** flow (Custom classes only). */
 export function formFromClass(c: Class): ClassFormValues {
   return {
     name: c.name,
-    source: c.source,
     reference: c.reference ?? '',
     description: c.description ?? ''
   };
 }
 
 /**
- * Build the **create** body from the form: the required name + source plus only the optional text
- * fields the user filled (a blank optional is simply omitted — `POST /classes` treats absent as
- * unset).
+ * Build the **create** body from the form: the required name plus only the optional text fields the
+ * user filled (a blank optional is simply omitted). The source is always `Custom` — users only ever
+ * create custom classes; the canonical org classes ship as built-ins.
  */
 export function buildCreateRequest(v: ClassFormValues): CreateClassRequest {
   const req: CreateClassRequest = {
     name: v.name.trim(),
-    source: v.source
+    source: 'Custom'
   };
   const reference = v.reference.trim();
   if (reference) req.reference = reference;
@@ -78,18 +91,17 @@ export function buildCreateRequest(v: ClassFormValues): CreateClassRequest {
  *
  *  - `name` — a present non-empty value that differs replaces it; a blank or unchanged one is
  *    omitted (the name is required and never cleared).
- *  - `source` — sent only when it changed.
  *  - `reference` / `description` — the **clear-via-null** three-state: omit if unchanged, `null` if
  *    the user emptied a field that had a value (clears it), value if set. Mirrors
  *    `buildUpdateRequest` in `lib/pilots.ts`.
+ *
+ * Built-in classes are read-only and never reach this path (the UI offers no Edit on them).
  */
 export function buildUpdateRequest(prev: Class, v: ClassFormValues): UpdateClassRequest {
   const req: UpdateClassRequest = {};
 
   const name = v.name.trim();
   if (name && name !== prev.name) req.name = name;
-
-  if (v.source !== prev.source) req.source = v.source;
 
   // A text optional: omit if unchanged, `null` if cleared, value if set.
   const diffText = (next: string, before: string | undefined): string | null | undefined => {
@@ -105,34 +117,4 @@ export function buildUpdateRequest(prev: Class, v: ClassFormValues): UpdateClass
   if (description !== undefined) req.description = description;
 
   return req;
-}
-
-/**
- * One entry in the **MultiGP quick-pick**: a standard MultiGP class the RD can add with one tap,
- * which pre-fills the create form with `source = MultiGP`, the class name, and a reference URL into
- * the MultiGP rules so the provenance is recorded.
- */
-export interface MultiGpClassPreset {
-  name: string;
-  reference: string;
-}
-
-/**
- * The seven standard MultiGP classes (the GQ / spec classes). Each carries a reference URL into the
- * MultiGP class rules so a quick-picked class records where it came from. Selecting one pre-fills
- * the create form (`source = MultiGP`, `name`, `reference`); the RD can still tweak before saving.
- */
-export const MULTIGP_CLASSES: readonly MultiGpClassPreset[] = [
-  { name: 'Spec', reference: 'https://www.multigp.com/multigp-drone-race-classes/' },
-  { name: 'Pro Spec', reference: 'https://www.multigp.com/multigp-drone-race-classes/' },
-  { name: 'Freedom Spec', reference: 'https://www.multigp.com/multigp-drone-race-classes/' },
-  { name: 'Street League', reference: 'https://www.multigp.com/multigp-drone-race-classes/' },
-  { name: 'Open', reference: 'https://www.multigp.com/multigp-drone-race-classes/' },
-  { name: 'Tiny Whoop', reference: 'https://www.multigp.com/multigp-drone-race-classes/' },
-  { name: 'Tiny Trainer', reference: 'https://www.multigp.com/multigp-drone-race-classes/' }
-];
-
-/** Build pre-filled form values for a MultiGP quick-pick preset (the create form seeds from this). */
-export function formFromMultiGp(preset: MultiGpClassPreset): ClassFormValues {
-  return { name: preset.name, source: 'MultiGP', reference: preset.reference, description: '' };
 }

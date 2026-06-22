@@ -764,6 +764,8 @@ async fn delete_class(
 fn class_error_to_protocol(error: ClassError) -> ProtocolError {
     let code = match error.kind {
         ClassErrorKind::Invalid => ErrorCode::BadRequest,
+        // A read-only built-in edit/delete is a rejected bad request (the built-in is canonical).
+        ClassErrorKind::ReadOnly => ErrorCode::BadRequest,
         ClassErrorKind::NotFound => ErrorCode::UnknownScope,
         ClassErrorKind::Internal => ErrorCode::Internal,
     };
