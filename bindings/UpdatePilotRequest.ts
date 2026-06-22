@@ -42,8 +42,8 @@ color?: OptionalEdit<string>,
 country?: OptionalEdit<string>, 
 /**
  * A **full replacement** of the VTX set when present (absent leaves it unchanged; present `[]`
- * clears it). Mirrors how [`attributes`](Self::attributes) updates — a present array replaces
- * the stored set wholesale (deduped, stable order), rather than a per-value set/clear edit.
+ * clears it) — a present array replaces the stored set wholesale (deduped, stable order),
+ * rather than a per-value set/clear edit.
  */
 vtx_types?: Array<VtxType>, 
 /**
@@ -53,9 +53,4 @@ multigp_id?: OptionalEdit<string>,
 /**
  * A new Velocidrone id (set / clear / leave-unchanged).
  */
-velocidrone_id?: OptionalEdit<string>, 
-/**
- * A **full replacement** of the custom-attributes bag when present (absent leaves it
- * unchanged; present `{}` clears it). Empty keys are rejected; keys/values trimmed.
- */
-attributes?: { [key in string]: string }, };
+velocidrone_id?: OptionalEdit<string>, };

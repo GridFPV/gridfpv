@@ -17,10 +17,7 @@ import type { VtxType } from "./VtxType";
  * Beyond the core callsign + cloud-pull ids, the directory carries a small set of
  * **display/organizer** fields those systems converge on: a [`phonetic`](Pilot::phonetic)
  * pronunciation hint for voice callouts (RotorHazard), a [`team`](Pilot::team) / club name, a
- * [`color`](Pilot::color) for overlays/leaderboards, and a [`country`](Pilot::country) code. The
- * open [`attributes`](Pilot::attributes) bag then captures whatever event/region-specific data
- * (insurance #, FAA/FCC license, bib, sponsor, …) an organizer needs without us hardcoding a
- * column per use.
+ * [`color`](Pilot::color) for overlays/leaderboards, and a [`country`](Pilot::country) code.
  */
 export type Pilot = { 
 /**
@@ -80,11 +77,4 @@ multigp_id?: string,
  * The pilot's **Velocidrone** id, if known — a forward hook for matching a Velocidrone racer
  * (#74). A free-form string. Omitted from the wire when unset.
  */
-velocidrone_id?: string, 
-/**
- * An **open custom-attributes** bag (insurance #, FAA/FCC license, bib, sponsor, …) so an
- * organizer can capture event/region-specific data without us hardcoding a field per use.
- * Keys are trimmed and non-empty; serializes to TS `Record<string, string>`. Defaults empty
- * (and, being a `BTreeMap`, an empty bag still serializes to `{}` — there is no `skip`).
- */
-attributes: { [key in string]: string }, };
+velocidrone_id?: string, };

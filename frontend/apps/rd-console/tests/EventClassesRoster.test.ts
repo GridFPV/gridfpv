@@ -5,8 +5,8 @@ import type { ChannelCatalogEntry, Class, EventMeta, Pilot, Timer } from '@gridf
 import EventClassesRoster from '../src/screens/EventClassesRoster.svelte';
 import { makeTestSession } from './support.js';
 
-const ACE: Pilot = { id: 'p1', callsign: 'Ace', vtx_types: [], attributes: {} };
-const BEE: Pilot = { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} };
+const ACE: Pilot = { id: 'p1', callsign: 'Ace', vtx_types: [] };
+const BEE: Pilot = { id: 'p2', callsign: 'Bee', vtx_types: [] };
 
 const OPEN: Class = { id: 'open', name: 'Open Class', source: 'Custom' };
 const SPEC: Class = { id: 'spec', name: 'Spec', source: 'Custom' };

@@ -11,10 +11,9 @@ const ACE: Pilot = {
   name: 'Alice',
   color: '#ff0000',
   country: 'US',
-  vtx_types: ['Analog', 'HDZero'],
-  attributes: { bib: '7' }
+  vtx_types: ['Analog', 'HDZero']
 };
-const BEE: Pilot = { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} };
+const BEE: Pilot = { id: 'p2', callsign: 'Bee', vtx_types: [] };
 
 /** Open the Add form via the manager's exported `openAdd()` (the page button calls it). */
 async function openAdd(manager: { openAdd: () => void }) {
@@ -56,8 +55,7 @@ describe('PilotManager (#74)', () => {
     const created: Pilot = {
       id: 'p9',
       callsign: 'Neo',
-      vtx_types: ['Analog', 'DJI'],
-      attributes: {}
+      vtx_types: ['Analog', 'DJI']
     };
     const listPilotsImpl = vi.fn(async () => (calls++ === 0 ? [] : [created]));
     const createPilotImpl = vi.fn(async () => created);
@@ -113,7 +111,7 @@ describe('PilotManager (#74)', () => {
     expect(createPilotImpl).not.toHaveBeenCalled();
   });
 
-  it('creates a pilot with callsign + name + country + color + a custom attribute', async () => {
+  it('creates a pilot with callsign + name + country + color', async () => {
     let calls = 0;
     const created: Pilot = {
       id: 'p9',
@@ -121,8 +119,7 @@ describe('PilotManager (#74)', () => {
       name: 'Thomas',
       country: 'US',
       color: '#00ff00',
-      vtx_types: [],
-      attributes: { sponsor: 'Acme' }
+      vtx_types: []
     };
     const listPilotsImpl = vi.fn(async () => (calls++ === 0 ? [] : [created]));
     const createPilotImpl = vi.fn(async () => created);
@@ -135,15 +132,6 @@ describe('PilotManager (#74)', () => {
     await fireEvent.input(screen.getByLabelText('Real name'), { target: { value: 'Thomas' } });
     await fireEvent.input(screen.getByLabelText('Color'), { target: { value: '#00ff00' } });
 
-    // Add a custom attribute row, fill it.
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add attribute' }));
-    await fireEvent.input(screen.getByLabelText('Attribute 1 key'), {
-      target: { value: 'sponsor' }
-    });
-    await fireEvent.input(screen.getByLabelText('Attribute 1 value'), {
-      target: { value: 'Acme' }
-    });
-
     await fireEvent.click(screen.getByRole('button', { name: 'Add pilot' }));
 
     await waitFor(() => expect(createPilotImpl).toHaveBeenCalledTimes(1));
@@ -152,36 +140,11 @@ describe('PilotManager (#74)', () => {
       expect.objectContaining({
         callsign: 'Neo',
         name: 'Thomas',
-        color: '#00ff00',
-        attributes: { sponsor: 'Acme' }
+        color: '#00ff00'
       }),
       'tok'
     );
     await screen.findByText('Neo');
-  });
-
-  it('removes an attribute row so it is omitted from the create body', async () => {
-    const listPilotsImpl = vi.fn(async () => []);
-    const createPilotImpl = vi.fn(async () => ACE);
-    const { session } = makeTestSession({ noEnter: true, listPilotsImpl, createPilotImpl });
-    const { component } = render(PilotManager, { session });
-    await screen.findByText(/No pilots/i);
-    await openAdd(component as unknown as { openAdd: () => void });
-
-    await fireEvent.input(screen.getByLabelText('Callsign'), { target: { value: 'Ace' } });
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add attribute' }));
-    await fireEvent.input(screen.getByLabelText('Attribute 1 key'), { target: { value: 'bib' } });
-    await fireEvent.input(screen.getByLabelText('Attribute 1 value'), { target: { value: '7' } });
-    // Remove it again.
-    await fireEvent.click(screen.getByRole('button', { name: 'Remove attribute 1' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Add pilot' }));
-
-    await waitFor(() => expect(createPilotImpl).toHaveBeenCalledTimes(1));
-    expect(createPilotImpl).toHaveBeenCalledWith(
-      'http://d.local',
-      expect.objectContaining({ callsign: 'Ace', attributes: {} }),
-      'tok'
-    );
   });
 
   it('edits a pilot and CLEARS color + country, sending null for each', async () => {

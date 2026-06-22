@@ -3,7 +3,6 @@ import type { Pilot } from '@gridfpv/types';
 import {
   buildCreateRequest,
   buildUpdateRequest,
-  cleanAttributes,
   emptyForm,
   formFromPilot,
   normalizeVtxTypes,
@@ -22,8 +21,7 @@ const FULL: Pilot = {
   country: 'US',
   vtx_types: ['Analog', 'DJI'],
   multigp_id: 'mg-1',
-  velocidrone_id: 'vd-1',
-  attributes: { bib: '7' }
+  velocidrone_id: 'vd-1'
 };
 
 describe('buildCreateRequest', () => {
@@ -33,25 +31,16 @@ describe('buildCreateRequest', () => {
     v.name = 'Alice';
     v.country = 'us'; // lower-case input → uppercased
     const req = buildCreateRequest(v);
-    // vtx_types + attributes always go (both default-empty server-side).
+    // vtx_types always goes (defaults empty server-side).
     expect(req).toEqual({
       callsign: 'Ace',
       name: 'Alice',
       country: 'US',
-      vtx_types: [],
-      attributes: {}
+      vtx_types: []
     });
     // Untouched optionals are absent (not empty strings).
     expect(req).not.toHaveProperty('team');
     expect(req).not.toHaveProperty('color');
-  });
-
-  it('carries the cleaned attributes bag', () => {
-    const v = emptyForm();
-    v.callsign = 'Ace';
-    v.attributes = { ' license ': 'FAA-9', '': 'dropped' };
-    const req = buildCreateRequest(v);
-    expect(req.attributes).toEqual({ license: 'FAA-9' });
   });
 
   it('sends the selected VTX set, deduped + in canonical order', () => {
@@ -136,19 +125,6 @@ describe('buildUpdateRequest — clear-via-null', () => {
     expect(buildUpdateRequest(FULL, same)).not.toHaveProperty('country');
   });
 
-  it('sends the full attributes map only when it differs', () => {
-    const unchanged = valuesFrom(FULL);
-    expect(buildUpdateRequest(FULL, unchanged)).not.toHaveProperty('attributes');
-
-    const added = valuesFrom(FULL);
-    added.attributes = { bib: '7', sponsor: 'Acme' };
-    expect(buildUpdateRequest(FULL, added).attributes).toEqual({ bib: '7', sponsor: 'Acme' });
-
-    const cleared = valuesFrom(FULL);
-    cleared.attributes = {};
-    expect(buildUpdateRequest(FULL, cleared).attributes).toEqual({});
-  });
-
   it('replaces the callsign when changed and never clears it when blanked', () => {
     const changed = valuesFrom(FULL);
     changed.callsign = 'Neo';
@@ -157,11 +133,5 @@ describe('buildUpdateRequest — clear-via-null', () => {
     const blanked = valuesFrom(FULL);
     blanked.callsign = '   ';
     expect(buildUpdateRequest(FULL, blanked)).not.toHaveProperty('callsign');
-  });
-});
-
-describe('cleanAttributes', () => {
-  it('trims keys and drops blank ones', () => {
-    expect(cleanAttributes({ ' a ': '1', '': '2', b: '3' })).toEqual({ a: '1', b: '3' });
   });
 });

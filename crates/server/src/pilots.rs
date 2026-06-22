@@ -130,10 +130,7 @@ where
 /// Beyond the core callsign + cloud-pull ids, the directory carries a small set of
 /// **display/organizer** fields those systems converge on: a [`phonetic`](Pilot::phonetic)
 /// pronunciation hint for voice callouts (RotorHazard), a [`team`](Pilot::team) / club name, a
-/// [`color`](Pilot::color) for overlays/leaderboards, and a [`country`](Pilot::country) code. The
-/// open [`attributes`](Pilot::attributes) bag then captures whatever event/region-specific data
-/// (insurance #, FAA/FCC license, bib, sponsor, …) an organizer needs without us hardcoding a
-/// column per use.
+/// [`color`](Pilot::color) for overlays/leaderboards, and a [`country`](Pilot::country) code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct Pilot {
@@ -194,12 +191,6 @@ pub struct Pilot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub velocidrone_id: Option<String>,
-    /// An **open custom-attributes** bag (insurance #, FAA/FCC license, bib, sponsor, …) so an
-    /// organizer can capture event/region-specific data without us hardcoding a field per use.
-    /// Keys are trimmed and non-empty; serializes to TS `Record<string, string>`. Defaults empty
-    /// (and, being a `BTreeMap`, an empty bag still serializes to `{}` — there is no `skip`).
-    #[serde(default)]
-    pub attributes: BTreeMap<String, String>,
 }
 
 /// The body of `POST /pilots` — the fields a caller supplies to create a pilot (issue #74).
@@ -244,10 +235,6 @@ pub struct CreatePilotRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub velocidrone_id: Option<String>,
-    /// Optional custom-attributes bag, stored on [`Pilot::attributes`]. Empty keys are rejected;
-    /// keys and values are trimmed. Defaults empty.
-    #[serde(default)]
-    pub attributes: BTreeMap<String, String>,
 }
 
 /// The body of `PUT /pilots/{id}` — the editable fields of a pilot (issue #74).
@@ -289,8 +276,8 @@ pub struct UpdatePilotRequest {
     #[ts(optional = nullable)]
     pub country: OptionalEdit<String>,
     /// A **full replacement** of the VTX set when present (absent leaves it unchanged; present `[]`
-    /// clears it). Mirrors how [`attributes`](Self::attributes) updates — a present array replaces
-    /// the stored set wholesale (deduped, stable order), rather than a per-value set/clear edit.
+    /// clears it) — a present array replaces the stored set wholesale (deduped, stable order),
+    /// rather than a per-value set/clear edit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub vtx_types: Option<Vec<VtxType>>,
@@ -302,11 +289,6 @@ pub struct UpdatePilotRequest {
     #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
     #[ts(optional = nullable)]
     pub velocidrone_id: OptionalEdit<String>,
-    /// A **full replacement** of the custom-attributes bag when present (absent leaves it
-    /// unchanged; present `{}` clears it). Empty keys are rejected; keys/values trimmed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub attributes: Option<BTreeMap<String, String>>,
 }
 
 /// A **three-state** edit to an optional field: *leave unchanged*, *clear*, or *set* (issue #74).
@@ -507,7 +489,6 @@ impl PilotDirectory {
         }
         let color = normalize_color(&request.color)?;
         let country = normalize_country(&request.country)?;
-        let attributes = normalize_attributes(&request.attributes)?;
         let mut dir = self.write();
         let id = loop {
             let candidate = PilotId(format!("{}-{}", slugify(callsign), short_suffix()));
@@ -526,7 +507,6 @@ impl PilotDirectory {
             vtx_types: normalize_vtx_types(&request.vtx_types),
             multigp_id: normalize_optional(&request.multigp_id),
             velocidrone_id: normalize_optional(&request.velocidrone_id),
-            attributes,
         };
         dir.pilots.insert(id, pilot.clone());
         dir.persist()?;
@@ -544,10 +524,6 @@ impl PilotDirectory {
         // clean rejection that leaves the stored pilot untouched.
         let color_edit = validate_color_edit(&request.color)?;
         let country_edit = validate_country_edit(&request.country)?;
-        let attributes = match &request.attributes {
-            Some(map) => Some(normalize_attributes(map)?),
-            None => None,
-        };
 
         let mut dir = self.write();
         let pilot = dir
@@ -569,16 +545,13 @@ impl PilotDirectory {
         if let Some(value) = country_edit {
             pilot.country = value;
         }
-        // VTX is a full-replacement set (like `attributes`): a present array replaces the stored
-        // set (normalized); `Some([])` clears it; absent (`None`) leaves it unchanged.
+        // VTX is a full-replacement set: a present array replaces the stored set (normalized);
+        // `Some([])` clears it; absent (`None`) leaves it unchanged.
         if let Some(vtx_types) = &request.vtx_types {
             pilot.vtx_types = normalize_vtx_types(vtx_types);
         }
         apply_string_edit(&mut pilot.multigp_id, &request.multigp_id);
         apply_string_edit(&mut pilot.velocidrone_id, &request.velocidrone_id);
-        if let Some(map) = attributes {
-            pilot.attributes = map;
-        }
         let updated = pilot.clone();
         dir.persist()?;
         Ok(updated)
@@ -661,7 +634,7 @@ pub struct PilotError {
 /// The class of a [`PilotError`], so a handler can pick the right status (issue #74).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PilotErrorKind {
-    /// A bad request value (missing callsign, invalid color/country, empty attribute key, …) → 400.
+    /// A bad request value (missing callsign, invalid color/country, …) → 400.
     Invalid,
     /// The addressed pilot id does not exist → 404.
     NotFound,
@@ -747,27 +720,6 @@ fn normalize_country(value: &Option<String>) -> Result<Option<String>, PilotErro
             "invalid country {raw:?}: expected a two-letter ISO 3166-1 alpha-2 code"
         )))
     }
-}
-
-/// Validate + normalize the **custom-attributes** bag (issue #74).
-///
-/// Each key is trimmed and must be non-empty (an empty/whitespace-only key is a validation
-/// [`PilotError`]); each value is trimmed. A normalized `BTreeMap` is returned (deterministic key
-/// order), which may be empty.
-fn normalize_attributes(
-    attributes: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>, PilotError> {
-    let mut out = BTreeMap::new();
-    for (key, value) in attributes {
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(PilotError::invalid(
-                "a custom attribute key must not be empty",
-            ));
-        }
-        out.insert(key.to_string(), value.trim().to_string());
-    }
-    Ok(out)
 }
 
 /// Validate a *set-or-clear* edit of a validated optional field (color/country), returning the
@@ -1040,10 +992,6 @@ mod tests {
                     vtx_types: vec![VtxType::DJI, VtxType::Other],
                     multigp_id: Some("mgp-7".to_string()),
                     velocidrone_id: None,
-                    attributes: BTreeMap::from([
-                        ("bib".to_string(), "7".to_string()),
-                        ("insurance".to_string(), "AMA-123".to_string()),
-                    ]),
                 })
                 .unwrap();
 
@@ -1058,11 +1006,6 @@ mod tests {
             assert_eq!(got.vtx_types, vec![VtxType::DJI, VtxType::Other]);
             assert_eq!(got.multigp_id.as_deref(), Some("mgp-7"));
             assert_eq!(got.velocidrone_id, None);
-            assert_eq!(got.attributes.get("bib").map(String::as_str), Some("7"));
-            assert_eq!(
-                got.attributes.get("insurance").map(String::as_str),
-                Some("AMA-123")
-            );
         }
         std::fs::remove_dir_all(&data_dir).ok();
     }
@@ -1155,94 +1098,6 @@ mod tests {
     }
 
     #[test]
-    fn attributes_set_replace_and_clear_with_empty_key_rejected() {
-        let dir = PilotDirectory::new(None).unwrap();
-        let created = dir
-            .create(&CreatePilotRequest {
-                callsign: "Attr".to_string(),
-                attributes: BTreeMap::from([
-                    (" bib ".to_string(), " 12 ".to_string()), // trimmed key + value
-                    ("sponsor".to_string(), "Acme".to_string()),
-                ]),
-                ..Default::default()
-            })
-            .unwrap();
-        assert_eq!(
-            created.attributes.get("bib").map(String::as_str),
-            Some("12")
-        );
-        assert_eq!(
-            created.attributes.get("sponsor").map(String::as_str),
-            Some("Acme")
-        );
-
-        // An empty (whitespace-only) key is rejected on create.
-        let bad = dir
-            .create(&CreatePilotRequest {
-                callsign: "BadAttr".to_string(),
-                attributes: BTreeMap::from([("   ".to_string(), "x".to_string())]),
-                ..Default::default()
-            })
-            .unwrap_err();
-        assert_eq!(bad.kind, PilotErrorKind::Invalid);
-
-        // Update replaces the whole bag when present.
-        let replaced = dir
-            .update(
-                &created.id,
-                &UpdatePilotRequest {
-                    attributes: Some(BTreeMap::from([("faa".to_string(), "FA123".to_string())])),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(replaced.attributes.len(), 1);
-        assert_eq!(
-            replaced.attributes.get("faa").map(String::as_str),
-            Some("FA123")
-        );
-
-        // An absent attributes field leaves the bag unchanged.
-        let unchanged = dir
-            .update(
-                &created.id,
-                &UpdatePilotRequest {
-                    name: OptionalEdit::Set("Nom".to_string()),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            unchanged.attributes.get("faa").map(String::as_str),
-            Some("FA123")
-        );
-
-        // A present empty map clears the bag.
-        let emptied = dir
-            .update(
-                &created.id,
-                &UpdatePilotRequest {
-                    attributes: Some(BTreeMap::new()),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert!(emptied.attributes.is_empty());
-
-        // An empty key in an update is rejected and leaves the bag untouched.
-        let bad_update = dir
-            .update(
-                &created.id,
-                &UpdatePilotRequest {
-                    attributes: Some(BTreeMap::from([(" ".to_string(), "y".to_string())])),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err();
-        assert_eq!(bad_update.kind, PilotErrorKind::Invalid);
-    }
-
-    #[test]
     fn vtx_types_replace_dedup_and_clear_via_empty_array() {
         let dir = PilotDirectory::new(None).unwrap();
         let created = dir
@@ -1323,6 +1178,28 @@ mod tests {
         let reopened = PilotDirectory::new(Some(data_dir.clone())).unwrap();
         let none = reopened.get(&PilotId("legacy-2".into())).unwrap();
         assert!(none.vtx_types.is_empty());
+
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[test]
+    fn loads_a_legacy_row_that_still_carries_a_dropped_attributes_field() {
+        // Pilots created before the custom-attributes bag was removed still have an `"attributes"`
+        // key on disk. The `Pilot` type no longer has the field; the row must still load (the stale
+        // key is simply ignored — `Pilot` must NOT use `deny_unknown_fields`), with no migration.
+        let data_dir =
+            std::env::temp_dir().join(format!("gridfpv-pilots-attrs-{}", short_suffix()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            pilots_path(&data_dir),
+            br#"[{"id":"legacy-attr","callsign":"OldAttr","vtx_types":["Analog"],"attributes":{"bib":"7","insurance":"AMA-123"}}]"#,
+        )
+        .unwrap();
+
+        let dir = PilotDirectory::new(Some(data_dir.clone())).unwrap();
+        let got = dir.get(&PilotId("legacy-attr".into())).unwrap();
+        assert_eq!(got.callsign, "OldAttr");
+        assert_eq!(got.vtx_types, vec![VtxType::Analog]);
 
         std::fs::remove_dir_all(&data_dir).ok();
     }

@@ -4,10 +4,10 @@
  *
  * A person opens the console, lands on the **home hub**, opens the **Pilots** page, and drives the
  * full directory CRUD against a **real** Director (open / no token, full-trust by default): **add**
- * a pilot (callsign + real name + country + color + a custom attribute) and see it listed; **edit**
- * it and **clear** the color and country, confirming they actually clear (the clear-via-`null`
- * wiring); then **remove** it. Every step is a real click/input in headless chromium on the real
- * `POST/PUT/DELETE /pilots` path — nothing mocked.
+ * a pilot (callsign + real name + country + color) and see it listed; **edit** it and **clear** the
+ * color and country, confirming they actually clear (the clear-via-`null` wiring); then **remove**
+ * it. Every step is a real click/input in headless chromium on the real `POST/PUT/DELETE /pilots`
+ * path — nothing mocked.
  *
  * Importing `test`/`expect` from `./observability.js` means a failure carries the full-stack dump
  * (browser console, page errors, the Director's server log). The worker's Director is shared, so
@@ -40,7 +40,7 @@ test('RD adds, edits (clearing color + country), and removes a directory pilot',
     timeout: 15_000
   });
 
-  // ── Add a pilot: callsign + real name + country + color + a custom attribute ───────────
+  // ── Add a pilot: callsign + real name + country + color ────────────────────────────────
   await page.getByRole('button', { name: '+ Add pilot' }).click();
   const addForm = page.getByRole('form', { name: 'Add pilot' });
   await expect(addForm).toBeVisible();
@@ -59,11 +59,6 @@ test('RD adds, edits (clearing color + country), and removes a directory pilot',
   await addForm.getByRole('button', { name: 'Country', exact: true }).click();
   await addForm.getByRole('textbox', { name: 'Search countries' }).fill('United States');
   await addForm.getByRole('option', { name: /United States/ }).click();
-
-  // A custom attribute row.
-  await addForm.getByRole('button', { name: '+ Add attribute' }).click();
-  await addForm.getByLabel('Attribute 1 key').fill('bib');
-  await addForm.getByLabel('Attribute 1 value').fill('42');
 
   // Submit (open Director — no token prompt). `exact` so it picks the dialog's submit, not the
   // page header's "+ Add pilot".
