@@ -51,9 +51,15 @@
   const phase = $derived(heat ? (live?.phase ?? 'Scheduled') : undefined);
 
   // The shared race clock (#62): ticks while Running, freezes on Unofficial/Final, resets
-  // otherwise. Reads the live phase reactively so it tracks the heat from one place — the
-  // SAME source the live screen drives, so the two never contradict.
-  const clock = useRaceClock(() => phase);
+  // otherwise. Server-time-authoritative (#62 follow-up) — it counts from the live state's
+  // `race_started_at` / `race_ended_at` (the server's race-go / race-end instants), the SAME
+  // anchor the live screen uses, so the header and the HUD read identically and accurately
+  // regardless of when each mounted (no more per-client wall-clock drift).
+  const clock = useRaceClock(
+    () => phase,
+    () => live?.race_started_at,
+    () => live?.race_ended_at
+  );
   // Show the heat clock while it's meaningful: ticking during the race (Running) and frozen at
   // the race-end value once the race has closed (Unofficial) and through finalize (Final). Before
   // the race starts (Scheduled/Staged/Armed) the clock reads 0, so we keep it hidden to avoid a
