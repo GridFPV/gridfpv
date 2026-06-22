@@ -44,6 +44,7 @@
   } from '@gridfpv/types';
   import { channelLabel, nodeChannelLabel } from '../lib/channels.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
+  import { fieldsForFormat, formatLabel, OPEN_PRACTICE } from '../lib/formats.js';
   import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -90,7 +91,6 @@
   // swapped for an active-channels picker driven by the event's **primary timer** (its `node_count`
   // seats, each labelled by its configured `available_channels[i]` channel). The picker reflects an
   // edited round's existing `AllChannels` selection.
-  const OPEN_PRACTICE = 'open_practice';
   // The effective primary timer (its node_count + available_channels lay out the picker).
   const primaryTimer = $derived<Timer | undefined>(session.primaryTimer);
   // One pickable node seat: its index, the raw MHz it's configured to (if any), and its label.
@@ -398,25 +398,24 @@
   }
 
   // --- The add/edit form -------------------------------------------------------------------------
-  // One form drives both add (no `editing`) and edit (an existing round id). The win condition and
-  // seeding are kept as discriminator + a couple of numeric knobs, assembled into the wire shapes
-  // on submit; params is a free key→value list.
+  // One form drives both add (no `editing`) and edit (an existing round id). Field order is **Label
+  // first, then Format**, then the remaining fields shown **dynamically** per the chosen format
+  // (Rounds form redesign item 2): see `lib/formats.ts` `fieldsForFormat`. The win condition and
+  // seeding are kept as discriminator + a couple of numeric knobs, assembled into the wire shapes on
+  // submit; each format's declared params are surfaced inline as proper labeled fields (item 4).
 
   type WinKind = 'Timed' | 'FirstToLaps' | 'BestLap' | 'BestConsecutive';
   type SeedKind = 'FromRoster' | 'FromRanking';
-  // A guided param the RD has added — the schema `key` it targets + the chosen raw `value` (the
-  // wire shape). The matching `FormatParam` schema (label/kind/options) is looked up by `key`.
-  interface ParamRow {
-    key: string;
-    value: string;
-  }
 
   let editing = $state<RoundId | undefined>(undefined);
   let formOpen = $state(false);
   let saving = $state(false);
 
   let label = $state('');
-  let selectedClasses = $state<Set<ClassId>>(new Set());
+  // The round's single eligible class (Rounds form redesign item 6): a round targets exactly one
+  // class, so this is a single-select `<select>` value rather than a multi-select. Stored on the
+  // wire as the existing one-element `classes` list. `''` = none chosen yet.
+  let selectedClass = $state<ClassId | ''>('');
   let format = $state('');
   let winKind = $state<WinKind>('Timed');
   let winSeconds = $state(120); // Timed window, in seconds (converted to micros on submit).
@@ -424,24 +423,24 @@
   let seedKind = $state<SeedKind>('FromRoster');
   let seedSource = $state<RoundId | ''>('');
   let seedTopN = $state(8);
-  // The guided params the RD has added (a subset of the chosen format's schema), each with its
-  // typed value. `addParam` (a dropdown of the format's not-yet-added params) appends one seeded
-  // from its default; `removeParam` unsets it. Stored as `key → value` strings, the wire shape.
-  let params = $state<ParamRow[]>([]);
+  // The chosen format's params, as a `key → value` map (Rounds form redesign item 4): every param
+  // the format declares is shown inline as a proper labeled field, seeded from its schema default
+  // (or the edited round's stored value). On a format switch the map is re-seeded to the new
+  // format's declared params. The wire shape is this same `key → value` map.
+  let paramValues = $state<Record<string, string>>({});
   // The round's channel mode (Static = fixed channels / channel-balanced heats; Per-heat = assigned
   // per heat, for brackets). Defaulted by format on the backend; the toggle overrides it.
   let channelMode = $state<ChannelMode>('PerHeat');
-  // Which param to add next (the `<select>`'s bound value), reset after each add.
-  let addParamKey = $state('');
   // ── Heat-lifecycle config (Slice 3) ─────────────────────────────────────────
   // The staging timer (entered as mm:ss, the field-friendly form), the randomized start-procedure
-  // window (min/max ms), and the completion grace (seconds). All map to the `RoundDef` fields the
-  // runtime + console read; sane defaults match the engine (5:00 staging, 2000–5000ms start, 3s grace).
+  // window (min/max as whole/decimal **seconds** — Rounds form redesign item 3), and the completion
+  // grace (seconds). All map to the `RoundDef` fields the runtime + console read; sane defaults match
+  // the engine (5:00 staging, 2.0–5.0s start, 30s grace — Rounds form redesign item 5).
   let stagingMinutes = $state(5); // staging timer minutes part
   let stagingSeconds = $state(0); // staging timer seconds part
-  let startMinMs = $state(2000); // randomized start hold: shortest
-  let startMaxMs = $state(5000); // randomized start hold: longest
-  let graceSeconds = $state(3); // grace window after the win condition, in seconds
+  let startMinSeconds = $state(2); // randomized start hold: shortest, in seconds (→ min_delay_ms)
+  let startMaxSeconds = $state(5); // randomized start hold: longest, in seconds (→ max_delay_ms)
+  let graceSeconds = $state(30); // grace window after the win condition, in seconds
   // ── Open-practice duration (open-practice refinement) ────────────────────────
   // The **time limit** for an open-practice round — the practice duration, entered as a single
   // "Minutes" field. Blank = no limit (the RD ends the practice manually). When set, the runtime
@@ -451,36 +450,33 @@
   // is distinct from 0 — blank ⇒ no limit, where 0/blank both `buildTimeLimitSecs()` → undefined.
   let timeLimitMinutes = $state('');
 
-  // Open-practice format (open-practice Slice 2): swaps the class/seeding inputs for the
-  // active-channels picker, and is submittable on a label + at least one active channel (no classes).
+  // The fields the chosen format shows (Rounds form redesign item 2) — drives which dynamic sections
+  // render. Open practice swaps the class/win/seeding/channel-mode block for the active-channels
+  // picker + time limit; every other format shows the full block plus its declared params (item 4).
+  const fields = $derived(fieldsForFormat(format));
+  // Open-practice format (open-practice Slice 2): submittable on a label + at least one active
+  // channel (no classes).
   const isOpenPractice = $derived(format === OPEN_PRACTICE);
   const canSubmitOpenPractice = $derived(
     isOpenPractice && label.trim().length > 0 && selectedNodes.size > 0
   );
 
-  // Whether the eligible-classes pick reads as open/practice (all selected) or a class round (one).
+  // The hint under the single-class dropdown (Rounds form redesign item 6): a round targets exactly
+  // one class, so this just nudges to pick one.
   const classHint = $derived(
-    selectedClasses.size === 0
-      ? 'Pick at least one eligible class.'
-      : selectedClasses.size === eventClasses.length && eventClasses.length > 1
-        ? 'All classes — an open / practice round.'
-        : selectedClasses.size === 1
-          ? 'One class — a class round.'
-          : `${selectedClasses.size} classes eligible.`
+    selectedClass === '' ? 'Pick the class this round runs for.' : 'This round runs for one class.'
   );
 
   // The other rounds a FromRanking seed may draw from (every round but the one being edited).
   const sourceCandidates = $derived(rounds.filter((r) => r.id !== editing));
 
-  // The chosen format's declared params (its schema), keyed for lookup, and the ones not yet added
-  // (what the "+ Add param" dropdown offers). Only the chosen format's params are ever offered.
+  // The chosen format's declared params (its schema), in display order — each surfaced inline as a
+  // proper labeled field (Rounds form redesign item 4). Only the chosen format's params are shown.
   const formatParams = $derived<FormatParam[]>(
     formatSchemas.find((s) => s.name === format)?.params ?? []
   );
-  const paramByKey = $derived(new Map(formatParams.map((p) => [p.key, p] as const)));
-  const addableParams = $derived(formatParams.filter((p) => !params.some((r) => r.key === p.key)));
 
-  /** The seed value for a freshly-added param: its schema default, else a kind-appropriate blank. */
+  /** The seed value for a param: its schema default, else a kind-appropriate blank. */
   function defaultValueFor(p: FormatParam): string {
     if (p.default !== undefined && p.default !== null) return p.default;
     if (p.kind === 'bool') return 'false';
@@ -488,42 +484,34 @@
     return '';
   }
 
-  // When the format changes, drop any added param that the new format doesn't declare (only the
-  // chosen format's params are offered). Tracked so it fires on a real format switch, not on every
-  // keystroke; the initial open/edit seed runs before this settles, then this reconciles to it.
+  // Re-seed the param values when the format changes: every param the new format declares gets a
+  // shown field, keeping the edited round's stored value where the param carries over and seeding
+  // from the schema default otherwise. Tracked so it fires on a real format switch, not every
+  // keystroke; the initial open/edit seed (which loads the round's params) runs before this settles,
+  // then this reconciles to the chosen format's declared set.
   let lastParamFormat = $state('');
   $effect(() => {
     // Only reconcile once the schemas have loaded and the chosen format is among them — otherwise an
-    // edit whose params load before the schemas would prune valid params against an empty schema.
+    // edit whose params load before the schemas would seed against an empty schema.
     const known = formatSchemas.some((s) => s.name === format);
     if (known && format !== lastParamFormat) {
       lastParamFormat = format;
-      const valid = new Set(formatParams.map((p) => p.key));
-      const pruned = params.filter((r) => valid.has(r.key));
-      if (pruned.length !== params.length) params = pruned;
-      addParamKey = '';
+      const next: Record<string, string> = {};
+      for (const p of formatParams) {
+        next[p.key] = paramValues[p.key] ?? defaultValueFor(p);
+      }
+      paramValues = next;
     }
   });
 
-  function addParam() {
-    const key = addParamKey;
-    if (!key) return;
-    const schema = paramByKey.get(key);
-    if (!schema || params.some((r) => r.key === key)) return;
-    params = [...params, { key, value: defaultValueFor(schema) }];
-    addParamKey = '';
-  }
-  function removeParam(key: string) {
-    params = params.filter((r) => r.key !== key);
-  }
   function setParamValue(key: string, value: string) {
-    params = params.map((r) => (r.key === key ? { ...r, value } : r));
+    paramValues = { ...paramValues, [key]: value };
   }
 
   function resetForm() {
     editing = undefined;
     label = '';
-    selectedClasses = new Set();
+    selectedClass = '';
     format = formats[0] ?? '';
     winKind = 'Timed';
     winSeconds = 120;
@@ -532,15 +520,15 @@
     seedSource = '';
     seedTopN = 8;
     selectedNodes = new Set();
-    params = [];
+    paramValues = {};
+    lastParamFormat = ''; // force the format effect to re-seed the new format's params
     channelMode = 'PerHeat';
-    addParamKey = '';
-    // Heat-lifecycle config defaults — match the engine (5:00 staging, 2000–5000ms, 3s grace).
+    // Heat-lifecycle config defaults — match the engine (5:00 staging, 2.0–5.0s start, 30s grace).
     stagingMinutes = 5;
     stagingSeconds = 0;
-    startMinMs = 2000;
-    startMaxMs = 5000;
-    graceSeconds = 3;
+    startMinSeconds = 2;
+    startMaxSeconds = 5;
+    graceSeconds = 30;
     timeLimitMinutes = ''; // blank = no limit
   }
 
@@ -552,11 +540,16 @@
   function openEdit(round: RoundDef) {
     editing = round.id;
     label = round.label;
-    selectedClasses = new Set(round.classes);
+    // A round stores its eligible classes as a list; the UI targets one class, so seed the
+    // single-select from the first (a legacy multi-class round shows its first class). Open practice
+    // carries an empty list, leaving the dropdown unset (it has no class field).
+    selectedClass = round.classes[0] ?? '';
     format = round.format;
-    params = Object.entries(round.params ?? {}).map(([key, value]) => ({ key, value }));
+    // Seed the param values from the round's stored params; the format effect then fills any of the
+    // format's declared params this round didn't set from their defaults.
+    paramValues = { ...(round.params ?? {}) };
+    lastParamFormat = ''; // force the format effect to re-seed against this round's format
     channelMode = round.channel_mode ?? 'PerHeat';
-    addParamKey = '';
 
     const wc = round.win_condition;
     if (typeof wc === 'string') {
@@ -586,16 +579,17 @@
       selectedNodes = new Set(seed.AllChannels.channels);
     }
 
-    // Heat-lifecycle config (Slice 3): staging timer (split mm:ss), the randomized start window, and
-    // the grace. Each falls back to the engine default when the round predates these fields.
+    // Heat-lifecycle config (Slice 3): staging timer (split mm:ss), the randomized start window
+    // (stored ms → shown as **seconds**, Rounds form redesign item 3), and the grace. Each falls back
+    // to the engine default when the round predates these fields.
     const stagingTotal = round.staging_timer_secs ?? 300;
     stagingMinutes = Math.floor(stagingTotal / 60);
     stagingSeconds = stagingTotal % 60;
-    startMinMs = round.start_procedure?.min_delay_ms ?? 2000;
-    startMaxMs = round.start_procedure?.max_delay_ms ?? 5000;
+    startMinSeconds = msToSeconds(round.start_procedure?.min_delay_ms ?? 2000);
+    startMaxSeconds = msToSeconds(round.start_procedure?.max_delay_ms ?? 5000);
     const grace = round.grace_window;
     graceSeconds =
-      grace && typeof grace !== 'string' ? Math.round(grace.Duration.micros / 1_000_000) : 3;
+      grace && typeof grace !== 'string' ? Math.round(grace.Duration.micros / 1_000_000) : 30;
 
     // Open-practice duration (open-practice refinement): reflect an existing time limit into the
     // single Minutes input. Unset (no limit) reads back as blank (`''`).
@@ -610,11 +604,17 @@
     resetForm();
   }
 
-  function toggleClass(id: ClassId) {
-    const next = new Set(selectedClasses);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    selectedClasses = next;
+  /**
+   * Whole/decimal seconds from a stored millisecond delay (Rounds form redesign item 3): the
+   * start-procedure inputs read/write seconds while the wire stays in ms. Rounded to one decimal so
+   * a 2500ms hold reads back as `2.5`, not `2.5000001`.
+   */
+  function msToSeconds(ms: number): number {
+    return Math.round((ms / 1000) * 10) / 10;
+  }
+  /** Whole milliseconds from a seconds input (the inverse of {@link msToSeconds}). */
+  function secondsToMs(seconds: number): number {
+    return Math.max(0, Math.round((Number(seconds) || 0) * 1000));
   }
 
   function buildWinCondition(): WinCondition {
@@ -640,11 +640,16 @@
     return 'FromRoster';
   }
 
+  /**
+   * The round's params (Rounds form redesign item 4): the chosen format's declared params, each
+   * with its (default-or-edited) value. Open practice declares none, so its map is empty. Only keys
+   * the current format declares are sent — a stale value left over from a previous format is dropped.
+   */
   function buildParams(): { [key: string]: string } {
     const out: { [key: string]: string } = {};
-    for (const { key, value } of params) {
-      const k = key.trim();
-      if (k) out[k] = value;
+    for (const p of formatParams) {
+      const value = paramValues[p.key];
+      if (value !== undefined) out[p.key] = value;
     }
     return out;
   }
@@ -658,12 +663,14 @@
   }
 
   /**
-   * The randomized-delay start procedure. The min is clamped ≥ 0 and the max ≥ min (a mis-ordered
-   * pair becomes a point delay — the same defensive rule the runtime applies).
+   * The randomized-delay start procedure. The seconds inputs are converted to the stored `*_delay_ms`
+   * (Rounds form redesign item 3 — the inputs are seconds, the wire stays ms). The min is clamped ≥ 0
+   * and the max ≥ min (a mis-ordered pair becomes a point delay — the same defensive rule the runtime
+   * applies).
    */
   function buildStartProcedure(): StartProcedure {
-    const min = Math.max(0, Math.round(startMinMs || 0));
-    const max = Math.max(min, Math.round(startMaxMs || 0));
+    const min = secondsToMs(startMinSeconds);
+    const max = Math.max(min, secondsToMs(startMaxSeconds));
     return { mode: 'randomized-delay', min_delay_ms: min, max_delay_ms: max };
   }
 
@@ -682,13 +689,13 @@
     return total > 0 ? total : undefined;
   }
 
-  // The form is submittable once it has a label, at least one eligible class, a format, and — when
+  // The form is submittable once it has a label, a single eligible class, a format, and — when
   // seeding from a ranking — a chosen source round.
   const canSubmit = $derived(
     isOpenPractice
       ? canSubmitOpenPractice
       : label.trim().length > 0 &&
-          selectedClasses.size > 0 &&
+          selectedClass !== '' &&
           format.length > 0 &&
           (seedKind === 'FromRoster' || (seedKind === 'FromRanking' && !!seedSource))
   );
@@ -696,11 +703,11 @@
   async function submit() {
     if (saving || !canSubmit) return;
     saving = true;
-    // Eligible classes in the event's selection order (a stable, sensible order). Open practice is
+    // A round targets one class, stored on the wire as a one-element `classes` list. Open practice is
     // class-less and seeds from the active channels (node indices) instead.
     const req: NewRoundReq = {
       label: label.trim(),
-      classes: isOpenPractice ? [] : eventClassIds.filter((id) => selectedClasses.has(id)),
+      classes: isOpenPractice || selectedClass === '' ? [] : [selectedClass],
       format,
       params: buildParams(),
       // Open practice does no scoring (open-practice refinement): send NO win condition — the backend
@@ -812,7 +819,7 @@
             <div class="round-main">
               <div class="round-head">
                 <span class="round-label">{round.label}</span>
-                <span class="round-format">{round.format}</span>
+                <span class="round-format">{formatLabel(round.format)}</span>
               </div>
               <div class="round-meta">
                 <span class="meta-chip">
@@ -850,40 +857,38 @@
       >
         <h3 class="form-title">{editing ? 'Edit round' : 'New round'}</h3>
 
+        <!-- Field order (Rounds form redesign item 2): Label first, then Format, then the remaining
+             fields shown dynamically per the chosen format (`fields` ← `fieldsForFormat`). -->
         <Field label="Label" required>
           <Input bind:value={label} placeholder="e.g. Qualifying R1" aria-label="Label" />
         </Field>
 
-        {#if !isOpenPractice}
-          <Field label="Eligible classes" required hint={classHint}>
-            <div class="class-picker" role="group" aria-label="Eligible classes">
-              {#each eventClasses as cls (cls.id)}
-                <label class="class-chip">
-                  <input
-                    type="checkbox"
-                    checked={selectedClasses.has(cls.id)}
-                    onchange={() => toggleClass(cls.id)}
-                    aria-label={`Eligible ${cls.name}`}
-                  />
-                  <span>{cls.name}</span>
-                </label>
-              {/each}
-            </div>
-          </Field>
-        {/if}
+        <Field label="Format" required>
+          <Select bind:value={format} aria-label="Format">
+            {#each formats as f (f)}
+              <!-- Friendly label shown (Rounds form redesign item 1); the value stays the key. -->
+              <option value={f}>{formatLabel(f)}</option>
+            {/each}
+          </Select>
+        </Field>
 
-        <div class="form-grid">
-          <Field label="Format" required>
-            <Select bind:value={format} aria-label="Format">
-              {#each formats as f (f)}
-                <option value={f}>{f}</option>
+        <!-- Eligible class — a single-select dropdown (Rounds form redesign item 6): a round targets
+             exactly one class. Stored on the wire as a one-element `classes` list. -->
+        {#if fields.eligibleClass}
+          <Field label="Eligible class" required hint={classHint}>
+            <Select bind:value={selectedClass} aria-label="Eligible class">
+              <option value="" disabled>Choose a class…</option>
+              {#each eventClasses as cls (cls.id)}
+                <option value={cls.id}>{cls.name}</option>
               {/each}
             </Select>
           </Field>
+        {/if}
 
-          <!-- Open practice does no scoring (open-practice refinement): hide the win-condition input
-               and offer the practice **Time limit** instead. A normal round keeps its win condition. -->
-          {#if !isOpenPractice}
+        <!-- Open practice does no scoring (open-practice refinement): hide the win-condition input and
+             offer the practice **Time limit** instead. A normal round keeps its win condition. -->
+        {#if fields.winCondition}
+          <div class="form-grid">
             <Field label="Win condition">
               <Select bind:value={winKind} aria-label="Win condition">
                 <option value="Timed">Timed window</option>
@@ -902,25 +907,27 @@
                 <Input type="number" min="1" bind:value={winLaps} aria-label="Laps" />
               </Field>
             {/if}
-          {:else}
-            <Field
-              label="Time limit (minutes)"
-              hint="Optional — blank = no limit (end the practice manually). When set, the practice auto-ends after this many minutes."
-            >
-              <div class="mmss" role="group" aria-label="Time limit">
-                <Input
-                  type="number"
-                  min="0"
-                  bind:value={timeLimitMinutes}
-                  aria-label="Time limit minutes"
-                />
-                <span class="mmss-sep" aria-hidden="true">min</span>
-              </div>
-            </Field>
-          {/if}
-        </div>
+          </div>
+        {/if}
 
-        {#if isOpenPractice}
+        {#if fields.timeLimit}
+          <Field
+            label="Time limit (minutes)"
+            hint="Optional — blank = no limit (end the practice manually). When set, the practice auto-ends after this many minutes."
+          >
+            <div class="mmss" role="group" aria-label="Time limit">
+              <Input
+                type="number"
+                min="0"
+                bind:value={timeLimitMinutes}
+                aria-label="Time limit minutes"
+              />
+              <span class="mmss-sep" aria-hidden="true">min</span>
+            </div>
+          </Field>
+        {/if}
+
+        {#if fields.activeChannels}
           <!-- Open-practice active-channels picker (open-practice Slice 2): the round runs one open
                heat over the primary timer's active node seats; pick which channels are live. Saved as
                `seeding: AllChannels { channels: [<node indices>] }` with no classes. -->
@@ -964,7 +971,43 @@
           </Field>
         {/if}
 
-        {#if !isOpenPractice}
+        <!-- Seeding (Rounds form redesign item 2): roster-seeded (qual) or ranking-seeded (bracket).
+             The FromRanking source-round + top-N reveals for the bracket / cut case. -->
+        {#if fields.seeding}
+          <Field
+            label="Seeding"
+            hint={seedKind === 'FromRanking'
+              ? 'Draw this round from a prior round’s ranking (the bracket / cut case).'
+              : 'Draw straight from the eligible class’ roster membership.'}
+          >
+            <Select bind:value={seedKind} aria-label="Seeding">
+              <option value="FromRoster">From roster</option>
+              <option value="FromRanking">From ranking</option>
+            </Select>
+          </Field>
+
+          {#if seedKind === 'FromRanking'}
+            <div class="form-grid">
+              <Field label="Source round" required>
+                {#if sourceCandidates.length === 0}
+                  <p class="inline-note">Add another round first to seed from its ranking.</p>
+                {:else}
+                  <Select bind:value={seedSource} aria-label="Source round">
+                    <option value="" disabled>Choose a round…</option>
+                    {#each sourceCandidates as r (r.id)}
+                      <option value={r.id}>{r.label}</option>
+                    {/each}
+                  </Select>
+                {/if}
+              </Field>
+              <Field label="Top N advance">
+                <Input type="number" min="1" bind:value={seedTopN} aria-label="Top N" />
+              </Field>
+            </div>
+          {/if}
+        {/if}
+
+        {#if fields.channelMode}
           <Field
             label="Channel mode"
             hint={channelMode === 'Static'
@@ -976,6 +1019,57 @@
               <option value="PerHeat">Per-heat</option>
             </Select>
           </Field>
+        {/if}
+
+        <!-- Format params (Rounds form redesign item 4): the chosen format's declared params, each a
+             proper labeled field seeded from its default. The generic "Format Params" add/remove
+             editor is gone — these knobs (rounds, heat_size, metric, bracket_reset, main_size) are
+             meaningful per format, so they show inline. Open practice declares none, so this is empty. -->
+        {#if fields.params && formatParams.length > 0}
+          <fieldset class="config-group">
+            <legend class="config-legend">Format options</legend>
+            <div class="params">
+              {#each formatParams as schema (schema.key)}
+                {@const value = paramValues[schema.key] ?? ''}
+                <Field label={schema.label}>
+                  {#if schema.kind === 'bool'}
+                    <label class="param-toggle">
+                      <input
+                        type="checkbox"
+                        checked={value === 'true' || value === '1'}
+                        aria-label={`${schema.label} value`}
+                        onchange={(e) =>
+                          setParamValue(
+                            schema.key,
+                            (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false'
+                          )}
+                      />
+                      <span>{value === 'true' || value === '1' ? 'On' : 'Off'}</span>
+                    </label>
+                  {:else if schema.kind === 'enum'}
+                    <Select
+                      {value}
+                      aria-label={`${schema.label} value`}
+                      onchange={(e: Event) =>
+                        setParamValue(schema.key, (e.currentTarget as HTMLSelectElement).value)}
+                    >
+                      {#each schema.options ?? [] as opt (opt)}
+                        <option value={opt}>{opt}</option>
+                      {/each}
+                    </Select>
+                  {:else}
+                    <Input
+                      type="number"
+                      {value}
+                      aria-label={`${schema.label} value`}
+                      oninput={(e: Event) =>
+                        setParamValue(schema.key, (e.currentTarget as HTMLInputElement).value)}
+                    />
+                  {/if}
+                </Field>
+              {/each}
+            </div>
+          </fieldset>
         {/if}
 
         <fieldset class="config-group">
@@ -1008,147 +1102,34 @@
               />
             </Field>
           </div>
+          <!-- Start procedure delays entered in **seconds** (Rounds form redesign item 3); converted
+               to/from the stored `*_delay_ms` on save/load. -->
           <Field
             label="Start procedure"
-            hint="Randomized hold before race-go (ms) — the “arm… and… go”. Max is held ≥ min."
+            hint="Randomized hold before race-go (seconds) — the “arm… and… go”. Max is held ≥ min."
           >
             <div class="form-grid">
-              <Field label="Min delay (ms)">
+              <Field label="Min delay (seconds)">
                 <Input
                   type="number"
                   min="0"
-                  bind:value={startMinMs}
-                  aria-label="Start min delay ms"
+                  step="0.1"
+                  bind:value={startMinSeconds}
+                  aria-label="Start min delay seconds"
                 />
               </Field>
-              <Field label="Max delay (ms)">
+              <Field label="Max delay (seconds)">
                 <Input
                   type="number"
                   min="0"
-                  bind:value={startMaxMs}
-                  aria-label="Start max delay ms"
+                  step="0.1"
+                  bind:value={startMaxSeconds}
+                  aria-label="Start max delay seconds"
                 />
               </Field>
             </div>
           </Field>
         </fieldset>
-
-        {#if !isOpenPractice}
-          <Field
-            label="Seeding"
-            hint={seedKind === 'FromRanking'
-              ? 'Draw this round from a prior round’s ranking (the bracket / cut case).'
-              : 'Draw straight from the eligible classes’ roster membership.'}
-          >
-            <Select bind:value={seedKind} aria-label="Seeding">
-              <option value="FromRoster">From roster</option>
-              <option value="FromRanking">From ranking</option>
-            </Select>
-          </Field>
-
-          {#if seedKind === 'FromRanking'}
-            <div class="form-grid">
-              <Field label="Source round" required>
-                {#if sourceCandidates.length === 0}
-                  <p class="inline-note">Add another round first to seed from its ranking.</p>
-                {:else}
-                  <Select bind:value={seedSource} aria-label="Source round">
-                    <option value="" disabled>Choose a round…</option>
-                    {#each sourceCandidates as r (r.id)}
-                      <option value={r.id}>{r.label}</option>
-                    {/each}
-                  </Select>
-                {/if}
-              </Field>
-              <Field label="Top N advance">
-                <Input type="number" min="1" bind:value={seedTopN} aria-label="Top N" />
-              </Field>
-            </div>
-          {/if}
-        {/if}
-
-        <Field
-          label="Format params"
-          hint={formatParams.length === 0
-            ? 'This format has no configurable params.'
-            : 'Add only the knobs this format declares; each value is typed by the param. Remove one to unset it.'}
-        >
-          <div class="params">
-            {#each params as row (row.key)}
-              {@const schema = paramByKey.get(row.key)}
-              <div class="param-row">
-                <span class="param-name">{schema?.label ?? row.key}</span>
-                <div class="param-input">
-                  {#if schema?.kind === 'bool'}
-                    <label class="param-toggle">
-                      <input
-                        type="checkbox"
-                        checked={row.value === 'true'}
-                        aria-label={`${schema?.label ?? row.key} value`}
-                        onchange={(e) =>
-                          setParamValue(
-                            row.key,
-                            (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false'
-                          )}
-                      />
-                      <span>{row.value === 'true' ? 'On' : 'Off'}</span>
-                    </label>
-                  {:else if schema?.kind === 'enum'}
-                    <Select
-                      value={row.value}
-                      aria-label={`${schema?.label ?? row.key} value`}
-                      onchange={(e: Event) =>
-                        setParamValue(row.key, (e.currentTarget as HTMLSelectElement).value)}
-                    >
-                      {#each schema.options ?? [] as opt (opt)}
-                        <option value={opt}>{opt}</option>
-                      {/each}
-                    </Select>
-                  {:else}
-                    <Input
-                      type="number"
-                      value={row.value}
-                      aria-label={`${schema?.label ?? row.key} value`}
-                      oninput={(e: Event) =>
-                        setParamValue(row.key, (e.currentTarget as HTMLInputElement).value)}
-                    />
-                  {/if}
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  type="button"
-                  onclick={() => removeParam(row.key)}
-                  aria-label={`Remove ${schema?.label ?? row.key}`}
-                >
-                  ✕
-                </Button>
-              </div>
-            {/each}
-
-            {#if addableParams.length > 0}
-              <div class="param-add">
-                <Select bind:value={addParamKey} aria-label="Add param">
-                  <option value="">+ Add param…</option>
-                  {#each addableParams as p (p.key)}
-                    <option value={p.key}>{p.label}</option>
-                  {/each}
-                </Select>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  type="button"
-                  onclick={addParam}
-                  disabled={addParamKey === ''}
-                >
-                  Add
-                </Button>
-              </div>
-            {:else if formatParams.length > 0}
-              <p class="inline-note">All of this format’s params are added.</p>
-            {/if}
-          </div>
-        </Field>
 
         <div class="form-actions">
           <Button variant="ghost" type="button" onclick={cancel} disabled={saving}>Cancel</Button>
@@ -1182,6 +1163,7 @@
           <section class="heat-round" aria-label={`Heats for ${round.label}`}>
             <Collapsible title={round.label} id={`round-${round.id}`} bind:open={rc.open}>
               {#snippet summary()}
+                <span class="meta-chip">{formatLabel(round.format)}</span>
                 <span class="meta-chip">
                   {round.classes.length === eventClasses.length && eventClasses.length > 1
                     ? 'All classes'
@@ -1549,29 +1531,6 @@
     font-weight: var(--gf-font-weight-bold);
     color: var(--gf-text-muted);
   }
-  .class-picker {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--gf-space-2);
-  }
-  .class-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--gf-space-2);
-    padding: 0.3rem var(--gf-space-3);
-    border: 1px solid var(--gf-border);
-    border-radius: var(--gf-radius-sm);
-    background: var(--gf-surface-sunken);
-    font-size: var(--gf-font-size-md);
-    color: var(--gf-text);
-    cursor: pointer;
-  }
-  .class-chip input {
-    width: 1.05rem;
-    height: 1.05rem;
-    accent-color: var(--gf-accent);
-    cursor: pointer;
-  }
   /* Open-practice active-channels picker — a node-seat checkbox grid. */
   .channel-picker {
     display: grid;
@@ -1623,21 +1582,7 @@
   .params {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-2);
-  }
-  .param-row {
-    display: grid;
-    grid-template-columns: minmax(8rem, 1fr) 1fr auto;
-    gap: var(--gf-space-2);
-    align-items: center;
-  }
-  .param-name {
-    font-size: var(--gf-font-size-md);
-    font-weight: var(--gf-font-weight-medium);
-    color: var(--gf-text);
-  }
-  .param-input {
-    min-width: 0;
+    gap: var(--gf-space-3);
   }
   .param-toggle {
     display: inline-flex;
@@ -1652,12 +1597,6 @@
     height: 1.05rem;
     accent-color: var(--gf-accent);
     cursor: pointer;
-  }
-  .param-add {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: var(--gf-space-2);
-    align-items: center;
   }
   .inline-note {
     margin: 0;

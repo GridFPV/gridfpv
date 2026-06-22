@@ -101,15 +101,15 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
   const form = page.getByRole('form', { name: 'Add round' });
   await expect(form).toBeVisible();
   await form.getByLabel('Label').fill('Slice3 Config');
-  await form.getByLabel('Eligible Open Class').check();
+  await form.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
   await form.getByLabel('Staging minutes').fill('3');
   await form.getByLabel('Staging seconds').fill('30');
-  await form.getByLabel('Start min delay ms').fill('1500');
-  await form.getByLabel('Start max delay ms').fill('3500');
+  await form.getByLabel('Start min delay seconds').fill('1.5');
+  await form.getByLabel('Start max delay seconds').fill('3.5');
   await form.getByLabel('Grace window seconds').fill('4');
-  // The Start & timing fieldset is present and populated.
+  // The Start & timing fieldset is present and populated (start delays in seconds — item 3).
   await expect(form.getByLabel('Staging minutes')).toHaveValue('3');
-  await expect(form.getByLabel('Start max delay ms')).toHaveValue('3500');
+  await expect(form.getByLabel('Start max delay seconds')).toHaveValue('3.5');
   await shot(form, 'round-config-form');
 
   // Clean up: cancel the form, then back on Classes & Roster deselect the class so the shared

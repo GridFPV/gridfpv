@@ -74,14 +74,16 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   const form = page.getByRole('form', { name: 'Add round' });
   await expect(form).toBeVisible();
   await form.getByLabel('Label').fill(LABEL);
-  await form.getByLabel('Eligible Open Class').check();
   await form.getByLabel('Format').selectOption('timed_qual');
+  // The eligible class is a single-select dropdown (Rounds form redesign item 6).
+  await form.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
   await form.getByLabel('Win condition').selectOption('BestLap');
-  // Heat-lifecycle config (Slice 3): a 3:30 staging window + a 1500–3500ms randomized start hold.
+  // Heat-lifecycle config (Slice 3): a 3:30 staging window + a 1.5–3.5s randomized start hold (the
+  // start-procedure delays are entered in seconds — Rounds form redesign item 3).
   await form.getByLabel('Staging minutes').fill('3');
   await form.getByLabel('Staging seconds').fill('30');
-  await form.getByLabel('Start min delay ms').fill('1500');
-  await form.getByLabel('Start max delay ms').fill('3500');
+  await form.getByLabel('Start min delay seconds').fill('1.5');
+  await form.getByLabel('Start max delay seconds').fill('3.5');
   await page.getByRole('button', { name: 'Add round', exact: true }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
 
@@ -89,7 +91,8 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   const list = page.getByRole('list').filter({ hasText: LABEL });
   const row = list.getByRole('listitem').filter({ hasText: LABEL });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  await expect(row.getByText('timed_qual')).toBeVisible();
+  // The friendly format name shows in the list (Rounds form redesign item 1).
+  await expect(row.getByText('Qualifying', { exact: true })).toBeVisible();
   await expect(row.getByText('From roster')).toBeVisible();
 
   // ── It persisted on the Director: a reload resumes into the event with the round listed ─────
@@ -106,8 +109,8 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   await expect(editForm).toBeVisible();
   await expect(editForm.getByLabel('Staging minutes')).toHaveValue('3');
   await expect(editForm.getByLabel('Staging seconds')).toHaveValue('30');
-  await expect(editForm.getByLabel('Start min delay ms')).toHaveValue('1500');
-  await expect(editForm.getByLabel('Start max delay ms')).toHaveValue('3500');
+  await expect(editForm.getByLabel('Start min delay seconds')).toHaveValue('1.5');
+  await expect(editForm.getByLabel('Start max delay seconds')).toHaveValue('3.5');
   const newLabel = `${LABEL}-v2`;
   await editForm.getByLabel('Label').fill(newLabel);
   await page.getByRole('button', { name: 'Save round' }).click();
@@ -180,15 +183,14 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
   const form = page.getByRole('form', { name: 'Add round' });
   await expect(form).toBeVisible();
   await form.getByLabel('Label').fill(LABEL);
-  await form.getByLabel('Eligible Open Class').check();
   await form.getByLabel('Format').selectOption('timed_qual');
+  await form.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
 
   // The channel-mode toggle defaults from the format; force Static.
   await form.getByLabel('Channel mode').selectOption('Static');
 
-  // The guided params dropdown offers only this format's params; add Rounds and set it to 5.
-  await form.getByLabel('Add param').selectOption('rounds');
-  await form.getByRole('button', { name: 'Add', exact: true }).click();
+  // The format's params show inline as labeled fields (Rounds form redesign item 4); Rounds is
+  // seeded from its schema default — set it to 5.
   const roundsInput = form.getByLabel('Rounds value');
   await expect(roundsInput).toHaveValue('3'); // seeded from the schema default
   await roundsInput.fill('5');

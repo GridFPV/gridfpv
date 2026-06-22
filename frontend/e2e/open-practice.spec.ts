@@ -60,7 +60,8 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   // the win-condition input (open practice does no scoring), and reveals the optional Time limit.
   await form.getByLabel('Format').selectOption('open_practice');
   await expect(form.getByRole('group', { name: 'Active channels' })).toBeVisible();
-  await expect(form.getByLabel('Eligible Open Class')).toBeHidden();
+  // The eligible-class dropdown (Rounds form redesign item 6) is gone for open practice.
+  await expect(form.getByLabel('Eligible class')).toBeHidden();
   await expect(form.getByLabel('Win condition')).toBeHidden();
   // The time limit is now a single Minutes field (no separate hours input).
   await expect(form.getByLabel('Time limit minutes')).toBeVisible();
@@ -84,7 +85,8 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   // The round lists as an open-practice round seeded from 2 channels, showing its time limit.
   const row = page.getByRole('listitem').filter({ hasText: LABEL });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  await expect(row.getByText('open_practice')).toBeVisible();
+  // The friendly format name shows in the list (Rounds form redesign item 1), not the raw key.
+  await expect(row.getByText('Open Practice', { exact: true })).toBeVisible();
   await expect(row.getByText(/Open practice · 2 channel/)).toBeVisible();
   await expect(row.getByText('1m', { exact: true })).toBeVisible();
 
