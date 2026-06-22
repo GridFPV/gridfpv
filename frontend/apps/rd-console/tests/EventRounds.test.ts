@@ -65,7 +65,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       win_condition: 'BestLap',
       seeding: 'FromRoster'
     };
-    const createRoundImpl = vi.fn(async () => created);
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session } = makeTestSession({
       ...impls,
       createRoundImpl,
@@ -111,7 +111,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       format: 'single_elim',
       seeding: { FromRanking: { source_round: 'r1', top_n: 8 } }
     };
-    const createRoundImpl = vi.fn(async () => updated);
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => updated);
     const { session } = makeTestSession({ ...impls, createRoundImpl, event: EVENT });
     render(EventRounds, { session });
 
@@ -157,7 +157,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
 
   it('removes a round via deleteRound', async () => {
     const impls = baseImpls();
-    const deleteRoundImpl = vi.fn(async () => ({ ...EVENT, rounds: [] }));
+    const deleteRoundImpl = vi.fn(async (_b, _e, _id) => ({ ...EVENT, rounds: [] }));
     const { session } = makeTestSession({ ...impls, deleteRoundImpl, event: EVENT });
     render(EventRounds, { session });
 
