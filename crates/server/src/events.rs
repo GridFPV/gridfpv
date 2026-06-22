@@ -35,6 +35,9 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use gridfpv_engine::format::FormatRegistry;
+use gridfpv_engine::scoring::WinCondition;
+use gridfpv_events::RoundId;
 use gridfpv_storage::{InMemoryLog, SqliteLog};
 
 use crate::app::AppState;
@@ -165,6 +168,20 @@ pub struct EventMeta {
     /// #115), so it is restart-safe for free.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub classes_membership: Vec<ClassMembership>,
+    /// The event's **rounds** (race redesign Slice 2a) — the event-level, class-tagged, *dynamic*
+    /// format-instances this event runs. A [`RoundDef`] scopes a format (a
+    /// [`FormatRegistry`](gridfpv_engine::format::FormatRegistry) name) and its config to one or
+    /// more eligible [`classes`](Self::classes), with a [`SeedingRule`] for how the field is drawn.
+    /// Practice / qualifying rounds are added **as-you-go** through
+    /// [`add_round`](EventRegistry::add_round); brackets (later slices) seed from a prior round's
+    /// ranking via [`SeedingRule::FromRanking`].
+    ///
+    /// Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted before
+    /// Slice 2a reads back with no rounds; new events and Practice default to an **empty** list. The
+    /// whole field round-trips through the event's persisted meta (issue #115), so it is restart-safe
+    /// for free.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rounds: Vec<RoundDef>,
 }
 
 /// One class's **membership** within an event (race redesign Slice 1a): the roster pilots that
@@ -181,6 +198,124 @@ pub struct ClassMembership {
     /// The roster pilots racing this class, in selection order. Each is a directory pilot that is
     /// also on the event's [`roster`](EventMeta::roster).
     pub pilots: Vec<PilotId>,
+}
+
+/// One **round** within an event (race redesign Slice 2a): an event-level, class-tagged, *dynamic*
+/// format-instance.
+///
+/// A round is a *format-instance* — a named, configured run of one
+/// [`FormatRegistry`](gridfpv_engine::format::FormatRegistry) format, scoped to the eligible
+/// [`classes`](Self::classes) it runs for, with a [`SeedingRule`] deciding how its field is drawn.
+/// One eligible class is a **class round** (e.g. "Open Qualifying"); many/all classes is an
+/// **open / practice** round. Rounds are added **as-you-go** (practice/quali) rather than
+/// precomputed; later slices seed brackets from a prior round's ranking
+/// ([`SeedingRule::FromRanking`]).
+///
+/// Carried in [`EventMeta::rounds`]. Derives serde (its JSON *is* the wire form) and `ts_rs::TS` so
+/// the frontend reads a generated `RoundDef` type (the Rounds UI lands in Slice 2b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RoundDef {
+    /// The stable, **auto-generated** handle for this round (a slug of the [`label`](Self::label)
+    /// plus a short random suffix — mirroring the event/pilot id-gen). Never user-entered; the
+    /// label is display-only. Referenced by a later round's [`SeedingRule::FromRanking`].
+    pub id: RoundId,
+    /// The human-readable label (e.g. `"Qualifying R1"`, `"Open Practice"`). Display-only; the
+    /// [`id`](Self::id) is authoritative.
+    pub label: String,
+    /// The eligible [`classes`](EventMeta::classes) this round runs for. One class is a *class
+    /// round*; many/all is an *open / practice* round. Each must be one of the event's selected
+    /// classes.
+    pub classes: Vec<ClassId>,
+    /// The format this round runs — a known
+    /// [`FormatRegistry`](gridfpv_engine::format::FormatRegistry) name (e.g. `"timed_qual"`,
+    /// `"single_elim"`). Validated against [`FormatRegistry::standard`] on add/update.
+    pub format: String,
+    /// The format's config knobs (e.g. `rounds`, `advance`, `heat_size`), stored as-is as a
+    /// string→string map — the same shape a `FormatConfig`'s params take. Stored verbatim with only
+    /// light validation; format-specific interpretation is the engine's concern when the round runs
+    /// (a later slice).
+    pub params: BTreeMap<String, String>,
+    /// How a heat in this round is won — the per-round scoring rule (the existing wire
+    /// [`WinCondition`](gridfpv_engine::scoring::WinCondition)).
+    pub win_condition: WinCondition,
+    /// How this round's field is **seeded** (drawn). Defaults to [`SeedingRule::FromRoster`] (the
+    /// eligible classes' membership, in roster order); a bracket round seeds from a prior round's
+    /// ranking ([`SeedingRule::FromRanking`], consumed in a later slice).
+    pub seeding: SeedingRule,
+}
+
+/// How a [`RoundDef`]'s field is **seeded** (race redesign Slice 2a).
+///
+/// A round either draws its field straight from the eligible classes' roster membership
+/// ([`FromRoster`](Self::FromRoster) — practice / first qualifying), or from a **prior round's
+/// ranking** ([`FromRanking`](Self::FromRanking) — the bracket / cut case, the issue-#84 carry that
+/// a later slice consumes). Derives serde + `ts_rs::TS`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum SeedingRule {
+    /// Seed from the eligible classes' roster membership, in roster order. The default for
+    /// practice and first-qualifying rounds.
+    #[default]
+    FromRoster,
+    /// Seed from the **top-N** of a prior round's ranking — the bracket / cut seam (issue #84).
+    /// The `source_round` must name another [`RoundDef`] in the same event's
+    /// [`rounds`](EventMeta::rounds); `top_n` is how many advance. Stored now; *consumed* when the
+    /// round actually runs (a later slice).
+    FromRanking {
+        /// The prior round this round seeds from — must exist in [`EventMeta::rounds`].
+        source_round: RoundId,
+        /// How many of the source ranking's top places advance into this round.
+        top_n: usize,
+    },
+}
+
+/// The body of `POST /events/{id}/rounds` — everything a caller supplies to add a round (race
+/// redesign Slice 2a).
+///
+/// The **id is always auto-generated** (a slug of `label` plus a short random suffix), never
+/// user-entered — mirroring the event/pilot create rule. The [`seeding`](Self::seeding) defaults to
+/// [`SeedingRule::FromRoster`] when omitted. The route returns the created [`RoundDef`] (with its
+/// generated [`id`](RoundDef::id)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NewRoundReq {
+    /// The display label for the new round (e.g. `"Qualifying R1"`).
+    pub label: String,
+    /// The eligible classes this round runs for. Each must be one of the event's selected classes.
+    pub classes: Vec<ClassId>,
+    /// The format this round runs — a known [`FormatRegistry`] name.
+    pub format: String,
+    /// The format's config knobs, stored verbatim.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+    /// How a heat in this round is won.
+    pub win_condition: WinCondition,
+    /// How the round's field is seeded; defaults to [`SeedingRule::FromRoster`] when omitted.
+    #[serde(default)]
+    pub seeding: SeedingRule,
+}
+
+/// The body of `PUT /events/{id}/rounds/{round}` — the editable fields of an existing round (race
+/// redesign Slice 2a). The round's [`id`](RoundDef::id) is the path segment and is **not** editable;
+/// every other field is replaced wholesale. Same validation as the add path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct UpdateRoundReq {
+    /// The new display label.
+    pub label: String,
+    /// The new eligible classes. Each must be one of the event's selected classes.
+    pub classes: Vec<ClassId>,
+    /// The new format — a known [`FormatRegistry`] name.
+    pub format: String,
+    /// The new format config knobs, stored verbatim.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+    /// The new win condition.
+    pub win_condition: WinCondition,
+    /// The new seeding rule; defaults to [`SeedingRule::FromRoster`] when omitted.
+    #[serde(default)]
+    pub seeding: SeedingRule,
 }
 
 impl EventMeta {
@@ -391,6 +526,7 @@ impl EventRegistry {
                     roster: Vec::new(),
                     classes: Vec::new(),
                     classes_membership: Vec::new(),
+                    rounds: Vec::new(),
                 },
                 state: practice_state,
             },
@@ -630,6 +766,144 @@ impl EventRegistry {
         Ok(meta)
     }
 
+    /// Add a **round** to an event (race redesign Slice 2a), returning the created [`RoundDef`]
+    /// (with its **generated** [`RoundId`]).
+    ///
+    /// The id is auto-generated — a slug of the request's `label` plus a short random suffix
+    /// (mirroring the event/pilot id-gen) — retried on the (astronomically unlikely) collision with
+    /// an existing round id. Validation (all [`RoundError::Invalid`], mapped to a 400):
+    ///
+    /// - each [`classes`](NewRoundReq::classes) entry exists in the class directory **and** is one
+    ///   of the event's selected [`classes`](EventMeta::classes);
+    /// - the [`format`](NewRoundReq::format) is a known [`FormatRegistry::standard`] name;
+    /// - on [`SeedingRule::FromRanking`], the `source_round` names an existing round in this event.
+    ///
+    /// An unknown event is a [`RoundError::EventNotFound`] (→ 404). On success the round is appended
+    /// to [`EventMeta::rounds`] and written through to the event's SQLite `meta` table (issue #115)
+    /// so it survives a Director restart — exactly the classes/membership path.
+    pub fn add_round(&self, id: &EventId, req: NewRoundReq) -> Result<RoundDef, RoundError> {
+        let mut reg = self.write();
+        let directory = reg.classes.clone();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RoundError::EventNotFound(id.0.clone()))?;
+
+        validate_round_fields(
+            &event.meta,
+            &directory,
+            &req.classes,
+            &req.format,
+            &req.seeding,
+            None,
+        )?;
+
+        // Auto-generate a unique round id within this event: slug(label) + short suffix, retried on
+        // the (astronomically unlikely) collision so the id is always fresh.
+        let round_id = loop {
+            let candidate = RoundId(format!("{}-{}", slugify(&req.label), short_suffix()));
+            if !event.meta.rounds.iter().any(|r| r.id == candidate) {
+                break candidate;
+            }
+        };
+
+        let round = RoundDef {
+            id: round_id,
+            label: req.label,
+            classes: req.classes,
+            format: req.format,
+            params: req.params,
+            win_condition: req.win_condition,
+            seeding: req.seeding,
+        };
+        event.meta.rounds.push(round.clone());
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(round)
+    }
+
+    /// Replace an existing **round**'s editable fields (race redesign Slice 2a), returning the
+    /// updated [`RoundDef`].
+    ///
+    /// The round's [`id`](RoundDef::id) is fixed (the path segment); every other field is replaced
+    /// wholesale with `req`. Same validation as [`add_round`](Self::add_round): unknown event →
+    /// [`RoundError::EventNotFound`] (404); unknown round id → [`RoundError::RoundNotFound`] (404);
+    /// bad class / format / dangling seeding source → [`RoundError::Invalid`] (400). A
+    /// [`SeedingRule::FromRanking`] may not name **this** round as its own source. Written through to
+    /// disk (issue #115).
+    pub fn update_round(
+        &self,
+        id: &EventId,
+        round_id: &RoundId,
+        req: UpdateRoundReq,
+    ) -> Result<RoundDef, RoundError> {
+        let mut reg = self.write();
+        let directory = reg.classes.clone();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RoundError::EventNotFound(id.0.clone()))?;
+
+        if !event.meta.rounds.iter().any(|r| &r.id == round_id) {
+            return Err(RoundError::RoundNotFound(round_id.0.clone()));
+        }
+        validate_round_fields(
+            &event.meta,
+            &directory,
+            &req.classes,
+            &req.format,
+            &req.seeding,
+            Some(round_id),
+        )?;
+
+        let round = RoundDef {
+            id: round_id.clone(),
+            label: req.label,
+            classes: req.classes,
+            format: req.format,
+            params: req.params,
+            win_condition: req.win_condition,
+            seeding: req.seeding,
+        };
+        if let Some(slot) = event.meta.rounds.iter_mut().find(|r| &r.id == round_id) {
+            *slot = round.clone();
+        }
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(round)
+    }
+
+    /// Remove a **round** from an event (race redesign Slice 2a), returning the event's updated
+    /// [`EventMeta`].
+    ///
+    /// Unknown event → [`RoundError::EventNotFound`] (404); unknown round id →
+    /// [`RoundError::RoundNotFound`] (404). Other rounds that seed from the removed round
+    /// ([`SeedingRule::FromRanking`]) are **left as-is** (a dangling source is caught the next time
+    /// that round is edited); pruning is a later-slice concern. Written through to disk (issue #115).
+    pub fn remove_round(&self, id: &EventId, round_id: &RoundId) -> Result<EventMeta, RoundError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RoundError::EventNotFound(id.0.clone()))?;
+        let before = event.meta.rounds.len();
+        event.meta.rounds.retain(|r| &r.id != round_id);
+        if event.meta.rounds.len() == before {
+            return Err(RoundError::RoundNotFound(round_id.0.clone()));
+        }
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(meta)
+    }
+
+    /// An event's **rounds** (race redesign Slice 2a), or `None` if no such event.
+    pub fn rounds_of(&self, id: &EventId) -> Option<Vec<RoundDef>> {
+        self.read().events.get(id).map(|e| e.meta.rounds.clone())
+    }
+
     /// Add **one** pilot to an event's roster (issue #74), returning its updated [`EventMeta`].
     ///
     /// Idempotent — adding a pilot already on the roster is a no-op (no duplicate). Validates the
@@ -773,6 +1047,7 @@ impl EventRegistry {
             roster: Vec::new(),
             classes: Vec::new(),
             classes_membership: Vec::new(),
+            rounds: Vec::new(),
         };
         // Persist the freshly-built meta into the event's own SQLite `meta` table (issue
         // #111) so a Director restart can restore it. Only for a persistent (file-backed)
@@ -926,6 +1201,92 @@ impl std::fmt::Display for RegistryError {
 }
 
 impl std::error::Error for RegistryError {}
+
+/// An error adding/updating/removing a **round** (race redesign Slice 2a).
+///
+/// Distinguishes a missing event/round (the route maps to a typed **404**) from an invalid round
+/// definition — a bad class, an unknown format, or a dangling seeding source — (a **400**). A
+/// persistence failure folds into [`Invalid`](Self::Invalid) via the `From<RegistryError>`
+/// conversion so the write-through path stays a single `?`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoundError {
+    /// No event with the given id (the inner `String` is the bad event id) — a typed 404.
+    EventNotFound(String),
+    /// No round with the given id in the event (the inner `String` is the bad round id) — a 404.
+    RoundNotFound(String),
+    /// The round definition is invalid (bad/unselected class, unknown format, or a dangling
+    /// [`SeedingRule::FromRanking`] source) — a 400. The message names what was rejected.
+    Invalid(String),
+}
+
+impl std::fmt::Display for RoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RoundError::EventNotFound(id) => write!(f, "no event with id {id:?}"),
+            RoundError::RoundNotFound(id) => write!(f, "no round with id {id:?}"),
+            RoundError::Invalid(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for RoundError {}
+
+impl From<RegistryError> for RoundError {
+    fn from(e: RegistryError) -> Self {
+        RoundError::Invalid(e.0)
+    }
+}
+
+/// Validate a round's class selection, format, and seeding against the event and the directories
+/// (race redesign Slice 2a) — the shared check the add/update paths run.
+///
+/// Returns [`RoundError::Invalid`] when: a `classes` entry is unknown to the directory or is not one
+/// of the event's selected [`classes`](EventMeta::classes); `format` is not a
+/// [`FormatRegistry::standard`] name; or a [`SeedingRule::FromRanking`]'s `source_round` does not
+/// name an existing round in this event (excluding `editing` — a round may not seed from itself).
+fn validate_round_fields(
+    meta: &EventMeta,
+    directory: &ClassDirectory,
+    classes: &[ClassId],
+    format: &str,
+    seeding: &SeedingRule,
+    editing: Option<&RoundId>,
+) -> Result<(), RoundError> {
+    for class in classes {
+        if !directory.exists(class) {
+            return Err(RoundError::Invalid(format!(
+                "no class with id {:?}",
+                class.0
+            )));
+        }
+        if !meta.classes.contains(class) {
+            return Err(RoundError::Invalid(format!(
+                "class {:?} is not selected by this event",
+                class.0
+            )));
+        }
+    }
+
+    if !FormatRegistry::standard().contains(format) {
+        return Err(RoundError::Invalid(format!("unknown format {format:?}")));
+    }
+
+    if let SeedingRule::FromRanking { source_round, .. } = seeding {
+        if Some(source_round) == editing {
+            return Err(RoundError::Invalid(
+                "a round cannot seed from itself".to_string(),
+            ));
+        }
+        if !meta.rounds.iter().any(|r| &r.id == source_round) {
+            return Err(RoundError::Invalid(format!(
+                "seeding source_round {:?} does not exist in this event",
+                source_round.0
+            )));
+        }
+    }
+
+    Ok(())
+}
 
 /// The default per-event timer selection (issue #73): just the built-in **Mock**
 /// ([`MOCK_TIMER_ID`]). New events and Practice select it so they run a sim race out of the box.
@@ -1446,6 +1807,233 @@ mod tests {
         assert!(created.persistent);
         let path = event_db_path(&dir, &created.id);
         assert!(path.exists(), "an event DB file should be created");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- Rounds (race redesign Slice 2a) ------------------------------------
+
+    /// Seed a directory class named `name` and return its generated [`ClassId`].
+    fn seed_class(reg: &EventRegistry, name: &str) -> ClassId {
+        reg.classes()
+            .create(&crate::classes::CreateClassRequest {
+                name: name.to_string(),
+                source: Default::default(),
+                reference: None,
+                description: None,
+            })
+            .unwrap()
+            .id
+    }
+
+    /// A minimal [`NewRoundReq`]: a `FromRoster` `timed_qual` round over `classes`.
+    fn round_req(label: &str, classes: Vec<ClassId>) -> NewRoundReq {
+        NewRoundReq {
+            label: label.to_string(),
+            classes,
+            format: "timed_qual".to_string(),
+            params: BTreeMap::new(),
+            win_condition: WinCondition::BestLap,
+            seeding: SeedingRule::FromRoster,
+        }
+    }
+
+    #[test]
+    fn add_round_generates_an_id_and_appends() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Rounds Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+
+        let round = reg
+            .add_round(&event.id, round_req("Qualifying R1", vec![open.clone()]))
+            .unwrap();
+        // The id is generated from the label slug + a suffix (not user-entered, never empty).
+        assert!(
+            round.id.0.starts_with("qualifying-r1-"),
+            "got {:?}",
+            round.id
+        );
+        assert_eq!(round.label, "Qualifying R1");
+        assert_eq!(round.classes, vec![open.clone()]);
+        assert_eq!(round.format, "timed_qual");
+        assert_eq!(round.seeding, SeedingRule::FromRoster);
+
+        // It is appended to the event's rounds list.
+        let rounds = reg.rounds_of(&event.id).unwrap();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].id, round.id);
+
+        // A second round with the same label gets a distinct id.
+        let round2 = reg
+            .add_round(&event.id, round_req("Qualifying R1", vec![open]))
+            .unwrap();
+        assert_ne!(round.id, round2.id);
+        assert_eq!(reg.rounds_of(&event.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn update_and_remove_a_round() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Rounds Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        let spec = seed_class(&reg, "Spec");
+        reg.set_classes(&event.id, vec![open.clone(), spec.clone()])
+            .unwrap();
+
+        let round = reg
+            .add_round(&event.id, round_req("Practice", vec![open.clone()]))
+            .unwrap();
+
+        // Update: replace fields wholesale, id is preserved.
+        let updated = reg
+            .update_round(
+                &event.id,
+                &round.id,
+                UpdateRoundReq {
+                    label: "Open Practice".to_string(),
+                    classes: vec![open.clone(), spec.clone()],
+                    format: "single_elim".to_string(),
+                    params: BTreeMap::from([("advance".to_string(), "2".to_string())]),
+                    win_condition: WinCondition::FirstToLaps { n: 5 },
+                    seeding: SeedingRule::FromRoster,
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.id, round.id, "the id is not editable");
+        assert_eq!(updated.label, "Open Practice");
+        assert_eq!(updated.classes, vec![open, spec]);
+        assert_eq!(updated.format, "single_elim");
+        assert_eq!(updated.params.get("advance").map(String::as_str), Some("2"));
+
+        // The list reflects the update (still one round).
+        let rounds = reg.rounds_of(&event.id).unwrap();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].format, "single_elim");
+
+        // Remove: the round is gone; removing it again is a 404.
+        let meta = reg.remove_round(&event.id, &round.id).unwrap();
+        assert!(meta.rounds.is_empty());
+        assert!(matches!(
+            reg.remove_round(&event.id, &round.id),
+            Err(RoundError::RoundNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn round_validation_rejects_bad_format_class_and_seeding() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Rounds Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        let unselected = seed_class(&reg, "Spec");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+
+        // Unknown event → EventNotFound (404).
+        assert!(matches!(
+            reg.add_round(&EventId("nope".into()), round_req("R", vec![open.clone()])),
+            Err(RoundError::EventNotFound(_))
+        ));
+
+        // Unknown format → Invalid (400).
+        let mut bad_format = round_req("R", vec![open.clone()]);
+        bad_format.format = "no-such-format".to_string();
+        assert!(matches!(
+            reg.add_round(&event.id, bad_format),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // A `*-demo` fixture format is NOT a production format → Invalid.
+        let mut demo_format = round_req("R", vec![open.clone()]);
+        demo_format.format = "knockout-demo".to_string();
+        assert!(matches!(
+            reg.add_round(&event.id, demo_format),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // A class not in the directory → Invalid.
+        assert!(matches!(
+            reg.add_round(&event.id, round_req("R", vec![ClassId("ghost".into())])),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // A directory class the event does not select → Invalid.
+        assert!(matches!(
+            reg.add_round(&event.id, round_req("R", vec![unselected])),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // FromRanking with a dangling source_round → Invalid.
+        let mut dangling = round_req("Bracket", vec![open.clone()]);
+        dangling.seeding = SeedingRule::FromRanking {
+            source_round: RoundId("does-not-exist".into()),
+            top_n: 4,
+        };
+        assert!(matches!(
+            reg.add_round(&event.id, dangling),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // FromRanking pointing at an existing round → ok (the #84 carry seam).
+        let q = reg
+            .add_round(&event.id, round_req("Qualifying", vec![open.clone()]))
+            .unwrap();
+        let mut bracket = round_req("Bracket", vec![open]);
+        bracket.seeding = SeedingRule::FromRanking {
+            source_round: q.id.clone(),
+            top_n: 4,
+        };
+        let bracket = reg.add_round(&event.id, bracket).unwrap();
+        assert_eq!(
+            bracket.seeding,
+            SeedingRule::FromRanking {
+                source_round: q.id,
+                top_n: 4
+            }
+        );
+
+        // A round may not seed from itself (caught on update).
+        let self_ref = reg.update_round(
+            &event.id,
+            &bracket.id,
+            UpdateRoundReq {
+                label: bracket.label.clone(),
+                classes: bracket.classes.clone(),
+                format: bracket.format.clone(),
+                params: BTreeMap::new(),
+                win_condition: bracket.win_condition,
+                seeding: SeedingRule::FromRanking {
+                    source_round: bracket.id.clone(),
+                    top_n: 2,
+                },
+            },
+        );
+        assert!(matches!(self_ref, Err(RoundError::Invalid(_))));
+    }
+
+    #[test]
+    fn rounds_persist_across_a_restart() {
+        // The #115 meta mechanism must carry the additive rounds list through a Director restart.
+        let dir = std::env::temp_dir().join(format!("gridfpv-rounds-test-{}", short_suffix()));
+        let created_id;
+        let round_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Persisted Rounds")).unwrap();
+            created_id = created.id.clone();
+            let open = seed_class(&reg, "Open");
+            reg.set_classes(&created.id, vec![open.clone()]).unwrap();
+            let round = reg
+                .add_round(&created.id, round_req("Qualifying R1", vec![open]))
+                .unwrap();
+            round_id = round.id.clone();
+        }
+        // Restart: a brand-new registry over the SAME data dir.
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        let restored = reopened.meta_of(&created_id).expect("event reloaded");
+        assert_eq!(restored.rounds.len(), 1);
+        assert_eq!(restored.rounds[0].id, round_id);
+        assert_eq!(restored.rounds[0].label, "Qualifying R1");
+        assert_eq!(restored.rounds[0].format, "timed_qual");
+        assert_eq!(restored.rounds[0].seeding, SeedingRule::FromRoster);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

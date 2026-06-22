@@ -3,6 +3,7 @@ import type { ClassId } from "./ClassId";
 import type { ClassMembership } from "./ClassMembership";
 import type { EventId } from "./EventId";
 import type { PilotId } from "./PilotId";
+import type { RoundDef } from "./RoundDef";
 import type { TimerId } from "./TimerId";
 
 /**
@@ -113,4 +114,19 @@ classes: Array<ClassId>,
  * **empty** list. The whole field round-trips through the event's persisted meta (issue
  * #115), so it is restart-safe for free.
  */
-classes_membership?: Array<ClassMembership>, };
+classes_membership?: Array<ClassMembership>, 
+/**
+ * The event's **rounds** (race redesign Slice 2a) — the event-level, class-tagged, *dynamic*
+ * format-instances this event runs. A [`RoundDef`] scopes a format (a
+ * [`FormatRegistry`](gridfpv_engine::format::FormatRegistry) name) and its config to one or
+ * more eligible [`classes`](Self::classes), with a [`SeedingRule`] for how the field is drawn.
+ * Practice / qualifying rounds are added **as-you-go** through
+ * [`add_round`](EventRegistry::add_round); brackets (later slices) seed from a prior round's
+ * ranking via [`SeedingRule::FromRanking`].
+ *
+ * Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted before
+ * Slice 2a reads back with no rounds; new events and Practice default to an **empty** list. The
+ * whole field round-trips through the event's persisted meta (issue #115), so it is restart-safe
+ * for free.
+ */
+rounds?: Array<RoundDef>, };

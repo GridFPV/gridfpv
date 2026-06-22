@@ -375,9 +375,36 @@ impl FormatRegistry {
         self.ctors.insert(name.into(), ctor);
     }
 
+    /// A registry pre-populated with every **production** format the engine ships:
+    /// [`timed_qual`](crate::timed_qual::TimedQualifying), [`zippyq`](crate::zippyq::ZippyQ),
+    /// [`single_elim`](crate::single_elim::SingleElim),
+    /// [`double_elim`](crate::double_elim::DoubleElim),
+    /// [`round_robin`](crate::round_robin::RoundRobin), and
+    /// [`multi_main`](crate::multi_main::MultiMain).
+    ///
+    /// This is the single authority for "which format names are valid": the server validates a
+    /// round's configured format name against [`names`](Self::names) / [`contains`](Self::contains)
+    /// of this registry. The `*-demo` formats in this module are test fixtures and are deliberately
+    /// **not** registered here.
+    pub fn standard() -> Self {
+        let mut registry = Self::new();
+        crate::timed_qual::TimedQualifying::register(&mut registry);
+        crate::zippyq::ZippyQ::register(&mut registry);
+        crate::single_elim::SingleElim::register(&mut registry);
+        crate::double_elim::DoubleElim::register(&mut registry);
+        crate::round_robin::RoundRobin::register(&mut registry);
+        crate::multi_main::MultiMain::register(&mut registry);
+        registry
+    }
+
     /// The format names registered, in sorted order.
     pub fn names(&self) -> Vec<&str> {
         self.ctors.keys().map(String::as_str).collect()
+    }
+
+    /// Whether a format is registered under `name`.
+    pub fn contains(&self, name: &str) -> bool {
+        self.ctors.contains_key(name)
     }
 
     /// Build a generator for the format registered under `name`, or `None` if no such
@@ -941,6 +968,26 @@ mod tests {
         );
 
         assert!(registry.build("no-such-format", &cfg).is_none());
+    }
+
+    #[test]
+    fn standard_registry_holds_every_production_format() {
+        let registry = FormatRegistry::standard();
+        assert_eq!(
+            registry.names(),
+            vec![
+                "double_elim",
+                "multi_main",
+                "round_robin",
+                "single_elim",
+                "timed_qual",
+                "zippyq",
+            ]
+        );
+        // The validation surface the server uses.
+        assert!(registry.contains("timed_qual"));
+        assert!(!registry.contains("knockout-demo"));
+        assert!(!registry.contains("no-such-format"));
     }
 
     #[test]

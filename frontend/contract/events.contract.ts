@@ -21,7 +21,7 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Class, Command, EventMeta, Pilot, Timer } from '@gridfpv/types';
+import type { Class, Command, EventMeta, Pilot, RoundDef, Timer } from '@gridfpv/types';
 
 import { type Director } from '../test-harness/director.ts';
 import { eventRoot, startContractDirector } from './harness.ts';
@@ -980,5 +980,188 @@ describe('race Slice 1a: per-class membership', () => {
 
     // RD-gated: no token → 401.
     expect((await setMembership(event.id, 'mgp-open', [a])).status).toBe(401);
+  });
+});
+
+/**
+ * Race redesign Slice 2a: **rounds** — event-level, class-tagged, *dynamic* format-instances. A
+ * `RoundDef` scopes a `FormatRegistry` format (+ its config + win condition) to one or more eligible
+ * classes, with a `SeedingRule` (default `FromRoster`; `FromRanking` is the #84 carry seam). Rounds
+ * are recorded on `EventMeta.rounds` (additive, omitted from the wire when empty). The Rounds UI is
+ * Slice 2b — these guard the backend wire only.
+ *
+ * guards:
+ *  - a new event's `EventMeta.rounds` is absent (additive `#[serde(default)]`, omit-when-empty).
+ *  - `POST /events/{id}/rounds` is **RD-gated** (no token → 401), auto-generates the round id, and
+ *    returns the created `RoundDef`. Each class must be selected by the event, the format must be a
+ *    known registry name, and a `FromRanking` source must exist (bad → 400 `BadRequest`).
+ *  - `PUT /events/{id}/rounds/{roundId}` replaces the round wholesale; `DELETE` removes it; an
+ *    unknown round id → 404 `UnknownScope`.
+ */
+describe('race Slice 2a: rounds', () => {
+  /** `POST /events/{id}/rounds` with a body + optional token → raw status + parsed body. */
+  async function addRound(
+    eventId: string,
+    body: unknown,
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/rounds`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** `PUT`/`DELETE /events/{id}/rounds/{roundId}` → raw status + parsed body. */
+  async function mutateRound(
+    eventId: string,
+    roundId: string,
+    method: 'PUT' | 'DELETE',
+    body?: unknown,
+    token: string = TOKEN
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`
+    };
+    const res = await fetch(
+      `${eventRoot(director.baseUrl, eventId)}/rounds/${encodeURIComponent(roundId)}`,
+      { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }
+    );
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** Select the built-in `mgp-open` class on an event so a round may run for it. */
+  async function selectOpen(eventId: string): Promise<void> {
+    await fetch(`${eventRoot(director.baseUrl, eventId)}/classes`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ ids: ['mgp-open'] })
+    });
+  }
+
+  it('a new event has no rounds (additive, omit-when-empty)', async () => {
+    const event = (await createEvent('Rounds Default', TOKEN)).body as EventMeta;
+    expect(event.rounds).toBeUndefined();
+  });
+
+  it('POST /rounds is RD-gated — no token → 401', async () => {
+    const event = (await createEvent('Rounds Auth', TOKEN)).body as EventMeta;
+    await selectOpen(event.id);
+    const res = await addRound(event.id, {
+      label: 'Q1',
+      classes: ['mgp-open'],
+      format: 'timed_qual',
+      win_condition: 'BestLap'
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('POST /rounds generates an id and records the round; PUT/DELETE edit it', async () => {
+    const event = (await createEvent('Rounds CRUD', TOKEN)).body as EventMeta;
+    await selectOpen(event.id);
+
+    const created = await addRound(
+      event.id,
+      {
+        label: 'Qualifying R1',
+        classes: ['mgp-open'],
+        format: 'timed_qual',
+        params: {},
+        win_condition: 'BestLap'
+      },
+      TOKEN
+    );
+    expect(created.status).toBe(200);
+    const round = created.body as RoundDef;
+    expect(round.id).toMatch(/^qualifying-r1-/);
+    expect(round.label).toBe('Qualifying R1');
+    expect(round.format).toBe('timed_qual');
+    expect(round.seeding).toBe('FromRoster'); // default
+
+    // The round is recorded on the event meta (re-create returns the current snapshot via list).
+    const list = (await fetch(`${director.baseUrl}/events`).then((r) => r.json())) as EventMeta[];
+    const meta = list.find((e) => e.id === event.id)!;
+    expect((meta.rounds ?? []).map((r) => r.id)).toContain(round.id);
+
+    // PUT replaces wholesale (id preserved).
+    const updated = await mutateRound(event.id, round.id, 'PUT', {
+      label: 'Open Qualifying',
+      classes: ['mgp-open'],
+      format: 'single_elim',
+      params: { advance: '2' },
+      win_condition: { FirstToLaps: { n: 5 } }
+    });
+    expect(updated.status).toBe(200);
+    const updatedRound = updated.body as RoundDef;
+    expect(updatedRound.id).toBe(round.id);
+    expect(updatedRound.format).toBe('single_elim');
+
+    // DELETE removes it; a second DELETE is a 404 UnknownScope.
+    expect((await mutateRound(event.id, round.id, 'DELETE')).status).toBe(200);
+    const gone = await mutateRound(event.id, round.id, 'DELETE');
+    expect(gone.status).toBe(404);
+    expect((gone.body as { code?: string }).code).toBe('UnknownScope');
+  });
+
+  it('POST /rounds validates format, class selection, and seeding source → 400', async () => {
+    const event = (await createEvent('Rounds Validation', TOKEN)).body as EventMeta;
+    await selectOpen(event.id);
+
+    // Unknown format → 400 BadRequest.
+    const badFormat = await addRound(
+      event.id,
+      { label: 'X', classes: ['mgp-open'], format: 'no-such-format', win_condition: 'BestLap' },
+      TOKEN
+    );
+    expect(badFormat.status).toBe(400);
+    expect((badFormat.body as { code?: string }).code).toBe('BadRequest');
+
+    // A directory class the event does NOT select (mgp-7 is a built-in, but only mgp-open is
+    // selected here) → 400.
+    const badClass = await addRound(
+      event.id,
+      { label: 'X', classes: ['mgp-7'], format: 'timed_qual', win_condition: 'BestLap' },
+      TOKEN
+    );
+    expect(badClass.status).toBe(400);
+
+    // FromRanking with a dangling source_round → 400.
+    const dangling = await addRound(
+      event.id,
+      {
+        label: 'Bracket',
+        classes: ['mgp-open'],
+        format: 'single_elim',
+        win_condition: 'BestLap',
+        seeding: { FromRanking: { source_round: 'does-not-exist', top_n: 4 } }
+      },
+      TOKEN
+    );
+    expect(dangling.status).toBe(400);
+
+    // An unknown event id → 404 UnknownScope.
+    const badEvent = await addRound(
+      'no-such-event',
+      { label: 'X', classes: ['mgp-open'], format: 'timed_qual', win_condition: 'BestLap' },
+      TOKEN
+    );
+    expect(badEvent.status).toBe(404);
+    expect((badEvent.body as { code?: string }).code).toBe('UnknownScope');
   });
 });
