@@ -100,7 +100,7 @@
   .phase[data-phase='Running'] {
     --_c: var(--gf-phase-running);
   }
-  .phase[data-phase='Finished'] {
+  .phase[data-phase='Unofficial'] {
     --_c: var(--gf-phase-finished);
   }
   .phase[data-phase='Final'] {

@@ -14,7 +14,7 @@
 //!
 //! | command group | validation | appended event |
 //! |---------------|------------|----------------|
-//! | heat-loop (`Stage`/`Arm`/`Start`/`Finish`/`Score`/`Advance`/`Abort`/`Restart`/`Discard`) | [`heat::heat_state`] folds the heat's current state; [`heat::apply`] checks the transition is legal | [`Event::HeatStateChanged`] with the engine-returned [`HeatTransition`](gridfpv_events::HeatTransition) |
+//! | heat-loop (`Stage`/`Arm`/`Start`/`Finish`/`Finalize`/`Advance`/`Revert`/`Abort`/`Restart`/`Discard`) | [`heat::heat_state`] folds the heat's current state; [`heat::apply`] checks the transition is legal | [`Event::HeatStateChanged`] with the engine-returned [`HeatTransition`](gridfpv_events::HeatTransition) |
 //! | [`Command::ScheduleHeat`] | none (it creates the heat) | [`Event::HeatScheduled`] |
 //! | [`Command::Register`] | none (the binding is always recordable; last-registration-wins folds downstream) | [`Event::CompetitorRegistered`] |
 //! | [`Command::VoidDetection`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::DetectionVoided`] |
@@ -494,8 +494,9 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::Arm { heat } => heat_transition(state, heat, HeatCommand::Arm),
         Command::Start { heat } => heat_transition(state, heat, HeatCommand::Start),
         Command::Finish { heat } => heat_transition(state, heat, HeatCommand::Finish),
-        Command::Score { heat } => heat_transition(state, heat, HeatCommand::Score),
+        Command::Finalize { heat } => heat_transition(state, heat, HeatCommand::Finalize),
         Command::Advance { heat } => heat_transition(state, heat, HeatCommand::Advance),
+        Command::Revert { heat } => heat_transition(state, heat, HeatCommand::Revert),
         Command::Abort { heat } => heat_transition(state, heat, HeatCommand::Abort),
         Command::Restart { heat } => heat_transition(state, heat, HeatCommand::Restart),
         Command::Discard { heat } => heat_transition(state, heat, HeatCommand::Discard),
@@ -675,7 +676,7 @@ mod tests {
         })
     }
 
-    /// (a) A legal Stage→Arm→Start→Finish→Score sequence acks ok and appends the matching
+    /// (a) A legal Stage→Arm→Start→Finish→Finalize sequence acks ok and appends the matching
     /// `HeatStateChanged` events in order.
     #[test]
     fn legal_heat_loop_sequence_appends_transitions_and_acks_ok() {
@@ -685,7 +686,10 @@ mod tests {
             (Command::Arm { heat: heat() }, HeatTransition::Armed),
             (Command::Start { heat: heat() }, HeatTransition::Running),
             (Command::Finish { heat: heat() }, HeatTransition::Finished),
-            (Command::Score { heat: heat() }, HeatTransition::Scored),
+            (
+                Command::Finalize { heat: heat() },
+                HeatTransition::Finalized,
+            ),
         ];
         for (command, _expected) in steps.iter().cloned() {
             let ack = apply_command(&state, command);

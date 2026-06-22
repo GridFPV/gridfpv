@@ -489,7 +489,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     assert_eq!(status, 401, "a read-only join-token never grants control");
     // The same command WITH the RD token finishes the heat — proving the gate admits the RD.
     rd_command(&addr, &Command::Finish { heat: heat.clone() }, &rd).await;
-    rd_command(&addr, &Command::Score { heat: heat.clone() }, &rd).await;
+    rd_command(&addr, &Command::Finalize { heat: heat.clone() }, &rd).await;
 
     // The event-scope client converges to the Final phase — the heat ran end to end.
     await_phase(&mut stream, HeatPhase::Final).await;

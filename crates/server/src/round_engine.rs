@@ -38,7 +38,7 @@
 //!    complete*.
 //!
 //! Because step 3 reads the log, the advance closes through the log: when a heat reaches
-//! `Score` (the existing FSM path appends `HeatStateChanged { Scored }`), the next
+//! `Final` (the existing FSM path appends `HeatStateChanged { Finalized }`), the next
 //! `FillRound` sees it as a completed heat and the generator advances — including across
 //! the bracket carry, where the *source* round's completed heats produce the ranking the
 //! bracket seeds from.
@@ -94,7 +94,7 @@ pub enum FillOutcome {
     /// heat is appended; the round's final ranking is available via [`round_ranking`].
     Complete,
     /// Every heat the generator wants right now is **already scheduled** and awaiting its
-    /// `Score`. No new heat is appended and the round is *not* finished — the RD just needs
+    /// `Finalize`. No new heat is appended and the round is *not* finished — the RD just needs
     /// to drive the outstanding heat before the next one can be drawn. A typed ok, not an
     /// error.
     AlreadyScheduled,
@@ -349,7 +349,7 @@ fn format_config(round: &RoundDef, field: Vec<CompetitorRef>) -> FormatConfig {
 /// [`win_condition`](RoundDef::win_condition) (race redesign Slice 3a).
 ///
 /// A heat counts as completed when it was scheduled tagged with this round *and* its folded
-/// [`HeatState`] is [`Final`](HeatState::Final) (the FSM terminal the `Score` command
+/// [`HeatState`] is [`Final`](HeatState::Final) (the FSM terminal the `Finalize` command
 /// reaches). Each is scored via [`score_marshaled`] over the passes that heat produced (the
 /// per-heat pass window, see [`heat_passes`]). The order is the order the heats were first
 /// scheduled, which is the order the generator emitted them — so the history fed to
@@ -672,7 +672,7 @@ fn fill_round_per_heat(
     match generator.next(&completed) {
         GeneratorStep::Run(plans) => {
             // The interactive flow schedules **one** heat per FillRound (the RD drives each
-            // heat to Score before asking for the next). A generator that emits several
+            // heat to Finalize before asking for the next). A generator that emits several
             // plans at once (a bracket round) still advances one heat at a time: take the
             // first not-yet-scheduled plan. Dedup against already-tagged heats so a repeated
             // FillRound before the prior heat is scored does not double-schedule it.
@@ -930,9 +930,9 @@ fn heat_passes(events: &[Event], heat: &HeatId) -> Vec<Pass> {
                 use gridfpv_events::HeatTransition as T;
                 match transition {
                     T::Running => running = Some(h.clone()),
-                    // Any exit from Running (forward to Finished/Scored or an off-ramp)
+                    // Any exit from Running (forward to Finished/Finalized or an off-ramp)
                     // closes that heat's pass window.
-                    T::Finished | T::Scored | T::Aborted | T::Restarted | T::Discarded
+                    T::Finished | T::Finalized | T::Aborted | T::Restarted | T::Discarded
                         if running.as_ref() == Some(h) =>
                     {
                         running = None;
@@ -1191,7 +1191,7 @@ mod tests {
         ];
         v.extend(passes);
         v.push(changed(heat, HeatTransition::Finished));
-        v.push(changed(heat, HeatTransition::Scored));
+        v.push(changed(heat, HeatTransition::Finalized));
         v
     }
 

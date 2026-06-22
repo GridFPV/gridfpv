@@ -155,8 +155,8 @@
   function statusLabel(h: HeatSummary): string {
     if (h.phase === 'Final') return 'Final';
     if (h.phase === 'Scheduled') return 'Scheduled';
-    // Staged / Armed / Running / Finished all read as the heat being live/in-progress.
-    return h.phase === 'Finished' ? 'Finished' : 'Running';
+    // Staged / Armed / Running / Unofficial all read as the heat being live/in-progress.
+    return h.phase === 'Unofficial' ? 'Unofficial' : 'Running';
   }
   function statusKind(phase: HeatPhase): 'scheduled' | 'running' | 'scored' {
     if (phase === 'Final') return 'scored';

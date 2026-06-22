@@ -1566,7 +1566,7 @@ mod tests {
             },
             Event::HeatStateChanged {
                 heat: HeatId("q-1".into()),
-                transition: HeatTransition::Scored,
+                transition: HeatTransition::Finalized,
             },
         ]
     }

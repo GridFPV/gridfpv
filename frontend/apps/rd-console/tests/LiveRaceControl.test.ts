@@ -20,8 +20,9 @@ describe('LiveRaceControl', () => {
     // Illegal in Running.
     expect(btn('Stage').disabled).toBe(true);
     expect(btn('Arm').disabled).toBe(true);
-    expect(btn('Score').disabled).toBe(true);
+    expect(btn('Finalize').disabled).toBe(true);
     expect(btn('Advance').disabled).toBe(true);
+    expect(btn('Revert').disabled).toBe(true);
     expect(btn('Discard').disabled).toBe(true);
   });
 
@@ -93,7 +94,7 @@ describe('LiveRaceControl', () => {
       expect(clockText()).toBe('1:01.250');
     });
 
-    it('freezes the clock when the phase becomes Finished, and stops ticking', async () => {
+    it('freezes the clock when the phase becomes Unofficial, and stops ticking', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(0);
       const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
@@ -104,7 +105,7 @@ describe('LiveRaceControl', () => {
       expect(clockText()).toBe('0:02.500');
 
       // Finishing freezes the displayed value…
-      pushLive(liveAt('Finished'));
+      pushLive(liveAt('Unofficial'));
       await tick();
       expect(clockText()).toBe('0:02.500');
 
@@ -121,7 +122,7 @@ describe('LiveRaceControl', () => {
       await tick();
       await vi.advanceTimersByTimeAsync(3_000);
 
-      pushLive(liveAt('Finished'));
+      pushLive(liveAt('Unofficial'));
       await tick();
       pushLive(liveAt('Final'));
       await tick();

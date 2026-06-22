@@ -97,7 +97,7 @@ fn wait_until(
 ///    `CompetitorRef("node-{i}")` per scenario node index, in scenario order),
 /// 2. the forward-path [`Event::HeatStateChanged`] transitions the FSM records —
 ///    `Staged`, `Armed`, then (after RH actually starts) `Running`, then `Finished`
-///    and `Scored`,
+///    and `Finalized`,
 /// 3. interleaved between the `Running` and `Finished` transitions, the
 ///    [`Event::Pass`]es the timer produced while the heat was live (other adapter
 ///    events such as lifecycle/`CompetitorSeen` are dropped — only `Pass`es are kept).
@@ -177,9 +177,9 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     // are adapter bookkeeping, not part of the heat's canonical race-engine log.
     log.extend(live.into_iter().filter(|e| matches!(e, Event::Pass(_))));
 
-    // Close the heat loop: Finished -> Scored.
+    // Close the heat loop: Finished -> Finalized.
     drive(&mut log, &heat, &mut state, HeatCommand::Finish);
-    drive(&mut log, &heat, &mut state, HeatCommand::Score);
+    drive(&mut log, &heat, &mut state, HeatCommand::Finalize);
     debug_assert_eq!(state, HeatState::Final);
 
     log

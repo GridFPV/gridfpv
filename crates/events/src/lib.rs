@@ -207,10 +207,11 @@ pub struct LogRef(pub u64);
 
 /// A transition of the heat-loop state machine (race-engine.html §2). The recorded
 /// transition is named for the state it enters on the forward path (Staged → Armed →
-/// Running → Finished → Scored), with the off-ramps (abort/restart/discard) named for
-/// the action so they stay distinct even when they land on the same state. The engine
-/// validates legality against the current state. Heat *creation* is a separate event
-/// ([`Event::HeatScheduled`]) — it carries the lineup, which a transition does not.
+/// Running → Finished → Finalized), with the off-ramps (revert/abort/restart/discard)
+/// named for the action so they stay distinct even when they land on the same state.
+/// The engine validates legality against the current state. Heat *creation* is a
+/// separate event ([`Event::HeatScheduled`]) — it carries the lineup, which a
+/// transition does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum HeatTransition {
@@ -220,17 +221,19 @@ pub enum HeatTransition {
     Armed,
     /// The race is running; passes are consumed from here (plus the grace window).
     Running,
-    /// The race closed — time elapsed or all landed.
+    /// The race closed — time elapsed or all landed — entering the unofficial phase.
     Finished,
     /// The result is finalized.
-    Scored,
+    Finalized,
     /// Results are handed to the format generator.
     Advanced,
-    /// Abandoned before scoring (Staged/Armed/Running → back a state).
+    /// A finalized result re-opened for correction (Final → Unofficial).
+    Reverted,
+    /// Abandoned before finalizing (Staged/Armed/Running → back a state).
     Aborted,
-    /// A running heat restarted from staging.
+    /// A committed heat restarted from staging.
     Restarted,
-    /// A scored heat discarded for a re-run.
+    /// A finalized heat discarded for a re-run.
     Discarded,
 }
 
@@ -502,7 +505,8 @@ mod tests {
     fn all_heat_transitions_round_trip() {
         use HeatTransition::*;
         for t in [
-            Staged, Armed, Running, Finished, Scored, Advanced, Aborted, Restarted, Discarded,
+            Staged, Armed, Running, Finished, Finalized, Advanced, Reverted, Aborted, Restarted,
+            Discarded,
         ] {
             let json = serde_json::to_string(&t).unwrap();
             let back: HeatTransition = serde_json::from_str(&json).unwrap();

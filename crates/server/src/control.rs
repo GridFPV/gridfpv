@@ -35,8 +35,9 @@ use crate::error::ProtocolError;
 /// The variants fall into four groups:
 ///
 /// - **Heat-loop transitions** — [`Stage`](Command::Stage), [`Arm`](Command::Arm),
-///   [`Start`](Command::Start), [`Finish`](Command::Finish), [`Score`](Command::Score),
-///   [`Advance`](Command::Advance), and the off-ramps [`Abort`](Command::Abort),
+///   [`Start`](Command::Start), [`Finish`](Command::Finish),
+///   [`Finalize`](Command::Finalize), [`Advance`](Command::Advance), and the off-ramps
+///   [`Revert`](Command::Revert), [`Abort`](Command::Abort),
 ///   [`Restart`](Command::Restart), [`Discard`](Command::Discard). Each requests the
 ///   matching [`HeatTransition`](gridfpv_events::HeatTransition); the engine validates
 ///   it against the heat's current state (race-engine.html §2).
@@ -73,27 +74,32 @@ pub enum Command {
         /// The heat to transition.
         heat: HeatId,
     },
-    /// Score the heat — finalize the result.
-    Score {
+    /// Finalize the heat — lock in the result (Unofficial → Final).
+    Finalize {
         /// The heat to transition.
         heat: HeatId,
     },
-    /// Advance the scored heat — hand its result to the format generator.
+    /// Advance the finalized heat — hand its result to the format generator.
     Advance {
         /// The heat to transition.
         heat: HeatId,
     },
-    /// Abort the heat — abandon it before scoring (an off-ramp).
+    /// Revert a finalized heat — re-open its result for correction (Final → Unofficial).
+    Revert {
+        /// The heat to transition.
+        heat: HeatId,
+    },
+    /// Abort the heat — abandon it before finalizing (an off-ramp).
     Abort {
         /// The heat to transition.
         heat: HeatId,
     },
-    /// Restart a running heat — back to staging for a re-run.
+    /// Restart a committed heat — back to staging for a re-run.
     Restart {
         /// The heat to transition.
         heat: HeatId,
     },
-    /// Discard a scored heat — drop its result for a re-run.
+    /// Discard a finalized heat — drop its result for a re-run.
     Discard {
         /// The heat to transition.
         heat: HeatId,
@@ -250,10 +256,13 @@ mod tests {
             Command::Finish {
                 heat: HeatId("q-1".into()),
             },
-            Command::Score {
+            Command::Finalize {
                 heat: HeatId("q-1".into()),
             },
             Command::Advance {
+                heat: HeatId("q-1".into()),
+            },
+            Command::Revert {
                 heat: HeatId("q-1".into()),
             },
             Command::Abort {

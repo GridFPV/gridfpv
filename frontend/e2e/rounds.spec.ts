@@ -440,7 +440,7 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
  *
  * The prerequisites (a class with two members + a `timed_qual` round, its heat filled) are set up
  * over the real REST/control path; then the test drives the **UI**: it runs the filled heat to
- * **Final** (Stage → Arm → Start, lets the sim emit laps, Finish → Score), opens **Results** and
+ * **Final** (Stage → Arm → Start, lets the sim emit laps, Finish → Finalize), opens **Results** and
  * asserts the **per-class standings populate** with the two pilots, then back in **Rounds & Heats**
  * **Advances to bracket** — asserting a `single_elim` round is created seeded `FromRanking`, and its
  * filled heat's lineup matches the round ranking's top-N. Nothing about the standings/advance UI is
@@ -525,8 +525,8 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
   await expect.poll(totalLaps, { timeout: 30_000 }).toBeGreaterThan(1);
 
   await page.getByRole('button', { name: 'Finish', exact: true }).click();
-  await expect(page.locator('.phase').first()).toHaveText('Finished');
-  await page.getByRole('button', { name: 'Score', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial');
+  await page.getByRole('button', { name: 'Finalize', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Final');
 
   // ── Results → the per-class standings populate with both pilots ───────────────────────────────

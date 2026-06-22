@@ -4,13 +4,13 @@
  * The heat loop is a linear forward path with off-ramps (race-engine.html §2,
  * protocol.html §1):
  *
- *     Scheduled → Staged → Armed → Running → Finished → Final → (Advanced)
+ *     Scheduled → Staged → Armed → Running → Unofficial → Final → (Advanced)
  *
  * `Command` exposes one variant per forward step (`Stage`/`Arm`/`Start`/`Finish`/
- * `Score`/`Advance`) and three off-ramps (`Abort`/`Restart`/`Discard`). Each carries
- * the same `{ heat }` payload and requests the matching `HeatTransition`; the engine
- * validates legality against the heat's *current* state — but the console disables
- * illegal actions up front so the RD never fires a command that can only fail
+ * `Finalize`/`Advance`) and the off-ramps (`Revert`/`Abort`/`Restart`/`Discard`). Each
+ * carries the same `{ heat }` payload and requests the matching `HeatTransition`; the
+ * engine validates legality against the heat's *current* state — but the console
+ * disables illegal actions up front so the RD never fires a command that can only fail
  * (clients.html §5: "reversible mistakes", progressive disclosure).
  *
  * The phase the projection reports is `HeatPhase` (the folded view). This module is
@@ -23,22 +23,25 @@ import type { Command, HeatId, HeatPhase } from '@gridfpv/types';
 
 /**
  * The console-facing name of a heat-loop action. Mirrors the forward
- * `Command`/`HeatTransition` steps plus the three off-ramps. (`Start` enters
- * `Running`; `Finish` enters the projected `Finished` phase; `Score` enters `Final`.)
+ * `Command`/`HeatTransition` steps plus the off-ramps. (`Start` enters `Running`;
+ * `Finish` enters the projected `Unofficial` phase; `Finalize` enters `Final`;
+ * `Revert` re-opens a `Final` heat back to `Unofficial`.)
  */
 export type HeatAction =
   | 'Stage'
   | 'Arm'
   | 'Start'
   | 'Finish'
-  | 'Score'
+  | 'Finalize'
   | 'Advance'
+  | 'Revert'
   | 'Abort'
   | 'Restart'
   | 'Discard';
 
 /** Actions that destroy or rewind progress — the console confirms these (§5). */
 export const DESTRUCTIVE_ACTIONS: ReadonlySet<HeatAction> = new Set<HeatAction>([
+  'Revert',
   'Abort',
   'Restart',
   'Discard'
@@ -50,7 +53,7 @@ const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
   Staged: 'Arm',
   Armed: 'Start',
   Running: 'Finish',
-  Finished: 'Score',
+  Unofficial: 'Finalize',
   Final: 'Advance'
 };
 
@@ -59,12 +62,14 @@ const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
  *
  * Forward steps follow the linear path. The off-ramps are available where they make
  * sense:
- *   • `Abort` — bail out of a heat that has been committed to but not yet scored
+ *   • `Revert` — re-open a finalized result for correction (Final → Unofficial): a
+ *     scoring fix the RD spotted after locking the heat in.
+ *   • `Abort` — bail out of a heat that has been committed to but not yet finalized
  *     (Staged/Armed/Running): stop it where it is.
- *   • `Restart` — re-run from the top once committed (Staged/Armed/Running/Finished):
+ *   • `Restart` — re-run from the top once committed (Armed/Running/Unofficial):
  *     a bad start, a crash before the window, a contested run.
  *   • `Discard` — throw the heat away entirely once it has results to throw away
- *     (Finished/Final): it should never have counted.
+ *     (Unofficial/Final): it should never have counted.
  *
  * The engine is the final authority (it re-validates), so this errs toward the RD's
  * mental model rather than encoding every edge; an over-permissive entry simply
@@ -72,11 +77,11 @@ const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
  */
 const LEGAL_BY_PHASE: Record<HeatPhase, ReadonlySet<HeatAction>> = {
   Scheduled: new Set<HeatAction>(['Stage']),
-  Staged: new Set<HeatAction>(['Arm', 'Abort', 'Restart']),
+  Staged: new Set<HeatAction>(['Arm', 'Abort']),
   Armed: new Set<HeatAction>(['Start', 'Abort', 'Restart']),
   Running: new Set<HeatAction>(['Finish', 'Abort', 'Restart']),
-  Finished: new Set<HeatAction>(['Score', 'Restart', 'Discard']),
-  Final: new Set<HeatAction>(['Advance', 'Discard'])
+  Unofficial: new Set<HeatAction>(['Finalize', 'Restart', 'Discard']),
+  Final: new Set<HeatAction>(['Advance', 'Revert', 'Discard'])
 };
 
 /** The display order actions render in (forward steps first, then off-ramps). */
@@ -85,8 +90,9 @@ export const ACTION_ORDER: readonly HeatAction[] = [
   'Arm',
   'Start',
   'Finish',
-  'Score',
+  'Finalize',
   'Advance',
+  'Revert',
   'Abort',
   'Restart',
   'Discard'
@@ -127,10 +133,12 @@ export function commandForAction(action: HeatAction, heat: HeatId): Command {
       return { Start: { heat } };
     case 'Finish':
       return { Finish: { heat } };
-    case 'Score':
-      return { Score: { heat } };
+    case 'Finalize':
+      return { Finalize: { heat } };
     case 'Advance':
       return { Advance: { heat } };
+    case 'Revert':
+      return { Revert: { heat } };
     case 'Abort':
       return { Abort: { heat } };
     case 'Restart':
@@ -156,10 +164,12 @@ export function actionDescription(action: HeatAction): string {
       return 'Start the race. The clock begins.';
     case 'Finish':
       return 'End the race window. Pilots land.';
-    case 'Score':
-      return 'Score the heat and lock in the result.';
+    case 'Finalize':
+      return 'Finalize the heat and lock in the result.';
     case 'Advance':
       return 'Advance to the next heat.';
+    case 'Revert':
+      return 'Re-open this finalized heat to correct its result.';
     case 'Abort':
       return 'Abort this heat where it is (no result).';
     case 'Restart':

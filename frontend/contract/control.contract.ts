@@ -65,7 +65,9 @@ describe('seam 5: control command shape + headers', () => {
       { Arm: { heat: 'h-loop' } },
       { Start: { heat: 'h-loop' } },
       { Finish: { heat: 'h-loop' } },
-      { Score: { heat: 'h-loop' } }
+      { Finalize: { heat: 'h-loop' } },
+      { Revert: { heat: 'h-loop' } },
+      { Finalize: { heat: 'h-loop' } }
     ];
     for (const command of loop) {
       const ack = await rdControl(director.baseUrl, TOKEN, command);

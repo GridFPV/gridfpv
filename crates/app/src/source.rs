@@ -39,7 +39,7 @@
 //! [`read_from`](gridfpv_server::app::EventSource::read_from) on a short interval
 //! ([`POLL_INTERVAL`]) and reacts to the `HeatScheduled` / `HeatStateChanged` events it
 //! sees. On a `Running` transition it looks back for that heat's lineup (its
-//! `HeatScheduled`) and spawns the source task; on `Finished`/`Aborted`/`Scored`/`Restarted`
+//! `HeatScheduled`) and spawns the source task; on `Finished`/`Aborted`/`Finalized`/`Restarted`
 //! for the running heat — or a *different* heat going `Running` — it cancels the task. At
 //! most one heat emits at a time (a single in-flight task), which is plenty for a Director
 //! driving one timer.
@@ -485,7 +485,7 @@ pub fn spawn_registry_bridge(
 }
 
 /// The bridge loop: poll the log tail, drive the event's **selected timers** on `Running`, cancel
-/// on `Finished`/`Aborted`/`Scored`/`Restarted` (or a newer heat going `Running`).
+/// on `Finished`/`Aborted`/`Finalized`/`Restarted` (or a newer heat going `Running`).
 ///
 /// On a `Running` transition the bridge reads the event's current
 /// [`EventMeta::timers`](gridfpv_server::events::EventMeta::timers) selection from `registry`,
@@ -897,7 +897,8 @@ fn handle_transition(
         // only emits while `Running`, mirroring `consumes_pass` (race-engine §2).
         HeatTransition::Finished
         | HeatTransition::Aborted
-        | HeatTransition::Scored
+        | HeatTransition::Finalized
+        | HeatTransition::Reverted
         | HeatTransition::Restarted
         | HeatTransition::Discarded
         | HeatTransition::Advanced => {

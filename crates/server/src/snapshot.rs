@@ -40,13 +40,13 @@ use crate::stream::Cursor;
 pub use crate::live_state::{LiveRaceState, PilotProgress};
 
 /// The heat-loop phase the live state reports (protocol.html §1: `Scheduled → Staged →
-/// Armed → Running → Finished → Final`).
+/// Armed → Running → Unofficial → Final`).
 ///
 /// This is the *projected* view of the heat loop — the folded current phase a client
 /// renders — not the raw [`HeatTransition`](gridfpv_events::HeatTransition) event the
-/// engine appends. The off-ramp transitions (abort/restart/discard) resolve back onto
-/// one of these phases, so the live view stays a simple linear status. A #41-era detail
-/// the placeholder pins minimally.
+/// engine appends. The off-ramp transitions (revert/abort/restart/discard) resolve back
+/// onto one of these phases, so the live view stays a simple linear status. A #41-era
+/// detail the placeholder pins minimally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum HeatPhase {
@@ -58,9 +58,9 @@ pub enum HeatPhase {
     Armed,
     /// The race is running; passes are being consumed.
     Running,
-    /// The race has closed — time elapsed or all finished — but is not yet scored.
-    /// Mirrors the canonical engine state `HeatState::Finished` (code-conventions §4).
-    Finished,
+    /// The race has closed — time elapsed or all finished — but is not yet finalized.
+    /// Mirrors the canonical engine state `HeatState::Unofficial` (code-conventions §4).
+    Unofficial,
     /// The result is finalized.
     Final,
 }

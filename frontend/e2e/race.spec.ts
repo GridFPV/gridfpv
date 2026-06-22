@@ -119,10 +119,17 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
 
   // ── Finish the window ────────────────────────────────────────────────────────────────
   await page.getByRole('button', { name: 'Finish', exact: true }).click();
-  await expect(page.locator('.phase').first()).toHaveText('Finished');
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 
-  // ── Score the heat ───────────────────────────────────────────────────────────────────
-  await page.getByRole('button', { name: 'Score', exact: true }).click();
+  // ── Finalize the heat ────────────────────────────────────────────────────────────────
+  await page.getByRole('button', { name: 'Finalize', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Final');
+
+  // ── Revert re-opens the finalized heat, then Finalize locks it back in ────────────────
+  await page.getByRole('button', { name: 'Revert', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial');
+  await page.getByRole('button', { name: 'Finalize', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Final');
 
   // ── Read the results: the Results screen shows the pilots, lap counts, and an order ───
