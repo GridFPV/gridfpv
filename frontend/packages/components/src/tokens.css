@@ -152,6 +152,12 @@
   --gf-info: var(--gf-blue-400);
   --gf-info-soft: color-mix(in srgb, var(--gf-blue-400) 16%, transparent);
 
+  /* Violet accent — a distinct "user-defined / your own" hue, used for the
+   * Custom class source badge so it reads apart from the org tones
+   * (green/blue/amber/red). Shares the violet ramp with the Scored phase. */
+  --gf-violet: var(--gf-violet-400);
+  --gf-violet-soft: color-mix(in srgb, var(--gf-violet-400) 16%, transparent);
+
   /* Legacy state aliases. */
   --gf-color-live: var(--gf-success);
   --gf-color-leader: var(--gf-accent);
@@ -282,6 +288,8 @@
   --gf-warn: var(--gf-amber-500);
   --gf-danger: var(--gf-red-500);
   --gf-info: var(--gf-blue-500);
+  --gf-violet: var(--gf-violet-500);
+  --gf-violet-soft: color-mix(in srgb, var(--gf-violet-500) 12%, transparent);
 
   /* Practice accent (#91): a touch deeper so it holds contrast on a white canvas. */
   --gf-accent-practice: #e8602a;

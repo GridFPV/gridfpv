@@ -91,13 +91,13 @@ describe('isBuiltin + source badges', () => {
     expect(isBuiltin({ ...FULL, builtin: false })).toBe(false);
   });
 
-  it('gives each org source a distinct badge tone, with Custom/Other neutral', () => {
+  it('gives each org source a distinct badge tone, Custom its own violet, Other neutral', () => {
     expect(sourceTone('MultiGP')).toBe('accent');
     expect(sourceTone('Five33')).toBe('success');
     expect(sourceTone('FreedomSpec')).toBe('info');
     expect(sourceTone('StreetLeague')).toBe('warn');
     expect(sourceTone('UDL')).toBe('danger');
-    expect(sourceTone('Custom')).toBe('neutral');
+    expect(sourceTone('Custom')).toBe('violet');
     expect(sourceTone('Other')).toBe('neutral');
   });
 });

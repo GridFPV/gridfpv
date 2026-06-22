@@ -14,11 +14,13 @@
 import type { Class, ClassSource, CreateClassRequest, UpdateClassRequest } from '@gridfpv/types';
 
 /** The Badge tones used for class sources (a subset of the Badge component's `tone` union). */
-type SourceTone = 'accent' | 'info' | 'success' | 'warn' | 'danger' | 'neutral';
+type SourceTone = 'accent' | 'info' | 'success' | 'warn' | 'danger' | 'violet' | 'neutral';
 
 /**
  * The Badge `tone` for each class source — a distinct tone per org so the built-in classes read at
- * a glance, plus `Custom`/`Other` for user classes.
+ * a glance. `Custom` (the classes users create) gets its own **violet** tone — a "your own /
+ * user-defined" color that reads apart from the org tones (green/blue/amber/red) without clashing.
+ * `Other` stays neutral.
  */
 const SOURCE_TONES: Record<ClassSource, SourceTone> = {
   MultiGP: 'accent',
@@ -26,7 +28,7 @@ const SOURCE_TONES: Record<ClassSource, SourceTone> = {
   FreedomSpec: 'info',
   StreetLeague: 'warn',
   UDL: 'danger',
-  Custom: 'neutral',
+  Custom: 'violet',
   Other: 'neutral'
 };
 

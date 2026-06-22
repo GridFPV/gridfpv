@@ -12,7 +12,7 @@
     dot = false,
     children
   }: {
-    tone?: 'neutral' | 'accent' | 'success' | 'warn' | 'danger' | 'info';
+    tone?: 'neutral' | 'accent' | 'success' | 'warn' | 'danger' | 'info' | 'violet';
     variant?: 'soft' | 'solid' | 'outline';
     dot?: boolean;
     children: Snippet;
@@ -58,6 +58,10 @@
   .gf-badge[data-tone='info'] {
     --_c: var(--gf-info);
     --_soft: var(--gf-info-soft);
+  }
+  .gf-badge[data-tone='violet'] {
+    --_c: var(--gf-violet);
+    --_soft: var(--gf-violet-soft);
   }
 
   .gf-badge[data-variant='soft'] {
