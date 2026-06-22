@@ -26,12 +26,13 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use gridfpv_app::director::build_app;
 use gridfpv_app::source::{SIM_ADAPTER, SimSource, SourceConfig, spawn_registry_bridge};
+use gridfpv_engine::heat::GraceWindow;
 use gridfpv_events::{AdapterId, ClassId, Event, HeatId, RoundId};
 use gridfpv_server::app::AppState;
 use gridfpv_server::classes::CreateClassRequest;
 use gridfpv_server::control::{Command, CommandAck};
 use gridfpv_server::events::{
-    ChannelMode, EventRegistry, MemberSlot, NewRoundReq, RoundDef, SeedingRule,
+    ChannelMode, EventRegistry, MemberSlot, NewRoundReq, RoundDef, SeedingRule, StartProcedure,
 };
 use gridfpv_server::pilots::CreatePilotRequest;
 use gridfpv_server::scope::EventId;
@@ -177,7 +178,16 @@ fn passes_in_running_window(events: &[Event]) -> usize {
 }
 
 /// Drive one round-scheduled heat through the full loop with the mock bridge emitting laps:
-/// FillRound → Stage → Arm → Start → (wait for laps) → Finish → Score. Returns the heat id.
+/// FillRound → Stage → Start → SkipCountdown → (wait for laps) → ForceEnd → Finalize. Returns the
+/// heat id.
+///
+/// Heat-lifecycle Slice 2 collapsed the manual `Arm`/`Start`/`Finish` commands: `Start` now arms the
+/// heat and the runtime auto-advances `Armed → Running` (after the round's start delay) and
+/// `Running → Unofficial` (on the win condition + grace). This e2e uses the **overrides**
+/// `SkipCountdown` / `ForceEnd` to bypass those timers so it stays fast and deterministic regardless
+/// of the round's start-delay / win-condition config (this round scores `BestLap`, which has no
+/// intrinsic auto-completion). A dedicated test drives the *auto* path
+/// ([`heat_auto_advances_running_to_unofficial_under_the_clock`]).
 async fn run_one_heat(
     app: &axum::Router,
     state: &AppState,
@@ -204,8 +214,16 @@ async fn run_one_heat(
     assert_eq!(lineup.len(), pilots, "the heat lineup is the round field");
 
     control_ok(app, event, token, &Command::Stage { heat: heat.clone() }).await;
-    control_ok(app, event, token, &Command::Arm { heat: heat.clone() }).await;
+    // `Start` arms the heat (Staged → Armed) and runs the start procedure; `SkipCountdown` forces
+    // Armed → Running immediately so the e2e doesn't wait on the randomized start delay.
     control_ok(app, event, token, &Command::Start { heat: heat.clone() }).await;
+    control_ok(
+        app,
+        event,
+        token,
+        &Command::SkipCountdown { heat: heat.clone() },
+    )
+    .await;
 
     // The mock bridge emits a holeshot + `laps` lap-gate passes per pilot. Wait until they
     // have all landed before closing the heat.
@@ -215,7 +233,8 @@ async fn run_one_heat(
     })
     .await;
 
-    control_ok(app, event, token, &Command::Finish { heat: heat.clone() }).await;
+    // `ForceEnd` closes the race (Running → Unofficial) — the override for the auto-completion.
+    control_ok(app, event, token, &Command::ForceEnd { heat: heat.clone() }).await;
     control_ok(app, event, token, &Command::Finalize { heat: heat.clone() }).await;
     heat
 }
@@ -306,6 +325,9 @@ async fn round_driven_mock_race_flow_e2e() {
             seeding: SeedingRule::FromRoster,
             // Per-heat: this flow asserts the whole-field heat + first-fit channel assignment.
             channel_mode: Some(ChannelMode::PerHeat),
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
         },
     )
     .await;
@@ -405,6 +427,9 @@ async fn round_driven_mock_race_flow_e2e() {
             },
             // single_elim defaults to PerHeat anyway; keep it explicit for the bracket carry.
             channel_mode: Some(ChannelMode::PerHeat),
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
         },
     )
     .await;
@@ -584,6 +609,9 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
             seeding: SeedingRule::FromRoster,
             // Per-heat: this flow asserts the node-cap rejection of an oversized whole-field heat.
             channel_mode: Some(ChannelMode::PerHeat),
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
         },
     )
     .await;
@@ -705,6 +733,9 @@ async fn static_channel_balanced_qual_flow_e2e() {
             win_condition: gridfpv_engine::scoring::WinCondition::BestLap,
             seeding: SeedingRule::FromRoster,
             channel_mode: Some(ChannelMode::Static),
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
         },
     )
     .await;
@@ -762,8 +793,16 @@ async fn static_channel_balanced_qual_flow_e2e() {
         }
         let want = freqs.len() * (laps as usize + 1);
         control_ok(&app, &event, &token, &Command::Stage { heat: heat.clone() }).await;
-        control_ok(&app, &event, &token, &Command::Arm { heat: heat.clone() }).await;
+        // Heat-lifecycle Slice 2: `Start` arms; `SkipCountdown`/`ForceEnd` are the overrides that
+        // bypass the runtime start/completion clocks so this static-formation flow stays fast.
         control_ok(&app, &event, &token, &Command::Start { heat: heat.clone() }).await;
+        control_ok(
+            &app,
+            &event,
+            &token,
+            &Command::SkipCountdown { heat: heat.clone() },
+        )
+        .await;
         wait_until(&state, Duration::from_secs(10), move |events| {
             passes_in_running_window(events) >= want
         })
@@ -772,7 +811,7 @@ async fn static_channel_balanced_qual_flow_e2e() {
             &app,
             &event,
             &token,
-            &Command::Finish { heat: heat.clone() },
+            &Command::ForceEnd { heat: heat.clone() },
         )
         .await;
         control_ok(&app, &event, &token, &Command::Finalize { heat }).await;
@@ -819,6 +858,291 @@ async fn static_channel_balanced_qual_flow_e2e() {
 async fn control_put(app: &axum::Router, uri: &str, token: &str, body: serde_json::Value) {
     let (status, resp) = call(app, "PUT", uri, Some(token), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "PUT {uri} failed: {resp}");
+}
+
+/// Fold the heat's current `HeatState` from a log (the engine's pure fold), for asserting the
+/// runtime clock drove the heat to a given state.
+fn heat_state_of(events: &[Event], heat: &HeatId) -> Option<gridfpv_engine::heat::HeatState> {
+    gridfpv_engine::heat::heat_state(events, heat)
+}
+
+/// Build the event + a single round whose **start procedure is near-instant** and whose win
+/// condition is `FirstToLaps`, so the runtime clock drives both auto-transitions quickly. Returns
+/// `(registry, app, token, event, round_id, pilots)`.
+async fn fast_auto_event(
+    laps: u32,
+    lap_ms: u64,
+    win_laps: u32,
+) -> (
+    EventRegistry,
+    axum::Router,
+    String,
+    EventId,
+    RoundId,
+    Vec<gridfpv_server::scope::PilotId>,
+) {
+    let registry = fast_registry(laps, lap_ms);
+    let class_id = registry
+        .classes()
+        .create(&CreateClassRequest {
+            name: "Open".into(),
+            source: Default::default(),
+            reference: None,
+            description: None,
+        })
+        .unwrap()
+        .id;
+    let mut pilots = Vec::new();
+    for cs in ["alpha", "bravo"] {
+        pilots.push(
+            registry
+                .pilots()
+                .create(&CreatePilotRequest {
+                    callsign: cs.into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .id,
+        );
+    }
+    let token = registry.tokens().issue_rd_token();
+    let _bridge = spawn_registry_bridge(
+        registry.clone(),
+        SourceConfig::Sim(SimSource::new(laps, Duration::from_millis(lap_ms))),
+        AdapterId(SIM_ADAPTER.to_string()),
+    );
+    // Leak the bridge handle so it runs for the whole test (the registry keeps the logs alive).
+    std::mem::forget(_bridge);
+    let app = build_app(registry.clone(), &no_assets());
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/events",
+        Some(&token),
+        Some(serde_json::json!({ "name": "Auto Clock" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create event: {body}");
+    let event_meta: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let event = EventId(event_meta["id"].as_str().unwrap().to_string());
+
+    control_put(
+        &app,
+        &format!("/events/{}/classes", event.0),
+        &token,
+        serde_json::json!({ "ids": [class_id.0] }),
+    )
+    .await;
+    control_put(
+        &app,
+        &format!("/events/{}/classes/{}/membership", event.0, class_id.0),
+        &token,
+        serde_json::json!({ "pilots": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
+    )
+    .await;
+
+    let round: RoundDef = add_round(
+        &app,
+        &event,
+        &token,
+        NewRoundReq {
+            label: "Qualifying".into(),
+            classes: vec![class_id.clone()],
+            format: "timed_qual".into(),
+            params: BTreeMap::from([("rounds".into(), "1".into())]),
+            // FirstToLaps gives the completion clock an intrinsic end (the leader reaching `win_laps`).
+            win_condition: gridfpv_engine::scoring::WinCondition::FirstToLaps { n: win_laps },
+            seeding: SeedingRule::FromRoster,
+            channel_mode: Some(ChannelMode::PerHeat),
+            staging_timer_secs: None,
+            // A near-instant start hold so the auto Armed→Running fires within a poll.
+            start_procedure: Some(StartProcedure::RandomizedDelay {
+                min_delay_ms: 0,
+                max_delay_ms: 1,
+                tone: None,
+            }),
+            // A short bounded grace so the auto Running→Unofficial fires promptly after the win.
+            grace_window: Some(GraceWindow::Duration { micros: 5_000 }),
+        },
+    )
+    .await;
+    control_put(
+        &app,
+        "/active-event",
+        &token,
+        serde_json::json!({ "id": event.0 }),
+    )
+    .await;
+    (registry, app, token, event, round.id, pilots)
+}
+
+/// The headline auto-advance: after `Start` (which arms the heat) the **runtime clock** drives the
+/// heat all the way to `Unofficial` on its own — auto `Armed → Running` (after the logged start
+/// delay) and auto `Running → Unofficial` (on the win condition + grace) — with no manual
+/// `SkipCountdown`/`ForceEnd`. Then `Finalize` reaches `Final`.
+#[tokio::test]
+async fn heat_auto_advances_running_to_unofficial_under_the_clock() {
+    let (registry, app, token, event, round, pilots) = fast_auto_event(5, 2, 3).await;
+    let state = registry.resolve(&event).unwrap();
+
+    control_ok(
+        &app,
+        &event,
+        &token,
+        &Command::FillRound {
+            round: round.clone(),
+        },
+    )
+    .await;
+    let (heat, _class, _lineup) =
+        round_heat(&read_log(&state), &round.0).expect("a heat scheduled");
+
+    // Stage, then Start — Start ARMS the heat; the runtime then auto-advances. No SkipCountdown.
+    control_ok(&app, &event, &token, &Command::Stage { heat: heat.clone() }).await;
+    control_ok(&app, &event, &token, &Command::Start { heat: heat.clone() }).await;
+
+    // The runtime logs the start delay (`HeatStarting`), then auto-appends `Running`.
+    let starting_heat = heat.clone();
+    wait_until(&state, Duration::from_secs(10), move |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, Event::HeatStarting { heat: h, .. } if *h == starting_heat))
+    })
+    .await;
+
+    // The completion clock then auto-advances `Running → Unofficial` once the leader hits 3 laps +
+    // the grace window — no `ForceEnd` was sent.
+    let unofficial_heat = heat.clone();
+    wait_until(&state, Duration::from_secs(15), move |events| {
+        heat_state_of(events, &unofficial_heat) == Some(gridfpv_engine::heat::HeatState::Unofficial)
+    })
+    .await;
+
+    // Exactly one auto `Running` and one auto `Finished` were appended (the runtime drove them).
+    let events = read_log(&state);
+    let running = events
+        .iter()
+        .filter(|e| matches!(e, Event::HeatStateChanged { heat: h, transition: gridfpv_events::HeatTransition::Running } if *h == heat))
+        .count();
+    let finished = events
+        .iter()
+        .filter(|e| matches!(e, Event::HeatStateChanged { heat: h, transition: gridfpv_events::HeatTransition::Finished } if *h == heat))
+        .count();
+    assert_eq!(running, 1, "the runtime auto-appended exactly one Running");
+    assert_eq!(
+        finished, 1,
+        "the runtime auto-appended exactly one Finished"
+    );
+
+    // Finalize closes the loop.
+    control_ok(
+        &app,
+        &event,
+        &token,
+        &Command::Finalize { heat: heat.clone() },
+    )
+    .await;
+    assert_eq!(
+        heat_state_of(&read_log(&state), &heat),
+        Some(gridfpv_engine::heat::HeatState::Final)
+    );
+    assert_eq!(pilots.len(), 2);
+}
+
+/// **Determinism / replay** (the headline guarantee): drive a heat through the full auto-clock path
+/// to `Final`, then **replay the resulting log** through the pure engine fold and assert the replay
+/// reproduces the identical state — the logged start delay (`HeatStarting`) + the two
+/// runtime-appended auto-transitions are *facts* the fold reads, never re-randomized or recomputed
+/// from a clock (race-engine.html §6).
+#[tokio::test]
+async fn the_logged_clock_events_replay_deterministically() {
+    let (registry, app, token, event, round, _pilots) = fast_auto_event(5, 2, 3).await;
+    let state = registry.resolve(&event).unwrap();
+
+    control_ok(
+        &app,
+        &event,
+        &token,
+        &Command::FillRound {
+            round: round.clone(),
+        },
+    )
+    .await;
+    let (heat, _class, _lineup) =
+        round_heat(&read_log(&state), &round.0).expect("a heat scheduled");
+    control_ok(&app, &event, &token, &Command::Stage { heat: heat.clone() }).await;
+    control_ok(&app, &event, &token, &Command::Start { heat: heat.clone() }).await;
+
+    // Wait for the full auto path to land, then Finalize.
+    let wheat = heat.clone();
+    wait_until(&state, Duration::from_secs(15), move |events| {
+        heat_state_of(events, &wheat) == Some(gridfpv_engine::heat::HeatState::Unofficial)
+    })
+    .await;
+    control_ok(
+        &app,
+        &event,
+        &token,
+        &Command::Finalize { heat: heat.clone() },
+    )
+    .await;
+
+    let log = read_log(&state);
+
+    // (1) The start delay was logged once as a FACT — the runtime chose it, the fold never re-rolls.
+    let delays: Vec<u32> = log
+        .iter()
+        .filter_map(|e| match e {
+            Event::HeatStarting { heat: h, delay_ms } if *h == heat => Some(*delay_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(delays.len(), 1, "exactly one logged start delay");
+
+    // (2) Replay: fold the SAME log twice; a pure fold gives the same state every time, with no
+    // hidden clock/RNG re-evaluation. This is the deterministic-replay guarantee.
+    let first = heat_state_of(&log, &heat);
+    let second = heat_state_of(&log, &heat);
+    assert_eq!(first, second);
+    assert_eq!(first, Some(gridfpv_engine::heat::HeatState::Final));
+
+    // (3) Replaying the start delay reads the SAME value — no re-randomization on replay.
+    let replay_delays: Vec<u32> = log
+        .iter()
+        .filter_map(|e| match e {
+            Event::HeatStarting { heat: h, delay_ms } if *h == heat => Some(*delay_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replay_delays, delays,
+        "the logged delay is stable on replay"
+    );
+
+    // (4) The auto-transitions appear exactly once each, in canonical forward order — the same log
+    // a fresh Director would replay identically.
+    let transitions: Vec<gridfpv_events::HeatTransition> = log
+        .iter()
+        .filter_map(|e| match e {
+            Event::HeatStateChanged {
+                heat: h,
+                transition,
+            } if *h == heat => Some(*transition),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        transitions,
+        vec![
+            gridfpv_events::HeatTransition::Staged,
+            gridfpv_events::HeatTransition::Armed,
+            gridfpv_events::HeatTransition::Running,
+            gridfpv_events::HeatTransition::Finished,
+            gridfpv_events::HeatTransition::Finalized,
+        ],
+        "the runtime-driven log folds the full forward path, once each"
+    );
 }
 
 /// `POST …/rounds` asserted ok, returning the created [`RoundDef`].

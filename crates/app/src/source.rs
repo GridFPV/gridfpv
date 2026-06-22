@@ -503,6 +503,10 @@ pub(crate) async fn run_bridge(
     let mut cursor: Offset = 0;
     // The in-flight heat task, if a heat is currently emitting. At most one at a time.
     let mut active: Option<ActiveHeat> = None;
+    // The runtime-clock drivers (heat-lifecycle Slice 2): the start countdown for a heat in `Armed`
+    // and the completion clock for a heat in `Running`. Each is `(heat, task)` so the bridge can
+    // cancel a superseded one (the heat left the relevant state) before it appends a stale auto.
+    let mut clock = HeatClock::default();
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
 
     loop {
@@ -561,6 +565,7 @@ pub(crate) async fn run_bridge(
                     &event_id,
                     &adapter,
                     &mut active,
+                    &mut clock,
                     #[cfg(feature = "live")]
                     &connections,
                     heat,
@@ -809,10 +814,16 @@ fn handle_transition(
     event_id: &EventId,
     adapter: &AdapterId,
     active: &mut Option<ActiveHeat>,
+    clock: &mut HeatClock,
     #[cfg(feature = "live")] connections: &RhConnections,
     heat: HeatId,
     transition: HeatTransition,
 ) {
+    // Heat-lifecycle Slice 2 — the runtime clock. Any transition for THIS heat cancels its in-flight
+    // clock drivers first (a stale countdown/completion must never append after the heat moved on);
+    // the per-state arms below then (re)spawn the driver the new state wants. A transition for a
+    // *different* heat leaves this heat's drivers alone.
+    clock.cancel_for(&heat);
     match transition {
         HeatTransition::Running => {
             // A different heat taking the timer cancels the previous one (only one heat
@@ -882,6 +893,14 @@ fn handle_transition(
             let nothing_armed = armed_rh.is_empty();
             #[cfg(not(feature = "live"))]
             let nothing_armed = true;
+            // Spawn the completion clock (heat-lifecycle Slice 2): it watches the running passes and
+            // auto-appends `Finished` once the win condition + grace are met. Independent of whether
+            // any source emits — a real RH heat with no Mock source still needs auto-completion.
+            clock.completion = Some((
+                heat.clone(),
+                spawn_completion_driver(state, registry, event_id, heat.clone()),
+            ));
+
             if handles.is_empty() && nothing_armed {
                 return;
             }
@@ -935,8 +954,48 @@ fn handle_transition(
             #[cfg(not(feature = "live"))]
             let _ = &heat;
         }
-        // Armed is pre-Running too: nothing to cancel (the heat isn't emitting yet).
-        HeatTransition::Armed => {}
+        // Armed: run the **start procedure** (heat-lifecycle Slice 2). The heat isn't emitting yet;
+        // the start driver logs the chosen delay (`HeatStarting`) and, after it, the auto
+        // `Armed → Running`. A manual `SkipCountdown` (or an abort) cancels this via `cancel_for`
+        // before it fires — see the top of this fn.
+        HeatTransition::Armed => {
+            clock.start = Some((
+                heat.clone(),
+                spawn_start_driver(state, registry, event_id, heat),
+            ));
+        }
+    }
+}
+
+/// The runtime-clock drivers in flight for the bridge (heat-lifecycle Slice 2): the `start`
+/// countdown for the heat currently in `Armed` and the `completion` clock for the heat currently in
+/// `Running`. Each is `(heat, task)` so a transition can cancel exactly the driver belonging to the
+/// heat that moved. At most one of each at a time (the bridge drives one heat at a time).
+#[derive(Default)]
+struct HeatClock {
+    /// The start countdown for a heat in `Armed` (appends `HeatStarting` then auto `Running`).
+    start: Option<(HeatId, JoinHandle<()>)>,
+    /// The completion clock for a heat in `Running` (appends auto `Finished` on win + grace).
+    completion: Option<(HeatId, JoinHandle<()>)>,
+}
+
+impl HeatClock {
+    /// Cancel any in-flight start/completion driver belonging to `heat` (it just changed state, so a
+    /// pending auto-transition for the *old* state must not land). Drivers for other heats are left
+    /// running. Aborting a finished task is a harmless no-op.
+    fn cancel_for(&mut self, heat: &HeatId) {
+        if let Some((h, task)) = &self.start {
+            if h == heat {
+                task.abort();
+                self.start = None;
+            }
+        }
+        if let Some((h, task)) = &self.completion {
+            if h == heat {
+                task.abort();
+                self.completion = None;
+            }
+        }
     }
 }
 
@@ -1045,6 +1104,277 @@ fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
         }
     }
     plan
+}
+
+// --- the runtime clock (heat-lifecycle redesign, Slice 2) -----------------------------
+//
+// The clock is a **runtime input**, exactly like an RD button press: it never computes a
+// transition from wall-clock *inside the fold* — it appends **logged events** that the pure
+// engine/projection folds like any other. Two auto-transitions are driven here:
+//
+//   * **start** — when a heat enters `Armed`, the runtime reads the round's `start_procedure`,
+//     picks the randomized delay **once** (RNG only here, at emission time), writes it to the log
+//     as `Event::HeatStarting { delay_ms }` (so the console can cue the tone and a replay reads the
+//     same delay), then appends `HeatStateChanged { Running }` after that delay.
+//   * **completion** — while a heat is `Running`, the runtime evaluates the round's win condition
+//     over the running passes (a *pure* predicate, `race_end_reached`), and once the race-end
+//     criterion is met it holds the configured **grace window** for trailing pilots, then appends
+//     `HeatStateChanged { Finished }`.
+//
+// Wall-clock (tokio time) decides only *when* the runtime appends; the delay and the criterion are
+// facts in the log, so the replay is deterministic (race-engine.html §6).
+
+use gridfpv_engine::heat::GraceWindow;
+use gridfpv_engine::scoring::race_end_reached;
+use gridfpv_server::events::{RoundDef, StartProcedure};
+
+/// How often the completion driver re-evaluates the win condition over the running passes.
+const COMPLETION_POLL: Duration = Duration::from_millis(100);
+
+/// The per-heat runtime config the clock needs: the round's start procedure, win condition, and
+/// grace window. Resolved from the heat's `HeatScheduled.round` against the event meta; a heat with
+/// no round (a sim / free-text heat) uses the documented defaults so the clock still drives it.
+struct HeatClockConfig {
+    start_procedure: StartProcedure,
+    win_condition: gridfpv_engine::scoring::WinCondition,
+    grace_window: GraceWindow,
+}
+
+/// Resolve the clock config for `heat`: find the heat's most-recent `HeatScheduled.round`, look that
+/// round up in the event meta, and read its `start_procedure` / `win_condition` / `grace_window`. A
+/// heat with no round tag, or whose round is gone, falls back to the round defaults (a sane
+/// randomized start delay + a bounded grace + a Timed win condition is *not* assumed — see below).
+fn heat_clock_config(
+    state: &AppState,
+    registry: &EventRegistry,
+    event_id: &EventId,
+    heat: &HeatId,
+) -> HeatClockConfig {
+    let round_id = round_of_heat(state, heat);
+    let round: Option<RoundDef> = round_id.and_then(|rid| {
+        registry
+            .rounds_of(event_id)
+            .and_then(|rounds| rounds.into_iter().find(|r| r.id == rid))
+    });
+    match round {
+        Some(r) => HeatClockConfig {
+            start_procedure: r.start_procedure,
+            win_condition: r.win_condition,
+            grace_window: r.grace_window,
+        },
+        // No round (sim/free-text): default the start procedure + grace so the auto-start still
+        // fires; the win condition defaults to the sim's `FirstToLaps` over the sim lap count so a
+        // round-less sim heat still auto-completes (the sim emits a fixed number of laps).
+        None => HeatClockConfig {
+            start_procedure: StartProcedure::default(),
+            win_condition: default_sim_win_condition(),
+            grace_window: gridfpv_server::events::default_grace_window(),
+        },
+    }
+}
+
+/// The win condition a **round-less** heat (a sim / free-text heat with no `RoundDef`) auto-completes
+/// under: first-to-`DEFAULT_SIM_LAPS` laps. The sim emits a holeshot + `DEFAULT_SIM_LAPS` laps per
+/// pilot, so the leader reaching that count is the natural completion point — letting the clock drive
+/// a bare sim heat all the way to `Unofficial` without a configured round.
+fn default_sim_win_condition() -> gridfpv_engine::scoring::WinCondition {
+    gridfpv_engine::scoring::WinCondition::FirstToLaps {
+        n: DEFAULT_SIM_LAPS,
+    }
+}
+
+/// The `RoundId` tag on `heat`'s most-recent `HeatScheduled`, if any.
+fn round_of_heat(state: &AppState, heat: &HeatId) -> Option<gridfpv_events::RoundId> {
+    let stored = state.log().lock().ok()?.read_all().ok()?;
+    let mut round = None;
+    for s in stored {
+        if let Event::HeatScheduled {
+            heat: h, round: r, ..
+        } = s.event
+        {
+            if &h == heat {
+                round = r;
+            }
+        }
+    }
+    round
+}
+
+/// Pick the randomized start delay for a `start_procedure`, in milliseconds — the **one** place the
+/// runtime rolls the dice (heat-lifecycle Slice 2). Seeded from the wall clock so each real arm is
+/// unpredictable; the chosen value is then logged as a fact, so the *replay* never calls this again.
+fn pick_start_delay_ms(procedure: &StartProcedure) -> u32 {
+    match procedure {
+        StartProcedure::RandomizedDelay {
+            min_delay_ms,
+            max_delay_ms,
+            ..
+        } => {
+            let (lo, hi) = (*min_delay_ms, *max_delay_ms);
+            // Defensively clamp a mis-ordered pair to a point delay rather than panicking.
+            if hi <= lo {
+                return lo;
+            }
+            let span = (hi - lo) as u64 + 1;
+            lo + (runtime_rng() % span) as u32
+        }
+    }
+}
+
+/// A tiny wall-clock-seeded RNG draw (a `u64`), used **only** at emission time in the runtime to pick
+/// the start delay — never in the engine/projection fold. Avoids pulling in the `rand` crate for one
+/// draw: a SplitMix64 step over the current monotonic-ish nanos is plenty random for a start hold.
+fn runtime_rng() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15);
+    // SplitMix64 finalizer — decorrelates successive nanos so close-together arms don't draw alike.
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The race-start origin for `heat`'s win-condition evaluation: the source time of the heat's
+/// **first lap-gate pass** while `Running`, matching how `completed_heats` derives `race_start`. The
+/// passes carry the source clock; the first crossing opens the shared race clock. `None` until the
+/// first pass lands (no crossing yet ⇒ the race-end criterion cannot be met).
+fn race_start_of(passes: &[Pass]) -> Option<SourceTime> {
+    passes.first().map(|p| p.at)
+}
+
+/// The grace hold, as a wall-clock `Duration`, for the completion driver: how long to keep the heat
+/// `Running` for trailing pilots after the win condition is met (heat-lifecycle Slice 2). An open
+/// [`GraceWindow::UntilScored`] would never auto-fire, so it is treated as **zero** here (the RD
+/// would `ForceEnd` / `Finalize` such a round); a bounded [`GraceWindow::Duration`] maps its source
+/// microseconds to a real-time hold of the same length.
+fn grace_hold(grace: GraceWindow) -> Duration {
+    match grace {
+        GraceWindow::Duration { micros } if micros > 0 => Duration::from_micros(micros as u64),
+        _ => Duration::ZERO,
+    }
+}
+
+/// Spawn the **start driver** for a heat that just entered `Armed` (heat-lifecycle Slice 2).
+///
+/// Reads the heat's start procedure, picks the randomized delay **once**, appends the
+/// `Event::HeatStarting { delay_ms }` fact immediately (so the console can cue the start tone and a
+/// replay reads this exact delay), then — after `delay_ms` of real time — appends the
+/// `HeatStateChanged { Running }` auto-transition through the shared append path (waking `/stream`).
+/// The returned task is cancelled by the bridge if the heat leaves `Armed` before it fires (an abort
+/// / restart / a manual `SkipCountdown`), so a superseded countdown never appends a stale `Running`.
+fn spawn_start_driver(
+    state: &AppState,
+    registry: &EventRegistry,
+    event_id: &EventId,
+    heat: HeatId,
+) -> JoinHandle<()> {
+    let config = heat_clock_config(state, registry, event_id, &heat);
+    let delay_ms = pick_start_delay_ms(&config.start_procedure);
+    let state = state.clone();
+    tokio::spawn(async move {
+        // The chosen delay is logged as a fact *before* the hold, so a console cueing the tone and a
+        // replay both read it; only the append timing below uses wall-clock.
+        if let Err(e) = state.append(
+            Event::HeatStarting {
+                heat: heat.clone(),
+                delay_ms,
+            },
+            None,
+        ) {
+            eprintln!("gridfpv: start driver could not log HeatStarting: {e:?}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
+        // Auto-advance Armed → Running. If the heat already left Armed (a manual SkipCountdown / an
+        // abort), this task has been cancelled by the bridge and never reaches here.
+        if let Err(e) = state.append(
+            Event::HeatStateChanged {
+                heat,
+                transition: HeatTransition::Running,
+            },
+            None,
+        ) {
+            eprintln!("gridfpv: start driver could not append Running: {e:?}");
+        }
+    })
+}
+
+/// Spawn the **completion driver** for a heat that just entered `Running` (heat-lifecycle Slice 2).
+///
+/// Polls the heat's running passes every [`COMPLETION_POLL`]; once the round's win condition is met
+/// (the pure [`race_end_reached`] over the passes + the race-start time), it holds the configured
+/// **grace window** for trailing pilots, then appends the `HeatStateChanged { Finished }`
+/// auto-transition (the `Running → Unofficial` step). Cancelled by the bridge if the heat leaves
+/// `Running` first (an abort / restart / a manual `ForceEnd`), so a superseded heat never appends a
+/// stale `Finished`. A round whose win condition has no intrinsic end (a bare qual — see
+/// [`race_end_reached`]) simply never fires here; the RD ends it with `ForceEnd`.
+fn spawn_completion_driver(
+    state: &AppState,
+    registry: &EventRegistry,
+    event_id: &EventId,
+    heat: HeatId,
+) -> JoinHandle<()> {
+    let config = heat_clock_config(state, registry, event_id, &heat);
+    let state = state.clone();
+    let mut ticker = tokio::time::interval(COMPLETION_POLL);
+    tokio::spawn(async move {
+        loop {
+            ticker.tick().await;
+            let passes = heat_running_passes(&state, &heat);
+            let Some(race_start) = race_start_of(&passes) else {
+                continue; // no crossing yet — the race clock hasn't opened
+            };
+            if race_end_reached(&passes, config.win_condition, race_start) {
+                // The race-end criterion is met: hold the grace window for late crossings, then
+                // close the race. The hold is wall-clock; the *decision* was pure.
+                tokio::time::sleep(grace_hold(config.grace_window)).await;
+                if let Err(e) = state.append(
+                    Event::HeatStateChanged {
+                        heat,
+                        transition: HeatTransition::Finished,
+                    },
+                    None,
+                ) {
+                    eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
+                }
+                return;
+            }
+        }
+    })
+}
+
+/// The lap-gate passes attributed to `heat`'s current run: every lap-gate [`Pass`] in the log since
+/// the heat last entered `Running`. The completion driver scores over exactly the running window, so
+/// an earlier aborted run's passes don't count toward this run's win condition.
+fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
+    let Some(stored) = state.log().lock().ok().and_then(|g| g.read_all().ok()) else {
+        return Vec::new();
+    };
+    // Walk the log: the most recent `Running` for this heat opens the window; collect lap-gate
+    // passes after it until the heat leaves Running. (Passes carry no heat id — while a heat is
+    // Running it is the only one consuming, mirroring the bridge's single-active-heat rule.)
+    let mut running = false;
+    let mut passes = Vec::new();
+    for s in stored {
+        match s.event {
+            Event::HeatStateChanged {
+                heat: ref h,
+                transition,
+            } if h == heat => match transition {
+                HeatTransition::Running => {
+                    running = true;
+                    passes.clear(); // a fresh run resets the window
+                }
+                _ => running = false,
+            },
+            Event::Pass(p) if running && p.gate.is_lap_gate() => passes.push(p),
+            _ => {}
+        }
+    }
+    passes
 }
 
 fn parse_env_u32(key: &str) -> Option<u32> {
