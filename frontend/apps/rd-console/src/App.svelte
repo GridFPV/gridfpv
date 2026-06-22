@@ -273,7 +273,7 @@
           />
         </svg>
         <span class="wordmark">
-          GridFPV
+          <span class="name">Grid<span class="brand-fpv">FPV</span></span>
           <span class="sub">RD Console</span>
         </span>
       </button>
@@ -508,6 +508,9 @@
     font-weight: var(--gf-font-weight-bold);
     font-size: var(--gf-font-size-md);
     letter-spacing: var(--gf-tracking-tight);
+  }
+  .wordmark .brand-fpv {
+    color: var(--gf-brand-500);
   }
   .wordmark .sub {
     font-size: var(--gf-font-size-2xs);

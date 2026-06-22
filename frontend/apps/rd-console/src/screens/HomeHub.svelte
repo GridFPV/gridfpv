@@ -2,8 +2,9 @@
   /**
    * HomeHub — the RD console's app-level landing (#118).
    *
-   * The two-level IA's root: three big, field-readable cards — **Pilots**, **Events**, **Timers**
-   * — each navigating to its own page. The picker is no longer the landing (it's the Events page),
+   * The two-level IA's root: big, field-readable cards — **Events** (the prominent, full-width
+   * primary action on top) above a smaller row of **Pilots**, **Classes**, **Timers** — each
+   * navigating to its own page. The picker is no longer the landing (it's the Events page),
    * and app-level timer management is no longer a modal (it's the Timers page). Each card shows a
    * quick at-a-glance summary read open (no token) on mount: Pilots count (`GET /pilots`), Events
    * count (`GET /events`), and timer count + how many are connected (`GET /timers`). A failed read
@@ -89,115 +90,122 @@
         />
       </svg>
       <div class="brand-text">
-        <span class="name">GridFPV</span>
+        <span class="name">Grid<span class="brand-fpv">FPV</span></span>
         <span class="kicker">Race Director Console</span>
       </div>
     </header>
 
+    <!-- Events is the primary action: a single full-width, prominent card on top. The three config
+         pages (Pilots, Classes, Timers) sit beneath it as a smaller row. To flip Events to the
+         bottom later, move the `.events-row` element after `.config-row` (or set `order` on them). -->
     <div class="cards">
-      <button type="button" class="hub-card pilots" onclick={onpilots}>
-        <Card elevation="md">
-          <div class="card-body">
-            <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M16 11a4 4 0 1 0-8 0M3 21v-1a6 6 0 0 1 6-6h6a6 6 0 0 1 6 6v1"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-              <circle cx="12" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="1.8" />
-            </svg>
-            <h2 class="card-title">Pilots</h2>
-            <p class="card-summary">
-              <span class="count">{fmt(pilotCount)}</span>
-              <span class="unit">{pilotCount === 1 ? 'pilot' : 'pilots'}</span>
-            </p>
-            <span class="card-go" aria-hidden="true">→</span>
-          </div>
-        </Card>
-      </button>
+      <div class="events-row">
+        <button type="button" class="hub-card events feature" onclick={onevents}>
+          <Card elevation="md">
+            <div class="card-body">
+              <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M16 6 L25 11 L25 21 L16 26 L7 21 L7 11 Z"
+                  transform="scale(0.85) translate(2 2)"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <h2 class="card-title">Events</h2>
+              <p class="card-summary">
+                <span class="count">{fmt(eventCount)}</span>
+                <span class="unit">{eventCount === 1 ? 'event' : 'events'}</span>
+              </p>
+              <span class="card-go" aria-hidden="true">→</span>
+            </div>
+          </Card>
+        </button>
+      </div>
 
-      <button type="button" class="hub-card classes" onclick={onclasses}>
-        <Card elevation="md">
-          <div class="card-body">
-            <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M4 6h16M4 12h10M4 18h7"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-              <path
-                d="M18 14l2 2 3-4"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <h2 class="card-title">Classes</h2>
-            <p class="card-summary">
-              <span class="count">{fmt(classCount)}</span>
-              <span class="unit">{classCount === 1 ? 'class' : 'classes'}</span>
-            </p>
-            <span class="card-go" aria-hidden="true">→</span>
-          </div>
-        </Card>
-      </button>
+      <div class="config-row">
+        <button type="button" class="hub-card pilots" onclick={onpilots}>
+          <Card elevation="md">
+            <div class="card-body">
+              <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M16 11a4 4 0 1 0-8 0M3 21v-1a6 6 0 0 1 6-6h6a6 6 0 0 1 6 6v1"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <circle cx="12" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="1.8" />
+              </svg>
+              <h2 class="card-title">Pilots</h2>
+              <p class="card-summary">
+                <span class="count">{fmt(pilotCount)}</span>
+                <span class="unit">{pilotCount === 1 ? 'pilot' : 'pilots'}</span>
+              </p>
+              <span class="card-go" aria-hidden="true">→</span>
+            </div>
+          </Card>
+        </button>
 
-      <button type="button" class="hub-card events" onclick={onevents}>
-        <Card elevation="md">
-          <div class="card-body">
-            <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M16 6 L25 11 L25 21 L16 26 L7 21 L7 11 Z"
-                transform="scale(0.85) translate(2 2)"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <h2 class="card-title">Events</h2>
-            <p class="card-summary">
-              <span class="count">{fmt(eventCount)}</span>
-              <span class="unit">{eventCount === 1 ? 'event' : 'events'}</span>
-            </p>
-            <span class="card-go" aria-hidden="true">→</span>
-          </div>
-        </Card>
-      </button>
+        <button type="button" class="hub-card classes" onclick={onclasses}>
+          <Card elevation="md">
+            <div class="card-body">
+              <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M4 6h16M4 12h10M4 18h7"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M18 14l2 2 3-4"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <h2 class="card-title">Classes</h2>
+              <p class="card-summary">
+                <span class="count">{fmt(classCount)}</span>
+                <span class="unit">{classCount === 1 ? 'class' : 'classes'}</span>
+              </p>
+              <span class="card-go" aria-hidden="true">→</span>
+            </div>
+          </Card>
+        </button>
 
-      <button type="button" class="hub-card timers" onclick={ontimers}>
-        <Card elevation="md">
-          <div class="card-body">
-            <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <h2 class="card-title">Timers</h2>
-            <p class="card-summary">
-              <span class="count">{fmt(timerCount)}</span>
-              <span class="unit">{timerCount === 1 ? 'timer' : 'timers'}</span>
-              {#if timerCount !== undefined && timerCount !== null && timerCount > 0}
-                <span class="connected">· {fmt(connectedTimers)} connected</span>
-              {/if}
-            </p>
-            <span class="card-go" aria-hidden="true">→</span>
-          </div>
-        </Card>
-      </button>
+        <button type="button" class="hub-card timers" onclick={ontimers}>
+          <Card elevation="md">
+            <div class="card-body">
+              <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <h2 class="card-title">Timers</h2>
+              <p class="card-summary">
+                <span class="count">{fmt(timerCount)}</span>
+                <span class="unit">{timerCount === 1 ? 'timer' : 'timers'}</span>
+                {#if timerCount !== undefined && timerCount !== null && timerCount > 0}
+                  <span class="connected">· {fmt(connectedTimers)} connected</span>
+                {/if}
+              </p>
+              <span class="card-go" aria-hidden="true">→</span>
+            </div>
+          </Card>
+        </button>
+      </div>
     </div>
   </div>
 </div>
@@ -240,6 +248,9 @@
     font-size: var(--gf-font-size-2xl);
     letter-spacing: var(--gf-tracking-tight);
   }
+  .brand-text .name .brand-fpv {
+    color: var(--gf-brand-500);
+  }
   .brand-text .kicker {
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
@@ -247,10 +258,27 @@
     letter-spacing: var(--gf-tracking-caps);
   }
 
+  /* Events on top (full width), the three config cards beneath. `.cards` stacks the two rows; flip
+     the order here (e.g. `flex-direction: column-reverse`) to move Events to the bottom later. */
   .cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    display: flex;
+    flex-direction: column;
     gap: var(--gf-space-5);
+  }
+  .events-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .config-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--gf-space-5);
+  }
+  @media (max-width: 44rem) {
+    /* Narrow widths: the three config cards wrap into a flexible grid. */
+    .config-row {
+      grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    }
   }
   .hub-card {
     display: block;
@@ -336,5 +364,30 @@
   .hub-card:hover .card-go {
     color: var(--gf-accent);
     transform: translateX(2px);
+  }
+
+  /* The prominent, full-width Events card: a taller body, a larger icon + title, and an accent
+     hairline so it reads as the primary action. */
+  .hub-card.feature .card-body {
+    min-height: 13rem;
+    padding: var(--gf-space-5);
+    gap: var(--gf-space-4);
+  }
+  .hub-card.feature :global(.gf-card) {
+    border-color: color-mix(in srgb, var(--gf-accent) 35%, var(--gf-border));
+    background: linear-gradient(135deg, var(--gf-accent-soft) 0%, transparent 60%);
+  }
+  .hub-card.feature .card-icon {
+    width: 3.25rem;
+    height: 3.25rem;
+  }
+  .hub-card.feature .card-title {
+    font-size: var(--gf-font-size-3xl);
+  }
+  .hub-card.feature .card-summary .count {
+    font-size: var(--gf-font-size-3xl);
+  }
+  .hub-card.feature .card-go {
+    font-size: var(--gf-font-size-2xl);
   }
 </style>
