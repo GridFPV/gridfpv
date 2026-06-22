@@ -988,24 +988,22 @@ fn handle_transition(
             }
             // Open practice (open-practice format, Slice 1): **clear on stop**. Drop the in-memory
             // per-channel accumulator when the open-practice heat reaches a terminal / abort / restart
-            // transition and push the now-idle live state. The `Finished` (Running → Unofficial) step
-            // is *kept* so the RD still sees the final practice laps before finalizing; the true
-            // terminals below clear it. A new heat/round becoming active also clears it (via `begin`).
+            // transition, then wake `/stream` so it re-folds the now-overlay-free log state (the
+            // console settles back onto the bare log — no stale laps frame). The `Finished`
+            // (Running → Unofficial) step is *kept* so the RD still sees the final practice laps
+            // before finalizing; the true terminals below clear it. A new heat/round becoming active
+            // also clears it (via `begin`).
             //
-            // Open-practice overlay-phase fix: the kept `Finished` step must also move the overlay's
-            // phase. Thread the real transition into the accumulator so its synthetic slice reports
-            // `Unofficial` (not a hardcoded `Running`) — which freezes the console race clock at the
-            // practice duration while the per-channel laps stay visible. The true terminals below
-            // clear the accumulator outright, so they need no phase threading.
-            if state.open_practice().is_active(&heat) {
-                let woke = if matches!(transition, HeatTransition::Finished) {
-                    state.open_practice().transition(&heat, transition)
-                } else {
-                    state.open_practice().clear()
-                };
-                if woke {
-                    state.wake_streams();
-                }
+            // The overlay is **laps-only** now: the heat's phase/clock are always the real log's
+            // (this same `HeatStateChanged` was already appended and woke the stream), so the served
+            // phase follows the log to `Unofficial` here and to `Staged` on a `Restart` with no
+            // shadow-tracking. We therefore only need to clear the laps on the terminals and wake.
+            if state.open_practice().is_active(&heat)
+                && !matches!(transition, HeatTransition::Finished)
+                && state.open_practice().clear()
+            {
+                // Wake-on-clear: re-fold without the overlay so the laps drop immediately.
+                state.wake_streams();
             }
         }
         // Staged is pre-Running: the heat isn't emitting yet, but it is the moment to **tune** the

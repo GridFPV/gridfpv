@@ -1272,56 +1272,105 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         "the time limit auto-ends the practice exactly once"
     );
 
-    // (d) Open-practice overlay-phase fix — the clock-freeze precondition. The served/overlay live
-    // state (the same accumulator the snapshot/stream serve in place of the log fold for an active
-    // open-practice heat) must report **`Unofficial`** once the time limit closes the race — *not*
-    // the old hardcoded `Running` — so the console race clock freezes at the practice duration. The
-    // bridge threads the heat's real `Finished` transition into the accumulator, which keeps the
-    // per-channel laps (the accumulator is only cleared on a true terminal / abort / restart).
+    // (d) Live-state desync fix — the **served** live state's phase/clock are the REAL log's at every
+    // step, with the per-channel laps spliced on top (laps-only overlay). The console renders phase →
+    // buttons and the clock from this served state, so it must follow the log exactly — never a stale
+    // synthetic phase. We fetch the served heat snapshot (the same merge the `/stream` fold applies).
     //
-    // The bridge processes the `Finished` it observes one poll after the log carries it, so wait for
-    // the overlay to settle on `Unofficial` rather than reading immediately.
-    let target = heat.clone();
-    let practice_overlay = registry.resolve(&event).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        let overlay = practice_overlay.open_practice().live_state();
-        if overlay
-            .as_ref()
-            .is_some_and(|s| s.phase == gridfpv_server::snapshot::HeatPhase::Unofficial)
-        {
-            break;
+    // The time limit has driven the LOG to `Unofficial` (asserted above). The served live state must
+    // therefore read `Unofficial` (so the console clock freezes at the duration — no synthetic-start
+    // bump), while the non-logged per-channel laps stay visible (the accumulator holds them through
+    // `Unofficial`; only a true terminal / abort / restart clears them).
+    let served_live = |heat: &HeatId| {
+        let app = app.clone();
+        let event = event.clone();
+        let token = token.clone();
+        let heat = heat.clone();
+        async move {
+            let (status, body) = call(
+                &app,
+                "GET",
+                &format!("/events/{}/snapshot/heat/{}", event.0, heat.0),
+                Some(&token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "served heat snapshot: {body}");
+            let snap: gridfpv_server::snapshot::Snapshot = serde_json::from_str(&body).unwrap();
+            match snap.body {
+                gridfpv_server::snapshot::ProjectionBody::LiveRaceState(ls) => ls,
+                other => panic!("expected a LiveRaceState body, got {other:?}"),
+            }
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the open-practice overlay never reported Unofficial after the time limit (was {:?})",
-            overlay.map(|s| s.phase)
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
 
-    let overlay = practice_overlay
-        .open_practice()
-        .live_state()
-        .expect("the open-practice overlay survives the Running → Unofficial step");
+    let unofficial = served_live(&heat).await;
     assert_eq!(
-        overlay.current_heat.as_ref(),
-        Some(&target),
-        "the overlay still reports the practice heat"
-    );
-    assert_eq!(
-        overlay.phase,
+        unofficial.phase,
         gridfpv_server::snapshot::HeatPhase::Unofficial,
-        "the overlay reports the heat's real phase (Unofficial) so the console clock freezes"
+        "the served phase follows the log to Unofficial so the console clock freezes (no bump)"
     );
-    // The per-channel laps are still carried through Unofficial (the clear-on-stop kept them).
+    assert_eq!(unofficial.current_heat.as_ref(), Some(&heat));
+    // The per-channel laps are still carried through Unofficial, each row unbound (per channel).
     assert!(
-        !overlay.progress.is_empty(),
+        !unofficial.progress.is_empty(),
         "the per-channel laps stay visible through Unofficial"
     );
     assert!(
-        overlay.progress.iter().all(|p| p.pilot.is_none()),
+        unofficial.progress.iter().all(|p| p.pilot.is_none()),
         "open-practice rows stay unbound (per channel)"
+    );
+
+    // (e) Restart → Staged: the RD restarts the closed practice. The engine lands the heat in
+    // `Staged`; the bridge clears the accumulator (wake-on-clear). The served live state must then
+    // read **`Staged`** with the laps cleared — never a stale `Unofficial` (the bug: the console kept
+    // rendering `Unofficial`/Final buttons and `Restart` then errored "illegal … in state Staged").
+    control_ok(
+        &app,
+        &event,
+        &token,
+        &Command::Restart { heat: heat.clone() },
+    )
+    .await;
+    wait_until(&state, Duration::from_secs(3), {
+        let heat = heat.clone();
+        move |events| heat_state_of(events, &heat) == Some(gridfpv_engine::heat::HeatState::Staged)
+    })
+    .await;
+
+    // The accumulator clears one bridge poll after it observes the restart; wait for it to settle.
+    let practice_overlay = registry.resolve(&event).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while practice_overlay.open_practice().is_active(&heat) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the open-practice accumulator never cleared after Restart"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let staged = served_live(&heat).await;
+    assert_eq!(
+        staged.phase,
+        gridfpv_server::snapshot::HeatPhase::Staged,
+        "after Restart the served phase is the log's Staged — never a stale Unofficial"
+    );
+    assert!(
+        staged.progress.iter().all(|p| p.laps_completed == 0),
+        "the per-channel laps are cleared after Restart"
+    );
+
+    // The clock-timing basis is the log's at every step: the heat carries exactly one `Finished`
+    // (the time-limit close) and one `Restarted`, so the served phase moved Running → Unofficial →
+    // Staged with no synthetic re-`Running` that would reset/bump the console clock.
+    let log = read_log(&state);
+    let restarts = log
+        .iter()
+        .filter(|e| matches!(e, Event::HeatStateChanged { heat: h, transition: gridfpv_events::HeatTransition::Restarted } if *h == heat))
+        .count();
+    assert_eq!(
+        restarts, 1,
+        "exactly one Restarted lands the heat in Staged"
     );
 }
 
