@@ -51,8 +51,9 @@ use gridfpv_engine::format::{
 };
 use gridfpv_engine::heat::{HeatState, heat_state};
 use gridfpv_engine::schedule::{Frequency, FrequencyPool, allocate};
-use gridfpv_engine::scoring::{HeatResult, Metric};
+use gridfpv_engine::scoring::HeatResult;
 use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, Pass, RoundId, SourceTime};
+use gridfpv_projection::lap_list;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -356,26 +357,8 @@ fn format_config(round: &RoundDef, field: Vec<CompetitorRef>) -> FormatConfig {
 /// [`Generator::next`](gridfpv_engine::format::Generator::next) matches what
 /// [`run_format`](gridfpv_engine::event::run_format) accumulated.
 pub fn completed_heats(round: &RoundDef, events: &[Event]) -> Vec<CompletedHeat> {
-    // The heats tagged with this round, in first-scheduled order (dedup repeated schedules
-    // of the same id — the latest lineup wins for the window scan, but order is by first
-    // appearance, matching the generator's emission order).
-    let mut tagged: Vec<HeatId> = Vec::new();
-    for event in events {
-        if let Event::HeatScheduled {
-            heat,
-            round: Some(r),
-            ..
-        } = event
-        {
-            if r == &round.id && !tagged.contains(heat) {
-                tagged.push(heat.clone());
-            }
-        }
-    }
-
-    tagged
+    finalized_heat_ids(round, events)
         .into_iter()
-        .filter(|heat| heat_state(events, heat) == Some(HeatState::Final))
         .map(|heat| {
             let passes = heat_passes(events, &heat);
             let race_start = passes
@@ -390,6 +373,54 @@ pub fn completed_heats(round: &RoundDef, events: &[Event]) -> Vec<CompletedHeat>
             CompletedHeat::new(heat.0, result)
         })
         .collect()
+}
+
+/// The **finalized** heats of a round, in first-scheduled order — the heat ids both
+/// [`completed_heats`] (which scores them) and the standings best-lap fold (which laps them) iterate.
+///
+/// A heat counts when it was scheduled tagged with this round *and* its folded
+/// [`HeatState`] is [`Final`](HeatState::Final). The order is the order the heats were first
+/// scheduled (repeated schedules of the same id are deduped to their first appearance), matching
+/// the generator's emission order.
+fn finalized_heat_ids(round: &RoundDef, events: &[Event]) -> Vec<HeatId> {
+    let mut tagged: Vec<HeatId> = Vec::new();
+    for event in events {
+        if let Event::HeatScheduled {
+            heat,
+            round: Some(r),
+            ..
+        } = event
+        {
+            if r == &round.id && !tagged.contains(heat) {
+                tagged.push(heat.clone());
+            }
+        }
+    }
+    tagged
+        .into_iter()
+        .filter(|heat| heat_state(events, heat) == Some(HeatState::Final))
+        .collect()
+}
+
+/// Every competitor's **best (fastest) lap** (µs) across a round's finalized heats, keyed by
+/// source-local [`CompetitorRef`] — the standings best-lap source.
+///
+/// For each finalized heat (the same set [`completed_heats`] scores) this folds [`heat_best_laps`]
+/// — the [`lap_list`] minimum lap over the heat's passes — keeping the smallest lap per competitor.
+/// Reusing the round's finalized heats + the projection's lap fold means the best lap is read from
+/// exactly the laps that decided the round, independent of the round's win condition. A competitor
+/// with no completed lap across the round is absent from the map.
+fn round_best_laps(round: &RoundDef, events: &[Event]) -> BTreeMap<CompetitorRef, i64> {
+    let mut best: BTreeMap<CompetitorRef, i64> = BTreeMap::new();
+    for heat in finalized_heat_ids(round, events) {
+        let passes = heat_passes(events, &heat);
+        for (competitor, lap) in heat_best_laps(&passes) {
+            best.entry(competitor)
+                .and_modify(|existing| *existing = (*existing).min(lap))
+                .or_insert(lap);
+        }
+    }
+    best
 }
 
 /// The round's current **ranking** (race redesign Slice 3a): build the round's generator and
@@ -495,19 +526,32 @@ fn rounds_for_class<'a>(meta: &'a EventMeta, class: &ClassId) -> Vec<&'a RoundDe
         .collect()
 }
 
-/// One competitor's **best lap** (µs) across a heat's [`HeatResult`], read off the scored
-/// [`Metric`] each placement carries. Only [`Metric::BestLapMicros`] is a lap duration; the other
-/// metrics are completion *times*, not durations, so they contribute no lap metric (the lap totals
-/// still aggregate). `None` when the competitor has no placement or no lap.
-fn placement_best_lap(result: &HeatResult, competitor: &CompetitorRef) -> Option<i64> {
-    result
-        .places
-        .iter()
-        .find(|p| &p.competitor.competitor == competitor)
-        .and_then(|p| match p.metric {
-            Metric::BestLapMicros(lap) => lap,
-            _ => None,
+/// Every competitor's **best (fastest) lap** (µs) across a heat, keyed by source-local
+/// [`CompetitorRef`].
+///
+/// Derived from the *same* corrected lap view the scorer ranks from — [`lap_list`] over the heat's
+/// lap-gate passes (the marshaling-aware [`corrected_passes`](gridfpv_projection::corrected_passes)
+/// fold, identical to the no-adjudications case here) — so a standing's best lap comes from exactly
+/// the laps that decided the heat, with **no second lap definition**.
+///
+/// This deliberately does *not* read the placement [`Metric`](gridfpv_engine::scoring::Metric):
+/// only a [`BestLap`](gridfpv_engine::scoring::WinCondition::BestLap) heat scores a lap *duration*
+/// into its metric; a [`Timed`](gridfpv_engine::scoring::WinCondition::Timed) /
+/// [`FirstToLaps`](gridfpv_engine::scoring::WinCondition::FirstToLaps) race scores a completion
+/// *time*, which is not a lap duration — so reading the metric would (and did) leave
+/// `best_lap_micros` null for every race round even though real per-lap durations exist. Folding
+/// the lap list gives the minimum lap regardless of win condition. A competitor with no completed
+/// lap is simply absent from the map.
+fn heat_best_laps(passes: &[Pass]) -> BTreeMap<CompetitorRef, i64> {
+    let pass_events: Vec<Event> = passes.iter().cloned().map(Event::Pass).collect();
+    let laps = lap_list(&pass_events);
+    laps.competitors
+        .into_iter()
+        .filter_map(|c| {
+            let best = c.best().map(|lap| lap.duration_micros)?;
+            Some((c.competitor.competitor, best))
         })
+        .collect()
 }
 
 /// One competitor's **counted laps** across a heat's [`HeatResult`] (0 when absent).
@@ -553,25 +597,23 @@ pub fn class_standings(
     for round in rounds_for_class(meta, class) {
         let ranking = round_ranking(meta, round, events)?;
         let field_size = ranking.len() as u32;
-        // The round's scored heats — the same view `round_ranking` ranked over — so the laps /
-        // best-lap a standing reports come from exactly the heats that decided the round position.
+        // The round's scored heats — the same view `round_ranking` ranked over — so the laps a
+        // standing reports come from exactly the heats that decided the round position.
         let completed = completed_heats(round, events);
+        // Best (fastest) lap per competitor, folded from the *same* finalized heats via the lap-list
+        // projection — independent of the win condition, so a Timed / FirstToLaps race reports a
+        // best lap from its real per-lap durations rather than the null its placement metric carries.
+        let best_laps = round_best_laps(round, events);
 
         for entry in &ranking {
             // Points: a win (position 1) is worth the field size; last is worth 1.
             let points = field_size.saturating_sub(entry.position).saturating_add(1);
-            // Laps / best lap for this competitor across the round's heats.
-            let mut laps = 0u32;
-            let mut best_lap: Option<i64> = None;
-            for heat in &completed {
-                laps += placement_laps(&heat.result, &entry.competitor);
-                if let Some(lap) = placement_best_lap(&heat.result, &entry.competitor) {
-                    best_lap = Some(match best_lap {
-                        Some(existing) => existing.min(lap),
-                        None => lap,
-                    });
-                }
-            }
+            // Laps for this competitor across the round's heats.
+            let laps = completed
+                .iter()
+                .map(|heat| placement_laps(&heat.result, &entry.competitor))
+                .sum();
+            let best_lap = best_laps.get(&entry.competitor).copied();
             acc.entry(entry.competitor.clone())
                 .or_default()
                 .add_round(points, laps, best_lap);
@@ -1580,6 +1622,111 @@ mod tests {
         let standings = class_standings(&meta, &ClassId("nobody".into()), &[]).unwrap();
         assert!(standings.standings.is_empty());
         assert_eq!(standings.class, ClassId("nobody".into()));
+    }
+
+    /// A **race** round (a `Timed` win condition) — the bug's reproduction case. Its placements
+    /// carry completion *times* (`Metric::LastLapAt`), not lap durations, so the standings best lap
+    /// must come from the lap-list projection, not the metric.
+    fn race_round(id: &str, class: &str) -> RoundDef {
+        RoundDef {
+            id: RoundId(id.into()),
+            label: id.into(),
+            classes: vec![ScopeClassId(class.into())],
+            format: "timed_qual".into(),
+            params: BTreeMap::from([("rounds".into(), "1".into())]),
+            win_condition: WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            seeding: SeedingRule::FromRoster,
+            channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
+        }
+    }
+
+    #[test]
+    fn class_standings_compute_best_lap_for_a_race_round() {
+        // Regression: a `Timed` race round scores completion *times* into its placement metric, not
+        // lap durations — so the old metric-reading best-lap left `best_lap_micros` null even though
+        // the heat had real per-pilot laps. The best lap must now be the minimum lap duration each
+        // pilot ran, folded from the same lap view `total_laps` is counted from.
+        let round = race_round("r1", "open");
+        let meta = meta_with(vec![round], vec![member("open", &["A", "B", "C"])]);
+
+        // Holeshot at t=0, then multi-lap runs with a known fastest lap per pilot:
+        //   A: laps 2.50s, 2.20s, 2.40s  → best 2.20s
+        //   B: laps 2.30s, 2.60s         → best 2.30s
+        //   C: never completes a lap (one crossing only) → no best lap.
+        let passes = vec![
+            pass("A", 0, 0),
+            pass("B", 0, 1),
+            pass("C", 0, 2),
+            pass("A", 2_500_000, 3), // A lap1 2.50s
+            pass("B", 2_300_000, 4), // B lap1 2.30s
+            pass("A", 4_700_000, 5), // A lap2 2.20s (A's fastest)
+            pass("B", 4_900_000, 6), // B lap2 2.60s
+            pass("A", 7_100_000, 7), // A lap3 2.40s
+        ];
+        let mut log = vec![scheduled("r-1", "r1", "open", &["A", "B", "C"])];
+        log.extend(run_heat_events("r-1", passes));
+
+        let standings = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        let by_name = |name: &str| {
+            standings
+                .standings
+                .iter()
+                .find(|s| s.competitor.0 == name)
+                .unwrap_or_else(|| panic!("{name} missing from standings"))
+        };
+
+        // The fix: each pilot's best lap is the minimum of their counted laps — not null.
+        assert_eq!(by_name("A").best_lap_micros, Some(2_200_000), "A min lap");
+        assert_eq!(by_name("A").total_laps, 3);
+        assert_eq!(by_name("B").best_lap_micros, Some(2_300_000), "B min lap");
+        assert_eq!(by_name("B").total_laps, 2);
+        // A pilot with no completed lap stays null.
+        assert_eq!(by_name("C").best_lap_micros, None, "C completed no lap");
+        assert_eq!(by_name("C").total_laps, 0);
+    }
+
+    #[test]
+    fn class_standings_best_lap_is_min_across_a_pilots_race_rounds() {
+        // Across two race rounds, the standings best lap is the minimum over both rounds' laps.
+        let r1 = race_round("r1", "open");
+        let r2 = race_round("r2", "open");
+        let meta = meta_with(vec![r1, r2], vec![member("open", &["A", "B"])]);
+
+        // Round 1: A's fastest lap 2.40s. Round 2: A's fastest lap 2.10s → overall best 2.10s.
+        let mut log = vec![scheduled("r1-1", "r1", "open", &["A", "B"])];
+        log.extend(run_heat_events(
+            "r1-1",
+            vec![
+                pass("A", 0, 0),
+                pass("B", 0, 1),
+                pass("A", 2_400_000, 2),
+                pass("B", 2_700_000, 3),
+            ],
+        ));
+        log.push(scheduled("r2-1", "r2", "open", &["A", "B"]));
+        log.extend(run_heat_events(
+            "r2-1",
+            vec![
+                pass("A", 0, 4),
+                pass("B", 0, 5),
+                pass("A", 2_100_000, 6),
+                pass("B", 2_900_000, 7),
+            ],
+        ));
+
+        let standings = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        let a = standings
+            .standings
+            .iter()
+            .find(|s| s.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(a.best_lap_micros, Some(2_100_000), "min across both rounds");
+        assert_eq!(a.total_laps, 2, "one lap each round");
     }
 
     #[test]

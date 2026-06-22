@@ -511,6 +511,16 @@ async fn round_driven_mock_race_flow_e2e() {
         "the standings leader is the qual ranking leader"
     );
     assert_eq!(standings.standings[0].position, 1);
+    // The standings best lap is derived from the heats' real laps (the lap-list projection), so a
+    // pilot who completed laps reports a non-null minimum — not the null the old metric-reading
+    // left for non-BestLap (FirstToLaps bracket) rounds.
+    assert!(
+        standings.standings[0]
+            .best_lap_micros
+            .is_some_and(|micros| micros > 0),
+        "the standings leader has a real best lap, not null: {:?}",
+        standings.standings[0],
+    );
     // Standings are ordered by points (descending) — non-increasing down the list.
     for pair in standings.standings.windows(2) {
         assert!(
