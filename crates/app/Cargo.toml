@@ -23,6 +23,11 @@ live = ["dep:gridfpv-adapters", "gridfpv-adapters/live"]
 gridfpv-events.workspace = true
 gridfpv-storage.workspace = true
 gridfpv-projection.workspace = true
+# The race engine: the runtime clock (heat-lifecycle Slice 2) reads the heat FSM vocabulary
+# (`GraceWindow`) and the pure win-condition completion predicate (`scoring::race_end_reached`) to
+# drive the auto start/completion transitions. Pure Rust — no network/TLS, so the default Director
+# build stays openssl-free.
+gridfpv-engine.workspace = true
 # Only compiled in under `--features live` (the real RotorHazard adapter + its TLS stack); the
 # default build never pulls it (and so never pulls openssl). Also a dev-dependency below for the
 # default-feature tests that use the pure translator without the live transport.
@@ -42,9 +47,8 @@ tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 [dev-dependencies]
 serde_json.workspace = true
 gridfpv-adapters.workspace = true
-# The race-flow e2e (`tests/race_flow.rs`) builds a `NewRoundReq` whose `win_condition`
-# is the engine's `WinCondition` — the round-driven engine's scoring rule (Slice 3a).
-gridfpv-engine.workspace = true
+# `gridfpv-engine` is a regular dependency above (the runtime clock uses it), which covers the
+# tests too — so no dev-dependency entry is needed.
 # The dockerized-RotorHazard harness for the `live` Director RH-connect e2e
 # (`tests/rh_connect_live.rs`): spins up + tears down a disposable RH container.
 gridfpv-testkit.workspace = true

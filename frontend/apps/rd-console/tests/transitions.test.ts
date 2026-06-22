@@ -13,11 +13,12 @@ import {
 const PHASES: HeatPhase[] = ['Scheduled', 'Staged', 'Armed', 'Running', 'Unofficial', 'Final'];
 
 describe('transitions: phase → legal actions', () => {
-  it('maps each phase to its forward primary action', () => {
+  it('maps each phase to its forward primary action (Armed/Running auto-advance, no primary)', () => {
     expect(primaryAction('Scheduled')).toBe('Stage');
-    expect(primaryAction('Staged')).toBe('Arm');
-    expect(primaryAction('Armed')).toBe('Start');
-    expect(primaryAction('Running')).toBe('Finish');
+    expect(primaryAction('Staged')).toBe('Start');
+    // The runtime clock drives Armed → Running and Running → Unofficial — no primary button.
+    expect(primaryAction('Armed')).toBe(null);
+    expect(primaryAction('Running')).toBe(null);
     expect(primaryAction('Unofficial')).toBe('Finalize');
     expect(primaryAction('Final')).toBe('Advance');
   });
@@ -25,7 +26,18 @@ describe('transitions: phase → legal actions', () => {
   it('only allows the forward step from Scheduled (no off-ramps before staging)', () => {
     expect(legalActions('Scheduled')).toEqual(['Stage']);
     expect(isActionLegal('Scheduled', 'Abort')).toBe(false);
-    expect(isActionLegal('Scheduled', 'Arm')).toBe(false);
+    expect(isActionLegal('Scheduled', 'Start')).toBe(false);
+  });
+
+  it('exposes the clock overrides only in their state (SkipCountdown from Armed, ForceEnd from Running)', () => {
+    expect(isActionLegal('Armed', 'SkipCountdown')).toBe(true);
+    expect(isActionLegal('Running', 'ForceEnd')).toBe(true);
+    for (const p of PHASES.filter((p) => p !== 'Armed')) {
+      expect(isActionLegal(p, 'SkipCountdown')).toBe(false);
+    }
+    for (const p of PHASES.filter((p) => p !== 'Running')) {
+      expect(isActionLegal(p, 'ForceEnd')).toBe(false);
+    }
   });
 
   it('allows abort once committed (Staged/Armed/Running) but not from Scheduled', () => {
@@ -65,9 +77,9 @@ describe('transitions: phase → legal actions', () => {
   });
 
   it("disables a phase's non-adjacent forward steps (no skipping)", () => {
-    // From Staged you can Arm, not Start/Finish/Finalize/Advance.
-    expect(isActionLegal('Staged', 'Arm')).toBe(true);
-    for (const a of ['Start', 'Finish', 'Finalize', 'Advance'] as HeatAction[]) {
+    // From Staged you can Start, not the later steps/overrides.
+    expect(isActionLegal('Staged', 'Start')).toBe(true);
+    for (const a of ['SkipCountdown', 'ForceEnd', 'Finalize', 'Advance'] as HeatAction[]) {
       expect(isActionLegal('Staged', a)).toBe(false);
     }
   });
@@ -87,7 +99,14 @@ describe('transitions: phase → legal actions', () => {
     expect(isDestructive('Abort')).toBe(true);
     expect(isDestructive('Restart')).toBe(true);
     expect(isDestructive('Discard')).toBe(true);
-    for (const a of ['Stage', 'Arm', 'Start', 'Finish', 'Finalize', 'Advance'] as HeatAction[]) {
+    for (const a of [
+      'Stage',
+      'Start',
+      'SkipCountdown',
+      'ForceEnd',
+      'Finalize',
+      'Advance'
+    ] as HeatAction[]) {
       expect(isDestructive(a)).toBe(false);
     }
   });
@@ -98,9 +117,9 @@ describe('transitions: action → Command', () => {
     // The action name IS the variant tag for every heat-loop action.
     const actions: HeatAction[] = [
       'Stage',
-      'Arm',
       'Start',
-      'Finish',
+      'SkipCountdown',
+      'ForceEnd',
       'Finalize',
       'Advance',
       'Revert',

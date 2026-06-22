@@ -233,6 +233,51 @@ impl Run {
     }
 }
 
+/// Whether a heat's **race-end criterion is met** under `condition`, given its lap-gate
+/// `passes` and the shared `race_start` (heat-lifecycle Slice 2).
+///
+/// This is the pure predicate the Director's **runtime completion clock** evaluates each poll to
+/// decide whether to begin the grace window and auto-append the `Running → Unofficial` transition.
+/// Like [`score`], it reads **no clock and no RNG** — it derives the answer entirely from the
+/// logged passes + the race start — so a replay reaches completion at the exact same point.
+///
+/// The criterion per condition:
+/// - [`WinCondition::Timed`]: met once a counted crossing lands **at or after** the window close
+///   (`race_start + window_micros`). A pass at/after the cutoff is the observable signal that the
+///   window has elapsed on the source clock; until one lands the window is still open.
+/// - [`WinCondition::FirstToLaps`]: met once **any** competitor has completed `n` laps (the leader
+///   reached the target).
+/// - [`WinCondition::BestLap`] / [`WinCondition::BestConsecutive`] (qualifying): there is no
+///   lap/leader criterion intrinsic to the passes — a qual session ends on its **time window**,
+///   which these conditions do not carry. This predicate returns `false` for them; such rounds end
+///   via the RD's [`ForceEnd`](crate::heat::HeatCommand::ForceEnd) override (or a Timed-bounded
+///   qual). This keeps the function total and pure without inventing a window the condition lacks.
+///
+/// `passes` may be the partial mid-heat list (the runtime calls it on the running passes); it is
+/// grouped/ordered internally exactly as [`score`] does.
+pub fn race_end_reached(passes: &[Pass], condition: WinCondition, race_start: SourceTime) -> bool {
+    match condition {
+        WinCondition::Timed { window_micros } => {
+            let cutoff = race_start.micros + window_micros;
+            passes
+                .iter()
+                .any(|p| p.gate.is_lap_gate() && p.at.micros >= cutoff)
+        }
+        WinCondition::FirstToLaps { n } => {
+            if n == 0 {
+                return true;
+            }
+            // A competitor reaches `n` laps after `n + 1` lap-gate crossings (the holeshot opens
+            // the count). Reuse the scorer's grouping so the lap model matches the ranking exactly.
+            Run::group(passes)
+                .iter()
+                .any(|run| run.laps.len() as u32 >= n)
+        }
+        // Qualifying conditions carry no intrinsic end criterion — see the doc above.
+        WinCondition::BestLap | WinCondition::BestConsecutive { .. } => false,
+    }
+}
+
 /// Score a heat from its lap-gate passes under `condition`.
 ///
 /// `passes` is the heat's lap-gate [`Pass`]es (split passes are ignored; pass any
@@ -1013,6 +1058,48 @@ mod tests {
 
         let r = score(&passes, WinCondition::BestLap, start());
         assert_eq!(r.places.len(), 2);
+    }
+
+    // --- race_end_reached (heat-lifecycle Slice 2 completion predicate) -----
+
+    #[test]
+    fn timed_race_end_reached_when_a_pass_lands_at_or_after_the_cutoff() {
+        let cond = WinCondition::Timed {
+            window_micros: 10_000_000,
+        };
+        // All passes strictly before the cutoff (10s): not yet reached.
+        let early = run("A", &[0, 5_000_000, 9_000_000]);
+        assert!(!race_end_reached(&early, cond, start()));
+        // A pass exactly at the cutoff signals the window has elapsed: reached.
+        let at_cutoff = run("A", &[0, 5_000_000, 10_000_000]);
+        assert!(race_end_reached(&at_cutoff, cond, start()));
+        // …and well after, too.
+        let after = run("A", &[0, 5_000_000, 12_000_000]);
+        assert!(race_end_reached(&after, cond, start()));
+    }
+
+    #[test]
+    fn first_to_laps_race_end_reached_when_leader_hits_n() {
+        let cond = WinCondition::FirstToLaps { n: 3 };
+        // 3 crossings ⇒ 2 laps: not yet.
+        let two = run("A", &[0, 3_000_000, 6_000_000]);
+        assert!(!race_end_reached(&two, cond, start()));
+        // 4 crossings ⇒ 3 laps: the leader reached the target.
+        let three = run("A", &[0, 3_000_000, 6_000_000, 9_000_000]);
+        assert!(race_end_reached(&three, cond, start()));
+    }
+
+    #[test]
+    fn qualifying_conditions_have_no_intrinsic_race_end() {
+        // BestLap / BestConsecutive end on a time window the condition does not carry, so the
+        // predicate is always false (the RD ForceEnds, or a Timed-bounded qual is used).
+        let passes = run("A", &[0, 2_000_000, 4_000_000, 6_000_000]);
+        assert!(!race_end_reached(&passes, WinCondition::BestLap, start()));
+        assert!(!race_end_reached(
+            &passes,
+            WinCondition::BestConsecutive { n: 2 },
+            start()
+        ));
     }
 
     // --- Adjudications: penalties & heat-void (#13) -------------------------

@@ -15,13 +15,16 @@ import type { SourceTime } from "./SourceTime";
  *
  * The variants fall into four groups:
  *
- * - **Heat-loop transitions** — [`Stage`](Command::Stage), [`Arm`](Command::Arm),
- *   [`Start`](Command::Start), [`Finish`](Command::Finish),
- *   [`Finalize`](Command::Finalize), [`Advance`](Command::Advance), and the off-ramps
+ * - **Heat-loop transitions** — [`Stage`](Command::Stage), [`Start`](Command::Start),
+ *   [`Finalize`](Command::Finalize), [`Advance`](Command::Advance), the off-ramps
  *   [`Revert`](Command::Revert), [`Abort`](Command::Abort),
- *   [`Restart`](Command::Restart), [`Discard`](Command::Discard). Each requests the
- *   matching [`HeatTransition`](gridfpv_events::HeatTransition); the engine validates
- *   it against the heat's current state (race-engine.html §2).
+ *   [`Restart`](Command::Restart), [`Discard`](Command::Discard), and the runtime-clock
+ *   **overrides** [`SkipCountdown`](Command::SkipCountdown) / [`ForceEnd`](Command::ForceEnd).
+ *   Each requests the matching [`HeatTransition`](gridfpv_events::HeatTransition); the engine
+ *   validates it against the heat's current state (race-engine.html §2). The ordinary
+ *   `Armed → Running` and `Running → Unofficial` transitions are appended by the Director's
+ *   **runtime clock** (heat-lifecycle Slice 2), not by a command — `SkipCountdown`/`ForceEnd`
+ *   are the manual overrides for when the clock must be bypassed.
  * - **Scheduling** — [`ScheduleHeat`](Command::ScheduleHeat) creates a heat with its
  *   lineup ([`Event::HeatScheduled`](gridfpv_events::Event::HeatScheduled)).
  * - **Registration** — [`Register`](Command::Register) binds a source-local
@@ -36,15 +39,15 @@ export type Command = { "Stage": {
 /**
  * The heat to transition.
  */
-heat: HeatId, } } | { "Arm": { 
-/**
- * The heat to transition.
- */
 heat: HeatId, } } | { "Start": { 
 /**
  * The heat to transition.
  */
-heat: HeatId, } } | { "Finish": { 
+heat: HeatId, } } | { "SkipCountdown": { 
+/**
+ * The heat to transition.
+ */
+heat: HeatId, } } | { "ForceEnd": { 
 /**
  * The heat to transition.
  */

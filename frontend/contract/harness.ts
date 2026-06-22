@@ -174,12 +174,18 @@ export async function waitForFrame(
   throw new Error(`condition not met within ${timeoutMs}ms; frames=${JSON.stringify(frames)}`);
 }
 
-/** Drive a heat through its legal loop to `Running` over the control path (schedule already done). */
+/**
+ * Drive a heat through its legal loop to `Running` over the control path (schedule already done).
+ *
+ * Heat-lifecycle Slice 2: `Start` arms the heat and the runtime clock would auto-advance it to
+ * `Running` after the start delay; to keep contract timing deterministic this uses the
+ * `SkipCountdown` override to reach `Running` immediately.
+ */
 export async function driveToRunning(baseUrl: string, token: string, heat: string): Promise<void> {
   for (const command of [
     { Stage: { heat } },
-    { Arm: { heat } },
-    { Start: { heat } }
+    { Start: { heat } },
+    { SkipCountdown: { heat } }
   ] as Command[]) {
     const ack = await rdControl(baseUrl, token, command);
     if (!ack.ok)

@@ -14,7 +14,7 @@
 //!
 //! | command group | validation | appended event |
 //! |---------------|------------|----------------|
-//! | heat-loop (`Stage`/`Arm`/`Start`/`Finish`/`Finalize`/`Advance`/`Revert`/`Abort`/`Restart`/`Discard`) | [`heat::heat_state`] folds the heat's current state; [`heat::apply`] checks the transition is legal | [`Event::HeatStateChanged`] with the engine-returned [`HeatTransition`](gridfpv_events::HeatTransition) |
+//! | heat-loop (`Stage`/`Start`/`SkipCountdown`/`ForceEnd`/`Finalize`/`Advance`/`Revert`/`Abort`/`Restart`/`Discard`) | [`heat::heat_state`] folds the heat's current state; [`heat::apply`] checks the transition is legal | [`Event::HeatStateChanged`] with the engine-returned [`HeatTransition`](gridfpv_events::HeatTransition) |
 //! | [`Command::ScheduleHeat`] | none (it creates the heat) | [`Event::HeatScheduled`] |
 //! | [`Command::Register`] | none (the binding is always recordable; last-registration-wins folds downstream) | [`Event::CompetitorRegistered`] |
 //! | [`Command::VoidDetection`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::DetectionVoided`] |
@@ -491,9 +491,9 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
     match command {
         // --- Heat-loop transitions: fold current state, reuse the engine's legality. ---
         Command::Stage { heat } => heat_transition(state, heat, HeatCommand::Stage),
-        Command::Arm { heat } => heat_transition(state, heat, HeatCommand::Arm),
         Command::Start { heat } => heat_transition(state, heat, HeatCommand::Start),
-        Command::Finish { heat } => heat_transition(state, heat, HeatCommand::Finish),
+        Command::SkipCountdown { heat } => heat_transition(state, heat, HeatCommand::SkipCountdown),
+        Command::ForceEnd { heat } => heat_transition(state, heat, HeatCommand::ForceEnd),
         Command::Finalize { heat } => heat_transition(state, heat, HeatCommand::Finalize),
         Command::Advance { heat } => heat_transition(state, heat, HeatCommand::Advance),
         Command::Revert { heat } => heat_transition(state, heat, HeatCommand::Revert),
@@ -676,16 +676,20 @@ mod tests {
         })
     }
 
-    /// (a) A legal Stage→Arm→Start→Finish→Finalize sequence acks ok and appends the matching
-    /// `HeatStateChanged` events in order.
+    /// (a) A legal Stage→Start→SkipCountdown→ForceEnd→Finalize sequence acks ok and appends the
+    /// matching `HeatStateChanged` events in order. (The Armed→Running / Running→Unofficial steps
+    /// are normally runtime-appended; here the overrides drive them through the command path.)
     #[test]
     fn legal_heat_loop_sequence_appends_transitions_and_acks_ok() {
         let state = scheduled_state();
         let steps = [
             (Command::Stage { heat: heat() }, HeatTransition::Staged),
-            (Command::Arm { heat: heat() }, HeatTransition::Armed),
-            (Command::Start { heat: heat() }, HeatTransition::Running),
-            (Command::Finish { heat: heat() }, HeatTransition::Finished),
+            (Command::Start { heat: heat() }, HeatTransition::Armed),
+            (
+                Command::SkipCountdown { heat: heat() },
+                HeatTransition::Running,
+            ),
+            (Command::ForceEnd { heat: heat() }, HeatTransition::Finished),
             (
                 Command::Finalize { heat: heat() },
                 HeatTransition::Finalized,
@@ -971,6 +975,9 @@ mod tests {
                     seeding: SeedingRule::FromRoster,
                     // Per-heat: this test asserts the whole-field single heat (the bracket path).
                     channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
                 },
             )
             .unwrap();
@@ -1106,6 +1113,9 @@ mod tests {
                     seeding: SeedingRule::FromRoster,
                     // Per-heat: this test asserts first-fit channel assignment from the timer pool.
                     channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
                 },
             )
             .unwrap();

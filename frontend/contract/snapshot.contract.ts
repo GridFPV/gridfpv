@@ -102,9 +102,10 @@ describe('seam 1: snapshot routes are path-scoped', () => {
 
   it('GET /snapshot/pilot/{event}/{pilot} → 200 LapList for a competitor with laps', async () => {
     // The sim emits passes for A/B once the heat runs; drive it so the pilot scope resolves.
+    // Start arms the heat; SkipCountdown forces it Running (the override for the runtime auto-start).
     await rdControl(director.baseUrl, TOKEN, { Stage: { heat: HEAT } });
-    await rdControl(director.baseUrl, TOKEN, { Arm: { heat: HEAT } });
     await rdControl(director.baseUrl, TOKEN, { Start: { heat: HEAT } });
+    await rdControl(director.baseUrl, TOKEN, { SkipCountdown: { heat: HEAT } });
     // Poll the pilot snapshot until A has a lap (sim paces in real time).
     const deadline = Date.now() + 8_000;
     let snap: { status: number; json: unknown } | undefined;

@@ -34,13 +34,16 @@ use crate::error::ProtocolError;
 ///
 /// The variants fall into four groups:
 ///
-/// - **Heat-loop transitions** — [`Stage`](Command::Stage), [`Arm`](Command::Arm),
-///   [`Start`](Command::Start), [`Finish`](Command::Finish),
-///   [`Finalize`](Command::Finalize), [`Advance`](Command::Advance), and the off-ramps
+/// - **Heat-loop transitions** — [`Stage`](Command::Stage), [`Start`](Command::Start),
+///   [`Finalize`](Command::Finalize), [`Advance`](Command::Advance), the off-ramps
 ///   [`Revert`](Command::Revert), [`Abort`](Command::Abort),
-///   [`Restart`](Command::Restart), [`Discard`](Command::Discard). Each requests the
-///   matching [`HeatTransition`](gridfpv_events::HeatTransition); the engine validates
-///   it against the heat's current state (race-engine.html §2).
+///   [`Restart`](Command::Restart), [`Discard`](Command::Discard), and the runtime-clock
+///   **overrides** [`SkipCountdown`](Command::SkipCountdown) / [`ForceEnd`](Command::ForceEnd).
+///   Each requests the matching [`HeatTransition`](gridfpv_events::HeatTransition); the engine
+///   validates it against the heat's current state (race-engine.html §2). The ordinary
+///   `Armed → Running` and `Running → Unofficial` transitions are appended by the Director's
+///   **runtime clock** (heat-lifecycle Slice 2), not by a command — `SkipCountdown`/`ForceEnd`
+///   are the manual overrides for when the clock must be bypassed.
 /// - **Scheduling** — [`ScheduleHeat`](Command::ScheduleHeat) creates a heat with its
 ///   lineup ([`Event::HeatScheduled`](gridfpv_events::Event::HeatScheduled)).
 /// - **Registration** — [`Register`](Command::Register) binds a source-local
@@ -59,18 +62,24 @@ pub enum Command {
         /// The heat to transition.
         heat: HeatId,
     },
-    /// Arm the heat — open the gate to detections.
-    Arm {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// Start the heat running — passes are consumed from here.
+    /// Start the heat — arm it (open the gate to detections) and run the start procedure. The
+    /// Director's runtime clock then auto-advances the heat to `Running` after the logged start
+    /// delay. (Renamed from the former `Arm` in the heat-lifecycle command collapse, Slice 2.)
     Start {
         /// The heat to transition.
         heat: HeatId,
     },
-    /// Finish the heat — close the race (time elapsed or all landed).
-    Finish {
+    /// **Override:** force the heat `Armed → Running` immediately, skipping the start countdown —
+    /// the race-day escape hatch when the runtime's auto-start can't be trusted. Records the same
+    /// `Running` transition the auto-start would (Slice 2).
+    SkipCountdown {
+        /// The heat to transition.
+        heat: HeatId,
+    },
+    /// **Override:** force the heat `Running → Unofficial` now — call the race when the runtime's
+    /// completion clock must be bypassed. Records the same `Finished` transition the auto-complete
+    /// would (Slice 2).
+    ForceEnd {
         /// The heat to transition.
         heat: HeatId,
     },
@@ -247,13 +256,13 @@ mod tests {
             Command::Stage {
                 heat: HeatId("q-1".into()),
             },
-            Command::Arm {
-                heat: HeatId("q-1".into()),
-            },
             Command::Start {
                 heat: HeatId("q-1".into()),
             },
-            Command::Finish {
+            Command::SkipCountdown {
+                heat: HeatId("q-1".into()),
+            },
+            Command::ForceEnd {
                 heat: HeatId("q-1".into()),
             },
             Command::Finalize {

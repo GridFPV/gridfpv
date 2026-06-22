@@ -33,7 +33,10 @@ describe('advanceRoundReq — the seeded single_elim payload', () => {
     params: { rounds: '2' },
     win_condition: { Timed: { window_micros: 120_000_000 } },
     seeding: 'FromRoster',
-    channel_mode: 'Static'
+    channel_mode: 'Static',
+    staging_timer_secs: 300,
+    start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+    grace_window: { Duration: { micros: 3000000 } }
   };
 
   it('builds a single_elim round seeded FromRanking from the source round, carrying its classes + win condition', () => {

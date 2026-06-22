@@ -4,9 +4,9 @@
 //! ```text
 //! [*] --> Scheduled
 //! Scheduled  --> Staged     : stage
-//! Staged     --> Armed      : arm
-//! Armed      --> Running    : start
-//! Running    --> Unofficial : time elapsed / all landed (finish)
+//! Staged     --> Armed      : start          (runs the start procedure)
+//! Armed      --> Running    : (auto) countdown elapsed  /  SkipCountdown (override)
+//! Running    --> Unofficial : (auto) win condition + grace  /  ForceEnd (override)
 //! Unofficial --> Final      : finalize
 //! Final      --> Unofficial : revert
 //! Final      --> [*]        : advance
@@ -17,6 +17,22 @@
 //! Unofficial --> Staged     : restart
 //! Final      --> Scheduled  : discard & re-run
 //! ```
+//!
+//! # The command collapse + the runtime clock (heat-lifecycle redesign, Slice 2)
+//!
+//! The two middle forward steps — `Armed → Running` and `Running → Unofficial` — are no
+//! longer **manual** commands. They are **runtime-driven**: the Director's clock appends the
+//! transition itself when the start countdown elapses (after a logged, deterministic delay) and
+//! when the round's win condition + grace window are met. So the manual command set drops the old
+//! `Start`/`Finish` (the engine *transitions* `Running`/`Finished` they produced still exist —
+//! the runtime records them). The old `Arm` command is renamed **`Start`** (the RD presses
+//! "Start", which arms the heat and runs the start procedure).
+//!
+//! For the race-day cases where the clock can't be trusted (a stuck countdown, a race that must be
+//! called now), two **manual overrides** remain, legal only in the right state:
+//! [`SkipCountdown`](HeatCommand::SkipCountdown) forces `Armed → Running` (skip the countdown) and
+//! [`ForceEnd`](HeatCommand::ForceEnd) forces `Running → Unofficial` now. They record the same
+//! `Running`/`Finished` transitions the auto-path does.
 //!
 //! This module is **pure** (race-engine.html §6): it reads no clock and rolls no
 //! dice, so a recorded session always replays identically. Live race control is just
@@ -35,6 +51,7 @@
 use std::fmt;
 
 use gridfpv_events::{Event, HeatId, HeatTransition};
+use serde::{Deserialize, Serialize};
 
 /// The states of the heat loop (race-engine.html §2). `Scheduled` is the entry
 /// state a [`Event::HeatScheduled`] creates; `Final` is reached when the result is
@@ -62,28 +79,39 @@ pub enum HeatState {
 /// the corresponding [`HeatTransition`]. Commands are kept distinct from the recorded
 /// transitions so the off-ramps stay legible:
 ///
-/// | command    | records                       |
-/// |------------|-------------------------------|
-/// | `Stage`    | [`HeatTransition::Staged`]    |
-/// | `Arm`      | [`HeatTransition::Armed`]     |
-/// | `Start`    | [`HeatTransition::Running`]   |
-/// | `Finish`   | [`HeatTransition::Finished`]  |
-/// | `Finalize` | [`HeatTransition::Finalized`] |
-/// | `Advance`  | [`HeatTransition::Advanced`]  |
-/// | `Revert`   | [`HeatTransition::Reverted`]  |
-/// | `Abort`    | [`HeatTransition::Aborted`]   |
-/// | `Restart`  | [`HeatTransition::Restarted`] |
-/// | `Discard`  | [`HeatTransition::Discarded`] |
+/// | command         | records                       |
+/// |-----------------|-------------------------------|
+/// | `Stage`         | [`HeatTransition::Staged`]    |
+/// | `Start`         | [`HeatTransition::Armed`]     |
+/// | `SkipCountdown` | [`HeatTransition::Running`]   |
+/// | `ForceEnd`      | [`HeatTransition::Finished`]  |
+/// | `Finalize`      | [`HeatTransition::Finalized`] |
+/// | `Advance`       | [`HeatTransition::Advanced`]  |
+/// | `Revert`        | [`HeatTransition::Reverted`]  |
+/// | `Abort`         | [`HeatTransition::Aborted`]   |
+/// | `Restart`       | [`HeatTransition::Restarted`] |
+/// | `Discard`       | [`HeatTransition::Discarded`] |
+///
+/// The `Armed → Running` and `Running → Unofficial` transitions are normally appended by the
+/// **runtime clock**, not an RD command (the command collapse, see the module docs).
+/// [`SkipCountdown`](Self::SkipCountdown) / [`ForceEnd`](Self::ForceEnd) are the manual overrides
+/// that record those same transitions when the clock must be bypassed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeatCommand {
     /// Begin the countdown (Scheduled → Staged).
     Stage,
-    /// Open the gate to detections (Staged → Armed).
-    Arm,
-    /// Start the race (Armed → Running).
+    /// Start the heat (Staged → Armed) — opens the gate to detections and **runs the start
+    /// procedure**. The runtime then auto-advances to `Running` after the logged start delay.
+    /// (Renamed from the former `Arm` in the command collapse.)
     Start,
-    /// Close the race — time elapsed / all landed (Running → Unofficial).
-    Finish,
+    /// **Override:** force `Armed → Running` immediately, skipping the start countdown — the
+    /// race-day escape hatch when the clock's auto-start can't be trusted. Records the same
+    /// [`HeatTransition::Running`] the runtime's auto-start would.
+    SkipCountdown,
+    /// **Override:** force `Running → Unofficial` now — call the race when the completion clock
+    /// must be bypassed. Records the same [`HeatTransition::Finished`] the runtime's auto-complete
+    /// would.
+    ForceEnd,
     /// Finalize the result (Unofficial → Final).
     Finalize,
     /// Hand results to the format generator (Final → terminal).
@@ -131,13 +159,18 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
     use HeatState as S;
 
     let transition = match (state, command) {
-        // Forward path.
+        // Forward path. `Start` arms the heat (the runtime then auto-advances to Running after the
+        // logged start delay); the manual Armed→Running / Running→Unofficial steps are gone — they
+        // are runtime-appended, with the overrides below as the only manual route.
         (S::Scheduled, C::Stage) => HeatTransition::Staged,
-        (S::Staged, C::Arm) => HeatTransition::Armed,
-        (S::Armed, C::Start) => HeatTransition::Running,
-        (S::Running, C::Finish) => HeatTransition::Finished,
+        (S::Staged, C::Start) => HeatTransition::Armed,
         (S::Unofficial, C::Finalize) => HeatTransition::Finalized,
         (S::Final, C::Advance) => HeatTransition::Advanced,
+
+        // Overrides for when the runtime clock can't be trusted (race-day escape hatches). They
+        // record exactly the transitions the auto-path would; legal only in the matching state.
+        (S::Armed, C::SkipCountdown) => HeatTransition::Running,
+        (S::Running, C::ForceEnd) => HeatTransition::Finished,
 
         // Off-ramps. Abort is legal from Staged/Armed/Running (it backs up a
         // state); the landing state is resolved by `next_state`.
@@ -232,10 +265,19 @@ pub fn heat_state<'a>(
 /// The grace window for late crossings after a heat is finished (race-engine.html
 /// §2): "late crossings still count until the heat is finalized; the window is
 /// configurable, default until finalized".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Derives serde + `ts_rs::TS` so it can be carried as a per-round config
+/// ([`RoundDef::grace_window`](../../server/events/struct.RoundDef.html)) and read by the
+/// frontend. The runtime completion clock (heat-lifecycle Slice 2) reads this to decide how long
+/// to hold the heat in `Running` for trailing pilots after the win condition is met, before
+/// appending the auto `Running → Unofficial`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "bindings/")]
 pub enum GraceWindow {
     /// Late crossings count for the whole `Unofficial` phase, until the heat is
-    /// `Final`. The default.
+    /// `Final`. The default for [`consumes_pass`] (an open window); a *completion-clock* round
+    /// config instead defaults to a bounded [`Duration`](Self::Duration) so the auto-transition
+    /// actually fires.
     #[default]
     UntilScored,
     /// Late crossings count only for `micros` microseconds after the heat finished;
@@ -243,6 +285,7 @@ pub enum GraceWindow {
     /// `Unofficial`.
     Duration {
         /// Length of the grace window, in microseconds on the source clock.
+        #[ts(type = "number")]
         micros: i64,
     },
 }
@@ -307,9 +350,9 @@ mod tests {
 
     const ALL_COMMANDS: [HeatCommand; 10] = [
         HeatCommand::Stage,
-        HeatCommand::Arm,
         HeatCommand::Start,
-        HeatCommand::Finish,
+        HeatCommand::SkipCountdown,
+        HeatCommand::ForceEnd,
         HeatCommand::Finalize,
         HeatCommand::Advance,
         HeatCommand::Revert,
@@ -325,13 +368,15 @@ mod tests {
         use HeatState as S;
         use HeatTransition as T;
         vec![
-            // forward path
+            // forward path (the Armed→Running / Running→Unofficial steps are runtime-appended,
+            // not manual commands — see the overrides below)
             (S::Scheduled, C::Stage, T::Staged),
-            (S::Staged, C::Arm, T::Armed),
-            (S::Armed, C::Start, T::Running),
-            (S::Running, C::Finish, T::Finished),
+            (S::Staged, C::Start, T::Armed),
             (S::Unofficial, C::Finalize, T::Finalized),
             (S::Final, C::Advance, T::Advanced),
+            // overrides (manual route for the runtime-driven transitions)
+            (S::Armed, C::SkipCountdown, T::Running),
+            (S::Running, C::ForceEnd, T::Finished),
             // off-ramps
             (S::Staged, C::Abort, T::Aborted),
             (S::Armed, C::Abort, T::Aborted),
@@ -379,8 +424,27 @@ mod tests {
 
     #[test]
     fn legal_table_is_exhaustive_over_the_diagram() {
-        // 6 forward edges + 3 aborts + 3 restarts + revert + discard = 14 legal pairs.
+        // 4 manual forward edges + 2 overrides + 3 aborts + 3 restarts + revert + discard = 14.
         assert_eq!(legal_table().len(), 14);
+    }
+
+    #[test]
+    fn overrides_are_legal_only_in_their_state() {
+        use HeatCommand as C;
+        use HeatState as S;
+        use HeatTransition as T;
+        // SkipCountdown forces Armed → Running; ForceEnd forces Running → Unofficial.
+        assert_eq!(apply(S::Armed, C::SkipCountdown), Ok(T::Running));
+        assert_eq!(apply(S::Running, C::ForceEnd), Ok(T::Finished));
+        // Each is illegal in every other state.
+        for &state in &ALL_STATES {
+            if state != S::Armed {
+                assert!(apply(state, C::SkipCountdown).is_err(), "{state:?} + Skip");
+            }
+            if state != S::Running {
+                assert!(apply(state, C::ForceEnd).is_err(), "{state:?} + ForceEnd");
+            }
+        }
     }
 
     #[test]
@@ -482,9 +546,11 @@ mod tests {
         let mut state = HeatState::Scheduled;
         let path = [
             (HeatCommand::Stage, HeatState::Staged),
-            (HeatCommand::Arm, HeatState::Armed),
-            (HeatCommand::Start, HeatState::Running),
-            (HeatCommand::Finish, HeatState::Unofficial),
+            (HeatCommand::Start, HeatState::Armed),
+            // The Armed→Running / Running→Unofficial steps are runtime-driven; the overrides
+            // record the same transitions, so the forward path is driven by them here.
+            (HeatCommand::SkipCountdown, HeatState::Running),
+            (HeatCommand::ForceEnd, HeatState::Unofficial),
             (HeatCommand::Finalize, HeatState::Final),
             (HeatCommand::Advance, HeatState::Final),
         ];

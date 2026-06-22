@@ -360,17 +360,19 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     .await;
 
     // === 3. Drive the heat loop through the control path; the client reads it back. ===
-    // Stage + Arm are deterministic; the client must observe each phase transition in order
+    // Stage + Start are deterministic; the client must observe each phase transition in order
     // (proving the control append reaches the read stream, §3, §5).
     rd_command(&addr, &Command::Stage { heat: heat.clone() }, &rd).await;
     let s_staged = await_phase(&mut stream, HeatPhase::Staged).await;
-    rd_command(&addr, &Command::Arm { heat: heat.clone() }, &rd).await;
+    rd_command(&addr, &Command::Start { heat: heat.clone() }, &rd).await;
     let s_armed = await_phase(&mut stream, HeatPhase::Armed).await;
     assert!(
         s_armed > s_staged,
         "the per-stream sequence is strictly increasing (Staged {s_staged} < Armed {s_armed})"
     );
-    rd_command(&addr, &Command::Start { heat: heat.clone() }, &rd).await;
+    // SkipCountdown stands in for the runtime auto-start here (this test drives the loop by hand,
+    // not via the Director clock): force Armed -> Running.
+    rd_command(&addr, &Command::SkipCountdown { heat: heat.clone() }, &rd).await;
     await_phase(&mut stream, HeatPhase::Running).await;
 
     // === 4. Run the real heat on dockerized RH; feed its passes through `append`. ===
@@ -477,18 +479,23 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     }
 
     // === 7. Auth gate: a control command without the RD token is rejected (401). ===
-    let (status, _ack) = post_raw(&addr, &Command::Finish { heat: heat.clone() }, None).await;
+    let (status, _ack) = post_raw(&addr, &Command::ForceEnd { heat: heat.clone() }, None).await;
     assert_eq!(
         status, 401,
         "an un-authenticated control command is rejected"
     );
     // A read-only join-token never grants control either.
     let join = state.tokens().issue_join_token();
-    let (status, _ack) =
-        post_raw(&addr, &Command::Finish { heat: heat.clone() }, Some(&join)).await;
+    let (status, _ack) = post_raw(
+        &addr,
+        &Command::ForceEnd { heat: heat.clone() },
+        Some(&join),
+    )
+    .await;
     assert_eq!(status, 401, "a read-only join-token never grants control");
-    // The same command WITH the RD token finishes the heat — proving the gate admits the RD.
-    rd_command(&addr, &Command::Finish { heat: heat.clone() }, &rd).await;
+    // The same command WITH the RD token ends the heat (ForceEnd: Running -> Unofficial) — proving
+    // the gate admits the RD.
+    rd_command(&addr, &Command::ForceEnd { heat: heat.clone() }, &rd).await;
     rd_command(&addr, &Command::Finalize { heat: heat.clone() }, &rd).await;
 
     // The event-scope client converges to the Final phase — the heat ran end to end.
