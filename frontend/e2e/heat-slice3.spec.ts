@@ -84,11 +84,14 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
     .getByRole('listitem')
     .filter({ hasText: 'Open Class' })
     .getByRole('checkbox', { name: 'Select Open Class' });
-  if (!(await classBox.isChecked())) await classBox.check();
-  await page.getByRole('button', { name: 'Save classes' }).click();
-  await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-    timeout: 15_000
-  });
+  if (!(await classBox.isChecked())) {
+    const classesSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await classBox.check();
+    await classesSaved;
+  }
+  await expect(classBox).toBeChecked();
 
   await page
     .getByRole('navigation', { name: 'Screens' })
@@ -120,10 +123,10 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
     timeout: 15_000
   });
   if (await classBox.isChecked()) {
+    const classesCleared = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
     await classBox.uncheck();
-    await page.getByRole('button', { name: 'Save classes' }).click();
-    await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-      timeout: 15_000
-    });
+    await classesCleared;
   }
 });

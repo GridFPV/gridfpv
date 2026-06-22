@@ -8,14 +8,21 @@
    * a checkbox per row bound to a local working set, saved to `EventMeta.timers` via
    * `setEventTimers`. New events and Practice default to the built-in Mock.
    *
-   * Selection edits a local working set as the RD ticks boxes; "Save" pushes it (the session then
-   * re-homes `currentEvent` with the server's response). After any create/edit/delete the manager
-   * reloads and hands back the fresh list, so the working set is reconciled (a removed timer drops
-   * out of the selection; a freshly added one is simply available to tick).
+   * Selection edits a local working set as the RD ticks boxes; each tick **auto-saves** the full
+   * selection (debounced, wholesale `setEventTimers`) — there is no explicit Save button. The
+   * session then re-homes `currentEvent` with the server's response. After any create/edit/delete
+   * the manager reloads and hands back the fresh list, so the working set is reconciled (a removed
+   * timer drops out of the selection; a freshly added one is simply available to tick).
+   *
+   * Auto-save is **optimistic**: the checkbox flips instantly and the wholesale-set lands in the
+   * background; on a save error the change is reverted (re-seeded from the event) and surfaced.
+   * Because every save sends the *entire* current selection (not a delta), coalescing rapid clicks
+   * into one trailing save is safe last-write-wins.
    */
   import { Button, Card, toast } from '@gridfpv/components';
   import type { Timer, TimerId } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
+  import { AutoSaver } from '../lib/autosave.js';
   import TimerManager from './TimerManager.svelte';
 
   let { session }: { session: Session } = $props();
@@ -23,12 +30,11 @@
   let manager = $state<TimerManager | undefined>(undefined);
 
   // The registry list (kept in sync by the manager via `bind:timers`) and the working selection
-  // (a set of timer ids), seeded from the event and edited locally until the RD saves. We snapshot
-  // the event's saved selection so "Save"/"changed" can compare.
+  // (a set of timer ids), seeded from the event. Toggling a box edits the set optimistically and
+  // schedules a debounced save; we snapshot the event's saved selection so a failed save can revert.
   let timers = $state<Timer[]>([]);
   let selected = $state<Set<TimerId>>(new Set());
   let savedSelection = $state<TimerId[]>([]);
-  let saving = $state(false);
 
   function syncFromEvent() {
     const ids = session.currentEvent?.timers ?? [];
@@ -53,45 +59,45 @@
     selected = next;
   }
 
-  function toggle(id: TimerId) {
-    const next = new Set(selected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    selected = next;
-  }
-
   // The ids to save, in the registry's listed order (a stable, sensible order).
   const orderedSelection = $derived(timers.filter((t) => selected.has(t.id)).map((t) => t.id));
 
-  const changed = $derived(
-    orderedSelection.length !== savedSelection.length ||
-      orderedSelection.some((id, i) => id !== savedSelection[i])
-  );
+  // ── Auto-save (debounced, optimistic, wholesale `setEventTimers`) ──────────
+  const autosaver = new AutoSaver();
 
-  async function save() {
-    if (saving || !changed) return;
-    if (orderedSelection.length === 0) {
-      toast.error('Select at least one timer for the event.');
+  function toggle(id: TimerId) {
+    // Optimistic flip first so the checkbox reflects the click instantly.
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    // An event must keep at least one timer — refuse to auto-clear the last one (revert + nudge).
+    if (next.size === 0) {
+      toast.error('An event needs at least one timer.');
+      // Re-seed from the event so the bound checkbox reliably snaps back to checked (the native
+      // click already flipped the DOM; re-seeding restores the saved selection).
+      syncFromEvent();
       return;
     }
-    saving = true;
-    try {
-      const updated = await session.setEventTimers(orderedSelection);
-      if (!updated) {
-        toast.info('A control token is required to set the event’s timers.');
-        return;
-      }
-      syncFromEvent();
-      toast.success('Event timers saved.');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      saving = false;
-    }
+    selected = next;
+    scheduleSave();
   }
 
-  function reset() {
-    syncFromEvent();
+  // Schedule a single trailing save of the full selection. The payload is computed at flush time so
+  // it reflects the latest selection even if more boxes were ticked during the debounce window.
+  function scheduleSave() {
+    autosaver.schedule('timers', {
+      compute: () => orderedSelection,
+      save: (ids) => session.setEventTimers(ids),
+      onUnsaved: () => {
+        toast.info('A control token is required to set the event’s timers.');
+        syncFromEvent();
+      },
+      onError: (e) => {
+        // Revert the optimistic change to the last-saved selection and surface the failure.
+        syncFromEvent();
+        toast.error(e instanceof Error ? e.message : String(e));
+      }
+    });
   }
 
   // ── Primary / alternate roles (issue #112) ────────────────────────────────
@@ -167,16 +173,8 @@
       {#snippet listFooter()}
         <div class="foot">
           <span class="count" aria-live="polite">
-            {orderedSelection.length} selected
+            {orderedSelection.length} selected · saved automatically
           </span>
-          <div class="foot-actions">
-            {#if changed}
-              <Button variant="ghost" onclick={reset} disabled={saving}>Reset</Button>
-            {/if}
-            <Button variant="primary" onclick={save} loading={saving} disabled={!changed}>
-              Save selection
-            </Button>
-          </div>
         </div>
       {/snippet}
     </TimerManager>
@@ -300,9 +298,5 @@
   .count {
     font-size: var(--gf-font-size-xs);
     color: var(--gf-text-muted);
-  }
-  .foot-actions {
-    display: flex;
-    gap: var(--gf-space-2);
   }
 </style>

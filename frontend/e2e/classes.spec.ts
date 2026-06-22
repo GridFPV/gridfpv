@@ -10,8 +10,9 @@
  *     the form has no org source picker (new classes are `Custom`), and the created row shows the
  *     `Custom` badge and keeps Edit/Remove; finally **remove** it.
  *  2. **In-event selection of a built-in** — enter an event (Practice), open the workspace's
- *     **Classes** tab, **check a built-in** (`Open Class`) into this event's selection and **Save**;
- *     a reload resumes into the event with the built-in still selected. Cleans up (uncheck + save).
+ *     **Classes** tab, **check a built-in** (`Open Class`) into this event's selection — which
+ *     **auto-saves** (no Save button); a reload resumes into the event with the built-in still
+ *     selected. Cleans up (uncheck auto-saves).
  *
  * Every step is a real click/input in headless chromium on the real `POST/DELETE /classes` +
  * `PUT /events/{id}/classes` paths — nothing mocked. Importing `test`/`expect` from
@@ -121,19 +122,22 @@ test('RD selects a built-in class onto the event and it persists', async ({ page
   });
   await expect(page.getByText(/selected for this event/i)).toBeVisible();
 
-  // ── A built-in is selectable like any class: check "Open Class" into the event, then Save ────
+  // ── A built-in is selectable like any class: checking "Open Class" AUTO-SAVES (no Save button) ─
   const list = page.getByRole('list', { name: 'Class directory' });
   const row = list.getByRole('listitem').filter({ hasText: 'Open Class' });
   await expect(row).toBeVisible({ timeout: 15_000 });
   const box = row.getByRole('checkbox', { name: 'Select Open Class' });
-  // Start from a known state (a prior run may have left it checked); ensure checked.
-  if (!(await box.isChecked())) await box.check();
+  // Start from a known state (a prior run may have left it checked); ensure checked, waiting for the
+  // debounced `PUT …/classes` to land when we actually toggle it on.
+  if (!(await box.isChecked())) {
+    const classesSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await box.check();
+    await classesSaved;
+  }
   await expect(box).toBeChecked();
-  await page.getByRole('button', { name: 'Save classes' }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-    timeout: 15_000
-  });
 
   // ── It persisted on the Director: a reload resumes into the event with the built-in checked ──
   await page.reload();
@@ -150,14 +154,14 @@ test('RD selects a built-in class onto the event and it persists', async ({ page
     timeout: 15_000
   });
 
-  // ── Clean up: uncheck + Save so the shared Director's event goes back to an empty selection ──
+  // ── Clean up: uncheck (auto-saves) so the shared Director's event goes back to an empty selection ─
   const boxAfter = rowAfter.getByRole('checkbox', { name: 'Select Open Class' });
+  const classesCleared = page.waitForResponse(
+    (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+  );
   await boxAfter.uncheck();
   await expect(boxAfter).not.toBeChecked();
-  await page.getByRole('button', { name: 'Save classes' }).click();
-  await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-    timeout: 15_000
-  });
+  await classesCleared;
 });
 
 test('RD hides a class on the Classes page; it drops out of the event picker; unhide restores it', async ({

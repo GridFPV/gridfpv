@@ -3,10 +3,10 @@
  *
  * A person enters an event (Practice), opens the workspace's **Registration** screen (now the
  * EventRoster), and — without leaving the event — **registers a brand-new pilot inline**, then
- * **checks it into this event's roster** and **saves**. The roster is asserted to have persisted on
- * the Director (a reload resumes into the event with the pilot still checked). Finally the pilot is
- * **unchecked + saved** (roster shrinks) and **removed** from the directory — cleaning up after
- * itself, since the worker's Director is shared.
+ * **checks it into this event's roster** — which **auto-saves** (no Save button). The roster is
+ * asserted to have persisted on the Director (a reload resumes into the event with the pilot still
+ * checked). Finally the pilot is **unchecked** (roster shrinks, auto-saved) and **removed** from the
+ * directory — cleaning up after itself, since the worker's Director is shared.
  *
  * Every step is a real click/input in headless chromium on the real `POST /pilots` +
  * `PUT /events/{id}/roster` paths — nothing mocked. Importing `test`/`expect` from
@@ -67,13 +67,15 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
   const box = row.getByRole('checkbox', { name: `Roster ${CALLSIGN}` });
   await expect(box).not.toBeChecked();
 
-  // ── Check it into the event roster, then Save ───────────────────────────────────────────────
+  // ── Check it into the event roster — this AUTO-SAVES (no Save button). Wait for the debounced
+  //    `PUT /events/{id}/roster` to land before asserting persistence. ──
+  const rosterSaved = page.waitForResponse(
+    (r) => /\/events\/.+\/roster$/.test(r.url()) && r.request().method() === 'PUT'
+  );
   await box.check();
   await expect(box).toBeChecked();
-  await page.getByRole('button', { name: 'Save roster' }).click();
+  await rosterSaved;
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
-  // After a successful save there is nothing pending, so Save goes disabled again.
-  await expect(page.getByRole('button', { name: 'Save roster' })).toBeDisabled({ timeout: 15_000 });
 
   // ── It persisted on the Director: a reload resumes into the event with the pilot still checked.
   await page.reload();
@@ -90,12 +92,14 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
     timeout: 15_000
   });
 
-  // ── Uncheck + Save: the roster shrinks back (the remove side of the toggle) ──────────────────
+  // ── Uncheck: the roster shrinks back (the remove side of the toggle) — auto-saved ────────────
   const boxAfter = rowAfter.getByRole('checkbox', { name: `Roster ${CALLSIGN}` });
+  const rosterShrank = page.waitForResponse(
+    (r) => /\/events\/.+\/roster$/.test(r.url()) && r.request().method() === 'PUT'
+  );
   await boxAfter.uncheck();
   await expect(boxAfter).not.toBeChecked();
-  await page.getByRole('button', { name: 'Save roster' }).click();
-  await expect(page.getByRole('button', { name: 'Save roster' })).toBeDisabled({ timeout: 15_000 });
+  await rosterShrank;
 
   // ── Clean up: remove the pilot from the directory (the worker's Director is shared) ──────────
   await rowAfter.getByRole('button', { name: 'Remove' }).click();
@@ -116,8 +120,9 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
  * Enter an event (Practice), select the built-in **Open Class** onto it, then in the same combined
  * stage: register a pilot inline and mark them present. Because exactly one class is selected the
  * pilot is **auto-placed** (no per-class checkbox); the RD assigns them a **channel** drawn from the
- * primary timer's available channels and saves the placement — the key proof, which we assert
- * **persists across a reload** (the channel seeds off `EventMeta.classes_membership`'s `MemberSlot`).
+ * primary timer's available channels — the channel placement **auto-saves** (no Save button), the
+ * key proof, which we assert **persists across a reload** (the channel seeds off
+ * `EventMeta.classes_membership`'s `MemberSlot`).
  * Cleans up after itself (the worker's Director is shared): unticks the class and removes the pilot.
  */
 test('RD auto-fills a single class and assigns a pilot a channel (persists)', async ({ page }) => {
@@ -153,12 +158,14 @@ test('RD auto-fills a single class and assigns a pilot a channel (persists)', as
     .getByRole('listitem')
     .filter({ hasText: 'Open Class' });
   const classBox = classRow.getByRole('checkbox', { name: 'Select Open Class' });
-  if (!(await classBox.isChecked())) await classBox.check();
+  if (!(await classBox.isChecked())) {
+    const classesSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await classBox.check();
+    await classesSaved;
+  }
   await expect(classBox).toBeChecked();
-  await page.getByRole('button', { name: 'Save classes' }).click();
-  await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-    timeout: 15_000
-  });
 
   // ── Roster stage: register a pilot inline + mark present ──────────────────────────────────────
   await nav.getByRole('button', { name: 'Classes & Roster' }).click();
@@ -175,25 +182,29 @@ test('RD auto-fills a single class and assigns a pilot a channel (persists)', as
   const dir = page.getByRole('list', { name: 'Pilot directory' });
   const pilotRow = dir.getByRole('listitem').filter({ hasText: CS });
   await expect(pilotRow).toBeVisible({ timeout: 15_000 });
+  const rosterSaved2 = page.waitForResponse(
+    (r) => /\/events\/.+\/roster$/.test(r.url()) && r.request().method() === 'PUT'
+  );
   await pilotRow.getByRole('checkbox', { name: `Roster ${CS}` }).check();
-  await page.getByRole('button', { name: 'Save roster' }).click();
-  await expect(page.getByRole('button', { name: 'Save roster' })).toBeDisabled({ timeout: 15_000 });
+  await rosterSaved2;
 
   // ── Single class → auto-fill: the present pilot is automatically placed (no checkbox); assign it
-  //    a channel from the primary timer and save the placement. The channel IS the static binding. ──
+  //    a channel from the primary timer. The channel placement AUTO-SAVES (the channel IS the static
+  //    binding) — wait for the debounced `PUT …/membership` to land. ──
   const channelSel = page.getByLabel(`Channel for ${CS}`);
   await expect(channelSel).toBeVisible({ timeout: 15_000 });
   // Pick the first real channel option (skip the "No channel" sentinel).
   const firstChannel = await channelSel.locator('option').nth(1).getAttribute('value');
-  await channelSel.selectOption(firstChannel!);
   if (process.env.GRIDFPV_SHOTS)
     await page
       .getByRole('region', { name: 'Classes and roster' })
       .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/classes-roster-stage.png` });
-  const savePlacement = page.getByRole('button', { name: 'Save placement' });
-  await savePlacement.click();
+  const placementSaved = page.waitForResponse(
+    (r) => /\/events\/.+\/membership$/.test(r.url()) && r.request().method() === 'PUT'
+  );
+  await channelSel.selectOption(firstChannel!);
+  await placementSaved;
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
-  await expect(savePlacement).toBeDisabled({ timeout: 15_000 });
 
   // ── The placement + channel persisted: a reload seeds the channel off
   //    `EventMeta.classes_membership` (the MemberSlot's channel). ──
@@ -211,11 +222,11 @@ test('RD auto-fills a single class and assigns a pilot a channel (persists)', as
     .filter({ hasText: 'Open Class' });
   const classBoxAfter = classRowAfter.getByRole('checkbox', { name: 'Select Open Class' });
   if (await classBoxAfter.isChecked()) {
+    const classesCleared = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
     await classBoxAfter.uncheck();
-    await page.getByRole('button', { name: 'Save classes' }).click();
-    await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-      timeout: 15_000
-    });
+    await classesCleared;
   }
 
   await nav.getByRole('button', { name: 'Classes & Roster' }).click();
