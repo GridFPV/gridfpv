@@ -60,16 +60,19 @@ import {
   updateClass,
   deleteClass,
   setEventClasses,
+  setClassMembership,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
 import type {
+  AdapterId,
   Class,
   ClassId,
   Command,
   CommandAck,
+  CompetitorRef,
   CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
@@ -239,6 +242,7 @@ export class Session {
   #updateClassImpl: typeof updateClass;
   #deleteClassImpl: typeof deleteClass;
   #setEventClassesImpl: typeof setEventClasses;
+  #setClassMembershipImpl: typeof setClassMembership;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -265,6 +269,7 @@ export class Session {
     updateClassImpl?: typeof updateClass;
     deleteClassImpl?: typeof deleteClass;
     setEventClassesImpl?: typeof setEventClasses;
+    setClassMembershipImpl?: typeof setClassMembership;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -292,6 +297,7 @@ export class Session {
     this.#updateClassImpl = opts?.updateClassImpl ?? updateClass;
     this.#deleteClassImpl = opts?.deleteClassImpl ?? deleteClass;
     this.#setEventClassesImpl = opts?.setEventClassesImpl ?? setEventClasses;
+    this.#setClassMembershipImpl = opts?.setClassMembershipImpl ?? setClassMembership;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -579,6 +585,42 @@ export class Session {
     );
     if (updated) this.currentEvent = updated;
     return updated;
+  }
+
+  /**
+   * Set which roster pilots race a single **class** of the current event
+   * (`PUT /events/{id}/classes/{classId}/membership`) — race redesign Slice 1b. This is the finer
+   * per-class join layered on the roster (who is *present*) and the class selection (which
+   * categories *run*): given those, which present pilots race *this* class. Pass the full set of
+   * pilot ids for the class (replaces *that class's* membership wholesale; an empty list clears it;
+   * other classes are untouched). No-op (resolves `undefined`) when no event is selected. On success
+   * the updated {@link EventMeta} replaces {@link currentEvent} so the workspace's view of
+   * `classes_membership` stays in sync; returns it, `undefined` on a cancelled prompt, or throws.
+   */
+  async setClassMembership(classId: ClassId, pilotIds: PilotId[]): Promise<EventMeta | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const updated = await this.#privilegedWrite((token) =>
+      this.#setClassMembershipImpl(this.baseUrl, event.id, classId, pilotIds, token)
+    );
+    if (updated) this.currentEvent = updated;
+    return updated;
+  }
+
+  /**
+   * Bind a timing-source competitor to a pilot for lap attribution (`Command::Register`) — the
+   * IRL **binding** step of the Roster stage. A timing source (RotorHazard node, sim player) reports
+   * a source-local {@link CompetitorRef} that means nothing to GridFPV until the RD binds it to a
+   * directory {@link PilotId}; the projection then attributes that competitor's laps to the pilot.
+   * (The sim auto-binds its players, so this is the manual IRL path.) Sent through the control path
+   * (full-trust first → lazy token), so it returns the raw {@link CommandAck} like {@link send}.
+   */
+  registerCompetitor(
+    adapter: AdapterId,
+    competitor: CompetitorRef,
+    pilot: PilotId
+  ): Promise<CommandAck> {
+    return this.send({ Register: { adapter, competitor, pilot } });
   }
 
   /**

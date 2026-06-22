@@ -123,19 +123,12 @@
     }
   });
 
-  type ScreenId =
-    | 'setup'
-    | 'timers'
-    | 'registration'
-    | 'classes'
-    | 'live'
-    | 'marshaling'
-    | 'results';
+  type ScreenId = 'setup' | 'timers' | 'roster' | 'classes' | 'live' | 'marshaling' | 'results';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
     { id: 'setup', label: 'Setup', key: '1', icon: 'M4 6h16M4 12h16M4 18h10' },
     {
-      id: 'registration',
-      label: 'Registration',
+      id: 'roster',
+      label: 'Roster',
       key: '2',
       icon: 'M16 11V7a4 4 0 1 0-8 0v4M5 11h14v9H5z'
     },
@@ -169,7 +162,7 @@
     // The console is already inside an event (#72) — the live read client was scoped to it on
     // entry — so committing the wizard just advances to registration; there is no separate
     // event to re-scope to (the redundant event field was removed, #72 Slice 1b A1).
-    setTab('registration');
+    setTab('roster');
   }
 
   function leaveToPicker() {
@@ -355,7 +348,7 @@
           />
         {:else if active === 'timers'}
           <EventTimers {session} />
-        {:else if active === 'registration'}
+        {:else if active === 'roster'}
           <EventRoster {session} />
         {:else if active === 'classes'}
           <EventClasses {session} />
