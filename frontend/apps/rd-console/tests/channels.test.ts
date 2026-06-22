@@ -13,6 +13,8 @@ import {
   groupByBand,
   isCatalogChannel,
   isPlausibleMhz,
+  nodeChannelLabel,
+  nodeIndexOf,
   offeredCatalog
 } from '../src/lib/channels.js';
 
@@ -134,5 +136,35 @@ describe('assignChannelsRoundRobin', () => {
 
   it('handles an empty pilot list', () => {
     expect(assignChannelsRoundRobin([], [5658]).size).toBe(0);
+  });
+});
+
+describe('nodeIndexOf (open-practice node ref parsing)', () => {
+  it('parses node-{i} into its index', () => {
+    expect(nodeIndexOf('node-0')).toBe(0);
+    expect(nodeIndexOf('node-7')).toBe(7);
+  });
+
+  it('returns undefined for a non-node ref', () => {
+    expect(nodeIndexOf('ALICE')).toBeUndefined();
+    expect(nodeIndexOf('node-')).toBeUndefined();
+    expect(nodeIndexOf('node-x')).toBeUndefined();
+  });
+});
+
+describe('nodeChannelLabel (open-practice seat label)', () => {
+  it('labels a configured seat as band + channel · MHz', () => {
+    // node 0 → available_channels[0] = 5658 → Raceband R1 · 5658
+    expect(nodeChannelLabel(0, [5658, 5800], CATALOG)).toBe('Raceband R1 · 5658');
+    expect(nodeChannelLabel(1, [5658, 5800], CATALOG)).toBe('Fatshark F4 · 5800');
+  });
+
+  it('falls back to raw MHz for a non-catalog channel', () => {
+    expect(nodeChannelLabel(0, [5111], CATALOG)).toBe('5111 MHz');
+  });
+
+  it('labels a seat with no configured channel as a bare 1-based node', () => {
+    // index 2 is past the available pool → Node 3 (1-based).
+    expect(nodeChannelLabel(2, [5658, 5800], CATALOG)).toBe('Node 3');
   });
 });

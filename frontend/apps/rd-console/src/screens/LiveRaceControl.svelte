@@ -9,7 +9,15 @@
    * destructive off-ramps (Abort/Restart/Discard) confirm before firing. A failed
    * `CommandAck` surfaces through the shared `ErrorBanner`.
    */
-  import { HeatSheet, RaceClock, Leaderboard, Card } from '@gridfpv/components';
+  import {
+    HeatSheet,
+    RaceClock,
+    Leaderboard,
+    Card,
+    Button,
+    formatMicros,
+    toast
+  } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
     CompetitorRef,
@@ -17,9 +25,10 @@
     HeatResult,
     HeatSummary,
     LiveRaceState,
+    PilotProgress,
     RoundDef
   } from '@gridfpv/types';
-  import { channelLabel } from '../lib/channels.js';
+  import { channelLabel, nodeChannelLabel, nodeIndexOf } from '../lib/channels.js';
   import {
     ACTION_ORDER,
     actionDescription,
@@ -99,6 +108,98 @@
   const stagingSecs = $derived(currentRound?.staging_timer_secs ?? 300);
   // The round's start-tone cue (pitch/length), when configured; else the player's default tone.
   const toneCue = $derived(currentRound?.start_procedure?.tone);
+
+  // ── Open-practice per-channel board (open-practice Slice 2) ───────────────────────────────────
+  // The casual **open-practice** format runs one open heat over the active **channels**: its live
+  // `LiveRaceState` rows are unbound (`pilot: null`) with competitor refs `node-{i}` (the timer
+  // seat). Rather than the pilot-keyed channels/heat-sheet panels, this heat reads as a per-channel
+  // practice board — each row a channel (resolved `node-{i}` → the primary timer's
+  // `available_channels[i]` → catalog label) with its laps, last lap, and best lap.
+  const OPEN_PRACTICE = 'open_practice';
+  const isOpenPractice = $derived(currentRound?.format === OPEN_PRACTICE);
+  // The primary timer (its `available_channels` resolve each `node-{i}` seat to a channel label).
+  const availableChannels = $derived<number[]>(session.primaryTimer?.available_channels ?? []);
+
+  // One per-channel board row: its node index, channel label, laps, last lap, and best lap (µs).
+  interface ChannelRow {
+    node: number;
+    ref: CompetitorRef;
+    label: string;
+    laps: number;
+    lastLapMicros: number | undefined;
+    bestLapMicros: number | undefined;
+  }
+  // Best lap isn't carried on the live stream (`PilotProgress` is laps + last lap), so the board
+  // tracks it client-side: the min `last_lap_micros` observed per channel over the run. It resets
+  // whenever the heat changes (a fresh practice run / Reset starts a clean board — the backend
+  // clears its in-memory laps on the new heat, and this mirrors that).
+  let bestByRef = $state<Map<CompetitorRef, number>>(new Map());
+  let bestForHeat = $state<HeatId | undefined>(undefined);
+  $effect(() => {
+    // On a heat change, wipe the accumulated bests (matches the backend clearing its lap store).
+    if (heat !== bestForHeat) {
+      bestForHeat = heat;
+      bestByRef = new Map();
+    }
+    if (!isOpenPractice) return;
+    let changed = false;
+    const next = new Map(bestByRef);
+    for (const p of live?.progress ?? []) {
+      const last = p.last_lap_micros;
+      if (last === undefined || last === null) continue;
+      const prev = next.get(p.competitor);
+      if (prev === undefined || last < prev) {
+        next.set(p.competitor, last);
+        changed = true;
+      }
+    }
+    if (changed) bestByRef = next;
+  });
+
+  // The board rows, in node order: every active `node-{i}` channel with its live laps. A channel
+  // with no laps yet still shows (a quiet seat reads "0 laps").
+  const channelRows = $derived<ChannelRow[]>(buildChannelRows(live, availableChannels));
+  function buildChannelRows(state: LiveRaceState | undefined, avail: number[]): ChannelRow[] {
+    const byRef = new Map<CompetitorRef, PilotProgress>(
+      (state?.progress ?? []).map((p) => [p.competitor, p])
+    );
+    const refs = state?.active_pilots ?? [];
+    const rows: ChannelRow[] = [];
+    for (const ref of refs) {
+      const node = nodeIndexOf(ref);
+      if (node === undefined) continue; // Not an open-practice channel ref — skip defensively.
+      const p = byRef.get(ref);
+      rows.push({
+        node,
+        ref,
+        label: nodeChannelLabel(node, avail, catalog),
+        laps: p?.laps_completed ?? 0,
+        lastLapMicros: p?.last_lap_micros ?? undefined,
+        bestLapMicros: bestByRef.get(ref)
+      });
+    }
+    return rows.sort((a, b) => a.node - b.node);
+  }
+
+  // ── Reset / new practice run (open-practice Slice 2) ──────────────────────────────────────────
+  // A fresh run re-fills the open-practice round to mint a new heat, which clears the backend's
+  // in-memory laps (per the format) — wiping the board between practice sessions. The new heat
+  // arrives on the live stream; the best-lap tracker resets on the heat change (above).
+  let resetting = $state(false);
+  async function startFreshRun() {
+    const roundId = currentRound?.id;
+    if (!roundId || resetting) return;
+    resetting = true;
+    try {
+      const ack = await session.fillRound(roundId);
+      if (!ack.ok) return; // The error banner surfaces session.lastCommandError.
+      toast.success('Fresh practice run — board cleared.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      resetting = false;
+    }
+  }
 
   // ── Staging countdown (heat-lifecycle Slice 3) ───────────────────────────────────────────────
   // While the heat is Staged, count down from the round's staging window. Informational only — no
@@ -280,40 +381,87 @@
     </div>
   </div>
 
-  {#if heat && lineup.length > 0}
-    <Card title="Channels">
-      <ul class="channels" aria-label="Heat channels">
-        {#each lineup as ref (ref)}
-          <li class="channel-row">
-            <span class="channel-pilot">{names[ref] ?? ref}</span>
-            <span class="channel-label" class:none={!currentChannels.get(ref)}>
-              {currentChannels.get(ref) ?? '—'}
-            </span>
-          </li>
-        {/each}
-      </ul>
-      {#if !hasChannels}
-        <p class="channels-note">No channels assigned (a sim heat tunes none).</p>
-      {/if}
-    </Card>
-  {/if}
+  {#if isOpenPractice}
+    <!-- Open-practice per-channel board (open-practice Slice 2): one row per active channel
+         (`node-{i}` → the timer's available channel), each with its laps + last/best lap. The
+         pilot-keyed channels/heat-sheet/standing panels are replaced by this practice board. -->
+    <Card title="Practice board">
+      {#snippet actions()}
+        <Button
+          variant="secondary"
+          size="sm"
+          onclick={startFreshRun}
+          loading={resetting}
+          disabled={!heat || resetting}
+          title="Mint a fresh open-practice heat — clears the live board"
+        >
+          New run · clear board
+        </Button>
+      {/snippet}
 
-  <div class="panels">
-    <Card title="Heat sheet" pad={false}>
-      {#if live}
-        <HeatSheet state={live} {names} />
+      {#if !heat}
+        <p class="empty pad">— no practice heat on the timer —</p>
+      {:else if channelRows.length === 0}
+        <p class="empty pad">No active channels — fill the round to start a practice run.</p>
       {:else}
-        <p class="empty">Waiting for a live heat…</p>
+        <ul class="practice-board" aria-label="Per-channel practice board">
+          {#each channelRows as row (row.ref)}
+            <li class="practice-row" aria-label={`Channel ${row.label}`}>
+              <span class="practice-node" aria-hidden="true">{row.node + 1}</span>
+              <span class="practice-channel">{row.label}</span>
+              <span class="practice-laps">
+                <span class="practice-laps-n">{row.laps}</span>
+                <span class="practice-laps-l">laps</span>
+              </span>
+              <span class="practice-metric">
+                <span class="practice-metric-l">Last</span>
+                <span class="practice-metric-v">{formatMicros(row.lastLapMicros)}</span>
+              </span>
+              <span class="practice-metric best">
+                <span class="practice-metric-l">Best</span>
+                <span class="practice-metric-v">{formatMicros(row.bestLapMicros)}</span>
+              </span>
+            </li>
+          {/each}
+        </ul>
       {/if}
     </Card>
-    <Card title="Live standing" pad={false}>
-      {#if liveResult}
-        <Leaderboard result={liveResult} metricLabel="Last lap" />
-      {:else}
-        <p class="empty">No laps yet.</p>
-      {/if}
-    </Card>
-  </div>
+  {:else}
+    {#if heat && lineup.length > 0}
+      <Card title="Channels">
+        <ul class="channels" aria-label="Heat channels">
+          {#each lineup as ref (ref)}
+            <li class="channel-row">
+              <span class="channel-pilot">{names[ref] ?? ref}</span>
+              <span class="channel-label" class:none={!currentChannels.get(ref)}>
+                {currentChannels.get(ref) ?? '—'}
+              </span>
+            </li>
+          {/each}
+        </ul>
+        {#if !hasChannels}
+          <p class="channels-note">No channels assigned (a sim heat tunes none).</p>
+        {/if}
+      </Card>
+    {/if}
+
+    <div class="panels">
+      <Card title="Heat sheet" pad={false}>
+        {#if live}
+          <HeatSheet state={live} {names} />
+        {:else}
+          <p class="empty">Waiting for a live heat…</p>
+        {/if}
+      </Card>
+      <Card title="Live standing" pad={false}>
+        {#if liveResult}
+          <Leaderboard result={liveResult} metricLabel="Last lap" />
+        {:else}
+          <p class="empty">No laps yet.</p>
+        {/if}
+      </Card>
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -654,6 +802,99 @@
     margin: var(--gf-space-3) 0 0;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
+  }
+
+  /* ── Open-practice per-channel board ─────────────────────────────────────── */
+  .empty.pad {
+    padding: var(--gf-space-5);
+  }
+  .practice-board {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+  }
+  .practice-row {
+    display: grid;
+    grid-template-columns: auto minmax(8rem, 1fr) auto auto auto;
+    align-items: center;
+    gap: var(--gf-space-5);
+    padding: var(--gf-space-3) var(--gf-space-4);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface);
+  }
+  .practice-node {
+    display: inline-grid;
+    place-items: center;
+    width: 2.2rem;
+    height: 2.2rem;
+    flex-shrink: 0;
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-bold);
+    font-variant-numeric: tabular-nums;
+  }
+  .practice-channel {
+    font-size: var(--gf-font-size-xl);
+    font-weight: var(--gf-font-weight-bold);
+    letter-spacing: var(--gf-tracking-tight);
+    color: var(--gf-accent);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .practice-laps {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--gf-space-2);
+    white-space: nowrap;
+  }
+  .practice-laps-n {
+    font-size: var(--gf-font-size-2xl, 1.75rem);
+    font-weight: var(--gf-font-weight-bold);
+    font-variant-numeric: tabular-nums;
+    color: var(--gf-text);
+  }
+  .practice-laps-l {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+  }
+  .practice-metric {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--gf-space-1);
+    white-space: nowrap;
+  }
+  .practice-metric-l {
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .practice-metric-v {
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-semibold);
+    font-variant-numeric: tabular-nums;
+    color: var(--gf-text);
+  }
+  .practice-metric.best .practice-metric-v {
+    color: var(--gf-phase-running, var(--gf-accent));
+  }
+  @media (max-width: 60rem) {
+    .practice-row {
+      grid-template-columns: auto 1fr auto;
+      gap: var(--gf-space-3);
+    }
   }
 
   .panels {

@@ -91,6 +91,39 @@ export function isPlausibleMhz(mhz: number): boolean {
 }
 
 /**
+ * Parse the node index out of an open-practice competitor ref (`node-{i}` → `i`), or `undefined`
+ * for any other ref. Open-practice heats lay their channels out as `node-{i}` refs (the timer-seat
+ * index), so this is the join key back onto the timer's `available_channels`.
+ */
+export function nodeIndexOf(ref: string): number | undefined {
+  const m = /^node-(\d+)$/.exec(ref);
+  if (!m) return undefined;
+  return Number(m[1]);
+}
+
+/**
+ * The display label for one open-practice node seat (`node-{i}`), resolved through the timer's
+ * `available_channels` + the catalog:
+ *
+ * - a node whose seat has a configured channel → `"Raceband R1 · 5658"` (band + channel · MHz), or
+ *   `"5800 MHz"` when the raw MHz isn't a catalog channel;
+ * - a node with no configured channel (index ≥ the available pool) → `"Node {i}"`.
+ *
+ * `availableChannels` is the timer's `available_channels` (raw MHz, in seat/node order). Shared by
+ * the active-channels picker and the per-channel live board so both label a seat identically.
+ */
+export function nodeChannelLabel(
+  node: number,
+  availableChannels: number[],
+  catalog: ChannelCatalogEntry[]
+): string {
+  const mhz = availableChannels[node];
+  if (mhz === undefined) return `Node ${node + 1}`;
+  const hit = catalogEntryFor(mhz, catalog);
+  return hit ? `${hit.band} ${hit.channel} · ${mhz}` : `${mhz} MHz`;
+}
+
+/**
  * Auto-assign channels to an ordered list of pilots, deterministic round-robin (first-fit) across an
  * ordered `pool` of available channels: the `i`-th pilot gets `pool[i % pool.length]`. When there are
  * fewer channels than pilots the assignment wraps and repeats — that's fine, repeated pilots simply

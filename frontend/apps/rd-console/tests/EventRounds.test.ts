@@ -7,7 +7,8 @@ import type {
   EventMeta,
   HeatSummary,
   Pilot,
-  RoundDef
+  RoundDef,
+  Timer
 } from '@gridfpv/types';
 import EventRounds from '../src/screens/EventRounds.svelte';
 import { makeTestSession } from './support.js';
@@ -647,5 +648,129 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
     expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
       FillRound: { round: 'r2' }
     });
+  });
+});
+
+// ── Open-practice format: the active-channels picker (open-practice Slice 2) ───────────────────
+
+// A primary timer with 4 node seats, the first three configured to Raceband R1/R2 + a custom MHz.
+const PRACTICE_TIMER: Timer = {
+  id: 'mock',
+  name: 'Mock',
+  kind: { Mock: { laps: 3, lap_ms: 30000 } },
+  status: 'Ready',
+  channel_capability: 'Flexible',
+  node_count: 4,
+  available_channels: [5658, 5800, 5732]
+};
+// The schemas including open_practice so the format dropdown offers it.
+const OP_SCHEMAS = [...SCHEMAS, { name: 'open_practice', params: [] }];
+// The channel catalog the picker resolves node channels through (5732 is custom → raw MHz).
+const OP_CATALOG: ChannelCatalogEntry[] = [
+  { band: 'Raceband', channel: 'R1', mhz: 5658 },
+  { band: 'Fatshark', channel: 'F4', mhz: 5800 }
+];
+
+describe('EventRounds — open-practice active-channels picker', () => {
+  it('swaps to an active-channels picker and saves AllChannels with the selected node indices', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
+      ...QUAL,
+      id: 'r2',
+      label: 'Open Practice',
+      classes: [],
+      format: 'open_practice',
+      seeding: { AllChannels: { channels: [0, 2] } }
+    }));
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listFormatsImpl: vi.fn(async () => [...FORMATS, 'open_practice']),
+      listFormatSchemasImpl: vi.fn(async () => OP_SCHEMAS),
+      listTimersImpl: vi.fn(async () => [PRACTICE_TIMER]),
+      listChannelsImpl: vi.fn(async () => OP_CATALOG),
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), {
+      target: { value: 'Open Practice' }
+    });
+    // Pick the open-practice format → the class picker disappears, the channel picker appears.
+    await fireEvent.change(screen.getByLabelText('Format'), {
+      target: { value: 'open_practice' }
+    });
+    await waitFor(() => expect(screen.queryByLabelText('Eligible Open')).not.toBeInTheDocument());
+
+    // Seats labelled by band+channel·MHz, with a bare node for the unconfigured 4th seat.
+    expect(await screen.findByLabelText('Channel Raceband R1 · 5658')).toBeInTheDocument();
+    expect(screen.getByLabelText('Channel Fatshark F4 · 5800')).toBeInTheDocument();
+    expect(screen.getByLabelText('Channel Node 4')).toBeInTheDocument();
+
+    // Activate node 0 (Raceband R1) and node 2 (5732 → custom MHz).
+    await fireEvent.click(screen.getByLabelText('Channel Raceband R1 · 5658'));
+    await fireEvent.click(screen.getByLabelText('Channel 5732 MHz'));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, eventId, req] = createRoundImpl.mock.calls[0];
+    expect(eventId).toBe('e1');
+    expect(req).toMatchObject({
+      label: 'Open Practice',
+      classes: [],
+      format: 'open_practice',
+      seeding: { AllChannels: { channels: [0, 2] } }
+    });
+  });
+
+  it('reflects an edited open-practice round’s existing channel selection', async () => {
+    const OP_ROUND: RoundDef = {
+      ...QUAL,
+      id: 'r9',
+      label: 'Practice',
+      classes: [],
+      format: 'open_practice',
+      seeding: { AllChannels: { channels: [1] } }
+    };
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listFormatsImpl: vi.fn(async () => [...FORMATS, 'open_practice']),
+      listFormatSchemasImpl: vi.fn(async () => OP_SCHEMAS),
+      listTimersImpl: vi.fn(async () => [PRACTICE_TIMER]),
+      listChannelsImpl: vi.fn(async () => OP_CATALOG),
+      event: { ...EVENT, rounds: [OP_ROUND] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    // The saved active channel (node 1 → Fatshark F4) seeds checked; node 0 is not.
+    const f4 = (await screen.findByLabelText('Channel Fatshark F4 · 5800')) as HTMLInputElement;
+    const r1 = screen.getByLabelText('Channel Raceband R1 · 5658') as HTMLInputElement;
+    expect(f4.checked).toBe(true);
+    expect(r1.checked).toBe(false);
+  });
+
+  it('nudges to set a timer when the event has no primary timer with channels', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listFormatsImpl: vi.fn(async () => [...FORMATS, 'open_practice']),
+      listFormatSchemasImpl: vi.fn(async () => OP_SCHEMAS),
+      // No timers in the registry → no primary timer resolves.
+      listTimersImpl: vi.fn(async () => []),
+      listChannelsImpl: vi.fn(async () => OP_CATALOG),
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.change(await screen.findByLabelText('Format'), {
+      target: { value: 'open_practice' }
+    });
+    // The picker degrades to a nudge to set a timer, and the round can't be saved.
+    expect(await screen.findByText(/No primary timer for this event/)).toBeInTheDocument();
+    expect((screen.getByRole('button', { name: 'Add round' }) as HTMLButtonElement).disabled).toBe(
+      true
+    );
   });
 });

@@ -39,9 +39,10 @@
     RoundId,
     SeedingRule,
     StartProcedure,
+    Timer,
     WinCondition
   } from '@gridfpv/types';
-  import { channelLabel } from '../lib/channels.js';
+  import { channelLabel, nodeChannelLabel } from '../lib/channels.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
   import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
@@ -81,6 +82,42 @@
   // frequency back to a band+channel label. An open read, loaded once; an empty catalog degrades
   // labels to raw "5800 MHz".
   let catalog = $state<ChannelCatalogEntry[]>([]);
+
+  // ── Open-practice format (open-practice Slice 2) ─────────────────────────────────────────────
+  // The casual **open-practice** format runs a single open heat over a set of active **channels**
+  // (timer node seats) rather than pilots — its field is seeded `AllChannels { channels }` (node
+  // indices), with no classes. So when this format is chosen the normal class/seeding inputs are
+  // swapped for an active-channels picker driven by the event's **primary timer** (its `node_count`
+  // seats, each labelled by its configured `available_channels[i]` channel). The picker reflects an
+  // edited round's existing `AllChannels` selection.
+  const OPEN_PRACTICE = 'open_practice';
+  // The effective primary timer (its node_count + available_channels lay out the picker).
+  const primaryTimer = $derived<Timer | undefined>(session.primaryTimer);
+  // One pickable node seat: its index, the raw MHz it's configured to (if any), and its label.
+  interface NodeSeat {
+    node: number;
+    mhz: number | undefined;
+    label: string;
+  }
+  const timerNodes = $derived<NodeSeat[]>(buildTimerNodes(primaryTimer, catalog));
+  function buildTimerNodes(timer: Timer | undefined, cat: ChannelCatalogEntry[]): NodeSeat[] {
+    if (!timer) return [];
+    const avail = timer.available_channels ?? [];
+    const count = Math.max(0, Math.round(timer.node_count ?? 0));
+    const seats: NodeSeat[] = [];
+    for (let i = 0; i < count; i++) {
+      seats.push({ node: i, mhz: avail[i], label: nodeChannelLabel(i, avail, cat) });
+    }
+    return seats;
+  }
+  // The chosen active node indices (the AllChannels payload), as a set for toggle ergonomics.
+  let selectedNodes = $state<Set<number>>(new Set());
+  function toggleNode(node: number) {
+    const next = new Set(selectedNodes);
+    if (next.has(node)) next.delete(node);
+    else next.add(node);
+    selectedNodes = next;
+  }
 
   // The event's rounds, read straight off `currentEvent` (the session re-homes it after each write
   // so this stays live). Display order is definition order.
@@ -392,6 +429,13 @@
   let startMaxMs = $state(5000); // randomized start hold: longest
   let graceSeconds = $state(3); // grace window after the win condition, in seconds
 
+  // Open-practice format (open-practice Slice 2): swaps the class/seeding inputs for the
+  // active-channels picker, and is submittable on a label + at least one active channel (no classes).
+  const isOpenPractice = $derived(format === OPEN_PRACTICE);
+  const canSubmitOpenPractice = $derived(
+    isOpenPractice && label.trim().length > 0 && selectedNodes.size > 0
+  );
+
   // Whether the eligible-classes pick reads as open/practice (all selected) or a class round (one).
   const classHint = $derived(
     selectedClasses.size === 0
@@ -465,6 +509,7 @@
     seedKind = 'FromRoster';
     seedSource = '';
     seedTopN = 8;
+    selectedNodes = new Set();
     params = [];
     channelMode = 'PerHeat';
     addParamKey = '';
@@ -512,9 +557,10 @@
       seedSource = seed.FromRanking.source_round;
       seedTopN = seed.FromRanking.top_n;
     } else {
-      // AllChannels (open-practice format) — its active-channels picker is Slice 2; the Rounds
-      // editor here just falls back to the roster-seeded view so it stays type-safe meanwhile.
+      // AllChannels (open-practice format): reflect the round's active node selection into the
+      // channels picker (the format swaps the class/seeding inputs for it below).
       seedKind = 'FromRoster';
+      selectedNodes = new Set(seed.AllChannels.channels);
     }
 
     // Heat-lifecycle config (Slice 3): staging timer (split mm:ss), the randomized start window, and
@@ -601,23 +647,28 @@
   // The form is submittable once it has a label, at least one eligible class, a format, and — when
   // seeding from a ranking — a chosen source round.
   const canSubmit = $derived(
-    label.trim().length > 0 &&
-      selectedClasses.size > 0 &&
-      format.length > 0 &&
-      (seedKind === 'FromRoster' || (seedKind === 'FromRanking' && !!seedSource))
+    isOpenPractice
+      ? canSubmitOpenPractice
+      : label.trim().length > 0 &&
+          selectedClasses.size > 0 &&
+          format.length > 0 &&
+          (seedKind === 'FromRoster' || (seedKind === 'FromRanking' && !!seedSource))
   );
 
   async function submit() {
     if (saving || !canSubmit) return;
     saving = true;
-    // Eligible classes in the event's selection order (a stable, sensible order).
+    // Eligible classes in the event's selection order (a stable, sensible order). Open practice is
+    // class-less and seeds from the active channels (node indices) instead.
     const req: NewRoundReq = {
       label: label.trim(),
-      classes: eventClassIds.filter((id) => selectedClasses.has(id)),
+      classes: isOpenPractice ? [] : eventClassIds.filter((id) => selectedClasses.has(id)),
       format,
       params: buildParams(),
       win_condition: buildWinCondition(),
-      seeding: buildSeeding(),
+      seeding: isOpenPractice
+        ? { AllChannels: { channels: [...selectedNodes].sort((a, b) => a - b) } }
+        : buildSeeding(),
       channel_mode: channelMode,
       staging_timer_secs: buildStagingSecs(),
       start_procedure: buildStartProcedure(),
@@ -681,15 +732,20 @@
     subtitle="Define this event's rounds — eligible classes, format, win condition, and seeding. Rounds are added as you go."
   >
     {#snippet actions()}
-      <Button variant="secondary" size="sm" onclick={openAdd} disabled={eventClasses.length === 0}>
+      <Button
+        variant="secondary"
+        size="sm"
+        onclick={openAdd}
+        disabled={eventClasses.length === 0 && !primaryTimer}
+      >
         + Add round
       </Button>
     {/snippet}
 
-    {#if eventClasses.length === 0}
+    {#if eventClasses.length === 0 && !primaryTimer}
       <p class="empty" role="status">
         This event selects no classes yet. Pick classes in the <strong>Classes</strong> stage first —
-        a round runs for one or more of them.
+        a round runs for one or more of them (or set a timer to run open practice).
       </p>
     {:else if rounds.length === 0}
       <p class="empty" role="status">No rounds yet. Add the first round to get going.</p>
@@ -739,21 +795,23 @@
           <Input bind:value={label} placeholder="e.g. Qualifying R1" aria-label="Label" />
         </Field>
 
-        <Field label="Eligible classes" required hint={classHint}>
-          <div class="class-picker" role="group" aria-label="Eligible classes">
-            {#each eventClasses as cls (cls.id)}
-              <label class="class-chip">
-                <input
-                  type="checkbox"
-                  checked={selectedClasses.has(cls.id)}
-                  onchange={() => toggleClass(cls.id)}
-                  aria-label={`Eligible ${cls.name}`}
-                />
-                <span>{cls.name}</span>
-              </label>
-            {/each}
-          </div>
-        </Field>
+        {#if !isOpenPractice}
+          <Field label="Eligible classes" required hint={classHint}>
+            <div class="class-picker" role="group" aria-label="Eligible classes">
+              {#each eventClasses as cls (cls.id)}
+                <label class="class-chip">
+                  <input
+                    type="checkbox"
+                    checked={selectedClasses.has(cls.id)}
+                    onchange={() => toggleClass(cls.id)}
+                    aria-label={`Eligible ${cls.name}`}
+                  />
+                  <span>{cls.name}</span>
+                </label>
+              {/each}
+            </div>
+          </Field>
+        {/if}
 
         <div class="form-grid">
           <Field label="Format" required>
@@ -784,17 +842,63 @@
           {/if}
         </div>
 
-        <Field
-          label="Channel mode"
-          hint={channelMode === 'Static'
-            ? 'Static = each pilot’s fixed channel; heats are channel-balanced (time-trial / qualifying).'
-            : 'Per-heat = channels assigned per heat from the timer’s pool (for brackets).'}
-        >
-          <Select bind:value={channelMode} aria-label="Channel mode">
-            <option value="Static">Static</option>
-            <option value="PerHeat">Per-heat</option>
-          </Select>
-        </Field>
+        {#if isOpenPractice}
+          <!-- Open-practice active-channels picker (open-practice Slice 2): the round runs one open
+               heat over the primary timer's active node seats; pick which channels are live. Saved as
+               `seeding: AllChannels { channels: [<node indices>] }` with no classes. -->
+          <Field
+            label="Active channels"
+            required
+            hint={timerNodes.length === 0
+              ? 'Set a primary timer with channels first — open practice runs over its node seats.'
+              : `${selectedNodes.size} of ${timerNodes.length} node${
+                  timerNodes.length === 1 ? '' : 's'
+                } active. Each active channel shows a live practice board.`}
+          >
+            {#if timerNodes.length === 0}
+              <p class="inline-note" role="status">
+                {#if !primaryTimer}
+                  No primary timer for this event. Set a timer in the <strong>Timers</strong> stage —
+                  open practice runs over its channels.
+                {:else}
+                  <strong>{primaryTimer.name}</strong> has no node seats configured. Set its
+                  channels in the <strong>Timers</strong> stage first.
+                {/if}
+              </p>
+            {:else}
+              <div class="channel-picker" role="group" aria-label="Active channels">
+                {#each timerNodes as seat (seat.node)}
+                  <label class="channel-chip" class:unset={seat.mhz === undefined}>
+                    <input
+                      type="checkbox"
+                      checked={selectedNodes.has(seat.node)}
+                      onchange={() => toggleNode(seat.node)}
+                      aria-label={`Channel ${seat.label}`}
+                    />
+                    <span class="channel-seat">
+                      <span class="channel-node" aria-hidden="true">{seat.node + 1}</span>
+                      <span class="channel-name">{seat.label}</span>
+                    </span>
+                  </label>
+                {/each}
+              </div>
+            {/if}
+          </Field>
+        {/if}
+
+        {#if !isOpenPractice}
+          <Field
+            label="Channel mode"
+            hint={channelMode === 'Static'
+              ? 'Static = each pilot’s fixed channel; heats are channel-balanced (time-trial / qualifying).'
+              : 'Per-heat = channels assigned per heat from the timer’s pool (for brackets).'}
+          >
+            <Select bind:value={channelMode} aria-label="Channel mode">
+              <option value="Static">Static</option>
+              <option value="PerHeat">Per-heat</option>
+            </Select>
+          </Field>
+        {/if}
 
         <fieldset class="config-group">
           <legend class="config-legend">Start &amp; timing</legend>
@@ -851,36 +955,38 @@
           </Field>
         </fieldset>
 
-        <Field
-          label="Seeding"
-          hint={seedKind === 'FromRanking'
-            ? 'Draw this round from a prior round’s ranking (the bracket / cut case).'
-            : 'Draw straight from the eligible classes’ roster membership.'}
-        >
-          <Select bind:value={seedKind} aria-label="Seeding">
-            <option value="FromRoster">From roster</option>
-            <option value="FromRanking">From ranking</option>
-          </Select>
-        </Field>
+        {#if !isOpenPractice}
+          <Field
+            label="Seeding"
+            hint={seedKind === 'FromRanking'
+              ? 'Draw this round from a prior round’s ranking (the bracket / cut case).'
+              : 'Draw straight from the eligible classes’ roster membership.'}
+          >
+            <Select bind:value={seedKind} aria-label="Seeding">
+              <option value="FromRoster">From roster</option>
+              <option value="FromRanking">From ranking</option>
+            </Select>
+          </Field>
 
-        {#if seedKind === 'FromRanking'}
-          <div class="form-grid">
-            <Field label="Source round" required>
-              {#if sourceCandidates.length === 0}
-                <p class="inline-note">Add another round first to seed from its ranking.</p>
-              {:else}
-                <Select bind:value={seedSource} aria-label="Source round">
-                  <option value="" disabled>Choose a round…</option>
-                  {#each sourceCandidates as r (r.id)}
-                    <option value={r.id}>{r.label}</option>
-                  {/each}
-                </Select>
-              {/if}
-            </Field>
-            <Field label="Top N advance">
-              <Input type="number" min="1" bind:value={seedTopN} aria-label="Top N" />
-            </Field>
-          </div>
+          {#if seedKind === 'FromRanking'}
+            <div class="form-grid">
+              <Field label="Source round" required>
+                {#if sourceCandidates.length === 0}
+                  <p class="inline-note">Add another round first to seed from its ranking.</p>
+                {:else}
+                  <Select bind:value={seedSource} aria-label="Source round">
+                    <option value="" disabled>Choose a round…</option>
+                    {#each sourceCandidates as r (r.id)}
+                      <option value={r.id}>{r.label}</option>
+                    {/each}
+                  </Select>
+                {/if}
+              </Field>
+              <Field label="Top N advance">
+                <Input type="number" min="1" bind:value={seedTopN} aria-label="Top N" />
+              </Field>
+            </div>
+          {/if}
         {/if}
 
         <Field
@@ -1369,6 +1475,54 @@
     height: 1.05rem;
     accent-color: var(--gf-accent);
     cursor: pointer;
+  }
+  /* Open-practice active-channels picker — a node-seat checkbox grid. */
+  .channel-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    gap: var(--gf-space-2);
+  }
+  .channel-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    cursor: pointer;
+  }
+  .channel-chip input {
+    width: 1.05rem;
+    height: 1.05rem;
+    accent-color: var(--gf-accent);
+    cursor: pointer;
+  }
+  .channel-chip.unset {
+    opacity: 0.7;
+  }
+  .channel-seat {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    min-width: 0;
+  }
+  .channel-node {
+    display: inline-grid;
+    place-items: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    flex-shrink: 0;
+    border-radius: var(--gf-radius-xs);
+    background: var(--gf-surface);
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+    font-variant-numeric: tabular-nums;
+  }
+  .channel-name {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-medium);
+    color: var(--gf-text);
   }
   .params {
     display: flex;
