@@ -149,6 +149,38 @@ pub struct EventMeta {
     /// slice only — the rounds / phase engine a class later drives is a separate concern.
     #[serde(default)]
     pub classes: Vec<ClassId>,
+    /// **Per-class membership** (race redesign Slice 1a) — which roster pilots race each
+    /// [`class`](Self::classes). Each [`ClassMembership`] pairs one selected class with the
+    /// [`PilotId`]s racing it; a roster pilot may be a member of several classes (or none).
+    ///
+    /// Distinct from the [`roster`](Self::roster) (who is *present at the event*) and from the
+    /// [`classes`](Self::classes) selection (which categories *run at all*): membership is the
+    /// finer join of the two — given the present pilots and the running classes, *who races
+    /// which class*. Set per class through
+    /// [`set_class_membership`](EventRegistry::set_class_membership).
+    ///
+    /// Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted
+    /// before Slice 1a reads back with no membership; new events and Practice default to an
+    /// **empty** list. The whole field round-trips through the event's persisted meta (issue
+    /// #115), so it is restart-safe for free.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes_membership: Vec<ClassMembership>,
+}
+
+/// One class's **membership** within an event (race redesign Slice 1a): the roster pilots that
+/// race a single [`ClassId`].
+///
+/// Carried in [`EventMeta::classes_membership`] as a list, one entry per class with any members.
+/// Derives serde (its JSON *is* the wire form) and `ts_rs::TS` so the frontend reads a generated
+/// `ClassMembership` type for the per-class roster picker (the UI lands in Slice 1b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ClassMembership {
+    /// The class these pilots race — one of the event's selected [`classes`](EventMeta::classes).
+    pub class: ClassId,
+    /// The roster pilots racing this class, in selection order. Each is a directory pilot that is
+    /// also on the event's [`roster`](EventMeta::roster).
+    pub pilots: Vec<PilotId>,
 }
 
 impl EventMeta {
@@ -210,6 +242,17 @@ pub struct SetEventRosterRequest {
 pub struct SetEventClassesRequest {
     /// The directory classes this event runs, in selection order. Each must name a known class.
     pub ids: Vec<ClassId>,
+}
+
+/// The body of `PUT /events/{id}/classes/{class}/membership` — the roster pilot ids that race a
+/// single class (race redesign Slice 1a). The `class` is the path segment; each id here must name
+/// a pilot in the [`PilotDirectory`](crate::pilots::PilotDirectory), else a typed 404. An empty
+/// list clears the class's membership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SetClassMembershipRequest {
+    /// The roster pilots that race this class, in selection order. Each must name a known pilot.
+    pub pilot_ids: Vec<PilotId>,
 }
 
 /// The body of `POST /events` — the only thing a caller supplies when creating an event.
@@ -347,6 +390,7 @@ impl EventRegistry {
                     primary_timer: None,
                     roster: Vec::new(),
                     classes: Vec::new(),
+                    classes_membership: Vec::new(),
                 },
                 state: practice_state,
             },
@@ -549,6 +593,43 @@ impl EventRegistry {
         Ok(meta)
     }
 
+    /// Set the **per-class membership** for one class (race redesign Slice 1a), returning the
+    /// event's updated [`EventMeta`].
+    ///
+    /// Replaces *that class's* pilot list wholesale with `pilot_ids` (other classes' memberships
+    /// are untouched). An empty `pilot_ids` removes the class's membership entry entirely (no empty
+    /// entries are persisted). Validates the event exists (else a [`RegistryError`] the caller maps
+    /// to a typed 404); the caller is responsible for validating that `class` names a directory
+    /// class and each id names a directory pilot (the class/pilot directories are separate
+    /// authorities). The membership is recorded on the event's [`EventMeta`] and **written through**
+    /// to the event's SQLite `meta` table (issue #115) so it survives a Director restart — exactly
+    /// the roster/classes path.
+    pub fn set_class_membership(
+        &self,
+        id: &EventId,
+        class: ClassId,
+        pilot_ids: Vec<PilotId>,
+    ) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+        // Last-write-wins, set-membership semantics: replace the class's entry, drop it when the
+        // new list is empty, so re-applying the same membership is idempotent.
+        event.meta.classes_membership.retain(|m| m.class != class);
+        if !pilot_ids.is_empty() {
+            event.meta.classes_membership.push(ClassMembership {
+                class,
+                pilots: pilot_ids,
+            });
+        }
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(meta)
+    }
+
     /// Add **one** pilot to an event's roster (issue #74), returning its updated [`EventMeta`].
     ///
     /// Idempotent — adding a pilot already on the roster is a no-op (no duplicate). Validates the
@@ -691,6 +772,7 @@ impl EventRegistry {
             primary_timer: None,
             roster: Vec::new(),
             classes: Vec::new(),
+            classes_membership: Vec::new(),
         };
         // Persist the freshly-built meta into the event's own SQLite `meta` table (issue
         // #111) so a Director restart can restore it. Only for a persistent (file-backed)
@@ -1252,6 +1334,106 @@ mod tests {
         assert_eq!(
             restored.classes,
             vec![ClassId("open-1".into()), ClassId("spec-2".into())]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn new_events_default_to_no_class_membership_and_set_replace_clear_work() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Membership Event")).unwrap();
+        assert!(
+            event.classes_membership.is_empty(),
+            "a new event has no per-class membership"
+        );
+
+        let open = ClassId("open-1".into());
+        let spec = ClassId("spec-2".into());
+        let a = PilotId("acroace-1".into());
+        let b = PilotId("zoom-2".into());
+        let c = PilotId("newbie-3".into());
+
+        // Set the Open class's membership.
+        let meta = reg
+            .set_class_membership(&event.id, open.clone(), vec![a.clone(), b.clone()])
+            .unwrap();
+        assert_eq!(meta.classes_membership.len(), 1);
+        assert_eq!(meta.classes_membership[0].class, open);
+        assert_eq!(
+            meta.classes_membership[0].pilots,
+            vec![a.clone(), b.clone()]
+        );
+
+        // A second class gets its own entry; the first is untouched.
+        let meta = reg
+            .set_class_membership(&event.id, spec.clone(), vec![c.clone()])
+            .unwrap();
+        assert_eq!(meta.classes_membership.len(), 2);
+        let open_entry = meta
+            .classes_membership
+            .iter()
+            .find(|m| m.class == open)
+            .unwrap();
+        assert_eq!(open_entry.pilots, vec![a.clone(), b.clone()]);
+
+        // Re-setting one class replaces only that class's list (last-write-wins, no duplicate entry).
+        let meta = reg
+            .set_class_membership(&event.id, open.clone(), vec![a.clone()])
+            .unwrap();
+        assert_eq!(
+            meta.classes_membership
+                .iter()
+                .filter(|m| m.class == open)
+                .count(),
+            1
+        );
+        let open_entry = meta
+            .classes_membership
+            .iter()
+            .find(|m| m.class == open)
+            .unwrap();
+        assert_eq!(open_entry.pilots, vec![a.clone()]);
+
+        // An empty list clears the class's membership entry entirely.
+        let meta = reg
+            .set_class_membership(&event.id, open.clone(), vec![])
+            .unwrap();
+        assert!(meta.classes_membership.iter().all(|m| m.class != open));
+        assert_eq!(meta.classes_membership.len(), 1, "only Spec remains");
+
+        // unknown event → error.
+        assert!(
+            reg.set_class_membership(&EventId("nope".into()), open, vec![])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn class_membership_persists_across_a_restart() {
+        // The #115 meta mechanism must carry the additive per-class membership through a restart.
+        let dir = std::env::temp_dir().join(format!("gridfpv-membership-{}", short_suffix()));
+        let created_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Persisted Membership")).unwrap();
+            created_id = created.id.clone();
+            reg.set_class_membership(
+                &created.id,
+                ClassId("open-1".into()),
+                vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())],
+            )
+            .unwrap();
+        }
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        let restored = reopened.meta_of(&created_id).expect("event reloaded");
+        assert_eq!(restored.classes_membership.len(), 1);
+        assert_eq!(
+            restored.classes_membership[0].class,
+            ClassId("open-1".into())
+        );
+        assert_eq!(
+            restored.classes_membership[0].pilots,
+            vec![PilotId("acroace-1".into()), PilotId("zoom-2".into())]
         );
         std::fs::remove_dir_all(&dir).ok();
     }

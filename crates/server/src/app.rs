@@ -92,7 +92,7 @@ use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
     ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, SetActiveEventRequest,
-    SetEventClassesRequest, SetEventRosterRequest,
+    SetClassMembershipRequest, SetEventClassesRequest, SetEventRosterRequest,
 };
 use crate::live_state::live_state;
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
@@ -315,6 +315,13 @@ pub fn router(registry: EventRegistry) -> Router {
         // Per-event class **selection** (issue #84): RD-gated; each id must name a known directory
         // class. Set the whole selection wholesale (mirrors the timer selection).
         .route("/events/{event_id}/classes", put(set_event_classes))
+        // Per-class **membership** (race redesign Slice 1a): RD-gated; the class must be selected by
+        // the event and each pilot id must name a known directory pilot. Replaces that class's pilot
+        // list wholesale (an empty list clears it).
+        .route(
+            "/events/{event_id}/classes/{class_id}/membership",
+            put(set_class_membership),
+        )
         // Per-event **roster** (issue #74): RD-gated; each id must name a known directory pilot.
         // Set the whole roster, or add/remove a single pilot.
         .route("/events/{event_id}/roster", put(set_event_roster))
@@ -795,6 +802,41 @@ async fn set_event_classes(
     }
     let meta = registry
         .set_classes(&event_id, body.ids)
+        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
+/// `PUT /events/{event_id}/classes/{class_id}/membership` — set which roster pilots race one
+/// class (race redesign Slice 1a), RD-gated.
+///
+/// [`ControlAuth`] runs first. The class must name a known directory class and **each** pilot id in
+/// the body must name a known directory pilot (else a typed 404 naming the bad id) — so a class's
+/// membership can never reference a deleted/unknown class or pilot. The event must exist (else a
+/// 404). On success the updated [`EventMeta`] is returned. Mirrors `set_event_classes` /
+/// `set_event_roster` (per-id validation against the relevant directory).
+async fn set_class_membership(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path((event_id, class_id)): Path<(EventId, ClassId)>,
+    Json(body): Json<SetClassMembershipRequest>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    if !registry.classes().exists(&class_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no class with id {:?}", class_id.0),
+        ));
+    }
+    let pilots = registry.pilots();
+    for id in &body.pilot_ids {
+        if !pilots.exists(id) {
+            return Err(ProtocolError::new(
+                ErrorCode::UnknownScope,
+                format!("no pilot with id {:?}", id.0),
+            ));
+        }
+    }
+    let meta = registry
+        .set_class_membership(&event_id, class_id, body.pilot_ids)
         .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
     Ok(Json(meta))
 }
