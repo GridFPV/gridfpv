@@ -13,9 +13,9 @@
 //! Staged     --> Scheduled  : abort
 //! Armed      --> Scheduled  : abort
 //! Running    --> Scheduled  : abort
-//! Running    --> Staged     : restart
-//! Armed      --> Staged     : restart
-//! Unofficial --> Staged     : restart
+//! Running    --> Scheduled  : restart
+//! Armed      --> Scheduled  : restart
+//! Unofficial --> Scheduled  : restart
 //! Final      --> Scheduled  : discard & re-run
 //! ```
 //!
@@ -122,7 +122,8 @@ pub enum HeatCommand {
     /// Abandon before finalizing — always resets the heat to `Scheduled`, from any
     /// abortable state (Staged/Armed/Running), so the RD re-Stages it.
     Abort,
-    /// Restart a committed heat from staging (Armed/Running/Unofficial → Staged).
+    /// Restart a committed heat — always resets it to `Scheduled`, from any committed
+    /// state (Armed/Running/Unofficial), so the RD re-Stages it.
     Restart,
     /// Discard a finalized heat for a re-run (Final → Scheduled).
     Discard,
@@ -177,7 +178,8 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
         // heat to `Scheduled` (see `next_state`), so the RD re-Stages it.
         (S::Staged | S::Armed | S::Running, C::Abort) => HeatTransition::Aborted,
         // Restart applies to any committed heat short of finalized (Armed/Running/
-        // Unofficial), back to staging for a clean re-run.
+        // Unofficial); it always resets the heat to `Scheduled` (see `next_state`), so
+        // the RD re-Stages it for a clean re-run.
         (S::Armed | S::Running | S::Unofficial, C::Restart) => HeatTransition::Restarted,
         // Revert re-opens a finalized result for correction (Final → Unofficial).
         (S::Final, C::Revert) => HeatTransition::Reverted,
@@ -196,7 +198,7 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
 /// the diagram:
 /// - `Aborted` → `Scheduled` (from any abortable state — Staged/Armed/Running — so the
 ///   RD re-Stages it).
-/// - `Restarted` → `Staged` (a committed heat back to staging).
+/// - `Restarted` → `Scheduled` (a committed heat fully reset, so the RD re-Stages it).
 /// - `Reverted` → `Unofficial` (a finalized heat re-opened for correction).
 /// - `Discarded` → `Scheduled` (a finalized heat queued for re-run).
 /// - `Advanced` is terminal for the heat; it stays `Final`.
@@ -223,7 +225,9 @@ pub fn next_state(_from: HeatState, transition: HeatTransition) -> HeatState {
         // Abort always resets the heat to Scheduled (from any abortable state), so the
         // RD re-Stages it.
         T::Aborted => S::Scheduled,
-        T::Restarted => S::Staged,
+        // Restart always resets the heat to Scheduled (from any committed state), so the
+        // RD re-Stages it — consistent with Abort.
+        T::Restarted => S::Scheduled,
         T::Discarded => S::Scheduled,
     }
 }
@@ -491,13 +495,13 @@ mod tests {
     }
 
     #[test]
-    fn restart_is_legal_from_armed_running_unofficial_landing_staged() {
+    fn restart_is_legal_from_armed_running_unofficial_landing_scheduled() {
         use HeatCommand as C;
         use HeatState as S;
         use HeatTransition as T;
         for &state in &[S::Armed, S::Running, S::Unofficial] {
             assert_eq!(apply(state, C::Restart), Ok(T::Restarted), "{state:?}");
-            assert_eq!(next_state(state, T::Restarted), S::Staged, "{state:?}");
+            assert_eq!(next_state(state, T::Restarted), S::Scheduled, "{state:?}");
         }
         // Not legal before the heat is committed, nor once finalized.
         for &state in &[S::Scheduled, S::Staged, S::Final] {
@@ -520,7 +524,7 @@ mod tests {
     fn restart_and_discard_land_correctly() {
         use HeatState as S;
         use HeatTransition as T;
-        assert_eq!(next_state(S::Running, T::Restarted), S::Staged);
+        assert_eq!(next_state(S::Running, T::Restarted), S::Scheduled);
         assert_eq!(next_state(S::Final, T::Discarded), S::Scheduled);
     }
 

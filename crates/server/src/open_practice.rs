@@ -15,8 +15,8 @@
 //! The live-state fold is normally a pure fold of the log; the non-logged practice laps can't drive
 //! it through that fold. Earlier this accumulator served a **fully synthetic** [`LiveRaceState`]
 //! (its own `Running` start plus a shadow-recorded transition list) *in place of* the log fold —
-//! but that synthetic phase/clock **drifted** from the real heat: a `Restart` landing the heat in
-//! `Staged` was never reflected (so the console kept rendering `Unofficial`/Final buttons and
+//! but that synthetic phase/clock **drifted** from the real heat: a `Restart` resetting the heat to
+//! `Scheduled` was never reflected (so the console kept rendering `Unofficial`/Final buttons and
 //! `Restart` then errored), and re-computing the synthetic slice reset the clock basis (the
 //! ~0.104 s clock bump after the time limit fired).
 //!
@@ -165,7 +165,7 @@ impl OpenPracticeLive {
     /// Splice the accumulator's per-channel laps into a **log-authoritative** `base` live state.
     ///
     /// `base` is the [`LiveRaceState`] folded from the real log — so its `current_heat`, `phase`,
-    /// lineup, running clock basis and on-deck are always truthful (a `Restart → Staged` is
+    /// lineup, running clock basis and on-deck are always truthful (a `Restart → Scheduled` is
     /// reflected, the time-limit `Running → Unofficial` is reflected, and the clock basis never
     /// resets). When the active open-practice heat **is** that current heat, this overlays the
     /// non-logged per-channel lap counts / last-lap onto the matching `progress` rows and recomputes
@@ -178,7 +178,7 @@ impl OpenPracticeLive {
             return base;
         };
         // Only splice laps when the overlay's heat is the one the log says is current. Across a
-        // `Restart` (heat back to `Staged`) the bridge clears the accumulator, but guard anyway so a
+        // `Restart` (heat back to `Scheduled`) the bridge clears the accumulator, but guard anyway so a
         // stale overlay can never bleed laps onto a different heat.
         if base.current_heat.as_ref() != Some(&active.heat) {
             return base;
@@ -343,10 +343,11 @@ mod tests {
     }
 
     #[test]
-    fn merge_follows_the_log_phase_through_unofficial_then_staged_on_restart() {
+    fn merge_follows_the_log_phase_through_unofficial_then_scheduled_on_restart() {
         // The core desync fix: the served phase is the LOG's at every step. The accumulator holds
         // laps throughout `Unofficial`; on `Restart` the bridge clears it, and the log base reads
-        // `Staged` — so the merge yields `Staged` with NO stale `Unofficial`.
+        // `Scheduled` (Restart fully resets, like Abort) — so the merge yields `Scheduled` with NO
+        // stale `Unofficial`.
         let live = OpenPracticeLive::new();
         let heat = HeatId("open-practice".into());
         let channels = vec![chan(0)];
@@ -375,10 +376,10 @@ mod tests {
         assert_eq!(unofficial.progress[0].laps_completed, 1);
 
         // RD hits Restart → the bridge clears the accumulator and the LOG records `Restarted`
-        // (heat back to `Staged`). The merge of the now-empty accumulator onto the `Staged` base is
-        // the bare log state: phase `Staged`, no stale `Unofficial`, laps cleared.
+        // (heat back to `Scheduled`). The merge of the now-empty accumulator onto the `Scheduled`
+        // base is the bare log state: phase `Scheduled`, no stale `Unofficial`, laps cleared.
         assert!(live.clear(), "restart clears the accumulator");
-        let staged = live.merge_into(log_base(
+        let scheduled = live.merge_into(log_base(
             &heat,
             &channels,
             &[
@@ -388,12 +389,12 @@ mod tests {
             ],
         ));
         assert_eq!(
-            staged.phase,
-            HeatPhase::Staged,
-            "after Restart the served phase is the log's Staged — never a stale Unofficial"
+            scheduled.phase,
+            HeatPhase::Scheduled,
+            "after Restart the served phase is the log's Scheduled — never a stale Unofficial"
         );
         assert_eq!(
-            staged.progress[0].laps_completed, 0,
+            scheduled.progress[0].laps_completed, 0,
             "the per-channel laps are cleared after Restart"
         );
     }

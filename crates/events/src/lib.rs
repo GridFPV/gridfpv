@@ -231,7 +231,7 @@ pub enum HeatTransition {
     Reverted,
     /// Abandoned before finalizing (Staged/Armed/Running → Scheduled, so the RD re-Stages).
     Aborted,
-    /// A committed heat restarted from staging.
+    /// A committed heat restarted (Armed/Running/Unofficial → Scheduled, so the RD re-Stages).
     Restarted,
     /// A finalized heat discarded for a re-run.
     Discarded,
