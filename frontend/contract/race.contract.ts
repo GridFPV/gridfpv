@@ -3,9 +3,9 @@
  *
  * guards: the whole integration (every v0.4 bug lived at a mocked boundary). This drives a
  * real race through the real control path (register → schedule → stage/arm/start → finish →
- * score) while the **real `@gridfpv/protocol-client`** holds a `/stream` subscription, and
+ * finalize) while the **real `@gridfpv/protocol-client`** holds a `/stream` subscription, and
  * asserts the client's *exposed converged state* tracks the race: current heat appears,
- * per-pilot laps climb, the phase walks Scheduled → Running → Finished → Final. If any seam
+ * per-pilot laps climb, the phase walks Scheduled → Running → Unofficial → Final. If any seam
  * (StreamMessage unwrap, cursor/sequence axis, bigint numbers, control headers) were wrong,
  * the client would not converge.
  */
@@ -78,9 +78,26 @@ describe('seam 8: a full race converges through the real protocol-client', () =>
         if (p.laps_completed >= 1) expect(typeof p.last_lap_micros).toBe('number');
       }
 
-      // Finish + Score; the client converges to the scored phase.
+      // Finish + Finalize; the client converges to the finalized phase.
       await rdControl(director.baseUrl, TOKEN, { Finish: { heat: HEAT } });
-      await rdControl(director.baseUrl, TOKEN, { Score: { heat: HEAT } });
+      await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } });
+      await waitForState(
+        client,
+        (s) => (s.body as LiveBody).LiveRaceState?.phase === 'Final',
+        6_000
+      );
+      expect((client.getState().body as LiveBody).LiveRaceState?.phase).toBe('Final');
+
+      // Revert re-opens the finalized result for correction (Final → Unofficial), then
+      // Finalize again locks it back in — the new Slice-1 off-ramp, end to end.
+      await rdControl(director.baseUrl, TOKEN, { Revert: { heat: HEAT } });
+      await waitForState(
+        client,
+        (s) => (s.body as LiveBody).LiveRaceState?.phase === 'Unofficial',
+        6_000
+      );
+      expect((client.getState().body as LiveBody).LiveRaceState?.phase).toBe('Unofficial');
+      await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } });
       await waitForState(
         client,
         (s) => (s.body as LiveBody).LiveRaceState?.phase === 'Final',

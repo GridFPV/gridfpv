@@ -107,10 +107,10 @@
   async function fire(action: HeatAction) {
     if (!heat) return;
     const ack = await session.send(commandForAction(action, heat));
-    // Scoring locks in the heat result; pull it so the Results screen has it to show. The
+    // Finalizing locks in the heat result; pull it so the Results screen has it to show. The
     // live stream only carries `LiveRaceState`, so the scored `HeatResult` is a separate
     // heat-scope fetch (`?projection=result`).
-    if (ack.ok && action === 'Score') {
+    if (ack.ok && action === 'Finalize') {
       await session.fetchHeatResult(heat);
     }
   }
@@ -256,7 +256,7 @@
   .hud[data-phase='Running'] {
     --_phase: var(--gf-phase-running);
   }
-  .hud[data-phase='Finished'] {
+  .hud[data-phase='Unofficial'] {
     --_phase: var(--gf-phase-finished);
   }
   .hud[data-phase='Final'] {

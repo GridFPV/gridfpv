@@ -67,7 +67,7 @@ describe('createControlClient', () => {
       throw new Error('network down');
     });
     const client = createControlClient('http://d.local', 't', { fetch });
-    const ack = await client.sendCommand({ Score: { heat: 'h' } });
+    const ack = await client.sendCommand({ Finalize: { heat: 'h' } });
     expect(ack.ok).toBe(false);
     expect(ack.error?.code).toBe('Internal');
   });

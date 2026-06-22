@@ -245,8 +245,8 @@ describe('ProtocolClient', () => {
     // The fresh subscription restarts the per-stream sequence, so its first envelope
     // is accepted and the body converges. The resume cursor stays the re-snapshot
     // offset (5).
-    sockets[1].emit(change(6, 'Finished'));
-    expect(phaseOf(client.getState().body)).toBe('Finished');
+    sockets[1].emit(change(6, 'Unofficial'));
+    expect(phaseOf(client.getState().body)).toBe('Unofficial');
     expect(client.getState().cursor).toBe(5);
 
     client.close();

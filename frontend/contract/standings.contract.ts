@@ -95,9 +95,9 @@ describe('GET round ranking + class standings serve the season-join projections'
     // before closing the heat, so the scored result is final.
     await waitForBothLaps(director.baseUrl, HEAT);
 
-    // Close the heat: Finish → Score.
+    // Close the heat: Finish → Finalize.
     expect((await rdControl(director.baseUrl, TOKEN, { Finish: { heat: HEAT } })).ok).toBe(true);
-    expect((await rdControl(director.baseUrl, TOKEN, { Score: { heat: HEAT } })).ok).toBe(true);
+    expect((await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
 
     // 1) The round ranking: best-first, A ahead of B, positions 1-based.
     const ranking = await roundRanking(director.baseUrl, PRACTICE_EVENT_ID, round.id);

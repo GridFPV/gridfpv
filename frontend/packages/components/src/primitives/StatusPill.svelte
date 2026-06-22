@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * StatusPill — a domain-aware status indicator for the console state machines:
-   * heat **phase** (Scheduled→Staged→Armed→Running→Finished→Final), the read-stream
+   * heat **phase** (Scheduled→Staged→Armed→Running→Unofficial→Final), the read-stream
    * **connection** status (live/connecting/reconnecting/closed/idle), and a **timer's**
    * connection status (Ready/Configured/Connecting/Connected/Disconnected/Error, #73/#65).
    *
@@ -14,7 +14,7 @@
    * lowercase `live`/`connecting`; a timer's `TimerStatus` is capitalized `Connected`/
    * `Connecting`/…), so one `status` map serves both.
    */
-  type Phase = 'Scheduled' | 'Staged' | 'Armed' | 'Running' | 'Finished' | 'Final';
+  type Phase = 'Scheduled' | 'Staged' | 'Armed' | 'Running' | 'Unofficial' | 'Final';
 
   let {
     phase = undefined,
@@ -33,7 +33,7 @@
     Staged: 'staged',
     Armed: 'armed',
     Running: 'running',
-    Finished: 'finished',
+    Unofficial: 'finished',
     Final: 'scored'
   };
   const CONN_TONE: Record<string, string> = {

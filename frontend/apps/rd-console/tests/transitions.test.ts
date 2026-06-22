@@ -10,7 +10,7 @@ import {
   type HeatAction
 } from '../src/lib/transitions.js';
 
-const PHASES: HeatPhase[] = ['Scheduled', 'Staged', 'Armed', 'Running', 'Finished', 'Final'];
+const PHASES: HeatPhase[] = ['Scheduled', 'Staged', 'Armed', 'Running', 'Unofficial', 'Final'];
 
 describe('transitions: phase → legal actions', () => {
   it('maps each phase to its forward primary action', () => {
@@ -18,7 +18,7 @@ describe('transitions: phase → legal actions', () => {
     expect(primaryAction('Staged')).toBe('Arm');
     expect(primaryAction('Armed')).toBe('Start');
     expect(primaryAction('Running')).toBe('Finish');
-    expect(primaryAction('Finished')).toBe('Score');
+    expect(primaryAction('Unofficial')).toBe('Finalize');
     expect(primaryAction('Final')).toBe('Advance');
   });
 
@@ -28,24 +28,46 @@ describe('transitions: phase → legal actions', () => {
     expect(isActionLegal('Scheduled', 'Arm')).toBe(false);
   });
 
-  it('allows abort/restart once committed (Staged/Armed/Running) but not from Scheduled', () => {
+  it('allows abort once committed (Staged/Armed/Running) but not from Scheduled', () => {
     for (const p of ['Staged', 'Armed', 'Running'] as HeatPhase[]) {
       expect(isActionLegal(p, 'Abort')).toBe(true);
-      expect(isActionLegal(p, 'Restart')).toBe(true);
     }
-    expect(isActionLegal('Scheduled', 'Restart')).toBe(false);
+    expect(isActionLegal('Scheduled', 'Abort')).toBe(false);
   });
 
-  it('allows discard only where there is a result to discard (Finished/Final)', () => {
-    expect(isActionLegal('Finished', 'Discard')).toBe(true);
+  it('allows restart from Armed/Running/Unofficial but not Scheduled/Staged/Final', () => {
+    for (const p of ['Armed', 'Running', 'Unofficial'] as HeatPhase[]) {
+      expect(isActionLegal(p, 'Restart')).toBe(true);
+    }
+    for (const p of ['Scheduled', 'Staged', 'Final'] as HeatPhase[]) {
+      expect(isActionLegal(p, 'Restart')).toBe(false);
+    }
+  });
+
+  it('allows finalize only from Unofficial', () => {
+    expect(isActionLegal('Unofficial', 'Finalize')).toBe(true);
+    for (const p of PHASES.filter((p) => p !== 'Unofficial')) {
+      expect(isActionLegal(p, 'Finalize')).toBe(false);
+    }
+  });
+
+  it('allows revert only from Final (the re-open off-ramp)', () => {
+    expect(isActionLegal('Final', 'Revert')).toBe(true);
+    for (const p of PHASES.filter((p) => p !== 'Final')) {
+      expect(isActionLegal(p, 'Revert')).toBe(false);
+    }
+  });
+
+  it('allows discard only where there is a result to discard (Unofficial/Final)', () => {
+    expect(isActionLegal('Unofficial', 'Discard')).toBe(true);
     expect(isActionLegal('Final', 'Discard')).toBe(true);
     expect(isActionLegal('Running', 'Discard')).toBe(false);
   });
 
   it("disables a phase's non-adjacent forward steps (no skipping)", () => {
-    // From Staged you can Arm, not Start/Finish/Score/Advance.
+    // From Staged you can Arm, not Start/Finish/Finalize/Advance.
     expect(isActionLegal('Staged', 'Arm')).toBe(true);
-    for (const a of ['Start', 'Finish', 'Score', 'Advance'] as HeatAction[]) {
+    for (const a of ['Start', 'Finish', 'Finalize', 'Advance'] as HeatAction[]) {
       expect(isActionLegal('Staged', a)).toBe(false);
     }
   });
@@ -60,11 +82,12 @@ describe('transitions: phase → legal actions', () => {
     }
   });
 
-  it('marks exactly the three off-ramps destructive', () => {
+  it('marks exactly the four off-ramps destructive', () => {
+    expect(isDestructive('Revert')).toBe(true);
     expect(isDestructive('Abort')).toBe(true);
     expect(isDestructive('Restart')).toBe(true);
     expect(isDestructive('Discard')).toBe(true);
-    for (const a of ['Stage', 'Arm', 'Start', 'Finish', 'Score', 'Advance'] as HeatAction[]) {
+    for (const a of ['Stage', 'Arm', 'Start', 'Finish', 'Finalize', 'Advance'] as HeatAction[]) {
       expect(isDestructive(a)).toBe(false);
     }
   });
@@ -78,8 +101,9 @@ describe('transitions: action → Command', () => {
       'Arm',
       'Start',
       'Finish',
-      'Score',
+      'Finalize',
       'Advance',
+      'Revert',
       'Abort',
       'Restart',
       'Discard'
