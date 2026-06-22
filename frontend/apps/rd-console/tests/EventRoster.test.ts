@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
-import type { EventMeta, Pilot } from '@gridfpv/types';
+import type { Class, EventMeta, LiveRaceState, Pilot } from '@gridfpv/types';
 import EventRoster from '../src/screens/EventRoster.svelte';
 import { makeTestSession } from './support.js';
 
 const ACE: Pilot = { id: 'p1', callsign: 'Ace', name: 'Alice', vtx_types: [], attributes: {} };
 const BEE: Pilot = { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} };
+
+const OPEN: Class = { id: 'open', name: 'Open Class', source: 'Custom' };
 
 /** An event that already rosters Ace (so its checkbox seeds checked). */
 const EVENT: EventMeta = {
@@ -19,7 +21,7 @@ const EVENT: EventMeta = {
   classes: []
 };
 
-describe('EventRoster (in-event roster + inline CRUD)', () => {
+describe('EventRoster — present pilots (in-event roster + inline CRUD)', () => {
   it('seeds the checkboxes from the event roster and shows the count', async () => {
     const listPilotsImpl = vi.fn(async () => [ACE, BEE]);
     const { session } = makeTestSession({ listPilotsImpl, event: EVENT });
@@ -30,9 +32,9 @@ describe('EventRoster (in-event roster + inline CRUD)', () => {
     expect(aceBox.checked).toBe(true);
     expect(beeBox.checked).toBe(false);
 
-    // The header count reflects 1 of 2 rostered.
-    expect(screen.getByText(/of 2 pilots rostered for this event/i)).toBeInTheDocument();
-    expect(within(screen.getByText(/rostered for this event/i)).getByText('1')).toBeInTheDocument();
+    // The header count reflects 1 of 2 present.
+    expect(screen.getByText(/of 2 pilots present at this event/i)).toBeInTheDocument();
+    expect(within(screen.getByText(/present at this event/i)).getByText('1')).toBeInTheDocument();
 
     // No change yet → Save disabled.
     expect(
@@ -105,5 +107,137 @@ describe('EventRoster (in-event roster + inline CRUD)', () => {
     const { session } = makeTestSession({ listPilotsImpl, event: { ...EVENT, roster: [] } });
     render(EventRoster, { session });
     await screen.findByText(/No pilots in the directory yet/i);
+  });
+});
+
+describe('EventRoster — per-class membership', () => {
+  // An event that runs the Open class and has Ace + Bee present.
+  const EV_CLASS: EventMeta = { ...EVENT, roster: ['p1', 'p2'], classes: ['open'] };
+
+  it('nudges to pick classes first when the event has none selected', async () => {
+    const listPilotsImpl = vi.fn(async () => [ACE, BEE]);
+    const { session } = makeTestSession({ listPilotsImpl, event: EVENT });
+    render(EventRoster, { session });
+    await screen.findByText(/no classes selected yet/i);
+  });
+
+  it('places a roster pilot into a class and saves via setClassMembership in roster order', async () => {
+    const listPilotsImpl = vi.fn(async () => [ACE, BEE]);
+    const listClassesImpl = vi.fn(async () => [OPEN]);
+    const setClassMembershipImpl = vi.fn(async () => ({
+      ...EV_CLASS,
+      classes_membership: [{ class: 'open', pilots: ['p1'] }]
+    }));
+    const { session } = makeTestSession({
+      listPilotsImpl,
+      listClassesImpl,
+      setClassMembershipImpl,
+      event: EV_CLASS
+    });
+    render(EventRoster, { session });
+
+    // The class section resolves the id → name and lists the roster pilots as checkboxes.
+    const aceInOpen = (await screen.findByLabelText('Place Ace in Open Class')) as HTMLInputElement;
+    expect(aceInOpen.checked).toBe(false);
+    await fireEvent.click(aceInOpen);
+
+    const save = screen.getByRole('button', { name: 'Save membership' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    await fireEvent.click(save);
+
+    await waitFor(() => expect(setClassMembershipImpl).toHaveBeenCalledTimes(1));
+    expect(setClassMembershipImpl).toHaveBeenCalledWith(
+      'http://d.local',
+      'e1',
+      'open',
+      ['p1'],
+      'tok'
+    );
+    // currentEvent re-homes; the membership sticks (the box stays checked, Save goes disabled).
+    await waitFor(() =>
+      expect((screen.getByLabelText('Place Ace in Open Class') as HTMLInputElement).checked).toBe(
+        true
+      )
+    );
+    await waitFor(() =>
+      expect(
+        (screen.getByRole('button', { name: 'Save membership' }) as HTMLButtonElement).disabled
+      ).toBe(true)
+    );
+  });
+
+  it('seeds the class checkboxes from the saved membership', async () => {
+    const listPilotsImpl = vi.fn(async () => [ACE, BEE]);
+    const listClassesImpl = vi.fn(async () => [OPEN]);
+    const { session } = makeTestSession({
+      listPilotsImpl,
+      listClassesImpl,
+      event: { ...EV_CLASS, classes_membership: [{ class: 'open', pilots: ['p2'] }] }
+    });
+    render(EventRoster, { session });
+
+    const beeInOpen = (await screen.findByLabelText('Place Bee in Open Class')) as HTMLInputElement;
+    expect(beeInOpen.checked).toBe(true);
+    expect((screen.getByLabelText('Place Ace in Open Class') as HTMLInputElement).checked).toBe(
+      false
+    );
+  });
+});
+
+describe('EventRoster — binding', () => {
+  const EV_PRESENT: EventMeta = { ...EVENT, roster: ['p1', 'p2'], classes: [] };
+
+  it('shows a present pilot as unbound, then bound from the live heat registrations', async () => {
+    const listPilotsImpl = vi.fn(async () => [ACE, BEE]);
+    // Ace is bound to competitor "node-1" in the current heat; Bee is not.
+    const live: LiveRaceState = {
+      phase: 'Running',
+      progress: [{ competitor: 'node-1', pilot: 'p1', laps_completed: 0 }]
+    };
+    const { session } = makeTestSession({ listPilotsImpl, live, event: EV_PRESENT });
+    render(EventRoster, { session });
+
+    const bindList = await screen.findByRole('list', { name: 'Pilot bindings' });
+    expect(within(bindList).getByText(/bound → node-1/i)).toBeInTheDocument();
+    expect(within(bindList).getByText(/^unbound$/i)).toBeInTheDocument();
+  });
+
+  it('binds a competitor to a pilot via Register through the control path', async () => {
+    const listPilotsImpl = vi.fn(async () => [ACE, BEE]);
+    const { session, sendSpy } = makeTestSession({ listPilotsImpl, event: EV_PRESENT });
+    render(EventRoster, { session });
+
+    const adapter = (await screen.findByLabelText('Bind adapter')) as HTMLInputElement;
+    const competitor = screen.getByLabelText('Bind competitor') as HTMLInputElement;
+    const pilot = screen.getByLabelText('Bind pilot') as HTMLSelectElement;
+
+    await fireEvent.input(adapter, { target: { value: 'rh-1' } });
+    await fireEvent.input(competitor, { target: { value: 'node-3' } });
+    await fireEvent.change(pilot, { target: { value: 'p2' } });
+
+    const bindBtn = screen.getByRole('button', { name: 'Bind' }) as HTMLButtonElement;
+    expect(bindBtn.disabled).toBe(false);
+    await fireEvent.click(bindBtn);
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
+    expect(sendSpy).toHaveBeenCalledWith({
+      Register: { adapter: 'rh-1', competitor: 'node-3', pilot: 'p2' }
+    });
+  });
+
+  it('keeps Bind disabled until adapter, competitor, and pilot are all set', async () => {
+    const listPilotsImpl = vi.fn(async () => [ACE, BEE]);
+    const { session } = makeTestSession({ listPilotsImpl, event: EV_PRESENT });
+    render(EventRoster, { session });
+
+    // The adapter defaults to "sim", so only competitor + pilot are missing.
+    const bindBtn = (await screen.findByRole('button', { name: 'Bind' })) as HTMLButtonElement;
+    expect(bindBtn.disabled).toBe(true);
+    await fireEvent.input(screen.getByLabelText('Bind competitor'), {
+      target: { value: 'node-3' }
+    });
+    expect(bindBtn.disabled).toBe(true); // still no pilot
+    await fireEvent.change(screen.getByLabelText('Bind pilot'), { target: { value: 'p1' } });
+    expect(bindBtn.disabled).toBe(false);
   });
 });

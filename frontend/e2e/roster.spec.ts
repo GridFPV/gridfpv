@@ -40,16 +40,16 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
     await expect(liveNav).toBeVisible({ timeout: 15_000 });
   }
 
-  // ── Open the Registration screen (the EventRoster) from the workspace sidebar ───────────────
+  // ── Open the Roster stage (the EventRoster) from the workspace sidebar ───────────────
   await page
     .getByRole('navigation', { name: 'Screens' })
-    .getByRole('button', { name: 'Registration' })
+    .getByRole('button', { name: 'Roster' })
     .click();
-  await expect(page.getByRole('heading', { name: 'Roster for this event' })).toBeVisible({
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
   // The roster count header is present.
-  await expect(page.getByText(/rostered for this event/i)).toBeVisible();
+  await expect(page.getByText(/present at this event/i)).toBeVisible();
 
   // ── Register a brand-new pilot inline — without leaving the event ────────────────────────────
   await page.getByRole('button', { name: '+ Add pilot' }).click();
@@ -80,7 +80,7 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
   await expect(liveNav).toBeVisible({ timeout: 15_000 });
   await page
     .getByRole('navigation', { name: 'Screens' })
-    .getByRole('button', { name: 'Registration' })
+    .getByRole('button', { name: 'Roster' })
     .click();
   const rowAfter = page
     .getByRole('list', { name: 'Pilot directory' })
@@ -106,5 +106,140 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
     page.getByRole('list', { name: 'Pilot directory' }).getByRole('listitem').filter({
       hasText: CALLSIGN
     })
+  ).toHaveCount(0, { timeout: 15_000 });
+});
+
+/**
+ * The Roster stage's **per-class membership** (race redesign Slice 1b) + a manual **bind**, end to
+ * end against a real Director.
+ *
+ * Enter an event (Practice), select the built-in **Open Class** onto it (so the Roster stage has a
+ * class to place into), then on the Roster stage: register a pilot inline, mark them present, and
+ * **place them into the Open Class** — the key proof, which we assert **persists across a reload**
+ * (the class checkbox seeds checked off `EventMeta.classes_membership`). Then exercise the manual
+ * binding form (`Command::Register`). Cleans up after itself (the worker's Director is shared):
+ * empties the membership, unticks the class, and removes the pilot.
+ */
+test('RD places a present pilot into a class (membership persists) and binds a competitor', async ({
+  page
+}) => {
+  const CS = `E2E-Member-${Date.now()}`;
+  const nav = page.getByRole('navigation', { name: 'Screens' });
+  await page.goto('/');
+
+  // ── Get into an event (Practice). Same resume-tolerant dance as the spec above. ──
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const eventsCard = page.getByRole('button', { name: /Events/ });
+  await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
+  if (!(await liveNav.isVisible().catch(() => false))) {
+    await eventsCard.click();
+    const picker = page.getByRole('heading', { name: 'Choose an event' });
+    await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+    if (await picker.isVisible().catch(() => false)) {
+      await page
+        .getByRole('button', { name: /Practice/ })
+        .first()
+        .click();
+    }
+    await expect(liveNav).toBeVisible({ timeout: 15_000 });
+  }
+
+  // ── Select the built-in "Open Class" onto the event (the Classes tab) so the Roster stage has a
+  //    class to place pilots into. ──
+  await nav.getByRole('button', { name: 'Classes' }).click();
+  await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
+    timeout: 15_000
+  });
+  const classRow = page
+    .getByRole('list', { name: 'Class directory' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Open Class' });
+  const classBox = classRow.getByRole('checkbox', { name: 'Select Open Class' });
+  if (!(await classBox.isChecked())) await classBox.check();
+  await expect(classBox).toBeChecked();
+  await page.getByRole('button', { name: 'Save classes' }).click();
+  await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
+    timeout: 15_000
+  });
+
+  // ── Roster stage: register a pilot inline + mark present ──────────────────────────────────────
+  await nav.getByRole('button', { name: 'Roster' }).click();
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
+    timeout: 15_000
+  });
+  await page.getByRole('button', { name: '+ Add pilot' }).click();
+  const addForm = page.getByRole('form', { name: 'Add pilot' });
+  await expect(addForm).toBeVisible();
+  await addForm.getByLabel('Callsign').fill(CS);
+  await page.getByRole('button', { name: 'Add pilot', exact: true }).click();
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+
+  const dir = page.getByRole('list', { name: 'Pilot directory' });
+  const pilotRow = dir.getByRole('listitem').filter({ hasText: CS });
+  await expect(pilotRow).toBeVisible({ timeout: 15_000 });
+  await pilotRow.getByRole('checkbox', { name: `Roster ${CS}` }).check();
+  await page.getByRole('button', { name: 'Save roster' }).click();
+  await expect(page.getByRole('button', { name: 'Save roster' })).toBeDisabled({ timeout: 15_000 });
+
+  // ── Place the present pilot into the Open Class and save that class's membership ───────────────
+  const memberBox = page.getByRole('checkbox', { name: `Place ${CS} in Open Class` });
+  await expect(memberBox).toBeVisible({ timeout: 15_000 });
+  await expect(memberBox).not.toBeChecked();
+  await memberBox.check();
+  const saveMembership = page.getByRole('button', { name: 'Save membership' });
+  await saveMembership.click();
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+  await expect(saveMembership).toBeDisabled({ timeout: 15_000 });
+
+  // ── The membership persisted: a reload seeds the class checkbox checked off
+  //    `EventMeta.classes_membership`. ──
+  await page.reload();
+  await expect(liveNav).toBeVisible({ timeout: 15_000 });
+  await nav.getByRole('button', { name: 'Roster' }).click();
+  const memberAfter = page.getByRole('checkbox', { name: `Place ${CS} in Open Class` });
+  await expect(memberAfter).toBeChecked({ timeout: 15_000 });
+
+  // ── Manual bind: bind a source-local competitor to the present pilot via Command::Register ────
+  await page.getByLabel('Bind competitor').fill('node-7');
+  await page.getByLabel('Bind pilot').selectOption({ label: CS });
+  await page.getByRole('button', { name: 'Bind', exact: true }).click();
+  // An open Director accepts the Register tokenless — no token prompt, no error toast.
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+
+  // ── Clean up (shared Director): empty the membership, untick the class, remove the pilot ───────
+  await memberAfter.uncheck();
+  await page.getByRole('button', { name: 'Save membership' }).click();
+  await expect(page.getByRole('button', { name: 'Save membership' })).toBeDisabled({
+    timeout: 15_000
+  });
+
+  await nav.getByRole('button', { name: 'Classes' }).click();
+  const classRowAfter = page
+    .getByRole('list', { name: 'Class directory' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Open Class' });
+  const classBoxAfter = classRowAfter.getByRole('checkbox', { name: 'Select Open Class' });
+  if (await classBoxAfter.isChecked()) {
+    await classBoxAfter.uncheck();
+    await page.getByRole('button', { name: 'Save classes' }).click();
+    await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
+      timeout: 15_000
+    });
+  }
+
+  await nav.getByRole('button', { name: 'Roster' }).click();
+  const cleanupRow = page
+    .getByRole('list', { name: 'Pilot directory' })
+    .getByRole('listitem')
+    .filter({ hasText: CS });
+  await cleanupRow.getByRole('button', { name: 'Remove' }).click();
+  const confirm2 = page.getByRole('dialog').filter({ hasText: 'Remove pilot' });
+  await expect(confirm2).toBeVisible();
+  await confirm2.getByRole('button', { name: 'Remove' }).click();
+  await expect(
+    page
+      .getByRole('list', { name: 'Pilot directory' })
+      .getByRole('listitem')
+      .filter({ hasText: CS })
   ).toHaveCount(0, { timeout: 15_000 });
 });

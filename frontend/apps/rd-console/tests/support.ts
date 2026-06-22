@@ -25,7 +25,8 @@ import type {
   createClass,
   updateClass,
   deleteClass,
-  setEventClasses
+  setEventClasses,
+  setClassMembership
 } from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
@@ -67,6 +68,8 @@ export interface TimerImpls {
   deleteClassImpl?: typeof deleteClass;
   /** The per-event class-selection write seam (issue #84) — backs the EventClasses tests. */
   setEventClassesImpl?: typeof setEventClasses;
+  /** The per-class membership write seam (race redesign Slice 1b) — backs the EventRoster tests. */
+  setClassMembershipImpl?: typeof setClassMembership;
 }
 
 export interface TestSession {
@@ -132,7 +135,9 @@ export function makeTestSession(
     createClassImpl: opts?.createClassImpl,
     updateClassImpl: opts?.updateClassImpl,
     deleteClassImpl: opts?.deleteClassImpl,
-    setEventClassesImpl: opts?.setEventClassesImpl
+    setEventClassesImpl: opts?.setEventClassesImpl,
+    // Per-class membership write seam (race redesign Slice 1b): inert unless a test overrides it.
+    setClassMembershipImpl: opts?.setClassMembershipImpl
   });
   // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event,
   // unless the test wants the app-level (no-event) context.

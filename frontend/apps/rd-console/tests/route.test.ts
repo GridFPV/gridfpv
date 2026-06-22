@@ -37,7 +37,7 @@ describe('parseHash', () => {
   it('is tolerant of a missing leading slash and a trailing slash and casing', () => {
     expect(parseHash('pilots')).toEqual({ kind: 'page', page: 'pilots' });
     expect(parseHash('#/pilots/')).toEqual({ kind: 'page', page: 'pilots' });
-    expect(parseHash('#/EVENT/Registration')).toEqual({ kind: 'workspace', tab: 'registration' });
+    expect(parseHash('#/EVENT/Roster')).toEqual({ kind: 'workspace', tab: 'roster' });
   });
 
   it('falls back to the hub for an unknown hash', () => {
@@ -58,7 +58,7 @@ describe('formatHash', () => {
 
   it('formats pages and workspace tabs', () => {
     expect(formatHash({ kind: 'page', page: 'pilots' })).toBe('#/pilots');
-    expect(formatHash({ kind: 'workspace', tab: 'registration' })).toBe('#/event/registration');
+    expect(formatHash({ kind: 'workspace', tab: 'roster' })).toBe('#/event/roster');
   });
 });
 
@@ -110,14 +110,14 @@ describe('resolveInitialRoute (hash is authoritative; #118)', () => {
   });
 
   it('a workspace tab hash restores that tab when an event is active', () => {
-    expect(resolveInitialRoute('#/event/registration', true)).toEqual({
+    expect(resolveInitialRoute('#/event/roster', true)).toEqual({
       kind: 'workspace',
-      tab: 'registration'
+      tab: 'roster'
     });
   });
 
   it('a workspace hash with no active event reconciles to the Events page', () => {
-    expect(resolveInitialRoute('#/event/registration', false)).toEqual({
+    expect(resolveInitialRoute('#/event/roster', false)).toEqual({
       kind: 'page',
       page: 'events'
     });
