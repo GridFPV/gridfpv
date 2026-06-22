@@ -30,6 +30,7 @@ export { default as Field } from './primitives/Field.svelte';
 export { default as Input } from './primitives/Input.svelte';
 export { default as Select } from './primitives/Select.svelte';
 export { default as Card } from './primitives/Card.svelte';
+export { default as Collapsible } from './primitives/Collapsible.svelte';
 export { default as Badge } from './primitives/Badge.svelte';
 export { default as StatusPill } from './primitives/StatusPill.svelte';
 export { default as Tabs } from './primitives/Tabs.svelte';
