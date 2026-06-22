@@ -15,7 +15,9 @@
 #![forbid(unsafe_code)]
 
 use gridfpv_app::director::{AssetStatus, Config, asset_status, build_app};
-use gridfpv_app::source::{SIM_ADAPTER, SourceConfig, spawn_registry_bridge};
+use gridfpv_app::source::{
+    SIM_ADAPTER, SourceConfig, spawn_presence_reconciler, spawn_registry_bridge,
+};
 use gridfpv_app::{SyntheticPilot, append_and_project, render_lap_list, synthetic_session};
 use gridfpv_events::AdapterId;
 use gridfpv_server::events::EventRegistry;
@@ -64,6 +66,11 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let source_desc = source.describe();
     let _bridge =
         spawn_registry_bridge(registry.clone(), source, AdapterId(SIM_ADAPTER.to_string()));
+
+    // Spawn the **sim auto-presence reconciler** (race redesign Slice 1a): per event it tails the
+    // log for the sim adapter's `CompetitorSeen` and auto-adds + binds any seen player whose name
+    // matches a directory pilot's callsign — so a sim race needs no manual roster/registration.
+    let _presence = spawn_presence_reconciler(registry.clone());
 
     let app = build_app(registry, &config.assets);
 
