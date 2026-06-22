@@ -202,14 +202,32 @@ flowchart LR
       proceeds. A source that drops mid-race reconnects and resumes appending; deduplication
       relies on source sequence numbers / timestamps so a reconnect can't double-count a pass.
     </p>
+    <div class="callout">
+      <p>
+        <strong>Channel capability is part of what an adapter declares.</strong> Beyond the yes/no
+        &ldquo;frequency / channel mgmt&rdquo; row, an adapter that manages channels declares
+        <em>how</em>: a <strong>fixed</strong> capability (only a built-in allowed set of channels) or a
+        <strong>flexible</strong> one (the standard FPV channel catalog plus arbitrary custom raw-MHz,
+        as RotorHazard allows), together with its <strong>node/slot count</strong>. The standard
+        catalog is built-in; what a given timer can actually tune to lives in <em>that timer's
+        config</em>. The race engine assigns channels from this declared set (first-fit + RD override),
+        capped by the node count, and the adapter <strong>dynamically tunes</strong> its nodes to the
+        assignment at race time (<a href="race-engine.html">Race Engine</a> §5,
+        <a href="pipeline-setup.html">Setup</a>). Sim sources declare no channel capability. <em>As
+        built (v0.4), this is the Timer-registry model (#73/#117): channels are configured on the timer,
+        not on the event.</em>
+      </p>
+    </div>
 
     <h2>6. Identity binding</h2>
     <p>
       Each source speaks in its own local references — a node seat, a sim player name, a
       transponder id. Binding those to a GridFPV pilot is a registration action (Architecture
       §9), not something the adapter decides; the adapter only <em>reports</em> the local
-      refs it sees (<code>CompetitorSeen</code>), which drives auto-presence ("everyone in
-      the room at 8 PM gets bracketed") and gives the RD the list to bind against.
+      refs it sees (<code>CompetitorSeen</code>), which for sim drives <strong>auto-membership</strong>
+      — auto-adding seen players to the class roster (membership = presence) and auto-binding name
+      matches ("everyone in the room at 8 PM gets bracketed") — and gives the RD the list to bind
+      against (<a href="pipeline-setup.html">Setup</a>).
     </p>
 
     <h2>7. Velocidrone — the first adapter</h2>
@@ -305,11 +323,13 @@ flowchart LR
       idempotent, keyed on (source, sequence#) — or (source, local-ref, source-timestamp)
       where no sequence counter exists. On reconnect the adapter buffers and de-dups against
       those keys, so a resume can't double-count or lose passes.</li>
-      <li><span class="resolved">Resolved — Frequency / channel management ownership.</span>
+      <li><span class="resolved">Resolved — Frequency / channel management ownership &amp; model.</span>
       The <strong>race engine allocates</strong> channels — it knows the heat/field and avoids
       conflicts — while the <strong>adapter advertises</strong> the hardware's channel
-      capabilities/constraints and <strong>applies</strong> the tuning. Shared with the Race
-      Engine; IRL sources only.</li>
+      capability (<em>fixed</em> allowed-set or <em>flexible</em> standard-catalog + custom raw-MHz)
+      and node count, and <strong>applies</strong> the tuning dynamically at race time. Channels are
+      <strong>defined on the timer</strong> (the Timer registry, #73/#117), not an event-level pool.
+      Shared with the Race Engine; IRL sources only.</li>
       <li><span class="resolved">Resolved — Velocidrone WebSocket message schema.</span>
       Reconstructed and implemented from two independent open-source consumers (the
       <code>rh-velocidrone</code> plugin and <code>VelocidroneWebSocketConsumer</code>); a raw

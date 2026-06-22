@@ -153,26 +153,53 @@ flowchart LR
       <strong>vertical slices</strong> (each <strong>backend → API → UI</strong>, working before the
       next):
     </p>
+    <div class="callout">
+      <p>
+        <strong>Built so far in v0.4.</strong> The earlier slices landed the
+        <strong>design-system foundation</strong>, the <strong>Event</strong> aggregate + workspace
+        (always-present non-persistent Practice; event-picker; you cannot act outside an event), and
+        three <strong>app-level registries</strong> with &ldquo;configure once, select per event&rdquo;
+        semantics: the <strong>Pilot directory</strong> (#74), the <strong>Class registry</strong>
+        (nine locked built-ins + Custom), and the <strong>Timer registry</strong> (Mock + RotorHazard,
+        persistent connect-on-select, drop detection / reconnect, primary/alternate failover; #73).
+        The console <strong>home-hub IA</strong> (Pilots / Classes / Events / Timers pages, hash
+        routing, monogram + wordmark) and per-event persistence via the sidecar <code>meta</code>
+        table (#115) are in. A hands-on review then reshaped the <em>remaining</em> v0.4 work into the
+        <strong>race-running redesign</strong> below.
+      </p>
+    </div>
+    <p>
+      <strong>Race-running redesign — the remaining v0.4 slices.</strong> The event workspace becomes a
+      sequence of editable <strong>stage-pages</strong> (Classes · Roster · Rounds+Heats · Live control ·
+      Marshaling · Results — no &ldquo;Setup&rdquo; tab), and the work is staged to wire the existing
+      v0.3 engine per-event:
+    </p>
     <ul>
-      <li><strong>Slice 0 — Design system foundation.</strong> Tokens, component library, and app
-      shell, built first so every later slice inherits a consistent UI.</li>
-      <li><strong>Slice 1 — Events &amp; workspace.</strong> The <strong>Event</strong> aggregate
-      itself: an always-present, non-persistent <em>Practice</em> event; a startup / event-picker
-      flow; you cannot act outside an event; and auth / connect to the served origin.</li>
-      <li><strong>Slice 2 — Timer configuration.</strong> Per-event timing source — Sim,
-      RotorHazard URL, or future sources — chosen and validated inside the event.</li>
-      <li><strong>Slice 3 — Pilot registration.</strong> Event-scoped pilots with auto-generated
-      IDs plus callsign / channel, and a working Registration UI.</li>
-      <li><strong>Slice 4 — Heat building.</strong> Build heats from the registered roster — select
-      pilots, assign channels.</li>
-      <li><strong>Slice 5 — Run a heat (live).</strong> Run a heat from the console with a
-      server-authoritative race clock.</li>
-      <li><strong>Slice 6 — Marshaling &amp; results.</strong> Void / insert / adjust laps and apply
-      penalties, with adjustments and penalties shown in the results UI.</li>
-      <li><strong>Slice 7 — Multi-heat formats.</strong> Select a format and drive its progress —
-      the six generators already exist from v0.3.</li>
+      <li><strong>Slice 0 — Log tags.</strong> Tag the log (notably <code>HeatScheduled</code>) with
+      class / round / per-pilot frequencies; promote <code>ClassId</code> / <code>RoundId</code> into
+      the events crate (<a href="architecture.html">Architecture</a> §4).</li>
+      <li><strong>Slice 1 — Roster = membership = presence.</strong> Per-class roster membership;
+      IRL = RD adds pilots + binds node→pilot, Sim = auto-membership from <code>CompetitorSeen</code>
+      (auto-add + auto-bind name matches).</li>
+      <li><strong>Slice 2 — Rounds.</strong> Event-level, class-tagged, dynamically-added rounds
+      (practice / quali as-you-go).</li>
+      <li><strong>Slice 3 — Engine + heats.</strong> Wire the v0.3 heat-loop FSM, scoring, and the six
+      generators per-event; heat-filling = manual + format-generated.</li>
+      <li><strong>Slice 4 — Channels.</strong> Timer-defined channels (standard catalog + adapter
+      fixed/flexible capability + custom raw-MHz), node-count cap, engine first-fit + manual assign,
+      dynamic node tuning at race time (#117, folded into timers).</li>
+      <li><strong>Slice 5 — Bracket carry.</strong> Advance-to-brackets generates the full bracket from
+      the top-N quali ranking, editable — reusing <code>run_event</code>'s quali→bracket carry (#84).</li>
+      <li><strong>Slice 6 — Per-class standings.</strong> Results and standings derived per class.</li>
+      <li><strong>Slice 7 — Setup wizard.</strong> A guided first-pass <em>over</em> the stage-pages,
+      built last.</li>
     </ul>
-    <p>Packaging follows alongside: a <strong>Tauri</strong> shell + single-binary build for Windows/Linux/macOS.</p>
+    <p>
+      <strong>Deferred out of v0.4:</strong> ZippyQ-style rolling fills and PWA self-register; channel
+      management as a standalone feature (#117 is folded into the Timer registry instead); seasons
+      (#129) stay local-first for now; multi-cloud (#132) is later. Packaging follows alongside: a
+      <strong>Tauri</strong> shell + single-binary build for Windows/Linux/macOS (#57/#58).
+    </p>
     <p><strong>Done when:</strong> a complete event — registration → heats → live races → marshaling → results, across a multi-heat format — runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
 
     <p class="phase-meta">

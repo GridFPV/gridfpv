@@ -38,12 +38,31 @@
 
     <h2>Capabilities</h2>
 
+    <div class="callout">
+      <p>
+        <strong>Planned — rounds are event-level, class-tagged, and dynamic.</strong> In the
+        race-running redesign, <strong>rounds live on the event</strong> (not buried inside one
+        bracket structure) and each round is <strong>tagged with the class(es) it is eligible for</strong>.
+        Rounds are added <em>dynamically as the event goes</em>: practice and qualifying rounds are
+        appended as-you-go, and <strong>advancing to brackets generates the full bracket from the
+        qualifying ranking (top-N)</strong> as a set of rounds — then editable by the RD (the #84
+        Class→Rounds carry). Heat-filling has two v1 modes: <strong>manual</strong> and
+        <strong>format-generated</strong> (the six generators). ZippyQ-style rolling fills and PWA
+        self-register are <strong>deferred</strong>. (Data model in <a href="architecture.html">Architecture</a>
+        §4; engine carry in <a href="race-engine.html">Race Engine</a> §3/§5; UI is the combined
+        Rounds+Heats stage-page, <a href="clients.html">Clients</a> §1.)
+      </p>
+    </div>
+
     <h3>Seed &amp; generate the bracket</h3>
     <p>
       The mains <strong>start</strong> by seeding the field — from the
       <a href="pipeline-qualifying.html">qualifying</a> ranking, or a manual / imported /
       registration order — and then <strong>generating a bracket</strong>: the rounds and heats
-      pilots will fly. Generation is the entry to the mains, not a separate phase.
+      pilots will fly. Generation is the entry to the mains, not a separate phase. Concretely, the
+      &ldquo;advance to brackets&rdquo; action takes the quali ranking's <strong>top-N</strong> and
+      <strong>generates the full bracket as event-level rounds</strong> (class-tagged), which the RD
+      may then edit before they fly (#84).
     </p>
     <ul>
       <li><strong>Bracket formats</strong> — a pluggable registry of generators: round robin,
@@ -106,10 +125,18 @@
         RD orders and can rearrange, so classes interleave however the RD wants.</li>
     </ul>
 
-    <h3>Frequency / channel assignment</h3>
+    <h3>Channel assignment — timer-defined, dynamically tuned</h3>
     <ul>
-      <li>(IRL) assign a frequency / channel per heat, avoiding conflicts across the pilots flying
-        together.</li>
+      <li>(IRL) per heat, assign each pilot a channel <strong>from the channels the selected timer
+        defines</strong> — the standard FPV catalog plus whatever the adapter's capability allows
+        (fixed allowed-set, or flexible standard + custom raw-MHz; <a href="pipeline-setup.html">Setup</a>).
+        The number of pilots in a heat is <strong>capped by the timer's node/slot count</strong>.</li>
+      <li>Assignment is <strong>engine first-fit + manual</strong> — the engine fills conflict-free in
+        seed order and the RD can override.</li>
+      <li>At race time GridFPV <strong>dynamically tunes the timer's nodes</strong> to the assigned
+        channels: the engine decides the assignment, the adapter applies the tuning to the hardware
+        (<a href="race-engine.html">Race Engine</a> §5; <a href="timer-adapters.html">Timer Adapters</a> §5).</li>
+      <li>Sim has no channel step (the sim timer declares no channel capability).</li>
     </ul>
 
     <h2>Sim vs IRL</h2>
@@ -126,7 +153,9 @@
       <dt>Bracket / generator config (per class)</dt>
       <dd>generator type, pilots-per-heat, seeds-advance, finals format, and — for pack-based leaderboard formats like GQ — the pack count and scoring metric.</dd>
       <dt>Round → Heat → Heat slot</dt>
-      <dd>a slot is a pilot assignment with a seed rank; heats group into rounds.</dd>
+      <dd>a slot is a pilot assignment with a seed rank (and, IRL, an assigned channel); heats group
+      into rounds. <em>Rounds are event-level and class-tagged</em> (eligible class[es]), added
+      dynamically; heats are filled <em>manually</em> or by a <em>format generator</em>.</dd>
       <dt>Heat win condition</dt>
       <dd>first-to-X or time-limit, plus its value (lap target or duration).</dd>
       <dt>Heat result</dt>
@@ -150,8 +179,12 @@
         within advancement.</li>
       <li><span class="q">Finals specifics.</span> Chase-the-Ace ("first to 2 wins") and the
         grand-final bracket reset in double-elimination.</li>
-      <li><span class="q">Frequency assignment.</span> Automated channel assignment versus manual
-        per heat.</li>
+      <li><span class="resolved">Resolved — Channel assignment &amp; model.</span> Channels are
+        <strong>defined on the selected timer</strong> (standard catalog + the adapter's fixed/flexible
+        capability + custom raw-MHz), not an event-level pool; per heat the engine assigns by
+        <strong>first-fit and the RD may override</strong>, capped by the timer's node count, and the
+        adapter <strong>dynamically tunes</strong> the nodes at race time
+        (<a href="pipeline-setup.html">Setup</a>, <a href="race-engine.html">Race Engine</a> §5).</li>
       <li><span class="q">Seeds-advance vs tiers.</span> How seeds-advance interplays with
         multi-tier "top-N advance up a tier".</li>
     </ol>
