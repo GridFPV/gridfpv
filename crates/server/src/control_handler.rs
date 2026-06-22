@@ -165,7 +165,9 @@ async fn control_post(
     // Resolve the event first (an unknown id → typed 404) so the command applies to THAT
     // event's log only — commands never cross event boundaries.
     let state = resolve_event(&registry, &event_id)?;
-    Ok(Json(apply_command(&state, command)))
+    Ok(Json(apply_command_in_event(
+        &registry, &event_id, &state, command,
+    )))
 }
 
 /// `GET /control` — upgrade to the bidirectional control WebSocket (protocol.html §5).
@@ -181,7 +183,7 @@ async fn control_ws(
     // Resolve the event before the upgrade so every command on this socket drives THAT
     // event's log (an unknown id → typed 404 before upgrading).
     let state = resolve_event(&registry, &event_id)?;
-    Ok(ws.on_upgrade(move |socket| run_control(socket, state)))
+    Ok(ws.on_upgrade(move |socket| run_control(socket, registry, event_id, state)))
 }
 
 /// Drive one control socket: read [`Command`] frames, write a [`CommandAck`] per command
@@ -192,18 +194,23 @@ async fn control_ws(
 /// frame is answered with a `CommandAck::failed(BadRequest)` rather than closing the
 /// socket, so one bad command does not drop the RD's control session. The loop ends when
 /// the client closes or the socket errors.
-async fn run_control(mut socket: WebSocket, state: AppState) {
+async fn run_control(
+    mut socket: WebSocket,
+    registry: EventRegistry,
+    event_id: EventId,
+    state: AppState,
+) {
     while let Some(frame) = socket.recv().await {
         let ack = match frame {
             Ok(Message::Text(text)) => match serde_json::from_str::<Command>(&text) {
-                Ok(command) => apply_command(&state, command),
+                Ok(command) => apply_command_in_event(&registry, &event_id, &state, command),
                 Err(e) => CommandAck::failed(ProtocolError::new(
                     ErrorCode::BadRequest,
                     format!("malformed command: {e}"),
                 )),
             },
             Ok(Message::Binary(bytes)) => match serde_json::from_slice::<Command>(&bytes) {
-                Ok(command) => apply_command(&state, command),
+                Ok(command) => apply_command_in_event(&registry, &event_id, &state, command),
                 Err(e) => CommandAck::failed(ProtocolError::new(
                     ErrorCode::BadRequest,
                     format!("malformed command: {e}"),
@@ -220,6 +227,82 @@ async fn run_control(mut socket: WebSocket, state: AppState) {
         if socket.send(Message::Text(json.into())).await.is_err() {
             return; // client gone
         }
+    }
+}
+
+/// Apply a [`Command`] in the context of a known event (race redesign Slice 3a) — the
+/// event-aware control write path both endpoints use.
+///
+/// All commands except [`Command::FillRound`] are pure log writes that need only the
+/// event's [`AppState`], so they delegate straight to [`apply_command`]. `FillRound` is the
+/// one command that also needs the event's **meta** (its rounds + class membership) to build
+/// the round's generator, so it is handled here where the [`EventRegistry`] and
+/// [`EventId`] are in scope — see [`apply_fill_round`].
+pub fn apply_command_in_event(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    command: Command,
+) -> CommandAck {
+    match command {
+        Command::FillRound { round } => apply_fill_round(registry, event_id, state, round),
+        other => apply_command(state, other),
+    }
+}
+
+/// Handle [`Command::FillRound`] (race redesign Slice 3a): build the round's generator from
+/// the event meta + the log, append the next tagged [`Event::HeatScheduled`] the generator
+/// emits, and ack.
+///
+/// - A `Scheduled` outcome appends the heat tagged with `round` (and `class` when the round
+///   is single-class), lineup from the generator's plan — then acks ok.
+/// - A `Complete` or `AlreadyScheduled` outcome appends **nothing** and acks ok (a finished
+///   round, or one whose outstanding heat must be scored first, are expected terminal/no-op
+///   states — typed oks, not errors).
+/// - A fill error (unknown round, empty field, unknown format) acks failed with a
+///   [`ProtocolError`] — `UnknownScope` for a missing round, `BadRequest` otherwise.
+fn apply_fill_round(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    round: gridfpv_events::RoundId,
+) -> CommandAck {
+    use crate::round_engine::{self, FillError, FillOutcome};
+
+    let Some(meta) = registry.meta_of(event_id) else {
+        return CommandAck::failed(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        ));
+    };
+    let events = match state.read() {
+        Ok((events, _cursor)) => events,
+        Err(err) => return CommandAck::failed(err),
+    };
+
+    match round_engine::fill_round(&meta, &round, &events) {
+        Ok(FillOutcome::Scheduled { heat, lineup }) => {
+            let class = round_engine::round_class(&meta, &round);
+            let event = Event::HeatScheduled {
+                heat,
+                lineup,
+                class,
+                round: Some(round),
+                // Frequencies are assigned in Slice 4 (the timer node-count cap lands there);
+                // a round-scheduled heat carries none for now (a sim race assigns no channels).
+                frequencies: Vec::new(),
+            };
+            match state.append(event, None) {
+                Ok(_offset) => CommandAck::ok(),
+                Err(err) => CommandAck::failed(err),
+            }
+        }
+        // Complete / AlreadyScheduled: nothing to append, a successful typed ack.
+        Ok(FillOutcome::Complete) | Ok(FillOutcome::AlreadyScheduled) => CommandAck::ok(),
+        Err(err @ FillError::UnknownRound(_)) => {
+            CommandAck::failed(ProtocolError::new(ErrorCode::UnknownScope, err.to_string()))
+        }
+        Err(err) => CommandAck::failed(ProtocolError::new(ErrorCode::BadRequest, err.to_string())),
     }
 }
 
@@ -274,6 +357,15 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             round,
             frequencies,
         }),
+
+        // --- FillRound is intercepted by `apply_command_in_event` (it needs the event
+        // meta, not just the log) and never reaches here on the real control path. The arm
+        // keeps the match exhaustive; on the (test-only) bare-`apply_command` path it is a
+        // clear BadRequest rather than a silent append. ---
+        Command::FillRound { .. } => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            "FillRound must be applied through the event-aware control path",
+        )),
 
         // --- Registration: bind a source competitor to a pilot (no prior-state check). ---
         Command::Register {
@@ -644,5 +736,131 @@ mod tests {
                     && *competitor == CompetitorRef("node-2".into())
                     && *pilot == PilotId("acroace".into())
         )));
+    }
+
+    /// `FillRound` (race redesign Slice 3a), through the event-aware control path, builds the
+    /// round's generator from the class membership and appends a tagged `HeatScheduled`.
+    #[test]
+    fn fill_round_schedules_a_tagged_heat_from_membership() {
+        use crate::classes::CreateClassRequest;
+        use crate::events::{CreateEventRequest, NewRoundReq, SeedingRule};
+        use crate::pilots::CreatePilotRequest;
+        use crate::scope::EventId;
+        use gridfpv_engine::scoring::WinCondition;
+        use gridfpv_events::{ClassId, RoundId};
+        use std::collections::BTreeMap;
+
+        let registry = EventRegistry::new(None).unwrap();
+        // Seed a directory class + two pilots, an event that selects the class, the class
+        // membership, and a single-round timed_qual round.
+        let class = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Open".into(),
+                source: Default::default(),
+                reference: None,
+                description: None,
+            })
+            .unwrap()
+            .id;
+        let mut pilots = Vec::new();
+        for cs in ["alpha", "bravo"] {
+            pilots.push(
+                registry
+                    .pilots()
+                    .create(&CreatePilotRequest {
+                        callsign: cs.into(),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .id,
+            );
+        }
+        let event = registry
+            .create(&CreateEventRequest {
+                name: "E".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap()
+            .id;
+        registry.set_classes(&event, vec![class.clone()]).unwrap();
+        registry
+            .set_class_membership(&event, class.clone(), pilots.clone())
+            .unwrap();
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    label: "Qual".into(),
+                    classes: vec![class.clone()],
+                    format: "timed_qual".into(),
+                    params: BTreeMap::from([("rounds".into(), "1".into())]),
+                    win_condition: WinCondition::BestLap,
+                    seeding: SeedingRule::FromRoster,
+                },
+            )
+            .unwrap();
+
+        let state = registry.resolve(&event).unwrap();
+        let event_id = EventId(event.0.clone());
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.id.clone(),
+            },
+        );
+        assert!(ack.ok, "FillRound rejected: {ack:?}");
+
+        // A HeatScheduled tagged with the round + the single class, lineup = the membership.
+        let (events, _) = state.read().unwrap();
+        let scheduled = events
+            .iter()
+            .find_map(|e| match e {
+                Event::HeatScheduled {
+                    lineup,
+                    class: Some(c),
+                    round: Some(r),
+                    ..
+                } => Some((lineup.clone(), c.clone(), r.clone())),
+                _ => None,
+            })
+            .expect("FillRound appended a tagged HeatScheduled");
+        assert_eq!(scheduled.1, ClassId(class.0.clone()));
+        assert_eq!(scheduled.2, RoundId(round.id.0.clone()));
+        assert_eq!(
+            scheduled.0,
+            pilots
+                .iter()
+                .map(|p| CompetitorRef(p.0.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `FillRound` on a round that does not exist is an `UnknownScope` rejection (no append).
+    #[test]
+    fn fill_round_unknown_round_is_rejected() {
+        use crate::scope::EventId;
+        use gridfpv_events::RoundId;
+
+        let registry = EventRegistry::new(None).unwrap();
+        let event = EventId(crate::events::PRACTICE_EVENT_ID.into());
+        let state = registry.resolve(&event).unwrap();
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::FillRound {
+                round: RoundId("nope".into()),
+            },
+        );
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, ErrorCode::UnknownScope);
+        let (events, _) = state.read().unwrap();
+        assert!(events.is_empty(), "a rejected FillRound appends nothing");
     }
 }

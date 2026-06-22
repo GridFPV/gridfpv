@@ -123,6 +123,22 @@ pub enum Command {
         frequencies: Vec<(CompetitorRef, u16)>,
     },
 
+    /// **Fill a round** (race redesign Slice 3a) — the round-driven engine's one command.
+    /// Build the round's format generator from the eligible classes' membership (the field)
+    /// and the round's completed heats read back from the log, then schedule the **next**
+    /// heat the generator emits — a [`Event::HeatScheduled`] tagged with `round` (and
+    /// `class` when the round is single-class), lineup from the generator's plan.
+    ///
+    /// The advance closes through the log: once the scheduled heat is driven to `Score`, the
+    /// next `FillRound` rebuilds the generator, sees the new completed heat, and emits the
+    /// following one — including the qualifying→bracket carry when the round seeds
+    /// [`FromRanking`](crate::events::SeedingRule::FromRanking). A round whose generator has
+    /// no more heats is **complete** — a successful ack, not an error.
+    FillRound {
+        /// The round to fill — one of the event's [`rounds`](crate::events::EventMeta::rounds).
+        round: RoundId,
+    },
+
     // --- Registration ---
     /// Bind a source-local competitor to a GridFPV pilot (Architecture §9) — the
     /// registration the adapter never performs. The pilot handle is the event-scoped
@@ -282,6 +298,9 @@ mod tests {
                     (CompetitorRef("node-0".into()), 5658),
                     (CompetitorRef("node-1".into()), 5695),
                 ],
+            },
+            Command::FillRound {
+                round: RoundId("qualifying-r1-abc".into()),
             },
             Command::Register {
                 adapter: AdapterId("rh".into()),

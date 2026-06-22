@@ -456,6 +456,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "gridfpv-adapters",
+ "gridfpv-engine",
  "gridfpv-events",
  "gridfpv-projection",
  "gridfpv-server",

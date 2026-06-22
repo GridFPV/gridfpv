@@ -42,6 +42,9 @@ tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 [dev-dependencies]
 serde_json.workspace = true
 gridfpv-adapters.workspace = true
+# The race-flow e2e (`tests/race_flow.rs`) builds a `NewRoundReq` whose `win_condition`
+# is the engine's `WinCondition` — the round-driven engine's scoring rule (Slice 3a).
+gridfpv-engine.workspace = true
 # The dockerized-RotorHazard harness for the `live` Director RH-connect e2e
 # (`tests/rh_connect_live.rs`): spins up + tears down a disposable RH container.
 gridfpv-testkit.workspace = true
