@@ -36,8 +36,8 @@ use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition, Pass};
 
 use crate::live_state::{LiveRaceState, live_state};
 
-/// One open-practice heat's **in-memory** state: the active heat, its channel lineup, and the
-/// accumulated lap-gate passes (never logged).
+/// One open-practice heat's **in-memory** state: the active heat, its channel lineup, the
+/// accumulated lap-gate passes (never logged), and the heat's **current loop phase**.
 #[derive(Debug, Clone)]
 struct ActivePractice {
     /// The open-practice heat currently accumulating laps.
@@ -47,15 +47,25 @@ struct ActivePractice {
     /// The lap-gate passes seen for this heat so far, in arrival order. These are **not** appended
     /// to the event log; they live only here and drive the live per-channel laps.
     passes: Vec<Pass>,
+    /// The heat-loop transitions this open-practice heat has gone through *after* `Running`, in
+    /// order — threaded in by the source bridge as it observes the heat's `HeatStateChanged`
+    /// (open-practice overlay-phase fix). Empty while the practice is live (`Running`); gains
+    /// `Finished` when the time limit (or a `ForceEnd`) closes the race, so the overlay reports
+    /// `Unofficial` and the console clock **freezes** — and any subsequent step (e.g. `Finalized`)
+    /// the heat reaches while its laps are still shown. Re-synthesized into the live fold so the
+    /// overlay's phase tracks the *real* heat phase, not a hardcoded `Running`.
+    transitions: Vec<HeatTransition>,
 }
 
 impl ActivePractice {
     /// Synthesize the event slice the live-state fold consumes: the heat's `HeatScheduled` over the
-    /// active channels, a `Running` transition (so the live phase reads `Running`), then the
-    /// accumulated passes. Reusing [`live_state`] over this slice gives per-channel laps with
-    /// `pilot: None` for free — the same fold the logged path uses, no second lap definition.
+    /// active channels, a `Running` transition, the **actual subsequent transitions** the heat has
+    /// reached (e.g. `Finished` once its time limit fires, so the live phase reads `Unofficial`),
+    /// then the accumulated passes. Reusing [`live_state`] over this slice gives per-channel laps
+    /// with `pilot: None` *and* the heat's real current phase for free — the same fold the logged
+    /// path uses, no second lap definition and no hardcoded phase.
     fn synthetic_events(&self) -> Vec<Event> {
-        let mut events = Vec::with_capacity(self.passes.len() + 2);
+        let mut events = Vec::with_capacity(self.passes.len() + 2 + self.transitions.len());
         events.push(Event::HeatScheduled {
             heat: self.heat.clone(),
             lineup: self.channels.clone(),
@@ -63,10 +73,23 @@ impl ActivePractice {
             round: None,
             frequencies: Vec::new(),
         });
+        // The race is live from `Running`; the bridge threads in any later transition (e.g. the
+        // time-limit `Finished` → `Unofficial`) so the overlay phase — and so the console clock —
+        // follows the heat. The passes follow the transitions; the lap fold is order-independent
+        // over them, and `live_state` resolves the phase from the transition sequence.
         events.push(Event::HeatStateChanged {
             heat: self.heat.clone(),
             transition: HeatTransition::Running,
         });
+        events.extend(
+            self.transitions
+                .iter()
+                .copied()
+                .map(|transition| Event::HeatStateChanged {
+                    heat: self.heat.clone(),
+                    transition,
+                }),
+        );
         events.extend(self.passes.iter().cloned().map(Event::Pass));
         events
     }
@@ -102,7 +125,29 @@ impl OpenPracticeLive {
             heat,
             channels,
             passes: Vec::new(),
+            transitions: Vec::new(),
         });
+    }
+
+    /// Thread one heat-loop `transition` for the active open-practice `heat` into the overlay
+    /// (open-practice overlay-phase fix). The source bridge calls this as it observes the heat's
+    /// `HeatStateChanged`, so the overlay reports the heat's **real** current phase: `Running` while
+    /// the practice is live, then `Unofficial` once the time limit (or a `ForceEnd`) closes it —
+    /// which freezes the console race clock at the practice duration — while the per-channel laps
+    /// stay visible. The accumulator is **not** cleared here (the clear-on-terminal path drops it);
+    /// `Running` is implicit (the base of every synthetic slice) so re-recording it is a no-op.
+    ///
+    /// A no-op when `heat` is not the active open-practice heat. Returns whether the overlay phase
+    /// actually changed, so the caller wakes `/stream` only when the live state moved.
+    pub fn transition(&self, heat: &HeatId, transition: HeatTransition) -> bool {
+        let mut guard = self.write();
+        match guard.as_mut() {
+            Some(active) if &active.heat == heat && transition != HeatTransition::Running => {
+                active.transitions.push(transition);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Record one lap-gate `pass` for the active open-practice heat (in memory, **not** logged).
@@ -162,6 +207,7 @@ impl OpenPracticeLive {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::HeatPhase;
     use gridfpv_events::{AdapterId, GateIndex, SourceTime};
 
     fn chan(i: usize) -> CompetitorRef {
@@ -208,6 +254,9 @@ mod tests {
             .live_state()
             .expect("an active open-practice live state");
         assert_eq!(state.current_heat, Some(heat));
+        // While the practice is live (no transition threaded past `Running`), the overlay phase is
+        // `Running` — so the console race clock ticks.
+        assert_eq!(state.phase, HeatPhase::Running);
         // Two channels, each a row; neither bound to a pilot (open practice is per channel).
         assert_eq!(state.progress.len(), 2);
         assert!(state.progress.iter().all(|p| p.pilot.is_none()));
@@ -242,6 +291,73 @@ mod tests {
         );
         assert!(live.live_state().is_none());
         assert!(!live.is_active(&heat));
+    }
+
+    #[test]
+    fn finished_transition_reports_unofficial_with_laps_intact() {
+        // Open-practice overlay-phase fix: when the heat's time limit fires `Running → Unofficial`
+        // (a `Finished` transition), the overlay must report **`Unofficial`** (so the console clock
+        // freezes) while the per-channel laps stay visible — not the old hardcoded `Running`.
+        let live = OpenPracticeLive::new();
+        let heat = HeatId("open-practice".into());
+        live.begin(heat.clone(), vec![chan(0)]);
+        live.record(pass(0, 1_000_000, 0)); // holeshot
+        live.record(pass(0, 4_000_000, 1)); // +1 lap (3.0s)
+
+        // While racing the overlay is `Running`.
+        assert_eq!(live.live_state().unwrap().phase, HeatPhase::Running);
+
+        // The time limit closes the race: thread the real `Finished` transition in.
+        assert!(
+            live.transition(&heat, HeatTransition::Finished),
+            "threading Finished into the active open-practice heat reports a change"
+        );
+
+        let state = live
+            .live_state()
+            .expect("the overlay survives Running → Unofficial");
+        assert_eq!(
+            state.phase,
+            HeatPhase::Unofficial,
+            "the overlay reports Unofficial once the heat finishes, so the clock freezes"
+        );
+        // The laps are NOT cleared by the Running → Unofficial step.
+        let n0 = state
+            .progress
+            .iter()
+            .find(|p| p.competitor == chan(0))
+            .unwrap();
+        assert_eq!(n0.laps_completed, 1);
+        assert_eq!(n0.last_lap_micros, Some(3_000_000));
+
+        // A subsequent `Finalized` step folds to `Final`, still carrying the laps.
+        assert!(live.transition(&heat, HeatTransition::Finalized));
+        let state = live.live_state().unwrap();
+        assert_eq!(state.phase, HeatPhase::Final);
+        assert_eq!(
+            state
+                .progress
+                .iter()
+                .find(|p| p.competitor == chan(0))
+                .unwrap()
+                .laps_completed,
+            1
+        );
+    }
+
+    #[test]
+    fn transition_is_a_no_op_for_a_stale_or_idle_heat() {
+        let live = OpenPracticeLive::new();
+        // No active heat → no-op.
+        assert!(!live.transition(&HeatId("h1".into()), HeatTransition::Finished));
+
+        live.begin(HeatId("h1".into()), vec![chan(0)]);
+        // A transition for a *different* heat is ignored (the overlay phase doesn't move).
+        assert!(!live.transition(&HeatId("h2".into()), HeatTransition::Finished));
+        assert_eq!(live.live_state().unwrap().phase, HeatPhase::Running);
+        // Re-recording `Running` is a no-op (it is the implicit base of the slice).
+        assert!(!live.transition(&HeatId("h1".into()), HeatTransition::Running));
+        assert_eq!(live.live_state().unwrap().phase, HeatPhase::Running);
     }
 
     #[test]
