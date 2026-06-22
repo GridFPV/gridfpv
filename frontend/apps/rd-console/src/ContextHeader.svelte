@@ -16,7 +16,7 @@
    * (No date/location hover — the maintainer explicitly dropped that.)
    *
    * The clock is the shared #62 logic via {@link useRaceClock}, so it ticks while Running,
-   * freezes on Finished/Scored, and resets when there's no live heat — everywhere, not just
+   * freezes on Finished/Final, and resets when there's no live heat — everywhere, not just
    * on the live screen, which now drives its clock from the same source.
    */
   import { StatusPill, RaceClock } from '@gridfpv/components';
@@ -48,7 +48,7 @@
   // Only show a phase once there's a live heat on the timer; otherwise the event is idle.
   const phase = $derived(heat ? (live?.phase ?? 'Scheduled') : undefined);
 
-  // The shared race clock (#62): ticks while Running, freezes on Finished/Scored, resets
+  // The shared race clock (#62): ticks while Running, freezes on Finished/Final, resets
   // otherwise. Reads the live phase reactively so it tracks the heat from one place.
   const clock = useRaceClock(() => phase);
   const running = $derived(phase === 'Running');

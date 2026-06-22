@@ -4,7 +4,7 @@
  * The heat loop is a linear forward path with off-ramps (race-engine.html §2,
  * protocol.html §1):
  *
- *     Scheduled → Staged → Armed → Running → Finished → Scored → (Advanced)
+ *     Scheduled → Staged → Armed → Running → Finished → Final → (Advanced)
  *
  * `Command` exposes one variant per forward step (`Stage`/`Arm`/`Start`/`Finish`/
  * `Score`/`Advance`) and three off-ramps (`Abort`/`Restart`/`Discard`). Each carries
@@ -24,7 +24,7 @@ import type { Command, HeatId, HeatPhase } from '@gridfpv/types';
 /**
  * The console-facing name of a heat-loop action. Mirrors the forward
  * `Command`/`HeatTransition` steps plus the three off-ramps. (`Start` enters
- * `Running`; `Finish` enters the projected `Finished` phase; `Score` enters `Scored`.)
+ * `Running`; `Finish` enters the projected `Finished` phase; `Score` enters `Final`.)
  */
 export type HeatAction =
   | 'Stage'
@@ -51,7 +51,7 @@ const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
   Armed: 'Start',
   Running: 'Finish',
   Finished: 'Score',
-  Scored: 'Advance'
+  Final: 'Advance'
 };
 
 /**
@@ -64,7 +64,7 @@ const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
  *   • `Restart` — re-run from the top once committed (Staged/Armed/Running/Finished):
  *     a bad start, a crash before the window, a contested run.
  *   • `Discard` — throw the heat away entirely once it has results to throw away
- *     (Finished/Scored): it should never have counted.
+ *     (Finished/Final): it should never have counted.
  *
  * The engine is the final authority (it re-validates), so this errs toward the RD's
  * mental model rather than encoding every edge; an over-permissive entry simply
@@ -76,7 +76,7 @@ const LEGAL_BY_PHASE: Record<HeatPhase, ReadonlySet<HeatAction>> = {
   Armed: new Set<HeatAction>(['Start', 'Abort', 'Restart']),
   Running: new Set<HeatAction>(['Finish', 'Abort', 'Restart']),
   Finished: new Set<HeatAction>(['Score', 'Restart', 'Discard']),
-  Scored: new Set<HeatAction>(['Advance', 'Discard'])
+  Final: new Set<HeatAction>(['Advance', 'Discard'])
 };
 
 /** The display order actions render in (forward steps first, then off-ramps). */

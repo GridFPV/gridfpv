@@ -4,7 +4,7 @@
  * plus the real `roundRanking` / `classStandings` client helpers.
  *
  * Sets up a real class + roster + membership + round on the Practice event through the real client
- * helpers, schedules that round's heat (tagged with the round + class), drives it to `Scored` with
+ * helpers, schedules that round's heat (tagged with the round + class), drives it to `Final` with
  * deterministic inserted laps (pilot A faster than B), then reads the two projections back through
  * the real `@gridfpv/protocol-client`. Asserts the round ranking comes back best-first (A then B)
  * and the class standings aggregate that round into one per-pilot row each, A leading on points. If

@@ -75,7 +75,7 @@
   // ── Race clock (#62) ────────────────────────────────────────────────────────────────
   // The phase-driven elapsed clock now lives in the shared `useRaceClock` helper so the
   // persistent ContextHeader (#85) and this screen drive the *same* clock from one place
-  // (ticks while Running, freezes on Finished/Scored, resets otherwise). See raceClock.svelte.ts.
+  // (ticks while Running, freezes on Finished/Final, resets otherwise). See raceClock.svelte.ts.
   const clock = useRaceClock(() => phase);
   const elapsedMs = $derived(clock.elapsedMs);
 
@@ -259,7 +259,7 @@
   .hud[data-phase='Finished'] {
     --_phase: var(--gf-phase-finished);
   }
-  .hud[data-phase='Scored'] {
+  .hud[data-phase='Final'] {
     --_phase: var(--gf-phase-scored);
   }
   .label {

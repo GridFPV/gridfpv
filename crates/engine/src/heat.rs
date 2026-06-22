@@ -7,12 +7,12 @@
 //! Staged    --> Armed     : arm
 //! Armed     --> Running   : start
 //! Running   --> Finished  : time elapsed / all landed (finish)
-//! Finished  --> Scored    : score
-//! Scored    --> [*]       : advance
+//! Finished  --> Final     : score
+//! Final     --> [*]       : advance
 //! Staged    --> Scheduled : abort
 //! Armed     --> Staged    : abort
 //! Running   --> Staged    : abort / restart
-//! Scored    --> Scheduled : discard & re-run
+//! Final     --> Scheduled : discard & re-run
 //! ```
 //!
 //! This module is **pure** (race-engine.html §6): it reads no clock and rolls no
@@ -34,8 +34,9 @@ use std::fmt;
 use gridfpv_events::{Event, HeatId, HeatTransition};
 
 /// The states of the heat loop (race-engine.html §2). `Scheduled` is the entry
-/// state a [`Event::HeatScheduled`] creates; `Scored` is reached when the result is
-/// finalized; `advance` leaves the machine (terminal for this heat).
+/// state a [`Event::HeatScheduled`] creates; `Final` is reached when the result is
+/// finalized (via the `Score` command); `advance` leaves the machine (terminal for
+/// this heat).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeatState {
     /// Created with a lineup, not yet staged (`[*] → Scheduled`).
@@ -49,7 +50,7 @@ pub enum HeatState {
     /// The race closed — time elapsed or all landed.
     Finished,
     /// The result is finalized.
-    Scored,
+    Final,
 }
 
 /// The imperative commands of live race control (race-engine.html §2). A command is
@@ -78,16 +79,16 @@ pub enum HeatCommand {
     Start,
     /// Close the race — time elapsed / all landed (Running → Finished).
     Finish,
-    /// Finalize the result (Finished → Scored).
+    /// Finalize the result (Finished → Final).
     Score,
-    /// Hand results to the format generator (Scored → terminal).
+    /// Hand results to the format generator (Final → terminal).
     Advance,
     /// Abandon before scoring — the target depends on the from-state
     /// (Staged → Scheduled, Armed → Staged, Running → Staged).
     Abort,
     /// Restart a running heat from staging (Running → Staged).
     Restart,
-    /// Discard a scored heat for a re-run (Scored → Scheduled).
+    /// Discard a scored heat for a re-run (Final → Scheduled).
     Discard,
 }
 
@@ -129,7 +130,7 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
         (S::Armed, C::Start) => HeatTransition::Running,
         (S::Running, C::Finish) => HeatTransition::Finished,
         (S::Finished, C::Score) => HeatTransition::Scored,
-        (S::Scored, C::Advance) => HeatTransition::Advanced,
+        (S::Final, C::Advance) => HeatTransition::Advanced,
 
         // Off-ramps. Abort is legal from Staged/Armed/Running (it backs up a
         // state); the landing state is resolved by `next_state`.
@@ -137,7 +138,7 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
         // Restart applies only to a running heat (back to staging).
         (S::Running, C::Restart) => HeatTransition::Restarted,
         // Discard-and-re-run applies only to a scored heat.
-        (S::Scored, C::Discard) => HeatTransition::Discarded,
+        (S::Final, C::Discard) => HeatTransition::Discarded,
 
         // Everything else is illegal in this state.
         _ => return Err(IllegalTransition { state, command }),
@@ -152,7 +153,7 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
 /// - `Aborted` from `Staged` → `Scheduled`; from `Armed`/`Running` → `Staged`.
 /// - `Restarted` → `Staged` (a running heat back to staging).
 /// - `Discarded` → `Scheduled` (a scored heat queued for re-run).
-/// - `Advanced` is terminal for the heat; it stays `Scored`.
+/// - `Advanced` is terminal for the heat; it stays `Final`.
 ///
 /// `from` is consulted only for `Aborted` (whose target is state-dependent). If a
 /// transition is replayed from an unexpected state it still resolves to its canonical
@@ -166,10 +167,10 @@ pub fn next_state(from: HeatState, transition: HeatTransition) -> HeatState {
         T::Armed => S::Armed,
         T::Running => S::Running,
         T::Finished => S::Finished,
-        T::Scored => S::Scored,
-        // Advance hands off to the format generator; the heat itself stays Scored
+        T::Scored => S::Final,
+        // Advance hands off to the format generator; the heat itself stays Final
         // (terminal). The state machine for this heat ends here.
-        T::Advanced => S::Scored,
+        T::Advanced => S::Final,
         // Abort backs up one state: Staged → Scheduled, Armed/Running → Staged.
         T::Aborted => match from {
             S::Staged => S::Scheduled,
@@ -221,7 +222,7 @@ pub fn heat_state<'a>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GraceWindow {
     /// Late crossings count for the whole `Finished` phase, until the heat is
-    /// `Scored`. The default.
+    /// `Final`. The default.
     #[default]
     UntilScored,
     /// Late crossings count only for `micros` microseconds after the heat finished;
@@ -236,7 +237,7 @@ pub enum GraceWindow {
 /// Whether a pass should be consumed by this heat (race-engine.html §2).
 ///
 /// The rule: **passes are consumed only while the heat is `Running`, plus the grace
-/// window after it `Finished`** — by default until the heat is `Scored`.
+/// window after it `Finished`** — by default until the heat is `Final`.
 ///
 /// Inputs:
 /// - `state` — the heat's current [`HeatState`].
@@ -254,8 +255,8 @@ pub enum GraceWindow {
 ///   - [`GraceWindow::Duration { micros }`]: `true` iff
 ///     `since_finished_micros <= micros` (a `None` elapsed is treated as within the
 ///     window, since the caller could not place the pass after finish).
-/// - any other state (`Scheduled`, `Staged`, `Armed`, `Scored`) → `false`. In
-///   particular, once `Scored` the window is closed regardless of `grace`.
+/// - any other state (`Scheduled`, `Staged`, `Armed`, `Final`) → `false`. In
+///   particular, once `Final` the window is closed regardless of `grace`.
 ///
 /// Pure: it derives consumption from the supplied values and reads no clock itself.
 pub fn consumes_pass(
@@ -288,7 +289,7 @@ mod tests {
         HeatState::Armed,
         HeatState::Running,
         HeatState::Finished,
-        HeatState::Scored,
+        HeatState::Final,
     ];
 
     const ALL_COMMANDS: [HeatCommand; 9] = [
@@ -316,13 +317,13 @@ mod tests {
             (S::Armed, C::Start, T::Running),
             (S::Running, C::Finish, T::Finished),
             (S::Finished, C::Score, T::Scored),
-            (S::Scored, C::Advance, T::Advanced),
+            (S::Final, C::Advance, T::Advanced),
             // off-ramps
             (S::Staged, C::Abort, T::Aborted),
             (S::Armed, C::Abort, T::Aborted),
             (S::Running, C::Abort, T::Aborted),
             (S::Running, C::Restart, T::Restarted),
-            (S::Scored, C::Discard, T::Discarded),
+            (S::Final, C::Discard, T::Discarded),
         ]
     }
 
@@ -373,9 +374,9 @@ mod tests {
         assert_eq!(next_state(S::Staged, T::Armed), S::Armed);
         assert_eq!(next_state(S::Armed, T::Running), S::Running);
         assert_eq!(next_state(S::Running, T::Finished), S::Finished);
-        assert_eq!(next_state(S::Finished, T::Scored), S::Scored);
-        // advance is terminal: the heat stays Scored.
-        assert_eq!(next_state(S::Scored, T::Advanced), S::Scored);
+        assert_eq!(next_state(S::Finished, T::Scored), S::Final);
+        // advance is terminal: the heat stays Final.
+        assert_eq!(next_state(S::Final, T::Advanced), S::Final);
     }
 
     #[test]
@@ -395,7 +396,7 @@ mod tests {
         use HeatState as S;
         use HeatTransition as T;
         assert_eq!(next_state(S::Running, T::Restarted), S::Staged);
-        assert_eq!(next_state(S::Scored, T::Discarded), S::Scheduled);
+        assert_eq!(next_state(S::Final, T::Discarded), S::Scheduled);
     }
 
     #[test]
@@ -407,8 +408,8 @@ mod tests {
             (HeatCommand::Arm, HeatState::Armed),
             (HeatCommand::Start, HeatState::Running),
             (HeatCommand::Finish, HeatState::Finished),
-            (HeatCommand::Score, HeatState::Scored),
-            (HeatCommand::Advance, HeatState::Scored),
+            (HeatCommand::Score, HeatState::Final),
+            (HeatCommand::Advance, HeatState::Final),
         ];
         for (command, expected) in path {
             let transition = apply(state, command).expect("legal on forward path");
@@ -457,7 +458,7 @@ mod tests {
             changed(HeatTransition::Finished),
             changed(HeatTransition::Scored),
         ];
-        assert_eq!(heat_state(&events, &heat()), Some(HeatState::Scored));
+        assert_eq!(heat_state(&events, &heat()), Some(HeatState::Final));
     }
 
     #[test]
@@ -484,7 +485,7 @@ mod tests {
             changed(HeatTransition::Running),
             changed(HeatTransition::Finished),
             changed(HeatTransition::Scored),
-            changed(HeatTransition::Discarded), // Scored → Scheduled
+            changed(HeatTransition::Discarded), // Final → Scheduled
         ];
         assert_eq!(heat_state(&events, &heat()), Some(HeatState::Scheduled));
     }
@@ -561,12 +562,12 @@ mod tests {
     #[test]
     fn grace_closed_once_scored() {
         assert!(!consumes_pass(
-            HeatState::Scored,
+            HeatState::Final,
             GraceWindow::UntilScored,
             None
         ));
         assert!(!consumes_pass(
-            HeatState::Scored,
+            HeatState::Final,
             GraceWindow::Duration { micros: 1_000_000 },
             Some(0),
         ));

@@ -31,7 +31,7 @@
 //! 2. **Build the generator** for the field via
 //!    [`FormatRegistry::build`](gridfpv_engine::format::FormatRegistry::build).
 //! 3. **Read the round's completed heats from the log** — every heat tagged
-//!    `round == round.id` whose result is final (it reached `Scored`), scored under the
+//!    `round == round.id` whose result is final (it reached `Final`), scored under the
 //!    round's [`win_condition`](crate::events::RoundDef::win_condition).
 //! 4. **`generator.next(&completed)`** → either emit a `HeatScheduled` per plan (tagged
 //!    with the round, and the class when the round is single-class) or surface *round
@@ -349,7 +349,7 @@ fn format_config(round: &RoundDef, field: Vec<CompetitorRef>) -> FormatConfig {
 /// [`win_condition`](RoundDef::win_condition) (race redesign Slice 3a).
 ///
 /// A heat counts as completed when it was scheduled tagged with this round *and* its folded
-/// [`HeatState`] is [`Scored`](HeatState::Scored) (the FSM terminal the `Score` command
+/// [`HeatState`] is [`Final`](HeatState::Final) (the FSM terminal the `Score` command
 /// reaches). Each is scored via [`score_marshaled`] over the passes that heat produced (the
 /// per-heat pass window, see [`heat_passes`]). The order is the order the heats were first
 /// scheduled, which is the order the generator emitted them — so the history fed to
@@ -375,7 +375,7 @@ pub fn completed_heats(round: &RoundDef, events: &[Event]) -> Vec<CompletedHeat>
 
     tagged
         .into_iter()
-        .filter(|heat| heat_state(events, heat) == Some(HeatState::Scored))
+        .filter(|heat| heat_state(events, heat) == Some(HeatState::Final))
         .map(|heat| {
             let passes = heat_passes(events, &heat);
             let race_start = passes
@@ -1181,7 +1181,7 @@ mod tests {
         })
     }
 
-    /// Drive one heat from Running to Scored with a set of best-lap passes, returning the
+    /// Drive one heat from Running to Final with a set of best-lap passes, returning the
     /// events that span it (schedule is the caller's).
     fn run_heat_events(heat: &str, passes: Vec<Event>) -> Vec<Event> {
         let mut v = vec![
@@ -1239,7 +1239,7 @@ mod tests {
             other => panic!("expected scheduled, got {other:?}"),
         };
 
-        // Append the tagged schedule + drive it to Scored with some passes.
+        // Append the tagged schedule + drive it to Final with some passes.
         let mut log = vec![scheduled(&heat_id, "q1", "open", &["A", "B"])];
         log.extend(run_heat_events(
             &heat_id,
@@ -1284,7 +1284,7 @@ mod tests {
             vec![member("open", &["A", "B", "C", "D"])],
         );
 
-        // Run the qual heat to Scored: A fastest, then B, C, D.
+        // Run the qual heat to Final: A fastest, then B, C, D.
         let first = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
         let qheat = match first {
             FillOutcome::Scheduled { heat, .. } => heat.0,
@@ -1461,7 +1461,7 @@ mod tests {
     // --- Per-class standings (race redesign Slice 5/6a) ------------------------------------
 
     /// A complete scored qual heat for a round + class with four pilots A>B>C>D on best lap,
-    /// returning the round-tagged schedule plus the run-to-Scored events.
+    /// returning the round-tagged schedule plus the run-to-Final events.
     fn scored_qual_heat(heat: &str, round: &str, class: &str, names: &[&str]) -> Vec<Event> {
         let mut log = vec![scheduled(heat, round, class, names)];
         // Holeshot for all, then a distinct lap per pilot so the best-lap order is A<B<C<D.

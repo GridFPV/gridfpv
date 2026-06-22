@@ -1501,7 +1501,7 @@ mod tests {
         })
     }
 
-    /// A recorded heat log: q-1 scheduled, run through to Scored, with laps for A and B.
+    /// A recorded heat log: q-1 scheduled, run through to Final, with laps for A and B.
     fn recorded_heat() -> Vec<Event> {
         vec![
             Event::HeatScheduled {
@@ -1582,7 +1582,7 @@ mod tests {
         match snap.body {
             ProjectionBody::LiveRaceState(ls) => {
                 assert_eq!(ls.current_heat, Some(HeatId("q-1".into())));
-                assert_eq!(ls.phase, HeatPhase::Scored);
+                assert_eq!(ls.phase, HeatPhase::Final);
                 assert_eq!(
                     ls.active_pilots,
                     vec![CompetitorRef("A".into()), CompetitorRef("B".into())]

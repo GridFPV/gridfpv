@@ -92,7 +92,7 @@
   // The round-tagged heats list (one entry per scheduled heat) and the pilot directory used to
   // resolve a heat's `CompetitorRef` lineup to callsigns. The heats list is a read of
   // `GET /events/{id}/heats`; it is re-fetched on enter, after each Fill round / manual build, and
-  // whenever the live state advances (so a heat's status follows it through Running → Scored).
+  // whenever the live state advances (so a heat's status follows it through Running → Final).
 
   let pilots = $state<Pilot[]>([]);
   let heats = $state<HeatSummary[]>([]);
@@ -130,13 +130,13 @@
   }
 
   function statusLabel(h: HeatSummary): string {
-    if (h.phase === 'Scored') return 'Scored';
+    if (h.phase === 'Final') return 'Final';
     if (h.phase === 'Scheduled') return 'Scheduled';
     // Staged / Armed / Running / Finished all read as the heat being live/in-progress.
     return h.phase === 'Finished' ? 'Finished' : 'Running';
   }
   function statusKind(phase: HeatPhase): 'scheduled' | 'running' | 'scored' {
-    if (phase === 'Scored') return 'scored';
+    if (phase === 'Final') return 'scored';
     if (phase === 'Scheduled') return 'scheduled';
     return 'running';
   }

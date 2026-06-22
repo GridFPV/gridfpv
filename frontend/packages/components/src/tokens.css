@@ -18,7 +18,7 @@
  * Token groups:
  *   --gf-color-*    raw neutral + brand + accent ramps (rarely used directly)
  *   --gf-surface/…  SEMANTIC color roles (surface, elevated, border, text, …)
- *   --gf-phase-*    the six heat-phase colors (Scheduled→…→Scored)
+ *   --gf-phase-*    the six heat-phase colors (Scheduled→…→Final)
  *   --gf-conn-*     connection-state colors
  *   --gf-space-*    spacing scale (4px base)
  *   --gf-font-*     type family + size scale + weights + line-heights
@@ -154,7 +154,7 @@
 
   /* Violet accent — a distinct "user-defined / your own" hue, used for the
    * Custom class source badge so it reads apart from the org tones
-   * (green/blue/amber/red). Shares the violet ramp with the Scored phase. */
+   * (green/blue/amber/red). Shares the violet ramp with the Final phase. */
   --gf-violet: var(--gf-violet-400);
   --gf-violet-soft: color-mix(in srgb, var(--gf-violet-400) 16%, transparent);
 
@@ -164,9 +164,9 @@
   --gf-color-warn: var(--gf-warn);
   --gf-color-danger: var(--gf-danger);
 
-  /* ── Heat-phase colors (Scheduled→Staged→Armed→Running→Finished→Scored). ───
+  /* ── Heat-phase colors (Scheduled→Staged→Armed→Running→Finished→Final). ───
    * A deliberate progression: neutral → warming amber → hot red (armed/ready) →
-   * live brand-green (running) → cool blue (finished) → settled violet (scored). */
+   * live brand-green (running) → cool blue (finished) → settled violet (final). */
   --gf-phase-scheduled: var(--gf-neutral-600);
   --gf-phase-staged: var(--gf-amber-400);
   --gf-phase-armed: var(--gf-red-400);

@@ -123,7 +123,7 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
 
   // ── Score the heat ───────────────────────────────────────────────────────────────────
   await page.getByRole('button', { name: 'Score', exact: true }).click();
-  await expect(page.locator('.phase').first()).toHaveText('Scored');
+  await expect(page.locator('.phase').first()).toHaveText('Final');
 
   // ── Read the results: the Results screen shows the pilots, lap counts, and an order ───
   await page.getByRole('button', { name: /Results/ }).click();

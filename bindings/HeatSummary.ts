@@ -42,7 +42,7 @@ round?: RoundId,
  */
 frequencies?: Array<[CompetitorRef, number]>, 
 /**
- * The heat's folded loop phase (its derived status: scheduled / running / scored / …).
+ * The heat's folded loop phase (its derived status: scheduled / running / final / …).
  */
 phase: HeatPhase, 
 /**

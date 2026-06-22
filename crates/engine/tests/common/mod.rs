@@ -103,7 +103,7 @@ fn wait_until(
 ///    events such as lifecycle/`CompetitorSeen` are dropped — only `Pass`es are kept).
 ///
 /// Folding the result with [`gridfpv_engine::heat::heat_state`] yields
-/// [`HeatState::Scored`]; the passes all fall in the live window, so cross-checking
+/// [`HeatState::Final`]; the passes all fall in the live window, so cross-checking
 /// each pass's surrounding state with [`gridfpv_engine::heat::consumes_pass`] holds.
 ///
 /// Timing is tolerant: it waits for RH to reach `RACING` and for at least one pass,
@@ -180,7 +180,7 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     // Close the heat loop: Finished -> Scored.
     drive(&mut log, &heat, &mut state, HeatCommand::Finish);
     drive(&mut log, &heat, &mut state, HeatCommand::Score);
-    debug_assert_eq!(state, HeatState::Scored);
+    debug_assert_eq!(state, HeatState::Final);
 
     log
 }

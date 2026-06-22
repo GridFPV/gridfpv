@@ -2,7 +2,7 @@
 
 /**
  * The heat-loop phase the live state reports (protocol.html §1: `Scheduled → Staged →
- * Armed → Running → Finished → Scored`).
+ * Armed → Running → Finished → Final`).
  *
  * This is the *projected* view of the heat loop — the folded current phase a client
  * renders — not the raw [`HeatTransition`](gridfpv_events::HeatTransition) event the
@@ -10,4 +10,4 @@
  * one of these phases, so the live view stays a simple linear status. A #41-era detail
  * the placeholder pins minimally.
  */
-export type HeatPhase = "Scheduled" | "Staged" | "Armed" | "Running" | "Finished" | "Scored";
+export type HeatPhase = "Scheduled" | "Staged" | "Armed" | "Running" | "Finished" | "Final";
