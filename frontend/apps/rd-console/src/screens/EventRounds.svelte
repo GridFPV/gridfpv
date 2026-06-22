@@ -187,6 +187,15 @@
   // controls for it and shows the practice heat as ready to Start.
   const isOpenPracticeRound = (round: RoundDef): boolean => round.format === OPEN_PRACTICE;
 
+  // The display name for a heat in the Heats list. An open-practice round auto-creates a single
+  // heat (its lineup = the active channels); it reads better as "Open Practice Heat" than the
+  // generated id. Heats carry no backend label, so this is derived from the round's format —
+  // every other round shows the heat's own id.
+  const OPEN_PRACTICE_HEAT_NAME = 'Open Practice Heat';
+  function heatDisplayName(round: RoundDef, h: HeatSummary): string {
+    return isOpenPracticeRound(round) ? OPEN_PRACTICE_HEAT_NAME : h.heat;
+  }
+
   // A heat's per-pilot channel assignment, resolved to a band+channel label (race redesign Slice
   // 4b). `HeatScheduled.frequencies` pairs each ref with a raw MHz; map ref → label so the lineup
   // can show it. A sim/free-text heat carries no frequencies, so a ref resolves to `undefined` ("—").
@@ -1318,7 +1327,7 @@
                       <li class="heat-row" class:current={h.is_current}>
                         <div class="heat-main">
                           <div class="heat-head">
-                            <span class="heat-id">{h.heat}</span>
+                            <span class="heat-id">{heatDisplayName(round, h)}</span>
                             {#if h.is_current}<span class="current-pill">Current</span>{/if}
                             <span class={`status-pill ${statusKind(h.phase)}`}
                               >{statusLabel(h)}</span

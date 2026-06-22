@@ -11,8 +11,9 @@
 //! Final      --> Unofficial : revert
 //! Final      --> [*]        : advance
 //! Staged     --> Scheduled  : abort
-//! Armed      --> Staged     : abort
-//! Running    --> Staged     : abort / restart
+//! Armed      --> Scheduled  : abort
+//! Running    --> Scheduled  : abort
+//! Running    --> Staged     : restart
 //! Armed      --> Staged     : restart
 //! Unofficial --> Staged     : restart
 //! Final      --> Scheduled  : discard & re-run
@@ -118,8 +119,8 @@ pub enum HeatCommand {
     Advance,
     /// Re-open a finalized result for correction (Final → Unofficial).
     Revert,
-    /// Abandon before finalizing — the target depends on the from-state
-    /// (Staged → Scheduled, Armed → Staged, Running → Staged).
+    /// Abandon before finalizing — always resets the heat to `Scheduled`, from any
+    /// abortable state (Staged/Armed/Running), so the RD re-Stages it.
     Abort,
     /// Restart a committed heat from staging (Armed/Running/Unofficial → Staged).
     Restart,
@@ -172,8 +173,8 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
         (S::Armed, C::SkipCountdown) => HeatTransition::Running,
         (S::Running, C::ForceEnd) => HeatTransition::Finished,
 
-        // Off-ramps. Abort is legal from Staged/Armed/Running (it backs up a
-        // state); the landing state is resolved by `next_state`.
+        // Off-ramps. Abort is legal from Staged/Armed/Running; it always resets the
+        // heat to `Scheduled` (see `next_state`), so the RD re-Stages it.
         (S::Staged | S::Armed | S::Running, C::Abort) => HeatTransition::Aborted,
         // Restart applies to any committed heat short of finalized (Armed/Running/
         // Unofficial), back to staging for a clean re-run.
@@ -191,18 +192,20 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
 
 /// The state a recorded [`HeatTransition`] lands in, given the state it left.
 ///
-/// The forward transitions name their target state directly. The off-ramps depend on
-/// the from-state per the diagram:
-/// - `Aborted` from `Staged` → `Scheduled`; from `Armed`/`Running` → `Staged`.
+/// The forward transitions name their target state directly. The off-ramps land per
+/// the diagram:
+/// - `Aborted` → `Scheduled` (from any abortable state — Staged/Armed/Running — so the
+///   RD re-Stages it).
 /// - `Restarted` → `Staged` (a committed heat back to staging).
 /// - `Reverted` → `Unofficial` (a finalized heat re-opened for correction).
 /// - `Discarded` → `Scheduled` (a finalized heat queued for re-run).
 /// - `Advanced` is terminal for the heat; it stays `Final`.
 ///
-/// `from` is consulted only for `Aborted` (whose target is state-dependent). If a
+/// `from` is no longer consulted for any transition (every target is now state-
+/// independent), but is kept in the signature so the fold reads uniformly. If a
 /// transition is replayed from an unexpected state it still resolves to its canonical
 /// target; legality is [`apply`]'s job, not this function's.
-pub fn next_state(from: HeatState, transition: HeatTransition) -> HeatState {
+pub fn next_state(_from: HeatState, transition: HeatTransition) -> HeatState {
     use HeatState as S;
     use HeatTransition as T;
 
@@ -217,11 +220,9 @@ pub fn next_state(from: HeatState, transition: HeatTransition) -> HeatState {
         T::Advanced => S::Final,
         // Revert re-opens a finalized result back to Unofficial for correction.
         T::Reverted => S::Unofficial,
-        // Abort backs up one state: Staged → Scheduled, Armed/Running → Staged.
-        T::Aborted => match from {
-            S::Staged => S::Scheduled,
-            _ => S::Staged,
-        },
+        // Abort always resets the heat to Scheduled (from any abortable state), so the
+        // RD re-Stages it.
+        T::Aborted => S::Scheduled,
         T::Restarted => S::Staged,
         T::Discarded => S::Scheduled,
     }
@@ -505,15 +506,14 @@ mod tests {
     }
 
     #[test]
-    fn abort_target_depends_on_the_from_state() {
+    fn abort_always_resets_to_scheduled() {
         use HeatState as S;
         use HeatTransition as T;
-        // Staged → Scheduled
+        // Abort always lands in Scheduled, from any abortable state, so the RD
+        // re-Stages the heat.
         assert_eq!(next_state(S::Staged, T::Aborted), S::Scheduled);
-        // Armed → Staged
-        assert_eq!(next_state(S::Armed, T::Aborted), S::Staged);
-        // Running → Staged
-        assert_eq!(next_state(S::Running, T::Aborted), S::Staged);
+        assert_eq!(next_state(S::Armed, T::Aborted), S::Scheduled);
+        assert_eq!(next_state(S::Running, T::Aborted), S::Scheduled);
     }
 
     #[test]
@@ -606,13 +606,14 @@ mod tests {
 
     #[test]
     fn heat_state_reconstructs_an_abort_and_re_run() {
-        // Stage, arm, run, abort (back to Staged), then re-arm and run on.
+        // Stage, arm, run, abort (back to Scheduled), then re-stage, re-arm and run on.
         let events = vec![
             scheduled(),
             changed(HeatTransition::Staged),
             changed(HeatTransition::Armed),
             changed(HeatTransition::Running),
-            changed(HeatTransition::Aborted), // Running → Staged
+            changed(HeatTransition::Aborted), // Running → Scheduled
+            changed(HeatTransition::Staged),
             changed(HeatTransition::Armed),
             changed(HeatTransition::Running),
         ];
@@ -669,7 +670,7 @@ mod tests {
         let first = heat_state(&events, &heat());
         let second = heat_state(&events, &heat());
         assert_eq!(first, second);
-        assert_eq!(first, Some(HeatState::Staged));
+        assert_eq!(first, Some(HeatState::Scheduled));
     }
 
     #[test]

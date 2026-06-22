@@ -229,7 +229,7 @@ pub enum HeatTransition {
     Advanced,
     /// A finalized result re-opened for correction (Final → Unofficial).
     Reverted,
-    /// Abandoned before finalizing (Staged/Armed/Running → back a state).
+    /// Abandoned before finalizing (Staged/Armed/Running → Scheduled, so the RD re-Stages).
     Aborted,
     /// A committed heat restarted from staging.
     Restarted,

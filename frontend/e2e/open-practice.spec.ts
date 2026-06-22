@@ -94,6 +94,8 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   await expect(heatSection.getByRole('button', { name: 'Fill next heat' })).toHaveCount(0);
   // The auto-created heat lands (its node lineup shows in the heats list).
   await expect(heatSection.getByText(/node-0/).first()).toBeVisible({ timeout: 15_000 });
+  // It displays under the friendly name "Open Practice Heat", not its generated heat id.
+  await expect(heatSection.getByText('Open Practice Heat').first()).toBeVisible();
 
   // ── Live control → the per-channel practice board ───────────────────────────────────────────
   await openTab(page, 'Live control');
