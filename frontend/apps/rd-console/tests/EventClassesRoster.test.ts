@@ -151,3 +151,79 @@ describe('EventClassesRoster — per-pilot channel (sourced from the primary tim
     expect(screen.getByText(/No channels to assign yet/i)).toBeInTheDocument();
   });
 });
+
+describe('EventClassesRoster — select all / unselect all pilots', () => {
+  // An event with neither pilot rostered yet, so Select all has work to do.
+  const EMPTY_ROSTER: EventMeta = { ...SINGLE, roster: [] };
+
+  it('select-all ticks every directory pilot, unselect-all clears the roster selection', async () => {
+    const { session } = makeTestSession({ ...impls(), event: EMPTY_ROSTER });
+    render(EventClassesRoster, { session });
+
+    // Both roster checkboxes start unchecked (nobody present yet).
+    const ace = (await screen.findByLabelText('Roster Ace')) as HTMLInputElement;
+    const bee = screen.getByLabelText('Roster Bee') as HTMLInputElement;
+    expect(ace.checked).toBe(false);
+    expect(bee.checked).toBe(false);
+
+    // Select all → both become checked.
+    await fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
+    await waitFor(() => expect(ace.checked).toBe(true));
+    expect(bee.checked).toBe(true);
+
+    // Unselect all → both clear again.
+    await fireEvent.click(screen.getByRole('button', { name: 'Unselect all' }));
+    await waitFor(() => expect(ace.checked).toBe(false));
+    expect(bee.checked).toBe(false);
+  });
+});
+
+describe('EventClassesRoster — auto-assign channels', () => {
+  it('fills every placed pilot from the channel pool (round-robin) and saves each class', async () => {
+    const setClassMembershipImpl = vi.fn(async () => SINGLE);
+    const { session } = makeTestSession({
+      ...impls({ setClassMembershipImpl }),
+      event: SINGLE
+    });
+    render(EventClassesRoster, { session });
+
+    // Both pilots auto-placed in the single class, channels unset to start.
+    const aceSel = (await screen.findByLabelText('Channel for Ace')) as HTMLSelectElement;
+    const beeSel = screen.getByLabelText('Channel for Bee') as HTMLSelectElement;
+    expect(aceSel.value).toBe('');
+    expect(beeSel.value).toBe('');
+
+    // Auto-assign → Ace gets pool[0] (5658), Bee gets pool[1] (5695); each select reflects it.
+    await fireEvent.click(screen.getByRole('button', { name: 'Auto-assign channels' }));
+    await waitFor(() => expect(aceSel.value).toBe('5658'));
+    expect(beeSel.value).toBe('5695');
+
+    // Membership saved for the lone class, both MemberSlots carrying their assigned channel.
+    await waitFor(() => expect(setClassMembershipImpl).toHaveBeenCalledTimes(1));
+    expect(setClassMembershipImpl).toHaveBeenCalledWith(
+      'http://d.local',
+      'e1',
+      'open',
+      [
+        { pilot: 'p1', channel: 5658 },
+        { pilot: 'p2', channel: 5695 }
+      ],
+      'tok'
+    );
+  });
+
+  it('disables auto-assign when the primary timer has no channels', async () => {
+    const { session } = makeTestSession({
+      ...impls({
+        listTimersImpl: vi.fn(async () => [{ ...MOCK, available_channels: [] }])
+      }),
+      event: SINGLE
+    });
+    render(EventClassesRoster, { session });
+
+    const btn = (await screen.findByRole('button', {
+      name: 'Auto-assign channels'
+    })) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+});

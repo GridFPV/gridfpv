@@ -1,0 +1,150 @@
+/**
+ * Classes / Pilots / Channels — the three labelled collapsible boxes on the Classes & Roster stage,
+ * plus the bulk roster select-all and the channel auto-assign (ui: Classes/Pilots/Channels boxes).
+ *
+ * The stage is restructured into exactly three top-level collapsible boxes — **Classes**, **Pilots**,
+ * **Channels** — each persisting its open state per stable section id in `localStorage`
+ * (gf.collapse.<event>.<section>). This spec drives the real UI against a real Director:
+ *
+ *   1. **Collapse each of the three boxes**, assert their content hides, reload, and assert all three
+ *      stayed collapsed (the persisted state stuck).
+ *   2. Re-open them, **Select all** in the Pilots box and save the roster, then
+ *   3. **Auto-assign channels** in the Channels box and assert every placed pilot got a channel
+ *      (its `<select>` carries a non-empty value).
+ *
+ * Nothing about the boxes / bulk actions is mocked. Cleans the shared Director's event back to empty.
+ */
+import { expect, test } from './observability.js';
+
+async function enterPractice(page: import('@playwright/test').Page) {
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const eventsCard = page.getByRole('button', { name: /Events/ });
+  await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
+  if (!(await liveNav.isVisible().catch(() => false))) {
+    await eventsCard.click();
+    const picker = page.getByRole('heading', { name: 'Choose an event' });
+    await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+    if (await picker.isVisible().catch(() => false)) {
+      await page
+        .getByRole('button', { name: /Practice/ })
+        .first()
+        .click();
+    }
+    await expect(liveNav).toBeVisible({ timeout: 15_000 });
+  }
+}
+
+async function openTab(page: import('@playwright/test').Page, name: string) {
+  await page.getByRole('navigation', { name: 'Screens' }).getByRole('button', { name }).click();
+}
+
+/**
+ * A box's top-level toggle (a Collapsible header button) by its title. Scoped to the stage region and
+ * to *direct-child* collapsible toggles, so the nav item ("Classes & Roster") and the nested Roster /
+ * placement collapsibles don't match.
+ */
+function boxToggle(page: import('@playwright/test').Page, title: string) {
+  return page
+    .getByRole('region', { name: 'Classes and roster' })
+    .locator('> .gf-collapsible > .gf-collapsible-head > .gf-collapsible-toggle')
+    .filter({ has: page.getByText(title, { exact: true }) });
+}
+
+test('three labelled boxes collapse + persist; select-all roster; auto-assign channels', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  const SUFFIX = Date.now();
+  const PILOTS = [`E2E-Box-Ace-${SUFFIX}`, `E2E-Box-Bee-${SUFFIX}`, `E2E-Box-Cas-${SUFFIX}`];
+
+  // ── Set up over the real write paths: Open Class selected, three directory pilots. ─────────────
+  const classes = (await (await page.request.get(`${base}/classes`)).json()) as Array<{
+    id: string;
+    name: string;
+  }>;
+  const classId = classes.find((c) => c.name === 'Open Class')!.id;
+  const pilotIds: string[] = [];
+  for (const callsign of PILOTS) {
+    const p = (await (
+      await page.request.post(`${base}/pilots`, { ...json, data: { callsign } })
+    ).json()) as { id: string };
+    pilotIds.push(p.id);
+  }
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [classId] } });
+
+  await page.goto('/');
+  await enterPractice(page);
+  await openTab(page, 'Classes & Roster');
+
+  // ── 1. The three labelled boxes exist; collapse each one and assert its body hides. ────────────
+  const classesBox = boxToggle(page, 'Classes');
+  const pilotsBox = boxToggle(page, 'Pilots');
+  const channelsBox = boxToggle(page, 'Channels');
+  for (const box of [classesBox, pilotsBox, channelsBox]) {
+    await expect(box).toBeVisible({ timeout: 15_000 });
+    await expect(box).toHaveAttribute('aria-expanded', 'true');
+  }
+
+  // Collapse all three.
+  for (const box of [classesBox, pilotsBox, channelsBox]) {
+    await box.click();
+    await expect(box).toHaveAttribute('aria-expanded', 'false');
+  }
+  if (process.env.GRIDFPV_SHOTS)
+    await page
+      .getByRole('region', { name: 'Classes and roster' })
+      .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/classes-roster-boxes-collapsed.png` });
+
+  // ── It persisted: a reload keeps all three boxes collapsed. ────────────────────────────────────
+  await page.reload();
+  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await openTab(page, 'Classes & Roster');
+  for (const title of ['Classes', 'Pilots', 'Channels']) {
+    await expect(boxToggle(page, title)).toHaveAttribute('aria-expanded', 'false', {
+      timeout: 15_000
+    });
+  }
+
+  // ── 2. Re-open the boxes; Select all in the Pilots box and save the roster. ────────────────────
+  await boxToggle(page, 'Pilots').click();
+  await expect(boxToggle(page, 'Pilots')).toHaveAttribute('aria-expanded', 'true');
+
+  await page.getByRole('button', { name: 'Select all', exact: true }).click();
+  // Every directory pilot's roster checkbox is now ticked.
+  for (const callsign of PILOTS) {
+    await expect(page.getByRole('checkbox', { name: `Roster ${callsign}` })).toBeChecked();
+  }
+  await page.getByRole('button', { name: 'Save roster' }).click();
+  // Single-class auto-fill places every rostered pilot — their channel selectors appear.
+  for (const callsign of PILOTS) {
+    await expect(page.getByLabel(`Channel for ${callsign}`)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByLabel(`Channel for ${callsign}`)).toHaveValue('');
+  }
+  if (process.env.GRIDFPV_SHOTS)
+    await page
+      .getByRole('region', { name: 'Classes and roster' })
+      .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/classes-roster-boxes-expanded.png` });
+
+  // ── 3. Auto-assign channels in the Channels box; every placed pilot ends up with a channel. ────
+  await boxToggle(page, 'Channels').click();
+  await expect(boxToggle(page, 'Channels')).toHaveAttribute('aria-expanded', 'true');
+
+  await page.getByRole('button', { name: 'Auto-assign channels' }).click();
+  for (const callsign of PILOTS) {
+    await expect(page.getByLabel(`Channel for ${callsign}`)).not.toHaveValue('', {
+      timeout: 15_000
+    });
+  }
+  if (process.env.GRIDFPV_SHOTS)
+    await page
+      .getByRole('region', { name: 'Classes and roster' })
+      .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/classes-roster-auto-assigned.png` });
+
+  // ── Clean up the shared Director's event back to empty. ────────────────────────────────────────
+  await page.request.put(`${ev}/classes/${classId}/membership`, { ...json, data: { pilots: [] } });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
+});

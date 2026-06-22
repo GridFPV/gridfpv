@@ -145,7 +145,7 @@ test('RD auto-fills a single class and assigns a pilot a channel (persists)', as
   // ── Select the built-in "Open Class" onto the event (the Classes tab) so the Roster stage has a
   //    class to place pilots into. ──
   await nav.getByRole('button', { name: 'Classes & Roster' }).click();
-  await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
   const classRow = page

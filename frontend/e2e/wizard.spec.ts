@@ -140,7 +140,7 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   // Classes & Roster tab: Open Class is selected, the pilot is present, and (single class) the pilot
   // is auto-placed with its channel selector present.
   await openTab('Classes & Roster');
-  await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
   await expect(page.getByRole('checkbox', { name: 'Select Open Class' })).toBeChecked();

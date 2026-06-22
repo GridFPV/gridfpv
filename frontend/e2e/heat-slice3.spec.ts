@@ -76,7 +76,7 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
     .getByRole('navigation', { name: 'Screens' })
     .getByRole('button', { name: 'Classes & Roster' })
     .click();
-  await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
   const classBox = page
@@ -116,7 +116,7 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
     .getByRole('navigation', { name: 'Screens' })
     .getByRole('button', { name: 'Classes & Roster' })
     .click();
-  await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
   if (await classBox.isChecked()) {
