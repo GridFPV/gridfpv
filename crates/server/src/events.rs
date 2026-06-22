@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use gridfpv_engine::format::FormatRegistry;
+use gridfpv_engine::heat::GraceWindow;
 use gridfpv_engine::scoring::WinCondition;
 use gridfpv_events::RoundId;
 use gridfpv_storage::{InMemoryLog, SqliteLog};
@@ -364,6 +365,107 @@ pub struct RoundDef {
     /// reads back as [`ChannelMode::PerHeat`], the prior behaviour); RD-overridable.
     #[serde(default)]
     pub channel_mode: ChannelMode,
+    /// The **staging timer** for this round, in seconds (heat-lifecycle Slice 2). *Informational
+    /// only* — there is **no** auto-advance out of `Staged`; the console displays it as a staging
+    /// countdown (Slice 3). Defaults to [`default_staging_timer_secs`] (300s = 5 min). Additive
+    /// (`#[serde(default)]`) so pre-Slice-2 meta reads back with the default.
+    #[serde(default = "default_staging_timer_secs")]
+    pub staging_timer_secs: u32,
+    /// The **start procedure** for this round (heat-lifecycle Slice 2) — how the heat auto-advances
+    /// `Armed → Running`. The runtime picks a randomized delay in the procedure's window once, logs
+    /// it ([`Event::HeatStarting`](gridfpv_events::Event::HeatStarting)), and fires the transition
+    /// then. Defaults to a sane randomized delay ([`StartProcedure::default`]). Additive.
+    #[serde(default)]
+    pub start_procedure: StartProcedure,
+    /// The **grace window** for late crossings after the win condition is met (heat-lifecycle
+    /// Slice 2). The runtime holds the heat in `Running` for this long after the race-end criterion
+    /// before appending the auto `Running → Unofficial`, so trailing pilots' final laps still count.
+    /// Defaults to [`default_grace_window`] (a bounded few seconds — *not* `UntilScored`, so the
+    /// auto-completion actually fires). Additive.
+    #[serde(default = "default_grace_window")]
+    pub grace_window: GraceWindow,
+}
+
+/// The default [`RoundDef::staging_timer_secs`] — **300s (5 minutes)** of staging (heat-lifecycle
+/// Slice 2). Informational only (no auto-advance); the console renders it as a staging countdown.
+pub fn default_staging_timer_secs() -> u32 {
+    300
+}
+
+/// The default [`RoundDef::grace_window`] — a **bounded 3-second** window after the win condition
+/// is met (heat-lifecycle Slice 2).
+///
+/// Deliberately a [`GraceWindow::Duration`], **not** the open-ended [`GraceWindow::UntilScored`]:
+/// the runtime's completion clock must eventually fire the `Running → Unofficial` auto-transition,
+/// so the grace window has to close on its own. Three seconds comfortably covers a trailing pilot
+/// finishing the lap they were on when the leader met the criterion, while still ending the heat
+/// promptly. RD-configurable per round.
+pub fn default_grace_window() -> GraceWindow {
+    GraceWindow::Duration { micros: 3_000_000 }
+}
+
+/// The **start procedure** that drives a heat's `Armed → Running` auto-transition (heat-lifecycle
+/// Slice 2).
+///
+/// An **extensible** enum (today the one [`RandomizedDelay`](Self::randomized-delay) mode): the
+/// runtime reads it when a heat enters `Armed`, picks a delay in the procedure's window **once**,
+/// writes it to the log as a fact ([`Event::HeatStarting`](gridfpv_events::Event::HeatStarting)),
+/// and schedules the `Running` transition for then. Randomization happens only in the runtime at
+/// emission time, never in the fold, so a replay reads the logged delay and reproduces the start
+/// exactly (race-engine.html §6). Derives serde + `ts_rs::TS`.
+///
+/// Serialized **internally tagged** on `mode` (e.g. `{ "mode": "randomized-delay", ... }`) so a
+/// future mode (a fixed countdown, an external arm-tone trigger) is an additive variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "mode")]
+#[ts(export, export_to = "bindings/")]
+pub enum StartProcedure {
+    /// **Randomized hold-then-go** (the FPV "arm… and… go" with a random hold): the runtime
+    /// picks a delay uniformly in `[min_delay_ms, max_delay_ms]` and starts the race then. This is
+    /// the canonical FPV start where pilots are armed and the go-tone comes after an
+    /// unpredictable hold.
+    #[serde(rename = "randomized-delay")]
+    RandomizedDelay {
+        /// The shortest the runtime will hold before `Running`, in milliseconds.
+        #[ts(type = "number")]
+        min_delay_ms: u32,
+        /// The longest the runtime will hold before `Running`, in milliseconds. Must be ≥
+        /// `min_delay_ms` (the runtime clamps a mis-ordered pair to a point delay defensively).
+        #[ts(type = "number")]
+        max_delay_ms: u32,
+        /// Optional start-tone cue config for the console (heat-lifecycle Slice 3 renders/plays it;
+        /// stored here now). Absent ⇒ the console uses its default tone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        tone: Option<StartTone>,
+    },
+}
+
+impl Default for StartProcedure {
+    /// A sane default randomized delay — a **2000–5000ms** hold before the go (heat-lifecycle
+    /// Slice 2), the canonical FPV start window.
+    fn default() -> Self {
+        StartProcedure::RandomizedDelay {
+            min_delay_ms: 2000,
+            max_delay_ms: 5000,
+            tone: None,
+        }
+    }
+}
+
+/// The start-tone cue for a [`StartProcedure`] (heat-lifecycle Slice 2) — stored config the console
+/// uses to play the go-tone (the audio UX lands in Slice 3). Kept minimal and additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct StartTone {
+    /// The tone frequency in hertz (e.g. `880`). Absent fields default in the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub hz: Option<u32>,
+    /// The tone duration in milliseconds (e.g. `400`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub ms: Option<u32>,
 }
 
 /// How a [`RoundDef`] assigns **video channels** to its heats (race redesign Slice 7a).
@@ -460,6 +562,21 @@ pub struct NewRoundReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub channel_mode: Option<ChannelMode>,
+    /// The round's staging timer in seconds (heat-lifecycle Slice 2). Optional — omit for the
+    /// [`default_staging_timer_secs`] (300). Informational only (no auto-advance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub staging_timer_secs: Option<u32>,
+    /// The round's start procedure (heat-lifecycle Slice 2). Optional — omit for the
+    /// [`StartProcedure::default`] randomized 2000–5000ms delay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub start_procedure: Option<StartProcedure>,
+    /// The round's grace window (heat-lifecycle Slice 2). Optional — omit for the
+    /// [`default_grace_window`] (a bounded 3s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub grace_window: Option<GraceWindow>,
 }
 
 /// The body of `PUT /events/{id}/rounds/{round}` — the editable fields of an existing round (race
@@ -487,6 +604,21 @@ pub struct UpdateRoundReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub channel_mode: Option<ChannelMode>,
+    /// The new staging timer in seconds (heat-lifecycle Slice 2). Optional — omit for the
+    /// [`default_staging_timer_secs`] (300).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub staging_timer_secs: Option<u32>,
+    /// The new start procedure (heat-lifecycle Slice 2). Optional — omit for the
+    /// [`StartProcedure::default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub start_procedure: Option<StartProcedure>,
+    /// The new grace window (heat-lifecycle Slice 2). Optional — omit for the
+    /// [`default_grace_window`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub grace_window: Option<GraceWindow>,
 }
 
 impl EventMeta {
@@ -1003,6 +1135,12 @@ impl EventRegistry {
             win_condition: req.win_condition,
             seeding: req.seeding,
             channel_mode,
+            // Heat-lifecycle Slice 2 configs: omitted request fields take their documented defaults.
+            staging_timer_secs: req
+                .staging_timer_secs
+                .unwrap_or_else(default_staging_timer_secs),
+            start_procedure: req.start_procedure.unwrap_or_default(),
+            grace_window: req.grace_window.unwrap_or_else(default_grace_window),
         };
         event.meta.rounds.push(round.clone());
         let meta = event.meta.clone();
@@ -1059,6 +1197,12 @@ impl EventRegistry {
             win_condition: req.win_condition,
             seeding: req.seeding,
             channel_mode,
+            // Heat-lifecycle Slice 2 configs: replaced wholesale, defaulting an omitted field.
+            staging_timer_secs: req
+                .staging_timer_secs
+                .unwrap_or_else(default_staging_timer_secs),
+            start_procedure: req.start_procedure.unwrap_or_default(),
+            grace_window: req.grace_window.unwrap_or_else(default_grace_window),
         };
         if let Some(slot) = event.meta.rounds.iter_mut().find(|r| &r.id == round_id) {
             *slot = round.clone();
@@ -2245,6 +2389,9 @@ mod tests {
             win_condition: WinCondition::BestLap,
             seeding: SeedingRule::FromRoster,
             channel_mode: None,
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
         }
     }
 
@@ -2342,6 +2489,9 @@ mod tests {
                     win_condition: WinCondition::FirstToLaps { n: 5 },
                     seeding: SeedingRule::FromRoster,
                     channel_mode: None,
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
                 },
             )
             .unwrap();
@@ -2451,6 +2601,9 @@ mod tests {
                     top_n: 2,
                 },
                 channel_mode: None,
+                staging_timer_secs: None,
+                start_procedure: None,
+                grace_window: None,
             },
         );
         assert!(matches!(self_ref, Err(RoundError::Invalid(_))));

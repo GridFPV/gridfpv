@@ -139,9 +139,9 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     std::thread::sleep(Duration::from_secs(2));
     let _ = conn.events(); // drop the reset's snapshot churn
 
-    // Drive the heat loop forward: Scheduled -> Staged -> Armed.
+    // Drive the heat loop forward: Scheduled -> Staged -> Armed (Start arms the heat).
     drive(&mut log, &heat, &mut state, HeatCommand::Stage);
-    drive(&mut log, &heat, &mut state, HeatCommand::Arm);
+    drive(&mut log, &heat, &mut state, HeatCommand::Start);
 
     // Actually start the race on RH (it stages + auto-starts), then record Running.
     conn.stage_race().expect("stage_race");
@@ -153,7 +153,9 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
         }),
         "RotorHazard never reached RACING"
     );
-    drive(&mut log, &heat, &mut state, HeatCommand::Start);
+    // The override stands in for the runtime auto-start here (this harness drives the FSM by
+    // hand rather than running the Director clock): force Armed -> Running.
+    drive(&mut log, &heat, &mut state, HeatCommand::SkipCountdown);
     debug_assert_eq!(state, HeatState::Running);
 
     // While Running, poll the timer crossings; keep at least one pass.
@@ -177,8 +179,9 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     // are adapter bookkeeping, not part of the heat's canonical race-engine log.
     log.extend(live.into_iter().filter(|e| matches!(e, Event::Pass(_))));
 
-    // Close the heat loop: Finished -> Finalized.
-    drive(&mut log, &heat, &mut state, HeatCommand::Finish);
+    // Close the heat loop: ForceEnd (Running -> Unofficial) then Finalize. ForceEnd stands in for
+    // the runtime auto-complete here (the harness has already stopped the RH race).
+    drive(&mut log, &heat, &mut state, HeatCommand::ForceEnd);
     drive(&mut log, &heat, &mut state, HeatCommand::Finalize);
     debug_assert_eq!(state, HeatState::Final);
 

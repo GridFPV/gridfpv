@@ -204,13 +204,13 @@ async fn post_command_drives_heat_loop_and_reaches_stream() {
     assert!(ack.ok, "stage should ack ok: {ack:?}");
     assert_eq!(next_phase(&mut stream).await, HeatPhase::Staged);
 
-    // Arm, again read back off the stream.
-    let ack = post_command(&addr, &Command::Arm { heat: heat() }, &rd).await;
-    assert!(ack.ok, "arm should ack ok: {ack:?}");
+    // Start (arms the heat), again read back off the stream.
+    let ack = post_command(&addr, &Command::Start { heat: heat() }, &rd).await;
+    assert!(ack.ok, "start should ack ok: {ack:?}");
     assert_eq!(next_phase(&mut stream).await, HeatPhase::Armed);
 }
 
-/// `GET /control` (the bidirectional WS): a Stage→Arm→Start sequence acks ok per command,
+/// `GET /control` (the bidirectional WS): a Stage→Start→SkipCountdown sequence acks ok per command,
 /// an illegal command is rejected with the shared error shape, and the resulting state is
 /// readable on `/stream`.
 #[tokio::test]
@@ -241,8 +241,8 @@ async fn control_ws_acks_each_command_and_rejects_illegal() {
     // Legal forward path over the same control socket.
     for (command, expected) in [
         (Command::Stage { heat: heat() }, HeatPhase::Staged),
-        (Command::Arm { heat: heat() }, HeatPhase::Armed),
-        (Command::Start { heat: heat() }, HeatPhase::Running),
+        (Command::Start { heat: heat() }, HeatPhase::Armed),
+        (Command::SkipCountdown { heat: heat() }, HeatPhase::Running),
     ] {
         let ack = send_command(&mut control, &command).await;
         assert!(ack.ok, "{command:?} should ack ok: {ack:?}");
@@ -255,9 +255,9 @@ async fn control_ws_acks_each_command_and_rejects_illegal() {
     assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
 
     // The log still reflects only the legal transitions (nothing was appended for the
-    // rejected command): the next legal command (Finish) acks ok.
-    let ack = send_command(&mut control, &Command::Finish { heat: heat() }).await;
-    assert!(ack.ok, "finish after running should ack ok: {ack:?}");
+    // rejected command): the next legal command (ForceEnd) acks ok.
+    let ack = send_command(&mut control, &Command::ForceEnd { heat: heat() }).await;
+    assert!(ack.ok, "force-end after running should ack ok: {ack:?}");
     // The `Finished` transition enters the `Unofficial` live-state phase.
     assert_eq!(next_phase(&mut stream).await, HeatPhase::Unofficial);
 }

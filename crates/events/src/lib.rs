@@ -331,6 +331,22 @@ pub enum Event {
         heat: HeatId,
         transition: HeatTransition,
     },
+    /// The **start procedure fired** for a heat that just entered `Armed` (heat-lifecycle
+    /// redesign, Slice 2). The Director runtime chooses the randomized start delay **once**, at
+    /// the moment the heat is armed, and writes it here as a *fact* — so the console can cue the
+    /// start tone, and a replay reads the **same** delay instead of re-randomizing. The
+    /// subsequent `Armed → Running` [`HeatStateChanged`](Event::HeatStateChanged) is appended by
+    /// the runtime `delay_ms` later; together they make the auto-start deterministic on replay
+    /// (race-engine.html §6 — the engine/projection fold never reads a clock or rolls dice; only
+    /// the runtime does, at emission time).
+    HeatStarting {
+        /// The heat whose start procedure fired (it is in `Armed`).
+        heat: HeatId,
+        /// The chosen randomized start delay, in **milliseconds**, from this event to the
+        /// `Armed → Running` transition. Written once by the runtime; deterministic on replay.
+        #[ts(type = "number")]
+        delay_ms: u32,
+    },
     /// Marshaling: void a previously-detected pass, referenced by log offset. The
     /// projection folds it out as if it never happened — the raw [`Pass`] stays in
     /// the log untouched.
@@ -461,6 +477,10 @@ mod tests {
                     (CompetitorRef("node-0".into()), 5658),
                     (CompetitorRef("node-1".into()), 5695),
                 ],
+            },
+            Event::HeatStarting {
+                heat: HeatId("q-1".into()),
+                delay_ms: 3200,
             },
             Event::HeatStateChanged {
                 heat: HeatId("q-1".into()),

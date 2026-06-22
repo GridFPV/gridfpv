@@ -952,8 +952,10 @@ fn heat_passes(events: &[Event], heat: &HeatId) -> Vec<Pass> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::StartProcedure;
     use crate::events::{
         ChannelMode, ClassMembership, EventMeta, MemberSlot, RoundDef, SeedingRule,
+        default_grace_window, default_staging_timer_secs,
     };
     use crate::scope::{ClassId as ScopeClassId, EventId, PilotId};
     use gridfpv_engine::scoring::WinCondition;
@@ -1150,6 +1152,9 @@ mod tests {
             win_condition: WinCondition::BestLap,
             seeding: SeedingRule::FromRoster,
             channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
         }
     }
 
@@ -1278,6 +1283,9 @@ mod tests {
                 top_n: 2,
             },
             channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
         };
         let meta = meta_with(
             vec![qual, bracket],
@@ -1332,6 +1340,9 @@ mod tests {
             win_condition: WinCondition::BestLap,
             seeding: SeedingRule::FromRoster,
             channel_mode: ChannelMode::Static,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
         }
     }
 
