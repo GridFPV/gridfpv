@@ -165,7 +165,7 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     conn.stop_race().ok();
     std::thread::sleep(Duration::from_millis(800));
     live.extend(conn.events());
-    conn.disconnect().ok();
+    conn.disconnect();
 
     assert!(
         got_pass,

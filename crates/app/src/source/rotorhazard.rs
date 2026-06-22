@@ -210,12 +210,34 @@ fn drive(
     tune: TuneSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
+    // The adapter is created **once** and reused across every (re)connection (#105). Its dedup +
+    // `last_race_status` must be continuous across a reconnect: on a mid-race drop the running heat
+    // stays `staged` (it lives in the shared `armed` Mutex, not the adapter), so the staging block
+    // below does NOT reset RH, and RotorHazard re-sends the in-progress `current_laps` snapshot on
+    // the new socket. A *fresh* adapter (empty dedup) would re-emit every replayed lap as a Pass,
+    // and the lap projection — which does not dedup by sequence — would turn those into duplicate
+    // laps (double-count). Reusing the adapter keeps that snapshot deduped.
+    //
+    // Combined invariant with #156 (the RACING-transition dedup reset):
+    //   * Mid-race reconnect: the adapter persists, so `last_race_status == RACING`. RH's re-sent
+    //     `race_status=RACING` is NOT a transition (`previous == Some(RACING)`) → no SessionStarted
+    //     re-emit, no #156 reset → the re-sent `current_laps` are deduped (no double-count). ✓
+    //   * New race / cross-heat: a real READY/DONE→RACING transition DOES fire #156, resetting dedup
+    //     so the next heat (whose lap_number restarts at 0) ingests its own fresh laps. ✓
+    let mut carry_adapter = Some(RotorHazardAdapter::new());
     while !cancel.load(Ordering::Relaxed) {
         timers.set_status(&timer_id, TimerStatus::Connecting);
-        let conn = match RotorHazardConnection::connect(&url, RotorHazardAdapter::new()) {
+        // Reuse the carried adapter (preserving dedup/last_race_status across reconnects); only on
+        // the first attempt is it `Some` from above — every later iteration re-seeds it from the
+        // adapter recovered out of the previous connection's `disconnect`.
+        let adapter = carry_adapter.take().unwrap_or_else(RotorHazardAdapter::new);
+        let conn = match RotorHazardConnection::connect(&url, adapter) {
             Ok(conn) => conn,
             Err(e) => {
                 // The connect attempt failed: surface Error, back off, and retry (unless cancelled).
+                // The adapter was consumed by the failed `connect`; start the next attempt fresh.
+                // (A connect failure means no socket and no replayed snapshot, so there is nothing
+                // to dedup against — a fresh adapter is correct and #156 re-seeds on the next race.)
                 eprintln!(
                     "gridfpv: RotorHazard connect failed for {:?}: {e}",
                     timer_id.0
@@ -234,9 +256,10 @@ fn drive(
         // Maintain the live link until it drops or we are cancelled.
         let dropped = maintain(&conn, &cancel, &armed, &tune);
 
-        // Stop any in-flight race and disconnect cleanly on the way out of this connection.
+        // Stop any in-flight race and disconnect on the way out of this connection. `disconnect`
+        // returns the adapter so the next reconnect reuses its dedup state (the #105 fix).
         conn.stop_race().ok();
-        conn.disconnect().ok();
+        carry_adapter = Some(conn.disconnect());
 
         if cancel.load(Ordering::Relaxed) {
             break;

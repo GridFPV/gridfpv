@@ -152,7 +152,7 @@ fn live_rotorhazard_race_translates_to_laps() {
     conn.stop_race().expect("emit stop_race (heat 2)");
     std::thread::sleep(Duration::from_millis(800));
     heat2.extend(conn.events());
-    conn.disconnect().ok();
+    conn.disconnect();
 
     assert!(
         got_laps2,
@@ -206,4 +206,89 @@ fn live_rotorhazard_race_translates_to_laps() {
         node0.lap_count(),
         node0.laps
     );
+}
+
+/// Mid-race reconnect must not double-count (#105). Drives a real race, accumulates laps, then
+/// **disconnects mid-race and reconnects reusing the same adapter** (the persisted-adapter fix:
+/// `disconnect` returns the adapter, the next `connect` takes it). RotorHazard re-sends the full
+/// in-progress `current_laps` snapshot on the new socket; because the carried adapter's dedup
+/// already holds those laps, the lap count after the reconnect must equal the count before it (no
+/// duplicates). Pre-fix, a fresh adapter on reconnect re-emitted every in-progress lap and the lap
+/// projection (no sequence dedup) turned them into duplicate laps.
+#[test]
+#[ignore = "requires a running dockerized RotorHazard (docker/rotorhazard/)"]
+fn mid_race_reconnect_does_not_double_count_laps() {
+    let rh = RhContainer::start(PORT + 1, "0.5", &[]);
+    let conn = RotorHazardConnection::connect(rh.url(), RotorHazardAdapter::new())
+        .expect("connect to RotorHazard");
+
+    let mut events: Vec<Event> = Vec::new();
+    std::thread::sleep(Duration::from_secs(2));
+
+    conn.stop_race().ok();
+    conn.discard_laps().expect("emit discard_laps");
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = conn.events();
+
+    conn.stage_race().expect("emit stage_race");
+    assert!(
+        wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+            evs.iter()
+                .any(|e| matches!(e, Event::SessionStarted { .. }))
+        }),
+        "race never reached RACING (no SessionStarted)"
+    );
+
+    // Drive several crossings on node 0 so there are in-progress laps to replay.
+    for node in [0u64, 0, 0, 0] {
+        conn.simulate_lap(node).expect("emit simulate_lap");
+        std::thread::sleep(Duration::from_millis(1200));
+        events.extend(conn.events());
+    }
+    assert!(
+        wait_until(&conn, &mut events, Duration::from_secs(10), |evs| {
+            lap_list(evs)
+                .competitors
+                .iter()
+                .any(|c| c.competitor.competitor.0 == "node-0" && c.lap_count() >= 1)
+        }),
+        "node-0 never produced a completed lap before the reconnect"
+    );
+    let laps_before = lap_list(&events)
+        .competitors
+        .iter()
+        .find(|c| c.competitor.competitor.0 == "node-0")
+        .map(|c| c.lap_count())
+        .unwrap_or(0);
+    assert!(laps_before >= 1, "need at least one lap before reconnect");
+
+    // Simulate a mid-race drop+reconnect: recover the adapter from `disconnect` and feed it into a
+    // fresh socket. The race keeps RUNNING server-side, so RH replays the in-progress snapshot.
+    let adapter = conn.disconnect();
+    std::thread::sleep(Duration::from_millis(500));
+    let conn = RotorHazardConnection::connect(rh.url(), adapter)
+        .expect("reconnect to RotorHazard reusing the persisted adapter");
+
+    // Drain the replayed snapshot the reconnect triggers; give it time to arrive.
+    let mut after: Vec<Event> = Vec::new();
+    wait_until(&conn, &mut after, Duration::from_secs(5), |_| false);
+    events.extend(after);
+
+    conn.stop_race().ok();
+    std::thread::sleep(Duration::from_millis(800));
+    events.extend(conn.events());
+    conn.disconnect();
+
+    let laps_after = lap_list(&events)
+        .competitors
+        .iter()
+        .find(|c| c.competitor.competitor.0 == "node-0")
+        .map(|c| c.lap_count())
+        .unwrap_or(0);
+    assert_eq!(
+        laps_after, laps_before,
+        "mid-race reconnect double-counted laps: {laps_before} before, {laps_after} after \
+         (the replayed in-progress snapshot was not deduped — the persisted-adapter fix regressed)"
+    );
+    println!("live RH reconnect: node-0 stable at {laps_after} lap(s) across the reconnect");
 }

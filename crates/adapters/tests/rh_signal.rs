@@ -120,7 +120,7 @@ fn emulated_signal_multi_node_race() {
     conn.stop_race().ok();
     std::thread::sleep(Duration::from_millis(800));
     events.extend(conn.events());
-    conn.disconnect().ok();
+    conn.disconnect();
 
     assert!(
         both_have_laps,

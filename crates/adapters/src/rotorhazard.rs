@@ -382,10 +382,13 @@ impl RotorHazardAdapter {
                 // `current_laps` snapshot carries *no* status transition, so it never
                 // reaches this arm; and a *mid-race* reconnect keeps
                 // `last_race_status == RACING` (so this arm does NOT fire — no reset),
-                // leaving the replayed snapshot suppressed. (In the persistent driver a
-                // reconnect additionally builds a fresh `RotorHazardAdapter`, so its
-                // dedup starts empty regardless; this reset only ever fires on a true
-                // new-race edge within one adapter's lifetime.)
+                // leaving the replayed snapshot suppressed. The persistent driver
+                // **reuses one `RotorHazardAdapter` across reconnects** (#105 fix:
+                // `connect` takes it, `disconnect` returns it), so `last_race_status`
+                // and the dedup are continuous — a mid-race reconnect does not reset
+                // and its replayed laps stay deduped. This reset therefore fires only
+                // on a true new-race edge within that adapter's (now connection-
+                // spanning) lifetime.
                 self.dedup = Deduplicator::new();
                 self.seen_seats.clear();
                 out.push(Event::SessionStarted {
@@ -822,6 +825,71 @@ mod tests {
             pass_count(&resent),
             0,
             "a re-sent snapshot within the same race emits no new passes"
+        );
+    }
+
+    /// The mid-race reconnect regression (#105): when the persistent driver's RH link drops and
+    /// reconnects *during* a running heat, RotorHazard re-sends the full in-progress `current_laps`
+    /// snapshot on the new socket — with `last_race_status` still `RACING`, so there is **no** status
+    /// transition (no #156 reset). The fix persists the SAME adapter across the reconnect, so its
+    /// dedup already holds those laps and the replay is suppressed (0 new passes). The old behavior —
+    /// building a *fresh* adapter on every reconnection — is what this test encodes as the bug: a
+    /// fresh adapter has an empty dedup and re-emits every in-progress lap, which the lap projection
+    /// (no sequence dedup) turns into duplicate laps. We assert both: the persisted adapter dedups,
+    /// the fresh adapter double-emits.
+    #[test]
+    fn mid_race_reconnect_with_persisted_adapter_does_not_double_count() {
+        // A heat is racing; node-0 has run four in-progress laps.
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(7),
+        }));
+        let in_progress = vec![
+            lap(0, 1_000.0),
+            lap(1, 2_000.0),
+            lap(2, 3_000.0),
+            lap(3, 4_000.0),
+        ];
+        let before = adapter.translate(snapshot(0, 0, in_progress.clone()));
+        assert_eq!(
+            pass_count(&before),
+            4,
+            "the four in-progress laps are ingested"
+        );
+
+        // The link drops and reconnects mid-race. The driver REUSES this adapter (the #105 fix:
+        // `connect` takes it, `disconnect` returns it), so `last_race_status` is still RACING. On a
+        // reconnect RH replays the full in-progress state: first the same `race_status=RACING` (NOT
+        // a transition — `previous == Some(RACING)` — so no SessionStarted, no #156 dedup reset)...
+        let replayed_status = adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(7),
+        }));
+        assert!(
+            replayed_status.is_empty(),
+            "re-sent RACING after a mid-race reconnect is not a transition (no reset)"
+        );
+        // ...then the re-sent `current_laps` snapshot of the very same laps.
+        let after = adapter.translate(snapshot(0, 0, in_progress.clone()));
+        assert_eq!(
+            pass_count(&after),
+            0,
+            "a mid-race reconnect's replayed snapshot must emit no new passes (no double-count)"
+        );
+
+        // Contrast — the OLD behavior the fix removes: a FRESH adapter (empty dedup) re-emits every
+        // replayed lap as a duplicate. This is exactly the double-count the persisted adapter avoids.
+        let mut fresh = RotorHazardAdapter::new();
+        fresh.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(7),
+        }));
+        let fresh_after = fresh.translate(snapshot(0, 0, in_progress));
+        assert_eq!(
+            pass_count(&fresh_after),
+            4,
+            "a fresh adapter (old reconnect behavior) double-emits the in-progress laps"
         );
     }
 
