@@ -60,6 +60,11 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
 pub struct RotorHazardConnection {
     client: Client,
     events: Arc<Mutex<Vec<Event>>>,
+    /// The adapter driving translation, held behind a handle so the **persistent** driver can
+    /// recover it on [`disconnect`](Self::disconnect) and reuse it across a reconnect (#105). The
+    /// adapter's dedup / `last_race_status` must survive a mid-race reconnect: a fresh adapter has an
+    /// empty dedup and would re-emit RotorHazard's re-sent `current_laps` snapshot as duplicate laps.
+    adapter: Arc<Mutex<RotorHazardAdapter>>,
     /// Liveness flag flipped to `false` by `rust_socketio`'s reserved `close`/`error` handlers when
     /// the socket drops. With `.reconnect(false)` (see [`connect`](Self::connect)) a dropped link is
     /// a real, final close — `rust_socketio` no longer silently buffers emits and auto-reconnects —
@@ -119,10 +124,11 @@ impl RotorHazardConnection {
             // reconnecting in the background, so `probe_liveness`'s emit never errors and a real
             // drop is never detected. With `.reconnect(false)` a drop becomes a real, final close
             // that fires the `close`/`error` reserved events below — and the *driver* owns
-            // reconnection (it has backoff and re-warms state). On its reconnect RotorHazard
-            // re-sends the full `current_laps` snapshot; the adapter's per-lap dedup makes that
-            // replay safe (no double-counted laps) — see the dedup module + the rh_signal
-            // snapshot-dedup assertion.
+            // reconnection (it has backoff and **reuses this adapter across reconnects**:
+            // `connect` takes it, [`disconnect`](Self::disconnect) returns it). On its reconnect
+            // RotorHazard re-sends the full `current_laps` snapshot; because the adapter's per-lap
+            // dedup persists across the reconnect, that replay is suppressed (no double-counted
+            // laps, #105) — see the dedup module + the rh_signal snapshot-dedup assertion.
             .reconnect(false)
             .on("error", drop_handler(alive.clone()))
             .on("close", drop_handler(alive.clone()))
@@ -152,6 +158,7 @@ impl RotorHazardConnection {
         Ok(Self {
             client,
             events,
+            adapter,
             alive,
         })
     }
@@ -212,8 +219,23 @@ impl RotorHazardConnection {
             .emit("load_data", json!({ "load_types": ["node_data"] }))
     }
 
-    /// Disconnect from the server.
-    pub fn disconnect(self) -> Result<(), rust_socketio::Error> {
-        self.client.disconnect()
+    /// Disconnect from the server, **returning the adapter** so the persistent driver can carry its
+    /// dedup / `last_race_status` into the next connection (#105). Reusing the adapter is what keeps
+    /// a mid-race reconnect from double-counting: RotorHazard re-sends the full `current_laps`
+    /// snapshot on the new socket, and only a dedup that already saw those laps suppresses the
+    /// replay. The socket disconnect itself is best-effort — even if it errors the adapter (the
+    /// state we care about) is recovered. The `Arc<Mutex<…>>` is uniquely held here once the socket
+    /// is torn down (the `rust_socketio` handler clones are dropped with the client), so unwrapping
+    /// it back to an owned adapter cannot fail in practice; on the off chance it is still shared we
+    /// fall back to cloning the inner adapter (its dedup/state clone is cheap and lossless).
+    pub fn disconnect(self) -> RotorHazardAdapter {
+        self.client.disconnect().ok();
+        // Drop the client first so its registered socket handlers (which hold `adapter` clones) are
+        // released, leaving this connection the sole owner of the adapter handle.
+        drop(self.client);
+        match Arc::try_unwrap(self.adapter) {
+            Ok(mutex) => mutex.into_inner().expect("adapter mutex poisoned"),
+            Err(shared) => shared.lock().expect("adapter mutex poisoned").clone(),
+        }
     }
 }

@@ -274,7 +274,7 @@ fn run_rh_heat(rh_url: &str) -> Vec<Event> {
     conn.stop_race().ok();
     std::thread::sleep(Duration::from_millis(800));
     live.extend(conn.events());
-    conn.disconnect().ok();
+    conn.disconnect();
 
     assert!(
         got_pass,
