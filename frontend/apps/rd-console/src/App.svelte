@@ -28,14 +28,13 @@
   import { Session } from './lib/session.svelte.js';
   import ContextHeader from './ContextHeader.svelte';
   import Breadcrumbs from './Breadcrumbs.svelte';
-  import { emptyConfig, type EventConfig } from './lib/setup.js';
   import HomeHub from './screens/HomeHub.svelte';
   import EventPicker from './screens/EventPicker.svelte';
   import TimersPage from './screens/TimersPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
-  import SetupWizard from './screens/SetupWizard.svelte';
+  import EventSetupWizard from './screens/EventSetupWizard.svelte';
   import EventTimers from './screens/EventTimers.svelte';
   import EventRoster from './screens/EventRoster.svelte';
   import EventClasses from './screens/EventClasses.svelte';
@@ -124,42 +123,33 @@
     }
   });
 
-  type ScreenId =
-    | 'setup'
-    | 'timers'
-    | 'roster'
-    | 'classes'
-    | 'rounds'
-    | 'live'
-    | 'marshaling'
-    | 'results';
+  type ScreenId = 'timers' | 'roster' | 'classes' | 'rounds' | 'live' | 'marshaling' | 'results';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
-    { id: 'setup', label: 'Setup', key: '1', icon: 'M4 6h16M4 12h16M4 18h10' },
     {
       id: 'roster',
       label: 'Roster',
-      key: '2',
+      key: '1',
       icon: 'M16 11V7a4 4 0 1 0-8 0v4M5 11h14v9H5z'
     },
     {
       id: 'classes',
       label: 'Classes',
-      key: '3',
+      key: '2',
       icon: 'M4 6h16M4 12h10M4 18h7M18 14l2 2 3-4'
     },
     {
       id: 'rounds',
       label: 'Rounds & Heats',
-      key: '4',
+      key: '3',
       icon: 'M4 5h16M4 12h16M4 19h16M9 5v14'
     },
-    { id: 'live', label: 'Live control', key: '5', icon: 'M5 3l14 9-14 9V3z' },
-    { id: 'marshaling', label: 'Marshaling', key: '6', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
-    { id: 'results', label: 'Results', key: '7', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
+    { id: 'live', label: 'Live control', key: '4', icon: 'M5 3l14 9-14 9V3z' },
+    { id: 'marshaling', label: 'Marshaling', key: '5', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
+    { id: 'results', label: 'Results', key: '6', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
     {
       id: 'timers',
       label: 'Timers',
-      key: '8',
+      key: '7',
       icon: 'M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'
     }
   ];
@@ -170,22 +160,26 @@
   const activeScreen = $derived(SCREENS.find((s) => s.id === active));
   const setTab = (tab: WorkspaceTab) => navigate({ kind: 'workspace', tab });
 
-  // The setup wizard's config lives at the shell so it survives screen switches.
-  let config = $state<EventConfig>(emptyConfig());
-
-  function onSetupCommit() {
-    // The console is already inside an event (#72) — the live read client was scoped to it on
-    // entry — so committing the wizard just advances to registration; there is no separate
-    // event to re-scope to (the redundant event field was removed, #72 Slice 1b A1).
-    setTab('roster');
-  }
+  // The setup wizard overlay (race redesign Slice 7): a guided first-pass over the stage-pages,
+  // reusing their components/commands (no separate config bag). Optional + re-runnable; launched on
+  // creating a new event (deferred via `pendingWizard` until the workspace mounts) and from the
+  // workspace header's "Setup wizard" button. Everything it sets stays editable on the pages.
+  let wizardOpen = $state(false);
+  // When a new event is created from the Events page, defer opening the wizard until the workspace
+  // route is in (the embedded stages need the active event), then pop it open once.
+  let pendingWizard = $state(false);
+  $effect(() => {
+    if (pendingWizard && session.currentEvent && route.kind === 'workspace') {
+      pendingWizard = false;
+      wizardOpen = true;
+    }
+  });
 
   function leaveToPicker() {
     session.leaveEvent();
-    // Reset the workspace's local view so re-entering starts clean, and land back on the Events
-    // page (the app route the "Switch event" action conceptually returns to). Setting the hash to
-    // `#/events` keeps the URL honest after leaving the workspace.
-    config = emptyConfig();
+    // Close the wizard if open, and land back on the Events page (the app route the "Switch event"
+    // action conceptually returns to). Setting the hash to `#/events` keeps the URL honest.
+    wizardOpen = false;
     goPage('events');
   }
 
@@ -193,7 +187,7 @@
   // "Home" crumb both use this. Same teardown as a switch, but lands on the hub, not the picker.
   function goToHubFromWorkspace() {
     session.leaveEvent();
-    config = emptyConfig();
+    wizardOpen = false;
     goHome();
   }
 
@@ -255,7 +249,7 @@
         ontimers={() => goPage('timers')}
       />
     {:else if route$page === 'events'}
-      <EventPicker {session} onhome={goHome} />
+      <EventPicker {session} onhome={goHome} onsetup={() => (pendingWizard = true)} />
     {:else if route$page === 'timers'}
       <TimersPage {session} onhome={goHome} />
     {:else if route$page === 'pilots'}
@@ -335,6 +329,24 @@
           <h1 class="screen-title">{activeScreen?.label}</h1>
           <button
             type="button"
+            class="wizard-launch"
+            onclick={() => (wizardOpen = true)}
+            title="Walk this event's setup — classes, roster, timer, first round"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                d="M5 3v4M3 5h4M6 17v4M4 19h4M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5L13 3z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span>Setup wizard</span>
+          </button>
+          <button
+            type="button"
             class="gear"
             onclick={openSettings}
             aria-label="Settings"
@@ -355,13 +367,7 @@
       </header>
 
       <main class="content">
-        {#if active === 'setup'}
-          <SetupWizard
-            bind:config
-            eventName={session.currentEvent?.name ?? ''}
-            oncommit={onSetupCommit}
-          />
-        {:else if active === 'timers'}
+        {#if active === 'timers'}
           <EventTimers {session} />
         {:else if active === 'roster'}
           <EventRoster {session} />
@@ -390,6 +396,10 @@
         {/if}
       </main>
     </div>
+
+    <!-- The guided setup wizard overlay (race redesign Slice 7): a first-pass over the stage-pages,
+         reusing their components/commands. Lives above the workspace so it can embed the stages. -->
+    <EventSetupWizard {session} bind:open={wizardOpen} />
   </div>
 {:else}
   <!-- Edge case: a workspace route with no active event (e.g. a hand-edited `#/event/*` hash with
@@ -658,6 +668,39 @@
     gap: var(--gf-space-3);
     flex-shrink: 0;
   }
+  .wizard-launch {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    height: 2rem;
+    padding: 0 var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    background: transparent;
+    color: var(--gf-text-secondary);
+    font-family: inherit;
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-medium);
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      color var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .wizard-launch:hover {
+    border-color: var(--gf-accent);
+    color: var(--gf-accent);
+  }
+  .wizard-launch:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
+  }
+  @media (max-width: 48rem) {
+    .wizard-launch span {
+      display: none;
+    }
+  }
+
   .gear {
     position: relative;
     display: inline-flex;

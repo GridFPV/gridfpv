@@ -22,7 +22,11 @@
 
 import type { AdapterId, Command, CompetitorRef, HeatId } from '@gridfpv/types';
 import { registerCommand } from './registration.js';
-import { scheduleHeatCommand } from './setup.js';
+
+/** Build a `ScheduleHeat` command creating a heat with its lineup (protocol.html §5). */
+function scheduleHeatCommand(heat: HeatId, lineup: CompetitorRef[]): Command {
+  return { ScheduleHeat: { heat, lineup } };
+}
 
 /** The default adapter a sim heat's competitors are bound under (the built-in source). */
 export const SIM_ADAPTER: AdapterId = 'sim';
