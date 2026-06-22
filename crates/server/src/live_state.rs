@@ -13,9 +13,9 @@
 //! [`Event::HeatStateChanged`](gridfpv_events::Event::HeatStateChanged) for every heat
 //! (race-engine.html §2). The **current heat** is the most-recently-active one: the heat
 //! whose latest state-changing event appears last in the log and that is not yet
-//! `Scored`/`Advanced` past the timer. We resolve it by scanning the log in order and
+//! `Final`/`Advanced` past the timer. We resolve it by scanning the log in order and
 //! tracking the last heat to receive a `HeatScheduled` or `HeatStateChanged`. A heat
-//! that has reached the terminal `Scored` phase is still reported as the current heat
+//! that has reached the terminal `Final` phase is still reported as the current heat
 //! until a *newer* heat takes the timer (a freshly-scheduled or transitioned heat),
 //! which mirrors what an overlay shows between heats ("last heat, now scored").
 //!
@@ -198,7 +198,7 @@ fn phase_of(state: HeatState) -> HeatPhase {
         HeatState::Armed => HeatPhase::Armed,
         HeatState::Running => HeatPhase::Running,
         HeatState::Finished => HeatPhase::Finished,
-        HeatState::Scored => HeatPhase::Scored,
+        HeatState::Final => HeatPhase::Final,
     }
 }
 
@@ -301,7 +301,7 @@ pub struct HeatSummary {
     /// "—". Additive — defaults empty so older logs round-trip.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frequencies: Vec<(CompetitorRef, u16)>,
-    /// The heat's folded loop phase (its derived status: scheduled / running / scored / …).
+    /// The heat's folded loop phase (its derived status: scheduled / running / final / …).
     pub phase: HeatPhase,
     /// Whether this heat is the one currently on the timer (the live `current_heat`).
     pub is_current: bool,
@@ -458,14 +458,14 @@ mod tests {
     }
 
     #[test]
-    fn phase_tracks_the_heat_loop_through_scored() {
-        // Scheduled → Staged → Armed → Running → Finished → Scored.
+    fn phase_tracks_the_heat_loop_through_final() {
+        // Scheduled → Staged → Armed → Running → Finished → Final.
         let steps = [
             (HeatTransition::Staged, HeatPhase::Staged),
             (HeatTransition::Armed, HeatPhase::Armed),
             (HeatTransition::Running, HeatPhase::Running),
             (HeatTransition::Finished, HeatPhase::Finished),
-            (HeatTransition::Scored, HeatPhase::Scored),
+            (HeatTransition::Scored, HeatPhase::Final),
         ];
         let mut events = vec![scheduled("q-1", &["A", "B"])];
         assert_eq!(live_state(&events).phase, HeatPhase::Scheduled);
@@ -660,7 +660,7 @@ mod tests {
         let q1 = &summaries[0];
         assert_eq!(q1.round, Some(RoundId("r1".into())));
         assert_eq!(q1.class, Some(ClassId("open".into())));
-        assert_eq!(q1.phase, HeatPhase::Scored);
+        assert_eq!(q1.phase, HeatPhase::Final);
         assert!(!q1.is_current);
         assert_eq!(
             q1.lineup,

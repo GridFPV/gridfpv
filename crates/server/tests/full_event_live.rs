@@ -491,8 +491,8 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     rd_command(&addr, &Command::Finish { heat: heat.clone() }, &rd).await;
     rd_command(&addr, &Command::Score { heat: heat.clone() }, &rd).await;
 
-    // The event-scope client converges to the Scored phase — the heat ran end to end.
-    await_phase(&mut stream, HeatPhase::Scored).await;
+    // The event-scope client converges to the Final phase — the heat ran end to end.
+    await_phase(&mut stream, HeatPhase::Final).await;
 }
 
 /// Drain any change envelopes already queued on the stream (the ones the appended passes

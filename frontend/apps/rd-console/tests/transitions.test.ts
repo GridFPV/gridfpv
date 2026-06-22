@@ -10,7 +10,7 @@ import {
   type HeatAction
 } from '../src/lib/transitions.js';
 
-const PHASES: HeatPhase[] = ['Scheduled', 'Staged', 'Armed', 'Running', 'Finished', 'Scored'];
+const PHASES: HeatPhase[] = ['Scheduled', 'Staged', 'Armed', 'Running', 'Finished', 'Final'];
 
 describe('transitions: phase → legal actions', () => {
   it('maps each phase to its forward primary action', () => {
@@ -19,7 +19,7 @@ describe('transitions: phase → legal actions', () => {
     expect(primaryAction('Armed')).toBe('Start');
     expect(primaryAction('Running')).toBe('Finish');
     expect(primaryAction('Finished')).toBe('Score');
-    expect(primaryAction('Scored')).toBe('Advance');
+    expect(primaryAction('Final')).toBe('Advance');
   });
 
   it('only allows the forward step from Scheduled (no off-ramps before staging)', () => {
@@ -36,9 +36,9 @@ describe('transitions: phase → legal actions', () => {
     expect(isActionLegal('Scheduled', 'Restart')).toBe(false);
   });
 
-  it('allows discard only where there is a result to discard (Finished/Scored)', () => {
+  it('allows discard only where there is a result to discard (Finished/Final)', () => {
     expect(isActionLegal('Finished', 'Discard')).toBe(true);
-    expect(isActionLegal('Scored', 'Discard')).toBe(true);
+    expect(isActionLegal('Final', 'Discard')).toBe(true);
     expect(isActionLegal('Running', 'Discard')).toBe(false);
   });
 

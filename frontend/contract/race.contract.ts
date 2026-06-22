@@ -5,7 +5,7 @@
  * real race through the real control path (register → schedule → stage/arm/start → finish →
  * score) while the **real `@gridfpv/protocol-client`** holds a `/stream` subscription, and
  * asserts the client's *exposed converged state* tracks the race: current heat appears,
- * per-pilot laps climb, the phase walks Scheduled → Running → Finished → Scored. If any seam
+ * per-pilot laps climb, the phase walks Scheduled → Running → Finished → Final. If any seam
  * (StreamMessage unwrap, cursor/sequence axis, bigint numbers, control headers) were wrong,
  * the client would not converge.
  */
@@ -83,10 +83,10 @@ describe('seam 8: a full race converges through the real protocol-client', () =>
       await rdControl(director.baseUrl, TOKEN, { Score: { heat: HEAT } });
       await waitForState(
         client,
-        (s) => (s.body as LiveBody).LiveRaceState?.phase === 'Scored',
+        (s) => (s.body as LiveBody).LiveRaceState?.phase === 'Final',
         6_000
       );
-      expect((client.getState().body as LiveBody).LiveRaceState?.phase).toBe('Scored');
+      expect((client.getState().body as LiveBody).LiveRaceState?.phase).toBe('Final');
 
       // And the scored HeatResult is served on the read path (a result exists).
       const result = (await (

@@ -113,7 +113,7 @@ describe('LiveRaceControl', () => {
       expect(clockText()).toBe('0:02.500');
     });
 
-    it('keeps the frozen value through Scored', async () => {
+    it('keeps the frozen value through Final', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(0);
       const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
@@ -123,7 +123,7 @@ describe('LiveRaceControl', () => {
 
       pushLive(liveAt('Finished'));
       await tick();
-      pushLive(liveAt('Scored'));
+      pushLive(liveAt('Final'));
       await tick();
       await vi.advanceTimersByTimeAsync(4_000);
       expect(clockText()).toBe('0:03.000');

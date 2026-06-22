@@ -103,7 +103,7 @@
   .phase[data-phase='Finished'] {
     --_c: var(--gf-phase-finished);
   }
-  .phase[data-phase='Scored'] {
+  .phase[data-phase='Final'] {
     --_c: var(--gf-phase-scored);
   }
   .lineup {

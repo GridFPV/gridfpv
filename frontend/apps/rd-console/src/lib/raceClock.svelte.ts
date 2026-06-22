@@ -4,7 +4,7 @@
  *
  * Behaviour, keyed off the live `phase`:
  *   • Running                → tick a wall-clock timer (`Date.now() - start`) every 50ms.
- *   • Finished / Scored      → freeze the clock at its last ticked value (stop ticking).
+ *   • Finished / Final       → freeze the clock at its last ticked value (stop ticking).
  *   • Scheduled/Staged/Armed → reset to 0 (a fresh/idle heat, or no heat at all).
  * The off-ramps Abort/Restart/Discard aren't phases of their own — they fold back onto one
  * of the above (typically Scheduled), so they fall out of these same rules.
@@ -45,10 +45,10 @@ export function useRaceClock(getPhase: () => string | undefined): RaceClockState
       advance();
       const id = setInterval(advance, 50);
       // Teardown: stop ticking when the phase leaves Running (or on unmount). The next
-      // effect run applies the freeze (Finished/Scored) or reset (everything else).
+      // effect run applies the freeze (Finished/Final) or reset (everything else).
       return () => clearInterval(id);
     }
-    if (phase === 'Finished' || phase === 'Scored') {
+    if (phase === 'Finished' || phase === 'Final') {
       // Freeze: leave `elapsedMs` at its last Running value.
       return;
     }

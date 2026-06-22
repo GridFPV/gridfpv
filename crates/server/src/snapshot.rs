@@ -40,7 +40,7 @@ use crate::stream::Cursor;
 pub use crate::live_state::{LiveRaceState, PilotProgress};
 
 /// The heat-loop phase the live state reports (protocol.html §1: `Scheduled → Staged →
-/// Armed → Running → Finished → Scored`).
+/// Armed → Running → Finished → Final`).
 ///
 /// This is the *projected* view of the heat loop — the folded current phase a client
 /// renders — not the raw [`HeatTransition`](gridfpv_events::HeatTransition) event the
@@ -62,7 +62,7 @@ pub enum HeatPhase {
     /// Mirrors the canonical engine state `HeatState::Finished` (code-conventions §4).
     Finished,
     /// The result is finalized.
-    Scored,
+    Final,
 }
 
 /// Which projection a snapshot body or change envelope is *about* — the bare
