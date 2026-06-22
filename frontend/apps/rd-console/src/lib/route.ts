@@ -17,7 +17,7 @@
  *   - `#/events`             → the Events page (the picker)
  *   - `#/timers`             → the Timers page
  *   - `#/event/<tab>`        → the in-event workspace on `<tab>`
- *                              (tab ∈ setup | roster | classes | live | marshaling | results | timers)
+ *                              (tab ∈ setup | roster | classes | rounds | live | marshaling | results | timers)
  *
  * The active event itself is **app-wide server state** (the Director's active event, #90), so the
  * hash only restores *which tab* of the workspace — not *which* event. The workspace always shows
@@ -33,6 +33,7 @@ export type WorkspaceTab =
   | 'setup'
   | 'roster'
   | 'classes'
+  | 'rounds'
   | 'live'
   | 'marshaling'
   | 'results'
@@ -49,6 +50,7 @@ export const WORKSPACE_TABS: readonly WorkspaceTab[] = [
   'setup',
   'roster',
   'classes',
+  'rounds',
   'live',
   'marshaling',
   'results',
