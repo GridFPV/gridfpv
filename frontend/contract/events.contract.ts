@@ -1164,4 +1164,21 @@ describe('race Slice 2a: rounds', () => {
     expect(badEvent.status).toBe(404);
     expect((badEvent.body as { code?: string }).code).toBe('UnknownScope');
   });
+
+  it('GET /formats is an open read of the standard format names (the round dropdown source)', async () => {
+    // The Rounds UI sources its format dropdown here rather than hard-coding the list — the single
+    // source of truth is the engine's `FormatRegistry::standard()`. An open read (no token).
+    const res = await fetch(`${director.baseUrl}/formats`);
+    expect(res.status).toBe(200);
+    const names = (await res.json()) as string[];
+    // The 6 production formats, in sorted order (the same set `POST /rounds` validates against).
+    expect(names).toEqual([
+      'double_elim',
+      'multi_main',
+      'round_robin',
+      'single_elim',
+      'timed_qual',
+      'zippyq'
+    ]);
+  });
 });

@@ -26,7 +26,11 @@ import type {
   updateClass,
   deleteClass,
   setEventClasses,
-  setClassMembership
+  setClassMembership,
+  listFormats,
+  createRound,
+  updateRound,
+  deleteRound
 } from '@gridfpv/protocol-client';
 import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
@@ -70,6 +74,12 @@ export interface TimerImpls {
   setEventClassesImpl?: typeof setEventClasses;
   /** The per-class membership write seam (race redesign Slice 1b) — backs the EventRoster tests. */
   setClassMembershipImpl?: typeof setClassMembership;
+  /** The valid format-names read (race redesign Slice 2b) — backs the EventRounds tests. */
+  listFormatsImpl?: typeof listFormats;
+  /** The per-event round write seams (race redesign Slice 2b) — back the EventRounds tests. */
+  createRoundImpl?: typeof createRound;
+  updateRoundImpl?: typeof updateRound;
+  deleteRoundImpl?: typeof deleteRound;
 }
 
 export interface TestSession {
@@ -137,7 +147,12 @@ export function makeTestSession(
     deleteClassImpl: opts?.deleteClassImpl,
     setEventClassesImpl: opts?.setEventClassesImpl,
     // Per-class membership write seam (race redesign Slice 1b): inert unless a test overrides it.
-    setClassMembershipImpl: opts?.setClassMembershipImpl
+    setClassMembershipImpl: opts?.setClassMembershipImpl,
+    // Round read/write seams (race redesign Slice 2b): inert unless a test overrides them.
+    listFormatsImpl: opts?.listFormatsImpl,
+    createRoundImpl: opts?.createRoundImpl,
+    updateRoundImpl: opts?.updateRoundImpl,
+    deleteRoundImpl: opts?.deleteRoundImpl
   });
   // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event,
   // unless the test wants the app-level (no-event) context.

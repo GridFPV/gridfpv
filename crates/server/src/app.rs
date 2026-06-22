@@ -79,6 +79,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use gridfpv_engine::format::FormatRegistry;
 use gridfpv_engine::scoring::{WinCondition, score_events};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{LapList, lap_list_marshaled, registrations};
@@ -314,6 +315,10 @@ pub fn router(registry: EventRegistry) -> Router {
             "/classes/{class_id}",
             put(update_class).delete(delete_class),
         )
+        // The valid **format names** (race redesign Slice 2b): the single source of truth the
+        // Rounds UI's format dropdown reads, straight from [`FormatRegistry::standard`]. An open
+        // read (no token) — it is static configuration, not event state.
+        .route("/formats", get(list_formats))
         // Per-event class **selection** (issue #84): RD-gated; each id must name a known directory
         // class. Set the whole selection wholesale (mirrors the timer selection).
         .route("/events/{event_id}/classes", put(set_event_classes))
@@ -724,6 +729,20 @@ async fn remove_from_roster(
 /// without a credential, mirroring `GET /pilots`.
 async fn list_classes(State(registry): State<EventRegistry>) -> Json<Vec<Class>> {
     Json(registry.classes().list())
+}
+
+/// `GET /formats` — the valid **format names** (race redesign Slice 2b).
+///
+/// The single source of truth the Rounds UI's format dropdown reads: the production formats
+/// registered in [`FormatRegistry::standard`], in sorted order. An open read (no token) — these
+/// are static, compiled-in configuration, not per-event state, so no registry state is touched.
+async fn list_formats() -> Json<Vec<String>> {
+    let formats = FormatRegistry::standard()
+        .names()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    Json(formats)
 }
 
 /// `POST /classes` — create a class from a [`CreateClassRequest`], RD-gated (issue #84).
