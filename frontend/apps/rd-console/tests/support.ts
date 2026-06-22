@@ -8,6 +8,9 @@ import type {
   ProtocolClient,
   ProtocolState,
   StateListener,
+  listEvents,
+  deleteEvent,
+  getActiveEvent,
   listTimers,
   createTimer,
   updateTimer,
@@ -54,6 +57,12 @@ const PRACTICE: EventMeta = {
 
 /** The registry seams a screen test can override (all optional; defaults are inert). */
 export interface TimerImpls {
+  /** The open event-list read — backs the EventPicker page tests. */
+  listEventsImpl?: typeof listEvents;
+  /** The hard-delete write seam — backs the EventPicker delete-dialog tests. */
+  deleteEventImpl?: typeof deleteEvent;
+  /** The active-event read (#91) — backs the EventPicker "Active" pill tests. */
+  getActiveEventImpl?: typeof getActiveEvent;
   listTimersImpl?: typeof listTimers;
   createTimerImpl?: typeof createTimer;
   updateTimerImpl?: typeof updateTimer;
@@ -142,6 +151,10 @@ export function makeTestSession(
     controlFactory: () => ({ baseUrl: 'http://d.local', sendCommand: sendSpy }),
     baseUrl: 'http://d.local',
     autoRestore: false,
+    // Event read/delete seams (EventPicker page): inert unless a test overrides them.
+    listEventsImpl: opts?.listEventsImpl,
+    deleteEventImpl: opts?.deleteEventImpl,
+    getActiveEventImpl: opts?.getActiveEventImpl,
     // Timer-registry seams (issue #73): inert unless a test overrides them.
     listTimersImpl: opts?.listTimersImpl,
     createTimerImpl: opts?.createTimerImpl,
