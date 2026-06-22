@@ -895,3 +895,90 @@ describe('seam 12: application-level classes + per-event selection (#84)', () =>
     expect((await setEventClasses(event.id, [cls.id])).status).toBe(401);
   });
 });
+
+/**
+ * Race redesign Slice 1a: **per-class membership** — given the event's present pilots (roster) and
+ * its selected classes, *which roster pilots race which class*. The membership is recorded on the
+ * event's `EventMeta.classes_membership` (additive, omitted from the wire when empty).
+ *
+ * guards:
+ *  - a new event's `EventMeta.classes_membership` is absent (additive `#[serde(default)]`,
+ *    omit-when-empty).
+ *  - `PUT /events/{id}/classes/{classId}/membership` is **RD-gated** (no token → 401), validates the
+ *    class names a known directory class and each pilot id names a directory pilot (unknown → 404
+ *    `UnknownScope`), and replaces that class's pilot list wholesale.
+ *  - an empty `pilot_ids` clears the class's membership entry.
+ */
+describe('race Slice 1a: per-class membership', () => {
+  /** `PUT /events/{id}/classes/{classId}/membership` with `{ pilot_ids }` + optional token. */
+  async function setMembership(
+    eventId: string,
+    classId: string,
+    pilotIds: string[],
+    token?: string
+  ): Promise<{ status: number; body: unknown }> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(
+      `${eventRoot(director.baseUrl, eventId)}/classes/${classId}/membership`,
+      { method: 'PUT', headers, body: JSON.stringify({ pilot_ids: pilotIds }) }
+    );
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** Create a pilot, returning its id. */
+  async function makePilot(callsign: string): Promise<string> {
+    const res = await fetch(`${director.baseUrl}/pilots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ callsign })
+    });
+    return ((await res.json()) as Pilot).id;
+  }
+
+  it('a new event has no class membership (additive, omit-when-empty)', async () => {
+    const event = (await createEvent('Membership Default', TOKEN)).body as EventMeta;
+    expect(event.classes_membership).toBeUndefined();
+  });
+
+  it('PUT membership validates the class + pilots and replaces a class list wholesale', async () => {
+    const event = (await createEvent('Membership Event', TOKEN)).body as EventMeta;
+    const a = await makePilot('Member A');
+    const b = await makePilot('Member B');
+
+    // Set the Open built-in class's membership.
+    const ok = await setMembership(event.id, 'mgp-open', [a, b], TOKEN);
+    expect(ok.status).toBe(200);
+    const meta = ok.body as EventMeta;
+    const entry = (meta.classes_membership ?? []).find((m) => m.class === 'mgp-open');
+    expect(entry?.pilots).toEqual([a, b]);
+
+    // Replacing that class's list is wholesale.
+    const replaced = (await setMembership(event.id, 'mgp-open', [a], TOKEN)).body as EventMeta;
+    const replacedEntry = (replaced.classes_membership ?? []).find((m) => m.class === 'mgp-open');
+    expect(replacedEntry?.pilots).toEqual([a]);
+
+    // An empty list clears the class's entry.
+    const cleared = (await setMembership(event.id, 'mgp-open', [], TOKEN)).body as EventMeta;
+    expect((cleared.classes_membership ?? []).some((m) => m.class === 'mgp-open')).toBe(false);
+
+    // An UNKNOWN class id → 404 UnknownScope.
+    const badClass = await setMembership(event.id, 'no-such-class', [a], TOKEN);
+    expect(badClass.status).toBe(404);
+    expect((badClass.body as { code?: string }).code).toBe('UnknownScope');
+
+    // An UNKNOWN pilot id → 404 UnknownScope.
+    const badPilot = await setMembership(event.id, 'mgp-open', ['no-such-pilot'], TOKEN);
+    expect(badPilot.status).toBe(404);
+    expect((badPilot.body as { code?: string }).code).toBe('UnknownScope');
+
+    // RD-gated: no token → 401.
+    expect((await setMembership(event.id, 'mgp-open', [a])).status).toBe(401);
+  });
+});

@@ -36,6 +36,7 @@ export {
   updateClass,
   deleteClass,
   setEventClasses,
+  setClassMembership,
   PRACTICE_EVENT_ID
 } from './client.js';
 export type {

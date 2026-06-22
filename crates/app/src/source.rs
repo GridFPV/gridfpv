@@ -51,8 +51,10 @@ use std::time::Duration;
 use gridfpv_events::{
     AdapterId, CompetitorRef, Event, GateIndex, HeatId, HeatTransition, Pass, SourceTime,
 };
+use gridfpv_projection::{CompetitorKey, registrations};
 use gridfpv_server::app::AppState;
 use gridfpv_server::events::EventRegistry;
+use gridfpv_server::pilots::PilotDirectory;
 use gridfpv_server::scope::EventId;
 use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry};
 use gridfpv_storage::Offset;
@@ -567,6 +569,173 @@ pub(crate) async fn run_bridge(
             }
         }
     }
+}
+
+// --- the sim auto-presence reconciler (race redesign Slice 1a) -------------------------
+
+/// Spawn the **sim auto-presence reconciler** across the whole [`EventRegistry`] (race redesign
+/// Slice 1a).
+///
+/// "Presence = roster membership": a pilot on an [`EventMeta::roster`] *is* present at the event.
+/// When the sim (Velocidrone) adapter reports a player via [`Event::CompetitorSeen`], the RD would
+/// normally have to add that pilot to the roster and bind the timing-source competitor to a GridFPV
+/// pilot by hand. This reconciler does it automatically for the sim: per active event it tails the
+/// log for `CompetitorSeen`, and for each seen competitor **not yet bound** whose name matches a
+/// **directory pilot's callsign**, it (a) adds that pilot to the event's roster (= present) if
+/// absent, and (b) appends an [`Event::CompetitorRegistered`] binding (the same binding the RD's
+/// [`Command::Register`](gridfpv_server::control::Command::Register) produces, folded by
+/// [`registrations`]). Unmatched / unrostered-but-no-matching-pilot seen players are a no-op (the RD
+/// handles them in Slice 1b).
+///
+/// The reconcile is **idempotent**: roster add is set-membership (no duplicate) and a binding is
+/// only appended for a competitor with no existing registration, so re-seeing a player does nothing.
+///
+/// Mirrors [`spawn_registry_bridge`]: it seeds a reconciler task per event present at startup and
+/// polls the registry on [`REGISTRY_POLL_INTERVAL`] to attach one to any event created at runtime.
+/// Returns the spawner's [`JoinHandle`]; the per-event tasks run for the process lifetime.
+pub fn spawn_presence_reconciler(registry: EventRegistry) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut attached: HashSet<EventId> = HashSet::new();
+        let mut ticker = tokio::time::interval(REGISTRY_POLL_INTERVAL);
+        loop {
+            for meta in registry.list() {
+                if attached.contains(&meta.id) {
+                    continue;
+                }
+                if let Some(state) = registry.resolve(&meta.id) {
+                    let registry = registry.clone();
+                    let event_id = meta.id.clone();
+                    tokio::spawn(async move {
+                        run_presence_reconciler(state, registry, event_id).await;
+                    });
+                    attached.insert(meta.id);
+                }
+            }
+            ticker.tick().await;
+        }
+    })
+}
+
+/// The per-event auto-presence loop (race redesign Slice 1a): poll the log tail for
+/// [`Event::CompetitorSeen`] and reconcile each one into presence + a binding.
+///
+/// Polls the event's log on [`POLL_INTERVAL`] from a cursor. On each batch it folds the *whole*
+/// log's [`registrations`] (so "already bound" reflects every binding, RD- or auto-made) and, for
+/// each newly-seen competitor in the batch, calls [`reconcile_seen`]. Exposed (crate-internal) so
+/// the test harness can run it directly against an in-memory [`AppState`].
+pub(crate) async fn run_presence_reconciler(
+    state: AppState,
+    registry: EventRegistry,
+    event_id: EventId,
+) {
+    let pilots = registry.pilots();
+    let mut cursor: Offset = 0;
+    let mut ticker = tokio::time::interval(POLL_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let new_events = match read_tail(&state, cursor) {
+            Ok(batch) => batch,
+            // A poisoned lock (or a dropped log at shutdown) ends the reconciler cleanly.
+            Err(_) => return,
+        };
+        if new_events.is_empty() {
+            continue;
+        }
+        // Fold the current bindings over the whole log so "already bound" is authoritative
+        // (an RD bind or a prior auto-bind both count). Cheap: one read; the log is per-event.
+        let bindings = match read_all(&state) {
+            Ok(events) => registrations(events.iter()),
+            Err(_) => continue,
+        };
+        for (offset, event) in new_events {
+            cursor = offset + 1;
+            if let Event::CompetitorSeen {
+                adapter,
+                competitor,
+            } = event
+            {
+                reconcile_seen(
+                    &state, &registry, &pilots, &event_id, &bindings, adapter, competitor,
+                );
+            }
+        }
+    }
+}
+
+/// Reconcile one seen competitor into presence + a binding (race redesign Slice 1a).
+///
+/// No-op when the competitor is **already bound** (its `(adapter, competitor)` is in `bindings`),
+/// or when **no directory pilot's callsign matches** the competitor name. Otherwise: add the
+/// matched pilot to the event's [`roster`](gridfpv_server::events::EventMeta::roster) (idempotent —
+/// set membership = presence) and append an [`Event::CompetitorRegistered`] binding so the lap
+/// projection attributes the sim player's laps to that pilot. Best-effort: a roster/append failure
+/// is logged-shaped (eprintln) and skipped rather than crashing the reconciler.
+fn reconcile_seen(
+    state: &AppState,
+    registry: &EventRegistry,
+    pilots: &PilotDirectory,
+    event_id: &EventId,
+    bindings: &std::collections::BTreeMap<CompetitorKey, gridfpv_server::scope::PilotId>,
+    adapter: AdapterId,
+    competitor: CompetitorRef,
+) {
+    let key = CompetitorKey {
+        adapter: adapter.clone(),
+        competitor: competitor.clone(),
+    };
+    // Already bound (by the RD or a prior auto-bind) → nothing to do (idempotent).
+    if bindings.contains_key(&key) {
+        return;
+    }
+    // Match the seen competitor name against a directory pilot's callsign. Unmatched → no-op.
+    let Some(pilot_id) = match_callsign(pilots, &competitor) else {
+        return;
+    };
+    // (a) Presence: add the matched pilot to the event's roster (idempotent set-membership).
+    if let Err(e) = registry.add_to_roster(event_id, pilot_id.clone()) {
+        eprintln!("gridfpv: auto-presence could not add pilot to roster: {e}");
+        return;
+    }
+    // (b) Binding: append the CompetitorRegistered the RD's `Register` command would (#60), so
+    // the sim player's laps attribute to the matched pilot.
+    if let Err(e) = state.append(
+        Event::CompetitorRegistered {
+            adapter,
+            competitor,
+            pilot: pilot_id,
+        },
+        None,
+    ) {
+        eprintln!("gridfpv: auto-presence could not append binding: {e:?}");
+    }
+}
+
+/// Find the directory pilot whose **callsign matches** the seen competitor name (race redesign
+/// Slice 1a), or `None`. The match is **case-insensitive and trimmed** so a sim player name and a
+/// stored callsign that differ only in surrounding whitespace or case still bind. The directory is
+/// listed in id order, so the first matching pilot wins deterministically.
+fn match_callsign(
+    pilots: &PilotDirectory,
+    competitor: &CompetitorRef,
+) -> Option<gridfpv_server::scope::PilotId> {
+    let name = competitor.0.trim();
+    pilots
+        .list()
+        .into_iter()
+        .find(|p| p.callsign.trim().eq_ignore_ascii_case(name))
+        .map(|p| p.id)
+}
+
+/// Read the whole event log, returning its [`Event`]s in append order. A thin wrapper over the
+/// shared log handle used by the presence reconciler to fold the current registration bindings.
+fn read_all(state: &AppState) -> Result<Vec<Event>, SourceError> {
+    let stored = state
+        .log()
+        .lock()
+        .map_err(|_| SourceError("the event log lock was poisoned".into()))?
+        .read_all()
+        .map_err(|e| SourceError(e.to_string()))?;
+    Ok(stored.into_iter().map(|s| s.event).collect())
 }
 
 /// Resolve the event's selected **Mock** timers into the [`SimSource`]s to run for this heat
@@ -1225,6 +1394,139 @@ mod tests {
         sleep(POLL_INTERVAL * 3).await;
         assert_eq!(count_passes(&read_all_events(&state)), 3);
         bridge.abort();
+    }
+
+    // --- race redesign Slice 1a: sim auto-presence reconciler ---------------------------------
+
+    /// Spawn the presence reconciler for `registry`'s Practice event, returning its handle and
+    /// Practice's `AppState` (the same log it polls), mirroring [`spawn_bridge_for`].
+    fn spawn_reconciler_for(registry: &EventRegistry) -> (JoinHandle<()>, AppState) {
+        let state = registry.resolve(&practice()).unwrap();
+        let reg = registry.clone();
+        let reconciler_state = state.clone();
+        let handle = tokio::spawn(async move {
+            run_presence_reconciler(reconciler_state, reg, practice()).await;
+        });
+        (handle, state)
+    }
+
+    /// Read the `CompetitorRegistered` bindings currently in the log, as `(competitor, pilot)`.
+    fn bindings_in(state: &AppState) -> Vec<(String, String)> {
+        read_all_events(state)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::CompetitorRegistered {
+                    competitor, pilot, ..
+                } => Some((competitor.0, pilot.0)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn seen_player_matching_a_rostered_pilot_is_added_and_bound() {
+        use gridfpv_server::pilots::CreatePilotRequest;
+
+        let registry = EventRegistry::new(None).unwrap();
+        // A directory pilot whose callsign matches the sim player name (case/space-insensitively).
+        let pilot = registry
+            .pilots()
+            .create(&CreatePilotRequest {
+                callsign: "AcroAce".into(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let (reconciler, state) = spawn_reconciler_for(&registry);
+
+        // The sim adapter reports a player by name — with surrounding whitespace and different case
+        // to prove the match is trimmed + case-insensitive.
+        state
+            .append(
+                Event::CompetitorSeen {
+                    adapter: AdapterId(SIM_ADAPTER.into()),
+                    competitor: CompetitorRef("  acroace ".into()),
+                },
+                None,
+            )
+            .unwrap();
+
+        // The pilot is added to the roster (= present) and a binding is appended.
+        let pilot_id = pilot.id.clone();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let rostered = registry
+                    .meta_of(&practice())
+                    .map(|m| m.roster.contains(&pilot_id))
+                    .unwrap_or(false);
+                if rostered && !bindings_in(&state).is_empty() {
+                    return;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the matching pilot should be auto-added and bound");
+
+        let bindings = bindings_in(&state);
+        assert_eq!(
+            bindings,
+            vec![("  acroace ".to_string(), pilot.id.0.clone())]
+        );
+
+        // Idempotent: re-seeing the SAME player (identical adapter+competitor — what the sim
+        // adapter actually re-emits) adds no second roster entry and no second binding.
+        state
+            .append(
+                Event::CompetitorSeen {
+                    adapter: AdapterId(SIM_ADAPTER.into()),
+                    competitor: CompetitorRef("  acroace ".into()),
+                },
+                None,
+            )
+            .unwrap();
+        sleep(POLL_INTERVAL * 3).await;
+        assert_eq!(
+            registry.meta_of(&practice()).unwrap().roster,
+            vec![pilot.id.clone()],
+            "presence is set-membership — no duplicate roster entry"
+        );
+        assert_eq!(
+            bindings_in(&state).len(),
+            1,
+            "the already-bound competitor is not re-bound"
+        );
+
+        reconciler.abort();
+    }
+
+    #[tokio::test]
+    async fn seen_player_with_no_matching_pilot_is_a_no_op() {
+        let registry = EventRegistry::new(None).unwrap();
+        // No directory pilot named "Stranger".
+        let (reconciler, state) = spawn_reconciler_for(&registry);
+
+        state
+            .append(
+                Event::CompetitorSeen {
+                    adapter: AdapterId(SIM_ADAPTER.into()),
+                    competitor: CompetitorRef("Stranger".into()),
+                },
+                None,
+            )
+            .unwrap();
+
+        // Wait past several poll cycles: the roster stays empty and no binding is appended.
+        sleep(POLL_INTERVAL * 4).await;
+        assert!(
+            registry.meta_of(&practice()).unwrap().roster.is_empty(),
+            "an unmatched seen player must not be added to the roster"
+        );
+        assert!(
+            bindings_in(&state).is_empty(),
+            "an unmatched seen player must not be bound"
+        );
+        reconciler.abort();
     }
 
     #[test]

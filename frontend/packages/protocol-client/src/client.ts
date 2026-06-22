@@ -754,6 +754,43 @@ export async function setEventClasses(
 }
 
 /**
+ * Set which roster pilots race a single class (`PUT /events/{id}/classes/{classId}/membership`) —
+ * race redesign Slice 1a. Replaces *that class's* pilot list wholesale (an empty list clears it);
+ * other classes' memberships are untouched. RD-gated; the server validates the event exists, the
+ * class names a known directory class, and **each** pilot id names a known directory pilot (else
+ * **404**). Resolves to the updated event {@link EventMeta}, or rejects on a non-2xx / transport
+ * failure.
+ */
+export async function setClassMembership(
+  baseUrl: string,
+  eventId: EventId,
+  classId: ClassId,
+  pilotIds: PilotId[],
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/membership`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ pilot_ids: pilotIds })
+    }
+  );
+  if (!resp.ok)
+    throw new Error(
+      `PUT /events/${eventId}/classes/${classId}/membership failed: HTTP ${resp.status}`
+    );
+  return (await resp.json()) as EventMeta;
+}
+
+/**
  * Connect to a GridFPV protocol server and begin the snapshot→subscribe handshake.
  *
  * Returns immediately with a {@link ProtocolClient}; the snapshot fetch and WS
