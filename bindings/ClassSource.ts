@@ -3,11 +3,13 @@
 /**
  * Where a [`Class`] came from (issue #84).
  *
- * A small closed enum the directory records so the RD can tell an imported class (e.g. a MultiGP
- * chapter class) from one they typed in themselves. Externally tagged (the default serde enum
- * representation) so it maps to a TS string union (`"MultiGP" | "Custom" | "Other"`), exactly like
- * [`VtxType`](crate::pilots::VtxType). Defaults to [`Custom`](ClassSource::Custom) — a class the RD
- * created by hand; [`Other`](ClassSource::Other) is the catch-all for any provenance not
- * enumerated.
+ * A small closed enum the directory records so the RD can tell a canonical built-in class (e.g. a
+ * MultiGP spec class) from one they typed in themselves. Externally tagged (the default serde enum
+ * representation) so it maps to a TS string union (`"MultiGP" | "Five33" | … | "Custom" |
+ * "Other"`), exactly like [`VtxType`](crate::pilots::VtxType). The org variants name the standard
+ * FPV racing leagues / spec bodies the built-in classes carry as their provenance (shown as a
+ * badge). Defaults to [`Custom`](ClassSource::Custom) — a class the RD created by hand; users only
+ * ever create `Custom` classes. [`Other`](ClassSource::Other) is the catch-all for any provenance
+ * not enumerated.
  */
-export type ClassSource = "MultiGP" | "Custom" | "Other";
+export type ClassSource = "MultiGP" | "Five33" | "FreedomSpec" | "StreetLeague" | "UDL" | "Custom" | "Other";

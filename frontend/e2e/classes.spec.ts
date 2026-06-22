@@ -1,27 +1,26 @@
 /**
  * Class registry lifecycle through the console UI (#84) — the deliverable proof for the class
- * registry slice.
+ * registry slice with its locked, fixed-id built-ins.
  *
  * Two real click-throughs against a **real** Director (open / no token, full-trust by default):
  *
- *  1. **Directory CRUD** — open the console, land on the **home hub**, open the **Classes** page,
- *     **add** a class via the **MultiGP quick-pick** (which pre-fills `source = MultiGP` + a
- *     reference) and see it listed with its source badge + reference link; **edit** it and **clear**
- *     the reference + description (the clear-via-`null` wiring), confirming they actually clear; then
- *     **remove** it.
- *  2. **In-event selection** — enter an event (Practice), open the workspace's **Classes** tab,
- *     register a class inline, **check it** into this event's selection and **Save**; a reload
- *     resumes into the event with the class still selected. Cleans up after itself (uncheck + remove)
- *     since the worker's Director is shared.
+ *  1. **Built-ins + Custom CRUD** — open the console, land on the **home hub**, open the **Classes**
+ *     page, and confirm the 9 standard **built-in** classes are listed with org source badges and a
+ *     built-in/lock indicator, and are **not removable** (no Remove button). Then **add** a class:
+ *     the form has no org source picker (new classes are `Custom`), and the created row shows the
+ *     `Custom` badge and keeps Edit/Remove; finally **remove** it.
+ *  2. **In-event selection of a built-in** — enter an event (Practice), open the workspace's
+ *     **Classes** tab, **check a built-in** (`Open Class`) into this event's selection and **Save**;
+ *     a reload resumes into the event with the built-in still selected. Cleans up (uncheck + save).
  *
- * Every step is a real click/input in headless chromium on the real `POST/PUT/DELETE /classes` +
+ * Every step is a real click/input in headless chromium on the real `POST/DELETE /classes` +
  * `PUT /events/{id}/classes` paths — nothing mocked. Importing `test`/`expect` from
  * `./observability.js` means a failure carries the full-stack dump (browser console, page errors,
  * the Director's server log).
  */
 import { expect, test } from './observability.js';
 
-test('RD adds (via MultiGP quick-pick), edits (clearing reference + description), and removes a directory class', async ({
+test('Classes page lists the locked built-ins (org badges, not removable) and full CRUD on a Custom class', async ({
   page
 }) => {
   const NAME = `E2E-Class-${Date.now()}`;
@@ -45,66 +44,51 @@ test('RD adds (via MultiGP quick-pick), edits (clearing reference + description)
     timeout: 15_000
   });
 
-  // ── Add a class via the MultiGP quick-pick, then override the name to a unique one ───────
+  // ── The 9 built-ins are present, org-badged, locked (no Remove) ──────────────────────────
+  const list = page.getByRole('list', { name: 'Class directory' });
+  const openBuiltin = list.getByRole('listitem').filter({ hasText: 'Open Class' });
+  await expect(openBuiltin).toBeVisible({ timeout: 15_000 });
+  // It carries its real org as a badge + a built-in/lock indicator…
+  await expect(openBuiltin.getByText('MultiGP', { exact: true })).toBeVisible();
+  await expect(openBuiltin.getByLabel('Built-in')).toBeVisible();
+  // …and is read-only: no Edit / Remove on a built-in row.
+  await expect(openBuiltin.getByRole('button', { name: 'Remove' })).toHaveCount(0);
+  await expect(openBuiltin.getByRole('button', { name: 'Edit' })).toHaveCount(0);
+  // A couple more of the 9 are listed, across orgs.
+  await expect(list.getByRole('listitem').filter({ hasText: 'Tiny Trainer' })).toBeVisible();
+  await expect(list.getByRole('listitem').filter({ hasText: 'Street League' })).toBeVisible();
+
+  // ── Add a class — the form offers NO org source picker; new classes are Custom ───────────
   await page.getByRole('button', { name: '+ Add class' }).click();
   const addForm = page.getByRole('form', { name: 'Add class' });
   await expect(addForm).toBeVisible();
-
-  // Pick "Open" from the MultiGP quick-pick: this pre-fills source=MultiGP + a reference URL.
-  await addForm.getByLabel('Add from MultiGP').selectOption('Open');
-  await expect(addForm.getByLabel('Source')).toHaveValue('MultiGP');
-  await expect(addForm.getByLabel('Reference')).toHaveValue(/^https?:\/\//);
-  // Use a unique name so the shared Director stays isolated; add a description.
+  await expect(addForm.getByLabel('Source')).toHaveCount(0);
+  await expect(addForm.getByLabel('Add from MultiGP')).toHaveCount(0);
   await addForm.getByLabel('Name').fill(NAME);
-  await addForm.getByLabel('Description').fill('A quick-picked MultiGP class.');
 
-  // Submit (open Director — no token prompt). `exact` so it picks the dialog's submit, not the
-  // page header's "+ Add class".
   await page.getByRole('button', { name: 'Add class', exact: true }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
 
-  // It appears in the directory with its name, a MultiGP source badge, and a reference link.
-  const list = page.getByRole('list', { name: 'Class directory' });
+  // The created class appears as a Custom row with full Edit/Remove controls.
   const row = list.getByRole('listitem').filter({ hasText: NAME });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  await expect(row.getByText('MultiGP', { exact: true })).toBeVisible();
-  await expect(row.getByRole('link', { name: `Reference for ${NAME}` })).toBeVisible();
-  await expect(row.getByText('A quick-picked MultiGP class.')).toBeVisible();
+  await expect(row.getByText('Custom', { exact: true })).toBeVisible();
+  await expect(row.getByLabel('Built-in')).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'Edit' })).toBeVisible();
 
-  // ── Edit: clear the reference + description ───────────────────────────────────────────────
-  await row.getByRole('button', { name: 'Edit' }).click();
-  const editForm = page.getByRole('form', { name: 'Edit class' });
-  await expect(editForm).toBeVisible();
-  await editForm.getByLabel('Reference').fill('');
-  await editForm.getByLabel('Description').fill('');
-  await page.getByRole('button', { name: 'Save changes' }).click();
-
-  // The row no longer renders a reference link or the description — the clear actually persisted
-  // (the edit sent `null` for reference/description; re-reading the directory shows them gone).
-  await expect(row.getByRole('link', { name: `Reference for ${NAME}` })).toHaveCount(0, {
-    timeout: 15_000
-  });
-  await expect(row.getByText('A quick-picked MultiGP class.')).toHaveCount(0);
-  // The name + source badge are unchanged (only reference/description were cleared).
-  await expect(row.getByText(NAME)).toBeVisible();
-  await expect(row.getByText('MultiGP', { exact: true })).toBeVisible();
-
-  // ── Remove (with the confirm step) ─────────────────────────────────────────────────────
+  // ── Remove the Custom class (with the confirm step) ──────────────────────────────────────
   await row.getByRole('button', { name: 'Remove' }).click();
   const confirm = page.getByRole('dialog').filter({ hasText: 'Remove class' });
   await expect(confirm).toBeVisible();
   await confirm.getByRole('button', { name: 'Remove' }).click();
-
-  // The class is gone from the directory.
   await expect(list.getByRole('listitem').filter({ hasText: NAME })).toHaveCount(0, {
     timeout: 15_000
   });
+  // The built-in is still there afterward.
+  await expect(list.getByRole('listitem').filter({ hasText: 'Open Class' })).toBeVisible();
 });
 
-test('RD registers a class inline and checks it into the event class selection', async ({
-  page
-}) => {
-  const NAME = `E2E-EventClass-${Date.now()}`;
+test('RD selects a built-in class onto the event and it persists', async ({ page }) => {
   await page.goto('/');
 
   // ── Get into an event (Practice). The worker's Director may already have an active event from a
@@ -135,35 +119,23 @@ test('RD registers a class inline and checks it into the event class selection',
   await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
     timeout: 15_000
   });
-  // The selection count header is present.
   await expect(page.getByText(/selected for this event/i)).toBeVisible();
 
-  // ── Register a brand-new class inline — without leaving the event ────────────────────────────
-  await page.getByRole('button', { name: '+ Add class' }).click();
-  const addForm = page.getByRole('form', { name: 'Add class' });
-  await expect(addForm).toBeVisible();
-  await addForm.getByLabel('Name').fill(NAME);
-  await page.getByRole('button', { name: 'Add class', exact: true }).click();
-  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
-
-  // The new class appears in the list as a fresh, unchecked, selectable row.
+  // ── A built-in is selectable like any class: check "Open Class" into the event, then Save ────
   const list = page.getByRole('list', { name: 'Class directory' });
-  const row = list.getByRole('listitem').filter({ hasText: NAME });
+  const row = list.getByRole('listitem').filter({ hasText: 'Open Class' });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  const box = row.getByRole('checkbox', { name: `Select ${NAME}` });
-  await expect(box).not.toBeChecked();
-
-  // ── Check it into the event's class selection, then Save ─────────────────────────────────────
-  await box.check();
+  const box = row.getByRole('checkbox', { name: 'Select Open Class' });
+  // Start from a known state (a prior run may have left it checked); ensure checked.
+  if (!(await box.isChecked())) await box.check();
   await expect(box).toBeChecked();
   await page.getByRole('button', { name: 'Save classes' }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
-  // After a successful save there is nothing pending, so Save goes disabled again.
   await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
     timeout: 15_000
   });
 
-  // ── It persisted on the Director: a reload resumes into the event with the class still checked.
+  // ── It persisted on the Director: a reload resumes into the event with the built-in checked ──
   await page.reload();
   await expect(liveNav).toBeVisible({ timeout: 15_000 });
   await page
@@ -173,28 +145,17 @@ test('RD registers a class inline and checks it into the event class selection',
   const rowAfter = page
     .getByRole('list', { name: 'Class directory' })
     .getByRole('listitem')
-    .filter({ hasText: NAME });
-  await expect(rowAfter.getByRole('checkbox', { name: `Select ${NAME}` })).toBeChecked({
+    .filter({ hasText: 'Open Class' });
+  await expect(rowAfter.getByRole('checkbox', { name: 'Select Open Class' })).toBeChecked({
     timeout: 15_000
   });
 
-  // ── Uncheck + Save: the selection shrinks back ───────────────────────────────────────────────
-  const boxAfter = rowAfter.getByRole('checkbox', { name: `Select ${NAME}` });
+  // ── Clean up: uncheck + Save so the shared Director's event goes back to an empty selection ──
+  const boxAfter = rowAfter.getByRole('checkbox', { name: 'Select Open Class' });
   await boxAfter.uncheck();
   await expect(boxAfter).not.toBeChecked();
   await page.getByRole('button', { name: 'Save classes' }).click();
   await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
     timeout: 15_000
   });
-
-  // ── Clean up: remove the class from the directory (the worker's Director is shared) ──────────
-  await rowAfter.getByRole('button', { name: 'Remove' }).click();
-  const confirm = page.getByRole('dialog').filter({ hasText: 'Remove class' });
-  await expect(confirm).toBeVisible();
-  await confirm.getByRole('button', { name: 'Remove' }).click();
-  await expect(
-    page.getByRole('list', { name: 'Class directory' }).getByRole('listitem').filter({
-      hasText: NAME
-    })
-  ).toHaveCount(0, { timeout: 15_000 });
 });

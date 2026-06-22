@@ -16,24 +16,24 @@
    *    {@link PilotManager} exposes for {@link EventRoster}. **Selection concerns live in that host,
    *    not here** — this component is purely the directory + form.
    *
-   * The add form offers an **"Add from MultiGP"** quick-pick that pre-fills `source = MultiGP` + a
-   * reference URL for one of the seven standard MultiGP classes.
+   * New classes the RD creates are always **`Custom`** (the create form has no org source picker).
+   * The canonical org classes ship as locked, fixed-id **built-ins** the Director seeds: each is
+   * shown with its org badge + a small lock indicator and has **no Edit/Remove** — only Custom rows
+   * are editable/removable.
    *
    * The list refreshes after every create/edit/delete; the latest `classes` are exposed back through
    * the bindable `classes` prop and an `onchange` callback so a selection owner can reconcile.
    */
-  import { Badge, Button, Dialog, Field, Input, Select, toast } from '@gridfpv/components';
+  import { Badge, Button, Dialog, Field, Input, toast } from '@gridfpv/components';
   import type { Snippet } from 'svelte';
   import type { Class, CreateClassRequest, UpdateClassRequest } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import {
-    CLASS_SOURCES,
-    MULTIGP_CLASSES,
     buildCreateRequest,
     buildUpdateRequest,
     emptyForm,
     formFromClass,
-    formFromMultiGp,
+    isBuiltin,
     sourceTone,
     type ClassFormValues
   } from '../lib/classes.js';
@@ -93,8 +93,8 @@
 
   // ── The add / edit dialog ──────────────────────────────────────────────────
   // One dialog drives both create and edit; `editing` (the class, or undefined for "add") chooses
-  // which protocol call submit makes. The form holds plain strings + the source; on submit it maps
-  // to a create request or a clear-via-null update diff (see ../lib/classes.ts).
+  // which protocol call submit makes. The form holds plain strings; on submit it maps to a create
+  // request (always source=Custom) or a clear-via-null update diff (see ../lib/classes.ts).
   let formOpen = $state(false);
   let editing = $state<Class | undefined>(undefined);
   let form = $state<ClassFormValues>(emptyForm());
@@ -109,16 +109,12 @@
   }
 
   function openEdit(cls: Class) {
+    // Built-ins are read-only — never open the edit form for one (the UI offers no Edit on them).
+    if (isBuiltin(cls)) return;
     editing = cls;
     form = formFromClass(cls);
     formError = undefined;
     formOpen = true;
-  }
-
-  /** Quick-pick: pre-fill the (add) form from a MultiGP preset — `source = MultiGP` + reference. */
-  function pickMultiGp(name: string) {
-    const preset = MULTIGP_CLASSES.find((p) => p.name === name);
-    if (preset) form = formFromMultiGp(preset);
   }
 
   async function submitForm(e?: Event) {
@@ -162,6 +158,8 @@
   let removing = $state<string | undefined>(undefined);
 
   function askRemove(cls: Class) {
+    // Built-ins are read-only — they can't be removed (the UI offers no Remove on them).
+    if (isBuiltin(cls)) return;
     confirming = cls;
   }
 
@@ -201,7 +199,7 @@
   {:else if loadState.classes.length === 0}
     <div class="empty">
       <p>No classes in the directory yet.</p>
-      <p class="empty-sub">Add one — or pick a standard MultiGP class — to get started.</p>
+      <p class="empty-sub">Add a custom class to get started.</p>
     </div>
   {:else}
     {@render listHeader?.()}
@@ -213,6 +211,11 @@
             <div class="class-head">
               <span class="class-name">{cls.name}</span>
               <Badge tone={sourceTone(cls.source)}>{cls.source}</Badge>
+              {#if isBuiltin(cls)}
+                <span class="builtin-lock" title="Built-in class — read-only" aria-label="Built-in">
+                  🔒 Built-in
+                </span>
+              {/if}
               {#if cls.reference}
                 <a
                   class="reference"
@@ -227,17 +230,19 @@
             </div>
             {#if cls.description}<span class="description">{cls.description}</span>{/if}
           </div>
-          <div class="class-actions">
-            <Button variant="ghost" size="sm" onclick={() => openEdit(cls)}>Edit</Button>
-            <Button
-              variant="danger"
-              size="sm"
-              loading={removing === cls.id}
-              onclick={() => askRemove(cls)}
-            >
-              Remove
-            </Button>
-          </div>
+          {#if !isBuiltin(cls)}
+            <div class="class-actions">
+              <Button variant="ghost" size="sm" onclick={() => openEdit(cls)}>Edit</Button>
+              <Button
+                variant="danger"
+                size="sm"
+                loading={removing === cls.id}
+                onclick={() => askRemove(cls)}
+              >
+                Remove
+              </Button>
+            </div>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -249,34 +254,23 @@
 <Dialog bind:open={formOpen} title={editing ? 'Edit class' : 'Add class'}>
   <form class="class-form" onsubmit={submitForm} aria-label={editing ? 'Edit class' : 'Add class'}>
     {#if !editing}
-      <!-- The MultiGP quick-pick only makes sense on a fresh add; it pre-fills the form below. -->
-      <Field label="Add from MultiGP" hint="Pre-fills a standard MultiGP class + its reference.">
-        <Select
-          value=""
-          aria-label="Add from MultiGP"
-          onchange={(e: Event) => pickMultiGp((e.currentTarget as HTMLSelectElement).value)}
-        >
-          <option value="" disabled selected>Choose a MultiGP class…</option>
-          {#each MULTIGP_CLASSES as preset (preset.name)}
-            <option value={preset.name}>{preset.name}</option>
-          {/each}
-        </Select>
-      </Field>
+      <!-- New classes are always Custom; the canonical org classes ship as locked built-ins. -->
+      <p class="custom-note">
+        New classes are <strong>Custom</strong>. The standard org classes (MultiGP, Five33, …) are
+        built in.
+      </p>
     {/if}
 
     <Field label="Name" required error={formError}>
-      <Input bind:value={form.name} placeholder="e.g. Open" aria-label="Name" autocomplete="off" />
+      <Input
+        bind:value={form.name}
+        placeholder="e.g. House Spec"
+        aria-label="Name"
+        autocomplete="off"
+      />
     </Field>
 
-    <Field label="Source" hint="Where this class came from.">
-      <Select bind:value={form.source} aria-label="Source">
-        {#each CLASS_SOURCES as src (src)}
-          <option value={src}>{src}</option>
-        {/each}
-      </Select>
-    </Field>
-
-    <Field label="Reference" hint="A source id/handle or URL (e.g. a MultiGP class link).">
+    <Field label="Reference" hint="An optional source id/handle or URL.">
       <Input bind:value={form.reference} aria-label="Reference" autocomplete="off" />
     </Field>
 
@@ -429,6 +423,21 @@
     font-size: var(--gf-font-size-md);
     font-weight: var(--gf-font-weight-semibold);
     letter-spacing: var(--gf-tracking-tight);
+  }
+  .builtin-lock {
+    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
+    font-weight: var(--gf-font-weight-medium);
+    letter-spacing: var(--gf-tracking-tight);
+  }
+  .custom-note {
+    margin: 0;
+    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
+    line-height: 1.5;
+  }
+  .custom-note strong {
+    color: var(--gf-text-secondary);
   }
   .reference {
     font-size: var(--gf-font-size-xs);
