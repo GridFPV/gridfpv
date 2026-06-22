@@ -434,12 +434,13 @@
   let startMaxMs = $state(5000); // randomized start hold: longest
   let graceSeconds = $state(3); // grace window after the win condition, in seconds
   // ── Open-practice duration (open-practice refinement) ────────────────────────
-  // The **time limit** for an open-practice round — the practice duration, entered as hours:minutes.
-  // Blank / both zero = no limit (the RD ends the practice manually). When set, the runtime auto-ends
-  // the practice once the elapsed running time reaches it. Only shown / sent for the open-practice
-  // format (it has no win condition; the time limit is its only auto-end).
-  let timeLimitHours = $state(0);
-  let timeLimitMinutes = $state(0);
+  // The **time limit** for an open-practice round — the practice duration, entered as a single
+  // "Minutes" field. Blank = no limit (the RD ends the practice manually). When set, the runtime
+  // auto-ends the practice once the elapsed running time reaches it. Only shown / sent for the
+  // open-practice format (it has no win condition; the time limit is its only auto-end). Stored as
+  // `time_limit_secs = minutes * 60`. Held as a **string** (the raw <input> value) so a blank field
+  // is distinct from 0 — blank ⇒ no limit, where 0/blank both `buildTimeLimitSecs()` → undefined.
+  let timeLimitMinutes = $state('');
 
   // Open-practice format (open-practice Slice 2): swaps the class/seeding inputs for the
   // active-channels picker, and is submittable on a label + at least one active channel (no classes).
@@ -531,8 +532,7 @@
     startMinMs = 2000;
     startMaxMs = 5000;
     graceSeconds = 3;
-    timeLimitHours = 0;
-    timeLimitMinutes = 0;
+    timeLimitMinutes = ''; // blank = no limit
   }
 
   export function openAdd() {
@@ -589,10 +589,9 @@
       grace && typeof grace !== 'string' ? Math.round(grace.Duration.micros / 1_000_000) : 3;
 
     // Open-practice duration (open-practice refinement): reflect an existing time limit into the
-    // hours:minutes inputs. Unset (no limit) reads back as blank (both zero).
-    const limit = round.time_limit_secs ?? 0;
-    timeLimitHours = Math.floor(limit / 3600);
-    timeLimitMinutes = Math.floor((limit % 3600) / 60);
+    // single Minutes input. Unset (no limit) reads back as blank (`''`).
+    timeLimitMinutes =
+      round.time_limit_secs != null ? String(Math.round(round.time_limit_secs / 60)) : '';
 
     formOpen = true;
   }
@@ -665,13 +664,12 @@
   }
 
   /**
-   * The open-practice **time limit** in whole seconds from the hours:minutes inputs, or `undefined`
+   * The open-practice **time limit** in whole seconds from the single Minutes input, or `undefined`
    * when blank / zero (no limit — the RD ends the practice manually). Open-practice refinement.
    */
   function buildTimeLimitSecs(): number | undefined {
-    const hours = Math.max(0, Math.round(timeLimitHours || 0));
-    const mins = Math.max(0, Math.round(timeLimitMinutes || 0));
-    const total = hours * 3600 + mins * 60;
+    const mins = Math.max(0, Math.round(Number(timeLimitMinutes) || 0));
+    const total = mins * 60;
     return total > 0 ? total : undefined;
   }
 
@@ -897,25 +895,17 @@
             {/if}
           {:else}
             <Field
-              label="Time limit"
-              hint="Optional — blank or 0:00 = no limit (end the practice manually). When set, the practice auto-ends at this duration."
+              label="Time limit (minutes)"
+              hint="Optional — blank = no limit (end the practice manually). When set, the practice auto-ends after this many minutes."
             >
               <div class="mmss" role="group" aria-label="Time limit">
                 <Input
                   type="number"
                   min="0"
-                  bind:value={timeLimitHours}
-                  aria-label="Time limit hours"
-                />
-                <span class="mmss-sep" aria-hidden="true">h</span>
-                <Input
-                  type="number"
-                  min="0"
-                  max="59"
                   bind:value={timeLimitMinutes}
                   aria-label="Time limit minutes"
                 />
-                <span class="mmss-sep" aria-hidden="true">m</span>
+                <span class="mmss-sep" aria-hidden="true">min</span>
               </div>
             </Field>
           {/if}

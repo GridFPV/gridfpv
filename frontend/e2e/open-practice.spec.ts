@@ -62,7 +62,9 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   await expect(form.getByRole('group', { name: 'Active channels' })).toBeVisible();
   await expect(form.getByLabel('Eligible Open Class')).toBeHidden();
   await expect(form.getByLabel('Win condition')).toBeHidden();
-  await expect(form.getByLabel('Time limit hours')).toBeVisible();
+  // The time limit is now a single Minutes field (no separate hours input).
+  await expect(form.getByLabel('Time limit minutes')).toBeVisible();
+  await expect(form.getByLabel('Time limit hours')).toBeHidden();
 
   // The primary timer's Raceband seats label by band + channel · MHz (node 0 → R1 · 5658).
   const r1 = form.getByLabel('Channel Raceband R1 · 5658');
