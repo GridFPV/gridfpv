@@ -64,10 +64,11 @@ describe('EventSetupWizard (guided first-pass stepper)', () => {
     // The header names the event being set up and the first step is the combined Classes & Roster.
     expect(screen.getByText(/Set up · Spring Cup/)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Classes & Roster', level: 2 })).toBeInTheDocument();
-    // It embeds the real combined stage (its card headings), not a reimplementation.
-    expect(
-      await screen.findByRole('heading', { name: 'Classes for this event' })
-    ).toBeInTheDocument();
+    // It embeds the real combined stage (its three labelled boxes + a card heading), not a
+    // reimplementation: the top-level Classes / Pilots / Channels boxes and the roster card.
+    expect(await screen.findByRole('button', { name: /^Classes/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Pilots/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Channels/ })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Present pilots' })).toBeInTheDocument();
   });
 

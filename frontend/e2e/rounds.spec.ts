@@ -47,7 +47,7 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
 
   // ── Make sure the event has an eligible class: select the built-in Open Class. ──────────────
   await openTab(page, 'Classes & Roster');
-  await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
   const classRow = page

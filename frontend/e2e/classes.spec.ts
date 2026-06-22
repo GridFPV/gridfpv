@@ -116,7 +116,7 @@ test('RD selects a built-in class onto the event and it persists', async ({ page
     .getByRole('navigation', { name: 'Screens' })
     .getByRole('button', { name: 'Classes & Roster' })
     .click();
-  await expect(page.getByRole('heading', { name: 'Classes for this event' })).toBeVisible({
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
     timeout: 15_000
   });
   await expect(page.getByText(/selected for this event/i)).toBeVisible();

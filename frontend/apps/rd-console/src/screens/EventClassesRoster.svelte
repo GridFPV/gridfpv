@@ -25,7 +25,7 @@
   import { Badge, Button, Card, Collapsible, Select, toast } from '@gridfpv/components';
   import type { Class, ClassId, MemberSlot, Pilot, PilotId, TimerId } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
-  import { channelLabel } from '../lib/channels.js';
+  import { assignChannelsRoundRobin, channelLabel } from '../lib/channels.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
   import ClassManager from './ClassManager.svelte';
   import PilotManager from './PilotManager.svelte';
@@ -50,6 +50,11 @@
     }
     return s;
   }
+
+  // The three top-level boxes (Classes / Pilots / Channels) each persist their own collapse state.
+  const classesBox = $derived(collapse('classes-box'));
+  const pilotsBox = $derived(collapse('pilots-box'));
+  const channelsBox = $derived(collapse('channels-box'));
 
   let classManager = $state<ClassManager | undefined>(undefined);
   let pilotManager = $state<PilotManager | undefined>(undefined);
@@ -141,6 +146,16 @@
     if (next.has(id)) next.delete(id);
     else next.add(id);
     selectedPilots = next;
+  }
+  // Select-all / Unselect-all for the roster — one fast toggle for a 20-pilot field. Select-all marks
+  // every directory pilot present; unselect-all clears the roster selection. Both edit locally until
+  // the RD hits Save roster (consistent with the per-row checkboxes).
+  const allPilotsSelected = $derived(pilots.length > 0 && selectedPilots.size === pilots.length);
+  function selectAllPilots() {
+    selectedPilots = new Set(pilots.map((p) => p.id));
+  }
+  function unselectAllPilots() {
+    selectedPilots = new Set();
   }
   const orderedRoster = $derived(pilots.filter((p) => selectedPilots.has(p.id)).map((p) => p.id));
   const rosterChanged = $derived(
@@ -292,6 +307,25 @@
     next.set(classId, inner);
     membership = next;
   }
+  // Place-all / clear-all for one class — fast bulk placement across the present roster. Place-all
+  // adds every roster pilot not already a member (channel unset, preserving any chosen channel);
+  // clear-all empties the class. Edits locally until the class's Save placement.
+  function placeAll(classId: ClassId) {
+    const next = new Map(membership);
+    const inner = new Map(next.get(classId) ?? []);
+    for (const id of eventRoster) if (!inner.has(id)) inner.set(id, undefined);
+    next.set(classId, inner);
+    membership = next;
+  }
+  function clearAll(classId: ClassId) {
+    const next = new Map(membership);
+    next.set(classId, new Map());
+    membership = next;
+  }
+  function allPlaced(classId: ClassId): boolean {
+    const inner = membersOf(classId);
+    return rosterPilots.length > 0 && rosterPilots.every((p) => inner.has(p.id));
+  }
   // Set (or clear, on '') a member's channel. The `<select>` value is the raw MHz as a string.
   function setChannel(classId: ClassId, pilotId: PilotId, raw: string) {
     const next = new Map(membership);
@@ -338,172 +372,223 @@
       savingClass = undefined;
     }
   }
+
+  // ── Auto-assign channels ───────────────────────────────────────────────────
+  // Deterministically fill every *placed* pilot's channel from the source timer's available pool
+  // (round-robin / first-fit, in roster order): the i-th placed pilot in a class gets pool[i % N], so
+  // N pilots spread across the channels and repeats are fine (they fly in different heats). Then save
+  // each touched class's membership via the existing setClassMembership. Manual per-pilot overrides
+  // afterwards stay intact — this only fills in one batch.
+  let autoAssigning = $state(false);
+  const placedTotal = $derived(eventClasses.reduce((n, c) => n + membersOf(c).size, 0));
+  const canAutoAssign = $derived(hasChannelPool && placedTotal > 0 && !autoAssigning);
+  async function autoAssignChannels() {
+    if (!canAutoAssign) return;
+    autoAssigning = true;
+    try {
+      const pool = channelPool;
+      // Build the next membership map with channels filled, and remember which classes changed.
+      const next = new Map<ClassId, Map<PilotId, number | undefined>>();
+      const touched: ClassId[] = [];
+      for (const classId of eventClasses) {
+        const inner = membersOf(classId);
+        // Stable roster order — the order the slots save in, so the assignment is reproducible.
+        const placed = eventRoster.filter((id) => inner.has(id));
+        const assigned = assignChannelsRoundRobin(placed, pool);
+        const filled = new Map(inner);
+        for (const [id, mhz] of assigned) filled.set(id, mhz);
+        next.set(classId, filled);
+        if (placed.length > 0) touched.push(classId);
+      }
+      membership = next;
+
+      if (touched.length === 0) return;
+      const results = await Promise.all(
+        touched.map((c) => session.setClassMembership(c, orderedSlots(c)))
+      );
+      if (results.some((r) => !r)) {
+        toast.info('A control token is required to assign channels.');
+        return;
+      }
+      toast.success(
+        `Auto-assigned channels across ${touched.length === 1 ? '1 class' : `${touched.length} classes`}.`
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      autoAssigning = false;
+    }
+  }
 </script>
 
 <section class="classes-roster" aria-label="Classes and roster">
-  <!-- ── 1. Classes ───────────────────────────────────────────────────────── -->
-  <Card
-    title="Classes for this event"
-    subtitle="Add, edit, or remove classes in the directory, and tick which ones this event runs."
-  >
+  <!-- ════ BOX 1 · Classes ════════════════════════════════════════════════ -->
+  <Collapsible title="Classes" id="box-classes" bind:open={classesBox.open}>
+    {#snippet summary()}
+      <Badge tone="neutral">{orderedClassSelection.length} of {classes.length} selected</Badge>
+    {/snippet}
     {#snippet actions()}
       <Button variant="secondary" size="sm" onclick={() => classManager?.openAdd()}>
         + Add class
       </Button>
     {/snippet}
 
-    <p class="count-line" aria-live="polite">
-      <strong>{orderedClassSelection.length}</strong> of {classes.length}
-      {classes.length === 1 ? 'class' : 'classes'} selected for this event
-    </p>
-
-    <ClassManager
-      bind:this={classManager}
-      {session}
-      bind:classes
-      onchange={onClassDirectoryChange}
-      rowChecked={(c) => selectedClasses.has(c.id)}
+    <Card
+      subtitle="Add, edit, or remove classes in the directory, and tick which ones this event runs."
     >
-      {#snippet rowLead(cls)}
-        <input
-          type="checkbox"
-          class="select-box"
-          checked={selectedClasses.has(cls.id)}
-          onchange={() => toggleClass(cls.id)}
-          aria-label={`Select ${cls.name}`}
-        />
-      {/snippet}
+      <p class="count-line" aria-live="polite">
+        <strong>{orderedClassSelection.length}</strong> of {classes.length}
+        {classes.length === 1 ? 'class' : 'classes'} selected for this event
+      </p>
 
-      {#snippet listFooter()}
-        <div class="foot">
-          <span class="count" aria-live="polite">{orderedClassSelection.length} selected</span>
-          <div class="foot-actions">
-            {#if classesChanged}
-              <Button variant="ghost" onclick={resetClasses} disabled={savingClasses}>Reset</Button>
-            {/if}
-            <Button
-              variant="primary"
-              onclick={saveClasses}
-              loading={savingClasses}
-              disabled={!classesChanged}
-            >
-              Save classes
-            </Button>
+      <ClassManager
+        bind:this={classManager}
+        {session}
+        bind:classes
+        onchange={onClassDirectoryChange}
+        rowChecked={(c) => selectedClasses.has(c.id)}
+      >
+        {#snippet rowLead(cls)}
+          <input
+            type="checkbox"
+            class="select-box"
+            checked={selectedClasses.has(cls.id)}
+            onchange={() => toggleClass(cls.id)}
+            aria-label={`Select ${cls.name}`}
+          />
+        {/snippet}
+
+        {#snippet listFooter()}
+          <div class="foot">
+            <span class="count" aria-live="polite">{orderedClassSelection.length} selected</span>
+            <div class="foot-actions">
+              {#if classesChanged}
+                <Button variant="ghost" onclick={resetClasses} disabled={savingClasses}>
+                  Reset
+                </Button>
+              {/if}
+              <Button
+                variant="primary"
+                onclick={saveClasses}
+                loading={savingClasses}
+                disabled={!classesChanged}
+              >
+                Save classes
+              </Button>
+            </div>
           </div>
-        </div>
-      {/snippet}
-    </ClassManager>
-  </Card>
+        {/snippet}
+      </ClassManager>
+    </Card>
+  </Collapsible>
 
-  <!-- ── 2. Present pilots (roster) ───────────────────────────────────────── -->
-  <Card
-    title="Present pilots"
-    subtitle="Who is here at the event. Tick a directory pilot to mark them present, or add a new one — sim players appear automatically as they join."
-  >
+  <!-- ════ BOX 2 · Pilots (roster + per-class placement) ══════════════════ -->
+  <Collapsible title="Pilots" id="box-pilots" bind:open={pilotsBox.open}>
+    {#snippet summary()}
+      <Badge tone="neutral">{orderedRoster.length} of {pilots.length} present</Badge>
+    {/snippet}
     {#snippet actions()}
       <Button variant="secondary" size="sm" onclick={() => pilotManager?.openAdd()}>
         + Add pilot
       </Button>
     {/snippet}
 
-    {@const rosterCollapse = collapse('roster')}
-    <Collapsible title="Roster" bind:open={rosterCollapse.open}>
-      {#snippet summary()}
-        <Badge tone="neutral">
-          {orderedRoster.length} of {pilots.length} present
-        </Badge>
+    <!-- Roster -->
+    <Card
+      title="Present pilots"
+      subtitle="Who is here at the event. Tick a directory pilot to mark them present, or add a new one — sim players appear automatically as they join."
+    >
+      {#snippet actions()}
+        <div class="bulk-actions">
+          <Button
+            variant="secondary"
+            size="sm"
+            onclick={selectAllPilots}
+            disabled={pilots.length === 0 || allPilotsSelected}
+          >
+            Select all
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onclick={unselectAllPilots}
+            disabled={selectedPilots.size === 0}
+          >
+            Unselect all
+          </Button>
+        </div>
       {/snippet}
 
-      <p class="count-line" aria-live="polite">
-        <strong>{orderedRoster.length}</strong> of {pilots.length}
-        {pilots.length === 1 ? 'pilot' : 'pilots'} present at this event
-      </p>
-
-      <PilotManager
-        bind:this={pilotManager}
-        {session}
-        bind:pilots
-        onchange={onPilotDirectoryChange}
-        rowChecked={(p) => selectedPilots.has(p.id)}
-      >
-        {#snippet rowLead(pilot)}
-          <input
-            type="checkbox"
-            class="select-box"
-            checked={selectedPilots.has(pilot.id)}
-            onchange={() => togglePilot(pilot.id)}
-            aria-label={`Roster ${pilot.callsign}`}
-          />
+      {@const rosterCollapse = collapse('roster')}
+      <Collapsible title="Roster" bind:open={rosterCollapse.open}>
+        {#snippet summary()}
+          <Badge tone="neutral">
+            {orderedRoster.length} of {pilots.length} present
+          </Badge>
         {/snippet}
 
-        {#snippet listFooter()}
-          <div class="foot">
-            <span class="count" aria-live="polite">{orderedRoster.length} present</span>
-            <div class="foot-actions">
-              {#if rosterChanged}
-                <Button variant="ghost" onclick={resetRoster} disabled={savingRoster}>Reset</Button>
-              {/if}
-              <Button
-                variant="primary"
-                onclick={saveRoster}
-                loading={savingRoster}
-                disabled={!rosterChanged}
-              >
-                Save roster
-              </Button>
-            </div>
-          </div>
-        {/snippet}
-      </PilotManager>
-    </Collapsible>
-  </Card>
-
-  <!-- ── 3. Placement + channels ──────────────────────────────────────────── -->
-  <Card
-    title="Placement & channels"
-    subtitle="Place present pilots into each class, and assign the channel each one flies. The channel is the pilot's fixed binding for time-trial / qualifying rounds."
-  >
-    {#snippet actions()}
-      {#if selectedTimers.length > 1}
-        <label class="source-pick">
-          <span class="source-label">Channels from</span>
-          <Select bind:value={channelSource} size="sm" aria-label="Channel source timer">
-            {#each selectedTimers as t (t.id)}
-              <option value={t.id}>{t.name}{t.id === primaryTimerId ? ' (primary)' : ''}</option>
-            {/each}
-          </Select>
-        </label>
-      {/if}
-    {/snippet}
-
-    {#if eventClasses.length === 0}
-      <div class="nudge" role="status">
-        <p>This event has no classes selected yet.</p>
-        <p class="nudge-sub">Tick the classes it runs above first.</p>
-      </div>
-    {:else if rosterPilots.length === 0}
-      <div class="nudge" role="status">
-        <p>No pilots are present yet.</p>
-        <p class="nudge-sub">Mark some pilots present above, then place them into classes.</p>
-      </div>
-    {:else}
-      {#if !hasChannelPool}
-        <div class="nudge subtle" role="status">
-          <p>No channels to assign yet.</p>
-          <p class="nudge-sub">
-            Pick a timer and give it some <strong>available channels</strong> on the
-            <strong>Timers</strong> tab — then each pilot can be assigned one here.
-          </p>
-        </div>
-      {:else if sourceTimer}
-        <p class="source-note" aria-live="polite">
-          Channels drawn from <strong>{sourceTimer.name}</strong>
-          {sourceTimer.id === primaryTimerId ? '(the primary timer)' : ''} — {channelOptions.length}
-          available.
+        <p class="count-line" aria-live="polite">
+          <strong>{orderedRoster.length}</strong> of {pilots.length}
+          {pilots.length === 1 ? 'pilot' : 'pilots'} present at this event
         </p>
-      {/if}
 
-      {#if singleClass}
+        <PilotManager
+          bind:this={pilotManager}
+          {session}
+          bind:pilots
+          onchange={onPilotDirectoryChange}
+          rowChecked={(p) => selectedPilots.has(p.id)}
+        >
+          {#snippet rowLead(pilot)}
+            <input
+              type="checkbox"
+              class="select-box"
+              checked={selectedPilots.has(pilot.id)}
+              onchange={() => togglePilot(pilot.id)}
+              aria-label={`Roster ${pilot.callsign}`}
+            />
+          {/snippet}
+
+          {#snippet listFooter()}
+            <div class="foot">
+              <span class="count" aria-live="polite">{orderedRoster.length} present</span>
+              <div class="foot-actions">
+                {#if rosterChanged}
+                  <Button variant="ghost" onclick={resetRoster} disabled={savingRoster}>
+                    Reset
+                  </Button>
+                {/if}
+                <Button
+                  variant="primary"
+                  onclick={saveRoster}
+                  loading={savingRoster}
+                  disabled={!rosterChanged}
+                >
+                  Save roster
+                </Button>
+              </div>
+            </div>
+          {/snippet}
+        </PilotManager>
+      </Collapsible>
+    </Card>
+
+    <!-- Per-class placement -->
+    <Card
+      title="Placement"
+      subtitle="Place present pilots into each class. Use the channel selectors (or the Channels box below) to assign each one a fixed channel for time-trial / qualifying rounds."
+    >
+      {#if eventClasses.length === 0}
+        <div class="nudge" role="status">
+          <p>This event has no classes selected yet.</p>
+          <p class="nudge-sub">Tick the classes it runs in the Classes box above first.</p>
+        </div>
+      {:else if rosterPilots.length === 0}
+        <div class="nudge" role="status">
+          <p>No pilots are present yet.</p>
+          <p class="nudge-sub">Mark some pilots present above, then place them into classes.</p>
+        </div>
+      {:else if singleClass}
         {@const sc = collapse(`place:${singleClass}`)}
         <!-- Single-class auto-fill: every present pilot is a member; just assign channels. -->
         <Collapsible
@@ -567,6 +652,24 @@
                 {#if dirty}<span class="dirty-tag">unsaved</span>{/if}
               {/snippet}
               <fieldset class="class-grid" aria-label={`Placement for ${classNameOf(classId)}`}>
+                <div class="grid-bulk">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onclick={() => placeAll(classId)}
+                    disabled={allPlaced(classId)}
+                  >
+                    Place all
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onclick={() => clearAll(classId)}
+                    disabled={membersOf(classId).size === 0}
+                  >
+                    Clear all
+                  </Button>
+                </div>
                 <ul class="member-list">
                   {#each rosterPilots as pilot (pilot.id)}
                     {@const member = isMember(classId, pilot.id)}
@@ -621,8 +724,64 @@
           {/each}
         </div>
       {/if}
-    {/if}
-  </Card>
+    </Card>
+  </Collapsible>
+
+  <!-- ════ BOX 3 · Channels ═══════════════════════════════════════════════ -->
+  <Collapsible title="Channels" id="box-channels" bind:open={channelsBox.open}>
+    {#snippet summary()}
+      <Badge tone="neutral">{channelOptions.length} available</Badge>
+    {/snippet}
+    {#snippet actions()}
+      {#if selectedTimers.length > 1}
+        <label class="source-pick">
+          <span class="source-label">Channels from</span>
+          <Select bind:value={channelSource} size="sm" aria-label="Channel source timer">
+            {#each selectedTimers as t (t.id)}
+              <option value={t.id}>{t.name}{t.id === primaryTimerId ? ' (primary)' : ''}</option>
+            {/each}
+          </Select>
+        </label>
+      {/if}
+    {/snippet}
+
+    <Card
+      title="Channel assignment"
+      subtitle="The channel each placed pilot flies — their fixed binding for time-trial / qualifying rounds. Auto-assign spreads the available channels across every placed pilot; override any pilot's channel in the Placement grid above."
+    >
+      {#if !hasChannelPool}
+        <div class="nudge subtle" role="status">
+          <p>No channels to assign yet.</p>
+          <p class="nudge-sub">
+            Pick a timer and give it some <strong>available channels</strong> on the
+            <strong>Timers</strong> tab — then each pilot can be assigned one.
+          </p>
+        </div>
+      {:else if sourceTimer}
+        <p class="source-note" aria-live="polite">
+          Channels drawn from <strong>{sourceTimer.name}</strong>
+          {sourceTimer.id === primaryTimerId ? '(the primary timer)' : ''} — {channelOptions.length}
+          available.
+        </p>
+      {/if}
+
+      <div class="channels-foot">
+        <span class="count" aria-live="polite">
+          {placedTotal}
+          {placedTotal === 1 ? 'pilot placed' : 'pilots placed'}
+        </span>
+        <Button
+          variant="primary"
+          size="sm"
+          onclick={autoAssignChannels}
+          loading={autoAssigning}
+          disabled={!canAutoAssign}
+        >
+          Auto-assign channels
+        </Button>
+      </div>
+    </Card>
+  </Collapsible>
 </section>
 
 <style>
@@ -664,6 +823,32 @@
   .foot-actions {
     display: flex;
     gap: var(--gf-space-2);
+  }
+
+  /* Two Cards stacked inside the Pilots box (roster + placement) want breathing room. */
+  .classes-roster :global(.gf-collapsible-body > .gf-card + .gf-card) {
+    margin-top: var(--gf-space-4);
+  }
+
+  /* ── Bulk select / place actions ──────────────────────────────────────── */
+  .bulk-actions,
+  .grid-bulk {
+    display: flex;
+    gap: var(--gf-space-2);
+  }
+  .grid-bulk {
+    padding-bottom: var(--gf-space-1);
+  }
+
+  /* ── Channels box: placed-count + auto-assign ─────────────────────────── */
+  .channels-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gf-space-3);
+    margin-top: var(--gf-space-3);
+    padding-top: var(--gf-space-4);
+    border-top: 1px solid var(--gf-border-subtle);
   }
 
   .source-pick {

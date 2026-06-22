@@ -89,3 +89,19 @@ export function offeredCatalog(
 export function isPlausibleMhz(mhz: number): boolean {
   return Number.isInteger(mhz) && mhz >= 5300 && mhz <= 6000;
 }
+
+/**
+ * Auto-assign channels to an ordered list of pilots, deterministic round-robin (first-fit) across an
+ * ordered `pool` of available channels: the `i`-th pilot gets `pool[i % pool.length]`. When there are
+ * fewer channels than pilots the assignment wraps and repeats — that's fine, repeated pilots simply
+ * fly in different heats. The input order is the caller's stable order (roster order), so the result
+ * is reproducible. An empty pool yields an empty map (nothing to assign).
+ *
+ * Returns a `pilotId → channel(MHz)` map covering every input pilot (when the pool is non-empty).
+ */
+export function assignChannelsRoundRobin<Id>(pilots: Id[], pool: number[]): Map<Id, number> {
+  const out = new Map<Id, number>();
+  if (pool.length === 0) return out;
+  pilots.forEach((id, i) => out.set(id, pool[i % pool.length]));
+  return out;
+}

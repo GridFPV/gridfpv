@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ChannelCapability, ChannelCatalogEntry } from '@gridfpv/types';
 import {
+  assignChannelsRoundRobin,
   capabilityTag,
   catalogEntryFor,
   channelLabel,
@@ -100,5 +101,38 @@ describe('isPlausibleMhz', () => {
     expect(isPlausibleMhz(6500)).toBe(false);
     expect(isPlausibleMhz(5800.5)).toBe(false);
     expect(isPlausibleMhz(Number.NaN)).toBe(false);
+  });
+});
+
+describe('assignChannelsRoundRobin', () => {
+  it('spreads channels first-fit, the i-th pilot getting pool[i]', () => {
+    const out = assignChannelsRoundRobin(['a', 'b', 'c'], [5658, 5695, 5760]);
+    expect([...out]).toEqual([
+      ['a', 5658],
+      ['b', 5695],
+      ['c', 5760]
+    ]);
+  });
+
+  it('wraps round-robin when there are more pilots than channels (repeats are fine)', () => {
+    // 5 pilots across 2 channels → 5658,5695,5658,5695,5658 (the repeats fly in different heats).
+    const out = assignChannelsRoundRobin(['p1', 'p2', 'p3', 'p4', 'p5'], [5658, 5695]);
+    expect([...out.values()]).toEqual([5658, 5695, 5658, 5695, 5658]);
+    // Every pilot is covered exactly once.
+    expect(out.size).toBe(5);
+  });
+
+  it('is deterministic — same input order yields the same assignment', () => {
+    const a = assignChannelsRoundRobin(['x', 'y', 'z'], [10, 20]);
+    const b = assignChannelsRoundRobin(['x', 'y', 'z'], [10, 20]);
+    expect([...a]).toEqual([...b]);
+  });
+
+  it('assigns nothing when the channel pool is empty', () => {
+    expect(assignChannelsRoundRobin(['a', 'b'], []).size).toBe(0);
+  });
+
+  it('handles an empty pilot list', () => {
+    expect(assignChannelsRoundRobin([], [5658]).size).toBe(0);
   });
 });
