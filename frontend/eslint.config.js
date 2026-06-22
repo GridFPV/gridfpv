@@ -33,5 +33,18 @@ export default ts.config(
         parser: ts.parser
       }
     }
+  },
+  {
+    // Honor the `_`-prefix convention for intentionally-unused vars/args/catch bindings.
+    rules: {
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_'
+        }
+      ]
+    }
   }
 );
