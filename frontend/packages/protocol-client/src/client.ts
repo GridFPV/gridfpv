@@ -43,6 +43,7 @@ import type {
   RoundDef,
   RoundId,
   Scope,
+  SetClassHiddenRequest,
   Snapshot,
   SubscribeRequest,
   Timer,
@@ -757,6 +758,38 @@ export async function deleteClass(
     headers
   });
   if (!resp.ok) throw new Error(`DELETE /classes/${id} failed: HTTP ${resp.status}`);
+}
+
+/**
+ * Hide or un-hide a class (`PUT /classes/{id}/hidden`) — hide/archive classes. RD-gated. The body is
+ * `{ hidden }`: `true` archives the class from the per-event class picker, `false` brings it back.
+ * Hiding is a **visibility preference**, not an edit — so it is valid for **built-in** classes too
+ * (never a read-only rejection): the class stays in the directory and the main Classes view, it is
+ * just filtered out of the picker. The choice is persisted server-side and survives a restart
+ * (including the built-in re-seed). An unknown id answers **404**. Resolves to the updated
+ * {@link Class} (with its fresh `hidden` flag), or rejects on a non-2xx / transport failure.
+ */
+export async function setClassHidden(
+  baseUrl: string,
+  id: ClassId,
+  hidden: boolean,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Class> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const body: SetClassHiddenRequest = { hidden };
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}/hidden`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) throw new Error(`PUT /classes/${id}/hidden failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Class;
 }
 
 /**

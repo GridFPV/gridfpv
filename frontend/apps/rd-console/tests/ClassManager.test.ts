@@ -163,3 +163,71 @@ describe('ClassManager (#84)', () => {
     expect(deleteClassImpl).toHaveBeenCalledWith('http://d.local', 'c2', 'tok');
   });
 });
+
+describe('ClassManager — hide / archive (manageHidden)', () => {
+  it('offers Hide on every row (built-in too) and hides via setClassHidden', async () => {
+    let calls = 0;
+    const listClassesImpl = vi.fn(async () =>
+      calls++ === 0 ? [OPEN, HOUSE] : [{ ...OPEN, hidden: true }, HOUSE]
+    );
+    const setClassHiddenImpl = vi.fn(async () => ({ ...OPEN, hidden: true }));
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl, setClassHiddenImpl });
+    render(ClassManager, { session, manageHidden: true });
+
+    await screen.findByText('Open Class');
+    const list = screen.getByRole('list', { name: 'Class directory' });
+    // A built-in has no Edit/Remove, but DOES get a Hide button (visibility is not an edit).
+    const builtinRow = within(list).getAllByRole('listitem')[0];
+    expect(within(builtinRow).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    await fireEvent.click(within(builtinRow).getByRole('button', { name: 'Hide' }));
+
+    await waitFor(() => expect(setClassHiddenImpl).toHaveBeenCalledTimes(1));
+    expect(setClassHiddenImpl).toHaveBeenCalledWith('http://d.local', 'mgp-open', true, 'tok');
+
+    // After the reload the built-in is marked Hidden and now offers Unhide.
+    await waitFor(() => {
+      const row = within(screen.getByRole('list', { name: 'Class directory' })).getAllByRole(
+        'listitem'
+      )[0];
+      expect(within(row).getByText('Hidden')).toBeInTheDocument();
+      expect(within(row).getByRole('button', { name: 'Unhide' })).toBeInTheDocument();
+    });
+  });
+
+  it('does not show Hide controls when manageHidden is off (default)', async () => {
+    const listClassesImpl = vi.fn(async () => [OPEN, HOUSE]);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl });
+    render(ClassManager, { session });
+    await screen.findByText('Open Class');
+    expect(screen.queryByRole('button', { name: 'Hide' })).not.toBeInTheDocument();
+  });
+});
+
+describe('ClassManager — per-event picker filter (filterHidden)', () => {
+  const HIDDEN: Class = { id: 'c3', name: 'Archived', source: 'Custom', hidden: true };
+
+  it('filters hidden classes out of the offered list', async () => {
+    const listClassesImpl = vi.fn(async () => [OPEN, HOUSE, HIDDEN]);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl });
+    render(ClassManager, { session, filterHidden: true });
+
+    await screen.findByText('Open Class');
+    expect(screen.getByText('House')).toBeInTheDocument();
+    // The hidden class is excluded from the picker.
+    expect(screen.queryByText('Archived')).not.toBeInTheDocument();
+  });
+
+  it('keeps a hidden class that is already selected (keepRow), so it never silently vanishes', async () => {
+    const listClassesImpl = vi.fn(async () => [HOUSE, HIDDEN]);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl });
+    render(ClassManager, {
+      session,
+      filterHidden: true,
+      keepRow: (c: Class) => c.id === 'c3'
+    });
+
+    await screen.findByText('House');
+    // The already-selected hidden class is still offered (kept), even though it is hidden.
+    expect(screen.getByText('Archived')).toBeInTheDocument();
+  });
+});

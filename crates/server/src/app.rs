@@ -89,7 +89,10 @@ use tokio::sync::Notify;
 
 use crate::auth::{JoinTokenResponse, TokenStore};
 use crate::channels::ChannelCatalogEntry;
-use crate::classes::{Class, ClassError, ClassErrorKind, CreateClassRequest, UpdateClassRequest};
+use crate::classes::{
+    Class, ClassError, ClassErrorKind, CreateClassRequest, SetClassHiddenRequest,
+    UpdateClassRequest,
+};
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
@@ -352,6 +355,10 @@ pub fn router(registry: EventRegistry) -> Router {
             "/classes/{class_id}",
             put(update_class).delete(delete_class),
         )
+        // Hide/archive a class (hide/archive classes): a control-gated visibility toggle, valid for
+        // built-in + custom classes. The id stays in the directory; hiding only filters it from the
+        // per-event class picker. Persisted to a sidecar so a hidden built-in survives the re-seed.
+        .route("/classes/{class_id}/hidden", put(set_class_hidden))
         // The valid **format names** (race redesign Slice 2b): the single source of truth the
         // Rounds UI's format dropdown reads, straight from [`FormatRegistry::standard`]. An open
         // read (no token) — it is static configuration, not event state.
@@ -884,6 +891,27 @@ async fn delete_class(
         .delete(&class_id)
         .map_err(class_error_to_protocol)?;
     Ok(StatusCode::OK)
+}
+
+/// `PUT /classes/{class_id}/hidden` — hide or un-hide a class (hide/archive classes), RD-gated.
+///
+/// [`ControlAuth`] runs first. The body is `{ hidden: bool }`. Hiding is a **visibility
+/// preference**, not an edit, so it is valid for **built-in** classes too (never a read-only
+/// rejection): the class stays in the directory and the main Classes view; it is just filtered out
+/// of the per-event class picker. The choice is persisted to a sidecar so a hidden built-in survives
+/// the boot re-seed. An unknown id is a typed 404 (`UnknownScope`). On success the updated [`Class`]
+/// (with its fresh `hidden` flag) is returned.
+async fn set_class_hidden(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(class_id): Path<ClassId>,
+    Json(body): Json<SetClassHiddenRequest>,
+) -> Result<Json<Class>, ProtocolError> {
+    let class = registry
+        .classes()
+        .set_hidden(&class_id, body.hidden)
+        .map_err(class_error_to_protocol)?;
+    Ok(Json(class))
 }
 
 /// Map a [`ClassError`] to a typed [`ProtocolError`] (issue #84): a validation failure is a

@@ -36,6 +36,7 @@ export {
   createClass,
   updateClass,
   deleteClass,
+  setClassHidden,
   setEventClasses,
   setClassMembership,
   listFormats,

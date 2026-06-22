@@ -46,4 +46,16 @@ description?: string,
  * built-in. Defaults to `false` and is omitted from the wire / disk when false, so a custom
  * class's JSON is unchanged.
  */
-builtin?: boolean, };
+builtin?: boolean, 
+/**
+ * Whether this class is **hidden / archived** from the per-event class picker (hide/archive
+ * classes). A pure **visibility preference**, not an edit: the RD can hide a class they don't
+ * use (especially a built-in) so it stops cluttering the per-event picker, while it stays in
+ * the directory and the main Classes view (where it can be un-hidden). Because built-ins are
+ * re-seeded on every boot, this flag is **not** stored on the class itself — it is derived when
+ * `GET /classes` is built from a persisted set of hidden ids (see [`HIDDEN_CLASSES_FILE`]), so
+ * a hidden built-in survives a restart. Defaults to `false` and is omitted from the wire / disk
+ * when false, so a class's persisted JSON is unchanged (and the hidden state never lands in
+ * `classes.json`).
+ */
+hidden?: boolean, };

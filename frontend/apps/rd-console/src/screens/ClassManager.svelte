@@ -34,6 +34,7 @@
     emptyForm,
     formFromClass,
     isBuiltin,
+    isHidden,
     sourceTone,
     type ClassFormValues
   } from '../lib/classes.js';
@@ -45,7 +46,10 @@
     rowLead,
     listHeader,
     listFooter,
-    rowChecked
+    rowChecked,
+    manageHidden = false,
+    filterHidden = false,
+    keepRow
   }: {
     session: Session;
     /** The latest loaded directory, exposed so a selection owner can reconcile its working set. */
@@ -60,6 +64,21 @@
     listFooter?: Snippet;
     /** Whether a row is currently selected — drives the row's "checked" highlight in select mode. */
     rowChecked?: (cls: Class) => boolean;
+    /**
+     * Whether to offer the **hide / unhide** affordance per row and surface hidden classes
+     * (hide/archive classes). The main Classes view sets this `true` (manageable, marked); the
+     * in-event picker leaves it `false`.
+     */
+    manageHidden?: boolean;
+    /**
+     * Whether to **filter out hidden classes** from the rendered list (hide/archive classes) — the
+     * per-event picker sets this so the offered list excludes archived classes. A row the
+     * {@link keepRow} predicate keeps (e.g. one already selected on the event) is shown even when
+     * hidden, so a previously-selected class never silently vanishes.
+     */
+    filterHidden?: boolean;
+    /** When {@link filterHidden} is set, keep a row that would otherwise be filtered (e.g. selected). */
+    keepRow?: (cls: Class) => boolean;
   } = $props();
 
   type LoadState =
@@ -182,6 +201,39 @@
       removing = undefined;
     }
   }
+
+  // ── Hide / un-hide (hide/archive classes) ────────────────────────────────────
+  // A visibility toggle, valid for built-ins too (hiding is a preference, not an edit). Hidden
+  // classes stay listed here (marked) so the RD can un-hide them; the per-event picker filters them.
+  let togglingHidden = $state<string | undefined>(undefined);
+  async function setHidden(cls: Class, hidden: boolean) {
+    if (togglingHidden) return;
+    togglingHidden = cls.id;
+    try {
+      const updated = await session.setClassHidden(cls.id, hidden);
+      if (updated === undefined) {
+        toast.info('A control token is required to change class visibility.');
+        return;
+      }
+      toast.success(hidden ? `Hid “${cls.name}”.` : `Unhid “${cls.name}”.`);
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      togglingHidden = undefined;
+    }
+  }
+
+  // The rows actually rendered. In the per-event picker (`filterHidden`) hidden classes drop out,
+  // except a row `keepRow` keeps (e.g. one already selected on the event), so a selected class never
+  // silently disappears. Everywhere else (the main view) all classes show; hidden ones are marked.
+  const renderedClasses = $derived(
+    loadState.kind === 'ready'
+      ? filterHidden
+        ? loadState.classes.filter((c) => !isHidden(c) || (keepRow?.(c) ?? false))
+        : loadState.classes
+      : []
+  );
 </script>
 
 <div class="class-manager">
@@ -196,16 +248,21 @@
       <code>{loadState.message}</code>
       <Button variant="secondary" onclick={load}>Try again</Button>
     </div>
-  {:else if loadState.classes.length === 0}
+  {:else if renderedClasses.length === 0}
     <div class="empty">
-      <p>No classes in the directory yet.</p>
-      <p class="empty-sub">Add a custom class to get started.</p>
+      {#if loadState.classes.length > 0 && filterHidden}
+        <p>No classes available to select.</p>
+        <p class="empty-sub">Every class is hidden — unhide one in the Classes page to offer it.</p>
+      {:else}
+        <p>No classes in the directory yet.</p>
+        <p class="empty-sub">Add a custom class to get started.</p>
+      {/if}
     </div>
   {:else}
     {@render listHeader?.()}
     <ul class="class-list" aria-label="Class directory">
-      {#each loadState.classes as cls (cls.id)}
-        <li class="class-row" class:checked={rowChecked?.(cls)}>
+      {#each renderedClasses as cls (cls.id)}
+        <li class="class-row" class:checked={rowChecked?.(cls)} class:hidden-row={isHidden(cls)}>
           {@render rowLead?.(cls)}
           <div class="class-main">
             <div class="class-head">
@@ -215,6 +272,9 @@
                 <span class="builtin-lock" title="Built-in class — read-only" aria-label="Built-in">
                   🔒 Built-in
                 </span>
+              {/if}
+              {#if isHidden(cls)}
+                <Badge tone="neutral">Hidden</Badge>
               {/if}
               {#if cls.reference}
                 <a
@@ -230,8 +290,18 @@
             </div>
             {#if cls.description}<span class="description">{cls.description}</span>{/if}
           </div>
-          {#if !isBuiltin(cls)}
-            <div class="class-actions">
+          <div class="class-actions">
+            {#if manageHidden}
+              <Button
+                variant="ghost"
+                size="sm"
+                loading={togglingHidden === cls.id}
+                onclick={() => setHidden(cls, !isHidden(cls))}
+              >
+                {isHidden(cls) ? 'Unhide' : 'Hide'}
+              </Button>
+            {/if}
+            {#if !isBuiltin(cls)}
               <Button variant="ghost" size="sm" onclick={() => openEdit(cls)}>Edit</Button>
               <Button
                 variant="danger"
@@ -241,8 +311,8 @@
               >
                 Remove
               </Button>
-            </div>
-          {/if}
+            {/if}
+          </div>
         </li>
       {/each}
     </ul>
@@ -405,6 +475,14 @@
   .class-row.checked {
     border-color: var(--gf-accent);
     background: var(--gf-accent-soft);
+  }
+  /* A hidden/archived class reads as muted (greyed) while staying manageable here. */
+  .class-row.hidden-row {
+    opacity: 0.6;
+    background: var(--gf-surface-alt);
+  }
+  .class-row.hidden-row .class-name {
+    color: var(--gf-text-muted);
   }
   .class-main {
     display: flex;

@@ -447,6 +447,8 @@
         bind:classes
         onchange={onClassDirectoryChange}
         rowChecked={(c) => selectedClasses.has(c.id)}
+        filterHidden
+        keepRow={(c) => selectedClasses.has(c.id)}
       >
         {#snippet rowLead(cls)}
           <input

@@ -92,6 +92,7 @@ export type * from '@bindings/SeedingRule';
 export type * from '@bindings/ServerHello';
 export type * from '@bindings/SessionId';
 export type * from '@bindings/SetActiveEventRequest';
+export type * from '@bindings/SetClassHiddenRequest';
 export type * from '@bindings/SetClassMembershipRequest';
 export type * from '@bindings/SetEventClassesRequest';
 export type * from '@bindings/SetEventRosterRequest';

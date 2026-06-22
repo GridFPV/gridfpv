@@ -25,6 +25,7 @@ import type {
   createClass,
   updateClass,
   deleteClass,
+  setClassHidden,
   setEventClasses,
   setClassMembership,
   listFormats,
@@ -75,6 +76,8 @@ export interface TimerImpls {
   createClassImpl?: typeof createClass;
   updateClassImpl?: typeof updateClass;
   deleteClassImpl?: typeof deleteClass;
+  /** The class hide/un-hide write seam (hide/archive classes) — backs the visibility tests. */
+  setClassHiddenImpl?: typeof setClassHidden;
   /** The per-event class-selection write seam (issue #84) — backs the EventClasses tests. */
   setEventClassesImpl?: typeof setEventClasses;
   /** The per-class membership write seam (race redesign Slice 1b) — backs the EventRoster tests. */
@@ -160,6 +163,7 @@ export function makeTestSession(
     createClassImpl: opts?.createClassImpl,
     updateClassImpl: opts?.updateClassImpl,
     deleteClassImpl: opts?.deleteClassImpl,
+    setClassHiddenImpl: opts?.setClassHiddenImpl,
     setEventClassesImpl: opts?.setEventClassesImpl,
     // Per-class membership write seam (race redesign Slice 1b): inert unless a test overrides it.
     setClassMembershipImpl: opts?.setClassMembershipImpl,

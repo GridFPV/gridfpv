@@ -6,6 +6,8 @@ import {
   emptyForm,
   formFromClass,
   isBuiltin,
+  isHidden,
+  partitionHidden,
   sourceTone,
   type ClassFormValues
 } from '../src/lib/classes.js';
@@ -99,5 +101,27 @@ describe('isBuiltin + source badges', () => {
     expect(sourceTone('UDL')).toBe('danger');
     expect(sourceTone('Custom')).toBe('violet');
     expect(sourceTone('Other')).toBe('neutral');
+  });
+});
+
+describe('isHidden + partitionHidden (hide/archive classes)', () => {
+  it('flags only hidden classes', () => {
+    expect(isHidden({ ...FULL, hidden: true })).toBe(true);
+    expect(isHidden(FULL)).toBe(false);
+    expect(isHidden({ ...FULL, hidden: false })).toBe(false);
+    // A built-in can be hidden too (hiding is a visibility preference, not an edit).
+    expect(isHidden({ ...BUILTIN, hidden: true })).toBe(true);
+  });
+
+  it('partitions visible vs hidden, preserving input order in each group', () => {
+    const list: Class[] = [
+      { ...FULL, id: 'a', hidden: false },
+      { ...FULL, id: 'b', hidden: true },
+      { ...FULL, id: 'c', hidden: false },
+      { ...BUILTIN, id: 'mgp-open', hidden: true }
+    ];
+    const { visible, hidden } = partitionHidden(list);
+    expect(visible.map((c) => c.id)).toEqual(['a', 'c']);
+    expect(hidden.map((c) => c.id)).toEqual(['b', 'mgp-open']);
   });
 });

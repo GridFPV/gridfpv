@@ -46,6 +46,30 @@ export function isBuiltin(c: Class): boolean {
 }
 
 /**
+ * Whether a class is **hidden / archived** (hide/archive classes): the RD tucked it away so it stops
+ * cluttering the per-event class picker, while it stays in the directory and the main Classes view.
+ * The server flags these with `hidden: true` (derived from a persisted hidden-set, so a hidden
+ * built-in survives a restart). Hiding is a visibility preference, not an edit — so a built-in can
+ * be hidden too, even though its edit/delete stay disabled.
+ */
+export function isHidden(c: Class): boolean {
+  return c.hidden === true;
+}
+
+/**
+ * Partition a directory list into **visible** and **hidden** classes (hide/archive classes),
+ * preserving the input (id) order within each group. The main Classes view renders both (hidden
+ * under a "Hidden" group so it stays manageable / un-hideable); the per-event picker offers only the
+ * visible ones (a class already selected on an event is handled separately by the picker).
+ */
+export function partitionHidden(classes: Class[]): { visible: Class[]; hidden: Class[] } {
+  const visible: Class[] = [];
+  const hidden: Class[] = [];
+  for (const c of classes) (isHidden(c) ? hidden : visible).push(c);
+  return { visible, hidden };
+}
+
+/**
  * The editable shape the form holds while open — every text field a string (the form binds plain
  * inputs). New classes are always `Custom`, so the create form carries no source picker; the form
  * diffs this against the class being edited to build the {@link UpdateClassRequest}, or maps it
