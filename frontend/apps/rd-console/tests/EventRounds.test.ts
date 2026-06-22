@@ -205,6 +205,86 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(req.label).toBe('Qualifying R2');
   });
 
+  it('authors the heat-lifecycle config (staging mm:ss, start min/max, grace) on create', async () => {
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Heat 1' } });
+    await fireEvent.click(screen.getByLabelText('Eligible Open'));
+
+    // Set a 2:30 staging window, a 1000–4000ms start hold, and a 4s grace.
+    await fireEvent.input(screen.getByLabelText('Staging minutes'), { target: { value: '2' } });
+    await fireEvent.input(screen.getByLabelText('Staging seconds'), { target: { value: '30' } });
+    await fireEvent.input(screen.getByLabelText('Start min delay ms'), {
+      target: { value: '1000' }
+    });
+    await fireEvent.input(screen.getByLabelText('Start max delay ms'), {
+      target: { value: '4000' }
+    });
+    await fireEvent.input(screen.getByLabelText('Grace window seconds'), {
+      target: { value: '4' }
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    expect(req.staging_timer_secs).toBe(150); // 2:30
+    expect(req.start_procedure).toEqual({
+      mode: 'randomized-delay',
+      min_delay_ms: 1000,
+      max_delay_ms: 4000
+    });
+    expect(req.grace_window).toEqual({ Duration: { micros: 4_000_000 } });
+  });
+
+  it('round-trips the heat-lifecycle config through edit (reads RoundDef fields back into the form)', async () => {
+    const impls = baseImpls();
+    // A round with non-default lifecycle config: 1:15 staging, 2500–6000ms start, 5s grace.
+    const tuned: RoundDef = {
+      ...QUAL,
+      staging_timer_secs: 75,
+      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2500, max_delay_ms: 6000 },
+      grace_window: { Duration: { micros: 5_000_000 } }
+    };
+    const updateRoundImpl = vi.fn(async (_b, _e, _id, req) => ({ ...tuned, ...req }));
+    const { session } = makeTestSession({
+      ...impls,
+      updateRoundImpl,
+      event: { ...EVENT, rounds: [tuned] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    // The form seeds from the round's current lifecycle config.
+    expect((screen.getByLabelText('Staging minutes') as HTMLInputElement).value).toBe('1');
+    expect((screen.getByLabelText('Staging seconds') as HTMLInputElement).value).toBe('15');
+    expect((screen.getByLabelText('Start min delay ms') as HTMLInputElement).value).toBe('2500');
+    expect((screen.getByLabelText('Start max delay ms') as HTMLInputElement).value).toBe('6000');
+    expect((screen.getByLabelText('Grace window seconds') as HTMLInputElement).value).toBe('5');
+
+    // Edit the staging seconds and save — the same values round-trip back out on the request.
+    await fireEvent.input(screen.getByLabelText('Staging seconds'), { target: { value: '45' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save round' }));
+
+    await waitFor(() => expect(updateRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , , req] = updateRoundImpl.mock.calls[0];
+    expect(req.staging_timer_secs).toBe(105); // 1:45
+    expect(req.start_procedure).toEqual({
+      mode: 'randomized-delay',
+      min_delay_ms: 2500,
+      max_delay_ms: 6000
+    });
+    expect(req.grace_window).toEqual({ Duration: { micros: 5_000_000 } });
+  });
+
   it('offers only the chosen format’s params via "+ Add param", typed by kind, and removes them', async () => {
     const impls = baseImpls();
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));

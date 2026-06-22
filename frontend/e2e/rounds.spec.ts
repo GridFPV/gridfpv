@@ -74,6 +74,11 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   await form.getByLabel('Eligible Open Class').check();
   await form.getByLabel('Format').selectOption('timed_qual');
   await form.getByLabel('Win condition').selectOption('BestLap');
+  // Heat-lifecycle config (Slice 3): a 3:30 staging window + a 1500–3500ms randomized start hold.
+  await form.getByLabel('Staging minutes').fill('3');
+  await form.getByLabel('Staging seconds').fill('30');
+  await form.getByLabel('Start min delay ms').fill('1500');
+  await form.getByLabel('Start max delay ms').fill('3500');
   await page.getByRole('button', { name: 'Add round', exact: true }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
 
@@ -91,10 +96,15 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   const rowAfter = page.getByRole('list').getByRole('listitem').filter({ hasText: LABEL });
   await expect(rowAfter).toBeVisible({ timeout: 15_000 });
 
-  // ── Edit the round's label ──────────────────────────────────────────────────────────────────
+  // ── Edit the round's label — and confirm the heat-lifecycle config round-tripped on the Director:
+  // the edit form is seeded from the persisted round, so the staging mm:ss + start min/max read back.
   await rowAfter.getByRole('button', { name: 'Edit' }).click();
   const editForm = page.getByRole('form', { name: 'Edit round' });
   await expect(editForm).toBeVisible();
+  await expect(editForm.getByLabel('Staging minutes')).toHaveValue('3');
+  await expect(editForm.getByLabel('Staging seconds')).toHaveValue('30');
+  await expect(editForm.getByLabel('Start min delay ms')).toHaveValue('1500');
+  await expect(editForm.getByLabel('Start max delay ms')).toHaveValue('3500');
   const newLabel = `${LABEL}-v2`;
   await editForm.getByLabel('Label').fill(newLabel);
   await page.getByRole('button', { name: 'Save round' }).click();
@@ -508,12 +518,12 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
   // The scheduled heat is current; run it.
   await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID, { timeout: 15_000 });
+  // Heat-lifecycle Slices 1–3: Stage → Start (arms; the runtime auto-advances to Running after a
+  // randomized hold). No manual Arm/Start→Running button; ForceEnd is the end-window override.
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Staged');
-  await page.getByRole('button', { name: 'Arm', exact: true }).click();
-  await expect(page.locator('.phase').first()).toHaveText('Armed');
   await page.getByRole('button', { name: 'Start', exact: true }).click();
-  await expect(page.locator('.phase').first()).toHaveText('Running');
+  await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
 
   // Let the sim bank some laps before closing the heat, so the scored result is real.
   const heatSheet = page.getByRole('region', { name: 'Heat sheet' });
@@ -524,8 +534,8 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
   };
   await expect.poll(totalLaps, { timeout: 30_000 }).toBeGreaterThan(1);
 
-  await page.getByRole('button', { name: 'Finish', exact: true }).click();
-  await expect(page.locator('.phase').first()).toHaveText('Unofficial');
+  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 15_000 });
   await page.getByRole('button', { name: 'Finalize', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Final');
 

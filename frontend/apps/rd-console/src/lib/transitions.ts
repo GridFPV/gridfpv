@@ -51,6 +51,18 @@ export const DESTRUCTIVE_ACTIONS: ReadonlySet<HeatAction> = new Set<HeatAction>(
 ]);
 
 /**
+ * The **runtime-clock overrides** (heat-lifecycle Slice 2): the manual escape hatches that force a
+ * transition the runtime clock normally drives on its own. `SkipCountdown` forces `Armed → Running`
+ * (skip the start hold); `ForceEnd` forces `Running → Unofficial` (call the race now). They are
+ * *secondary* to the forward path — the RD waits for the clock by default — so the console styles
+ * them as clearly-labelled "override" buttons, not the obvious next step.
+ */
+export const OVERRIDE_ACTIONS: ReadonlySet<HeatAction> = new Set<HeatAction>([
+  'SkipCountdown',
+  'ForceEnd'
+]);
+
+/**
  * The forward "primary" action for each phase (the obvious next step), if any.
  *
  * `Armed` and `Running` have **no** primary button: the runtime clock auto-advances them
@@ -127,6 +139,11 @@ export function primaryAction(phase: HeatPhase): HeatAction | null {
 /** Does this action need a confirm before firing (clients.html §5)? */
 export function isDestructive(action: HeatAction): boolean {
   return DESTRUCTIVE_ACTIONS.has(action);
+}
+
+/** Is this action a **runtime-clock override** (the console styles it as a secondary "override")? */
+export function isOverride(action: HeatAction): boolean {
+  return OVERRIDE_ACTIONS.has(action);
 }
 
 /**

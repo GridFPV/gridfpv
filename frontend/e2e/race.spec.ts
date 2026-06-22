@@ -89,15 +89,21 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   }
   await expect(page.locator('.phase').first()).toHaveText('Scheduled');
 
-  // ── Run the heat loop: Stage → Arm → Start ───────────────────────────────────────────
+  // ── Run the heat loop: Stage → Start, then the runtime auto-advances ───────────────────
+  // Heat-lifecycle Slices 1–3: `Stage` calls the field to the line; in Staged the console shows the
+  // informational **staging countdown** (no auto-advance). `Start` *arms* the heat (Staged → Armed)
+  // and runs the start procedure; the Director's runtime clock then auto-advances Armed → Running
+  // after a randomized hold — there is NO manual "Arm"/"Start→Running" button anymore.
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Staged');
-
-  await page.getByRole('button', { name: 'Arm', exact: true }).click();
-  await expect(page.locator('.phase').first()).toHaveText('Armed');
+  // The staging countdown is shown (informational only).
+  await expect(page.getByRole('status', { name: 'Staging countdown' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Start', exact: true }).click();
-  await expect(page.locator('.phase').first()).toHaveText('Running');
+  // Armed: the console shows the generic "arming… stand by" state (the random hold is hidden — no
+  // precise countdown), then the runtime auto-advances to Running and the race clock takes over.
+  await expect(page.getByRole('status', { name: 'Arming' })).toBeVisible();
+  await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
 
   // ── Watch the live laps climb in the DOM: poll the rendered per-pilot lap counts ──────
   // THIS is the proof the live-stream + reactive-Session path renders updates: the HeatSheet
@@ -117,8 +123,8 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
     .poll(totalLaps, { timeout: 30_000, message: 'live lap counts should climb in the DOM' })
     .toBeGreaterThan(early);
 
-  // ── Finish the window ────────────────────────────────────────────────────────────────
-  await page.getByRole('button', { name: 'Finish', exact: true }).click();
+  // ── End the window: ForceEnd is the runtime-clock override (the old manual "Finish") ──
+  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 
   // ── Finalize the heat ────────────────────────────────────────────────────────────────
