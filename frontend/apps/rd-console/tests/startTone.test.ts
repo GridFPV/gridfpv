@@ -135,6 +135,56 @@ describe('StartTonePlayer', () => {
     expect(resumeSpy).toHaveBeenCalled();
   });
 
+  it('on a *suspended* context, resumes BEFORE starting the oscillator (the audible-tone fix)', async () => {
+    // The race-go edge is an auto transition (no click), so the context can still be suspended.
+    // Scheduling against a frozen suspended clock and only resuming after means the note never
+    // sounds — the original "no tone" bug. Assert play() resumes first, then emits an oscillator.
+    const { ctx, oscillators, resumeSpy } = makeMockContext('suspended');
+    const order: string[] = [];
+    resumeSpy.mockImplementation(async () => {
+      order.push('resume');
+    });
+    const origCreate = ctx.createOscillator.bind(ctx);
+    ctx.createOscillator = () => {
+      order.push('oscillator');
+      return origCreate();
+    };
+    const player = new StartTonePlayer({ audioContextFactory: () => ctx, initialMuted: false });
+
+    player.play();
+    // Let the resume() promise + its .then() emit chain settle.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(resumeSpy).toHaveBeenCalled();
+    expect(oscillators).toHaveLength(1);
+    expect(oscillators[0].started).toBe(true);
+    // Resume must precede the oscillator so the note is scheduled on the *resumed* clock.
+    expect(order).toEqual(['resume', 'oscillator']);
+  });
+
+  it('on a *running* context, plays synchronously without an extra resume', () => {
+    const { ctx, oscillators, resumeSpy } = makeMockContext('running');
+    const player = new StartTonePlayer({ audioContextFactory: () => ctx, initialMuted: false });
+    player.play();
+    // Already running → fire immediately; no resume needed on this path.
+    expect(oscillators).toHaveLength(1);
+    expect(oscillators[0].started).toBe(true);
+    expect(resumeSpy).not.toHaveBeenCalled();
+  });
+
+  it('a mute toggled during the resume suppresses the (suspended-path) tone', async () => {
+    const { ctx, oscillators, resumeSpy } = makeMockContext('suspended');
+    const player = new StartTonePlayer({ audioContextFactory: () => ctx, initialMuted: false });
+    resumeSpy.mockImplementation(async () => {
+      player.setMuted(true); // RD hits mute during the brief resume window
+    });
+    player.play();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(oscillators).toHaveLength(0);
+  });
+
   it('is a silent no-op when Web Audio is unavailable (no factory)', () => {
     // No platform AudioContext and no injected factory → unavailable; play never throws.
     const player = new StartTonePlayer({ audioContextFactory: undefined, initialMuted: false });
