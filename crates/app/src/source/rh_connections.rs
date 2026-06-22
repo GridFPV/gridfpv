@@ -70,6 +70,21 @@ impl RhConnections {
         }
     }
 
+    /// **Tune** `(event, timer)`'s connection to a per-node channel assignment (race redesign Slice
+    /// 4a), if a live connection exists: the driver emits a `set_frequency` per node so the device
+    /// tunes to the staging heat's assigned channels ("the engine allocates, the adapter applies").
+    /// Returns whether a live connection was found to tune. A no-op (returns `false`) for a
+    /// non-active event or a not-yet-connected timer.
+    pub fn tune(&self, event: &EventId, timer: &TimerId, assignment: Vec<(u64, u16)>) -> bool {
+        let map = self.inner.lock().expect("rh-connections lock poisoned");
+        if let Some(conn) = map.get(&(event.clone(), timer.clone())) {
+            conn.tune(assignment);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Disarm the current heat on `(event, timer)`'s connection (the heat left `Running`): the race
     /// is stopped/cleared but the **connection stays alive**. A no-op if no such connection.
     pub fn disarm(&self, event: &EventId, timer: &TimerId) {

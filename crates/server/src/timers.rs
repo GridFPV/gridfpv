@@ -42,6 +42,13 @@ pub const MOCK_TIMER_ID: &str = "mock";
 /// The display name of the built-in Mock timer.
 pub const MOCK_TIMER_NAME: &str = "Mock";
 
+/// The default node/slot count for a timer that does not specify one (race redesign Slice 4a).
+///
+/// Eight is the ubiquitous FPV timer width (RotorHazard's default, the Raceband R1–R8 grid), so a
+/// timer persisted before the channel model existed — or created without an explicit `node_count`
+/// — reads back as an 8-node timer, the same heat-size cap a real 8-seat timer enforces.
+pub const DEFAULT_NODE_COUNT: u32 = 8;
+
 /// The file name (under the data dir) the timer registry is persisted to (issue #73).
 pub const TIMERS_FILE: &str = "timers.json";
 
@@ -79,6 +86,55 @@ pub enum TimerKind {
         /// The RotorHazard server base URL (e.g. `http://rotorhazard.local:5000`).
         url: String,
     },
+}
+
+/// What channels a timer can be tuned to (race redesign Slice 4a) — its *channel capability*,
+/// declared generically (NOT RotorHazard-specific).
+///
+/// A timer is one of two kinds:
+///
+/// - [`Fixed`](ChannelCapability::Fixed) — the timer supports only a **specific allowed set** of
+///   built-in catalog frequencies (raw MHz). A limited timer (e.g. a fixed-band module) exposes
+///   only what it physically supports; a console must pick a heat's channels from this set.
+/// - [`Flexible`](ChannelCapability::Flexible) — the timer accepts **any** frequency: the whole
+///   standard catalog *plus* arbitrary custom raw MHz (e.g. RotorHazard, whose nodes tune freely).
+///
+/// Externally tagged so it maps to a TS discriminated union. It is **additive** on the wire and on
+/// disk: a timer persisted before the channel model existed deserializes with the
+/// [`Default`] capability ([`Flexible`](ChannelCapability::Flexible)), so old `timers.json` files
+/// round-trip and stay valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum ChannelCapability {
+    /// The timer supports only this explicit set of built-in catalog frequencies (raw MHz). A
+    /// console offers exactly these; assignment allocates from (the timer's available subset of)
+    /// these.
+    Fixed {
+        /// The allowed built-in channel centre frequencies, in raw MHz, in preference order.
+        channels: Vec<u16>,
+    },
+    /// The timer accepts any frequency — the standard catalog plus arbitrary custom raw MHz.
+    Flexible,
+}
+
+impl Default for ChannelCapability {
+    /// A timer with no declared capability is [`Flexible`](ChannelCapability::Flexible) — the
+    /// permissive default, so a pre-channel-model timer (and the free-tune Mock) stays usable.
+    fn default() -> Self {
+        ChannelCapability::Flexible
+    }
+}
+
+impl ChannelCapability {
+    /// Whether `mhz` is a frequency this timer can be tuned to: any value for a
+    /// [`Flexible`](ChannelCapability::Flexible) timer, or one of the allowed set for a
+    /// [`Fixed`](ChannelCapability::Fixed) one.
+    pub fn allows(&self, mhz: u16) -> bool {
+        match self {
+            ChannelCapability::Flexible => true,
+            ChannelCapability::Fixed { channels } => channels.contains(&mhz),
+        }
+    }
 }
 
 /// Whether a timer is currently usable, and — for a live source — the state of its connection
@@ -131,6 +187,29 @@ pub struct Timer {
     pub kind: TimerKind,
     /// The derived usability of the timer (see [`TimerStatus`]).
     pub status: TimerStatus,
+    /// The timer's **channel capability** (race redesign Slice 4a): the set of frequencies it can
+    /// tune to ([`Fixed`](ChannelCapability::Fixed)) or that it tunes freely
+    /// ([`Flexible`](ChannelCapability::Flexible)). Additive — defaults to
+    /// [`Flexible`](ChannelCapability::Flexible) for a pre-channel-model timer.
+    #[serde(default)]
+    pub channel_capability: ChannelCapability,
+    /// How many nodes/slots the timer has (race redesign Slice 4a) — the **heat-size cap**: a
+    /// heat's lineup must be ≤ this. Additive; defaults to [`DEFAULT_NODE_COUNT`].
+    #[serde(default = "default_node_count")]
+    pub node_count: u32,
+    /// The timer's **defined available channels** (race redesign Slice 4a): the raw-MHz channels,
+    /// within its [`channel_capability`](Timer::channel_capability), that the Race Director has
+    /// made available on this timer — the pool per-heat assignment allocates from, in preference
+    /// order. Empty means none configured (assignment then allocates nothing). Additive — defaults
+    /// empty for a pre-channel-model timer.
+    #[serde(default)]
+    pub available_channels: Vec<u16>,
+}
+
+/// The `serde(default)` provider for [`Timer::node_count`] (a function because serde defaults must
+/// be callable): the ubiquitous 8-node width.
+fn default_node_count() -> u32 {
+    DEFAULT_NODE_COUNT
 }
 
 impl Timer {
@@ -155,6 +234,21 @@ pub struct CreateTimerRequest {
     pub name: String,
     /// The kind + config of the new timer.
     pub kind: TimerKind,
+    /// The new timer's **channel capability** (race redesign Slice 4a). Optional and additive —
+    /// omit it for the permissive [`Flexible`](ChannelCapability::Flexible) default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel_capability: Option<ChannelCapability>,
+    /// The new timer's **node/slot count** (race redesign Slice 4a) — the heat-size cap. Optional;
+    /// defaults to [`DEFAULT_NODE_COUNT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node_count: Option<u32>,
+    /// The new timer's **available channels** in raw MHz (race redesign Slice 4a). Optional;
+    /// defaults to empty (none configured).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub available_channels: Option<Vec<u16>>,
 }
 
 /// The body of `PUT /timers/{id}` — the editable fields of a timer (issue #73).
@@ -162,7 +256,7 @@ pub struct CreateTimerRequest {
 /// Edits the display `name` and/or the [`TimerKind`] config (e.g. retune the sim's `lap_ms`, or
 /// point a RotorHazard timer at a new URL). Both optional so a partial edit is a one-field body;
 /// the id is fixed (it is in the path) and the built-in Mock may be retuned but not removed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct UpdateTimerRequest {
     /// A new display name, or `None` to leave it unchanged.
@@ -173,6 +267,19 @@ pub struct UpdateTimerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub kind: Option<TimerKind>,
+    /// A new **channel capability** (race redesign Slice 4a), or `None` to leave it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel_capability: Option<ChannelCapability>,
+    /// A new **node/slot count** (race redesign Slice 4a), or `None` to leave it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node_count: Option<u32>,
+    /// A new **available-channels** set in raw MHz (race redesign Slice 4a), or `None` to leave it
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub available_channels: Option<Vec<u16>>,
 }
 
 /// The body of `PUT /events/{id}/timers` — the timer ids an event selects (issue #73), and
@@ -238,7 +345,9 @@ impl TimerRegistry {
     ) -> Result<Self, TimerError> {
         let mut timers = BTreeMap::new();
 
-        // Always seed the built-in Mock first.
+        // Always seed the built-in Mock first. Sensible channel defaults (race redesign Slice 4a):
+        // flexible, 8 nodes, seeded from Raceband R1–R8 — so an out-of-the-box sim race has an
+        // 8-channel pool and an 8-seat cap, matching a typical real timer.
         let sim = Timer {
             id: TimerId(MOCK_TIMER_ID.to_string()),
             name: MOCK_TIMER_NAME.to_string(),
@@ -247,6 +356,9 @@ impl TimerRegistry {
                 lap_ms: sim_lap_ms,
             },
             status: TimerStatus::Ready,
+            channel_capability: ChannelCapability::Flexible,
+            node_count: DEFAULT_NODE_COUNT,
+            available_channels: crate::channels::RACEBAND_MHZ.to_vec(),
         };
         timers.insert(sim.id.clone(), sim);
 
@@ -314,6 +426,9 @@ impl TimerRegistry {
             name: request.name.trim().to_string(),
             status: Timer::status_for(&request.kind),
             kind: request.kind.clone(),
+            channel_capability: request.channel_capability.clone().unwrap_or_default(),
+            node_count: request.node_count.unwrap_or(DEFAULT_NODE_COUNT),
+            available_channels: request.available_channels.clone().unwrap_or_default(),
         };
         reg.timers.insert(id, timer.clone());
         reg.persist()?;
@@ -340,6 +455,15 @@ impl TimerRegistry {
         if let Some(kind) = &request.kind {
             timer.kind = kind.clone();
             timer.status = Timer::status_for(kind);
+        }
+        if let Some(capability) = &request.channel_capability {
+            timer.channel_capability = capability.clone();
+        }
+        if let Some(node_count) = request.node_count {
+            timer.node_count = node_count;
+        }
+        if let Some(available) = &request.available_channels {
+            timer.available_channels = available.clone();
         }
         let updated = timer.clone();
         reg.persist()?;
@@ -469,6 +593,9 @@ mod tests {
                 laps: 3,
                 lap_ms: 2000,
             },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
         }
     }
 
@@ -478,6 +605,9 @@ mod tests {
             kind: TimerKind::Rotorhazard {
                 url: url.to_string(),
             },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
         }
     }
 
@@ -529,6 +659,7 @@ mod tests {
                         laps: 9,
                         lap_ms: 1000,
                     }),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -555,6 +686,7 @@ mod tests {
                     laps: 1,
                     lap_ms: 50,
                 }),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -597,6 +729,7 @@ mod tests {
                         laps: 7,
                         lap_ms: 1234,
                     }),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -671,6 +804,88 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_seeded_mock_has_channel_defaults() {
+        // Race redesign Slice 4a: the built-in Mock is flexible, 8 nodes, seeded from Raceband.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let mock = reg.get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
+        assert_eq!(mock.channel_capability, ChannelCapability::Flexible);
+        assert_eq!(mock.node_count, DEFAULT_NODE_COUNT);
+        assert_eq!(
+            mock.available_channels,
+            crate::channels::RACEBAND_MHZ.to_vec()
+        );
+    }
+
+    #[test]
+    fn channel_capability_node_count_and_available_persist_across_restart() {
+        // Race redesign Slice 4a: a timer's Fixed capability + node count + available channels
+        // survive a Director restart, and an old `timers.json` (no channel fields) reads back valid.
+        let dir = std::env::temp_dir().join(format!("gridfpv-timers-chan-{}", short_suffix()));
+        let fixed = ChannelCapability::Fixed {
+            channels: vec![5658, 5695, 5732, 5769],
+        };
+        {
+            let reg = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
+            let created = reg
+                .create(&CreateTimerRequest {
+                    name: "Field RH".into(),
+                    kind: TimerKind::Rotorhazard {
+                        url: "http://rh.local:5000".into(),
+                    },
+                    channel_capability: Some(fixed.clone()),
+                    node_count: Some(4),
+                    available_channels: Some(vec![5658, 5695, 5732, 5769]),
+                })
+                .unwrap();
+            assert_eq!(created.channel_capability, fixed);
+            assert_eq!(created.node_count, 4);
+
+            let reopened = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
+            let got = reopened.get(&created.id).unwrap();
+            assert_eq!(got.channel_capability, fixed);
+            assert_eq!(got.node_count, 4);
+            assert_eq!(got.available_channels, vec![5658, 5695, 5732, 5769]);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_pre_channel_model_timers_file_deserializes_with_defaults() {
+        // An old `timers.json` written before the channel fields existed must still load — the new
+        // fields default (Flexible, 8 nodes, no available channels).
+        let dir = std::env::temp_dir().join(format!("gridfpv-timers-legacy-{}", short_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A minimal legacy timer entry: id/name/kind/status only.
+        let legacy = r#"[{"id":"mock","name":"Mock","kind":{"Mock":{"laps":3,"lap_ms":2000}},"status":"Ready"},
+                         {"id":"old-rh","name":"Old RH","kind":{"Rotorhazard":{"url":"http://x:5000"}},"status":"Configured"}]"#;
+        std::fs::write(timers_path(&dir), legacy).unwrap();
+        let reg = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
+        let old = reg.get(&TimerId("old-rh".into())).unwrap();
+        assert_eq!(old.channel_capability, ChannelCapability::Flexible);
+        assert_eq!(old.node_count, DEFAULT_NODE_COUNT);
+        assert!(old.available_channels.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_edits_channel_capability_and_node_count() {
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let created = reg.create(&sim_req("Tunable")).unwrap();
+        let updated = reg
+            .update(
+                &created.id,
+                &UpdateTimerRequest {
+                    node_count: Some(6),
+                    available_channels: Some(vec![5800, 5820, 5840]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.node_count, 6);
+        assert_eq!(updated.available_channels, vec![5800, 5820, 5840]);
     }
 
     #[test]

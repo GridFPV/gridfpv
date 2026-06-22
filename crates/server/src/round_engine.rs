@@ -48,10 +48,12 @@ use gridfpv_engine::format::{
     CompletedHeat, FormatConfig, FormatRegistry, GeneratorStep, RankEntry, advance_top_n,
 };
 use gridfpv_engine::heat::{HeatState, heat_state};
+use gridfpv_engine::schedule::{Frequency, FrequencyPool, allocate};
 use gridfpv_engine::scoring::HeatResult;
 use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, Pass, RoundId, SourceTime};
 
 use crate::events::{EventMeta, RoundDef, SeedingRule};
+use crate::timers::{Timer, TimerRegistry};
 
 /// The hard guard against a generator that never completes (mirrors
 /// [`run_event`](gridfpv_engine::event::run_event)'s `max_heats`): a real format always
@@ -128,6 +130,129 @@ impl std::fmt::Display for FillError {
 }
 
 impl std::error::Error for FillError {}
+
+/// Per-heat **channel assignment** failed (race redesign Slice 4a): the lineup exceeds the timer's
+/// node/slot count (the heat-size cap), or there are too few available channels to seat it.
+///
+/// A typed error the heat-build paths (`FillRound` / `ScheduleHeat`) surface as a `400` with a
+/// clear message — a heat that cannot be seated on the timer must not be scheduled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignError {
+    /// The lineup is larger than the timer can physically run: `lineup` pilots, `nodes` slots.
+    TooManyForNodes {
+        /// Pilots in the heat's lineup.
+        lineup: usize,
+        /// The timer's node/slot count (the cap).
+        nodes: usize,
+    },
+    /// The lineup fits the node count, but the timer's **available channels** are too few to give
+    /// every pilot a distinct channel: `lineup` pilots, `available` channels.
+    TooFewChannels {
+        /// Pilots in the heat's lineup.
+        lineup: usize,
+        /// Distinct available channels the timer offered.
+        available: usize,
+    },
+}
+
+impl std::fmt::Display for AssignError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AssignError::TooManyForNodes { lineup, nodes } => write!(
+                f,
+                "heat lineup of {lineup} exceeds the timer's {nodes} node(s)"
+            ),
+            AssignError::TooFewChannels { lineup, available } => write!(
+                f,
+                "the timer offers only {available} channel(s) for a {lineup}-pilot heat"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AssignError {}
+
+/// Assign **video channels** to a heat's lineup from a timer's available channels (race redesign
+/// Slice 4a) — the engine's half of the RE §7.3 split (the engine allocates; the adapter applies).
+///
+/// Given the event's selected `timer` and the heat's `lineup` (in seed order):
+///
+/// 1. **Heat-size cap.** The lineup must be ≤ the timer's
+///    [`node_count`](crate::timers::Timer::node_count); otherwise [`AssignError::TooManyForNodes`].
+///    A timer with **no available channels** (a sim/Mock-without-frequencies, an unconfigured
+///    timer) assigns **nothing** — an empty allocation — *after* the cap check, so a heat that is
+///    simply un-channelled is fine but an oversized one is still rejected.
+/// 2. **First-fit allocation.** The available channels (raw MHz, in preference order, capped to the
+///    node count) form a [`FrequencyPool`]; [`allocate`] hands each pilot the first free channel in
+///    seed order (top seed → first channel). Too few channels for the lineup is
+///    [`AssignError::TooFewChannels`].
+///
+/// Pure and deterministic: the same lineup + timer config always yields the same per-pilot
+/// `(competitor, mhz)` assignment — the determinism `HeatScheduled.frequencies` and the e2e rely on.
+pub fn assign_frequencies(
+    timer: &Timer,
+    lineup: &[CompetitorRef],
+) -> Result<Vec<(CompetitorRef, u16)>, AssignError> {
+    let nodes = timer.node_count as usize;
+    if lineup.len() > nodes {
+        return Err(AssignError::TooManyForNodes {
+            lineup: lineup.len(),
+            nodes,
+        });
+    }
+    // No available channels ⇒ no channel assignment (sim/Mock-without-frequencies, unconfigured).
+    // The cap above still applies; only the channel step is skipped.
+    if timer.available_channels.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The pool is the available channels, in preference order, but never more than the timer has
+    // nodes for (a node can't run two channels). `FrequencyPool::new` de-duplicates.
+    let pool = FrequencyPool::new(
+        timer
+            .available_channels
+            .iter()
+            .take(nodes)
+            .copied()
+            .map(Frequency::new),
+    );
+    match allocate(lineup, &pool) {
+        Ok(assignment) => Ok(assignment
+            .into_iter()
+            .map(|(competitor, freq)| (competitor, freq.mhz))
+            .collect()),
+        Err(e) => Err(AssignError::TooFewChannels {
+            lineup: e.needed,
+            available: e.available,
+        }),
+    }
+}
+
+/// The timer a heat's channels are assigned from for an event (race redesign Slice 4a): the event's
+/// **effective primary** timer (its override, else the first selected), resolved in `timers`.
+///
+/// `None` when the event selects no timer, or the selected timer is not in the registry — the
+/// caller then assigns no channels (an un-channelled heat, e.g. a pure-sim event). The effective
+/// primary mirrors the source bridge's selection, so the channels a heat is assigned match the
+/// timer it will actually fly on.
+pub fn assignment_timer(meta: &EventMeta, timers: &TimerRegistry) -> Option<Timer> {
+    let primary = meta.effective_primary()?;
+    timers.get(&primary)
+}
+
+/// Assign channels to `lineup` for `meta`'s event using its effective primary timer (race redesign
+/// Slice 4a). When the event has a resolvable timer, delegate to [`assign_frequencies`] (cap +
+/// first-fit); when it has none, the heat carries no channels (an empty assignment — a pure-sim
+/// event has no node cap beyond the format).
+pub fn assign_for_event(
+    meta: &EventMeta,
+    timers: &TimerRegistry,
+    lineup: &[CompetitorRef],
+) -> Result<Vec<(CompetitorRef, u16)>, AssignError> {
+    match assignment_timer(meta, timers) {
+        Some(timer) => assign_frequencies(&timer, lineup),
+        None => Ok(Vec::new()),
+    }
+}
 
 /// Resolve a round by id in the event meta, or [`FillError::UnknownRound`].
 fn round_of<'a>(meta: &'a EventMeta, round: &RoundId) -> Result<&'a RoundDef, FillError> {
@@ -396,6 +521,108 @@ mod tests {
     use std::collections::BTreeMap;
 
     const ADAPTER: &str = "mock";
+
+    // --- Channel assignment (race redesign Slice 4a) ---------------------------------------
+
+    use crate::channels::RACEBAND_MHZ;
+    use crate::timers::{ChannelCapability, Timer, TimerId, TimerKind, TimerStatus};
+
+    /// A test timer with the given node count + available channels (raw MHz), flexible capability.
+    fn timer_with(node_count: u32, available: Vec<u16>) -> Timer {
+        Timer {
+            id: TimerId("t".into()),
+            name: "T".into(),
+            kind: TimerKind::Mock { laps: 1, lap_ms: 1 },
+            status: TimerStatus::Ready,
+            channel_capability: ChannelCapability::Flexible,
+            node_count,
+            available_channels: available,
+        }
+    }
+
+    fn lineup(names: &[&str]) -> Vec<CompetitorRef> {
+        names.iter().map(|n| CompetitorRef((*n).into())).collect()
+    }
+
+    #[test]
+    fn assign_is_first_fit_in_seed_order() {
+        // An 8-node Raceband timer assigns R1, R2, R3 to the top three seeds in order.
+        let timer = timer_with(8, RACEBAND_MHZ.to_vec());
+        let assignment = assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap();
+        assert_eq!(
+            assignment,
+            vec![
+                (CompetitorRef("A".into()), 5658),
+                (CompetitorRef("B".into()), 5695),
+                (CompetitorRef("C".into()), 5732),
+            ]
+        );
+    }
+
+    #[test]
+    fn assign_is_deterministic() {
+        let timer = timer_with(8, RACEBAND_MHZ.to_vec());
+        let l = lineup(&["X", "Y", "Z", "W"]);
+        assert_eq!(
+            assign_frequencies(&timer, &l).unwrap(),
+            assign_frequencies(&timer, &l).unwrap()
+        );
+    }
+
+    #[test]
+    fn assign_with_no_available_channels_is_empty() {
+        // A sim/Mock-without-frequencies (no available channels) assigns no channels — but the cap
+        // still applies (covered separately).
+        let timer = timer_with(8, vec![]);
+        let assignment = assign_frequencies(&timer, &lineup(&["A", "B"])).unwrap();
+        assert!(assignment.is_empty());
+    }
+
+    #[test]
+    fn assign_rejects_an_oversized_lineup_at_the_node_cap() {
+        // A 4-node timer cannot seat a 5-pilot heat — TooManyForNodes regardless of channel count.
+        let timer = timer_with(4, RACEBAND_MHZ.to_vec());
+        let err = assign_frequencies(&timer, &lineup(&["A", "B", "C", "D", "E"])).unwrap_err();
+        assert_eq!(
+            err,
+            AssignError::TooManyForNodes {
+                lineup: 5,
+                nodes: 4
+            }
+        );
+    }
+
+    #[test]
+    fn assign_caps_the_pool_to_the_node_count_even_with_more_channels() {
+        // 2 nodes but 8 available channels: a 3-pilot lineup is rejected at the node cap first.
+        let timer = timer_with(2, RACEBAND_MHZ.to_vec());
+        let err = assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap_err();
+        assert_eq!(
+            err,
+            AssignError::TooManyForNodes {
+                lineup: 3,
+                nodes: 2
+            }
+        );
+        // A 2-pilot lineup fits and gets the first two channels.
+        let ok = assign_frequencies(&timer, &lineup(&["A", "B"])).unwrap();
+        assert_eq!(ok.len(), 2);
+    }
+
+    #[test]
+    fn assign_too_few_channels_within_the_node_count() {
+        // 8 nodes but only 2 available channels: a 3-pilot heat fits the node cap but runs out of
+        // distinct channels.
+        let timer = timer_with(8, vec![5658, 5695]);
+        let err = assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap_err();
+        assert_eq!(
+            err,
+            AssignError::TooFewChannels {
+                lineup: 3,
+                available: 2
+            }
+        );
+    }
 
     fn meta_with(rounds: Vec<RoundDef>, membership: Vec<ClassMembership>) -> EventMeta {
         EventMeta {

@@ -9,13 +9,19 @@ const MOCK: Timer = {
   id: 'mock',
   name: 'Mock',
   kind: { Mock: { laps: 3, lap_ms: 30000 } },
-  status: 'Ready'
+  status: 'Ready',
+  channel_capability: 'Flexible',
+  node_count: 8,
+  available_channels: []
 };
 const RH: Timer = {
   id: 'rh-1',
   name: 'Track RH',
   kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
-  status: 'Configured'
+  status: 'Configured',
+  channel_capability: 'Flexible',
+  node_count: 8,
+  available_channels: []
 };
 
 /** A created event selecting only the Mock timer (so its checkbox seeds checked). */
@@ -97,7 +103,10 @@ describe('EventTimers (in-event CRUD + selection)', () => {
       id: 'fast-x',
       name: 'Fast',
       kind: { Mock: { laps: 5, lap_ms: 12000 } },
-      status: 'Ready'
+      status: 'Ready',
+      channel_capability: 'Flexible',
+      node_count: 8,
+      available_channels: []
     };
     let calls = 0;
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));

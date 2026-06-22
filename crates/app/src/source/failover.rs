@@ -89,6 +89,9 @@ mod tests {
                 kind: TimerKind::Rotorhazard {
                     url: "http://rh.local:5000".into(),
                 },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
             })
             .unwrap();
         let practice = EventId("practice".into());

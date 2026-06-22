@@ -246,7 +246,95 @@ pub fn apply_command_in_event(
 ) -> CommandAck {
     match command {
         Command::FillRound { round } => apply_fill_round(registry, event_id, state, round),
+        // `ScheduleHeat` also needs the event meta + timer registry (the channel cap + assignment),
+        // so it is handled here rather than in the log-only `apply_command`.
+        Command::ScheduleHeat {
+            heat,
+            lineup,
+            class,
+            round,
+            frequencies,
+        } => apply_schedule_heat(
+            registry,
+            event_id,
+            state,
+            heat,
+            lineup,
+            class,
+            round,
+            frequencies,
+        ),
         other => apply_command(state, other),
+    }
+}
+
+/// Handle [`Command::ScheduleHeat`] (race redesign Slice 4a) — create a heat with its lineup, with
+/// the **channel assignment + heat-size cap** the round-driven path also applies.
+///
+/// The cap (lineup ≤ the event's effective primary timer's node count) is enforced here and an
+/// oversized lineup is a typed `400` (nothing appended). Channels are assigned from the timer's
+/// available set unless the caller supplied an explicit `frequencies` set (the caller — a test, a
+/// manual override — wins; the engine assignment is the default when none is given). A pure-sim
+/// event (no resolvable timer) assigns none.
+#[allow(clippy::too_many_arguments)]
+fn apply_schedule_heat(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    heat: HeatId,
+    lineup: Vec<gridfpv_events::CompetitorRef>,
+    class: Option<gridfpv_events::ClassId>,
+    round: Option<gridfpv_events::RoundId>,
+    frequencies: Vec<(gridfpv_events::CompetitorRef, u16)>,
+) -> CommandAck {
+    use crate::round_engine;
+
+    let Some(meta) = registry.meta_of(event_id) else {
+        return CommandAck::failed(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        ));
+    };
+
+    // Caller-supplied frequencies win (manual override / test); otherwise assign from the event's
+    // timer. Either way the heat-size cap is enforced against the event's timer.
+    let frequencies = if frequencies.is_empty() {
+        match round_engine::assign_for_event(&meta, &registry.timers(), &lineup) {
+            Ok(freqs) => freqs,
+            Err(err) => {
+                return CommandAck::failed(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    err.to_string(),
+                ));
+            }
+        }
+    } else {
+        // A caller-supplied assignment still must fit the timer's node count (the cap).
+        if let Some(timer) = round_engine::assignment_timer(&meta, &registry.timers()) {
+            if lineup.len() > timer.node_count as usize {
+                return CommandAck::failed(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    round_engine::AssignError::TooManyForNodes {
+                        lineup: lineup.len(),
+                        nodes: timer.node_count as usize,
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+        frequencies
+    };
+
+    let event = Event::HeatScheduled {
+        heat,
+        lineup,
+        class,
+        round,
+        frequencies,
+    };
+    match state.append(event, None) {
+        Ok(_offset) => CommandAck::ok(),
+        Err(err) => CommandAck::failed(err),
     }
 }
 
@@ -283,14 +371,26 @@ fn apply_fill_round(
     match round_engine::fill_round(&meta, &round, &events) {
         Ok(FillOutcome::Scheduled { heat, lineup }) => {
             let class = round_engine::round_class(&meta, &round);
+            // Assign channels from the event's effective primary timer's available set (race
+            // redesign Slice 4a): the heat-size cap (lineup ≤ node count) is enforced here, and the
+            // engine's first-fit allocator fills `frequencies` in seed order. A pure-sim event (no
+            // resolvable timer / no available channels) assigns none — an un-channelled heat.
+            let frequencies =
+                match round_engine::assign_for_event(&meta, &registry.timers(), &lineup) {
+                    Ok(freqs) => freqs,
+                    Err(err) => {
+                        return CommandAck::failed(ProtocolError::new(
+                            ErrorCode::BadRequest,
+                            err.to_string(),
+                        ));
+                    }
+                };
             let event = Event::HeatScheduled {
                 heat,
                 lineup,
                 class,
                 round: Some(round),
-                // Frequencies are assigned in Slice 4 (the timer node-count cap lands there);
-                // a round-scheduled heat carries none for now (a sim race assigns no channels).
-                frequencies: Vec::new(),
+                frequencies,
             };
             match state.append(event, None) {
                 Ok(_offset) => CommandAck::ok(),
@@ -862,5 +962,140 @@ mod tests {
         assert_eq!(ack.error.unwrap().code, ErrorCode::UnknownScope);
         let (events, _) = state.read().unwrap();
         assert!(events.is_empty(), "a rejected FillRound appends nothing");
+    }
+
+    /// Build an event selecting one timer (created from `req`) over a class with `pilots`, plus a
+    /// single-round timed_qual round. Returns the registry, the event id, and the round id.
+    #[cfg(test)]
+    fn event_with_timer_and_round(
+        timer_req: crate::timers::CreateTimerRequest,
+        pilots: &[&str],
+    ) -> (EventRegistry, EventId, gridfpv_events::RoundId) {
+        use crate::classes::CreateClassRequest;
+        use crate::events::{CreateEventRequest, NewRoundReq, SeedingRule};
+        use crate::pilots::CreatePilotRequest;
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let registry = EventRegistry::new(None).unwrap();
+        let timer = registry.timers().create(&timer_req).unwrap();
+        let class = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Open".into(),
+                source: Default::default(),
+                reference: None,
+                description: None,
+            })
+            .unwrap()
+            .id;
+        let pilot_ids: Vec<_> = pilots
+            .iter()
+            .map(|cs| {
+                registry
+                    .pilots()
+                    .create(&CreatePilotRequest {
+                        callsign: (*cs).into(),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        let event = registry
+            .create(&CreateEventRequest {
+                name: "E".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap()
+            .id;
+        registry.set_classes(&event, vec![class.clone()]).unwrap();
+        registry
+            .set_class_membership(&event, class.clone(), pilot_ids)
+            .unwrap();
+        registry.set_timers(&event, vec![timer.id]).unwrap();
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    label: "Qual".into(),
+                    classes: vec![class],
+                    format: "timed_qual".into(),
+                    params: BTreeMap::from([("rounds".into(), "1".into())]),
+                    win_condition: WinCondition::BestLap,
+                    seeding: SeedingRule::FromRoster,
+                },
+            )
+            .unwrap();
+        (registry, EventId(event.0.clone()), round.id)
+    }
+
+    /// `FillRound` assigns channels from the event's selected timer onto the heat — the lineup gets
+    /// first-fit Raceband frequencies in seed order (race redesign Slice 4a).
+    #[test]
+    fn fill_round_assigns_frequencies_from_the_selected_timer() {
+        use crate::timers::{ChannelCapability, CreateTimerRequest, TimerKind};
+        let timer_req = CreateTimerRequest {
+            name: "8-node".into(),
+            kind: TimerKind::Mock { laps: 1, lap_ms: 1 },
+            channel_capability: Some(ChannelCapability::Flexible),
+            node_count: Some(8),
+            available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+        };
+        let (registry, event_id, round) =
+            event_with_timer_and_round(timer_req, &["alpha", "bravo"]);
+        let state = registry.resolve(&event_id).unwrap();
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.clone(),
+            },
+        );
+        assert!(ack.ok, "FillRound rejected: {ack:?}");
+
+        let (events, _) = state.read().unwrap();
+        let freqs = events
+            .iter()
+            .find_map(|e| match e {
+                Event::HeatScheduled { frequencies, .. } if !frequencies.is_empty() => {
+                    Some(frequencies.clone())
+                }
+                _ => None,
+            })
+            .expect("the scheduled heat carries an assigned frequency set");
+        // Top two seeds get Raceband R1, R2 in order.
+        assert_eq!(freqs.len(), 2);
+        assert_eq!(freqs[0].1, 5658);
+        assert_eq!(freqs[1].1, 5695);
+    }
+
+    /// `FillRound` rejects an oversized lineup with a typed `BadRequest` (the heat-size cap) and
+    /// appends nothing (race redesign Slice 4a).
+    #[test]
+    fn fill_round_rejects_a_lineup_over_the_node_cap() {
+        use crate::timers::{ChannelCapability, CreateTimerRequest, TimerKind};
+        // A 2-node timer, but the round fields four pilots — the heat exceeds the cap.
+        let timer_req = CreateTimerRequest {
+            name: "2-node".into(),
+            kind: TimerKind::Mock { laps: 1, lap_ms: 1 },
+            channel_capability: Some(ChannelCapability::Flexible),
+            node_count: Some(2),
+            available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+        };
+        let (registry, event_id, round) =
+            event_with_timer_and_round(timer_req, &["a", "b", "c", "d"]);
+        let state = registry.resolve(&event_id).unwrap();
+        let before = state.read().unwrap().0.len();
+        let ack =
+            apply_command_in_event(&registry, &event_id, &state, Command::FillRound { round });
+        assert!(!ack.ok, "an oversized heat must be rejected");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        let after = state.read().unwrap().0.len();
+        assert_eq!(before, after, "a rejected FillRound appends nothing");
     }
 }

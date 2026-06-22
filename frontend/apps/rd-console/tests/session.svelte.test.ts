@@ -468,7 +468,10 @@ describe('Session', () => {
       id: 'mock',
       name: 'Mock',
       kind: { Mock: { laps: 3, lap_ms: 30000 } },
-      status: 'Ready'
+      status: 'Ready',
+      channel_capability: 'Flexible',
+      node_count: 8,
+      available_channels: []
     };
 
     function timerSession(overrides?: {
@@ -507,7 +510,10 @@ describe('Session', () => {
         id: 'fast-x1',
         name: 'Fast',
         kind: { Mock: { laps: 5, lap_ms: 12000 } },
-        status: 'Ready'
+        status: 'Ready',
+        channel_capability: 'Flexible',
+        node_count: 8,
+        available_channels: []
       };
       const createTimerImpl = vi.fn(async () => created);
       const session = timerSession({ createTimerImpl });
@@ -620,7 +626,10 @@ describe('Session', () => {
           id: 'rh-1',
           name: 'Track RH',
           kind: { Rotorhazard: { url: 'http://rh' } },
-          status: 'Disconnected'
+          status: 'Disconnected',
+          channel_capability: 'Flexible',
+          node_count: 8,
+          available_channels: []
         };
         const listTimersImpl = vi.fn(async () => [rh, MOCK_CONNECTED]); // registry order differs
         const session = timerSession({ listTimersImpl });
