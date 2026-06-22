@@ -91,8 +91,9 @@ use crate::classes::{Class, ClassError, ClassErrorKind, CreateClassRequest, Upda
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
-    ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, SetActiveEventRequest,
-    SetClassMembershipRequest, SetEventClassesRequest, SetEventRosterRequest,
+    ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, NewRoundReq, RoundDef, RoundError,
+    SetActiveEventRequest, SetClassMembershipRequest, SetEventClassesRequest,
+    SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::live_state;
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
@@ -103,6 +104,7 @@ use crate::timers::{
     CreateTimerRequest, SetEventTimersRequest, SetPrimaryTimerRequest, Timer, TimerId,
     UpdateTimerRequest,
 };
+use gridfpv_events::RoundId;
 
 /// The object-safe slice of [`EventLog`] the protocol transport needs: read the whole
 /// log, read its tail, append, and report its length.
@@ -321,6 +323,15 @@ pub fn router(registry: EventRegistry) -> Router {
         .route(
             "/events/{event_id}/classes/{class_id}/membership",
             put(set_class_membership),
+        )
+        // Per-event **rounds** (race redesign Slice 2a): RD-gated. Add a round (POST, id
+        // generated), or update/remove an existing one by its generated round id. Each class must be
+        // selected by the event, the format must be known, and a `FromRanking` seeding source must
+        // name an existing round.
+        .route("/events/{event_id}/rounds", post(add_round))
+        .route(
+            "/events/{event_id}/rounds/{round_id}",
+            put(update_round).delete(remove_round),
         )
         // Per-event **roster** (issue #74): RD-gated; each id must name a known directory pilot.
         // Set the whole roster, or add/remove a single pilot.
@@ -838,6 +849,71 @@ async fn set_class_membership(
     let meta = registry
         .set_class_membership(&event_id, class_id, body.pilot_ids)
         .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+    Ok(Json(meta))
+}
+
+/// Map a [`RoundError`] to a [`ProtocolError`]: a missing event/round is a typed **404**
+/// ([`ErrorCode::UnknownScope`]); an invalid round definition (bad class, unknown format, dangling
+/// seeding source) is a **400** ([`ErrorCode::BadRequest`]).
+fn round_error(e: RoundError) -> ProtocolError {
+    let code = match e {
+        RoundError::EventNotFound(_) | RoundError::RoundNotFound(_) => ErrorCode::UnknownScope,
+        RoundError::Invalid(_) => ErrorCode::BadRequest,
+    };
+    ProtocolError::new(code, e.to_string())
+}
+
+/// `POST /events/{event_id}/rounds` — add a **round** to an event (race redesign Slice 2a),
+/// RD-gated.
+///
+/// [`ControlAuth`] runs first. The round id is **auto-generated** server-side (never in the body).
+/// Each class in the body must be selected by the event, the `format` must be a known
+/// [`FormatRegistry`](gridfpv_engine::format::FormatRegistry) name, and a `FromRanking` seeding
+/// source must name an existing round — else a typed **400**. An unknown event is a **404**. On
+/// success the created [`RoundDef`] (with its generated id) is returned and the event's meta is
+/// written through to disk (issue #115).
+async fn add_round(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<NewRoundReq>,
+) -> Result<Json<RoundDef>, ProtocolError> {
+    let round = registry.add_round(&event_id, body).map_err(round_error)?;
+    Ok(Json(round))
+}
+
+/// `PUT /events/{event_id}/rounds/{round_id}` — replace an existing **round**'s fields (race
+/// redesign Slice 2a), RD-gated.
+///
+/// [`ControlAuth`] runs first. The round id is the path segment (not editable); every other field is
+/// replaced wholesale. Same validation as `add_round` (bad class / format / seeding → **400**); an
+/// unknown event or round id is a **404**. On success the updated [`RoundDef`] is returned and the
+/// meta is written through to disk.
+async fn update_round(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path((event_id, round_id)): Path<(EventId, RoundId)>,
+    Json(body): Json<UpdateRoundReq>,
+) -> Result<Json<RoundDef>, ProtocolError> {
+    let round = registry
+        .update_round(&event_id, &round_id, body)
+        .map_err(round_error)?;
+    Ok(Json(round))
+}
+
+/// `DELETE /events/{event_id}/rounds/{round_id}` — remove a **round** from an event (race redesign
+/// Slice 2a), RD-gated.
+///
+/// [`ControlAuth`] runs first. An unknown event or round id is a typed **404**. On success the
+/// event's updated [`EventMeta`] is returned and the meta is written through to disk.
+async fn remove_round(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path((event_id, round_id)): Path<(EventId, RoundId)>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    let meta = registry
+        .remove_round(&event_id, &round_id)
+        .map_err(round_error)?;
     Ok(Json(meta))
 }
 
