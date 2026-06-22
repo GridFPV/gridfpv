@@ -21,7 +21,9 @@
 //! > event/class addressing on commands (protocol.html §9.6) are refined alongside the
 //! > control endpoints (#45) and the doc-reconciliation pass.
 
-use gridfpv_events::{AdapterId, CompetitorRef, HeatId, LogRef, Penalty, SourceTime};
+use gridfpv_events::{
+    AdapterId, ClassId, CompetitorRef, HeatId, LogRef, Penalty, RoundId, SourceTime,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -98,13 +100,27 @@ pub enum Command {
     },
 
     // --- Scheduling ---
-    /// Create a heat with its lineup (`Event::HeatScheduled`). Seat/frequency
-    /// assignment is the scheduler's concern; this commits who is in the heat.
+    /// Create a heat with its lineup (`Event::HeatScheduled`). Additively carries the
+    /// class/round the heat runs in and the per-pilot frequency assignment; all three
+    /// are optional and default-absent, so the free-text NewHeat path (which assigns
+    /// none of them) is unchanged on the wire.
     ScheduleHeat {
         /// The id the new heat will carry.
         heat: HeatId,
         /// The competitors in the heat, in lineup order.
         lineup: Vec<CompetitorRef>,
+        /// The class this heat runs in, when the scheduler assigns one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        class: Option<ClassId>,
+        /// The round within the class's schedule, when the scheduler assigns one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        round: Option<RoundId>,
+        /// Per-pilot frequency assignment in raw MHz (e.g. `5800`); empty when none is
+        /// assigned (a sim race, or the free-text path).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frequencies: Vec<(CompetitorRef, u16)>,
     },
 
     // --- Registration ---
@@ -249,6 +265,22 @@ mod tests {
                 lineup: vec![
                     CompetitorRef("node-0".into()),
                     CompetitorRef("node-1".into()),
+                ],
+                class: None,
+                round: None,
+                frequencies: vec![],
+            },
+            Command::ScheduleHeat {
+                heat: HeatId("main-a".into()),
+                lineup: vec![
+                    CompetitorRef("node-0".into()),
+                    CompetitorRef("node-1".into()),
+                ],
+                class: Some(ClassId("open".into())),
+                round: Some(RoundId("r1".into())),
+                frequencies: vec![
+                    (CompetitorRef("node-0".into()), 5658),
+                    (CompetitorRef("node-1".into()), 5695),
                 ],
             },
             Command::Register {

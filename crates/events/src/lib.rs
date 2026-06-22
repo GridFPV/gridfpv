@@ -171,6 +171,29 @@ pub struct Pass {
 #[ts(export, export_to = "bindings/")]
 pub struct HeatId(pub String);
 
+/// Identifies a **class** within an event (protocol.html §4 "Class scope") — one
+/// class's phases, schedule, and standings, which may run in parallel with others.
+///
+/// This is the **canonical** class handle the whole stack shares: the event model tags
+/// a scheduled heat with the class it belongs to ([`Event::HeatScheduled`]) and the
+/// wire/scope layer addresses a class by the same type
+/// ([`ClassId`](../../server/scope/struct.ClassId.html), re-exported from here), so the
+/// log and the protocol never disagree on what a class id is. A transparent string
+/// newtype like the other event-model ids.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct ClassId(pub String);
+
+/// Identifies a **round** within a class's schedule — one pass through the phase
+/// (qualifying round 1, round 2, …). A transparent string newtype like [`ClassId`];
+/// the richer phase/round model lands with the scheduler, this is the stable handle a
+/// scheduled heat is tagged with.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct RoundId(pub String);
+
 /// A reference to an already-logged event by its append **offset** — the stable id
 /// marshaling adjudications target (e.g. "void *this* pass"). The offset is assigned
 /// by the storage layer when the target event was appended.
@@ -275,12 +298,30 @@ pub enum Event {
 
     // --- race-engine events (#28) ---
     /// A heat is created with its lineup and enters the `Scheduled` state — the
-    /// `[*] → Scheduled` entry of the heat loop (race-engine.html §2). Minimal for
-    /// now: the competitors in the heat; seat/frequency assignment lands with the
-    /// scheduler (#36).
+    /// `[*] → Scheduled` entry of the heat loop (race-engine.html §2). Carries the
+    /// competitors in the heat and, additively, the class/round it belongs to and the
+    /// per-pilot frequency assignment.
+    ///
+    /// The `class`, `round`, and `frequencies` fields are **additive** and
+    /// default-absent: a heat scheduled without them (the free-text NewHeat path, a
+    /// sim race, a pre-existing log entry) reads back as `None`/empty, so older logs
+    /// round-trip unchanged. `frequencies` pairs each competitor with a raw-MHz channel
+    /// (e.g. `5800`); empty means none assigned (sim/none).
     HeatScheduled {
         heat: HeatId,
         lineup: Vec<CompetitorRef>,
+        /// The class this heat runs in, where the scheduler tagged it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        class: Option<ClassId>,
+        /// The round within the class's schedule, where the scheduler tagged it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        round: Option<RoundId>,
+        /// Per-pilot frequency assignment in raw MHz (e.g. `5800`). Empty when none is
+        /// assigned (a simulator, or the free-text path that does not assign channels).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frequencies: Vec<(CompetitorRef, u16)>,
     },
     /// A heat-loop state transition appended by the engine (race-engine.html §2).
     HeatStateChanged {
@@ -401,6 +442,22 @@ mod tests {
                     CompetitorRef("node-0".into()),
                     CompetitorRef("node-1".into()),
                 ],
+                class: None,
+                round: None,
+                frequencies: vec![],
+            },
+            Event::HeatScheduled {
+                heat: HeatId("main-a".into()),
+                lineup: vec![
+                    CompetitorRef("node-0".into()),
+                    CompetitorRef("node-1".into()),
+                ],
+                class: Some(ClassId("open".into())),
+                round: Some(RoundId("r1".into())),
+                frequencies: vec![
+                    (CompetitorRef("node-0".into()), 5658),
+                    (CompetitorRef("node-1".into()), 5695),
+                ],
             },
             Event::HeatStateChanged {
                 heat: HeatId("q-1".into()),
@@ -480,5 +537,84 @@ mod tests {
         // `LogRef` is transparent — it serialises as the raw offset integer, the
         // stable id adjudications target.
         assert_eq!(serde_json::to_string(&LogRef(42)).unwrap(), "42");
+    }
+
+    #[test]
+    fn class_and_round_ids_are_transparent_on_the_wire() {
+        // Both newtypes serialise as the bare string, like the other event-model ids.
+        assert_eq!(
+            serde_json::to_string(&ClassId("open".into())).unwrap(),
+            "\"open\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RoundId("r1".into())).unwrap(),
+            "\"r1\""
+        );
+    }
+
+    #[test]
+    fn heat_scheduled_omits_class_round_and_frequencies_when_default() {
+        // A heat with no class/round/frequencies (the free-text NewHeat path, a sim
+        // race) serialises *exactly* like the pre-tag shape: the new fields are
+        // skipped entirely, so the wire stays byte-compatible with old logs.
+        let event = Event::HeatScheduled {
+            heat: HeatId("q-1".into()),
+            lineup: vec![CompetitorRef("node-0".into())],
+            class: None,
+            round: None,
+            frequencies: vec![],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("class"), "absent class omitted: {json}");
+        assert!(!json.contains("round"), "absent round omitted: {json}");
+        assert!(
+            !json.contains("frequencies"),
+            "empty frequencies omitted: {json}"
+        );
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn heat_scheduled_round_trips_with_the_new_fields() {
+        let event = Event::HeatScheduled {
+            heat: HeatId("main-a".into()),
+            lineup: vec![
+                CompetitorRef("node-0".into()),
+                CompetitorRef("node-1".into()),
+            ],
+            class: Some(ClassId("open".into())),
+            round: Some(RoundId("r2".into())),
+            frequencies: vec![
+                (CompetitorRef("node-0".into()), 5658),
+                (CompetitorRef("node-1".into()), 5695),
+            ],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("class") && json.contains("round") && json.contains("frequencies"));
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn legacy_heat_scheduled_reads_back_with_defaults() {
+        // A pre-existing serialized `HeatScheduled` (before the class/round/frequencies
+        // tags existed) must still deserialize, with the new fields defaulting to
+        // None/empty. This is the exact JSON shape an old log on disk holds.
+        let legacy = r#"{"HeatScheduled":{"heat":"q-1","lineup":["node-0","node-1"]}}"#;
+        let back: Event = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            back,
+            Event::HeatScheduled {
+                heat: HeatId("q-1".into()),
+                lineup: vec![
+                    CompetitorRef("node-0".into()),
+                    CompetitorRef("node-1".into()),
+                ],
+                class: None,
+                round: None,
+                frequencies: vec![],
+            }
+        );
     }
 }

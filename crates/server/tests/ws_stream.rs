@@ -90,6 +90,9 @@ fn heat_scheduled(id: &str, lineup: &[&str]) -> Event {
     Event::HeatScheduled {
         heat: HeatId(id.into()),
         lineup: lineup.iter().map(|c| CompetitorRef((*c).into())).collect(),
+        class: None,
+        round: None,
+        frequencies: vec![],
     }
 }
 

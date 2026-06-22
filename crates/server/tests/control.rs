@@ -185,6 +185,9 @@ async fn post_command_drives_heat_loop_and_reaches_stream() {
         &Command::ScheduleHeat {
             heat: heat(),
             lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+            class: None,
+            round: None,
+            frequencies: vec![],
         },
         &rd,
     )
@@ -223,6 +226,9 @@ async fn control_ws_acks_each_command_and_rejects_illegal() {
         &Command::ScheduleHeat {
             heat: heat(),
             lineup: vec![CompetitorRef("A".into())],
+            class: None,
+            round: None,
+            frequencies: vec![],
         },
     )
     .await;
@@ -286,6 +292,9 @@ async fn control_ws_survives_a_malformed_frame() {
         &Command::ScheduleHeat {
             heat: heat(),
             lineup: vec![],
+            class: None,
+            round: None,
+            frequencies: vec![],
         },
     )
     .await;
@@ -302,6 +311,9 @@ async fn control_post_requires_a_valid_rd_token() {
     let cmd = Command::ScheduleHeat {
         heat: heat(),
         lineup: vec![],
+        class: None,
+        round: None,
+        frequencies: vec![],
     };
 
     // No token → 401.
@@ -358,6 +370,9 @@ async fn control_ws_upgrade_requires_a_valid_rd_token() {
         &Command::ScheduleHeat {
             heat: heat(),
             lineup: vec![],
+            class: None,
+            round: None,
+            frequencies: vec![],
         },
     )
     .await;
@@ -378,6 +393,9 @@ async fn reads_are_open_and_a_join_token_authenticates_reads() {
         &Command::ScheduleHeat {
             heat: heat(),
             lineup: vec![CompetitorRef("A".into())],
+            class: None,
+            round: None,
+            frequencies: vec![],
         },
         &rd,
     )
@@ -419,6 +437,9 @@ async fn out_of_band_contract_version_is_told_to_refresh() {
         &Command::ScheduleHeat {
             heat: heat(),
             lineup: vec![],
+            class: None,
+            round: None,
+            frequencies: vec![],
         },
         &rd,
     )

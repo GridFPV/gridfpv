@@ -428,6 +428,9 @@ mod tests {
                 CompetitorRef("node-0".into()),
                 CompetitorRef("node-1".into()),
             ],
+            class: None,
+            round: None,
+            frequencies: vec![],
         }
     }
 
@@ -494,6 +497,9 @@ mod tests {
             Event::HeatScheduled {
                 heat: other.clone(),
                 lineup: vec![],
+                class: None,
+                round: None,
+                frequencies: vec![],
             },
             changed(HeatTransition::Staged),
             Event::HeatStateChanged {

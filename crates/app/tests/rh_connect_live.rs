@@ -169,6 +169,9 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
             Event::HeatScheduled {
                 heat: heat.clone(),
                 lineup: vec![pilot.clone()],
+                class: None,
+                round: None,
+                frequencies: vec![],
             },
             None,
         )
@@ -354,6 +357,9 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
             Event::HeatScheduled {
                 heat: heat.clone(),
                 lineup: vec![pilot.clone()],
+                class: None,
+                round: None,
+                frequencies: vec![],
             },
             None,
         )

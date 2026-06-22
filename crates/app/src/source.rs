@@ -810,7 +810,10 @@ fn lineup_of(state: &AppState, heat: &HeatId) -> Option<Vec<CompetitorRef>> {
     let stored = state.log().lock().ok()?.read_all().ok()?;
     let mut lineup = None;
     for s in stored {
-        if let Event::HeatScheduled { heat: h, lineup: l } = s.event {
+        if let Event::HeatScheduled {
+            heat: h, lineup: l, ..
+        } = s.event
+        {
             if &h == heat {
                 lineup = Some(l);
             }
@@ -946,6 +949,9 @@ mod tests {
                 Event::HeatScheduled {
                     heat: heat.clone(),
                     lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
                 },
                 None,
             )
@@ -1006,6 +1012,9 @@ mod tests {
                 Event::HeatScheduled {
                     heat: heat.clone(),
                     lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
                 },
                 None,
             )
@@ -1065,6 +1074,9 @@ mod tests {
                 Event::HeatScheduled {
                     heat: HeatId("q-1".into()),
                     lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
                 },
                 None,
             )
@@ -1091,6 +1103,9 @@ mod tests {
                 Event::HeatScheduled {
                     heat: HeatId("q-2".into()),
                     lineup: vec![CompetitorRef("B".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
                 },
                 None,
             )
@@ -1139,6 +1154,9 @@ mod tests {
                 Event::HeatScheduled {
                     heat: heat.clone(),
                     lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
                 },
                 None,
             )
@@ -1182,6 +1200,9 @@ mod tests {
                 Event::HeatScheduled {
                     heat: heat.clone(),
                     lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
                 },
                 None,
             )
@@ -1246,6 +1267,9 @@ mod tests {
                 Event::HeatScheduled {
                     heat: heat.clone(),
                     lineup,
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
                 },
                 None,
             )
