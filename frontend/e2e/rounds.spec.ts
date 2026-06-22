@@ -344,3 +344,170 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
     }
   });
 });
+
+/**
+ * **Results (per-class standings) + Advance to bracket** (race redesign Slice 5/6b) — the deliverable
+ * proof.
+ *
+ * The prerequisites (a class with two members + a `timed_qual` round, its heat filled) are set up
+ * over the real REST/control path; then the test drives the **UI**: it runs the filled heat to
+ * **Scored** (Stage → Arm → Start, lets the sim emit laps, Finish → Score), opens **Results** and
+ * asserts the **per-class standings populate** with the two pilots, then back in **Rounds & Heats**
+ * **Advances to bracket** — asserting a `single_elim` round is created seeded `FromRanking`, and its
+ * filled heat's lineup matches the round ranking's top-N. Nothing about the standings/advance UI is
+ * mocked.
+ */
+test('RD reads per-class standings, then advances a round to a seeded bracket', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  const SUFFIX = Date.now();
+  const ACE = `E2E-Std-Ace-${SUFFIX}`;
+  const BEE = `E2E-Std-Bee-${SUFFIX}`;
+  const ROUND_LABEL = `E2E-StdRound-${SUFFIX}`;
+  const HEAT_ID = `e2e-std-${SUFFIX}`;
+
+  // ── Set up over the real write paths: Open Class selected, two members, a round + a heat ──────
+  const classes = (await (await page.request.get(`${base}/classes`)).json()) as Array<{
+    id: string;
+    name: string;
+  }>;
+  const classId = classes.find((c) => c.name === 'Open Class')!.id;
+  const mkPilot = async (callsign: string) => {
+    const p = (await (
+      await page.request.post(`${base}/pilots`, { ...json, data: { callsign } })
+    ).json()) as { id: string };
+    return p.id;
+  };
+  const aceId = await mkPilot(ACE);
+  const beeId = await mkPilot(BEE);
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [classId] } });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [aceId, beeId] } });
+  await page.request.put(`${ev}/classes/${classId}/membership`, {
+    ...json,
+    data: { pilot_ids: [aceId, beeId] }
+  });
+  const round = (await (
+    await page.request.post(`${ev}/rounds`, {
+      ...json,
+      data: {
+        label: ROUND_LABEL,
+        classes: [classId],
+        format: 'timed_qual',
+        params: { rounds: '1' },
+        win_condition: 'BestLap',
+        seeding: 'FromRoster'
+      }
+    })
+  ).json()) as { id: string };
+  // Schedule the round's heat tagged with the round + class so it lands in the round's list.
+  const sched = await page.request.post(`${ev}/control`, {
+    ...json,
+    data: {
+      ScheduleHeat: { heat: HEAT_ID, lineup: [aceId, beeId], class: classId, round: round.id }
+    }
+  });
+  expect(sched.ok()).toBeTruthy();
+
+  // ── Drive the heat to Scored through Live control ─────────────────────────────────────────────
+  await page.goto('/');
+  await enterPractice(page);
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
+  // The scheduled heat is current; run it.
+  await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID, { timeout: 15_000 });
+  await page.getByRole('button', { name: 'Stage', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Staged');
+  await page.getByRole('button', { name: 'Arm', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Armed');
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Running');
+
+  // Let the sim bank some laps before closing the heat, so the scored result is real.
+  const heatSheet = page.getByRole('region', { name: 'Heat sheet' });
+  const lapCells = heatSheet.locator('.laps');
+  const totalLaps = async () => {
+    const texts = await lapCells.allTextContents();
+    return texts.reduce((sum, t) => sum + (parseInt(t.match(/(\d+)/)?.[1] ?? '0', 10) || 0), 0);
+  };
+  await expect.poll(totalLaps, { timeout: 30_000 }).toBeGreaterThan(1);
+
+  await page.getByRole('button', { name: 'Finish', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Finished');
+  await page.getByRole('button', { name: 'Score', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Scored');
+
+  // ── Results → the per-class standings populate with both pilots ───────────────────────────────
+  await openTab(page, 'Results');
+  const standings = page.getByRole('table', { name: /Open Class standings/i });
+  await expect(standings).toBeVisible({ timeout: 15_000 });
+  await expect(standings.getByText(ACE)).toBeVisible();
+  await expect(standings.getByText(BEE)).toBeVisible();
+  if (process.env.GRIDFPV_SHOTS)
+    await page
+      .getByRole('region', { name: 'Results' })
+      .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/class-standings.png` });
+
+  // ── Rounds & Heats → Advance the qualifying round to a seeded bracket ─────────────────────────
+  await openTab(page, 'Rounds & Heats');
+  const heatRound = page.getByRole('region', { name: `Heats for ${ROUND_LABEL}` });
+  await expect(heatRound).toBeVisible({ timeout: 15_000 });
+  await heatRound.getByRole('button', { name: 'Advance to bracket' }).click();
+  const advanceForm = page.getByRole('form', { name: `Advance ${ROUND_LABEL} to bracket` });
+  await expect(advanceForm).toBeVisible();
+  // The top_n defaults to the largest power-of-two ≤ the 2-pilot field → 2.
+  await expect(advanceForm.getByLabel('Top N advance')).toHaveValue('2');
+  if (process.env.GRIDFPV_SHOTS)
+    await advanceForm.screenshot({ path: `${process.env.GRIDFPV_SHOTS}/advance-to-bracket.png` });
+  await page.getByRole('button', { name: 'Create & fill bracket' }).click();
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+
+  // A new single_elim bracket round was created on the Director, seeded FromRanking from the source.
+  // (`GET /events` is the events list; pick the Practice event off it to read its rounds.)
+  const practiceRounds = async (): Promise<
+    Array<{ id: string; format: string; seeding: unknown }>
+  > => {
+    const events = (await (await page.request.get(`${base}/events`)).json()) as Array<{
+      id: string;
+      rounds?: Array<{ id: string; format: string; seeding: unknown }>;
+    }>;
+    return events.find((e) => e.id === 'practice')?.rounds ?? [];
+  };
+  await expect
+    .poll(
+      async () =>
+        (await practiceRounds()).find(
+          (r) =>
+            r.format === 'single_elim' &&
+            typeof r.seeding === 'object' &&
+            r.seeding !== null &&
+            'FromRanking' in (r.seeding as Record<string, unknown>)
+        ),
+      { timeout: 15_000 }
+    )
+    .toBeTruthy();
+
+  // Its seeded bracket heat lists with the ranking's top-N (the two pilots) in the lineup.
+  const bracketLabel = `${ROUND_LABEL} — Bracket`;
+  const bracketRound = page.getByRole('region', { name: `Heats for ${bracketLabel}` });
+  await expect(bracketRound).toBeVisible({ timeout: 15_000 });
+  const bracketHeat = bracketRound.locator('.heat-row').first();
+  await expect(bracketHeat).toBeVisible({ timeout: 15_000 });
+  await expect(bracketHeat.getByText(ACE)).toBeVisible();
+  await expect(bracketHeat.getByText(BEE)).toBeVisible();
+  if (process.env.GRIDFPV_SHOTS)
+    await bracketRound.screenshot({
+      path: `${process.env.GRIDFPV_SHOTS}/seeded-bracket-heats.png`
+    });
+
+  // ── Clean up the shared Director's event back to empty. ───────────────────────────────────────
+  for (const r of await practiceRounds()) await page.request.delete(`${ev}/rounds/${r.id}`);
+  await page.request.put(`${ev}/classes/${classId}/membership`, {
+    ...json,
+    data: { pilot_ids: [] }
+  });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
+});

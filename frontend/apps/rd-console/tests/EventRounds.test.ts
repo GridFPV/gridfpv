@@ -320,3 +320,105 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     });
   });
 });
+
+describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)', () => {
+  // An event whose Open class has two members so a round has a field, with one Qualifying round.
+  const EVENT_WITH_MEMBERS: EventMeta = {
+    ...EVENT,
+    roster: ['p1', 'p2'],
+    classes_membership: [{ class: 'c1', pilots: ['p1', 'p2'] }]
+  };
+
+  function baseHeatsImpls() {
+    return {
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [] as HeatSummary[])
+    };
+  }
+
+  it("toggles a round's standings, resolving competitors to callsigns in ranking order", async () => {
+    const roundRankingImpl = vi.fn(async (_b, _e, _round) => [
+      { competitor: 'p1', position: 1 },
+      { competitor: 'p2', position: 2 }
+    ]);
+    const { session } = makeTestSession({
+      ...baseHeatsImpls(),
+      roundRankingImpl,
+      event: EVENT_WITH_MEMBERS
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Standings' }));
+    await waitFor(() => expect(roundRankingImpl).toHaveBeenCalled());
+    // The round id was read; the ranking renders as ordered callsigns.
+    expect(roundRankingImpl.mock.calls[0][2]).toBe('r1');
+    const panel = (await screen.findByLabelText(/Standings for Qualifying R1/i)) as HTMLElement;
+    expect(within(panel).getByText('AceOne')).toBeInTheDocument();
+    expect(within(panel).getByText('Bolt')).toBeInTheDocument();
+  });
+
+  it('surfaces an inline note when a round has no ranking yet (unscored 400s)', async () => {
+    const roundRankingImpl = vi.fn(async () => {
+      throw new Error('GET …/ranking failed: HTTP 400');
+    });
+    const { session } = makeTestSession({
+      ...baseHeatsImpls(),
+      roundRankingImpl,
+      event: EVENT_WITH_MEMBERS
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Standings' }));
+    await waitFor(() => expect(screen.getByText(/No ranking yet/i)).toBeInTheDocument());
+  });
+
+  it('advances a round to a single_elim bracket seeded FromRanking with a power-of-two top_n default', async () => {
+    // A 3-member field defaults top_n to 2 (largest power-of-two ≤ 3).
+    const EVENT_3: EventMeta = {
+      ...EVENT_WITH_MEMBERS,
+      roster: ['p1', 'p2', 'p3'],
+      classes_membership: [{ class: 'c1', pilots: ['p1', 'p2', 'p3'] }]
+    };
+    const created: RoundDef = {
+      id: 'r2',
+      label: 'Qualifying R1 — Bracket',
+      classes: ['c1'],
+      format: 'single_elim',
+      params: {},
+      win_condition: QUAL.win_condition,
+      seeding: { FromRanking: { source_round: 'r1', top_n: 2 } }
+    };
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
+    const { session, sendSpy } = makeTestSession({
+      ...baseHeatsImpls(),
+      createRoundImpl,
+      event: EVENT_3
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to bracket' }));
+
+    // The top_n field defaults to the power-of-two ≤ 3 → 2.
+    const topN = (await screen.findByLabelText('Top N advance')) as HTMLInputElement;
+    expect(topN.value).toBe('2');
+    // The label defaults to "<round> — Bracket".
+    const label = screen.getByLabelText('Bracket label') as HTMLInputElement;
+    expect(label.value).toBe('Qualifying R1 — Bracket');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Create & fill bracket' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    expect(req).toMatchObject({
+      classes: ['c1'],
+      format: 'single_elim',
+      seeding: { FromRanking: { source_round: 'r1', top_n: 2 } }
+    });
+    // After creating, the bracket's first heat is filled (a FillRound on the new round).
+    await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
+    expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
+      FillRound: { round: 'r2' }
+    });
+  });
+});

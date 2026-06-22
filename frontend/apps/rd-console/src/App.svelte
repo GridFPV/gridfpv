@@ -375,6 +375,7 @@
           <Marshaling {session} />
         {:else if active === 'results'}
           <Results
+            {session}
             heatResult={session.heatResult ??
               (session.protocolState?.body && 'HeatResult' in session.protocolState.body
                 ? session.protocolState.body.HeatResult
