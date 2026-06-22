@@ -108,16 +108,19 @@ test('three labelled boxes collapse + persist; select-all roster; auto-assign ch
     });
   }
 
-  // ── 2. Re-open the boxes; Select all in the Pilots box and save the roster. ────────────────────
+  // ── 2. Re-open the boxes; Select all in the Pilots box — the roster AUTO-SAVES (no Save button). ─
   await boxToggle(page, 'Pilots').click();
   await expect(boxToggle(page, 'Pilots')).toHaveAttribute('aria-expanded', 'true');
 
+  const rosterSaved = page.waitForResponse(
+    (r) => /\/events\/.+\/roster$/.test(r.url()) && r.request().method() === 'PUT'
+  );
   await page.getByRole('button', { name: 'Select all', exact: true }).click();
   // Every directory pilot's roster checkbox is now ticked.
   for (const callsign of PILOTS) {
     await expect(page.getByRole('checkbox', { name: `Roster ${callsign}` })).toBeChecked();
   }
-  await page.getByRole('button', { name: 'Save roster' }).click();
+  await rosterSaved;
   // Single-class auto-fill places every rostered pilot — their channel selectors appear.
   for (const callsign of PILOTS) {
     await expect(page.getByLabel(`Channel for ${callsign}`)).toBeVisible({ timeout: 15_000 });

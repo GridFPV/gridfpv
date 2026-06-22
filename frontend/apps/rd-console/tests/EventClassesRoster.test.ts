@@ -122,19 +122,21 @@ describe('EventClassesRoster — per-pilot channel (sourced from the primary tim
     expect(options).toContain('Raceband R2 · 5695 MHz');
     expect(options).toContain('No channel');
 
-    // Assign Ace a channel and save the placement → the wire carries a MemberSlot with the channel.
+    // There is no Save button — placement auto-saves. Assign Ace a channel; the debounced
+    // `setClassMembership` lands on its own carrying a MemberSlot with the channel.
+    expect(screen.queryByRole('button', { name: 'Save placement' })).toBeNull();
     await fireEvent.change(sel, { target: { value: '5658' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Save placement' }));
 
-    await waitFor(() => expect(setClassMembershipImpl).toHaveBeenCalledTimes(1));
-    // The wire carries the class id + MemberSlots — both auto-filled pilots, Ace with his channel,
-    // Bee channel-less (a single-class event auto-fills every roster pilot into the lone class).
-    expect(setClassMembershipImpl).toHaveBeenCalledWith(
-      'http://d.local',
-      'e1',
-      'open',
-      [{ pilot: 'p1', channel: 5658 }, { pilot: 'p2' }],
-      'tok'
+    // The latest wire call carries the class id + MemberSlots — both auto-filled pilots, Ace with
+    // his channel, Bee channel-less (a single-class event auto-fills every roster pilot).
+    await waitFor(() =>
+      expect(setClassMembershipImpl).toHaveBeenCalledWith(
+        'http://d.local',
+        'e1',
+        'open',
+        [{ pilot: 'p1', channel: 5658 }, { pilot: 'p2' }],
+        'tok'
+      )
     );
   });
 
@@ -178,6 +180,59 @@ describe('EventClassesRoster — select all / unselect all pilots', () => {
   });
 });
 
+describe('EventClassesRoster — auto-save (no Save buttons)', () => {
+  // A two-class event so toggling a class is a non-empty selection both ways.
+  const TWO_CLASS: EventMeta = { ...SINGLE, classes: ['open'] };
+
+  it('toggling a class auto-saves the full selection (debounced), no Save click', async () => {
+    const setEventClassesImpl = vi.fn(async () => ({ ...TWO_CLASS, classes: ['open', 'spec'] }));
+    const { session } = makeTestSession({
+      ...impls({ setEventClassesImpl }),
+      event: TWO_CLASS
+    });
+    render(EventClassesRoster, { session });
+
+    // No Save buttons for the selection boxes.
+    const spec = (await screen.findByLabelText('Select Spec')) as HTMLInputElement;
+    expect(screen.queryByRole('button', { name: 'Save classes' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save roster' })).toBeNull();
+
+    // Tick Spec → optimistic flip, then a debounced wholesale save of the full class selection.
+    await fireEvent.click(spec);
+    expect(spec.checked).toBe(true);
+    await waitFor(() =>
+      expect(setEventClassesImpl).toHaveBeenCalledWith(
+        'http://d.local',
+        'e1',
+        ['open', 'spec'],
+        'tok'
+      )
+    );
+  });
+
+  it('reverts a roster toggle optimistically when the save fails', async () => {
+    const EMPTY_ROSTER: EventMeta = { ...SINGLE, roster: [] };
+    const setEventRosterImpl = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const { session } = makeTestSession({
+      ...impls({ setEventRosterImpl }),
+      event: EMPTY_ROSTER
+    });
+    render(EventClassesRoster, { session });
+
+    const ace = (await screen.findByLabelText('Roster Ace')) as HTMLInputElement;
+    await fireEvent.click(ace); // optimistically present
+    expect(ace.checked).toBe(true);
+
+    // The failed save reverts the roster to the last-saved (empty) state.
+    await waitFor(() => expect(setEventRosterImpl).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Roster Ace') as HTMLInputElement).checked).toBe(false)
+    );
+  });
+});
+
 describe('EventClassesRoster — auto-assign channels', () => {
   it('fills every placed pilot from the channel pool (round-robin) and saves each class', async () => {
     const setClassMembershipImpl = vi.fn(async () => SINGLE);
@@ -199,16 +254,17 @@ describe('EventClassesRoster — auto-assign channels', () => {
     expect(beeSel.value).toBe('5695');
 
     // Membership saved for the lone class, both MemberSlots carrying their assigned channel.
-    await waitFor(() => expect(setClassMembershipImpl).toHaveBeenCalledTimes(1));
-    expect(setClassMembershipImpl).toHaveBeenCalledWith(
-      'http://d.local',
-      'e1',
-      'open',
-      [
-        { pilot: 'p1', channel: 5658 },
-        { pilot: 'p2', channel: 5695 }
-      ],
-      'tok'
+    await waitFor(() =>
+      expect(setClassMembershipImpl).toHaveBeenLastCalledWith(
+        'http://d.local',
+        'e1',
+        'open',
+        [
+          { pilot: 'p1', channel: 5658 },
+          { pilot: 'p2', channel: 5695 }
+        ],
+        'tok'
+      )
     );
   });
 

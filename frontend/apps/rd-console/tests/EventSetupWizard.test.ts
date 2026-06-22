@@ -95,6 +95,34 @@ describe('EventSetupWizard (guided first-pass stepper)', () => {
     expect(await screen.findByRole('heading', { name: 'Rounds', level: 3 })).toBeInTheDocument();
   });
 
+  it('advances through every stage with only Next — no Save button anywhere (auto-save)', async () => {
+    const { session } = makeTestSession({ ...impls(), event: EMPTY_EVENT });
+    render(EventSetupWizard, { session, open: true });
+
+    const noSaveButtons = () => {
+      // The embedded stages auto-save; none surfaces a selection Save button in the wizard.
+      expect(screen.queryByRole('button', { name: 'Save classes' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Save roster' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Save placement' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Save selection' })).toBeNull();
+    };
+
+    // Step 1: Classes & Roster.
+    await screen.findByRole('button', { name: /^Classes/ });
+    noSaveButtons();
+    // Next → Timers.
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByRole('heading', { name: 'Timers for this event' });
+    noSaveButtons();
+    // Next → First round.
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByRole('heading', { name: 'Rounds', level: 3 });
+    noSaveButtons();
+    // Next → Review, finishing with only Next clicks.
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(screen.getByRole('button', { name: 'Finish setup' })).toBeInTheDocument();
+  });
+
   it('Skip advances a step just like Next (steps are optional)', async () => {
     const { session } = makeTestSession({ ...impls(), event: EMPTY_EVENT });
     render(EventSetupWizard, { session, open: true });

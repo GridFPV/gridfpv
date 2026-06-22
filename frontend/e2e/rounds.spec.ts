@@ -55,11 +55,14 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
     .getByRole('listitem')
     .filter({ hasText: 'Open Class' });
   const classBox = classRow.getByRole('checkbox', { name: 'Select Open Class' });
-  if (!(await classBox.isChecked())) await classBox.check();
-  await page.getByRole('button', { name: 'Save classes' }).click();
-  await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-    timeout: 15_000
-  });
+  if (!(await classBox.isChecked())) {
+    const classesSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await classBox.check();
+    await classesSaved;
+  }
+  await expect(classBox).toBeChecked();
 
   // ── Rounds & Heats tab → add a round ────────────────────────────────────────────────────────
   await openTab(page, 'Rounds & Heats');
@@ -127,11 +130,11 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
     .filter({ hasText: 'Open Class' })
     .getByRole('checkbox', { name: 'Select Open Class' });
   if (await cleanupBox.isChecked()) {
+    const classesCleared = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
     await cleanupBox.uncheck();
-    await page.getByRole('button', { name: 'Save classes' }).click();
-    await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-      timeout: 15_000
-    });
+    await classesCleared;
   }
 });
 
@@ -162,11 +165,14 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
     .getByRole('listitem')
     .filter({ hasText: 'Open Class' })
     .getByRole('checkbox', { name: 'Select Open Class' });
-  if (!(await classBox.isChecked())) await classBox.check();
-  await page.getByRole('button', { name: 'Save classes' }).click();
-  await expect(page.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-    timeout: 15_000
-  });
+  if (!(await classBox.isChecked())) {
+    const classesSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await classBox.check();
+    await classesSaved;
+  }
+  await expect(classBox).toBeChecked();
 
   // Rounds & Heats → add a timed_qual round with a guided param + Static channel mode.
   await openTab(page, 'Rounds & Heats');

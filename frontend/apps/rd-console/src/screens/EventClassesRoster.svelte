@@ -27,6 +27,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import { assignChannelsRoundRobin, channelLabel } from '../lib/channels.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
+  import { AutoSaver } from '../lib/autosave.js';
   import ClassManager from './ClassManager.svelte';
   import PilotManager from './PilotManager.svelte';
 
@@ -59,18 +60,23 @@
   let classManager = $state<ClassManager | undefined>(undefined);
   let pilotManager = $state<PilotManager | undefined>(undefined);
 
+  // ── Auto-save (debounced, optimistic, wholesale set-the-full-selection) ─────
+  // Each box persists on every change rather than behind a Save button. Every save here is a
+  // *wholesale* set (`setEventClasses` / `setEventRoster` / `setClassMembership` send the entire
+  // current selection, not a delta), so coalescing rapid clicks into one trailing save per target
+  // is safe last-write-wins. The UI flips optimistically; a failed save reverts that target. The
+  // targets are: 'classes', 'roster', and one per class id for membership.
+  const autosaver = new AutoSaver();
+
   // ── 1. Class selection (top) ───────────────────────────────────────────────
   // The directory list (kept in sync by the manager via `bind:classes`) and the working selection
-  // (a set of class ids), seeded from the event and edited locally until the RD saves.
+  // (a set of class ids), seeded from the event. Toggling a class edits the set optimistically and
+  // auto-saves the full selection (debounced); a failed save reverts to the last-saved set.
   let classes = $state<Class[]>([]);
   let selectedClasses = $state<Set<ClassId>>(new Set());
-  let savedClasses = $state<ClassId[]>([]);
-  let savingClasses = $state(false);
 
   function syncClassesFromEvent() {
-    const ids = session.currentEvent?.classes ?? [];
-    savedClasses = [...ids];
-    selectedClasses = new Set(ids);
+    selectedClasses = new Set(session.currentEvent?.classes ?? []);
   }
   $effect(() => {
     syncClassesFromEvent();
@@ -82,45 +88,33 @@
     for (const id of selectedClasses) if (present.has(id)) next.add(id);
     selectedClasses = next;
   }
+  const orderedClassSelection = $derived(
+    classes.filter((c) => selectedClasses.has(c.id)).map((c) => c.id)
+  );
   function toggleClass(id: ClassId) {
+    // Optimistic flip, then schedule a wholesale save of the full class selection.
     const next = new Set(selectedClasses);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     selectedClasses = next;
-  }
-  const orderedClassSelection = $derived(
-    classes.filter((c) => selectedClasses.has(c.id)).map((c) => c.id)
-  );
-  const classesChanged = $derived(
-    orderedClassSelection.length !== savedClasses.length ||
-      orderedClassSelection.some((id, i) => id !== savedClasses[i])
-  );
-  async function saveClasses() {
-    if (savingClasses || !classesChanged) return;
-    savingClasses = true;
-    try {
-      const updated = await session.setEventClasses(orderedClassSelection);
-      if (!updated) {
+    autosaver.schedule('classes', {
+      compute: () => orderedClassSelection,
+      save: (ids) => session.setEventClasses(ids),
+      onUnsaved: () => {
         toast.info('A control token is required to set the event’s classes.');
-        return;
+        syncClassesFromEvent();
+      },
+      onError: (e) => {
+        syncClassesFromEvent();
+        toast.error(e instanceof Error ? e.message : String(e));
       }
-      syncClassesFromEvent();
-      toast.success('Event classes saved.');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      savingClasses = false;
-    }
-  }
-  function resetClasses() {
-    syncClassesFromEvent();
+    });
   }
 
   // ── 2. Present pilots (the roster) ─────────────────────────────────────────
   let pilots = $state<Pilot[]>([]);
   let selectedPilots = $state<Set<PilotId>>(new Set());
   let savedRoster = $state<PilotId[]>([]);
-  let savingRoster = $state(false);
 
   const eventRoster = $derived(session.currentEvent?.roster ?? []);
   const eventRosterKey = $derived(eventRoster.join(','));
@@ -141,46 +135,41 @@
     for (const id of selectedPilots) if (present.has(id)) next.add(id);
     selectedPilots = next;
   }
+  const orderedRoster = $derived(pilots.filter((p) => selectedPilots.has(p.id)).map((p) => p.id));
+  // Schedule a debounced wholesale save of the present-pilots roster. Computed at flush time so
+  // rapid checks (or a select-all then a tweak) coalesce into one trailing `setEventRoster`.
+  function scheduleRosterSave() {
+    autosaver.schedule('roster', {
+      compute: () => orderedRoster,
+      save: (ids) => session.setEventRoster(ids),
+      onUnsaved: () => {
+        toast.info('A control token is required to set the event’s roster.');
+        syncRosterFromEvent();
+      },
+      onError: (e) => {
+        syncRosterFromEvent();
+        toast.error(e instanceof Error ? e.message : String(e));
+      }
+    });
+  }
   function togglePilot(id: PilotId) {
     const next = new Set(selectedPilots);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     selectedPilots = next;
+    scheduleRosterSave();
   }
   // Select-all / Unselect-all for the roster — one fast toggle for a 20-pilot field. Select-all marks
-  // every directory pilot present; unselect-all clears the roster selection. Both edit locally until
-  // the RD hits Save roster (consistent with the per-row checkboxes).
+  // every directory pilot present; unselect-all clears the roster selection. Both edit the selection
+  // optimistically and auto-save (debounced), like the per-row checkboxes.
   const allPilotsSelected = $derived(pilots.length > 0 && selectedPilots.size === pilots.length);
   function selectAllPilots() {
     selectedPilots = new Set(pilots.map((p) => p.id));
+    scheduleRosterSave();
   }
   function unselectAllPilots() {
     selectedPilots = new Set();
-  }
-  const orderedRoster = $derived(pilots.filter((p) => selectedPilots.has(p.id)).map((p) => p.id));
-  const rosterChanged = $derived(
-    orderedRoster.length !== savedRoster.length ||
-      orderedRoster.some((id, i) => id !== savedRoster[i])
-  );
-  async function saveRoster() {
-    if (savingRoster || !rosterChanged) return;
-    savingRoster = true;
-    try {
-      const updated = await session.setEventRoster(orderedRoster);
-      if (!updated) {
-        toast.info('A control token is required to set the event’s roster.');
-        return;
-      }
-      syncRosterFromEvent();
-      toast.success('Present pilots saved.');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      savingRoster = false;
-    }
-  }
-  function resetRoster() {
-    syncRosterFromEvent();
+    scheduleRosterSave();
   }
 
   // ── Class directory (resolve the event's selected class ids → names) ────────
@@ -269,6 +258,8 @@
   // Single-class auto-fill: keep the lone class's membership in sync with the roster — add every
   // present pilot that isn't a member yet (channel unset), and drop members no longer rostered.
   // Runs whenever the roster or the single-class identity changes; never clobbers a chosen channel.
+  // When it changes the membership we auto-save it too (so placement persists with only the roster
+  // ticked — the wizard's Next-only flow needs no Save click).
   $effect(() => {
     const cls = singleClass;
     if (!cls) return;
@@ -290,6 +281,9 @@
       const m = new Map(membership);
       m.set(cls, next);
       membership = m;
+      // Only persist once the auto-filled membership actually differs from what's saved (avoids a
+      // redundant save when re-seeding from an event that already carries this membership).
+      if (membershipDiffers(cls)) scheduleMembershipSave(cls);
     }
   });
 
@@ -306,21 +300,24 @@
     else inner.set(pilotId, undefined);
     next.set(classId, inner);
     membership = next;
+    scheduleMembershipSave(classId);
   }
   // Place-all / clear-all for one class — fast bulk placement across the present roster. Place-all
   // adds every roster pilot not already a member (channel unset, preserving any chosen channel);
-  // clear-all empties the class. Edits locally until the class's Save placement.
+  // clear-all empties the class. Each edits optimistically and auto-saves the class's membership.
   function placeAll(classId: ClassId) {
     const next = new Map(membership);
     const inner = new Map(next.get(classId) ?? []);
     for (const id of eventRoster) if (!inner.has(id)) inner.set(id, undefined);
     next.set(classId, inner);
     membership = next;
+    scheduleMembershipSave(classId);
   }
   function clearAll(classId: ClassId) {
     const next = new Map(membership);
     next.set(classId, new Map());
     membership = next;
+    scheduleMembershipSave(classId);
   }
   function allPlaced(classId: ClassId): boolean {
     const inner = membersOf(classId);
@@ -333,6 +330,7 @@
     inner.set(pilotId, raw === '' ? undefined : Number(raw));
     next.set(classId, inner);
     membership = next;
+    scheduleMembershipSave(classId);
   }
   function channelOf(classId: ClassId, pilotId: PilotId): number | undefined {
     return membersOf(classId).get(pilotId);
@@ -348,29 +346,36 @@
         return channel === undefined ? { pilot: id } : { pilot: id, channel };
       });
   }
-  function membershipChanged(classId: ClassId): boolean {
+  // Whether a class's working membership differs from the event's saved membership — guards the
+  // auto-fill save (and skips a no-op `setClassMembership` round-trip).
+  function membershipDiffers(classId: ClassId): boolean {
     const next = orderedSlots(classId);
     const prev = savedMembership.get(classId) ?? new Map<PilotId, number | undefined>();
     if (next.length !== prev.size) return true;
     return next.some((s) => !prev.has(s.pilot) || (prev.get(s.pilot) ?? undefined) !== s.channel);
   }
 
-  let savingClass = $state<ClassId | undefined>(undefined);
-  async function saveMembership(classId: ClassId) {
-    if (savingClass) return;
-    savingClass = classId;
-    try {
-      const updated = await session.setClassMembership(classId, orderedSlots(classId));
-      if (!updated) {
+  // Schedule a debounced wholesale save of one class's membership (`setClassMembership`). Keyed by
+  // class id so different classes save independently; the slots are computed at flush time so rapid
+  // edits to the same class coalesce into one trailing save.
+  function scheduleMembershipSave(classId: ClassId) {
+    autosaver.schedule(`membership:${classId}`, {
+      compute: () => orderedSlots(classId),
+      save: (slots) => session.setClassMembership(classId, slots),
+      onUnsaved: () => {
         toast.info('A control token is required to set class membership.');
-        return;
+        revertMembership();
+      },
+      onError: (e) => {
+        revertMembership();
+        toast.error(e instanceof Error ? e.message : String(e));
       }
-      toast.success(`Membership for “${classNameOf(classId)}” saved.`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      savingClass = undefined;
-    }
+    });
+  }
+  // Revert the working membership to the event's last-saved state by forcing the membershipKey
+  // effect to re-seed (the saved membership is unchanged on a failed/declined save).
+  function revertMembership() {
+    lastMembershipKey = ' ';
   }
 
   // ── Auto-assign channels ───────────────────────────────────────────────────
@@ -403,6 +408,9 @@
       membership = next;
 
       if (touched.length === 0) return;
+      // Drop any pending debounced membership save for the touched classes — auto-assign saves
+      // them itself, immediately, with the freshly-assigned channels (so we don't double-save).
+      for (const c of touched) autosaver.cancel(`membership:${c}`);
       const results = await Promise.all(
         touched.map((c) => session.setClassMembership(c, orderedSlots(c)))
       );
@@ -462,22 +470,9 @@
 
         {#snippet listFooter()}
           <div class="foot">
-            <span class="count" aria-live="polite">{orderedClassSelection.length} selected</span>
-            <div class="foot-actions">
-              {#if classesChanged}
-                <Button variant="ghost" onclick={resetClasses} disabled={savingClasses}>
-                  Reset
-                </Button>
-              {/if}
-              <Button
-                variant="primary"
-                onclick={saveClasses}
-                loading={savingClasses}
-                disabled={!classesChanged}
-              >
-                Save classes
-              </Button>
-            </div>
+            <span class="count" aria-live="polite">
+              {orderedClassSelection.length} selected · saved automatically
+            </span>
           </div>
         {/snippet}
       </ClassManager>
@@ -553,22 +548,9 @@
 
           {#snippet listFooter()}
             <div class="foot">
-              <span class="count" aria-live="polite">{orderedRoster.length} present</span>
-              <div class="foot-actions">
-                {#if rosterChanged}
-                  <Button variant="ghost" onclick={resetRoster} disabled={savingRoster}>
-                    Reset
-                  </Button>
-                {/if}
-                <Button
-                  variant="primary"
-                  onclick={saveRoster}
-                  loading={savingRoster}
-                  disabled={!rosterChanged}
-                >
-                  Save roster
-                </Button>
-              </div>
+              <span class="count" aria-live="polite">
+                {orderedRoster.length} present · saved automatically
+              </span>
             </div>
           {/snippet}
         </PilotManager>
@@ -629,29 +611,16 @@
                 </li>
               {/each}
             </ul>
-            <div class="class-foot">
-              <Button
-                variant="primary"
-                size="sm"
-                onclick={() => saveMembership(singleClass)}
-                loading={savingClass === singleClass}
-                disabled={!membershipChanged(singleClass) || savingClass !== undefined}
-              >
-                Save placement
-              </Button>
-            </div>
           </fieldset>
         </Collapsible>
       {:else}
         <!-- ≥2 classes: a per-class placement grid (checkbox per roster pilot + a channel). -->
         <div class="class-grids">
           {#each eventClasses as classId (classId)}
-            {@const dirty = membershipChanged(classId)}
             {@const cc = collapse(`place:${classId}`)}
             <Collapsible title={classNameOf(classId)} id={`place-${classId}`} bind:open={cc.open}>
               {#snippet summary()}
                 <Badge tone="neutral">{membersOf(classId).size} placed</Badge>
-                {#if dirty}<span class="dirty-tag">unsaved</span>{/if}
               {/snippet}
               <fieldset class="class-grid" aria-label={`Placement for ${classNameOf(classId)}`}>
                 <div class="grid-bulk">
@@ -710,17 +679,6 @@
                     </li>
                   {/each}
                 </ul>
-                <div class="class-foot">
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onclick={() => saveMembership(classId)}
-                    loading={savingClass === classId}
-                    disabled={!dirty || savingClass !== undefined}
-                  >
-                    Save placement
-                  </Button>
-                </div>
               </fieldset>
             </Collapsible>
           {/each}
@@ -822,10 +780,6 @@
     font-size: var(--gf-font-size-xs);
     color: var(--gf-text-muted);
   }
-  .foot-actions {
-    display: flex;
-    gap: var(--gf-space-2);
-  }
 
   /* Two Cards stacked inside the Pilots box (roster + placement) want breathing room. */
   .classes-roster :global(.gf-collapsible-body > .gf-card + .gf-card) {
@@ -916,11 +870,6 @@
     font-size: var(--gf-font-size-xs);
     color: var(--gf-text-muted);
   }
-  .dirty-tag {
-    font-size: var(--gf-font-size-xs);
-    font-weight: var(--gf-font-weight-semibold);
-    color: var(--gf-warn);
-  }
   .member-list {
     list-style: none;
     margin: 0;
@@ -957,11 +906,5 @@
     flex-shrink: 0;
     width: 12rem;
     max-width: 50%;
-  }
-  .class-foot {
-    display: flex;
-    justify-content: flex-end;
-    padding-top: var(--gf-space-2);
-    border-top: 1px solid var(--gf-border-subtle);
   }
 </style>

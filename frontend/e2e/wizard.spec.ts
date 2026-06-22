@@ -69,16 +69,19 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   await expect(wizard.getByText(`Set up · ${EVENT}`)).toBeVisible();
   if (shots) await wizard.screenshot({ path: `${shots}/wizard-classes-roster.png` });
 
-  // Step 1 — Classes & Roster: tick the built-in Open Class and save…
+  // Step 1 — Classes & Roster: tick the built-in Open Class — this AUTO-SAVES (no Save button).
   const classBox = wizard.getByRole('checkbox', { name: 'Select Open Class' });
   await expect(classBox).toBeVisible({ timeout: 15_000 });
-  if (!(await classBox.isChecked())) await classBox.check();
-  await wizard.getByRole('button', { name: 'Save classes' }).click();
-  await expect(wizard.getByRole('button', { name: 'Save classes' })).toBeDisabled({
-    timeout: 15_000
-  });
+  if (!(await classBox.isChecked())) {
+    const classesSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await classBox.check();
+    await classesSaved;
+  }
+  await expect(classBox).toBeChecked();
 
-  // …then, in the same combined step, add a brand-new pilot, mark present, and save the roster.
+  // …then, in the same combined step, add a brand-new pilot and mark present — the roster auto-saves.
   await wizard.getByRole('button', { name: '+ Add pilot' }).click();
   const addForm = page.getByRole('form', { name: 'Add pilot' });
   await expect(addForm).toBeVisible();
@@ -87,30 +90,30 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   await page.getByRole('button', { name: 'Add pilot', exact: true }).click();
   const rosterBox = wizard.getByRole('checkbox', { name: `Roster ${PILOT}` });
   await expect(rosterBox).toBeVisible({ timeout: 15_000 });
-  if (!(await rosterBox.isChecked())) await rosterBox.check();
-  await wizard.getByRole('button', { name: 'Save roster' }).click();
-  await expect(wizard.getByRole('button', { name: 'Save roster' })).toBeDisabled({
-    timeout: 15_000
-  });
-  // With a single class the pilot is auto-placed (no "Place …" checkbox); save the placement.
+  if (!(await rosterBox.isChecked())) {
+    const rosterSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/roster$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await rosterBox.check();
+    await rosterSaved;
+  }
+  // With a single class the pilot is auto-placed (no "Place …" checkbox) and the membership
+  // auto-saves — the channel selector simply appears, no Save click needed.
   await expect(wizard.getByLabel(`Channel for ${PILOT}`)).toBeVisible({ timeout: 15_000 });
-  await wizard.getByRole('button', { name: 'Save placement' }).click();
-  await expect(wizard.getByRole('button', { name: 'Save placement' })).toBeDisabled({
-    timeout: 15_000
-  });
 
-  // Step 2 — Timer & channels: the built-in Mock is selectable; ensure it's chosen.
+  // Step 2 — Timer & channels: the built-in Mock is selectable; ensure it's chosen (auto-saves).
   await wizard.getByRole('button', { name: 'Next', exact: true }).click();
   await expect(wizard.getByRole('heading', { name: 'Timers for this event' })).toBeVisible();
   const mockBox = wizard.getByRole('checkbox', { name: 'Use Mock' });
   await expect(mockBox).toBeVisible({ timeout: 15_000 });
   if (!(await mockBox.isChecked())) {
+    const timersSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/timers$/.test(r.url()) && r.request().method() === 'PUT'
+    );
     await mockBox.check();
-    await wizard.getByRole('button', { name: 'Save selection' }).click();
-    await expect(wizard.getByRole('button', { name: 'Save selection' })).toBeDisabled({
-      timeout: 15_000
-    });
+    await timersSaved;
   }
+  await expect(mockBox).toBeChecked();
 
   // Step 3 — First round: the add-round form is pre-opened; define one and add it.
   await wizard.getByRole('button', { name: 'Next', exact: true }).click();

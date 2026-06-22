@@ -56,25 +56,23 @@ describe('EventTimers (in-event CRUD + selection)', () => {
     const rhBox = screen.getByLabelText('Use Track RH') as HTMLInputElement;
     expect(mockBox.checked).toBe(true);
     expect(rhBox.checked).toBe(false);
-    // No change yet → Save disabled.
-    expect(
-      (screen.getByRole('button', { name: 'Save selection' }) as HTMLButtonElement).disabled
-    ).toBe(true);
+    // Selection auto-saves — there is no explicit Save button.
+    expect(screen.queryByRole('button', { name: 'Save selection' })).toBeNull();
+    expect(screen.getByText(/saved automatically/)).toBeInTheDocument();
   });
 
-  it('saves the working selection in the registry-listed order on change', async () => {
+  it('auto-saves the working selection (debounced) in registry-listed order on a toggle', async () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
     const setEventTimersImpl = vi.fn(async () => ({ ...EVENT, timers: ['mock', 'rh-1'] }));
     const { session } = makeTestSession({ listTimersImpl, setEventTimersImpl, event: EVENT });
     render(EventTimers, { session });
 
     const rhBox = (await screen.findByLabelText('Use Track RH')) as HTMLInputElement;
+    // Optimistic: the box flips instantly, no Save click.
     await fireEvent.click(rhBox);
+    expect(rhBox.checked).toBe(true);
 
-    const save = screen.getByRole('button', { name: 'Save selection' }) as HTMLButtonElement;
-    expect(save.disabled).toBe(false);
-    await fireEvent.click(save);
-
+    // The debounced save lands on its own with the FULL selection in registry order.
     await waitFor(() => expect(setEventTimersImpl).toHaveBeenCalledTimes(1));
     expect(setEventTimersImpl).toHaveBeenCalledWith(
       'http://d.local',
@@ -84,18 +82,54 @@ describe('EventTimers (in-event CRUD + selection)', () => {
     );
   });
 
-  it('blocks saving an empty selection', async () => {
+  it('coalesces rapid toggles into one trailing save carrying the latest selection', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const setEventTimersImpl = vi.fn(async () => EVENT);
+    const { session } = makeTestSession({ listTimersImpl, setEventTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    const rhBox = (await screen.findByLabelText('Use Track RH')) as HTMLInputElement;
+    // Tick then untick within the debounce window → one save, back at {mock}.
+    await fireEvent.click(rhBox);
+    await fireEvent.click(rhBox);
+
+    await waitFor(() => expect(setEventTimersImpl).toHaveBeenCalledTimes(1));
+    expect(setEventTimersImpl).toHaveBeenCalledWith('http://d.local', 'e1', ['mock'], 'tok');
+  });
+
+  it('refuses to auto-clear the last timer (an event needs at least one)', async () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
     const setEventTimersImpl = vi.fn(async () => EVENT);
     const { session } = makeTestSession({ listTimersImpl, setEventTimersImpl, event: EVENT });
     render(EventTimers, { session });
 
     const mockBox = (await screen.findByLabelText('Use Mock')) as HTMLInputElement;
-    await fireEvent.click(mockBox); // unselect the only selected → empty
-    await fireEvent.click(screen.getByRole('button', { name: 'Save selection' }));
+    await fireEvent.click(mockBox); // unselect the only selected → would be empty
 
-    // The empty selection is rejected client-side; no protocol call goes out.
+    // The toggle is refused: the selection still holds the one timer (the count line reflects it)
+    // and no wholesale save goes out.
+    expect(screen.getByText(/1 selected/)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 400));
     expect(setEventTimersImpl).not.toHaveBeenCalled();
+  });
+
+  it('reverts the optimistic toggle when the save fails', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const setEventTimersImpl = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const { session } = makeTestSession({ listTimersImpl, setEventTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    const rhBox = (await screen.findByLabelText('Use Track RH')) as HTMLInputElement;
+    await fireEvent.click(rhBox); // optimistically checked
+    expect(rhBox.checked).toBe(true);
+
+    // The failed save reverts the selection to the last-saved state (RH unchecked again).
+    await waitFor(() => expect(setEventTimersImpl).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Use Track RH') as HTMLInputElement).checked).toBe(false)
+    );
   });
 
   it('adds a timer from inside the event (shared management)', async () => {
