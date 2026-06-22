@@ -470,17 +470,18 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       target: { value: 'open_practice' }
     });
 
-    // The win-condition input is gone; the Time limit appears instead.
+    // The win-condition input is gone; the single-minutes Time limit appears instead.
     await waitFor(() => expect(screen.queryByLabelText('Win condition')).toBeNull());
-    expect(screen.getByLabelText('Time limit hours')).toBeInTheDocument();
+    expect(screen.getByLabelText('Time limit minutes')).toBeInTheDocument();
+    // No separate hours field anymore — minutes only.
+    expect(screen.queryByLabelText('Time limit hours')).toBeNull();
 
     // Pick both active channels (the picker is driven by the primary timer's node seats).
     await fireEvent.click(await screen.findByLabelText(/Channel .*5658/));
     await fireEvent.click(screen.getByLabelText(/Channel .*5800/));
 
-    // Set a 1h 30m practice duration.
-    await fireEvent.input(screen.getByLabelText('Time limit hours'), { target: { value: '1' } });
-    await fireEvent.input(screen.getByLabelText('Time limit minutes'), { target: { value: '30' } });
+    // Set a 90-minute practice duration (stored as 90*60 = 5400s).
+    await fireEvent.input(screen.getByLabelText('Time limit minutes'), { target: { value: '90' } });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
 
@@ -490,7 +491,45 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     expect(req.win_condition).toBeUndefined();
     expect(req.classes).toEqual([]);
     expect(req.seeding).toEqual({ AllChannels: { channels: [0, 1] } });
-    expect(req.time_limit_secs).toBe(5400); // 1h30m
+    expect(req.time_limit_secs).toBe(5400); // 90 min * 60
+  });
+
+  it('treats a blank time-limit minutes field as no limit (undefined)', async () => {
+    const created: RoundDef = {
+      id: 'op2',
+      label: 'Open Practice',
+      classes: [],
+      format: 'open_practice',
+      params: {},
+      win_condition: 'BestLap',
+      seeding: { AllChannels: { channels: [0, 1] } },
+      channel_mode: 'PerHeat',
+      staging_timer_secs: 300,
+      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+      grace_window: { Duration: { micros: 3000000 } }
+    };
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
+    const { session } = makeTestSession({
+      ...opImpls(),
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), {
+      target: { value: 'Open Practice' }
+    });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'open_practice' } });
+    await waitFor(() => expect(screen.queryByLabelText('Win condition')).toBeNull());
+    await fireEvent.click(await screen.findByLabelText(/Channel .*5658/));
+    await fireEvent.click(screen.getByLabelText(/Channel .*5800/));
+
+    // Leave the minutes field blank → no limit.
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    expect(req.time_limit_secs).toBeUndefined();
   });
 
   it('reflects an open-practice round: shows its time-limit summary and no Fill control', async () => {
@@ -549,11 +588,11 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    // The time limit seeds back into the hours:minutes inputs (5400s = 1h 30m).
+    // The time limit seeds back into the single Minutes input (5400s = 90 min).
     await waitFor(() =>
-      expect((screen.getByLabelText('Time limit hours') as HTMLInputElement).value).toBe('1')
+      expect((screen.getByLabelText('Time limit minutes') as HTMLInputElement).value).toBe('90')
     );
-    expect((screen.getByLabelText('Time limit minutes') as HTMLInputElement).value).toBe('30');
+    expect(screen.queryByLabelText('Time limit hours')).toBeNull();
   });
 });
 

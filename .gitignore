@@ -28,3 +28,4 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/blob-report/
 frontend/.playwright/
+frontend/e2e-artifacts/

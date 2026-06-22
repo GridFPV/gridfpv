@@ -10,7 +10,9 @@
    * Contents (maintainer-approved spec):
    *   • Event name — prominent; clicking it goes to **Live control** (not the picker).
    *   • Current heat + phase — the active heat id and a {@link StatusPill} phase pill
-   *     (Slice 0 phase colors), plus a live {@link RaceClock} while the heat is Running.
+   *     (Slice 0 phase colors), plus the shared {@link RaceClock}: it ticks while the heat is
+   *     Running and stays visible *frozen* at the race-end time through Unofficial/Final, so the
+   *     header clock matches the live screen's heat clock rather than vanishing when the race ends.
    *   • Connection status — the existing connection pill.
    *   • "← Switch event" — the only way back to the picker.
    * (No date/location hover — the maintainer explicitly dropped that.)
@@ -49,9 +51,14 @@
   const phase = $derived(heat ? (live?.phase ?? 'Scheduled') : undefined);
 
   // The shared race clock (#62): ticks while Running, freezes on Unofficial/Final, resets
-  // otherwise. Reads the live phase reactively so it tracks the heat from one place.
+  // otherwise. Reads the live phase reactively so it tracks the heat from one place — the
+  // SAME source the live screen drives, so the two never contradict.
   const clock = useRaceClock(() => phase);
-  const running = $derived(phase === 'Running');
+  // Show the heat clock while it's meaningful: ticking during the race (Running) and frozen at
+  // the race-end value once the race has closed (Unofficial) and through finalize (Final). Before
+  // the race starts (Scheduled/Staged/Armed) the clock reads 0, so we keep it hidden to avoid a
+  // misleading "0:00.000" — it appears the moment the race goes live and persists, frozen, after.
+  const showClock = $derived(phase === 'Running' || phase === 'Unofficial' || phase === 'Final');
 </script>
 
 <div class="ctx-bar" aria-label="Event context">
@@ -74,7 +81,7 @@
       {#if phase}
         <span class="ctx-phase"><StatusPill {phase} size="sm" /></span>
       {/if}
-      {#if running}
+      {#if showClock}
         <span class="ctx-clock"><RaceClock elapsedMs={clock.elapsedMs} label="Heat time" /></span>
       {/if}
     {:else}
