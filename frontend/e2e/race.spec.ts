@@ -28,7 +28,7 @@ import { expect, test } from './observability.js';
 const PILOTS = ['Ace', 'Bee', 'Cee'];
 const HEAT_ID = 'q-1';
 
-test('RD drives a full basic sim race through the console UI', async ({ page }) => {
+test('RD drives a full basic sim race through the console UI', async ({ page, director }) => {
   // ── Open the console: the home hub is the landing screen (#118) ──────────────────────
   await page.goto('/');
 
@@ -70,20 +70,16 @@ test('RD drives a full basic sim race through the console UI', async ({ page }) 
   await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeHidden();
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
-  // ── Define a heat with named pilots ──────────────────────────────────────────────────
-  const newHeat = page.getByRole('region', { name: 'New heat' });
-  await newHeat.getByLabel('Heat id').fill(HEAT_ID);
-  // Two default pilot rows + one added → three named pilots.
-  await newHeat.getByRole('button', { name: 'Add pilot' }).click();
-  for (let i = 0; i < PILOTS.length; i++) {
-    await newHeat.getByLabel(`Pilot ${i + 1} name`).fill(PILOTS[i]);
-  }
-
-  // ── Schedule it: the Director is open (no token configured), so this control action goes
-  //    straight through — NO token prompt appears (full-trust by default, #72) ──────────────
-  await newHeat.getByRole('button', { name: 'Schedule heat' }).click();
-  // The lazy token prompt must NOT appear against an open Director.
-  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+  // ── Schedule a heat with named pilots over the real control path ──────────────────────
+  // The free-text NewHeat form is retired (race redesign Slice 3b); heats are built from real
+  // round/class members in the Rounds & Heats stage (covered by `rounds.spec.ts`). This race
+  // spec's focus is *running* a heat, so it schedules one straight over the open control path
+  // (the Director is booted with no token configured) — exactly what the Heats UI emits.
+  const ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: { ScheduleHeat: { heat: HEAT_ID, lineup: PILOTS } }
+  });
+  expect(ack.ok()).toBeTruthy();
 
   // The heat lands on the timer: current heat + the lineup show, phase Scheduled.
   await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID);

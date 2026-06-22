@@ -41,7 +41,7 @@
 use std::collections::BTreeMap;
 
 use gridfpv_engine::heat::{HeatState, heat_state};
-use gridfpv_events::{CompetitorRef, Event, HeatId, PilotId};
+use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, PilotId, RoundId};
 use gridfpv_projection::{CompetitorKey, lap_list_marshaled, registrations};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -268,6 +268,101 @@ fn running_order(progress: &[PilotProgress]) -> Vec<CompetitorRef> {
             .then_with(|| a.competitor.cmp(&b.competitor))
     });
     order.into_iter().map(|p| p.competitor.clone()).collect()
+}
+
+/// A scheduled heat as the **Heats UI** lists it (race redesign Slice 3b) — the per-heat view
+/// model the Rounds & Heats stage renders under each round.
+///
+/// Unlike [`LiveRaceState`] (which is *only* about the current heat), this is one entry per heat
+/// the log ever scheduled, carrying the round/class tag the scheduler assigned so the UI can group
+/// heats by round and resolve their lineup to pilots. Folded from the log by
+/// [`heat_summaries`] — pure and recomputable like every other projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct HeatSummary {
+    /// The heat's id (its scheduled handle, the same one the live/control path drives).
+    pub heat: HeatId,
+    /// The heat's lineup — the competitors from its most recent `HeatScheduled`, in lineup order.
+    pub lineup: Vec<CompetitorRef>,
+    /// The class this heat was tagged with, when the scheduler assigned one (`None` for the
+    /// free-text / untagged path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub class: Option<ClassId>,
+    /// The round this heat was tagged with, when the scheduler assigned one. The Heats UI groups
+    /// the list by this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub round: Option<RoundId>,
+    /// The heat's folded loop phase (its derived status: scheduled / running / scored / …).
+    pub phase: HeatPhase,
+    /// Whether this heat is the one currently on the timer (the live `current_heat`).
+    pub is_current: bool,
+}
+
+/// Fold the event log into the list of **scheduled heats** (race redesign Slice 3b), in
+/// first-scheduled order — one [`HeatSummary`] per heat the log ever scheduled.
+///
+/// Pure and order-preserving, mirroring [`live_state`]: a heat appears once (keyed on its id, the
+/// latest `HeatScheduled` wins for lineup/class/round so a re-schedule updates the entry in place),
+/// ordered by first appearance in the log (the order the generator emitted them). Each heat's
+/// `phase` is its folded [`HeatState`] and `is_current` marks the one on the timer. The Heats UI
+/// filters this by `round` to render each round's heats.
+pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
+    let current = current_heat(events);
+
+    // First-scheduled order, deduped — collect the heat ids in the order they first appear.
+    let mut order: Vec<HeatId> = Vec::new();
+    for event in events {
+        if let Event::HeatScheduled { heat, .. } = event {
+            if !order.contains(heat) {
+                order.push(heat.clone());
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .map(|heat| {
+            let (lineup, class, round) = latest_schedule(events, &heat);
+            let phase = heat_state(events, &heat)
+                .map(phase_of)
+                .unwrap_or(HeatPhase::Scheduled);
+            let is_current = current.as_ref() == Some(&heat);
+            HeatSummary {
+                heat,
+                lineup,
+                class,
+                round,
+                phase,
+                is_current,
+            }
+        })
+        .collect()
+}
+
+/// The lineup + class/round tag a heat carries, taken from its **most recent** `HeatScheduled`
+/// (a re-schedule of the same id supersedes the earlier one).
+fn latest_schedule(
+    events: &[Event],
+    heat: &HeatId,
+) -> (Vec<CompetitorRef>, Option<ClassId>, Option<RoundId>) {
+    let mut out = (Vec::new(), None, None);
+    for event in events {
+        if let Event::HeatScheduled {
+            heat: h,
+            lineup,
+            class,
+            round,
+            ..
+        } = event
+        {
+            if h == heat {
+                out = (lineup.clone(), class.clone(), round.clone());
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -504,5 +599,68 @@ mod tests {
             pass("A", 4_000_000, 2),
         ];
         assert_eq!(live_state(&events), live_state(&events));
+    }
+
+    fn scheduled_tagged(id: &str, lineup: &[&str], class: &str, round: &str) -> Event {
+        Event::HeatScheduled {
+            heat: HeatId(id.into()),
+            lineup: lineup.iter().map(|c| CompetitorRef((*c).into())).collect(),
+            class: Some(ClassId(class.into())),
+            round: Some(RoundId(round.into())),
+            frequencies: vec![],
+        }
+    }
+
+    #[test]
+    fn heat_summaries_lists_each_heat_with_tag_phase_and_current() {
+        // q-1 (round r1) ran and scored; q-2 (round r1) is scheduled and current; q-x is an
+        // untagged free-text heat that still appears (no round/class).
+        let events = vec![
+            scheduled_tagged("q-1", &["A", "B"], "open", "r1"),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            changed("q-1", HeatTransition::Finished),
+            changed("q-1", HeatTransition::Scored),
+            scheduled_tagged("q-2", &["C", "D"], "open", "r1"),
+            scheduled("q-x", &["E"]),
+        ];
+        // q-x was scheduled last, so it is the current heat; q-2 is not current.
+        let summaries = heat_summaries(&events);
+        assert_eq!(summaries.len(), 3);
+
+        // First-scheduled order is preserved.
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|h| h.heat.0.clone())
+                .collect::<Vec<_>>(),
+            vec!["q-1", "q-2", "q-x"]
+        );
+
+        let q1 = &summaries[0];
+        assert_eq!(q1.round, Some(RoundId("r1".into())));
+        assert_eq!(q1.class, Some(ClassId("open".into())));
+        assert_eq!(q1.phase, HeatPhase::Scored);
+        assert!(!q1.is_current);
+        assert_eq!(
+            q1.lineup,
+            vec![CompetitorRef("A".into()), CompetitorRef("B".into())]
+        );
+
+        let q2 = &summaries[1];
+        assert_eq!(q2.round, Some(RoundId("r1".into())));
+        assert_eq!(q2.phase, HeatPhase::Scheduled);
+        assert!(!q2.is_current);
+
+        let qx = &summaries[2];
+        assert_eq!(qx.round, None);
+        assert_eq!(qx.class, None);
+        assert!(qx.is_current);
+    }
+
+    #[test]
+    fn heat_summaries_empty_log_is_empty() {
+        assert!(heat_summaries(&[]).is_empty());
     }
 }

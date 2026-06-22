@@ -96,7 +96,7 @@ use crate::events::{
     SetActiveEventRequest, SetClassMembershipRequest, SetEventClassesRequest,
     SetEventRosterRequest, UpdateRoundReq,
 };
-use crate::live_state::live_state;
+use crate::live_state::{HeatSummary, heat_summaries, live_state};
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
@@ -338,6 +338,9 @@ pub fn router(registry: EventRegistry) -> Router {
             "/events/{event_id}/rounds/{round_id}",
             put(update_round).delete(remove_round),
         )
+        // Per-event scheduled **heats** (race redesign Slice 3b): the round-tagged heats list the
+        // Heats UI reads — open, no token (a read), like the snapshot routes.
+        .route("/events/{event_id}/heats", get(list_heats))
         // Per-event **roster** (issue #74): RD-gated; each id must name a known directory pilot.
         // Set the whole roster, or add/remove a single pilot.
         .route("/events/{event_id}/roster", put(set_event_roster))
@@ -934,6 +937,21 @@ async fn remove_round(
         .remove_round(&event_id, &round_id)
         .map_err(round_error)?;
     Ok(Json(meta))
+}
+
+/// `GET /events/{event_id}/heats` — the event's **scheduled heats** (race redesign Slice 3b).
+///
+/// A read (open, no token, like the snapshot routes): folds the event's log into one
+/// [`HeatSummary`] per scheduled heat — id, lineup, the round/class it was tagged with, its
+/// derived phase, and whether it is the current heat — in first-scheduled order. The Heats UI
+/// groups this by round to render each round's heats list. An unknown event is a typed **404**.
+async fn list_heats(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Json<Vec<HeatSummary>>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
+    let (events, _cursor) = state.read()?;
+    Ok(Json(heat_summaries(&events)))
 }
 
 /// `POST /events/{event_id}/auth/join-token` — mint a fresh **read-only** join token

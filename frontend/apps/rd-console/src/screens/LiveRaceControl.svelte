@@ -24,7 +24,6 @@
   import { useRaceClock } from '../lib/raceClock.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
-  import NewHeat from './NewHeat.svelte';
 
   let { session, names = {} }: { session: Session; names?: Record<string, string> } = $props();
 
@@ -115,8 +114,6 @@
   {#if session.lastCommandError}
     <ErrorBanner error={session.lastCommandError} ondismiss={() => session.clearCommandError()} />
   {/if}
-
-  <NewHeat {session} />
 
   <div class="controls" role="group" aria-label="Heat transitions">
     <span class="controls-label">Transitions</span>

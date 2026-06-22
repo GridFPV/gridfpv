@@ -65,6 +65,7 @@ import {
   createRound,
   updateRound,
   deleteRound,
+  listHeats,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
@@ -84,6 +85,7 @@ import type {
   EventMeta,
   HeatId,
   HeatResult,
+  HeatSummary,
   LiveRaceState,
   Pilot,
   PilotId,
@@ -255,6 +257,7 @@ export class Session {
   #createRoundImpl: typeof createRound;
   #updateRoundImpl: typeof updateRound;
   #deleteRoundImpl: typeof deleteRound;
+  #listHeatsImpl: typeof listHeats;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -286,6 +289,7 @@ export class Session {
     createRoundImpl?: typeof createRound;
     updateRoundImpl?: typeof updateRound;
     deleteRoundImpl?: typeof deleteRound;
+    listHeatsImpl?: typeof listHeats;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -318,6 +322,7 @@ export class Session {
     this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
+    this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -694,6 +699,53 @@ export class Session {
     );
     if (updated) this.currentEvent = updated;
     return updated;
+  }
+
+  // --- Heats (race redesign Slice 3b) -----------------------------------------------------------
+  // The Heats half of the Rounds & Heats stage. `fillRound` and the tagged `scheduleHeat` are
+  // privileged **control commands** (they go through the same `send` path as every transition);
+  // `listHeats` is an open read of the round-tagged heats list the UI groups by round.
+
+  /**
+   * Fill a round's **next heat** (`Command::FillRound`) — race redesign Slice 3b. Asks the per-event
+   * round engine to append the next format-generated `HeatScheduled` tagged with this round (and its
+   * class when single-class). A successful ack means *either* a heat was appended *or* the round is
+   * already complete / its outstanding heat must be scored first — the engine treats those as
+   * expected no-ops, so the caller re-reads {@link listHeats} to see whether a new heat appeared.
+   * Sent through the control path (full-trust first → lazy token); returns the raw {@link CommandAck}
+   * like {@link send}.
+   */
+  fillRound(round: RoundId): Promise<CommandAck> {
+    return this.send({ FillRound: { round } });
+  }
+
+  /**
+   * Schedule a heat by hand (`Command::ScheduleHeat`) — race redesign Slice 3b, the manual build that
+   * replaces the retired free-text NewHeat form. The lineup is real {@link CompetitorRef}s drawn from
+   * a round's eligible class members (no typed names), and the heat is **tagged** with the round and
+   * its class so it lands in that round's heats list. Sent through the control path; returns the raw
+   * {@link CommandAck}.
+   */
+  scheduleHeat(
+    heat: HeatId,
+    lineup: CompetitorRef[],
+    tag: { class?: ClassId; round?: RoundId } = {}
+  ): Promise<CommandAck> {
+    return this.send({
+      ScheduleHeat: { heat, lineup, class: tag.class, round: tag.round }
+    });
+  }
+
+  /**
+   * List the current event's **scheduled heats** (`GET /events/{id}/heats`, open, no token) — race
+   * redesign Slice 3b. One {@link HeatSummary} per heat the log ever scheduled, with its round/class
+   * tag, lineup, derived phase, and current flag. The Heats UI filters this by round. No-op (resolves
+   * `[]`) when no event is selected; rejects on a transport/HTTP failure (the screen surfaces it).
+   */
+  listHeats(): Promise<HeatSummary[]> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve([]);
+    return this.#listHeatsImpl(this.baseUrl, event.id, { token: this.#token });
   }
 
   /**

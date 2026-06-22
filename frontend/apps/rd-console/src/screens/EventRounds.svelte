@@ -23,7 +23,12 @@
   import type {
     Class,
     ClassId,
+    CompetitorRef,
+    HeatPhase,
+    HeatSummary,
     NewRoundReq,
+    Pilot,
+    PilotId,
     RoundDef,
     RoundId,
     SeedingRule,
@@ -59,7 +64,152 @@
       .listFormats()
       .then((list) => (formats = list))
       .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
+    session
+      .listPilots()
+      .then((list) => (pilots = list))
+      .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
   });
+
+  // --- The Heats half of the stage (race redesign Slice 3b) --------------------------------------
+  // The round-tagged heats list (one entry per scheduled heat) and the pilot directory used to
+  // resolve a heat's `CompetitorRef` lineup to callsigns. The heats list is a read of
+  // `GET /events/{id}/heats`; it is re-fetched on enter, after each Fill round / manual build, and
+  // whenever the live state advances (so a heat's status follows it through Running → Scored).
+
+  let pilots = $state<Pilot[]>([]);
+  let heats = $state<HeatSummary[]>([]);
+  let fillingRound = $state<RoundId | undefined>(undefined);
+
+  async function refreshHeats() {
+    try {
+      heats = await session.listHeats();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Initial load + re-load whenever the live state changes (a transition advances a heat's phase).
+  $effect(() => {
+    // Touch the live state so this effect re-runs on every stream update.
+    void session.liveState;
+    void refreshHeats();
+  });
+
+  // A pilot id maps straight to a `CompetitorRef` of the same string (round_engine.rs); resolve a
+  // ref to its directory callsign, falling back to the bare ref for an unregistered/free-text one.
+  const pilotByRef = $derived(new Map(pilots.map((p) => [p.id, p] as const)));
+  const callsign = (ref: CompetitorRef): string => pilotByRef.get(ref)?.callsign ?? ref;
+
+  const heatsByRound = (id: RoundId): HeatSummary[] => heats.filter((h) => h.round === id);
+
+  function statusLabel(h: HeatSummary): string {
+    if (h.phase === 'Scored') return 'Scored';
+    if (h.phase === 'Scheduled') return 'Scheduled';
+    // Staged / Armed / Running / Finished all read as the heat being live/in-progress.
+    return h.phase === 'Finished' ? 'Finished' : 'Running';
+  }
+  function statusKind(phase: HeatPhase): 'scheduled' | 'running' | 'scored' {
+    if (phase === 'Scored') return 'scored';
+    if (phase === 'Scheduled') return 'scheduled';
+    return 'running';
+  }
+
+  // Fill a round's next heat. The engine acks ok whether it appended a heat OR reported the round
+  // complete / its outstanding heat unscored, so compare the round's heat count before and after to
+  // tell the RD which happened.
+  async function fillRound(round: RoundDef) {
+    if (fillingRound) return;
+    fillingRound = round.id;
+    const before = heatsByRound(round.id).length;
+    try {
+      const ack = await session.fillRound(round.id);
+      if (!ack.ok) return; // The error banner / toast surfaces session.lastCommandError.
+      await refreshHeats();
+      const after = heatsByRound(round.id).length;
+      if (after > before) toast.success(`Heat added to ${round.label}.`);
+      else toast.info(`${round.label}: no new heat — the round is complete or awaiting a score.`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      fillingRound = undefined;
+    }
+  }
+
+  // --- Manual heat build (replaces the retired NewHeat free-text form) ---------------------------
+  // Pick a round, then select from that round's **eligible class members** (real roster pilots, no
+  // typed names) → schedule a heat tagged with the round + its single class. The heat id is
+  // RD-entered (so a duplicate is caught by the ack); the lineup is the chosen pilots' refs.
+
+  let buildOpen = $state(false);
+  let buildRound = $state<RoundId | ''>('');
+  let buildHeatId = $state('');
+  let buildSelected = $state<Set<PilotId>>(new Set());
+  let building = $state(false);
+
+  // The pilot ids eligible for the chosen round: the union of its eligible classes' membership.
+  const eligibleMembers = $derived<PilotId[]>(buildEligibleMembers(buildRound));
+  function buildEligibleMembers(roundId: RoundId | ''): PilotId[] {
+    if (!roundId) return [];
+    const round = rounds.find((r) => r.id === roundId);
+    if (!round) return [];
+    const membership = session.currentEvent?.classes_membership ?? [];
+    const out: PilotId[] = [];
+    for (const cls of round.classes) {
+      const m = membership.find((mm) => mm.class === cls);
+      for (const pid of m?.pilots ?? []) if (!out.includes(pid)) out.push(pid);
+    }
+    return out;
+  }
+
+  // The single class a round tags its heats with (one eligible class), else undefined (open round).
+  function roundClass(roundId: RoundId | ''): ClassId | undefined {
+    const round = rounds.find((r) => r.id === roundId);
+    return round && round.classes.length === 1 ? round.classes[0] : undefined;
+  }
+
+  const canBuild = $derived(
+    buildRound !== '' && buildHeatId.trim().length > 0 && buildSelected.size > 0
+  );
+
+  function openBuild() {
+    buildOpen = true;
+    buildRound = rounds[0]?.id ?? '';
+    buildHeatId = '';
+    buildSelected = new Set();
+  }
+  function cancelBuild() {
+    buildOpen = false;
+    buildSelected = new Set();
+  }
+  function toggleMember(pid: PilotId) {
+    const next = new Set(buildSelected);
+    if (next.has(pid)) next.delete(pid);
+    else next.add(pid);
+    buildSelected = next;
+  }
+
+  async function submitBuild() {
+    if (building || !canBuild || buildRound === '') return;
+    building = true;
+    // Lineup in eligible-member order; a pilot id is its own CompetitorRef.
+    const lineup: CompetitorRef[] = eligibleMembers.filter((pid) => buildSelected.has(pid));
+    try {
+      const ack = await session.scheduleHeat(buildHeatId.trim(), lineup, {
+        round: buildRound,
+        class: roundClass(buildRound)
+      });
+      if (!ack.ok) return; // The toast/banner surfaces session.lastCommandError (e.g. a dup id).
+      await refreshHeats();
+      toast.success('Heat scheduled.');
+      buildOpen = false;
+      buildSelected = new Set();
+      buildHeatId = '';
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      building = false;
+    }
+  }
 
   // --- The add/edit form -------------------------------------------------------------------------
   // One form drives both add (no `editing`) and edit (an existing round id). The win condition and
@@ -454,11 +604,137 @@
     {/if}
   </Card>
 
-  <Card title="Heats" subtitle="Fill each round’s heats with pilots — coming in Slice 3.">
-    <p class="placeholder" role="status">
-      <strong>Heat building — Slice 3.</strong> Once a round is defined, this is where its field gets
-      drawn into heats and slotted to channels. Not yet available.
-    </p>
+  <Card
+    title="Heats"
+    subtitle="Fill each round’s heats from its field, or build one by hand. Run them from Live control."
+  >
+    {#snippet actions()}
+      <Button variant="secondary" size="sm" onclick={openBuild} disabled={rounds.length === 0}>
+        + Build heat
+      </Button>
+    {/snippet}
+
+    {#if rounds.length === 0}
+      <p class="empty" role="status">
+        Add a round above first — heats are drawn from a round’s field.
+      </p>
+    {:else}
+      <div class="heat-rounds">
+        {#each rounds as round (round.id)}
+          <section class="heat-round" aria-label={`Heats for ${round.label}`}>
+            <header class="heat-round-head">
+              <div class="heat-round-title">
+                <span class="round-label">{round.label}</span>
+                <span class="meta-chip">
+                  {round.classes.length === eventClasses.length && eventClasses.length > 1
+                    ? 'All classes'
+                    : round.classes.map(className).join(', ') || '—'}
+                </span>
+              </div>
+              <Button
+                variant="primary"
+                size="sm"
+                onclick={() => fillRound(round)}
+                loading={fillingRound === round.id}
+                disabled={fillingRound !== undefined}
+              >
+                Fill next heat
+              </Button>
+            </header>
+
+            {#if heatsByRound(round.id).length === 0}
+              <p class="empty small" role="status">
+                No heats yet — <strong>Fill next heat</strong> to draw the first from this round’s field.
+              </p>
+            {:else}
+              <ol class="heat-list">
+                {#each heatsByRound(round.id) as h (h.heat)}
+                  <li class="heat-row" class:current={h.is_current}>
+                    <div class="heat-main">
+                      <div class="heat-head">
+                        <span class="heat-id">{h.heat}</span>
+                        {#if h.is_current}<span class="current-pill">Current</span>{/if}
+                        <span class={`status-pill ${statusKind(h.phase)}`}>{statusLabel(h)}</span>
+                      </div>
+                      <div class="lineup">
+                        {#each h.lineup as ref, i (ref)}
+                          <span class="lineup-pilot">
+                            <span class="lineup-num" aria-hidden="true">{i + 1}</span>{callsign(
+                              ref
+                            )}
+                          </span>
+                        {/each}
+                        {#if h.lineup.length === 0}<span class="lineup-empty">— no pilots —</span
+                          >{/if}
+                      </div>
+                    </div>
+                  </li>
+                {/each}
+              </ol>
+            {/if}
+          </section>
+        {/each}
+      </div>
+    {/if}
+
+    {#if buildOpen}
+      <form
+        class="build-form"
+        aria-label="Build heat"
+        onsubmit={(e) => {
+          e.preventDefault();
+          submitBuild();
+        }}
+      >
+        <h3 class="form-title">Build a heat by hand</h3>
+        <div class="form-grid">
+          <Field label="Round" required>
+            <Select bind:value={buildRound} aria-label="Build round">
+              <option value="" disabled>Choose a round…</option>
+              {#each rounds as r (r.id)}
+                <option value={r.id}>{r.label}</option>
+              {/each}
+            </Select>
+          </Field>
+          <Field label="Heat id" required>
+            <Input bind:value={buildHeatId} placeholder="e.g. q-1" aria-label="Build heat id" />
+          </Field>
+        </div>
+
+        <Field
+          label="Pilots"
+          required
+          hint={buildRound === ''
+            ? 'Pick a round to see its eligible members.'
+            : eligibleMembers.length === 0
+              ? 'This round’s classes have no members yet — set them in the Roster stage.'
+              : 'Select the round’s eligible class members to fly this heat.'}
+        >
+          <div class="member-picker" role="group" aria-label="Eligible members">
+            {#each eligibleMembers as pid (pid)}
+              <label class="member-chip">
+                <input
+                  type="checkbox"
+                  checked={buildSelected.has(pid)}
+                  onchange={() => toggleMember(pid)}
+                  aria-label={`Select ${callsign(pid)}`}
+                />
+                <span>{callsign(pid)}</span>
+              </label>
+            {/each}
+          </div>
+        </Field>
+
+        <div class="form-actions">
+          <Button variant="ghost" type="button" onclick={cancelBuild} disabled={building}>
+            Cancel
+          </Button>
+          <Button variant="primary" type="submit" loading={building} disabled={!canBuild}>
+            Schedule heat
+          </Button>
+        </div>
+      </form>
+    {/if}
   </Card>
 </section>
 
@@ -469,15 +745,11 @@
     flex-direction: column;
     gap: var(--gf-space-4);
   }
-  .empty,
-  .placeholder {
+  .empty {
     margin: 0;
     font-size: var(--gf-font-size-md);
     color: var(--gf-text-secondary);
     line-height: 1.5;
-  }
-  .placeholder strong {
-    color: var(--gf-text);
   }
 
   .round-list {
@@ -611,5 +883,165 @@
     justify-content: flex-end;
     gap: var(--gf-space-2);
     padding-top: var(--gf-space-2);
+  }
+
+  /* ── Heats half of the stage ─────────────────────────────────────────────── */
+  .heat-rounds {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-4);
+  }
+  .heat-round {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+  }
+  .heat-round-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gf-space-3);
+  }
+  .heat-round-title {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+  }
+  .empty.small {
+    font-size: var(--gf-font-size-sm);
+  }
+  .empty strong {
+    color: var(--gf-text);
+  }
+  .heat-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+  }
+  .heat-row {
+    display: flex;
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface);
+  }
+  .heat-row.current {
+    border-color: var(--gf-accent);
+    box-shadow: 0 0 0 1px var(--gf-accent);
+  }
+  .heat-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+  }
+  .heat-head {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+  }
+  .heat-id {
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text);
+    font-family: var(--gf-font-mono, monospace);
+  }
+  .current-pill {
+    font-size: var(--gf-font-size-xs);
+    font-weight: var(--gf-font-weight-bold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    padding: 0.1rem var(--gf-space-2);
+    border-radius: var(--gf-radius-pill);
+    background: var(--gf-accent);
+    color: var(--gf-on-accent, #000);
+  }
+  .status-pill {
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    padding: 0.1rem var(--gf-space-2);
+    border-radius: var(--gf-radius-pill);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text-secondary);
+    border: 1px solid var(--gf-border-subtle);
+  }
+  .status-pill.running {
+    color: var(--gf-phase-running, var(--gf-accent));
+    border-color: var(--gf-phase-running, var(--gf-accent));
+  }
+  .status-pill.scored {
+    color: var(--gf-phase-scored, var(--gf-text-secondary));
+    border-color: var(--gf-phase-scored, var(--gf-border));
+  }
+  .lineup {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+  }
+  .lineup-pilot {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-1);
+    font-size: var(--gf-font-size-md);
+    color: var(--gf-text);
+    padding: 0.1rem var(--gf-space-2);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+  }
+  .lineup-num {
+    display: inline-grid;
+    place-items: center;
+    width: 1.4rem;
+    height: 1.4rem;
+    border-radius: var(--gf-radius-xs);
+    background: var(--gf-surface);
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .lineup-empty {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .build-form {
+    margin-top: var(--gf-space-4);
+    padding-top: var(--gf-space-4);
+    border-top: 1px solid var(--gf-border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-4);
+  }
+  .member-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+  }
+  .member-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    padding: 0.3rem var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    font-size: var(--gf-font-size-md);
+    color: var(--gf-text);
+    cursor: pointer;
+  }
+  .member-chip input {
+    width: 1.05rem;
+    height: 1.05rem;
+    accent-color: var(--gf-accent);
+    cursor: pointer;
   }
 </style>

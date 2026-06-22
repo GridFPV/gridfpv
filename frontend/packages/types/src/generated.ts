@@ -54,6 +54,7 @@ export type * from '@bindings/GateIndex';
 export type * from '@bindings/HeatId';
 export type * from '@bindings/HeatPhase';
 export type * from '@bindings/HeatResult';
+export type * from '@bindings/HeatSummary';
 export type * from '@bindings/HeatTransition';
 export type * from '@bindings/Hello';
 export type * from '@bindings/JoinTokenResponse';
