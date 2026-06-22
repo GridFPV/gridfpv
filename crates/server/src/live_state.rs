@@ -254,7 +254,7 @@ fn on_deck(events: &[Event], current: &HeatId) -> Option<HeatId> {
 /// Rank active pilots into the provisional running order: most laps first, ties broken
 /// by the shorter last-lap time (a proxy for who is pacing ahead), then by competitor
 /// ref for a total, deterministic order.
-fn running_order(progress: &[PilotProgress]) -> Vec<CompetitorRef> {
+pub(crate) fn running_order(progress: &[PilotProgress]) -> Vec<CompetitorRef> {
     let mut order: Vec<&PilotProgress> = progress.iter().collect();
     order.sort_by(|a, b| {
         b.laps_completed

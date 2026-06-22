@@ -1350,14 +1350,12 @@ async fn snapshot_event(
 ) -> Result<Json<Snapshot>, ProtocolError> {
     let state = resolve_event(&registry, &event_id)?;
     let (events, cursor) = state.read()?;
-    // Open-practice overlay (open-practice format, Slice 1): while an open-practice heat is active
-    // its per-channel laps are in memory (NOT logged), so the snapshot serves the accumulator's live
-    // state in place of the log fold — "snapshot first, then subscribe" stays correct (the `/stream`
-    // fold applies the same overlay), so a client renders the live per-channel laps immediately.
-    let body = state
-        .open_practice()
-        .live_state()
-        .unwrap_or_else(|| live_state(&events));
+    // Open-practice overlay (open-practice format, Slice 1): the live state's phase/clock are always
+    // the **real log's** (folded here as for any heat); while an open-practice heat is active its
+    // per-channel laps are in memory (NOT logged), so the accumulator splices those laps onto the log
+    // base — "snapshot first, then subscribe" stays correct (the `/stream` fold applies the same
+    // merge), so a client renders the live per-channel laps immediately atop a truthful phase/clock.
+    let body = state.open_practice().merge_into(live_state(&events));
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(body),
@@ -1455,14 +1453,13 @@ async fn snapshot_heat(
 
     let body = match query.projection {
         HeatProjection::Live => {
-            // Open-practice overlay (open-practice format, Slice 1): when this *is* the active
-            // open-practice heat, its laps live in the in-memory accumulator (NOT the log), so serve
-            // the accumulator's live state; otherwise fold the heat's log window as usual.
-            let open = state
-                .open_practice()
-                .live_state()
-                .filter(|s| s.current_heat.as_ref() == Some(&heat));
-            ProjectionBody::LiveRaceState(open.unwrap_or_else(|| live_state(&heat_events)))
+            // Open-practice overlay (open-practice format, Slice 1): fold the heat's real log window
+            // for a truthful phase/clock, then — when this *is* the active open-practice heat — splice
+            // its in-memory (NOT logged) per-channel laps on top. `merge_into` guards on the heat
+            // matching the accumulator's, so a non-op heat folds its log window unchanged.
+            ProjectionBody::LiveRaceState(
+                state.open_practice().merge_into(live_state(&heat_events)),
+            )
         }
         HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled(
             heat_events.iter().enumerate().map(|(i, e)| (i as u64, e)),
