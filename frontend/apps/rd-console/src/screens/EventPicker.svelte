@@ -22,7 +22,17 @@
   import { PRACTICE_EVENT_ID } from '../lib/session.svelte.js';
   import Breadcrumbs from '../Breadcrumbs.svelte';
 
-  let { session, onhome }: { session: Session; onhome: () => void } = $props();
+  let {
+    session,
+    onhome,
+    onsetup = undefined
+  }: {
+    session: Session;
+    onhome: () => void;
+    /** Called after a brand-new event is created + entered, when the RD opted to set it up (the
+     *  guided wizard, race redesign Slice 7). The shell opens the wizard once the workspace mounts. */
+    onsetup?: () => void;
+  } = $props();
 
   type LoadState =
     | { kind: 'loading' }
@@ -50,6 +60,9 @@
   let detailsOpen = $state(false);
   let creating = $state(false);
   let newError = $state<string | undefined>(undefined);
+  // Offer the guided setup wizard for a brand-new event (race redesign Slice 7), default on — a new
+  // event has nothing configured, so walking the stages is the natural next step. Editable later.
+  let setUpAfter = $state(true);
 
   async function load() {
     loadState = { kind: 'loading' };
@@ -125,6 +138,7 @@
     newOrganizer = '';
     detailsOpen = false;
     newError = undefined;
+    setUpAfter = true;
     newOpen = true;
   }
 
@@ -153,6 +167,9 @@
       }
       newOpen = false;
       toast.success(`Created “${meta.name}”.`);
+      // Opt-in: kick off the guided setup wizard for the freshly-created event. The shell defers
+      // opening it until the workspace mounts (the embedded stages need the active event).
+      if (setUpAfter) onsetup?.();
     } catch (err) {
       newError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -286,6 +303,18 @@
         </Field>
       </div>
     </details>
+
+    <!-- Opt into the guided setup wizard after creating (race redesign Slice 7) — a first-pass over
+         the event's stages (classes, roster, timer, first round). Everything stays editable later. -->
+    <label class="setup-opt">
+      <input type="checkbox" bind:checked={setUpAfter} aria-label="Set up event after creating" />
+      <span class="setup-opt-text">
+        <span class="setup-opt-title">Set up event</span>
+        <span class="setup-opt-sub"
+          >Walk classes, roster, timer, and a first round after creating.</span
+        >
+      </span>
+    </label>
   </form>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (newOpen = false)} disabled={creating}>Cancel</Button>
@@ -537,5 +566,37 @@
     flex-direction: column;
     gap: var(--gf-space-3);
     margin-top: var(--gf-space-3);
+  }
+  .setup-opt {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface-alt);
+    cursor: pointer;
+  }
+  .setup-opt input {
+    width: 1.1rem;
+    height: 1.1rem;
+    margin-top: 0.15rem;
+    accent-color: var(--gf-accent);
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+  .setup-opt-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .setup-opt-title {
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text);
+  }
+  .setup-opt-sub {
+    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
   }
 </style>
