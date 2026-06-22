@@ -258,8 +258,22 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::Restart { heat } => heat_transition(state, heat, HeatCommand::Restart),
         Command::Discard { heat } => heat_transition(state, heat, HeatCommand::Discard),
 
-        // --- Scheduling: creates the heat, so no prior-state check. ---
-        Command::ScheduleHeat { heat, lineup } => Ok(Event::HeatScheduled { heat, lineup }),
+        // --- Scheduling: creates the heat, so no prior-state check. The class/round/
+        // frequency tags are carried straight through (default-absent for the
+        // free-text path). ---
+        Command::ScheduleHeat {
+            heat,
+            lineup,
+            class,
+            round,
+            frequencies,
+        } => Ok(Event::HeatScheduled {
+            heat,
+            lineup,
+            class,
+            round,
+            frequencies,
+        }),
 
         // --- Registration: bind a source competitor to a pilot (no prior-state check). ---
         Command::Register {
@@ -389,6 +403,9 @@ mod tests {
             Event::HeatScheduled {
                 heat: heat(),
                 lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
             },
             None,
         )
@@ -475,7 +492,8 @@ mod tests {
         assert_eq!(ack.error.unwrap().code, ErrorCode::UnknownScope);
     }
 
-    /// `ScheduleHeat` creates the heat with its lineup.
+    /// `ScheduleHeat` creates the heat with its lineup; the free-text path leaves the
+    /// additive class/round/frequencies absent.
     #[test]
     fn schedule_heat_appends_heat_scheduled() {
         let state = AppState::new(InMemoryLog::default());
@@ -485,13 +503,50 @@ mod tests {
             Command::ScheduleHeat {
                 heat: heat(),
                 lineup: lineup.clone(),
+                class: None,
+                round: None,
+                frequencies: vec![],
             },
         );
         assert!(ack.ok);
         let (events, _) = state.read().unwrap();
         assert!(events.iter().any(|e| matches!(
             e,
-            Event::HeatScheduled { heat: h, lineup: l } if *h == heat() && *l == lineup
+            Event::HeatScheduled { heat: h, lineup: l, class: None, round: None, frequencies }
+                if *h == heat() && *l == lineup && frequencies.is_empty()
+        )));
+    }
+
+    /// A `ScheduleHeat` carrying class/round/frequencies threads them straight into the
+    /// emitted `HeatScheduled` (the scheduler path).
+    #[test]
+    fn schedule_heat_carries_class_round_and_frequencies() {
+        use gridfpv_events::{ClassId, RoundId};
+        let state = AppState::new(InMemoryLog::default());
+        let lineup = vec![CompetitorRef("A".into()), CompetitorRef("B".into())];
+        let freqs = vec![
+            (CompetitorRef("A".into()), 5658u16),
+            (CompetitorRef("B".into()), 5695u16),
+        ];
+        let ack = apply_command(
+            &state,
+            Command::ScheduleHeat {
+                heat: heat(),
+                lineup: lineup.clone(),
+                class: Some(ClassId("open".into())),
+                round: Some(RoundId("r1".into())),
+                frequencies: freqs.clone(),
+            },
+        );
+        assert!(ack.ok, "got {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::HeatScheduled { heat: h, class: Some(c), round: Some(r), frequencies, .. }
+                if *h == heat()
+                    && *c == ClassId("open".into())
+                    && *r == RoundId("r1".into())
+                    && *frequencies == freqs
         )));
     }
 
@@ -528,6 +583,9 @@ mod tests {
             Event::HeatScheduled {
                 heat: heat(),
                 lineup: vec![],
+                class: None,
+                round: None,
+                frequencies: vec![],
             },
             None,
         )

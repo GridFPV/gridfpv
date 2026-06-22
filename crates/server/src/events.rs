@@ -984,6 +984,9 @@ mod tests {
                 Event::HeatScheduled {
                     heat: HeatId("q-1".into()),
                     lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
                 },
                 None,
             )
@@ -1098,6 +1101,9 @@ mod tests {
                     Event::HeatScheduled {
                         heat: HeatId("q-1".into()),
                         lineup: vec![CompetitorRef("A".into())],
+                        class: None,
+                        round: None,
+                        frequencies: vec![],
                     },
                     None,
                 )

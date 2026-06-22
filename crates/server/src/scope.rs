@@ -41,10 +41,13 @@ pub struct EventId(pub String);
 
 /// Identifies a **class** within an event (protocol.html §4 "Class scope") — one
 /// class's phases, schedule, and standings, which may run in parallel with others.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
-#[serde(transparent)]
-#[ts(export, export_to = "bindings/")]
-pub struct ClassId(pub String);
+///
+/// This is the **canonical** [`ClassId`](gridfpv_events::ClassId) re-exported from the
+/// event model — the same type the log uses to tag a scheduled heat with its class
+/// ([`Event::HeatScheduled`](gridfpv_events::Event::HeatScheduled)) — so the wire/scope
+/// layer and the log never disagree on what a class id is. Mirrors how
+/// [`PilotId`](gridfpv_events::PilotId) is shared.
+pub use gridfpv_events::ClassId;
 
 /// What a subscription addresses (protocol.html §4): one of the four resources a
 /// client can scope to. Externally tagged like the event model, so it maps to a TS

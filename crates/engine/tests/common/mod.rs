@@ -124,6 +124,9 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     let mut log: Vec<Event> = vec![Event::HeatScheduled {
         heat: heat.clone(),
         lineup,
+        class: None,
+        round: None,
+        frequencies: vec![],
     }];
     // The heat's current FSM state, validated by `apply` and advanced by `next_state`.
     let mut state = HeatState::Scheduled;

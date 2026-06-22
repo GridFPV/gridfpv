@@ -322,6 +322,9 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
         &Command::ScheduleHeat {
             heat: heat.clone(),
             lineup: vec![pilot.clone()],
+            class: None,
+            round: None,
+            frequencies: vec![],
         },
         &rd,
     )

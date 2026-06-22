@@ -72,6 +72,7 @@ export type * from '@bindings/ProjectionBody';
 export type * from '@bindings/ProjectionKind';
 export type * from '@bindings/ProtocolError';
 export type * from '@bindings/RankEntry';
+export type * from '@bindings/RoundId';
 export type * from '@bindings/Scope';
 export type * from '@bindings/ServerHello';
 export type * from '@bindings/SessionId';

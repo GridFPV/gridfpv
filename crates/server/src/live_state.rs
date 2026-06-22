@@ -221,7 +221,10 @@ fn current_heat(events: &[Event]) -> Option<HeatId> {
 fn lineup_of(events: &[Event], heat: &HeatId) -> Vec<CompetitorRef> {
     let mut lineup = Vec::new();
     for event in events {
-        if let Event::HeatScheduled { heat: h, lineup: l } = event {
+        if let Event::HeatScheduled {
+            heat: h, lineup: l, ..
+        } = event
+        {
             if h == heat {
                 lineup = l.clone();
             }
@@ -280,6 +283,9 @@ mod tests {
         Event::HeatScheduled {
             heat: HeatId(id.into()),
             lineup: lineup.iter().map(|c| CompetitorRef((*c).into())).collect(),
+            class: None,
+            round: None,
+            frequencies: vec![],
         }
     }
 
