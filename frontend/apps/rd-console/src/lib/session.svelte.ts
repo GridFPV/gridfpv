@@ -61,6 +61,10 @@ import {
   deleteClass,
   setEventClasses,
   setClassMembership,
+  listFormats,
+  createRound,
+  updateRound,
+  deleteRound,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
 import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
@@ -83,12 +87,16 @@ import type {
   LiveRaceState,
   Pilot,
   PilotId,
+  NewRoundReq,
   ProjectionBody,
+  RoundDef,
+  RoundId,
   Scope,
   Timer,
   TimerId,
   UpdateClassRequest,
   UpdatePilotRequest,
+  UpdateRoundReq,
   UpdateTimerRequest
 } from '@gridfpv/types';
 
@@ -243,6 +251,10 @@ export class Session {
   #deleteClassImpl: typeof deleteClass;
   #setEventClassesImpl: typeof setEventClasses;
   #setClassMembershipImpl: typeof setClassMembership;
+  #listFormatsImpl: typeof listFormats;
+  #createRoundImpl: typeof createRound;
+  #updateRoundImpl: typeof updateRound;
+  #deleteRoundImpl: typeof deleteRound;
 
   constructor(opts?: {
     connectImpl?: typeof connect;
@@ -270,6 +282,10 @@ export class Session {
     deleteClassImpl?: typeof deleteClass;
     setEventClassesImpl?: typeof setEventClasses;
     setClassMembershipImpl?: typeof setClassMembership;
+    listFormatsImpl?: typeof listFormats;
+    createRoundImpl?: typeof createRound;
+    updateRoundImpl?: typeof updateRound;
+    deleteRoundImpl?: typeof deleteRound;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
@@ -298,6 +314,10 @@ export class Session {
     this.#deleteClassImpl = opts?.deleteClassImpl ?? deleteClass;
     this.#setEventClassesImpl = opts?.setEventClassesImpl ?? setEventClasses;
     this.#setClassMembershipImpl = opts?.setClassMembershipImpl ?? setClassMembership;
+    this.#listFormatsImpl = opts?.listFormatsImpl ?? listFormats;
+    this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
+    this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
+    this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -602,6 +622,75 @@ export class Session {
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
       this.#setClassMembershipImpl(this.baseUrl, event.id, classId, pilotIds, token)
+    );
+    if (updated) this.currentEvent = updated;
+    return updated;
+  }
+
+  // --- Rounds (race redesign Slice 2b) ----------------------------------------------------------
+  // The event's rounds are event-level, class-tagged, dynamic format-instances. Reads of the valid
+  // **format names** are open (`GET /formats`); the add/update/remove writes are control-gated and
+  // re-home `currentEvent` so the Rounds stage stays in sync, mirroring the class/roster writes.
+
+  /**
+   * List the valid **format names** (`GET /formats`, open, no token) — race redesign Slice 2b. The
+   * single source of truth (the engine's `FormatRegistry::standard()`, sorted) the Rounds UI's
+   * format dropdown reads, rather than a hard-coded list. Rejects on a transport/HTTP failure.
+   */
+  listFormats(): Promise<string[]> {
+    return this.#listFormatsImpl(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Add a **round** to the current event (`POST /events/{id}/rounds`) — race redesign Slice 2b.
+   * RD-gated; the round id is auto-generated server-side. No-op (resolves `undefined`) when no event
+   * is selected. On success the created {@link RoundDef} is appended to {@link currentEvent}'s
+   * rounds so the stage reflects the add immediately; returns the new round, `undefined` on a
+   * cancelled prompt, or throws (a bad class / format / seeding is a **400**).
+   */
+  async createRound(request: NewRoundReq): Promise<RoundDef | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const round = await this.#privilegedWrite((token) =>
+      this.#createRoundImpl(this.baseUrl, event.id, request, token)
+    );
+    if (round) {
+      this.currentEvent = { ...event, rounds: [...(event.rounds ?? []), round] };
+    }
+    return round;
+  }
+
+  /**
+   * Replace an existing **round**'s fields (`PUT /events/{id}/rounds/{round}`) — race redesign Slice
+   * 2b. RD-gated; the id is not editable and every other field is replaced wholesale. No-op
+   * (resolves `undefined`) when no event is selected. On success the updated {@link RoundDef}
+   * replaces its entry in {@link currentEvent}'s rounds; returns it, `undefined` on a cancelled
+   * prompt, or throws (a bad class / format / seeding is a **400**; an unknown round a **404**).
+   */
+  async updateRound(roundId: RoundId, request: UpdateRoundReq): Promise<RoundDef | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const round = await this.#privilegedWrite((token) =>
+      this.#updateRoundImpl(this.baseUrl, event.id, roundId, request, token)
+    );
+    if (round) {
+      const rounds = (event.rounds ?? []).map((r) => (r.id === roundId ? round : r));
+      this.currentEvent = { ...event, rounds };
+    }
+    return round;
+  }
+
+  /**
+   * Remove a **round** from the current event (`DELETE /events/{id}/rounds/{round}`) — race redesign
+   * Slice 2b. RD-gated. No-op (resolves `undefined`) when no event is selected. On success the
+   * updated {@link EventMeta} replaces {@link currentEvent} so the stage drops the round; returns
+   * it, `undefined` on a cancelled prompt, or throws (an unknown round is a **404**).
+   */
+  async deleteRound(roundId: RoundId): Promise<EventMeta | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const updated = await this.#privilegedWrite((token) =>
+      this.#deleteRoundImpl(this.baseUrl, event.id, roundId, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;

@@ -29,10 +29,13 @@ import type {
   Cursor,
   EventId,
   EventMeta,
+  NewRoundReq,
   Pilot,
   PilotId,
   ProjectionBody,
   ProtocolError,
+  RoundDef,
+  RoundId,
   Scope,
   Snapshot,
   SubscribeRequest,
@@ -40,6 +43,7 @@ import type {
   TimerId,
   UpdateClassRequest,
   UpdatePilotRequest,
+  UpdateRoundReq,
   UpdateTimerRequest
 } from '@gridfpv/types';
 
@@ -787,6 +791,114 @@ export async function setClassMembership(
     throw new Error(
       `PUT /events/${eventId}/classes/${classId}/membership failed: HTTP ${resp.status}`
     );
+  return (await resp.json()) as EventMeta;
+}
+
+/**
+ * List the valid **format names** (`GET /formats`) — race redesign Slice 2b. An open read (no
+ * token): the production formats registered in the engine's `FormatRegistry::standard()`, the
+ * single source of truth the Rounds UI's format dropdown reads. Resolves to the names in sorted
+ * order, or rejects on a non-2xx / transport failure.
+ */
+export async function listFormats(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<string[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/formats`, { headers });
+  if (!resp.ok) throw new Error(`GET /formats failed: HTTP ${resp.status}`);
+  return (await resp.json()) as string[];
+}
+
+/**
+ * Add a **round** to an event (`POST /events/{id}/rounds`) — race redesign Slice 2b. RD-gated; the
+ * round id is auto-generated server-side. The server validates each class is selected by the event,
+ * the `format` is a known {@link listFormats} name, and a `FromRanking` seeding source names an
+ * existing round (else **400**); an unknown event is **404**. Resolves to the created
+ * {@link RoundDef} (with its generated id), or rejects on a non-2xx / transport failure.
+ */
+export async function createRound(
+  baseUrl: string,
+  eventId: EventId,
+  request: NewRoundReq,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<RoundDef> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) throw new Error(`POST /events/${eventId}/rounds failed: HTTP ${resp.status}`);
+  return (await resp.json()) as RoundDef;
+}
+
+/**
+ * Replace an existing **round**'s fields (`PUT /events/{id}/rounds/{round}`) — race redesign Slice
+ * 2b. RD-gated; the round id is the path segment (not editable) and every other field is replaced
+ * wholesale. Same validation as {@link createRound} (bad class / format / seeding → **400**); an
+ * unknown event or round id is **404**. Resolves to the updated {@link RoundDef}, or rejects on a
+ * non-2xx / transport failure.
+ */
+export async function updateRound(
+  baseUrl: string,
+  eventId: EventId,
+  roundId: RoundId,
+  request: UpdateRoundReq,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<RoundDef> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(request)
+    }
+  );
+  if (!resp.ok)
+    throw new Error(`PUT /events/${eventId}/rounds/${roundId} failed: HTTP ${resp.status}`);
+  return (await resp.json()) as RoundDef;
+}
+
+/**
+ * Remove a **round** from an event (`DELETE /events/{id}/rounds/{round}`) — race redesign Slice 2b.
+ * RD-gated; an unknown event or round id is **404**. Resolves to the event's updated
+ * {@link EventMeta}, or rejects on a non-2xx / transport failure.
+ */
+export async function deleteRound(
+  baseUrl: string,
+  eventId: EventId,
+  roundId: RoundId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
+    {
+      method: 'DELETE',
+      headers
+    }
+  );
+  if (!resp.ok)
+    throw new Error(`DELETE /events/${eventId}/rounds/${roundId} failed: HTTP ${resp.status}`);
   return (await resp.json()) as EventMeta;
 }
 
