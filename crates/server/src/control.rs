@@ -103,7 +103,7 @@ pub enum Command {
         /// The heat to transition.
         heat: HeatId,
     },
-    /// Restart a committed heat — back to staging for a re-run.
+    /// Restart a committed heat — reset to `Scheduled` for a re-run (the RD re-Stages).
     Restart {
         /// The heat to transition.
         heat: HeatId,

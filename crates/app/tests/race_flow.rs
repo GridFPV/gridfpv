@@ -1321,10 +1321,11 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         "open-practice rows stay unbound (per channel)"
     );
 
-    // (e) Restart → Staged: the RD restarts the closed practice. The engine lands the heat in
-    // `Staged`; the bridge clears the accumulator (wake-on-clear). The served live state must then
-    // read **`Staged`** with the laps cleared — never a stale `Unofficial` (the bug: the console kept
-    // rendering `Unofficial`/Final buttons and `Restart` then errored "illegal … in state Staged").
+    // (e) Restart → Scheduled: the RD restarts the closed practice. The engine resets the heat to
+    // `Scheduled` (a full reset, like Abort; the RD re-Stages); the bridge clears the accumulator
+    // (wake-on-clear). The served live state must then read **`Scheduled`** with the laps cleared —
+    // never a stale `Unofficial` (the bug: the console kept rendering `Unofficial`/Final buttons and
+    // `Restart` then errored "illegal … in state Staged").
     control_ok(
         &app,
         &event,
@@ -1334,7 +1335,9 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
     .await;
     wait_until(&state, Duration::from_secs(3), {
         let heat = heat.clone();
-        move |events| heat_state_of(events, &heat) == Some(gridfpv_engine::heat::HeatState::Staged)
+        move |events| {
+            heat_state_of(events, &heat) == Some(gridfpv_engine::heat::HeatState::Scheduled)
+        }
     })
     .await;
 
@@ -1349,20 +1352,20 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    let staged = served_live(&heat).await;
+    let scheduled = served_live(&heat).await;
     assert_eq!(
-        staged.phase,
-        gridfpv_server::snapshot::HeatPhase::Staged,
-        "after Restart the served phase is the log's Staged — never a stale Unofficial"
+        scheduled.phase,
+        gridfpv_server::snapshot::HeatPhase::Scheduled,
+        "after Restart the served phase is the log's Scheduled — never a stale Unofficial"
     );
     assert!(
-        staged.progress.iter().all(|p| p.laps_completed == 0),
+        scheduled.progress.iter().all(|p| p.laps_completed == 0),
         "the per-channel laps are cleared after Restart"
     );
 
     // The clock-timing basis is the log's at every step: the heat carries exactly one `Finished`
     // (the time-limit close) and one `Restarted`, so the served phase moved Running → Unofficial →
-    // Staged with no synthetic re-`Running` that would reset/bump the console clock.
+    // Scheduled with no synthetic re-`Running` that would reset/bump the console clock.
     let log = read_log(&state);
     let restarts = log
         .iter()
@@ -1370,7 +1373,7 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         .count();
     assert_eq!(
         restarts, 1,
-        "exactly one Restarted lands the heat in Staged"
+        "exactly one Restarted resets the heat to Scheduled"
     );
 }
 

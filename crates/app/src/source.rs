@@ -996,7 +996,7 @@ fn handle_transition(
             //
             // The overlay is **laps-only** now: the heat's phase/clock are always the real log's
             // (this same `HeatStateChanged` was already appended and woke the stream), so the served
-            // phase follows the log to `Unofficial` here and to `Staged` on a `Restart` with no
+            // phase follows the log to `Unofficial` here and to `Scheduled` on a `Restart` with no
             // shadow-tracking. We therefore only need to clear the laps on the terminals and wake.
             if state.open_practice().is_active(&heat)
                 && !matches!(transition, HeatTransition::Finished)
