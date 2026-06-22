@@ -42,7 +42,7 @@
 
     <Card elevation="sm">
       <div class="manager-wrap">
-        <ClassManager bind:this={manager} {session} />
+        <ClassManager bind:this={manager} {session} manageHidden />
       </div>
     </Card>
   </div>

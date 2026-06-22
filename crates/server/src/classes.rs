@@ -27,7 +27,7 @@
 //! exist* plus the per-event selection of *which run here*. The rounds / phase engine that a class
 //! later drives is a separate concern and is not modelled here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -39,6 +39,15 @@ use crate::scope::ClassId;
 
 /// The file name (under the data dir) the class directory is persisted to (issue #84).
 pub const CLASSES_FILE: &str = "classes.json";
+
+/// The file name (under the data dir) the **hidden-set** is persisted to (hide/archive classes).
+///
+/// A small sidecar holding just the [`ClassId`]s the RD has hidden from the per-event picker. It is
+/// kept *separate* from `classes.json` deliberately: the built-in classes are re-seeded on every
+/// boot and never written to `classes.json`, so a `hidden` flag stored *on* a class would be lost
+/// on restart. Persisting the hidden ids on their own — and applying them **after** the re-seed —
+/// makes a hidden built-in (or custom class) survive a Director restart.
+pub const HIDDEN_CLASSES_FILE: &str = "hidden_classes.json";
 
 /// Where a [`Class`] came from (issue #84).
 ///
@@ -109,6 +118,17 @@ pub struct Class {
     /// class's JSON is unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub builtin: bool,
+    /// Whether this class is **hidden / archived** from the per-event class picker (hide/archive
+    /// classes). A pure **visibility preference**, not an edit: the RD can hide a class they don't
+    /// use (especially a built-in) so it stops cluttering the per-event picker, while it stays in
+    /// the directory and the main Classes view (where it can be un-hidden). Because built-ins are
+    /// re-seeded on every boot, this flag is **not** stored on the class itself — it is derived when
+    /// `GET /classes` is built from a persisted set of hidden ids (see [`HIDDEN_CLASSES_FILE`]), so
+    /// a hidden built-in survives a restart. Defaults to `false` and is omitted from the wire / disk
+    /// when false, so a class's persisted JSON is unchanged (and the hidden state never lands in
+    /// `classes.json`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
 }
 
 /// `skip_serializing_if` helper: the `builtin` flag is omitted from the wire/disk when false, so a
@@ -214,6 +234,8 @@ fn builtin_classes() -> Vec<Class> {
             reference: Some(b.reference.to_string()),
             description: Some(b.description.to_string()),
             builtin: true,
+            // Visibility is layered on later from the persisted hidden-set, never seeded here.
+            hidden: false,
         })
         .collect()
 }
@@ -277,6 +299,18 @@ pub struct UpdateClassRequest {
     pub description: OptionalEdit<String>,
 }
 
+/// The body of `PUT /classes/{id}/hidden` — the new visibility for a class (hide/archive classes).
+///
+/// A one-field body: `hidden: true` tucks the class away from the per-event picker, `false` brings
+/// it back. Applies to **built-in** and custom classes alike (hiding is a visibility preference, not
+/// an edit), so it is valid even on a read-only built-in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SetClassHiddenRequest {
+    /// The desired visibility: `true` → hidden (archived from the picker), `false` → visible.
+    pub hidden: bool,
+}
+
 /// The application-level directory of all configured classes (issue #84).
 ///
 /// Maps each [`ClassId`] to its [`Class`]. The set is **persisted** to `<data_dir>/classes.json`
@@ -289,11 +323,19 @@ pub struct ClassDirectory {
     inner: Arc<RwLock<Directory>>,
 }
 
-/// The guarded interior: the class map and where `classes.json` lives.
+/// The guarded interior: the class map, the hidden-set, and where the JSON files live.
 struct Directory {
-    /// `ClassId → Class`. A `BTreeMap` so listing is deterministic (id order).
+    /// `ClassId → Class`. A `BTreeMap` so listing is deterministic (id order). The stored `Class`
+    /// values always carry `hidden = false`; visibility is layered on from [`hidden`](Self::hidden)
+    /// when a `Class` is *served* (see [`Directory::view`]), so the hidden state never has to live
+    /// on the class (and never leaks into `classes.json`).
     classes: BTreeMap<ClassId, Class>,
-    /// Directory `classes.json` is persisted under; `None` ⇒ in-memory only (no data dir).
+    /// The set of **hidden** class ids (hide/archive classes) — built-in or custom. Persisted to
+    /// `<data_dir>/hidden_classes.json` and applied **after** the boot re-seed, so a hidden built-in
+    /// survives a restart. An id in here that no longer names a class is harmless (ignored on read).
+    hidden: BTreeSet<ClassId>,
+    /// Directory `classes.json` / `hidden_classes.json` are persisted under; `None` ⇒ in-memory
+    /// only (no data dir).
     data_dir: Option<PathBuf>,
 }
 
@@ -315,6 +357,7 @@ impl ClassDirectory {
             classes.insert(class.id.clone(), class);
         }
 
+        let mut hidden = BTreeSet::new();
         if let Some(dir) = &data_dir {
             std::fs::create_dir_all(dir).map_err(|e| {
                 ClassError::internal(format!("could not create data dir {}: {e}", dir.display()))
@@ -327,29 +370,74 @@ impl ClassDirectory {
                         continue;
                     }
                     class.builtin = false;
+                    // Hidden state lives in the sidecar, never on the class — clear any stray flag.
+                    class.hidden = false;
                     classes.insert(class.id.clone(), class);
                 }
+            }
+            // Restore the hidden-set **after** the re-seed so a hidden built-in survives a restart.
+            // (A bad/missing file degrades to "nothing hidden" rather than failing to boot.)
+            if let Some(ids) = read_hidden_classes(dir) {
+                hidden = ids;
             }
         }
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(Directory { classes, data_dir })),
+            inner: Arc::new(RwLock::new(Directory {
+                classes,
+                hidden,
+                data_dir,
+            })),
         })
     }
 
-    /// Every class in id order — the `GET /classes` body.
+    /// Every class in id order — the `GET /classes` body. Each served [`Class`] carries its
+    /// `hidden` flag derived from the persisted hidden-set (hide/archive classes), so the frontend
+    /// can mark hidden classes in the main view and filter them out of the per-event picker.
     pub fn list(&self) -> Vec<Class> {
-        self.read().classes.values().cloned().collect()
+        let dir = self.read();
+        dir.classes.values().map(|c| dir.view(c)).collect()
     }
 
     /// Whether a class with `id` exists — the per-event selection validates each id through this.
+    /// (A *hidden* class still exists; hiding only affects what the picker *offers*, never the
+    /// validity of an id already selected on an event.)
     pub fn exists(&self, id: &ClassId) -> bool {
         self.read().classes.contains_key(id)
     }
 
-    /// The [`Class`] for `id`, or `None`.
+    /// The [`Class`] for `id` (with its `hidden` flag applied), or `None`.
     pub fn get(&self, id: &ClassId) -> Option<Class> {
-        self.read().classes.get(id).cloned()
+        let dir = self.read();
+        dir.classes.get(id).map(|c| dir.view(c))
+    }
+
+    /// Hide or un-hide a class (hide/archive classes): add or remove `id` from the persisted
+    /// hidden-set and return the updated [`Class`] (with its fresh `hidden` flag).
+    ///
+    /// Hiding is a **visibility preference**, not an edit — so it is allowed for **built-in**
+    /// classes too (it is *not* a [`ReadOnly`](ClassErrorKind::ReadOnly) violation): the whole
+    /// point is to let the RD tuck away the standard built-ins they don't run. An unknown id is a
+    /// 404 ([`NotFound`](ClassErrorKind::NotFound)). The hidden-set is **persisted** on success, so
+    /// the choice survives a restart — including the boot re-seed of the built-ins.
+    pub fn set_hidden(&self, id: &ClassId, hidden: bool) -> Result<Class, ClassError> {
+        let mut dir = self.write();
+        if !dir.classes.contains_key(id) {
+            return Err(ClassError::not_found(format!(
+                "no class with id {:?}",
+                id.0
+            )));
+        }
+        let changed = if hidden {
+            dir.hidden.insert(id.clone())
+        } else {
+            dir.hidden.remove(id)
+        };
+        if changed {
+            dir.persist_hidden()?;
+        }
+        let class = dir.classes.get(id).expect("checked above");
+        Ok(dir.view(class))
     }
 
     /// Create a class from a [`CreateClassRequest`], returning it (issue #84).
@@ -376,6 +464,8 @@ impl ClassDirectory {
             reference: normalize_optional(&request.reference),
             description: normalize_optional(&request.description),
             builtin: false,
+            // A freshly-created class is always visible; the RD hides it later if they choose.
+            hidden: false,
         };
         dir.classes.insert(id, class.clone());
         dir.persist()?;
@@ -414,7 +504,8 @@ impl ClassDirectory {
         apply_string_edit(&mut class.description, &request.description);
         let updated = class.clone();
         dir.persist()?;
-        Ok(updated)
+        // Re-apply the served `hidden` flag (an edit never changes visibility).
+        Ok(dir.view(&updated))
     }
 
     /// Delete a class (issue #84). A **built-in** class is read-only and cannot be deleted (it is
@@ -437,6 +528,11 @@ impl ClassDirectory {
             )));
         }
         dir.persist()?;
+        // A deleted class drops out of the hidden-set too (so a later recreate isn't silently
+        // hidden by a stale id, and the sidecar doesn't accumulate dangling ids).
+        if dir.hidden.remove(id) {
+            dir.persist_hidden()?;
+        }
         Ok(())
     }
 
@@ -450,6 +546,16 @@ impl ClassDirectory {
 }
 
 impl Directory {
+    /// A served view of `class`: the stored class with its `hidden` flag set from the hidden-set
+    /// (hide/archive classes). The stored `Class` always has `hidden = false`; this is the one place
+    /// visibility is layered on, so `GET /classes` / `get` / `set_hidden` all report it consistently
+    /// and the hidden state never has to live on the stored class.
+    fn view(&self, class: &Class) -> Class {
+        let mut out = class.clone();
+        out.hidden = self.hidden.contains(&class.id);
+        out
+    }
+
     /// Persist the **user/Custom** classes to `<data_dir>/classes.json` (issue #84), a no-op with no
     /// data dir. The code-defined built-ins are **never** written — they are re-seeded on every boot
     /// — so the persisted file holds only the classes the RD created.
@@ -466,6 +572,22 @@ impl Directory {
             .map_err(|e| ClassError::internal(format!("could not serialize classes: {e}")))?;
         std::fs::write(classes_path(dir), json)
             .map_err(|e| ClassError::internal(format!("could not persist classes: {e}")))
+    }
+
+    /// Persist the **hidden-set** to `<data_dir>/hidden_classes.json` (hide/archive classes), a
+    /// no-op with no data dir. Written as a plain JSON array of the hidden [`ClassId`]s — a tiny
+    /// sidecar kept separate from `classes.json` so it can record hidden *built-in* ids (which never
+    /// go in `classes.json`) and be applied **after** the boot re-seed.
+    fn persist_hidden(&self) -> Result<(), ClassError> {
+        let Some(dir) = &self.data_dir else {
+            return Ok(());
+        };
+        let ids: Vec<&ClassId> = self.hidden.iter().collect();
+        let json = serde_json::to_string_pretty(&ids).map_err(|e| {
+            ClassError::internal(format!("could not serialize hidden classes: {e}"))
+        })?;
+        std::fs::write(hidden_classes_path(dir), json)
+            .map_err(|e| ClassError::internal(format!("could not persist hidden classes: {e}")))
     }
 }
 
@@ -491,6 +613,18 @@ fn classes_path(dir: &Path) -> PathBuf {
 /// A bad file degrades to "no persisted classes" so the Director still boots.
 fn read_persisted_classes(dir: &Path) -> Option<Vec<Class>> {
     let raw = std::fs::read_to_string(classes_path(dir)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// The file the hidden-set is persisted to under `dir`: `<dir>/hidden_classes.json`.
+fn hidden_classes_path(dir: &Path) -> PathBuf {
+    dir.join(HIDDEN_CLASSES_FILE)
+}
+
+/// Read the persisted hidden-set from `<dir>/hidden_classes.json`, or `None` if
+/// absent/unreadable/corrupt (degrades to "nothing hidden" so the Director still boots).
+fn read_hidden_classes(dir: &Path) -> Option<BTreeSet<ClassId>> {
+    let raw = std::fs::read_to_string(hidden_classes_path(dir)).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
@@ -951,6 +1085,122 @@ mod tests {
             assert!(!got.builtin);
             // The built-ins are still all present.
             assert!(reopened.get(&ClassId("mgp-open".into())).unwrap().builtin);
+        }
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    // ── hide / archive classes ──────────────────────────────────────────────
+
+    #[test]
+    fn classes_default_to_visible_and_set_hidden_toggles_the_flag() {
+        let dir = ClassDirectory::new(None).unwrap();
+        let created = dir.create(&req("House Spec")).unwrap();
+        // Fresh classes (and built-ins) are visible by default.
+        assert!(!created.hidden);
+        assert!(!dir.get(&ClassId("mgp-open".into())).unwrap().hidden);
+
+        // Hide it, then un-hide it — the served flag and the list both reflect the change.
+        let hidden = dir.set_hidden(&created.id, true).unwrap();
+        assert!(hidden.hidden);
+        assert!(dir.get(&created.id).unwrap().hidden);
+        assert!(
+            dir.list()
+                .iter()
+                .find(|c| c.id == created.id)
+                .unwrap()
+                .hidden
+        );
+
+        let shown = dir.set_hidden(&created.id, false).unwrap();
+        assert!(!shown.hidden);
+        assert!(!dir.get(&created.id).unwrap().hidden);
+    }
+
+    #[test]
+    fn hiding_a_class_is_not_a_read_only_edit_so_built_ins_can_be_hidden() {
+        let dir = ClassDirectory::new(None).unwrap();
+        let id = ClassId("mgp-open".into());
+        // A built-in cannot be edited/deleted (ReadOnly), but it CAN be hidden — visibility is a
+        // preference, not an edit.
+        let hidden = dir.set_hidden(&id, true).unwrap();
+        assert!(hidden.hidden);
+        assert!(hidden.builtin, "still a built-in, just hidden");
+        assert!(dir.get(&id).unwrap().hidden);
+        // Editing/deleting it is still rejected.
+        assert_eq!(
+            dir.update(
+                &id,
+                &UpdateClassRequest {
+                    name: Some("X".into()),
+                    ..Default::default()
+                }
+            )
+            .unwrap_err()
+            .kind,
+            ClassErrorKind::ReadOnly
+        );
+        assert_eq!(dir.delete(&id).unwrap_err().kind, ClassErrorKind::ReadOnly);
+    }
+
+    #[test]
+    fn set_hidden_rejects_an_unknown_id() {
+        let dir = ClassDirectory::new(None).unwrap();
+        let err = dir.set_hidden(&ClassId("nope".into()), true).unwrap_err();
+        assert_eq!(err.kind, ClassErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_hidden_built_in_persists_across_a_restart_surviving_the_reseed() {
+        let data_dir =
+            std::env::temp_dir().join(format!("gridfpv-classes-hide-{}", short_suffix()));
+        {
+            let dir = ClassDirectory::new(Some(data_dir.clone())).unwrap();
+            let builtin = ClassId("mgp-open".into());
+            let custom = dir.create(&req("House Spec")).unwrap();
+            dir.set_hidden(&builtin, true).unwrap();
+            dir.set_hidden(&custom.id, true).unwrap();
+
+            // The sidecar holds the hidden ids; classes.json never carries the built-in id or a
+            // `hidden` flag.
+            let hidden_raw = std::fs::read_to_string(hidden_classes_path(&data_dir)).unwrap();
+            assert!(hidden_raw.contains("mgp-open"));
+            let classes_raw = std::fs::read_to_string(classes_path(&data_dir)).unwrap();
+            assert!(
+                !classes_raw.contains("mgp-open"),
+                "built-in id must not leak into classes.json"
+            );
+            assert!(
+                !classes_raw.contains("hidden"),
+                "hidden state must not be persisted on the class in classes.json"
+            );
+
+            // Reopen: the built-ins are re-seeded, yet the hidden built-in (and custom) stay hidden.
+            let reopened = ClassDirectory::new(Some(data_dir.clone())).unwrap();
+            let bi = reopened.get(&builtin).unwrap();
+            assert!(bi.builtin, "re-seeded built-in present");
+            assert!(bi.hidden, "hidden built-in survives the re-seed");
+            assert!(reopened.get(&custom.id).unwrap().hidden);
+
+            // Un-hide the built-in and confirm it sticks across another restart.
+            reopened.set_hidden(&builtin, false).unwrap();
+            let again = ClassDirectory::new(Some(data_dir.clone())).unwrap();
+            assert!(!again.get(&builtin).unwrap().hidden);
+        }
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[test]
+    fn deleting_a_class_drops_it_from_the_hidden_set() {
+        let data_dir =
+            std::env::temp_dir().join(format!("gridfpv-classes-hide-del-{}", short_suffix()));
+        {
+            let dir = ClassDirectory::new(Some(data_dir.clone())).unwrap();
+            let created = dir.create(&req("Temp")).unwrap();
+            dir.set_hidden(&created.id, true).unwrap();
+            dir.delete(&created.id).unwrap();
+            // The id is gone from the sidecar, so a same-named recreate is not silently hidden.
+            let raw = std::fs::read_to_string(hidden_classes_path(&data_dir)).unwrap();
+            assert!(!raw.contains(&created.id.0));
         }
         std::fs::remove_dir_all(&data_dir).ok();
     }

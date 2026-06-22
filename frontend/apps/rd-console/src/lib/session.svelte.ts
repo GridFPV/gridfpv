@@ -60,6 +60,7 @@ import {
   createClass,
   updateClass,
   deleteClass,
+  setClassHidden,
   setEventClasses,
   setClassMembership,
   listFormats,
@@ -262,6 +263,7 @@ export class Session {
   #createClassImpl: typeof createClass;
   #updateClassImpl: typeof updateClass;
   #deleteClassImpl: typeof deleteClass;
+  #setClassHiddenImpl: typeof setClassHidden;
   #setEventClassesImpl: typeof setEventClasses;
   #setClassMembershipImpl: typeof setClassMembership;
   #listFormatsImpl: typeof listFormats;
@@ -299,6 +301,7 @@ export class Session {
     createClassImpl?: typeof createClass;
     updateClassImpl?: typeof updateClass;
     deleteClassImpl?: typeof deleteClass;
+    setClassHiddenImpl?: typeof setClassHidden;
     setEventClassesImpl?: typeof setEventClasses;
     setClassMembershipImpl?: typeof setClassMembership;
     listFormatsImpl?: typeof listFormats;
@@ -337,6 +340,7 @@ export class Session {
     this.#createClassImpl = opts?.createClassImpl ?? createClass;
     this.#updateClassImpl = opts?.updateClassImpl ?? updateClass;
     this.#deleteClassImpl = opts?.deleteClassImpl ?? deleteClass;
+    this.#setClassHiddenImpl = opts?.setClassHiddenImpl ?? setClassHidden;
     this.#setEventClassesImpl = opts?.setEventClassesImpl ?? setEventClasses;
     this.#setClassMembershipImpl = opts?.setClassMembershipImpl ?? setClassMembership;
     this.#listFormatsImpl = opts?.listFormatsImpl ?? listFormats;
@@ -514,6 +518,21 @@ export class Session {
       await this.#deleteClassImpl(this.baseUrl, id, token);
       return true as const;
     });
+  }
+
+  /**
+   * Hide or un-hide a directory class (`PUT /classes/{id}/hidden`) — hide/archive classes. RD-gated,
+   * full-trust first like the other class writes. Hiding is a **visibility preference**, not an edit
+   * — valid for **built-in** classes too: the class stays in the directory and the main Classes
+   * view, it is just filtered out of the per-event class picker. The choice persists server-side and
+   * survives a restart (including the built-in re-seed). Returns the updated {@link Class} (with its
+   * fresh `hidden` flag), `undefined` on a cancelled token prompt, or throws on a non-auth failure
+   * (an unknown id is a **404**).
+   */
+  setClassHidden(id: ClassId, hidden: boolean): Promise<Class | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#setClassHiddenImpl(this.baseUrl, id, hidden, token)
+    );
   }
 
   /**

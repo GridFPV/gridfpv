@@ -962,6 +962,36 @@ describe('seam 12: application-level classes + per-event selection (#84)', () =>
     // RD-gated: no token → 401.
     expect((await setEventClasses(event.id, [cls.id])).status).toBe(401);
   });
+
+  it('PUT /classes/{id}/hidden toggles visibility (built-ins too), RD-gated, 404 on unknown', async () => {
+    const setHidden = async (id: string, hidden: boolean, token?: string) => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${director.baseUrl}/classes/${id}/hidden`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ hidden })
+      });
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
+    };
+
+    // A built-in CAN be hidden — visibility is a preference, not a read-only edit.
+    const hid = await setHidden('mgp-open', true, TOKEN);
+    expect(hid.status).toBe(200);
+    expect((hid.body as Class).hidden).toBe(true);
+    expect((hid.body as Class).builtin).toBe(true);
+    // GET /classes reflects the hidden flag.
+    expect((await listClasses()).find((c) => c.id === 'mgp-open')?.hidden).toBe(true);
+
+    // Un-hide it again.
+    const shown = await setHidden('mgp-open', false, TOKEN);
+    expect(shown.status).toBe(200);
+    expect((shown.body as Class).hidden).toBeUndefined(); // omitted from the wire when false
+
+    // RD-gated (no token → 401) and an unknown id → 404.
+    expect((await setHidden('mgp-open', true)).status).toBe(401);
+    expect((await setHidden('no-such-class', true, TOKEN)).status).toBe(404);
+  });
 });
 
 /**

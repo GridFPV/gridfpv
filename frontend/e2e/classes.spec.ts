@@ -159,3 +159,91 @@ test('RD selects a built-in class onto the event and it persists', async ({ page
     timeout: 15_000
   });
 });
+
+test('RD hides a class on the Classes page; it drops out of the event picker; unhide restores it', async ({
+  page
+}) => {
+  await page.goto('/');
+
+  // ── Get back to the home hub (a prior spec may have left an active event) ────────────────────
+  const classesCard = page.getByRole('heading', { name: 'Classes' });
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  await expect(classesCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+  if (await liveNav.isVisible().catch(() => false)) {
+    await page
+      .getByRole('navigation', { name: 'Breadcrumb' })
+      .getByRole('button', { name: 'Home' })
+      .click();
+  }
+
+  // ── Open the Classes page and hide a built-in (a visibility preference, allowed for built-ins) ─
+  await page.getByRole('button', { name: /Classes/ }).click();
+  await expect(page.getByRole('heading', { name: 'Classes', level: 1 })).toBeVisible({
+    timeout: 15_000
+  });
+  const list = page.getByRole('list', { name: 'Class directory' });
+  const whoop = list.getByRole('listitem').filter({ hasText: 'Whoop Class' });
+  await expect(whoop).toBeVisible({ timeout: 15_000 });
+
+  // Hide it (it stays listed here, marked "Hidden", and now offers "Unhide").
+  await whoop.getByRole('button', { name: 'Hide' }).click();
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+  await expect(whoop.getByText('Hidden', { exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(whoop.getByRole('button', { name: 'Unhide' })).toBeVisible();
+  // Screenshot: the main view with a class marked Hidden.
+  await page.screenshot({ path: 'e2e-artifacts/classes-page-hidden.png', fullPage: true });
+
+  // ── Into the event (Practice) → the Classes & Roster picker must NOT offer the hidden class ──
+  await page
+    .getByRole('navigation', { name: 'Breadcrumb' })
+    .getByRole('button', { name: 'Home' })
+    .click();
+  const eventsCard = page.getByRole('button', { name: /Events/ });
+  await expect(eventsCard).toBeVisible({ timeout: 15_000 });
+  await eventsCard.click();
+  const picker = page.getByRole('heading', { name: 'Choose an event' });
+  await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
+  if (await picker.isVisible().catch(() => false)) {
+    await page
+      .getByRole('button', { name: /Practice/ })
+      .first()
+      .click();
+  }
+  await expect(liveNav).toBeVisible({ timeout: 15_000 });
+  await page
+    .getByRole('navigation', { name: 'Screens' })
+    .getByRole('button', { name: 'Classes & Roster' })
+    .click();
+  await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeVisible({
+    timeout: 15_000
+  });
+
+  const pickerList = page.getByRole('list', { name: 'Class directory' });
+  // The hidden class is filtered out of the per-event picker…
+  await expect(pickerList.getByRole('listitem').filter({ hasText: 'Whoop Class' })).toHaveCount(0, {
+    timeout: 15_000
+  });
+  // …while a visible class is still offered.
+  await expect(
+    pickerList.getByRole('listitem').filter({ hasText: 'Open Class' })
+  ).toBeVisible();
+  // Screenshot: the picker with the hidden class excluded.
+  await page.screenshot({ path: 'e2e-artifacts/event-picker-hidden-excluded.png', fullPage: true });
+
+  // ── Unhide it back on the Classes page → it returns to the picker (cleanup the shared Director) ─
+  await page
+    .getByRole('navigation', { name: 'Breadcrumb' })
+    .getByRole('button', { name: 'Home' })
+    .click();
+  await page.getByRole('button', { name: /Classes/ }).click();
+  await expect(page.getByRole('heading', { name: 'Classes', level: 1 })).toBeVisible({
+    timeout: 15_000
+  });
+  const whoopAgain = page
+    .getByRole('list', { name: 'Class directory' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Whoop Class' });
+  await whoopAgain.getByRole('button', { name: 'Unhide' }).click();
+  await expect(whoopAgain.getByText('Hidden', { exact: true })).toHaveCount(0, { timeout: 15_000 });
+  await expect(whoopAgain.getByRole('button', { name: 'Hide' })).toBeVisible();
+});
