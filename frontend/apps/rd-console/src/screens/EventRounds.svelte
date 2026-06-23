@@ -758,7 +758,8 @@
   // --- Read-only summaries for the list ----------------------------------------------------------
   function winSummary(wc: WinCondition): string {
     if (typeof wc === 'string') return 'Best lap';
-    if ('Timed' in wc) return `Timed · ${Math.round(wc.Timed.window_micros / 1_000_000)}s`;
+    if ('Timed' in wc)
+      return `Timed — Most Laps · ${Math.round(wc.Timed.window_micros / 1_000_000)}s`;
     if ('FirstToLaps' in wc) return `First to ${wc.FirstToLaps.n} laps`;
     if ('BestConsecutive' in wc) return `Best ${wc.BestConsecutive.n} consecutive`;
     return 'Best lap';
@@ -891,7 +892,7 @@
           <div class="form-grid">
             <Field label="Win condition">
               <Select bind:value={winKind} aria-label="Win condition">
-                <option value="Timed">Timed window</option>
+                <option value="Timed">Timed — Most Laps</option>
                 <option value="FirstToLaps">First to N laps</option>
                 <option value="BestLap">Best lap</option>
                 <option value="BestConsecutive">Best N consecutive</option>
@@ -899,8 +900,13 @@
             </Field>
 
             {#if winKind === 'Timed'}
-              <Field label="Window (seconds)">
-                <Input type="number" min="1" bind:value={winSeconds} aria-label="Window seconds" />
+              <Field label="Race time (seconds)">
+                <Input
+                  type="number"
+                  min="1"
+                  bind:value={winSeconds}
+                  aria-label="Race time seconds"
+                />
               </Field>
             {:else if winKind === 'FirstToLaps' || winKind === 'BestConsecutive'}
               <Field label="Laps">

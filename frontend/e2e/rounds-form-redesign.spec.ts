@@ -109,3 +109,49 @@ test('the redesigned Rounds form shows the dynamic per-format fields (open pract
   // Clean up the shared Director's event back to empty (no round was saved).
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
 });
+
+test('the win-condition selector labels the Timed condition "Timed — Most Laps"', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  await page.goto('/');
+  await enterPractice(page);
+
+  // Select the Open Class so a class round has an eligible class.
+  await openTab(page, 'Classes & Roster');
+  const classBox = page
+    .getByRole('list', { name: 'Class directory' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Open Class' })
+    .getByRole('checkbox', { name: 'Select Open Class' });
+  if (!(await classBox.isChecked())) {
+    const classesSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await classBox.check();
+    await classesSaved;
+  }
+  await expect(classBox).toBeChecked();
+
+  await openTab(page, 'Rounds & Heats');
+  await page.getByRole('button', { name: '+ Add round' }).click();
+  const form = page.getByRole('form', { name: 'Add round' });
+  await expect(form).toBeVisible();
+
+  // A bracket format surfaces the win-condition selector. The Timed condition is a misnomer-free
+  // "Timed — Most Laps" (the win is most laps within the set time; the time is just the parameter).
+  await form.getByLabel('Format').selectOption('double_elim');
+  const winSelect = form.getByLabel('Win condition');
+  await expect(winSelect).toBeVisible();
+  await expect(winSelect.locator('option', { hasText: 'Timed — Most Laps' })).toHaveCount(1);
+  await winSelect.selectOption('Timed');
+  // The time parameter reads as the duration parameter, not the win condition itself.
+  await expect(form.getByLabel('Race time seconds')).toBeVisible();
+  await form.screenshot({ path: `${SHOTS}rounds-form-timed-most-laps.png` });
+
+  // Clean up the shared Director's event back to empty (no round was saved).
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
+});
