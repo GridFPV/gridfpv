@@ -96,7 +96,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(within(roundsCard).queryByText('timed_qual')).toBeNull();
     expect(within(roundsCard).getByText('Open')).toBeInTheDocument();
     expect(within(roundsCard).getByText('From roster')).toBeInTheDocument();
-    expect(within(roundsCard).getByText(/Timed · 120s/)).toBeInTheDocument();
+    expect(within(roundsCard).getByText(/Timed — Most Laps · 120s/)).toBeInTheDocument();
     // The round index renders.
     expect(within(roundsCard).getByText('1')).toBeInTheDocument();
   });
