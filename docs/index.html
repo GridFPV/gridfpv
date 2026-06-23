@@ -115,11 +115,28 @@
         </div>
       </li>
       <li>
+        <div class="doc-title"><a href="decisions.html">Decisions</a></div>
+        <div class="doc-desc">
+          The running record of settled design decisions and their rationale (ADR-style) —
+          the heat lifecycle and phase naming, the Abort/Restart off-ramps, ephemeral
+          open-practice laps, the qualifying metric, grace defaults, and more. Why the
+          system is the way it is.
+        </div>
+      </li>
+      <li>
         <div class="doc-title"><a href="timer-adapters.html">Timer Adapters</a></div>
         <div class="doc-desc">
           The adapter interface and canonical event model — the foundational wall that makes
           every timing source (Velocidrone, RotorHazard, LapRF, manual) look the same
           to the engine. The vocabulary the whole log speaks.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="channel-model.html">Channel Model</a></div>
+        <div class="doc-desc">
+          Channels vs. nodes — node count caps pilots-per-heat while a timer can offer more
+          channels than nodes; the standard FPV catalog plus custom raw-MHz, per-timer
+          capability (fixed / flexible), static vs. per-heat assignment, and race-time tuning.
         </div>
       </li>
       <li>
@@ -131,10 +148,26 @@
         </div>
       </li>
       <li>
+        <div class="doc-title"><a href="heat-lifecycle.html">Heat Lifecycle</a></div>
+        <div class="doc-desc">
+          The heat state machine in depth — the six phases, command legality, the runtime
+          start procedure and completion / grace transitions, per-round config, and how it
+          all replays deterministically from the log.
+        </div>
+      </li>
+      <li>
         <div class="doc-title"><a href="protocol.html">Protocol</a></div>
         <div class="doc-desc">
           The single read/realtime contract both transports speak — snapshot, change
           stream, subscription scoping, auth, and versioning.
+        </div>
+      </li>
+      <li>
+        <div class="doc-title"><a href="live-state-clock.html">Live State &amp; the Race Clock</a></div>
+        <div class="doc-desc">
+          How the live race state is folded from the log, the server-time-authoritative race
+          clock (anchored to logged transition timestamps; header and HUD agree, exact frozen
+          duration), and the open-practice laps-only overlay composed onto the log fold.
         </div>
       </li>
       <li>
