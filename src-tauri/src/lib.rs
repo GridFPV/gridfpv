@@ -11,8 +11,10 @@
 //!    `gridfpv` binary runs — via the shared [`gridfpv_app::director::run_director`] — as a
 //!    background task. It binds **loopback on an ephemeral free port** (`127.0.0.1:0`), uses
 //!    a **per-user app-data dir** (Tauri's resolved app-data path) for created events, and
-//!    serves the **bundled** `rd-console` dist as the SPA. Loopback ⇒ the control path is
-//!    open (no auth), per the GridFPV auth model (loopback = trusted).
+//!    serves the `rd-console` SPA **embedded into the binary** (`gridfpv-app`'s `embed-assets`
+//!    feature) — so this executable is self-contained, with no external dist folder beside it.
+//!    Loopback ⇒ the control path is open (no auth), per the GridFPV auth model (loopback =
+//!    trusted).
 //! 2. Waits (briefly) for the Director to report the OS-assigned port, then opens the main
 //!    window pointed at `http://127.0.0.1:<port>/`.
 //!
@@ -36,10 +38,14 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Resolve the per-user app-data dir (created events' SQLite files live here) and
-            // the bundled RD-console dist (the SPA the embedded Director serves).
+            // Resolve the per-user app-data dir (created events' SQLite files live here). The
+            // RD-console SPA is **embedded in the binary** (`gridfpv-app`'s `embed-assets`
+            // feature), so there is no on-disk dist to resolve — the Director serves it from
+            // memory. We still pass an `assets` path to `run_director` (it's part of the shared
+            // signature), but with embedded assets the path is ignored. See
+            // `gridfpv_app::director::ASSETS_EMBEDDED`.
             let data_dir = resolve_data_dir(&handle);
-            let assets_dir = resolve_assets_dir(&handle);
+            let assets_dir = PathBuf::new();
 
             // A dedicated multi-thread tokio runtime hosts the in-process Director. We keep
             // the runtime alive for the whole app lifetime by leaking its handle into app
@@ -128,27 +134,4 @@ fn resolve_data_dir(handle: &tauri::AppHandle) -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("gridfpv"));
     let _ = std::fs::create_dir_all(&dir);
     dir
-}
-
-/// Resolve the RD-console SPA assets dir the embedded Director serves.
-///
-/// In a bundled install it's the `rd-console-dist` resource shipped alongside the binary
-/// (see `tauri.conf.json` `bundle.resources`). When running unbundled (`cargo run` /
-/// `cargo tauri dev`) the resource resolves under the dev target dir; if that doesn't exist
-/// we fall back to the repo's `frontend/apps/rd-console/dist`.
-fn resolve_assets_dir(handle: &tauri::AppHandle) -> PathBuf {
-    if let Ok(resource) = handle
-        .path()
-        .resolve("rd-console-dist", tauri::path::BaseDirectory::Resource)
-    {
-        if resource.join("index.html").is_file() {
-            return resource;
-        }
-    }
-
-    // Dev fallback: the repo's built dist, relative to this crate (`<repo>/src-tauri`).
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|root| root.join("frontend/apps/rd-console/dist"))
-        .unwrap_or_default()
 }

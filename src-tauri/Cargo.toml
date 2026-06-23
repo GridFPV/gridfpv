@@ -37,7 +37,12 @@ tauri-build = { version = "2", features = [] }
 # The Director itself: the native app runs the SAME `gridfpv_app::director::run_director` the
 # hosted `gridfpv` binary runs — in-process, on a tokio task, bound to loopback. No `live`
 # feature (sim source only), so the desktop build pulls no openssl, exactly like the Director.
-gridfpv-app = { path = "../crates/app" }
+#
+# `embed-assets` bakes the built RD console `dist/` into THIS binary at compile time, so the
+# produced `gridfpv-desktop` executable is **self-contained** — it serves the console from
+# memory and needs no external dist folder beside it. That makes the raw binary a single-file
+# portable, and lets the installers drop the previously-bundled `rd-console-dist` resource.
+gridfpv-app = { path = "../crates/app", features = ["embed-assets"] }
 
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }

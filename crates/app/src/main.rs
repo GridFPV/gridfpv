@@ -14,7 +14,7 @@
 //! race can be served.
 #![forbid(unsafe_code)]
 
-use gridfpv_app::director::{AssetStatus, Config, asset_status, run_director};
+use gridfpv_app::director::{ASSETS_EMBEDDED, AssetStatus, Config, asset_status, run_director};
 use gridfpv_app::{SyntheticPilot, append_and_project, render_lap_list, synthetic_session};
 use gridfpv_storage::SqliteLog;
 
@@ -112,17 +112,24 @@ fn print_startup(
         "    (drive a heat to Running via the control path to see synthetic laps; set \
          GRIDFPV_SOURCE / GRIDFPV_SIM_LAPS / GRIDFPV_SIM_LAP_MS to tune)"
     );
-    let assets = config.assets.display();
-    match asset_status(&config.assets) {
-        AssetStatus::Built => println!("  RD console   : serving SPA from {assets}"),
-        AssetStatus::Missing => println!(
-            "  RD console   : WARNING — assets dir not found at {assets}; serving the API only \
-             (run `cd frontend && npm run build`, or set GRIDFPV_ASSETS)"
-        ),
-        AssetStatus::NoIndex => println!(
-            "  RD console   : WARNING — {assets} has no index.html; serving the API only \
-             (is this the rd-console dist?)"
-        ),
+    // When built with `embed-assets`, the SPA is baked into the binary — the on-disk
+    // `assets` dir / `GRIDFPV_ASSETS` are ignored, so report the embedded source rather than
+    // inspecting (and possibly warning about) a filesystem dist that isn't used.
+    if ASSETS_EMBEDDED {
+        println!("  RD console   : serving SPA from assets embedded in the binary");
+    } else {
+        let assets = config.assets.display();
+        match asset_status(&config.assets) {
+            AssetStatus::Built => println!("  RD console   : serving SPA from {assets}"),
+            AssetStatus::Missing => println!(
+                "  RD console   : WARNING — assets dir not found at {assets}; serving the API only \
+                 (run `cd frontend && npm run build`, or set GRIDFPV_ASSETS)"
+            ),
+            AssetStatus::NoIndex => println!(
+                "  RD console   : WARNING — {assets} has no index.html; serving the API only \
+                 (is this the rd-console dist?)"
+            ),
+        }
     }
 }
 
