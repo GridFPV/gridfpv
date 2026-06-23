@@ -424,7 +424,7 @@ async fn round_driven_mock_race_flow_e2e() {
             win_condition: Some(gridfpv_engine::scoring::WinCondition::FirstToLaps { n: laps }),
             time_limit_secs: None,
             seeding: SeedingRule::FromRanking {
-                source_round: qual.id.clone(),
+                source_rounds: vec![qual.id.clone()],
                 top_n: 2,
             },
             // single_elim defaults to PerHeat anyway; keep it explicit for the bracket carry.
@@ -1375,6 +1375,66 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         restarts, 1,
         "exactly one Restarted resets the heat to Scheduled"
     );
+}
+
+#[tokio::test]
+async fn two_open_practice_rounds_in_one_event_get_distinct_heats_e2e() {
+    // Issue #54: two open-practice rounds in the same event must each auto-create their OWN heat.
+    // Before the fix both rounds' heats collided on the generator's fixed `"open-practice"` id, so
+    // the second round silently got no distinct heat. The heat id is now round-scoped.
+    let registry = fast_registry(3, 1);
+    let token = registry.tokens().issue_rd_token();
+    let _bridge = spawn_registry_bridge(
+        registry.clone(),
+        SourceConfig::Sim(SimSource::new(3, Duration::from_millis(1))),
+        AdapterId(SIM_ADAPTER.to_string()),
+    );
+    std::mem::forget(_bridge);
+    let app = build_app(registry.clone(), &no_assets());
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/events",
+        Some(&token),
+        Some(serde_json::json!({ "name": "Two Practices" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create event: {body}");
+    let event_meta: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let event = EventId(event_meta["id"].as_str().unwrap().to_string());
+
+    let open_req = |label: &str| NewRoundReq {
+        label: label.into(),
+        classes: vec![],
+        format: "open_practice".into(),
+        params: BTreeMap::new(),
+        win_condition: None,
+        time_limit_secs: None,
+        seeding: SeedingRule::AllChannels {
+            channels: vec![0, 1],
+        },
+        channel_mode: None,
+        staging_timer_secs: None,
+        start_procedure: None,
+        grace_window: None,
+    };
+
+    let round_a: RoundDef = add_round(&app, &event, &token, open_req("Open A")).await;
+    let round_b: RoundDef = add_round(&app, &event, &token, open_req("Open B")).await;
+    let state = registry.resolve(&event).unwrap();
+
+    // Each round auto-created exactly one heat, and the two heat ids are distinct + round-scoped.
+    let (heat_a, _, _) = round_heat(&read_log(&state), &round_a.id.0)
+        .expect("round A auto-created its open-practice heat");
+    let (heat_b, _, _) = round_heat(&read_log(&state), &round_b.id.0)
+        .expect("round B auto-created its own open-practice heat");
+    assert_ne!(
+        heat_a, heat_b,
+        "two open-practice rounds must not share one heat id (#54)"
+    );
+    assert_eq!(heat_a.0, format!("{}-heat", round_a.id.0));
+    assert_eq!(heat_b.0, format!("{}-heat", round_b.id.0));
 }
 
 /// `POST …/rounds` asserted ok, returning the created [`RoundDef`].

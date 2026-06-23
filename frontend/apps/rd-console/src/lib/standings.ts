@@ -45,7 +45,9 @@ export function advanceRoundReq(source: RoundDef, topN: number, label: string): 
     params: {},
     win_condition,
     seeding: {
-      FromRanking: { source_round: source.id, top_n: Math.max(1, Math.round(topN)) }
+      // Advancing one round seeds the bracket from that single round (issue #51: `source_rounds` is
+      // a list — a one-element list here; the Rounds form lets the RD add more sources after).
+      FromRanking: { source_rounds: [source.id], top_n: Math.max(1, Math.round(topN)) }
     }
   };
 }

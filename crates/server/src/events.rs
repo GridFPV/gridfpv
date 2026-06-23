@@ -545,21 +545,28 @@ impl ChannelMode {
 /// ranking** ([`FromRanking`](Self::FromRanking) — the bracket / cut case, the issue-#84 carry that
 /// a later slice consumes), or — for the casual **open-practice** format — from a set of active
 /// **channels** ([`AllChannels`](Self::AllChannels)) rather than pilots. Derives serde + `ts_rs::TS`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum SeedingRule {
     /// Seed from the eligible classes' roster membership, in roster order. The default for
     /// practice and first-qualifying rounds.
     #[default]
     FromRoster,
-    /// Seed from the **top-N** of a prior round's ranking — the bracket / cut seam (issue #84).
-    /// The `source_round` must name another [`RoundDef`] in the same event's
-    /// [`rounds`](EventMeta::rounds); `top_n` is how many advance. Stored now; *consumed* when the
-    /// round actually runs (a later slice).
+    /// Seed from the **top-N** of one or more prior rounds' aggregated ranking — the bracket / cut
+    /// seam (issue #51 multi-select, issue #84 carry). Each entry of `source_rounds` must name
+    /// another [`RoundDef`] in the same event's [`rounds`](EventMeta::rounds); `top_n` is how many
+    /// advance. When several rounds are named, the field is seeded from the **best-per-pilot
+    /// ranking aggregated across those rounds** (see the round engine's `round_field`).
+    ///
+    /// **Serde back-compat:** an older stored round wrote a single `source_round: "x"` string;
+    /// the enum's hand-written [`Deserialize`](SeedingRule#impl-Deserialize) reads either the
+    /// legacy `source_round` key (→ `source_rounds: ["x"]`) or the current `source_rounds` array.
+    /// Purely additive — no data migration.
     FromRanking {
-        /// The prior round this round seeds from — must exist in [`EventMeta::rounds`].
-        source_round: RoundId,
-        /// How many of the source ranking's top places advance into this round.
+        /// The prior rounds this round seeds from — each must exist in [`EventMeta::rounds`].
+        /// Aggregated best-per-pilot when more than one is named. Always at least one entry.
+        source_rounds: Vec<RoundId>,
+        /// How many of the aggregated ranking's top places advance into this round.
         top_n: usize,
     },
     /// Seed from a set of active **channels** rather than pilots — the **open-practice** seeding
@@ -575,6 +582,64 @@ pub enum SeedingRule {
         /// out as `node-{i}` competitor refs by the field builder, in this order.
         channels: Vec<usize>,
     },
+}
+
+/// Hand-written [`Deserialize`] for [`SeedingRule`] that mirrors serde's default externally-tagged
+/// representation while accepting **both** the current `source_rounds: [...]` shape and the legacy
+/// single `source_round: "x"` shape for [`FromRanking`](SeedingRule::FromRanking) (issue #51
+/// back-compat). The legacy string is lifted to a one-element `source_rounds` — additive, no data
+/// migration. Every other variant deserializes exactly as the derive would.
+impl<'de> Deserialize<'de> for SeedingRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        // The body of the `FromRanking` variant, accepting either `source_rounds` (current) or the
+        // legacy `source_round` single string. `deny_unknown_fields` keeps a typo from silently
+        // seeding from an empty set; exactly one of the two source keys must be present.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FromRankingBody {
+            #[serde(default)]
+            source_rounds: Option<Vec<RoundId>>,
+            #[serde(default)]
+            source_round: Option<RoundId>,
+            top_n: usize,
+        }
+
+        // An untagged shadow of the externally-tagged enum. `FromRanking` carries the lenient body;
+        // the other variants reuse the same field shapes as `SeedingRule` so they round-trip 1:1.
+        #[derive(Deserialize)]
+        enum Shadow {
+            FromRoster,
+            FromRanking(FromRankingBody),
+            AllChannels { channels: Vec<usize> },
+        }
+
+        match Shadow::deserialize(deserializer)? {
+            Shadow::FromRoster => Ok(SeedingRule::FromRoster),
+            Shadow::AllChannels { channels } => Ok(SeedingRule::AllChannels { channels }),
+            Shadow::FromRanking(body) => {
+                let source_rounds = match (body.source_rounds, body.source_round) {
+                    // Current shape — the explicit list wins.
+                    (Some(rounds), _) => rounds,
+                    // Legacy shape — lift the single source to a one-element list.
+                    (None, Some(single)) => vec![single],
+                    (None, None) => {
+                        return Err(D::Error::custom(
+                            "FromRanking seeding requires `source_rounds` (or legacy `source_round`)",
+                        ));
+                    }
+                };
+                Ok(SeedingRule::FromRanking {
+                    source_rounds,
+                    top_n: body.top_n,
+                })
+            }
+        }
+    }
 }
 
 /// The body of `POST /events/{id}/rounds` — everything a caller supplies to add a round (race
@@ -1154,7 +1219,8 @@ impl EventRegistry {
     /// - each [`classes`](NewRoundReq::classes) entry exists in the class directory **and** is one
     ///   of the event's selected [`classes`](EventMeta::classes);
     /// - the [`format`](NewRoundReq::format) is a known [`FormatRegistry::standard`] name;
-    /// - on [`SeedingRule::FromRanking`], the `source_round` names an existing round in this event.
+    /// - on [`SeedingRule::FromRanking`], each `source_rounds` entry names an existing round in this
+    ///   event.
     ///
     /// An unknown event is a [`RoundError::EventNotFound`] (→ 404). On success the round is appended
     /// to [`EventMeta::rounds`] and written through to the event's SQLite `meta` table (issue #115)
@@ -1726,8 +1792,9 @@ impl From<RegistryError> for RoundError {
 ///
 /// Returns [`RoundError::Invalid`] when: a `classes` entry is unknown to the directory or is not one
 /// of the event's selected [`classes`](EventMeta::classes); `format` is not a
-/// [`FormatRegistry::standard`] name; or a [`SeedingRule::FromRanking`]'s `source_round` does not
-/// name an existing round in this event (excluding `editing` — a round may not seed from itself).
+/// [`FormatRegistry::standard`] name; or a [`SeedingRule::FromRanking`]'s `source_rounds` is empty
+/// or names a round that does not exist in this event (excluding `editing` — a round may not seed
+/// from itself).
 fn validate_round_fields(
     meta: &EventMeta,
     directory: &ClassDirectory,
@@ -1755,17 +1822,24 @@ fn validate_round_fields(
         return Err(RoundError::Invalid(format!("unknown format {format:?}")));
     }
 
-    if let SeedingRule::FromRanking { source_round, .. } = seeding {
-        if Some(source_round) == editing {
+    if let SeedingRule::FromRanking { source_rounds, .. } = seeding {
+        if source_rounds.is_empty() {
             return Err(RoundError::Invalid(
-                "a round cannot seed from itself".to_string(),
+                "FromRanking seeding must name at least one source round".to_string(),
             ));
         }
-        if !meta.rounds.iter().any(|r| &r.id == source_round) {
-            return Err(RoundError::Invalid(format!(
-                "seeding source_round {:?} does not exist in this event",
-                source_round.0
-            )));
+        for source_round in source_rounds {
+            if Some(source_round) == editing {
+                return Err(RoundError::Invalid(
+                    "a round cannot seed from itself".to_string(),
+                ));
+            }
+            if !meta.rounds.iter().any(|r| &r.id == source_round) {
+                return Err(RoundError::Invalid(format!(
+                    "seeding source round {:?} does not exist in this event",
+                    source_round.0
+                )));
+            }
         }
     }
 
@@ -2672,10 +2746,10 @@ mod tests {
             Err(RoundError::Invalid(_))
         ));
 
-        // FromRanking with a dangling source_round → Invalid.
+        // FromRanking with a dangling source round → Invalid.
         let mut dangling = round_req("Bracket", vec![open.clone()]);
         dangling.seeding = SeedingRule::FromRanking {
-            source_round: RoundId("does-not-exist".into()),
+            source_rounds: vec![RoundId("does-not-exist".into())],
             top_n: 4,
         };
         assert!(matches!(
@@ -2689,14 +2763,14 @@ mod tests {
             .unwrap();
         let mut bracket = round_req("Bracket", vec![open]);
         bracket.seeding = SeedingRule::FromRanking {
-            source_round: q.id.clone(),
+            source_rounds: vec![q.id.clone()],
             top_n: 4,
         };
         let bracket = reg.add_round(&event.id, bracket).unwrap();
         assert_eq!(
             bracket.seeding,
             SeedingRule::FromRanking {
-                source_round: q.id,
+                source_rounds: vec![q.id],
                 top_n: 4
             }
         );
@@ -2712,7 +2786,7 @@ mod tests {
                 params: BTreeMap::new(),
                 win_condition: Some(bracket.win_condition),
                 seeding: SeedingRule::FromRanking {
-                    source_round: bracket.id.clone(),
+                    source_rounds: vec![bracket.id.clone()],
                     top_n: 2,
                 },
                 time_limit_secs: None,
@@ -2723,6 +2797,50 @@ mod tests {
             },
         );
         assert!(matches!(self_ref, Err(RoundError::Invalid(_))));
+    }
+
+    #[test]
+    fn from_ranking_deserializes_legacy_single_source_round() {
+        // A round stored before issue #51 wrote a single `source_round` string. It must still
+        // deserialize, lifting the legacy key into a one-element `source_rounds` list.
+        let legacy = r#"{ "FromRanking": { "source_round": "qual-r1", "top_n": 4 } }"#;
+        let rule: SeedingRule = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            rule,
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("qual-r1".into())],
+                top_n: 4,
+            }
+        );
+
+        // The current multi-round shape deserializes directly.
+        let current =
+            r#"{ "FromRanking": { "source_rounds": ["qual-r1", "qual-r2"], "top_n": 8 } }"#;
+        let rule: SeedingRule = serde_json::from_str(current).unwrap();
+        assert_eq!(
+            rule,
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("qual-r1".into()), RoundId("qual-r2".into())],
+                top_n: 8,
+            }
+        );
+
+        // Round-trips through serialize → deserialize on the current shape.
+        let json = serde_json::to_string(&rule).unwrap();
+        let back: SeedingRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(rule, back);
+
+        // The other variants are unaffected.
+        let roster: SeedingRule = serde_json::from_str(r#""FromRoster""#).unwrap();
+        assert_eq!(roster, SeedingRule::FromRoster);
+        let channels: SeedingRule =
+            serde_json::from_str(r#"{ "AllChannels": { "channels": [0, 1, 2] } }"#).unwrap();
+        assert_eq!(
+            channels,
+            SeedingRule::AllChannels {
+                channels: vec![0, 1, 2]
+            }
+        );
     }
 
     #[test]

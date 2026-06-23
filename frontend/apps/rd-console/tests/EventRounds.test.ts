@@ -156,14 +156,14 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await within(roundsCard).findByText('Open Practice');
   });
 
-  it('reveals the FromRanking selector (source round + top N) and authors it', async () => {
+  it('reveals the FromRanking source-rounds multi-select (+ top N) and authors it', async () => {
     const impls = baseImpls();
     const updated: RoundDef = {
       ...QUAL,
       id: 'r2',
       label: 'Mains',
       format: 'single_elim',
-      seeding: { FromRanking: { source_round: 'r1', top_n: 8 } }
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 8 } }
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => updated);
     const { session } = makeTestSession({ ...impls, createRoundImpl, event: EVENT });
@@ -174,21 +174,60 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'single_elim' } });
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
 
-    // No source-round dropdown until From ranking is chosen.
-    expect(screen.queryByLabelText('Source round')).not.toBeInTheDocument();
+    // No source-rounds picker until From ranking is chosen.
+    expect(screen.queryByLabelText('Seed from Qualifying R1')).not.toBeInTheDocument();
     await fireEvent.change(screen.getByLabelText('Seeding'), {
       target: { value: 'FromRanking' }
     });
-    // The source-round selector reveals, listing the existing round.
-    const source = (await screen.findByLabelText('Source round')) as HTMLSelectElement;
-    await fireEvent.change(source, { target: { value: 'r1' } });
+    // The source-rounds multi-select reveals as a checkbox per prior round (issue #51).
+    const source = (await screen.findByLabelText('Seed from Qualifying R1')) as HTMLInputElement;
+    await fireEvent.click(source);
     await fireEvent.input(screen.getByLabelText('Top N'), { target: { value: '4' } });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
 
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     const [, , req] = createRoundImpl.mock.calls[0];
-    expect(req.seeding).toEqual({ FromRanking: { source_round: 'r1', top_n: 4 } });
+    expect(req.seeding).toEqual({ FromRanking: { source_rounds: ['r1'], top_n: 4 } });
+  });
+
+  it('authors a FromRanking seed from MULTIPLE source rounds (issue #51)', async () => {
+    // Two prior rounds exist; selecting both stores them as `source_rounds` in event-definition
+    // order (the server then aggregates best-per-pilot across them).
+    const impls = baseImpls();
+    const second: RoundDef = { ...QUAL, id: 'r1b', label: 'Qualifying 2' };
+    const twoRoundEvent: EventMeta = { ...EVENT, rounds: [QUAL, second] };
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
+      ...QUAL,
+      id: 'r3',
+      label: 'Mains',
+      format: 'single_elim'
+    }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: twoRoundEvent
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Mains' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'single_elim' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.change(screen.getByLabelText('Seeding'), {
+      target: { value: 'FromRanking' }
+    });
+
+    // Tick both source rounds.
+    await fireEvent.click(await screen.findByLabelText('Seed from Qualifying R1'));
+    await fireEvent.click(await screen.findByLabelText('Seed from Qualifying 2'));
+    await fireEvent.input(screen.getByLabelText('Top N'), { target: { value: '8' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    expect(req.seeding).toEqual({ FromRanking: { source_rounds: ['r1', 'r1b'], top_n: 8 } });
   });
 
   it('edits an existing round via updateRound, seeded from its current fields', async () => {
@@ -971,7 +1010,7 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
       format: 'single_elim',
       params: {},
       win_condition: QUAL.win_condition,
-      seeding: { FromRanking: { source_round: 'r1', top_n: 2 } },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 2 } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1001,7 +1040,7 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
     expect(req).toMatchObject({
       classes: ['c1'],
       format: 'single_elim',
-      seeding: { FromRanking: { source_round: 'r1', top_n: 2 } }
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 2 } }
     });
     // After creating, the bracket's first heat is filled (a FillRound on the new round).
     await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
