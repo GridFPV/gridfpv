@@ -30,7 +30,9 @@
         does <strong>not</strong> redefine the projections themselves — those belong to the
         engines that derive them (<a href="race-engine.html">Race Engine</a>,
         <a href="cloud.html">Cloud &amp; Season</a>) — nor the timing vocabulary
-        (<a href="timer-adapters.html">Timer Adapters</a>). It defers the cross-event registry
+        (<a href="timer-adapters.html">Timer Adapters</a>). The live race-state projection, its
+        server-time race clock, and the open-practice overlay get their own deep-dive in
+        <a href="live-state-clock.html">Live State &amp; the Race Clock</a>. It defers the cross-event registry
         and account model to <a href="cloud.html">Cloud &amp; Season</a>, and the overlay
         catalogue to <a href="streaming.html">Streaming</a>. Trust boundaries are fixed in
         <a href="architecture.html">Architecture</a> §9; the wire mechanics are decided here.
@@ -59,10 +61,13 @@
     <p>The projections the contract serves, each its own addressable resource:</p>
     <dl class="entities">
       <dt>Live race-state</dt>
-      <dd>The current heat and its loop state (<code>Scheduled → Staged → Armed → Running →
-      Finished → Scored</code>, see <a href="race-engine.html">Race Engine</a> §2), the active
-      pilots and their live lap/split progress, the running order, and the on-deck heat. The
-      latency-sensitive core every overlay and spectator watches.</dd>
+      <dd>The current heat and its loop phase (<code>Scheduled → Staged → Armed → Running →
+      Unofficial → Final</code>, the projected <code>HeatPhase</code>; see
+      <a href="race-engine.html">Race Engine</a> §2), the active pilots and their live lap progress,
+      the running order, the on-deck heat, and the <strong>server-authoritative race clock</strong>
+      (<code>race_started_at</code> / <code>race_ended_at</code>). The latency-sensitive core every
+      overlay and spectator watches. Its full fold, the clock model, and the open-practice overlay
+      are the subject of <a href="live-state-clock.html">Live State &amp; the Race Clock</a>.</dd>
       <dt>Lap lists</dt>
       <dd>Per-pilot, per-heat laps and splits, already folding marshaling adjudications (void,
       insert, adjust). What the engine derives, not what the timer reported.</dd>
@@ -93,12 +98,15 @@
     </div>
     <div class="callout">
       <p>
-        <strong>Deferred in v0.4.</strong> Several inputs the contract is designed around are not
-        yet wired: the registration-binding event (#60),
-        the event-setup commands (#61), and the <code>LiveRaceState</code> race-start clock plus
-        per-gate splits (#62) are still to come. And the <strong>Tauri shell + 3-OS single-binary
-        packaging are not yet built (#57/#58)</strong> — v0.4 ships the RD console as a web app
-        served by the Director, not as a native window.
+        <strong>As built.</strong> Most of what was deferred in early v0.4 is now wired: the
+        registration-binding event (<code>CompetitorRegistered</code>, surfaced in
+        <code>LiveRaceState.progress[].pilot</code>), the event-setup commands, and the
+        <code>LiveRaceState</code> race clock (<code>race_started_at</code> /
+        <code>race_ended_at</code>, server-time authoritative — see
+        <a href="live-state-clock.html">Live State &amp; the Race Clock</a>) all ship. Per-gate
+        <em>splits</em> remain a later refinement (the lap-count + last-lap pair is the live core).
+        The <strong>Tauri shell + 3-OS single-binary packaging are still not built (#57/#58)</strong>
+        — the RD console runs as a web app served by the Director, not yet a native window.
       </p>
     </div>
 
@@ -135,30 +143,57 @@
       apart.
     </p>
 
-    <h3>Endpoint surface (as built, v0.4)</h3>
+    <h3>Endpoint surface (as built)</h3>
     <p>
-      The concrete HTTP/WS surface the Director serves today, behind the storage trait:
+      The concrete HTTP/WS surface the Director serves today, behind the
+      <code>EventRegistry</code> storage seam. <strong>Every read / realtime / control surface is
+      event-rooted</strong> under <code>/events/{eventId}/…</code> (issue #72): the handler resolves
+      <code>eventId</code> to that event's own log (its <code>AppState</code>) before serving, and an
+      unknown <code>eventId</code> is a typed <code>ProtocolError</code> 404 (<code>UnknownScope</code>),
+      the same shape a wrong scope-within-event gets. Only the events lifecycle, the app-level
+      directories (timers / pilots / classes), the static config reads, and <code>GET /health</code>
+      sit at the root.
     </p>
+    <p><strong>Root surface — lifecycle, directories, static config:</strong></p>
     <table>
       <thead>
         <tr><th>Endpoint</th><th>What it serves</th></tr>
       </thead>
       <tbody>
         <tr><td><code>GET /health</code></td><td>liveness</td></tr>
-        <tr><td><code>GET /snapshot/event/{event}</code></td><td>event snapshot</td></tr>
-        <tr><td><code>GET /snapshot/class/{event}/{class}</code></td><td>class snapshot</td></tr>
-        <tr><td><code>GET /snapshot/heat/{heat}</code> (+ <code>?projection=live|laps|result</code>)</td><td>heat snapshot</td></tr>
-        <tr><td><code>GET /snapshot/pilot/{event}/{pilot}</code></td><td>pilot snapshot</td></tr>
+        <tr><td><code>GET /events</code> · <code>POST /events</code> · <code>DELETE /events/{id}</code></td><td>list (Practice first) / RD-gated create / RD-gated permanent delete (Practice can't be deleted)</td></tr>
+        <tr><td><code>GET·PUT /active-event</code></td><td>the Director's active event (open read; RD-gated write) — <code>ActiveEvent</code> / <code>SetActiveEventRequest</code></td></tr>
+        <tr><td><code>GET·POST /timers</code> · <code>PUT·DELETE /timers/{id}</code></td><td>app-level timer registry: Mock + RotorHazard, carrying <code>channel_capability</code> / <code>node_count</code> / <code>available_channels</code> (§ below). Open read; RD-gated writes; Mock undeletable</td></tr>
+        <tr><td><code>GET·POST /pilots</code> · <code>PUT·DELETE /pilots/{id}</code></td><td>app-level pilot directory (typed fields only — no attributes bag). Open read; RD-gated writes</td></tr>
+        <tr><td><code>GET·POST /classes</code> · <code>PUT·DELETE /classes/{id}</code> · <code>PUT /classes/{id}/hidden</code></td><td>app-level class directory incl. the hide/archive visibility toggle. Open read; control-gated writes</td></tr>
+        <tr><td><code>GET /formats</code> · <code>GET /channels</code></td><td>static compiled-in config: the valid format names and the standard FPV channel catalog (band/channel ↔ raw MHz). Open reads, no token</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Per-event surface — everything under <code>/events/{eventId}</code>:</strong></p>
+    <table>
+      <thead>
+        <tr><th>Endpoint (under <code>/events/{eventId}</code>)</th><th>What it serves</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>PUT /classes</code> · <code>PUT /classes/{class}/membership</code></td><td>per-event class selection and per-class roster membership (RD-gated)</td></tr>
+        <tr><td><code>POST /rounds</code> · <code>PUT·DELETE /rounds/{round}</code></td><td>per-event class-tagged rounds (RD-gated) — <code>RoundDef</code> / <code>NewRoundReq</code> / <code>UpdateRoundReq</code></td></tr>
+        <tr><td><code>GET /heats</code></td><td>the round-tagged scheduled-heats list (<code>HeatSummary[]</code>) the Heats UI reads. Open read</td></tr>
+        <tr><td><code>GET /rounds/{round}/ranking</code> · <code>GET /classes/{class}/standings</code></td><td>a round's per-pilot ranking and a class's aggregated standings. Open reads</td></tr>
+        <tr><td><code>PUT /roster</code> · <code>POST·DELETE /roster/{pilot}</code></td><td>per-event roster, wholesale or single-pilot (RD-gated)</td></tr>
+        <tr><td><code>PUT /timers</code> · <code>PUT /primary-timer</code></td><td>per-event timer selection and the primary timer (RD-gated)</td></tr>
+        <tr><td><code>GET /snapshot/event/{event}</code></td><td>event-scope live race-state snapshot</td></tr>
+        <tr><td><code>GET /snapshot/class/{event}/{class}</code></td><td>class-scope snapshot (a real class filter — only that class's heats)</td></tr>
+        <tr><td><code>GET /snapshot/heat/{heat}</code></td><td>heat-scope snapshot</td></tr>
+        <tr><td><code>GET /snapshot/pilot/{event}/{pilot}</code></td><td>pilot-scope snapshot</td></tr>
         <tr><td><code>GET /stream</code></td><td>WS change stream (<code>SubscribeRequest</code> → <code>StreamMessage</code>)</td></tr>
-        <tr><td><code>GET /control</code> (WS) and <code>POST /control</code> (one-shot)</td><td>RD-bearer-gated; <code>Command</code> → <code>CommandAck</code></td></tr>
+        <tr><td><code>GET /control</code> (WS) and <code>POST /control</code> (one-shot)</td><td>control-gated; <code>Command</code> → <code>CommandAck</code> (§5)</td></tr>
         <tr><td><code>POST /auth/join-token</code></td><td>RD-gated; mints a read-only <code>JoinTokenResponse { token }</code> — the QR/URL spectator capability (§5)</td></tr>
       </tbody>
     </table>
     <p>
-      <strong>Unknown API routes</strong> under <code>/snapshot</code>, <code>/stream</code>,
-      <code>/control</code>, <code>/auth</code>, and <code>/health</code> return a typed
-      <code>ProtocolError</code> 404 — not the SPA shell — so a contract miss surfaces as a
-      structured error rather than an HTML page a client can't parse.
+      <strong>Unknown API routes</strong> under any known API tree return a typed
+      <code>ProtocolError</code> 404 (an <code>api_fallback</code>) — not the SPA shell — so a contract
+      miss surfaces as a structured error rather than an HTML page a client can't parse.
     </p>
 
     <h2>3. The realtime change stream</h2>
@@ -201,6 +236,23 @@
       the client to re-snapshot — fetch a fresh snapshot and resume the stream from its new
       cursor. Re-snapshot is always correct because projections are recomputable; the stream
       is an optimization, never the source of truth.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>As built — two integers, deliberately distinct.</strong> The design above commits to
+        a <em>projection sequence</em> as the public ordering; the implementation realizes this as
+        <strong>two</strong> integers a client persists together. The resume <code>from</code> cursor
+        (the <code>Cursor</code> the <strong>snapshot</strong> hands back) is the <strong>log length
+        at snapshot time</strong> — the offset of the first event after the snapshot — and is what a
+        reconnect re-presents to resume. The change-stream <code>sequence</code> on each
+        <code>ChangeEnvelope</code> is a <em>separate</em> per-stream counter starting at
+        <strong>1</strong> and advancing once per emitted envelope (one log append may fan out into
+        several envelopes, or none this scope subscribes to). A client <strong>renders by
+        <code>sequence</code> order and resumes by the <code>from</code> log-offset cursor</strong>;
+        the two coincide numerically only by accident. This keeps the log offset usable as the resume
+        key while the per-stream sequence stays the public ordering. Detailed in
+        <a href="live-state-clock.html">Live State &amp; the Race Clock</a> §3.
+      </p>
     </div>
     <p>
       Ordering guarantees, stated plainly:
@@ -568,9 +620,14 @@ flowchart LR
       <li><span class="q">RESOLVED (accepted as working design) — Sequence-cursor representation.</span>
       The public projection sequence is a <strong>single monotonic integer per stream</strong>
       (not per-projection cursors a client composes). How it stays stable across a Director
-      restart / projection recompute is settled at implementation. <strong>As built (v0.4):</strong>
-      a per-stream <code>u64</code> <code>Cursor</code> counting from 1, distinct from the log
-      offset.</li>
+      restart / projection recompute is settled at implementation. <strong>As built:</strong> two
+      distinct <code>u64</code>s a client persists together — the per-envelope
+      <strong>sequence</strong> (the public ordering, counting from 1) and the resume
+      <strong>cursor</strong> (the <strong>log length</strong> the snapshot returns, the offset the
+      client re-presents in <code>from</code>). The <code>Cursor</code> wire type renders as a plain
+      TS <code>number</code> (<code>#[ts(as = "f64")]</code>; bounded well below 2^53). See the
+      "two integers, distinct" callout in §3 and
+      <a href="live-state-clock.html">Live State &amp; the Race Clock</a> §3.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Scope grammar &amp; pagination.</span>
       The contract uses a <strong>scope grammar</strong> for addressing (with multi-scope
       subscribe) and <strong>cursor-based pagination</strong> for large historical / open-data

@@ -25,7 +25,9 @@
         This doc decides <strong>system shape and stack</strong>. It deliberately defers
         the things that earn their own docs: the adapter interface internals
         (<a href="timer-adapters.html">Timer Adapters</a>), the wire contract
-        (<a href="protocol.html">Protocol</a>), the Cloud warehouse and season model
+        (<a href="protocol.html">Protocol</a>), the live race-state projection and its
+        server-time clock (<a href="live-state-clock.html">Live State &amp; the Race Clock</a>),
+        the Cloud warehouse and season model
         (<a href="cloud.html">Cloud &amp; Season</a>), the client surfaces
         (<a href="clients.html">Clients</a>), the broadcast subsystem
         (<a href="streaming.html">Streaming</a>), external integrations
@@ -456,13 +458,13 @@ CREATE TABLE event_log (
       Cloud (off-LAN) — a client is configured only with a base URL.
     </p>
     <div class="principle">
-      <p><span class="name">Contract defined once, in Rust.</span> The wire types live in a
-      shared Rust crate — today the canonical event model (<code>gridfpv-events</code>),
-      extended with the protocol's snapshot/read types as they land — and are generated into
-      TypeScript for the frontend, so the Director, the Cloud, and every client share one
-      definition that can't drift. <em>(The event-log vocabulary already generates to TS via
-      ts-rs with a CI drift check; the projection/snapshot types get their own bindings when
-      the protocol crate arrives.)</em></p>
+      <p><span class="name">Contract defined once, in Rust.</span> The wire types live in shared
+      Rust crates — the canonical event model (<code>gridfpv-events</code>) plus the protocol's
+      snapshot/read/control types (<code>gridfpv-server</code>) — and are generated into TypeScript
+      for the frontend, so the Director, the Cloud, and every client share one definition that can't
+      drift. <em>(The whole contract — event vocabulary, projections, and the snapshot/stream/control
+      wire types — already generates to TS via ts-rs into repo-root <code>bindings/</code> with a CI
+      drift check; this is no longer a forward-looking note.)</em></p>
     </div>
     <div class="callout">
       <p>
@@ -644,17 +646,23 @@ CREATE TABLE event_log (
       two adapters (RotorHazard, Velocidrone) translate validated real wire formats; a lap is a
       re-derivable projection of the pass stream. Remaining detail (richer signal summary,
       signal-based recovery) — <a href="timer-adapters.html">Timer Adapters</a>.</li>
-      <li><span class="q">Protocol message shapes, realtime transport &amp; auth.</span>
-      Snapshot format, change envelope, WS-vs-SSE, and the RD's privileged write path —
-      <a href="protocol.html">Protocol</a>.</li>
+      <li><span class="resolved">Built — Protocol message shapes, realtime transport &amp; auth.</span>
+      The snapshot format, the externally-tagged change envelope, WS-only transport, and the RD's
+      privileged control path are all built and pinned by a strict contract suite — the as-built
+      details and remaining refinements are in <a href="protocol.html">Protocol</a>.</li>
       <li><span class="q">Cloud warehouse, season model &amp; identity reconciliation.</span>
       The aggregate store, season scoring, and merging local pilots into the global
       registry — <a href="cloud.html">Cloud &amp; Season</a>.</li>
       <li><span class="q">Streaming &amp; broadcast subsystem.</span> OBS control,
       capture / RTMP handling, and the overlay catalogue — <a href="streaming.html">Streaming</a>.</li>
-      <li><span class="q">Time &amp; clock authority.</span> The authoritative clock
-      (monotonic for race timing vs wall-clock for logging) and how adapter timestamps —
-      sim time vs hardware time — map onto one timeline — <a href="timer-adapters.html">Timer Adapters</a>.</li>
+      <li><span class="resolved">Resolved (race clock) — Time &amp; clock authority.</span> The
+      <strong>race clock is server-time authoritative</strong>: a heat's <code>Armed → Running</code>
+      and <code>Running → Unofficial</code> transitions are stamped with the server's
+      <code>recorded_at</code> (µs) at the single append choke point, and the live state derives
+      elapsed from those instants — header and HUD share the anchor, with no client wall-clock drift
+      (<a href="live-state-clock.html">Live State &amp; the Race Clock</a> §2). Lap/split
+      <em>intervals</em> stay on the source's own clock (sim time vs hardware time); how those
+      timelines map onto one axis is still <a href="timer-adapters.html">Timer Adapters</a>.</li>
       <li><span class="q">Log &amp; schema versioning.</span> How the event-log format
       evolves while keeping old events readable for long-term open data — paired with the
       <a href="protocol.html">Protocol</a> contract versioning.</li>
