@@ -14,13 +14,8 @@
 //! race can be served.
 #![forbid(unsafe_code)]
 
-use gridfpv_app::director::{AssetStatus, Config, asset_status, build_app};
-use gridfpv_app::source::{
-    SIM_ADAPTER, SourceConfig, spawn_presence_reconciler, spawn_registry_bridge,
-};
+use gridfpv_app::director::{AssetStatus, Config, asset_status, run_director};
 use gridfpv_app::{SyntheticPilot, append_and_project, render_lap_list, synthetic_session};
-use gridfpv_events::AdapterId;
-use gridfpv_server::events::EventRegistry;
 use gridfpv_storage::SqliteLog;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,51 +32,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Open the log, wire the Director, print the login details, and serve until shutdown.
+///
+/// The actual Director wiring (registry, token, source bridge, presence reconciler, router,
+/// bind, serve) lives in the reusable [`gridfpv_app::director::run_director`] — shared with
+/// the Tauri native app — so this binary's behavior is identical to when the wiring was
+/// inline here. This function only resolves the env config and prints the startup banner via
+/// the `on_ready` callback.
 async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
+    let banner_config = config.clone();
 
-    // Build the event registry — events are first-class containers (#72), each with its own
-    // log. The built-in **Practice** event (in-memory, non-persistent) is always present;
-    // events created via `POST /events` get a SQLite file under the configured data dir.
-    let registry = EventRegistry::new(config.data_dir.clone())?;
-
-    // Control auth is **full-trust (open) by default** (issue #72, Slice 1b): the control
-    // path requires no credential unless one is *configured*. So we only register an RD token
-    // when `GRIDFPV_RD_TOKEN` is set to a non-blank value — a *known* credential so an
-    // automated/remote client (the Tauri app, a token-gated deployment) can log in
-    // deterministically; with the env unset the Director registers **no** token and control is
-    // open (safe on loopback / a trusted LAN). The proper loopback-trust + remote-passphrase
-    // split for production is tracked separately as #80.
-    let tokens = registry.tokens();
-    let rd_token = match std::env::var("GRIDFPV_RD_TOKEN") {
-        Ok(value) if tokens.register_rd_token(&value) => Some(value),
-        _ => None,
-    };
-
-    // Resolve the built-in lap source (default `sim`) and spawn the **per-event**
-    // control→source bridge over the registry: each event (Practice + any created event) gets
-    // its own bridge feeding sim passes into ITS own log when a heat goes `Running` there. It
-    // runs until the process exits (see [`gridfpv_app::source::spawn_registry_bridge`]).
-    let source = SourceConfig::from_env();
-    let source_desc = source.describe();
-    let _bridge =
-        spawn_registry_bridge(registry.clone(), source, AdapterId(SIM_ADAPTER.to_string()));
-
-    // Spawn the **sim auto-presence reconciler** (race redesign Slice 1a): per event it tails the
-    // log for the sim adapter's `CompetitorSeen` and auto-adds + binds any seen player whose name
-    // matches a directory pilot's callsign — so a sim race needs no manual roster/registration.
-    let _presence = spawn_presence_reconciler(registry.clone());
-
-    let app = build_app(registry, &config.assets);
-
-    let listener = tokio::net::TcpListener::bind(config.addr).await?;
-    let bound = listener.local_addr()?;
-    print_startup(&config, bound, rd_token.as_deref(), &source_desc);
-
-    // Serve until Ctrl-C; the protocol API + the RD console SPA are live on `bound`.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    run_director(
+        config.addr,
+        config.data_dir,
+        config.assets,
+        // Print the same startup banner once the listener is bound, before serving.
+        move |ready| {
+            print_startup(
+                &banner_config,
+                ready.bound,
+                ready.rd_token.as_deref(),
+                &ready.source_desc,
+            );
+        },
+        // Serve until Ctrl-C.
+        shutdown_signal(),
+    )
+    .await?;
 
     println!("gridfpv: shutting down");
     Ok(())

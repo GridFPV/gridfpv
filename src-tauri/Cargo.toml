@@ -1,0 +1,47 @@
+# GridFPV native desktop app (Tauri 2) — the RELEASE form of the Director.
+#
+# This crate is EXCLUDED from the root workspace (see `../Cargo.toml`) so the core check
+# suite (`cargo xtask ci`) never compiles it — CI runners have no webkit2gtk/GTK. It carries
+# its own `[workspace]` table below so it resolves standalone while path-depending back into
+# the spine (`gridfpv-app`), reusing the **exact same** Director via `run_director`.
+#
+# Build it separately with:  cd src-tauri && cargo tauri build
+[package]
+name = "gridfpv-desktop"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/GridFPV/gridfpv"
+rust-version = "1.85"
+description = "GridFPV native desktop app — embeds the Director and opens the RD console."
+default-run = "gridfpv-desktop"
+
+# Standalone workspace: keeps this crate out of the root spine workspace (which excludes it)
+# while still letting cargo resolve its own lockfile here.
+[workspace]
+
+[lib]
+name = "gridfpv_desktop_lib"
+# Tauri's mobile targets want a cdylib/staticlib; on desktop a plain rlib is fine, but we keep
+# the conventional crate types so the same lib could be reused by a future mobile shell.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "gridfpv-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The Director itself: the native app runs the SAME `gridfpv_app::director::run_director` the
+# hosted `gridfpv` binary runs — in-process, on a tokio task, bound to loopback. No `live`
+# feature (sim source only), so the desktop build pulls no openssl, exactly like the Director.
+gridfpv-app = { path = "../crates/app" }
+
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+
+[features]
+# This feature is used by the Tauri webview-isolation tooling; harmless default.
+custom-protocol = ["tauri/custom-protocol"]

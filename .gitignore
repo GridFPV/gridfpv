@@ -1,6 +1,13 @@
 # Rust build artifacts
 /target/
 
+# Tauri native-app build artifacts. `src-tauri` is the release-only desktop crate
+# (excluded from the workspace; built with `cargo tauri build`). Its own `target/` and
+# Tauri's generated `gen/` (capability schemas) are derived — never committed. The bundled
+# RD-console dist is built fresh by the `beforeBuildCommand`, so it's ignored too.
+/src-tauri/target/
+/src-tauri/gen/
+
 # Claude Code local state (agent worktrees, etc.)
 .claude/
 
