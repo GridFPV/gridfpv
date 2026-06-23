@@ -222,7 +222,7 @@ test('a qualifying round: win condition IS the metric, "Heats per pilot", heats 
   // ── Two heats in the round → named by position: "Qualifying Heat 1" / "Qualifying Heat 2".
   // Schedule them via the control API tagged with the round (the generator only emits the next heat
   // once the prior is finalized; two ScheduleHeats give the two heats this naming test needs without
-  // running them). The Heats list re-reads on the live-state push, so the names appear.
+  // running them).
   for (const heatId of ['round-1', 'round-2']) {
     await page.request.post(`${ev}/control`, {
       ...json,
@@ -231,13 +231,23 @@ test('a qualifying round: win condition IS the metric, "Heats per pilot", heats 
       }
     });
   }
-  await expect(page.getByText('Qualifying Heat 1')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText('Qualifying Heat 2')).toBeVisible({ timeout: 15_000 });
-  // The raw generated heat ids are not shown.
-  await expect(page.getByText('round-1', { exact: true })).toHaveCount(0);
+  // The Heats list re-reads on a live-state push OR on a fresh mount. Filling a heat does NOT steal
+  // Live focus (current-heat.spec.ts), so on the shared worker Director — where a prior spec may
+  // have left a heat current — scheduling these does not necessarily push a live change, leaving the
+  // list stale. Reload to force a fresh fetch so this assertion is order-independent.
+  await page.reload();
   await page
-    .getByRole('region', { name: 'Heats for Qualifying' })
-    .screenshot({ path: `${SHOTS}rounds-qualifying-heat-names.png` });
+    .getByRole('navigation', { name: 'Screens' })
+    .getByRole('button', { name: 'Rounds & Heats' })
+    .click();
+  const heatsRegion = page.getByRole('region', { name: 'Heats for Qualifying' });
+  await expect(heatsRegion.getByText('Qualifying Heat 1')).toBeVisible({ timeout: 15_000 });
+  await expect(heatsRegion.getByText('Qualifying Heat 2')).toBeVisible({ timeout: 15_000 });
+  // The raw generated heat ids are not shown IN THE HEATS LIST — scoped to that region, because the
+  // Live HUD's ContextHeader legitimately shows the current heat's raw id (and on the shared worker
+  // Director one of these scheduled heats is the current heat), which a page-wide assert would catch.
+  await expect(heatsRegion.getByText('round-1', { exact: true })).toHaveCount(0);
+  await heatsRegion.screenshot({ path: `${SHOTS}rounds-qualifying-heat-names.png` });
 
   // Clean up the shared Director's event back to empty.
   await page.request.delete(`${ev}/rounds/${roundId}`);

@@ -123,6 +123,9 @@ test('no start tone on landing on an already-running heat (late join); tone on a
   await page.goto('/');
   await enterPractice(page);
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
+  // The late-join heat's own Stage/Start transitions above already moved the Director's
+  // `current_heat` onto it (a transition is exactly what moves focus), so the page lands on it
+  // regardless of what a prior spec left current.
   // The heat is already Running when the page lands on it (a late join).
   await expect(page.locator('.heat-id .value')).toHaveText('late-join-1', { timeout: 15_000 });
   await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
@@ -144,6 +147,14 @@ test('no start tone on landing on an already-running heat (late join); tone on a
   ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: 'tone-1', lineup: ['Ace', 'Bee', 'Cee'] } }
+  });
+  expect(ack.ok()).toBeTruthy();
+  // Filling tone-1 does NOT steal Live focus (fill-no-steal), and discarding the late-join heat
+  // above did not move focus off it either — so explicitly focus tone-1 as the current heat over
+  // the control path (server-side, independent of the Live picker's fetch timing).
+  ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: { SetCurrentHeat: { heat: 'tone-1' } }
   });
   expect(ack.ok()).toBeTruthy();
   await expect(page.locator('.heat-id .value')).toHaveText('tone-1', { timeout: 15_000 });
@@ -226,9 +237,17 @@ test('REAL AudioContext: a control click resumes to running and the synth graph 
   await enterPractice(page);
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
-  const ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  let ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: 'tone-real-1', lineup: ['Ace', 'Bee', 'Cee'] } }
+  });
+  expect(ack.ok()).toBeTruthy();
+  // Explicitly focus THIS heat as the current heat (SetCurrentHeat) over the control path; filling
+  // does not steal Live focus, so this keeps the test independent of any heat a prior spec left
+  // current (server-side, independent of the Live picker's fetch timing).
+  ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: { SetCurrentHeat: { heat: 'tone-real-1' } }
   });
   expect(ack.ok()).toBeTruthy();
   await expect(page.locator('.heat-id .value')).toHaveText('tone-real-1', { timeout: 15_000 });

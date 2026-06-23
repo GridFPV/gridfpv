@@ -626,12 +626,23 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
     }
   });
   expect(sched.ok()).toBeTruthy();
+  // Explicitly focus THIS test's heat as the current heat (SetCurrentHeat) over the control path.
+  // The shared worker Director's `current_heat` is pinned to whatever heat the LAST transition or
+  // selection touched (it never resets between specs), and filling a heat deliberately does NOT
+  // steal Live focus (see current-heat.spec.ts) — so without this explicit selection the run flakes
+  // against a stale current heat from an earlier spec. Doing it on the server (not via the Live
+  // picker, whose options only re-fetch on a live change) makes this independent of UI timing.
+  const focused = await page.request.post(`${ev}/control`, {
+    ...json,
+    data: { SetCurrentHeat: { heat: HEAT_ID } }
+  });
+  expect(focused.ok()).toBeTruthy();
 
   // ── Drive the heat to Final through Live control ─────────────────────────────────────────────
   await page.goto('/');
   await enterPractice(page);
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
-  // The scheduled heat is current; run it.
+  // The scheduled heat is now the current heat; run it.
   await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID, { timeout: 15_000 });
   // Heat-lifecycle Slices 1–3: Stage → Start (arms; the runtime auto-advances to Running after a
   // randomized hold). No manual Arm/Start→Running button; ForceEnd is the end-window override.
