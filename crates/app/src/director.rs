@@ -17,16 +17,20 @@
 //! drive the exact same router over an in-memory log via `tower::ServiceExt::oneshot`,
 //! with no real socket and no dependency on a built frontend `dist/`.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
+use gridfpv_events::AdapterId;
 use gridfpv_server::app::{router, smart_fallback};
 use gridfpv_server::events::EventRegistry;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
+
+use crate::source::{SIM_ADAPTER, SourceConfig, spawn_presence_reconciler, spawn_registry_bridge};
 
 /// The default listen address: every interface on port 8080, so the RD console and the
 /// LAN spectators reach the Director without extra config.
@@ -95,6 +99,94 @@ impl Config {
             assets,
         })
     }
+}
+
+/// What [`run_director`] reports back to its caller once the listener is bound, before
+/// it starts serving: the resolved bind address and whether the control path is gated.
+///
+/// The Director binary uses this to print its startup banner; the Tauri app uses
+/// `bound.port()` to learn the ephemeral port it should point the window at.
+#[derive(Debug, Clone)]
+pub struct DirectorReady {
+    /// The address the listener actually bound to. With a `:0` request this carries the
+    /// OS-assigned ephemeral port — the only way to learn it.
+    pub bound: SocketAddr,
+    /// The registered RD token, if `GRIDFPV_RD_TOKEN` configured one; `None` ⇒ control is
+    /// open (full-trust, safe on loopback).
+    pub rd_token: Option<String>,
+    /// A one-line description of the active lap source (for the startup banner).
+    pub source_desc: String,
+}
+
+/// Run the GridFPV Director server to completion: open the event registry, register an
+/// optional RD token, spawn the built-in lap-source bridge + presence reconciler, build the
+/// router, bind `addr`, hand the resolved [`DirectorReady`] to `on_ready`, then serve until
+/// `shutdown` resolves.
+///
+/// This is the **single reusable Director entry point**, shared by:
+/// - the `gridfpv` binary (`main.rs`), which passes the env-resolved [`Config`] address, the
+///   process Ctrl-C signal as `shutdown`, and an `on_ready` that prints the startup banner —
+///   so the binary's behavior is unchanged; and
+/// - the Tauri native app, which passes a per-user app-data dir, a `127.0.0.1:0` address
+///   (ephemeral free port on loopback ⇒ no auth per the auth model), and an `on_ready` that
+///   records `bound.port()` so it can point the window at `http://127.0.0.1:<port>`.
+///
+/// The token / bridge / presence wiring matches what `serve()` did inline before this was
+/// extracted, so both callers get identical Director behavior.
+///
+/// `addr` is the requested bind address (use a `:0` port for an OS-assigned ephemeral one).
+/// `data_dir` is where created events' SQLite files live (`None` ⇒ in-memory, non-durable).
+/// `assets` is the built RD-console `dist/` to serve as the SPA. `on_ready` is invoked once,
+/// after binding, with the resolved [`DirectorReady`]. `shutdown` is awaited to trigger a
+/// graceful stop.
+pub async fn run_director<R, S>(
+    addr: SocketAddr,
+    data_dir: Option<PathBuf>,
+    assets: PathBuf,
+    on_ready: R,
+    shutdown: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    R: FnOnce(&DirectorReady),
+    S: Future<Output = ()> + Send + 'static,
+{
+    // Events are first-class containers (#72): the built-in Practice event is always present
+    // (in-memory); created events persist as a SQLite file under `data_dir` when set.
+    let registry = EventRegistry::new(data_dir)?;
+
+    // Control auth is full-trust (open) by default (#72, Slice 1b): register an RD token only
+    // when `GRIDFPV_RD_TOKEN` is set to a non-blank value. On loopback (the Tauri app) this is
+    // unset, so control is open — matching the loopback-no-auth model.
+    let tokens = registry.tokens();
+    let rd_token = match std::env::var("GRIDFPV_RD_TOKEN") {
+        Ok(value) if tokens.register_rd_token(&value) => Some(value),
+        _ => None,
+    };
+
+    // The built-in lap source (default `sim`) + the per-event control→source bridge: each
+    // event gets a bridge feeding sim passes into ITS log when a heat goes `Running`. Plus the
+    // sim auto-presence reconciler (race redesign Slice 1a). Both run until the process exits.
+    let source = SourceConfig::from_env();
+    let source_desc = source.describe();
+    let _bridge =
+        spawn_registry_bridge(registry.clone(), source, AdapterId(SIM_ADAPTER.to_string()));
+    let _presence = spawn_presence_reconciler(registry.clone());
+
+    let app = build_app(registry, &assets);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+
+    on_ready(&DirectorReady {
+        bound,
+        rd_token,
+        source_desc,
+    });
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
+    Ok(())
 }
 
 /// The default RD console assets directory: `frontend/apps/rd-console/dist` under the

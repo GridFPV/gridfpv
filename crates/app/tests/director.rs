@@ -7,11 +7,15 @@
 //! committed tests never depend on the real frontend `dist/`: the SPA case writes its own
 //! tiny `index.html` into a temp dir.
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use gridfpv_app::director::{AssetStatus, asset_status, build_app, default_assets_dir};
+use gridfpv_app::director::{
+    AssetStatus, asset_status, build_app, default_assets_dir, run_director,
+};
 use gridfpv_server::events::EventRegistry;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -130,6 +134,97 @@ async fn cors_preflight_is_permissive() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The **embedded-Director path** the Tauri native app relies on: [`run_director`] binds a
+/// loopback **ephemeral** port (`127.0.0.1:0`), reports the OS-assigned port via `on_ready`,
+/// and answers `/health` over a real socket — all with **no display**, proving the server
+/// half of the desktop app is sound on a headless VM (the GUI window is the only piece that
+/// needs a display). A `oneshot`-driven graceful shutdown then stops it cleanly.
+#[tokio::test]
+async fn run_director_serves_health_on_loopback_ephemeral_port() {
+    let dir = temp_dir("embedded");
+    std::fs::write(dir.join("index.html"), "<title>RD Console</title>").unwrap();
+
+    // Capture the bound address `run_director` reports — this is exactly what the Tauri app
+    // reads (`ready.bound.port()`) to point its window at `http://127.0.0.1:<port>`.
+    let bound: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+    let bound_for_cb = bound.clone();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Run the SAME entry point the desktop app uses, on loopback + an ephemeral port, with no
+    // configured token (⇒ open control, the loopback-trust model) and an in-memory registry.
+    let server = tokio::spawn(async move {
+        // `Box<dyn Error>` isn't `Send`, so flatten to a `String` for the join across tasks.
+        run_director(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            None,
+            dir,
+            move |ready| {
+                *bound_for_cb.lock().unwrap() = Some(ready.bound);
+            },
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())
+    });
+
+    // Poll briefly for `on_ready` to record the bound (ephemeral) address.
+    let addr = {
+        let mut found = None;
+        for _ in 0..100 {
+            if let Some(addr) = *bound.lock().unwrap() {
+                found = Some(addr);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        found.expect("run_director reported its bound address via on_ready")
+    };
+
+    assert!(addr.ip().is_loopback(), "bound to loopback: {addr}");
+    assert_ne!(addr.port(), 0, "an ephemeral port was assigned: {addr}");
+
+    // Hit the real socket: the embedded Director answers /health with a 200 "ok".
+    let body = reqwest_get(&format!("http://{addr}/health")).await;
+    assert_eq!(
+        body, "ok",
+        "embedded Director answers /health over loopback"
+    );
+
+    // Graceful shutdown via the oneshot trigger, mirroring the app's lifetime model.
+    let _ = shutdown_tx.send(());
+    server
+        .await
+        .expect("server task joins")
+        .expect("run_director returns Ok after graceful shutdown");
+}
+
+/// A tiny dependency-free HTTP GET over a TcpStream — enough to read a short `/health` body
+/// without pulling an HTTP client into the app crate's dev-deps.
+async fn reqwest_get(url: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr = url.strip_prefix("http://").unwrap();
+    let (host_port, path) = match addr.find('/') {
+        Some(i) => (&addr[..i], &addr[i..]),
+        None => (addr, "/"),
+    };
+    let mut stream = tokio::net::TcpStream::connect(host_port).await.unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf);
+    // The body follows the blank line after the headers.
+    text.split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 #[test]

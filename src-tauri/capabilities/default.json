@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capabilities for the GridFPV desktop shell. The RD console talks to the embedded Director directly over HTTP/WS (same origin), so the webview needs no Tauri JS API surface beyond the core defaults.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
