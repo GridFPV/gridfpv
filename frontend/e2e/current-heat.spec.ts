@@ -79,3 +79,47 @@ test('filling a heat does not steal Live focus; the heat picker selects the curr
   await page.getByRole('button', { name: 'Abort', exact: true }).click();
   await page.getByRole('button', { name: 'Confirm' }).click();
 });
+
+test('scheduling a heat that does not move on-deck still appears in the picker without a transition', async ({
+  page,
+  director
+}) => {
+  // Regression for the stale-list bug: filling a heat that changes neither `current_heat`
+  // (fill-no-steal) NOR `on_deck` (the earliest still-scheduled heat) leaves the whole
+  // `LiveRaceState` body unchanged — so the picker (and the Rounds & Heats list), which re-read
+  // `/heats` on a stream update, used to stay stale until the next transition. The backend now
+  // force-emits a stream envelope on a schedule, so the new heat must appear immediately.
+  await page.goto('/');
+  await enterPractice(page);
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
+
+  const schedule = (heat: string, lineup: string[]) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { ScheduleHeat: { heat, lineup } }
+    });
+
+  // The Director is shared across specs, so a prior spec may have left a current heat / on-deck.
+  // We don't depend on which heat is current — we drive the current heat explicitly via the picker
+  // (a SetCurrentHeat) so the assertions hold regardless of leftover ordering.
+  const select = page.getByRole('combobox', { name: 'Select current heat' });
+
+  // 1) Schedule two heats and pin the first as the current heat via the picker. Picking it records
+  //    a SetCurrentHeat, so `current_heat` is now sc-1 deterministically (no leftover dependence).
+  expect((await schedule('sc-1', ['Ace', 'Bee'])).ok()).toBeTruthy();
+  expect((await schedule('sc-2', ['Cee', 'Dee'])).ok()).toBeTruthy();
+  await expect(select.locator('option', { hasText: 'sc-1' })).toHaveCount(1, { timeout: 15_000 });
+  await select.selectOption('sc-1');
+  await expect(page.locator('.heat-id .value')).toHaveText('sc-1', { timeout: 15_000 });
+
+  // 2) The bug repro: a THIRD heat scheduled now. With sc-1 current and an on-deck already present,
+  //    appending sc-3 moves neither `current_heat` (fill-no-steal) nor the on-deck (the earliest
+  //    still-scheduled heat), so the live `LiveRaceState` body is unchanged. Before the fix the
+  //    picker stayed stale until a transition; now the backend wakes the stream on a schedule, so
+  //    sc-3 must appear in the picker IMMEDIATELY — no transition driven.
+  expect((await schedule('sc-3', ['Eff', 'Gee'])).ok()).toBeTruthy();
+  await expect(select.locator('option', { hasText: 'sc-3' })).toHaveCount(1, { timeout: 15_000 });
+
+  // 3) The schedule did NOT steal focus — the current heat is still sc-1.
+  await expect(page.locator('.heat-id .value')).toHaveText('sc-1');
+});

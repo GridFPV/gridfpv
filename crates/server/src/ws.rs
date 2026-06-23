@@ -414,6 +414,21 @@ impl Engine {
     /// non-logged per-channel live re-snapshot. Each `wake_streams` after a pass / clear re-enters
     /// this with a fresh `overlay`, so a clear settles back onto the bare log state with no stale
     /// frame.
+    ///
+    /// # Scheduling a heat wakes the stream even when the body is unchanged
+    ///
+    /// A bare [`Event::HeatScheduled`] that *fills* a heat must NOT steal Live focus
+    /// ([`live_state`] keeps `current_heat` on the staged/last-transitioned heat), and it often does
+    /// not move `on_deck` either (that is the *earliest* still-scheduled heat — appending a third
+    /// heat behind it leaves it unchanged). So for a `LiveRaceState` scope the folded body can be
+    /// byte-identical across a `HeatScheduled` offset, and the plain change-suppression below would
+    /// emit nothing — leaving every client's `/heats`-derived list (the Live heat picker, the
+    /// Rounds & Heats list) stale until the next real transition. A scheduled heat is nonetheless a
+    /// real, observable change to the event's heat set, so we **force one fresh-value envelope** at a
+    /// `HeatScheduled` offset for the live-state scopes, re-sending the (possibly unchanged) body.
+    /// The client dedups by per-stream `sequence`, not by content, so re-sending the same body is
+    /// harmless; the extra envelope simply wakes consumers to re-read the heats list. `current_heat`
+    /// is untouched, so this never steals focus (the `current-heat` proof stays green).
     fn advance(
         &mut self,
         events: &[StoredEvent],
@@ -421,6 +436,9 @@ impl Engine {
     ) -> Vec<StreamMessage> {
         let mut out = Vec::new();
         let len = events.len() as u64;
+        // Whether this scope folds the live race-state (Event/Class/Heat): only those carry the
+        // heat set the `/heats` lists derive from, so only they need the schedule-wake re-emit.
+        let live_state_scope = self.projection.kind == ProjectionKind::LiveRaceState;
 
         // On the *first* fold from a resume point > 0, seed `last_emitted` with the
         // projection value at `from` so we only emit changes strictly after the cursor
@@ -434,11 +452,19 @@ impl Engine {
         while self.applied_offset < len {
             self.applied_offset += 1;
             let prefix = &events[..self.applied_offset as usize];
+            // Whether the event newly folded at this offset schedules a heat — a real change to the
+            // event's heat set that must wake the heats lists even when the rendered body is unchanged
+            // (the fill-no-steal case; see the doc comment above).
+            let scheduled_heat = live_state_scope
+                && matches!(
+                    prefix.last().map(|s| &s.event),
+                    Some(Event::HeatScheduled { .. })
+                );
             // The per-offset walk is over the pure log (no overlay) so logged-change sequencing is
             // unaffected; the overlay re-snapshot is emitted once after the walk, below.
             let body = ScopeProjection::fold(&self.scope, prefix, None);
             if let Some(body) = body {
-                if self.last_emitted.as_ref() != Some(&body) {
+                if scheduled_heat || self.last_emitted.as_ref() != Some(&body) {
                     out.push(StreamMessage::Change(self.envelope(body.clone())));
                     self.last_emitted = Some(body);
                 }
@@ -542,4 +568,101 @@ async fn close_with(socket: &mut WebSocket, err: ProtocolError) {
             reason: reason.into(),
         })))
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gridfpv_events::{HeatId, HeatTransition};
+
+    /// Wrap a bare [`Event`] as a stored log entry (offset/timing irrelevant to the fold here).
+    fn stored(event: Event) -> StoredEvent {
+        StoredEvent {
+            offset: 0,
+            recorded_at: None,
+            event,
+        }
+    }
+
+    fn scheduled(id: &str) -> Event {
+        Event::HeatScheduled {
+            heat: HeatId(id.into()),
+            lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+            class: None,
+            round: None,
+            frequencies: Vec::new(),
+        }
+    }
+
+    fn changed(id: &str, transition: HeatTransition) -> Event {
+        Event::HeatStateChanged {
+            heat: HeatId(id.into()),
+            transition,
+        }
+    }
+
+    fn event_engine() -> Engine {
+        let scope = Scope::Event {
+            event: EventId("practice".into()),
+        };
+        Engine::new(scope.clone(), ScopeProjection::of(&scope), 0)
+    }
+
+    /// How many `Change` envelopes a batch of stream messages carries.
+    fn change_count(msgs: &[StreamMessage]) -> usize {
+        msgs.iter()
+            .filter(|m| matches!(m, StreamMessage::Change(_)))
+            .count()
+    }
+
+    #[test]
+    fn scheduling_a_heat_wakes_the_stream_even_when_the_body_is_unchanged() {
+        // Reproduce the fill-no-steal staleness: q-1 is staged (current), q-2 is on deck. Scheduling
+        // a THIRD heat (q-3) appends behind the on-deck heat, so `current_heat` (still q-1) and
+        // `on_deck` (still q-2, the earliest scheduled) are unchanged — the folded `LiveRaceState`
+        // body is byte-identical. The stream must still emit an envelope so heats lists re-read.
+        let mut engine = event_engine();
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(scheduled("q-2")),
+        ];
+        // Catch up to the current state; the picker would now show q-1 + q-2.
+        let _ = engine.advance(&log, None);
+
+        // Append q-3 — a bare schedule that does not move current/on-deck.
+        let mut log3 = log.clone();
+        log3.push(stored(scheduled("q-3")));
+        let out = engine.advance(&log3, None);
+
+        // Exactly one fresh-value envelope is emitted for the schedule (the wake), even though the
+        // body did not change — so every console re-reads `/heats` and q-3 appears immediately.
+        assert_eq!(change_count(&out), 1, "a schedule must wake the stream");
+        match &out[0] {
+            StreamMessage::Change(env) => match &env.change {
+                Change::FreshValue(ProjectionBody::LiveRaceState(live)) => {
+                    // current_heat is unchanged — no focus steal.
+                    assert_eq!(live.current_heat, Some(HeatId("q-1".into())));
+                    assert_eq!(live.on_deck, Some(HeatId("q-2".into())));
+                }
+                other => panic!("expected a LiveRaceState fresh value, got {other:?}"),
+            },
+            other => panic!("expected a Change envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_schedule_unchanged_fold_still_emits_nothing() {
+        // The wake is scoped to `HeatScheduled` offsets only — an offset that leaves the body
+        // unchanged for any other reason must stay suppressed (no spurious envelopes).
+        let mut engine = event_engine();
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+        ];
+        let _ = engine.advance(&log, None);
+        // Re-advancing over the SAME log (no new offsets) emits nothing.
+        let out = engine.advance(&log, None);
+        assert_eq!(change_count(&out), 0);
+    }
 }

@@ -238,8 +238,10 @@ async fn too_old_cursor_requires_re_snapshot() {
     }
 }
 
-/// A change that does not alter the scoped projection emits no envelope (the engine emits
-/// one envelope per *change*, keeping the per-stream sequence a faithful change count).
+/// A transition that does not alter the scoped projection emits no envelope (the engine emits
+/// one envelope per *change*, keeping the per-stream sequence a faithful change count) — except
+/// a `HeatScheduled`, which always wakes the stream so the heats lists re-read (see
+/// `scheduling_a_heat_wakes_the_stream_even_when_the_body_is_unchanged`, below).
 #[tokio::test]
 async fn unchanged_fold_emits_no_envelope() {
     let (registry, state) = practice_registry();
@@ -263,18 +265,82 @@ async fn unchanged_fold_emits_no_envelope() {
     assert_eq!(seq(&m1), 1);
     assert_eq!(live_body(&m1).phase, HeatPhase::Scheduled);
 
-    // Re-scheduling the same heat with the same lineup folds to the same live state → no
-    // new envelope. A following Running transition *does* change it and must arrive as
-    // sequence 2 (proving sequence 2 was not silently consumed by the no-op append).
+    // Re-applying the same Running transition folds to the same live state → no new envelope.
+    // A following Running transition (after a fold-changing Staged) proves the no-op did not
+    // consume a sequence: drive Staged (a change, seq 2) then Running (a change, seq 3) and
+    // re-append Running (a no-op) — the next message read is the genuine Running at seq 3.
     state
-        .append(heat_scheduled("q-1", &["A", "B"]), None)
+        .append(heat_changed("q-1", HeatTransition::Staged), None)
         .unwrap();
+    let m2 = next_message(&mut ws).await;
+    assert_eq!(seq(&m2), 2);
+    assert_eq!(live_body(&m2).phase, HeatPhase::Staged);
+
     state
         .append(heat_changed("q-1", HeatTransition::Running), None)
         .unwrap();
-    let m2 = next_message(&mut ws).await;
-    assert_eq!(seq(&m2), 2, "the no-op append did not consume a sequence");
-    assert_eq!(live_body(&m2).phase, HeatPhase::Running);
+    // A redundant Running transition folds to the SAME body → no envelope; it must not consume
+    // a sequence, so the Running message arrives at seq 3.
+    state
+        .append(heat_changed("q-1", HeatTransition::Running), None)
+        .unwrap();
+    let m3 = next_message(&mut ws).await;
+    assert_eq!(
+        seq(&m3),
+        3,
+        "the no-op transition did not consume a sequence"
+    );
+    assert_eq!(live_body(&m3).phase, HeatPhase::Running);
+}
+
+/// A bare `HeatScheduled` that *fills* a heat must wake the change stream even when the folded
+/// `LiveRaceState` body is unchanged (fill-no-steal does not move `current_heat`, and an
+/// appended heat behind the on-deck one does not move `on_deck`). The end-to-end proof that the
+/// scheduled heat reaches consumers so the Live heat picker / Rounds & Heats list re-read
+/// `/heats` without waiting for a transition.
+#[tokio::test]
+async fn scheduling_a_heat_wakes_the_stream_even_when_the_body_is_unchanged() {
+    let (registry, state) = practice_registry();
+    let (url, _server) = serve(registry.clone()).await;
+
+    let mut ws = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: None,
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+
+    // q-1 scheduled + staged (current), q-2 scheduled (on-deck).
+    state
+        .append(heat_scheduled("q-1", &["A", "B"]), None)
+        .unwrap();
+    assert_eq!(seq(&next_message(&mut ws).await), 1);
+    state
+        .append(heat_changed("q-1", HeatTransition::Staged), None)
+        .unwrap();
+    assert_eq!(seq(&next_message(&mut ws).await), 2);
+    state
+        .append(heat_scheduled("q-2", &["C", "D"]), None)
+        .unwrap();
+    let m_ondeck = next_message(&mut ws).await;
+    assert_eq!(seq(&m_ondeck), 3);
+    assert_eq!(live_body(&m_ondeck).on_deck, Some(HeatId("q-2".into())));
+
+    // q-3 scheduled behind q-2: neither `current_heat` (still q-1) nor `on_deck` (still q-2)
+    // moves, so the folded body is unchanged — yet the schedule must still wake the stream.
+    state
+        .append(heat_scheduled("q-3", &["E", "F"]), None)
+        .unwrap();
+    let m_wake = next_message(&mut ws).await;
+    assert_eq!(seq(&m_wake), 4, "a schedule wakes the stream");
+    let live = live_body(&m_wake);
+    // current_heat is untouched (no focus steal) and on_deck is unchanged.
+    assert_eq!(live.current_heat, Some(HeatId("q-1".into())));
+    assert_eq!(live.on_deck, Some(HeatId("q-2".into())));
 }
 
 /// A malformed first frame closes the socket with a BadRequest close (no panic, no hang).
