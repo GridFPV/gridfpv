@@ -6,11 +6,21 @@ import type {
   CreateClassRequest,
   CreatePilotRequest,
   EventMeta,
+  HeatSummary,
   Pilot,
   Timer
 } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
+import type { ControlClient, createControlClient } from '../src/lib/control.js';
 import { liveRunning, okAck, failAck } from './fixtures.js';
+
+/**
+ * Per-test overrides for the `Session` constructor's injected impls. Derived from the
+ * constructor's own options so the `*Impl` fields stay in lock-step with `Session`.
+ * (Vitest 4 widened `vi.fn()`'s return type, so the old `ReturnType<typeof vi.fn>`
+ * field typing no longer assigned to the specific impl signatures.)
+ */
+type SessionOverrides = Partial<NonNullable<ConstructorParameters<typeof Session>[0]>>;
 
 const PRACTICE: EventMeta = {
   id: 'practice',
@@ -533,14 +543,7 @@ describe('Session', () => {
       available_channels: []
     };
 
-    function timerSession(overrides?: {
-      listTimersImpl?: ReturnType<typeof vi.fn>;
-      createTimerImpl?: ReturnType<typeof vi.fn>;
-      updateTimerImpl?: ReturnType<typeof vi.fn>;
-      deleteTimerImpl?: ReturnType<typeof vi.fn>;
-      setEventTimersImpl?: ReturnType<typeof vi.fn>;
-      setPrimaryTimerImpl?: ReturnType<typeof vi.fn>;
-    }) {
+    function timerSession(overrides?: SessionOverrides) {
       const { connect } = mockConnect(connecting);
       const controlFactory = vi.fn(() => ({
         baseUrl: 'http://d.local',
@@ -799,12 +802,7 @@ describe('Session', () => {
   describe('pilots (#74)', () => {
     const ACE: Pilot = { id: 'p1', callsign: 'Ace', vtx_types: [] };
 
-    function pilotSession(overrides?: {
-      listPilotsImpl?: ReturnType<typeof vi.fn>;
-      createPilotImpl?: ReturnType<typeof vi.fn>;
-      updatePilotImpl?: ReturnType<typeof vi.fn>;
-      deletePilotImpl?: ReturnType<typeof vi.fn>;
-    }) {
+    function pilotSession(overrides?: SessionOverrides) {
       const { connect } = mockConnect(connecting);
       const controlFactory = vi.fn(() => ({
         baseUrl: 'http://d.local',
@@ -885,13 +883,7 @@ describe('Session', () => {
   describe('classes (#84)', () => {
     const OPEN: Class = { id: 'c1', name: 'Open', source: 'MultiGP' };
 
-    function classSession(overrides?: {
-      listClassesImpl?: ReturnType<typeof vi.fn>;
-      createClassImpl?: ReturnType<typeof vi.fn>;
-      updateClassImpl?: ReturnType<typeof vi.fn>;
-      deleteClassImpl?: ReturnType<typeof vi.fn>;
-      setEventClassesImpl?: ReturnType<typeof vi.fn>;
-    }) {
+    function classSession(overrides?: SessionOverrides) {
       const { connect } = mockConnect(connecting);
       const controlFactory = vi.fn(() => ({
         baseUrl: 'http://d.local',
@@ -981,12 +973,15 @@ describe('Session', () => {
 
   describe('heats (race redesign Slice 3b)', () => {
     function heatSession(overrides?: {
-      sendCommand?: ReturnType<typeof vi.fn>;
-      listHeatsImpl?: ReturnType<typeof vi.fn>;
+      sendCommand?: ControlClient['sendCommand'];
+      listHeatsImpl?: SessionOverrides['listHeatsImpl'];
     }) {
       const { connect } = mockConnect(connecting);
       const sendCommand = overrides?.sendCommand ?? vi.fn(async () => okAck);
-      const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
+      const controlFactory: typeof createControlClient = () => ({
+        baseUrl: 'http://d.local',
+        sendCommand
+      });
       const session = new Session({
         connectImpl: connect,
         controlFactory,
@@ -1019,8 +1014,8 @@ describe('Session', () => {
     });
 
     it('listHeats reads the round-tagged heats open (no token), [] with no event', async () => {
-      const heats = [
-        { heat: 'q-1', lineup: ['p1'], round: 'r1', phase: 'Scheduled', is_current: true } as const
+      const heats: HeatSummary[] = [
+        { heat: 'q-1', lineup: ['p1'], round: 'r1', phase: 'Scheduled', is_current: true }
       ];
       const listHeatsImpl = vi.fn(async () => heats);
       const { session } = heatSession({ listHeatsImpl });
