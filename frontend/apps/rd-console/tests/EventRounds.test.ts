@@ -47,15 +47,17 @@ const EVENT: EventMeta = {
 
 const FORMATS = ['double_elim', 'multi_main', 'round_robin', 'single_elim', 'timed_qual', 'zippyq'];
 
-// The format param schemas the screen reads (`GET /formats`). `timed_qual` declares a couple of
-// typed params (a number `rounds` + an enum `tiebreak`) — surfaced inline as proper labeled fields
-// (Rounds form redesign item 4); the rest declare none, so they show no Format options section.
+// The format param schemas the screen reads (`GET /formats`). `timed_qual` declares its `rounds`
+// param labelled **"Heats per pilot"** (the qualifying-metric param is gone — the metric is derived
+// from the win condition) plus a synthetic enum `tiebreak` to exercise enum-field rendering; the
+// rest declare none, so they show no Format options section. Params surface inline as proper labeled
+// fields (Rounds form redesign item 4).
 const SCHEMAS = FORMATS.map((name) =>
   name === 'timed_qual'
     ? {
         name,
         params: [
-          { key: 'rounds', label: 'Rounds', kind: 'number' as const, default: '3' },
+          { key: 'rounds', label: 'Heats per pilot', kind: 'number' as const, default: '3' },
           {
             key: 'tiebreak',
             label: 'Tiebreak',
@@ -311,7 +313,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     // The format's params show inline as proper labeled fields, seeded from their schema defaults —
     // no "+ Add param" control any more (Rounds form redesign item 4).
     expect(screen.queryByLabelText('Add param')).not.toBeInTheDocument();
-    const roundsInput = (await screen.findByLabelText('Rounds value')) as HTMLInputElement;
+    const roundsInput = (await screen.findByLabelText('Heats per pilot value')) as HTMLInputElement;
     expect(roundsInput.type).toBe('number');
     expect(roundsInput.value).toBe('3'); // schema default
     await fireEvent.input(roundsInput, { target: { value: '5' } });
@@ -342,9 +344,11 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     // its params from the submitted request.
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
-    expect(await screen.findByLabelText('Rounds value')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Heats per pilot value')).toBeInTheDocument();
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'zippyq' } });
-    await waitFor(() => expect(screen.queryByLabelText('Rounds value')).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Heats per pilot value')).not.toBeInTheDocument()
+    );
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
@@ -371,6 +375,56 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     expect(createRoundImpl.mock.calls[0][2].channel_mode).toBe('Static');
+  });
+
+  it('for a qualifying format, the win condition IS the metric — no separate metric field, no First-to-N option', async () => {
+    // The qualifying metric is derived from the win condition (Rounds form redesign), so a
+    // qualifying format (timed_qual / round_robin) shows NO separate "qualifying metric" field and
+    // the win-condition dropdown offers only the qualifying-applicable conditions.
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Q' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+
+    // No separate metric field is rendered (it was the old `metric` enum param / a "metric" control).
+    expect(screen.queryByLabelText(/qualifying metric/i)).toBeNull();
+    expect(screen.queryByLabelText(/ranking metric/i)).toBeNull();
+
+    // The win-condition dropdown offers only the qualifying conditions — First-to-N is hidden.
+    const win = (await screen.findByLabelText('Win condition')) as HTMLSelectElement;
+    const options = Array.from(win.options).map((o) => o.value);
+    expect(options).toEqual(['Timed', 'BestLap', 'BestConsecutive']);
+    expect(options).not.toContain('FirstToLaps');
+  });
+
+  it('shows the First-to-N win condition for a non-qualifying (bracket) format', async () => {
+    // A bracket format keeps the full win-condition catalogue, including First-to-N laps.
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Mains' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'single_elim' } });
+
+    const win = (await screen.findByLabelText('Win condition')) as HTMLSelectElement;
+    expect(Array.from(win.options).map((o) => o.value)).toContain('FirstToLaps');
+  });
+
+  it('shows the rounds param as "Heats per pilot" for a qualifying format', async () => {
+    // The `rounds` param keeps its key/default/behaviour but is relabeled "Heats per pilot" so it no
+    // longer clashes with the Round entity (Rounds form redesign).
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Q' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+
+    // The field renders as "Heats per pilot" (its value input is labelled "<label> value"), not "Rounds".
+    expect(await screen.findByLabelText('Heats per pilot value')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Rounds value')).toBeNull();
   });
 
   it('defaults the grace window to 30s on a new round (Rounds form redesign item 5)', async () => {
@@ -671,12 +725,46 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session } = makeTestSession({ ...heatsImpls([heat]), event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
+    // The heat is named "<round label> Heat <N>" (not the raw id) — the only heat in r1 → Heat 1.
+    const nameEl = await screen.findByText('Qualifying R1 Heat 1');
+    expect(nameEl).toHaveClass('heat-id');
+    expect(screen.queryByText('q-1')).toBeNull();
     // The heat appears under its round with resolved callsigns, a Running status, and Current.
-    const heatRow = (await screen.findByText('q-1')).closest('.heat-row') as HTMLElement;
+    const heatRow = nameEl.closest('.heat-row') as HTMLElement;
     expect(within(heatRow).getByText('AceOne')).toBeInTheDocument();
     expect(within(heatRow).getByText('Bolt')).toBeInTheDocument();
     expect(within(heatRow).getByText('Running')).toBeInTheDocument();
     expect(within(heatRow).getByText('Current')).toBeInTheDocument();
+  });
+
+  it('names each non-open-practice heat "<round label> Heat <N>" by its position in the round', async () => {
+    // Two heats in the same round → "Qualifying R1 Heat 1" and "Qualifying R1 Heat 2" by order.
+    const heats: HeatSummary[] = [
+      {
+        heat: 'q-a',
+        lineup: ['p1', 'p2'],
+        class: 'c1',
+        round: 'r1',
+        phase: 'Final',
+        is_current: false
+      },
+      {
+        heat: 'q-b',
+        lineup: ['p1', 'p2'],
+        class: 'c1',
+        round: 'r1',
+        phase: 'Scheduled',
+        is_current: false
+      }
+    ];
+    const { session } = makeTestSession({ ...heatsImpls(heats), event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    expect(await screen.findByText('Qualifying R1 Heat 1')).toBeInTheDocument();
+    expect(await screen.findByText('Qualifying R1 Heat 2')).toBeInTheDocument();
+    // The raw heat ids are not shown.
+    expect(screen.queryByText('q-a')).toBeNull();
+    expect(screen.queryByText('q-b')).toBeNull();
   });
 
   it("renders each pilot's assigned channel as a band+channel label, custom MHz, or — (Slice 4b)", async () => {
@@ -700,7 +788,9 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     });
     render(EventRounds, { session });
 
-    const heatRow = (await screen.findByText('q-1')).closest('.heat-row') as HTMLElement;
+    const heatRow = (await screen.findByText('Qualifying R1 Heat 1')).closest(
+      '.heat-row'
+    ) as HTMLElement;
     // The catalog frequency resolves to its band+channel; the custom one falls back to raw MHz.
     await waitFor(() => expect(within(heatRow).getByText('Raceband R1')).toBeInTheDocument());
     expect(within(heatRow).getByText('5685 MHz')).toBeInTheDocument();
@@ -722,7 +812,9 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     });
     render(EventRounds, { session });
 
-    const heatRow = (await screen.findByText('q-2')).closest('.heat-row') as HTMLElement;
+    const heatRow = (await screen.findByText('Qualifying R1 Heat 1')).closest(
+      '.heat-row'
+    ) as HTMLElement;
     // Both pilots show the dash (no channel assigned).
     const dashes = within(heatRow).getAllByText('—');
     expect(dashes.length).toBe(2);
@@ -784,8 +876,8 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     // A FillRound command tagged with the round was sent.
     await waitFor(() => expect(sendSpy).toHaveBeenCalled());
     expect(sendSpy.mock.calls[0][0]).toEqual({ FillRound: { round: 'r1' } });
-    // The newly-scheduled heat shows up after the re-read.
-    await screen.findByText('q-1');
+    // The newly-scheduled heat shows up after the re-read, named by its round + position.
+    await screen.findByText('Qualifying R1 Heat 1');
   });
 
   it('builds a heat by hand from the round’s eligible members (tagged, no free text)', async () => {

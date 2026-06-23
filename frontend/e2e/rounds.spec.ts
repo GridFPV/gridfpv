@@ -145,10 +145,11 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
  * **Guided round params + channel-mode toggle** (race redesign Slice 7b) — the deliverable proof.
  *
  * Enter Practice, select the Open Class, open Rounds & Heats and add a `timed_qual` round driving
- * the *guided* params editor: "+ Add param" offers only that format's params (`Rounds`, a number;
- * `metric`, an enum); add `Rounds` (a typed number input, seeded from its default) and set it, pick
- * the **Static** channel mode, and add the round. Assert it persisted on the Director with the
- * chosen `params.rounds` + `channel_mode: "Static"`. Cleans up after itself.
+ * the *guided* params editor: the format's params show inline as labeled fields. For a qualifying
+ * format the only param is `rounds`, labeled **"Heats per pilot"** (the qualifying metric is derived
+ * from the win condition, so there is no separate `metric` field). Set it, pick the **Static**
+ * channel mode, and add the round. Assert it persisted on the Director with the chosen
+ * `params.rounds` + `channel_mode: "Static"`. Cleans up after itself.
  */
 test('RD adds a round with a guided param and a Static channel mode', async ({
   page,
@@ -189,9 +190,10 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
   // The channel-mode toggle defaults from the format; force Static.
   await form.getByLabel('Channel mode').selectOption('Static');
 
-  // The format's params show inline as labeled fields (Rounds form redesign item 4); Rounds is
-  // seeded from its schema default — set it to 5.
-  const roundsInput = form.getByLabel('Rounds value');
+  // The format's params show inline as labeled fields (Rounds form redesign item 4); the `rounds`
+  // param is labeled "Heats per pilot" (it no longer clashes with the Round entity) and is seeded
+  // from its schema default — set it to 5.
+  const roundsInput = form.getByLabel('Heats per pilot value');
   await expect(roundsInput).toHaveValue('3'); // seeded from the schema default
   await roundsInput.fill('5');
   if (process.env.GRIDFPV_SHOTS)
@@ -317,8 +319,10 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   await page.getByRole('button', { name: 'Schedule heat' }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
 
-  // The hand-built heat now lists under the round too.
-  await expect(heatRound.getByText(HAND_HEAT)).toBeVisible({ timeout: 15_000 });
+  // The hand-built heat now lists under the round too — named by its position in the round (the
+  // filled heat is "<round> Heat 1", this hand-built one is "<round> Heat 2"), not its raw id.
+  await expect(heatRound.getByText(`${ROUND_LABEL} Heat 2`)).toBeVisible({ timeout: 15_000 });
+  await expect(heatRound.getByText(HAND_HEAT)).toHaveCount(0);
 
   // ── Clean up the shared Director's event back to empty. ───────────────────────────────────────
   await page.request.delete(`${ev}/rounds/${round.id}`);
