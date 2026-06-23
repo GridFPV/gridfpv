@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Decisions</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Decisions</h1>
+      <p class="doc-kind">Internal design doc · an ADR-style log of the race-engine &amp; heat-lifecycle decisions</p>
+    </header>
+
+    <p class="lead">
+      A decision log for the race engine and the heat lifecycle, written ADR-style:
+      <strong>context → decision → rationale</strong>. These are the calls that shaped the FSM
+      and the round/format model as they stand in the code today. The mechanics they describe
+      live in <a href="heat-lifecycle.html">Heat Lifecycle</a> and
+      <a href="race-engine.html">Race Engine</a>; this doc records <em>why</em>.
+    </p>
+
+    <div class="callout">
+      <p>
+        Each entry is a small accepted decision, not a spec. Where a decision changed an earlier
+        stance (e.g. an abort once landed at <code>Staged</code>), the entry says so. When this
+        doc and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>D1 · A six-phase heat lifecycle, named for honesty</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The original heat loop was <code>Scheduled → Staged → Armed → Running → Finished →
+      Scored</code>, with "Scored" as the terminal. But a scored heat is not yet
+      <em>official</em>: the grace window for late crossings is still open, marshaling may still
+      land, and the RD has not committed the result.</dd>
+      <dt>Decision</dt>
+      <dd>The phases are <code>Scheduled → Staged → Armed → Running → Unofficial → Final</code>.
+      The closed-but-uncommitted state is named <strong>Unofficial</strong> (not "Scored" or
+      "Completed"); <strong>Final</strong> is the locked terminal. The transition that closes the
+      race is <code>Finished</code>; it lands the heat in <code>Unofficial</code>.</dd>
+      <dt>Rationale</dt>
+      <dd>"Unofficial" tells the truth on the console: a real, displayable result that is
+      explicitly provisional and can still change. "Final" makes the commit a distinct, deliberate
+      act (<code>Finalize</code>), and gives <code>Revert</code> a clean inverse. Naming the
+      <em>transition</em> (<code>Finished</code>) differently from the <em>state</em>
+      (<code>Unofficial</code>) keeps "the race finished" and "the result is unofficial" as two
+      separate, accurate statements.</dd>
+    </dl>
+
+    <h2>D2 · Abort and Restart both reset to Scheduled</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>An earlier model had <code>Abort</code> land in different places depending on where it
+      was issued (e.g. <code>Armed → Staged</code>), and <code>Restart</code> as a separate
+      half-reset. That left the off-ramp ambiguous — "abort to where?" depended on timing.</dd>
+      <dt>Decision</dt>
+      <dd>Both <code>Abort</code> and <code>Restart</code> reset the heat <strong>all the way to
+      <code>Scheduled</code></strong>, from any legal state, and the RD re-Stages. <code>Abort</code>
+      is legal from <code>Staged</code>/<code>Armed</code>/<code>Running</code>;
+      <code>Restart</code> from <code>Armed</code>/<code>Running</code>/<code>Unofficial</code>.</dd>
+      <dt>Rationale</dt>
+      <dd>One unambiguous landing state for every off-ramp: whatever went wrong, the heat returns
+      to a clean, un-run state. It collapses a fiddly multi-target table into a uniform rule,
+      makes the fold trivial (every reset lands at <code>Scheduled</code>), and matches how an RD
+      actually recovers — stop, reset, re-Stage. <code>Discard</code> (re-run a finalized heat)
+      follows the same landing; <code>Revert</code> is the one non-resetting off-ramp because its
+      whole purpose is to keep the result and re-open it for correction.</dd>
+    </dl>
+
+    <h2>D3 · The two middle forward steps are runtime-driven, not RD commands</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd><code>Armed → Running</code> and <code>Running → Unofficial</code> used to be manual
+      commands (<code>Start</code>/<code>Finish</code>). But an RD pressing "go" at exactly the
+      right instant, and "stop" at exactly the win condition, is busywork the system can do more
+      precisely — and the FSM must stay pure for replay.</dd>
+      <dt>Decision</dt>
+      <dd>The Director's <strong>runtime clock</strong> appends both transitions: it auto-advances
+      <code>Armed → Running</code> when the start procedure's hold elapses, and
+      <code>Running → Unofficial</code> when the win condition plus grace window are met. The old
+      <code>Arm</code> command is renamed <strong><code>Start</code></strong> (the RD presses
+      "Start", which arms the heat and runs the start procedure). Two manual overrides remain for
+      when the clock can't be trusted: <code>SkipCountdown</code> and <code>ForceEnd</code>, each
+      legal only in its matching state and recording exactly the transition the auto-path would.</dd>
+      <dt>Rationale</dt>
+      <dd>The clock is more precise and frees the RD's hands during the most time-critical moments.
+      Keeping the FSM module pure (no clock, no RNG) preserves deterministic replay; the runtime —
+      which <em>does</em> read wall-time — lives outside the pure engine and only ever appends facts
+      the fold can replay. The overrides are the race-day escape hatch, so a stuck countdown or a
+      race that must be called now never traps the RD.</dd>
+    </dl>
+
+    <h2>D4 · The console owns the start tone; the hold is randomized and logged</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The canonical FPV start is "arm… and… <em>go</em>" after an unpredictable hold, so pilots
+      can't time the launch. Something must roll that hold and play the tone — and whatever rolls it
+      must not break replay determinism.</dd>
+      <dt>Decision</dt>
+      <dd>The start procedure (per round, default a randomized <strong>2000–5000ms</strong> hold)
+      is run by the runtime when a heat enters <code>Armed</code>. The runtime picks the delay
+      <strong>once</strong>, writes it to the log as <code>HeatStarting { delay_ms }</code>, and
+      schedules the <code>Running</code> transition for then. The <strong>GridFPV console owns the
+      start tone</strong> (cued from <code>HeatStarting</code>), not the timer.</dd>
+      <dt>Rationale</dt>
+      <dd>Logging the chosen delay once makes the random hold a recorded <em>fact</em>: a replay
+      reads <code>delay_ms</code> and reproduces the exact start, so nothing re-rolls. Letting the
+      console own the tone keeps the audible start consistent across every timer (sim or hardware),
+      driven by one source of truth on the wire. The procedure is an extensible enum, so a future
+      fixed countdown or external arm-trigger is an additive variant.</dd>
+    </dl>
+
+    <h2>D5 · Open-practice laps are ephemeral; the session is logged</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Open practice is casual flying over the active channels — pilots come and go and nobody
+      is scoring. Recording every practice pass would bloat the durable log with data nobody
+      adjudicates, yet the session boundaries are worth keeping.</dd>
+      <dt>Decision</dt>
+      <dd>An open-practice round is <strong>one open heat over the active channels</strong>
+      (<code>node-{i}</code> seats, seeded by <code>AllChannels { channels }</code>), and is
+      <strong>auto-created</strong>. The session <em>is</em> logged (the heat's
+      <code>HeatScheduled</code> and its start/stop transitions), but the per-channel
+      <strong>laps are in-memory only, never appended</strong>. A live accumulator holds them and
+      the served live state takes its phase/clock from the real log, splicing the non-logged laps
+      over it. There is no win condition (an inert one is stored, never consulted); an optional
+      <code>time_limit_secs</code> auto-ends the heat (<code>Running → Unofficial</code>), else the
+      RD <code>ForceEnd</code>s.</dd>
+      <dt>Rationale</dt>
+      <dd>The durable log stays lean — it carries the session boundaries and zero practice passes —
+      while pilots still see live laps. Keying laps by channel (not pilot) fits practice, where seats
+      are unbound. Driving phase/clock from the real log (not a synthetic one) avoids the drift bug an
+      earlier fully-synthetic live state had — a <code>Restart</code> or a time-limit end is always
+      reflected because the phase is the log's.</dd>
+    </dl>
+
+    <h2>D6 · The win condition <em>is</em> the qualifying metric (unified)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>A round used to risk carrying two overlapping scoring knobs: a per-heat "win condition" and
+      a separate "qualifying metric" for the cross-flight ranking. Two knobs that mean almost the
+      same thing invite contradiction (rank on best lap, but win on most laps?).</dd>
+      <dt>Decision</dt>
+      <dd>A round carries one <code>WinCondition</code> that drives both per-heat results and the
+      qualifying ranking. The catalogue is <code>Timed</code> (displayed <strong>"Timed — Most
+      Laps"</strong>), <code>FirstToLaps</code>, <code>BestLap</code>, and
+      <code>BestConsecutive</code>. The qualifying generator ranks each pilot on their best flight
+      under that same condition (<code>BestLap</code> → fastest lap, <code>BestConsecutive</code> →
+      fastest N-lap window, <code>Timed</code> → most laps). Open practice does no scoring and stores
+      an inert condition.</dd>
+      <dt>Rationale</dt>
+      <dd>One rule per round can't contradict itself, and the same scorer serves heat results,
+      live/provisional ranking, and qualifying aggregation — written once, replayed identically.
+      <em>Doc-vs-code note:</em> the intent is to surface the qualifying <code>rounds</code> param as
+      <strong>"Heats per pilot"</strong> in the console; as built the round form still labels it
+      <strong>"Rounds"</strong> (the format schema label), and the qualifying <code>metric</code>
+      param coexists with the win condition in <code>timed_qual</code>. The unified
+      <em>scoring</em> model above is real; the friendlier "Heats per pilot" label is the remaining
+      surfacing step.</dd>
+    </dl>
+
+    <h2>D7 · The grace window defaults to a bounded 30 seconds</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>When the win condition is met, a trailing pilot may be mid-lap; their final lap should
+      still count. But the runtime's completion clock must eventually fire the auto
+      <code>Running → Unofficial</code> — an open-ended window would never let it.</dd>
+      <dt>Decision</dt>
+      <dd>The grace window (<code>GraceWindow</code>) is either <code>UntilScored</code> (the whole
+      <code>Unofficial</code> phase) or <code>Duration { micros }</code>. A round defaults to a
+      bounded <strong>30 seconds</strong> (<code>Duration</code>, deliberately <em>not</em>
+      <code>UntilScored</code>), RD-configurable per round.</dd>
+      <dt>Rationale</dt>
+      <dd>Thirty seconds comfortably covers a trailing pilot finishing the lap they were on when the
+      leader met the criterion, while still closing on its own so the auto-transition fires. A
+      bounded default is what makes runtime auto-completion possible at all; <code>UntilScored</code>
+      remains available where the RD wants to gate the close on scoring instead of a timer.</dd>
+    </dl>
+
+    <h2>D8 · The qualifying → bracket carry seeds from a ranking's top-N</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Brackets don't start from the roster — they start from how qualifying ended. The model
+      needs a clean seam from "a round's ranking" to "a bracket's field" without bolting bracket
+      logic onto qualifying.</dd>
+      <dt>Decision</dt>
+      <dd>Rounds are <strong>event-level and class-tagged</strong>, added as-you-go. A bracket round
+      uses a <code>FromRanking { source_round, top_n }</code> seeding rule: its field is the
+      <strong>top-N</strong> of the source round's ranking (via <code>advance_top_n</code>, the same
+      phase-2 seeding the wholesale <code>run_event</code> does). The full bracket is generated from
+      that ranking and is then <strong>editable</strong> as event-level rounds.</dd>
+      <dt>Rationale</dt>
+      <dd>Reusing the existing ranking + <code>advance_top_n</code> means the carry is one seeding
+      rule, not a new code path — the generator interface and advancement are unchanged. Making the
+      generated bracket editable lets the RD fix seeds, byes, or a withdrawal before pilots fly, while
+      everything stays a pure function of the log so the bracket recomputes deterministically.</dd>
+    </dl>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

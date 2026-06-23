@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Heat Lifecycle</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Heat Lifecycle</h1>
+      <p class="doc-kind">Internal design doc · the heat FSM, its commands, and the runtime clock that drives it</p>
+    </header>
+
+    <p class="lead">
+      The one reusable state machine that runs every heat, in every phase — six states from
+      <code>Scheduled</code> to <code>Final</code>. This is the deep-dive behind
+      <a href="race-engine.html">Race Engine</a> §2: the exact legality table, the two
+      runtime-driven forward steps (the start procedure and the grace-window completion), the
+      off-ramps, and how all of it stays a deterministic, replayable fold of the log.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>heat finite-state machine</strong> — its states, commands,
+        recorded transitions, and the runtime clock that appends the automatic ones. It builds
+        on the append-only spine (<a href="architecture.html">Architecture</a> §3), the scoring
+        and win conditions (<a href="race-engine.html">Race Engine</a> §4), and the canonical
+        passes from <a href="timer-adapters.html">Timer Adapters</a>. The <em>why</em> behind
+        each decision here is logged ADR-style in <a href="decisions.html">Decisions</a>. When
+        this doc and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. The six phases</h2>
+    <p>
+      A heat moves through six states. A <code>HeatScheduled</code> event seeds it at
+      <code>Scheduled</code>; every move after is a <code>HeatStateChanged</code> carrying a
+      <code>HeatTransition</code>; <code>Advance</code> hands the result to the format generator
+      and leaves the machine. The pure FSM lives in <code>crates/engine/src/heat.rs</code>.
+    </p>
+
+    <pre class="mermaid">
+stateDiagram-v2
+  [*] --> Scheduled
+  Scheduled  --> Staged     : Stage
+  Staged     --> Armed      : Start (runs the start procedure)
+  Armed      --> Running    : (auto) countdown elapsed / SkipCountdown
+  Running    --> Unofficial : (auto) win condition + grace / ForceEnd
+  Unofficial --> Final      : Finalize
+  Final      --> Unofficial : Revert
+  Final      --> [*]        : Advance
+  Staged     --> Scheduled  : Abort
+  Armed      --> Scheduled  : Abort / Restart
+  Running    --> Scheduled  : Abort / Restart
+  Unofficial --> Scheduled  : Restart
+  Final      --> Scheduled  : Discard
+    </pre>
+
+    <dl class="entities">
+      <dt>Scheduled</dt>
+      <dd>Created with a lineup (and its class / round tag and per-pilot frequency
+      assignments), not yet staged. The entry state a <code>HeatScheduled</code> event creates,
+      and the state every off-ramp resets to.</dd>
+      <dt>Staged</dt>
+      <dd>The staging countdown is underway; for IRL this is when frequencies / channels are
+      assigned. The staging timer is <strong>informational only</strong> — there is no
+      auto-advance out of <code>Staged</code>; the RD presses <em>Start</em> when ready.</dd>
+      <dt>Armed</dt>
+      <dd>The gate is open to detections and the <strong>start procedure is running</strong>
+      (announce → randomized hold → tone). The runtime auto-advances to <code>Running</code>
+      when the hold elapses.</dd>
+      <dt>Running</dt>
+      <dd>The race is live; passes are consumed from here (plus the grace window). The runtime's
+      completion clock watches the win condition and auto-advances to <code>Unofficial</code>.</dd>
+      <dt>Unofficial</dt>
+      <dd>The race has closed but the result is <strong>not yet locked</strong> — the grace
+      window for late crossings is still open and marshaling / corrections may land. Named
+      <em>Unofficial</em> deliberately (not "Scored" or "Completed"): it is a real, displayable
+      result that is explicitly provisional.</dd>
+      <dt>Final</dt>
+      <dd>The result is <strong>finalized and locked</strong>. <code>Revert</code> can re-open
+      it for correction; <code>Advance</code> hands it to the format generator;
+      <code>Discard</code> queues a clean re-run.</dd>
+    </dl>
+
+    <h2>2. Commands &amp; the legality table</h2>
+    <p>
+      Live race control is just <code>HeatCommand</code>s validated against the current state.
+      Commands are kept distinct from the recorded <code>HeatTransition</code> so the off-ramps
+      read clearly. The <code>apply(state, command)</code> function is the single source of FSM
+      legality; <code>next_state(from, transition)</code> only describes where a recorded
+      transition lands. The complete table:
+    </p>
+    <table>
+      <thead>
+        <tr><th>Command</th><th>Legal in</th><th>Records</th><th>Lands in</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>Stage</code></td><td>Scheduled</td><td><code>Staged</code></td><td>Staged</td></tr>
+        <tr><td><code>Start</code></td><td>Staged</td><td><code>Armed</code></td><td>Armed</td></tr>
+        <tr><td><code>SkipCountdown</code> <em>(override)</em></td><td>Armed</td><td><code>Running</code></td><td>Running</td></tr>
+        <tr><td><code>ForceEnd</code> <em>(override)</em></td><td>Running</td><td><code>Finished</code></td><td>Unofficial</td></tr>
+        <tr><td><code>Finalize</code></td><td>Unofficial</td><td><code>Finalized</code></td><td>Final</td></tr>
+        <tr><td><code>Advance</code></td><td>Final</td><td><code>Advanced</code></td><td>Final <em>(terminal)</em></td></tr>
+        <tr><td><code>Revert</code></td><td>Final</td><td><code>Reverted</code></td><td>Unofficial</td></tr>
+        <tr><td><code>Abort</code></td><td>Staged / Armed / Running</td><td><code>Aborted</code></td><td>Scheduled</td></tr>
+        <tr><td><code>Restart</code></td><td>Armed / Running / Unofficial</td><td><code>Restarted</code></td><td>Scheduled</td></tr>
+        <tr><td><code>Discard</code></td><td>Final</td><td><code>Discarded</code></td><td>Scheduled</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Every <code>(state, command)</code> pair not in this table is rejected as an
+      <code>IllegalTransition</code>. The two <strong>middle forward steps</strong> —
+      <code>Armed → Running</code> and <code>Running → Unofficial</code> — have no everyday
+      command: they are appended by the runtime clock (§4). The override commands
+      <code>SkipCountdown</code> and <code>ForceEnd</code> record exactly the same transitions
+      the auto-path would, as race-day escape hatches.
+    </p>
+
+    <h3>Abort and Restart both reset to Scheduled</h3>
+    <div class="principle">
+      <p><span class="name">Every off-ramp lands at <code>Scheduled</code>, so the RD
+      re-Stages.</span> <code>Abort</code> (from <code>Staged</code>/<code>Armed</code>/<code>Running</code>)
+      and <code>Restart</code> (from <code>Armed</code>/<code>Running</code>/<code>Unofficial</code>)
+      <em>both</em> reset the heat fully to <code>Scheduled</code> — there is no "abort back to
+      Staged" half-step. This makes the off-ramp uniform and unambiguous: whatever went wrong,
+      the heat returns to a clean, un-run state and the RD re-Stages it. <code>Discard</code>
+      (re-run a finalized heat) lands at <code>Scheduled</code> the same way; <code>Revert</code>
+      is the one exception — it re-opens <code>Final → Unofficial</code> for correction without
+      throwing the result away.</p>
+    </div>
+
+    <h2>3. The transitions in the log</h2>
+    <p>
+      Each phase change is an appended <code>HeatStateChanged { heat, transition }</code>. The
+      <code>HeatTransition</code> vocabulary (the events crate) names the state entered or the
+      off-ramp taken:
+    </p>
+    <dl class="entities">
+      <dt><code>Staged</code> · <code>Armed</code> · <code>Running</code> · <code>Finished</code> · <code>Finalized</code> · <code>Advanced</code></dt>
+      <dd>The forward path. <code>Finished</code> is the transition that lands a heat in
+      <code>Unofficial</code> (the state and the transition are deliberately named differently —
+      the race <em>finished</em>, the result is <em>Unofficial</em>).</dd>
+      <dt><code>Aborted</code> · <code>Restarted</code> · <code>Discarded</code></dt>
+      <dd>The reset off-ramps — all land at <code>Scheduled</code>.</dd>
+      <dt><code>Reverted</code></dt>
+      <dd>Re-opens a finalized result (<code>Final → Unofficial</code>).</dd>
+    </dl>
+    <p>
+      One more event is part of the lifecycle but is not a <code>HeatStateChanged</code>: when a
+      heat enters <code>Armed</code>, the start procedure appends a
+      <code>HeatStarting { delay_ms }</code> fact recording the randomized hold it chose (§4).
+    </p>
+    <p>
+      A heat's current state is recovered by <code>heat_state(events, heat)</code> — a pure fold
+      that seeds at <code>Scheduled</code> on the <code>HeatScheduled</code> and walks each
+      <code>HeatStateChanged</code> through <code>next_state</code>. Folding the same slice twice
+      yields the same state; an abort-and-re-run reconstructs exactly (back to
+      <code>Scheduled</code>, then forward again).
+    </p>
+
+    <h2>4. The runtime clock — the two automatic forward steps</h2>
+    <p>
+      The FSM module is <strong>pure</strong>: it reads no clock and rolls no dice. The two
+      forward steps that <em>do</em> depend on wall-time and randomness are driven by the
+      Director's <strong>runtime clock</strong> (in <code>crates/app/src/source.rs</code>),
+      which appends the transition itself — the same one an override command would record — so
+      the pure fold and a replay never have to re-derive it.
+    </p>
+
+    <h3>4.1 Start procedure — <code>Armed → Running</code></h3>
+    <p>
+      When a heat enters <code>Armed</code>, the start driver reads the round's
+      <code>StartProcedure</code> and runs the canonical FPV start: <em>announce → a randomized
+      hold → the go-tone</em>. Today the one procedure mode is <code>RandomizedDelay {
+      min_delay_ms, max_delay_ms, tone? }</code>, defaulting to a <strong>2000–5000ms</strong>
+      hold.
+    </p>
+    <div class="principle">
+      <p><span class="name">The randomized hold is rolled once, in the runtime, and logged.</span>
+      The driver picks a delay uniformly in the procedure's window, immediately appends
+      <code>HeatStarting { delay_ms }</code>, then schedules the <code>Armed → Running</code>
+      transition for that delay. The randomization happens only at emission time, never in the
+      fold — so a replay reads the logged <code>delay_ms</code> and reproduces the start exactly
+      (<a href="race-engine.html">Race Engine</a> §6). The <code>HeatStarting</code> event also
+      lets the console cue the start tone (the GridFPV console owns the audible start, not the
+      timer).</p>
+    </div>
+    <p>
+      If the clock can't be trusted — a stuck countdown, or a race that must go now — the RD's
+      <code>SkipCountdown</code> override forces <code>Armed → Running</code> immediately,
+      recording the same <code>Running</code> transition the driver would.
+    </p>
+
+    <h3>4.2 Completion — <code>Running → Unofficial</code></h3>
+    <p>
+      While a heat is <code>Running</code>, the completion driver polls the round's win condition
+      against the heat's running passes via the pure predicate
+      <code>race_end_reached(passes, win_condition, race_start)</code>:
+    </p>
+    <ul>
+      <li><strong>Timed</strong> — met once a counted crossing lands at or after the window
+      close (<code>race_start + window_micros</code>): the observable signal that the window has
+      elapsed on the source clock.</li>
+      <li><strong>FirstToLaps</strong> — met once any competitor (the leader) completes
+      <code>n</code> laps.</li>
+      <li><strong>BestLap / BestConsecutive</strong> (qualifying) — no intrinsic lap/leader
+      criterion in the passes, so the predicate never fires; such a qual session ends on a time
+      limit or the RD's <code>ForceEnd</code>.</li>
+    </ul>
+    <div class="principle">
+      <p><span class="name">Win condition, then the grace window, then auto-Unofficial.</span>
+      Once the race-end criterion is met the driver holds the heat in <code>Running</code> for
+      the round's <strong>grace window</strong> — so a trailing pilot's final lap still counts —
+      and only then appends <code>Running → Unofficial</code>. The <code>ForceEnd</code> override
+      forces the same step now when the completion clock must be bypassed.</p>
+    </div>
+
+    <h3>4.3 The grace window</h3>
+    <p>
+      The grace window is per-round config: <code>GraceWindow</code> is either
+      <code>UntilScored</code> (late crossings count for the whole <code>Unofficial</code> phase,
+      until <code>Final</code>) or <code>Duration { micros }</code> (count only for a bounded
+      span after the heat finished). The default a round stores is a bounded
+      <strong>30&nbsp;seconds</strong> — deliberately a <code>Duration</code>, <em>not</em>
+      <code>UntilScored</code>, because the completion clock must eventually fire the
+      auto-transition, so the window has to close on its own. The <code>consumes_pass</code>
+      function decides whether a given pass still counts: always while <code>Running</code>,
+      within the grace window while <code>Unofficial</code>, never once <code>Final</code>.
+    </p>
+
+    <h2>5. Per-round configuration</h2>
+    <p>
+      The lifecycle knobs live on the round (<code>RoundDef</code>), so each round can tune its
+      own staging, start, and grace behaviour:
+    </p>
+    <dl class="entities">
+      <dt><code>staging_timer_secs</code> — default 300 (5:00)</dt>
+      <dd>The staging countdown, <strong>informational only</strong> (no auto-advance out of
+      <code>Staged</code>); the console renders it as a countdown.</dd>
+      <dt><code>start_procedure</code> — default randomized 2000–5000ms</dt>
+      <dd>How the heat auto-advances <code>Armed → Running</code>, with an optional start-tone
+      cue config for the console.</dd>
+      <dt><code>grace_window</code> — default <code>Duration</code> of 30s</dt>
+      <dd>How long the runtime holds <code>Running</code> after the win condition is met before
+      appending <code>Running → Unofficial</code>.</dd>
+      <dt><code>time_limit_secs</code> — optional (open practice)</dt>
+      <dd>When set, the runtime auto-ends the heat (<code>Running → Unofficial</code>) once its
+      elapsed running time reaches the limit, independent of any win condition.</dd>
+    </dl>
+
+    <h2>6. Open practice — a lifecycle with un-logged laps</h2>
+    <p>
+      Open practice is the casual format: a round is <strong>one open heat over the active
+      channels</strong> (<code>node-{i}</code> seats, not pilots), seeded by
+      <code>AllChannels { channels }</code>. Its lifecycle is the same six-phase FSM, with two
+      deliberate differences:
+    </p>
+    <div class="principle">
+      <p><span class="name">The session is logged; the laps are not.</span> The heat's
+      <code>HeatScheduled</code> and its start/stop <code>HeatStateChanged</code> transitions
+      <em>are</em> recorded — so the durable log carries the session boundaries — but the
+      practice passes are <strong>in-memory only</strong>, keyed per channel, never appended to
+      the log. The source bridge routes an open-practice heat's passes into a live accumulator
+      instead of the event log; the served live state takes its phase/clock from the real log and
+      splices the non-logged per-channel laps over it (so phase can never drift from the log).</p>
+    </div>
+    <p>
+      Open practice does <strong>no scoring</strong> — there is no win condition (the round
+      stores an inert one that is never consulted). The heat is <strong>auto-created</strong> on
+      round creation, and ends either when its optional <code>time_limit_secs</code> elapses (the
+      runtime auto-advances <code>Running → Unofficial</code>) or when the RD presses
+      <code>ForceEnd</code>.
+    </p>
+
+    <h2>7. Determinism &amp; replay</h2>
+    <div class="principle">
+      <p><span class="name">Everything non-deterministic lands in the log as a fact.</span> The
+      FSM fold, the scorer, and the completion predicate are all pure functions of the log. The
+      only non-determinism — the start procedure's randomized hold — is rolled once in the
+      runtime and recorded as <code>HeatStarting { delay_ms }</code>; the completion step is a
+      pure predicate over logged passes. So a recorded session reaches <code>Armed → Running</code>
+      and <code>Running → Unofficial</code> at exactly the same points on replay, and rebuilds the
+      same heat states, results, and standings (the testing backbone).</p>
+    </div>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>
