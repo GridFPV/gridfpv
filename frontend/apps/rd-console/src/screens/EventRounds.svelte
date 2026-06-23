@@ -160,7 +160,8 @@
   // The round-tagged heats list (one entry per scheduled heat) and the pilot directory used to
   // resolve a heat's `CompetitorRef` lineup to callsigns. The heats list is a read of
   // `GET /events/{id}/heats`; it is re-fetched on enter, after each Fill round / manual build, and
-  // whenever the live state advances (so a heat's status follows it through Running → Final).
+  // whenever the stream advances (so a heat's status follows it through Running → Final, and a heat
+  // scheduled by another console — or one that doesn't move the live state — appears too).
 
   let pilots = $state<Pilot[]>([]);
   let heats = $state<HeatSummary[]>([]);
@@ -174,10 +175,15 @@
     }
   }
 
-  // Initial load + re-load whenever the live state changes (a transition advances a heat's phase).
+  // Initial load + re-load on every stream update. Keying off `protocolState` (reassigned on every
+  // stream envelope) rather than `liveState` (its content) is what makes a freshly *scheduled* heat
+  // appear without a transition: filling a heat does not move `current_heat` (fill-no-steal, #191)
+  // and often leaves the whole `LiveRaceState` body unchanged, so the backend force-emits a stream
+  // envelope on a schedule and this re-reads the heats list when it lands.
   $effect(() => {
-    // Touch the live state so this effect re-runs on every stream update.
-    void session.liveState;
+    // Touch the protocol state so this effect re-runs on every stream update (not only on a
+    // live-state content change).
+    void session.protocolState;
     void refreshHeats();
   });
 

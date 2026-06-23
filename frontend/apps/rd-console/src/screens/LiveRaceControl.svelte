@@ -58,7 +58,7 @@
   // The live stream carries only `LiveRaceState` (no frequencies), so resolve the current heat's
   // channel assignment by joining `current_heat` against the heats list (which carries the
   // `HeatScheduled.frequencies`), labelled through the standard catalog. Both are open reads,
-  // re-fetched whenever the live state advances (so a freshly-staged heat's channels appear).
+  // re-fetched whenever the stream advances (so a freshly-staged OR freshly-scheduled heat appears).
   let catalog = $state<ChannelCatalogEntry[]>([]);
   let heats = $state<HeatSummary[]>([]);
   $effect(() => {
@@ -68,7 +68,13 @@
       .catch(() => (catalog = []));
   });
   $effect(() => {
-    void session.liveState;
+    // Re-read the heats list on every stream update, not only when `liveState` content changes:
+    // filling/scheduling a heat does NOT move `current_heat` (fill-no-steal, #191) and often leaves
+    // the whole `LiveRaceState` body unchanged, so keying off `liveState` alone would leave the heat
+    // picker stale until the next transition. `protocolState` is reassigned on every stream envelope
+    // (the backend force-emits one when a heat is scheduled), so touching it refreshes the picker the
+    // moment a heat appears — without changing `current_heat` (no focus steal).
+    void session.protocolState;
     session
       .listHeats()
       .then((h) => (heats = h))
