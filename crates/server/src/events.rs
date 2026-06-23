@@ -423,16 +423,16 @@ pub fn default_staging_timer_secs() -> u32 {
     300
 }
 
-/// The default [`RoundDef::grace_window`] — a **bounded 3-second** window after the win condition
+/// The default [`RoundDef::grace_window`] — a **bounded 30-second** window after the win condition
 /// is met (heat-lifecycle Slice 2).
 ///
 /// Deliberately a [`GraceWindow::Duration`], **not** the open-ended [`GraceWindow::UntilScored`]:
 /// the runtime's completion clock must eventually fire the `Running → Unofficial` auto-transition,
-/// so the grace window has to close on its own. Three seconds comfortably covers a trailing pilot
-/// finishing the lap they were on when the leader met the criterion, while still ending the heat
-/// promptly. RD-configurable per round.
+/// so the grace window has to close on its own. Thirty seconds comfortably covers a trailing pilot
+/// finishing the lap (or the last lap of a multi-lap final) they were on when the leader met the
+/// criterion, while still ending the heat on its own. RD-configurable per round.
 pub fn default_grace_window() -> GraceWindow {
-    GraceWindow::Duration { micros: 3_000_000 }
+    GraceWindow::Duration { micros: 30_000_000 }
 }
 
 /// The **start procedure** that drives a heat's `Armed → Running` auto-transition (heat-lifecycle

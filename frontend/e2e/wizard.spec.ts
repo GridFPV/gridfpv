@@ -120,8 +120,8 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   const roundForm = page.getByRole('form', { name: 'Add round' });
   await expect(roundForm).toBeVisible({ timeout: 15_000 });
   await roundForm.getByLabel('Label').fill(ROUND);
-  await roundForm.getByLabel('Eligible Open Class').check();
   await roundForm.getByLabel('Format').selectOption('timed_qual');
+  await roundForm.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
   await roundForm.getByLabel('Win condition').selectOption('BestLap');
   await page.getByRole('button', { name: 'Add round', exact: true }).click();
   await expect(

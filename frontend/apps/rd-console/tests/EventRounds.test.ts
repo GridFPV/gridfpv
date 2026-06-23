@@ -47,10 +47,9 @@ const EVENT: EventMeta = {
 
 const FORMATS = ['double_elim', 'multi_main', 'round_robin', 'single_elim', 'timed_qual', 'zippyq'];
 
-// The guided-params schemas the screen reads (`GET /formats`). `timed_qual` declares a couple of
-// typed params (a number `rounds` + an enum `tiebreak`); the rest declare none, so they offer no
-// params editor. Keeps the existing add/edit tests green (they don't touch params) and backs the
-// guided-params test below.
+// The format param schemas the screen reads (`GET /formats`). `timed_qual` declares a couple of
+// typed params (a number `rounds` + an enum `tiebreak`) — surfaced inline as proper labeled fields
+// (Rounds form redesign item 4); the rest declare none, so they show no Format options section.
 const SCHEMAS = FORMATS.map((name) =>
   name === 'timed_qual'
     ? {
@@ -91,8 +90,10 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     // assertions to the Rounds card (the section whose heading is "Rounds").
     const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
     await within(roundsCard).findByText('Qualifying R1');
-    // Format and the resolved class name show; FromRoster summarises as "From roster".
-    expect(within(roundsCard).getByText('timed_qual')).toBeInTheDocument();
+    // The friendly format name shows (not the raw `timed_qual` key); the resolved class name shows;
+    // FromRoster summarises as "From roster".
+    expect(within(roundsCard).getByText('Qualifying')).toBeInTheDocument();
+    expect(within(roundsCard).queryByText('timed_qual')).toBeNull();
     expect(within(roundsCard).getByText('Open')).toBeInTheDocument();
     expect(within(roundsCard).getByText('From roster')).toBeInTheDocument();
     expect(within(roundsCard).getByText(/Timed · 120s/)).toBeInTheDocument();
@@ -128,10 +129,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.input(await screen.findByLabelText('Label'), {
       target: { value: 'Open Practice' }
     });
-    // Tick both classes (open / practice).
-    await fireEvent.click(screen.getByLabelText('Eligible Open'));
-    await fireEvent.click(screen.getByLabelText('Eligible Spec'));
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'zippyq' } });
+    // The eligible class is a single-select dropdown (Rounds form redesign item 6).
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
     await fireEvent.change(screen.getByLabelText('Win condition'), {
       target: { value: 'BestLap' }
     });
@@ -141,9 +141,10 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     const [, eventId, req] = createRoundImpl.mock.calls[0];
     expect(eventId).toBe('e1');
+    // The single-select class stores a one-element `classes` list.
     expect(req).toMatchObject({
       label: 'Open Practice',
-      classes: ['c1', 'c2'],
+      classes: ['c1'],
       format: 'zippyq',
       win_condition: 'BestLap',
       seeding: 'FromRoster'
@@ -168,8 +169,8 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Mains' } });
-    await fireEvent.click(screen.getByLabelText('Eligible Open'));
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'single_elim' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
 
     // No source-round dropdown until From ranking is chosen.
     expect(screen.queryByLabelText('Source round')).not.toBeInTheDocument();
@@ -218,16 +219,17 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Heat 1' } });
-    await fireEvent.click(screen.getByLabelText('Eligible Open'));
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
 
-    // Set a 2:30 staging window, a 1000–4000ms start hold, and a 4s grace.
+    // Set a 2:30 staging window, a 1.0–4.0s start hold (entered in seconds, stored as ms — item 3),
+    // and a 4s grace.
     await fireEvent.input(screen.getByLabelText('Staging minutes'), { target: { value: '2' } });
     await fireEvent.input(screen.getByLabelText('Staging seconds'), { target: { value: '30' } });
-    await fireEvent.input(screen.getByLabelText('Start min delay ms'), {
-      target: { value: '1000' }
+    await fireEvent.input(screen.getByLabelText('Start min delay seconds'), {
+      target: { value: '1' }
     });
-    await fireEvent.input(screen.getByLabelText('Start max delay ms'), {
-      target: { value: '4000' }
+    await fireEvent.input(screen.getByLabelText('Start max delay seconds'), {
+      target: { value: '4' }
     });
     await fireEvent.input(screen.getByLabelText('Grace window seconds'), {
       target: { value: '4' }
@@ -238,6 +240,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     const [, , req] = createRoundImpl.mock.calls[0];
     expect(req.staging_timer_secs).toBe(150); // 2:30
+    // The seconds inputs are converted back to the stored ms on submit.
     expect(req.start_procedure).toEqual({
       mode: 'randomized-delay',
       min_delay_ms: 1000,
@@ -264,14 +267,17 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    // The form seeds from the round's current lifecycle config.
+    // The form seeds from the round's current lifecycle config; the ms delays read back as seconds.
     expect((screen.getByLabelText('Staging minutes') as HTMLInputElement).value).toBe('1');
     expect((screen.getByLabelText('Staging seconds') as HTMLInputElement).value).toBe('15');
-    expect((screen.getByLabelText('Start min delay ms') as HTMLInputElement).value).toBe('2500');
-    expect((screen.getByLabelText('Start max delay ms') as HTMLInputElement).value).toBe('6000');
+    expect((screen.getByLabelText('Start min delay seconds') as HTMLInputElement).value).toBe(
+      '2.5'
+    );
+    expect((screen.getByLabelText('Start max delay seconds') as HTMLInputElement).value).toBe('6');
     expect((screen.getByLabelText('Grace window seconds') as HTMLInputElement).value).toBe('5');
 
-    // Edit the staging seconds and save — the same values round-trip back out on the request.
+    // Edit the staging seconds and save — the same values round-trip back out on the request (the
+    // seconds inputs convert back to the stored ms).
     await fireEvent.input(screen.getByLabelText('Staging seconds'), { target: { value: '45' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Save round' }));
 
@@ -286,7 +292,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(req.grace_window).toEqual({ Duration: { micros: 5_000_000 } });
   });
 
-  it('offers only the chosen format’s params via "+ Add param", typed by kind, and removes them', async () => {
+  it('surfaces the chosen format’s params inline as labeled fields, seeded from their defaults', async () => {
     const impls = baseImpls();
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
     const { session } = makeTestSession({
@@ -298,44 +304,29 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Q' } });
-    await fireEvent.click(screen.getByLabelText('Eligible Open'));
     // timed_qual declares the `rounds` (number) + `tiebreak` (enum) params; zippyq declares none.
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
 
-    // The add-param dropdown offers exactly this format's params.
-    const adder = (await screen.findByLabelText('Add param')) as HTMLSelectElement;
-    const offered = within(adder)
-      .getAllByRole('option')
-      .map((o) => o.textContent?.trim());
-    expect(offered).toEqual(expect.arrayContaining(['+ Add param…', 'Rounds', 'Tiebreak']));
-
-    // Add the `rounds` param → a typed number input seeded from its default ("3").
-    await fireEvent.change(adder, { target: { value: 'rounds' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    // The format's params show inline as proper labeled fields, seeded from their schema defaults —
+    // no "+ Add param" control any more (Rounds form redesign item 4).
+    expect(screen.queryByLabelText('Add param')).not.toBeInTheDocument();
     const roundsInput = (await screen.findByLabelText('Rounds value')) as HTMLInputElement;
     expect(roundsInput.type).toBe('number');
-    expect(roundsInput.value).toBe('3');
+    expect(roundsInput.value).toBe('3'); // schema default
     await fireEvent.input(roundsInput, { target: { value: '5' } });
 
-    // Add the `tiebreak` enum param → a <select> of its options, seeded from its default.
-    await fireEvent.change(screen.getByLabelText('Add param'), { target: { value: 'tiebreak' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     const tb = (await screen.findByLabelText('Tiebreak value')) as HTMLSelectElement;
-    expect(tb.value).toBe('best_lap');
+    expect(tb.value).toBe('best_lap'); // schema default
     await fireEvent.change(tb, { target: { value: 'count_back' } });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     const [, , req] = createRoundImpl.mock.calls[0];
     expect(req.params).toEqual({ rounds: '5', tiebreak: 'count_back' });
-
-    // Re-open the form: a format with no declared params offers no add-param control.
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add round' }));
-    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'zippyq' } });
-    await waitFor(() => expect(screen.queryByLabelText('Add param')).not.toBeInTheDocument());
   });
 
-  it('removing a guided param unsets it', async () => {
+  it('shows no Format options section for a format that declares no params', async () => {
     const impls = baseImpls();
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
     const { session } = makeTestSession({
@@ -347,18 +338,14 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Q' } });
-    await fireEvent.click(screen.getByLabelText('Eligible Open'));
+    // zippyq declares no params → no params fields show, and switching away from timed_qual drops
+    // its params from the submitted request.
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
-
-    await fireEvent.change(await screen.findByLabelText('Add param'), {
-      target: { value: 'rounds' }
-    });
-    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
     expect(await screen.findByLabelText('Rounds value')).toBeInTheDocument();
-
-    // Remove it → the input is gone; the submitted params are empty.
-    await fireEvent.click(screen.getByRole('button', { name: 'Remove Rounds' }));
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'zippyq' } });
     await waitFor(() => expect(screen.queryByLabelText('Rounds value')).not.toBeInTheDocument());
+
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     expect(createRoundImpl.mock.calls[0][2].params).toEqual({});
@@ -378,12 +365,72 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     const mode = (await screen.findByLabelText('Channel mode')) as HTMLSelectElement;
     expect(mode.value).toBe('PerHeat');
     await fireEvent.input(screen.getByLabelText('Label'), { target: { value: 'Q' } });
-    await fireEvent.click(screen.getByLabelText('Eligible Open'));
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
     await fireEvent.change(mode, { target: { value: 'Static' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     expect(createRoundImpl.mock.calls[0][2].channel_mode).toBe('Static');
+  });
+
+  it('defaults the grace window to 30s on a new round (Rounds form redesign item 5)', async () => {
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    // The grace input shows 30 by default; the submitted request carries 30s as micros.
+    expect((await screen.findByLabelText('Grace window seconds')).getAttribute('value') ?? '');
+    expect((screen.getByLabelText('Grace window seconds') as HTMLInputElement).value).toBe('30');
+    await fireEvent.input(screen.getByLabelText('Label'), { target: { value: 'Q' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    expect(createRoundImpl.mock.calls[0][2].grace_window).toEqual({
+      Duration: { micros: 30_000_000 }
+    });
+  });
+
+  it('stores exactly one class from the single-select dropdown (Rounds form redesign item 6)', async () => {
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), {
+      target: { value: 'Spec Qual' }
+    });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    // The class control is a single `<select>` of the event's classes — pick the Spec class.
+    const classSelect = screen.getByLabelText('Eligible class') as HTMLSelectElement;
+    expect(classSelect.tagName).toBe('SELECT');
+    await fireEvent.change(classSelect, { target: { value: 'c2' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    // Stored as the existing one-element `classes` list.
+    expect(createRoundImpl.mock.calls[0][2].classes).toEqual(['c2']);
+  });
+
+  it('seeds the class dropdown from the first class of the round being edited', async () => {
+    const { session } = makeTestSession({ ...baseImpls(), event: EVENT });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    // QUAL targets class c1 — the dropdown seeds to it.
+    const classSelect = (await screen.findByLabelText('Eligible class')) as HTMLSelectElement;
+    expect(classSelect.value).toBe('c1');
   });
 
   it('seeds the channel-mode toggle from the round being edited', async () => {
