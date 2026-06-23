@@ -45,8 +45,9 @@
         <strong>format is <code>timed_qual</code></strong> (friendly name <em>&ldquo;Qualifying&rdquo;</em>)
         or <code>round_robin</code>, created from the Rounds+Heats stage-page like any other round and
         <strong>targeting one class</strong> (single-select). Within that one round each pilot flies
-        <strong>multiple heats</strong> — the format's <strong>&ldquo;Rounds&rdquo; param</strong>
-        (default&nbsp;<strong>3</strong>) sets how many — over the static, channel-balanced field, and
+        <strong>multiple heats</strong> — the format's <strong>&ldquo;Heats per pilot&rdquo; param</strong>
+        (key <code>rounds</code>, default&nbsp;<strong>3</strong>) sets how many — over the static,
+        channel-balanced field, and
         the round's final ranking is the seeding the bracket consumes via the <code>FromRanking</code>
         seed (top-N). Live is the path that shipped; <strong>import / skip and the rolling-queue
         (ZippyQ) engine are not built</strong> in v0.4. (Engine: <code>round_engine.rs</code> static
@@ -69,42 +70,37 @@
         and explicit-import seeds are planned.</li>
     </ul>
 
-    <h3>Win condition &amp; metric (when run live)</h3>
+    <h3>Win condition = qualifying metric (when run live)</h3>
     <p>
-      How a pilot's flying becomes a rank. In the as-built engine this is driven by the round's
-      <strong>heat win condition</strong> and the <code>timed_qual</code> format's
-      <strong>&ldquo;Qualifying metric&rdquo;</strong> param:
+      How a pilot's flying becomes a rank. In the as-built engine the qualifying metric <strong>is</strong>
+      the round's <strong>heat win condition</strong> — there is no separate metric param. The win
+      condition both ends each heat and, derived from it, determines how heats roll up into the
+      per-pilot ranking:
     </p>
     <ul>
-      <li><strong>Win condition</strong> (the round form's <em>Win condition</em> dropdown) —
-        <em>Timed — Most Laps</em>, <em>First to N laps</em>, <em>Best lap</em>, or <em>Best N
-        consecutive</em>. For qualifying this is typically a timed window or a best-lap / best-N
-        condition. The usual <em>last-lap rule</em> applies to timed windows: a lap whose
-        start/finish crossing came before the limit completes and counts even if it ends after the
-        buzzer.</li>
-      <li><strong>Qualifying metric</strong> (the <code>timed_qual</code> format param, an enum of
-        <code>best-lap</code> / <code>best-consecutive</code> / <code>most-laps</code>, default
-        <code>best-lap</code>) — how the round's heats roll up into the per-pilot ranking. For
-        <code>best-consecutive</code> the span N defaults to 3.</li>
+      <li><strong>Win condition</strong> (the round form's <em>Win condition</em> dropdown) — for a
+        qualifying format the form shows only the qualifying-applicable conditions:
+        <em>Best lap</em>, <em>Best N consecutive</em>, or <em>Timed — Most Laps</em>
+        (<em>First to N laps</em> is hidden). The usual <em>last-lap rule</em> applies to timed
+        windows: a lap whose start/finish crossing came before the limit completes and counts even
+        if it ends after the buzzer.</li>
+      <li><strong>Derived ranking metric</strong> — the engine
+        (<code>qual_metric_for</code> in <code>round_engine.rs</code>) maps the win condition to the
+        ranking metric, so the two can never disagree. For <code>timed_qual</code>:
+        <em>Best lap</em>&nbsp;&rarr;&nbsp;<code>best-lap</code>,
+        <em>Best N consecutive</em>&nbsp;&rarr;&nbsp;<code>best-consecutive</code>,
+        <em>Timed — Most Laps</em>&nbsp;&rarr;&nbsp;<code>most-laps</code>. For
+        <code>round_robin</code>: <em>Timed</em>&nbsp;&rarr;&nbsp;<code>total-laps</code>, otherwise
+        a <code>points</code> standing. For <code>best-consecutive</code> the span N defaults to 3.</li>
     </ul>
-    <div class="callout">
-      <p>
-        <strong>Discrepancy to reconcile:</strong> the redesign intent is for the qualifying
-        <em>metric</em> to <strong>be</strong> the win condition (one field), and for the
-        <code>timed_qual</code> &ldquo;Rounds&rdquo; param to read as <em>&ldquo;Heats per pilot&rdquo;</em>
-        in the UI. As built today the engine still exposes a <strong>separate</strong>
-        <code>metric</code> enum param alongside the heat win condition, and the params are labeled
-        <em>&ldquo;Rounds&rdquo;</em> and <em>&ldquo;Qualifying metric&rdquo;</em> straight from the
-        format schema (no UI relabel). This doc tracks what shipped; collapsing the two is a follow-up.
-      </p>
-    </div>
 
     <h3>Organizing qualifying flights — multiple heats per pilot</h3>
     <ul>
       <li><strong>One qualifying round per class</strong> — the round targets a single class
         (single-select), and within it every member flies the same number of heats.</li>
-      <li><strong>&ldquo;Rounds&rdquo; param = heats per pilot</strong> — the format's
-        <code>rounds</code> param (default <strong>3</strong>) sets how many heats each pilot flies; the
+      <li><strong>&ldquo;Heats per pilot&rdquo; param</strong> — the format's
+        <code>rounds</code> param (labeled <em>&ldquo;Heats per pilot&rdquo;</em>, default
+        <strong>3</strong>) sets how many heats each pilot flies; the
         engine builds a deterministic, <strong>channel-balanced</strong> plan (one pilot per distinct
         channel per heat, capped by the timer's node count) across all of them.</li>
       <li><strong>Static channel mode</strong> — qualifying uses fixed per-pilot channels (each
@@ -116,8 +112,8 @@
 
     <h3>Output → seeding</h3>
     <p>
-      The qualifying round's final ranking (its generator's ranking, per the win condition + metric)
-      gives every member a qualifying position. A bracket round then seeds from it with the
+      The qualifying round's final ranking (its generator's ranking, per the metric derived from the
+      win condition) gives every member a qualifying position. A bracket round then seeds from it with the
       <code>FromRanking</code> rule, taking the <strong>top-N</strong> — that is the seed input the
       mains are generated from.
     </p>
@@ -135,10 +131,10 @@
     <p>What this phase needs to exist (conceptual — not a schema; the Architecture doc formalizes it):</p>
     <dl class="entities">
       <dt>Qualifying round (per class) — <code>timed_qual</code> / <code>round_robin</code></dt>
-      <dd><em>As built:</em> a round targeting one class; carries a heat <strong>win condition</strong>,
-      a <code>rounds</code> param (heats per pilot, default 3), and (for <code>timed_qual</code>) a
-      <code>metric</code> enum (best-lap / best-consecutive / most-laps). Channel mode is
-      <strong>Static</strong> (fixed per-pilot channels).</dd>
+      <dd><em>As built:</em> a round targeting one class; carries a heat <strong>win condition</strong>
+      (which <em>is</em> the qualifying metric — derived, not stored separately) and a
+      <code>rounds</code> param labeled <em>&ldquo;Heats per pilot&rdquo;</em> (default 3). Channel
+      mode is <strong>Static</strong> (fixed per-pilot channels).</dd>
       <dt>Qualifying heat (scored)</dt>
       <dd>a channel-balanced heat over the class members; scored under the round's win condition and
       appended to the log.</dd>
@@ -154,10 +150,6 @@
 
     <h2>Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">Collapse metric into win condition.</span> The redesign intent — one field
-        where the qualifying metric <em>is</em> the win condition, and the &ldquo;Rounds&rdquo; param
-        reads as &ldquo;Heats per pilot&rdquo; — is <strong>not yet done</strong>; the engine still
-        exposes a separate <code>metric</code> param. A follow-up.</li>
       <li><span class="q">Rank aggregation across heats.</span> Confirm how each pilot's multiple
         qualifying heats roll into one ranking per the chosen metric (best-of vs aggregate), and the
         tiebreakers (next-best lap; total time for most-laps).</li>

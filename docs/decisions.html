@@ -138,7 +138,7 @@
       reflected because the phase is the log's.</dd>
     </dl>
 
-    <h2>D6 · The win condition <em>is</em> the qualifying metric (unified)</h2>
+    <h2>D6 · The win condition <em>is</em> the qualifying metric (unified) — <em>implemented</em></h2>
     <dl class="entities">
       <dt>Context</dt>
       <dd>A round used to risk carrying two overlapping scoring knobs: a per-heat "win condition" and
@@ -154,13 +154,21 @@
       an inert condition.</dd>
       <dt>Rationale</dt>
       <dd>One rule per round can't contradict itself, and the same scorer serves heat results,
-      live/provisional ranking, and qualifying aggregation — written once, replayed identically.
-      <em>Doc-vs-code note:</em> the intent is to surface the qualifying <code>rounds</code> param as
-      <strong>"Heats per pilot"</strong> in the console; as built the round form still labels it
-      <strong>"Rounds"</strong> (the format schema label), and the qualifying <code>metric</code>
-      param coexists with the win condition in <code>timed_qual</code>. The unified
-      <em>scoring</em> model above is real; the friendlier "Heats per pilot" label is the remaining
-      surfacing step.</dd>
+      live/provisional ranking, and qualifying aggregation — written once, replayed identically.</dd>
+      <dt>Realized (as built)</dt>
+      <dd>Implemented (PR #188 on <code>devel</code>). The separate <code>metric</code> param was
+      <strong>removed</strong> from the <code>timed_qual</code> and <code>round_robin</code> format
+      schemas (<code>engine/src/format.rs</code>); the ranking metric is now <strong>derived from the
+      round's win condition</strong> by <code>qual_metric_for</code>
+      (<code>server/src/round_engine.rs</code>). The mapping —
+      <code>timed_qual</code>: Best lap&nbsp;&rarr;&nbsp;<code>best-lap</code>,
+      Best N consecutive&nbsp;&rarr;&nbsp;<code>best-consecutive</code>,
+      Timed (Most Laps)&nbsp;&rarr;&nbsp;<code>most-laps</code>, First-to-N&nbsp;&rarr;&nbsp;the
+      <code>best-lap</code> default; <code>round_robin</code>:
+      Timed&nbsp;&rarr;&nbsp;<code>total-laps</code>, else&nbsp;&rarr;&nbsp;<code>points</code>.
+      The <code>rounds</code> param is now labeled <strong>"Heats per pilot"</strong> (default 3) in
+      the schema, and <code>EventRounds.svelte</code> shows only the qualifying-applicable win
+      conditions (First-to-N hidden) with no separate metric field.</dd>
     </dl>
 
     <h2>D7 · The grace window defaults to a bounded 30 seconds</h2>
