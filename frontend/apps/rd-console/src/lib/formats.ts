@@ -17,6 +17,20 @@
 export const OPEN_PRACTICE = 'open_practice';
 
 /**
+ * The **qualifying** format keys — `timed_qual` and `round_robin`. For these the cross-round
+ * ranking metric *is* the win condition (the qualifying metric is derived from the win condition,
+ * not a separate stored param — Rounds form redesign), so the win-condition dropdown offers only
+ * the qualifying-applicable conditions (Best lap, Best N consecutive, Timed — Most Laps) and the
+ * separate metric field is gone.
+ */
+export const QUALIFYING_FORMATS: readonly string[] = ['timed_qual', 'round_robin'];
+
+/** Whether a format key is a qualifying format (its win condition drives the qualifying metric). */
+export function isQualifyingFormat(format: string | undefined | null): boolean {
+  return !!format && QUALIFYING_FORMATS.includes(format);
+}
+
+/**
  * The friendly, human-readable label for each known format key (the engine's
  * `FormatRegistry::standard` names). The form selector, the Rounds list, and the Heats area all
  * render this in place of the raw key while the key stays the stored wire value.

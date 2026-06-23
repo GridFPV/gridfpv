@@ -402,6 +402,12 @@ impl FormatParam {
     }
 
     /// An enum param with its allowed `options` and a default.
+    ///
+    /// No standard format declares an enum param at the moment (the qualifying `metric` enum was
+    /// removed when the qualifying metric became the win condition — Rounds form redesign), but the
+    /// [`Enum`](ParamKind::Enum) kind and its frontend rendering path are still supported, so this
+    /// constructor is kept for the next format that needs a fixed-choice param.
+    #[allow(dead_code)]
     fn enumerated(key: &str, label: &str, options: &[&str], default: &str) -> Self {
         Self {
             key: key.into(),
@@ -500,8 +506,11 @@ impl FormatRegistry {
     /// and default), the single source of truth `GET /formats` returns so the Rounds UI renders a
     /// per-format params editor. Kept in lock-step with the generators' `from_config` readers:
     ///
-    /// - `timed_qual`: `rounds` (number, 3), `metric` (enum: best-lap/best-consecutive/most-laps).
-    /// - `round_robin`: `rounds` (3), `heat_size` (4), `metric` (enum: points/total-laps).
+    /// - `timed_qual`: `rounds` ("Heats per pilot", number, 3). The ranking metric is **derived
+    ///   from the round's win condition** (the qualifying metric *is* the win condition), so it is
+    ///   **not** a separate param here.
+    /// - `round_robin`: `rounds` ("Heats per pilot", 3), `heat_size` (4). The ranking metric is
+    ///   likewise **derived from the win condition**, not a separate param.
     /// - `single_elim`: `heat_size` (number, 2).
     /// - `double_elim`: `bracket_reset` (bool, on).
     /// - `multi_main`: `main_size` (number, 4).
@@ -528,15 +537,13 @@ impl FormatRegistry {
             },
             FormatSchema {
                 name: "round_robin".into(),
+                // No `metric` param: the cross-round ranking metric is **derived from the round's
+                // win condition** (the qualifying metric *is* the win condition — Rounds form
+                // redesign), not a separate stored knob. The `rounds` param is "Heats per pilot":
+                // how many heats each pilot flies (their best result ranks).
                 params: vec![
-                    FormatParam::number("rounds", "Rounds", "3"),
+                    FormatParam::number("rounds", "Heats per pilot", "3"),
                     FormatParam::number("heat_size", "Heat size", "4"),
-                    FormatParam::enumerated(
-                        "metric",
-                        "Ranking metric",
-                        &["points", "total-laps"],
-                        "points",
-                    ),
                 ],
             },
             FormatSchema {
@@ -545,15 +552,11 @@ impl FormatRegistry {
             },
             FormatSchema {
                 name: "timed_qual".into(),
-                params: vec![
-                    FormatParam::number("rounds", "Rounds", "3"),
-                    FormatParam::enumerated(
-                        "metric",
-                        "Qualifying metric",
-                        &["best-lap", "best-consecutive", "most-laps"],
-                        "best-lap",
-                    ),
-                ],
+                // No `metric` param: the qualifying metric is **derived from the round's win
+                // condition** (the qualifying metric *is* the win condition — Rounds form redesign),
+                // not a separate stored knob. The `rounds` param is "Heats per pilot": how many heats
+                // each pilot flies in the qualifying round (their best flight ranks).
+                params: vec![FormatParam::number("rounds", "Heats per pilot", "3")],
             },
             FormatSchema {
                 name: "zippyq".into(),

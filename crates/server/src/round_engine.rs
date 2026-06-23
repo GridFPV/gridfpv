@@ -359,10 +359,59 @@ pub fn is_open_practice(round: &RoundDef) -> bool {
 /// Build a [`FormatConfig`] for a round over `field`: the round's
 /// [`params`](RoundDef::params) verbatim, identity seeding (the field is already in seed
 /// order — the membership/carry decided it), and no recorded draw.
+///
+/// For the **qualifying formats** (`timed_qual` / `round_robin`) the cross-round ranking
+/// **metric is derived from the round's [`win_condition`](RoundDef::win_condition)** rather
+/// than from a separately-stored `metric` param — the qualifying metric *is* the win
+/// condition, so the win condition is the single source of truth (Rounds form redesign:
+/// qualifying metric is the win condition). The derived `metric` param is injected into the
+/// config (overriding any stale stored value), so the generators' existing `from_config`
+/// readers see the win-condition-derived metric. A non-qualifying format keeps its params
+/// verbatim. See [`qual_metric_for`].
 fn format_config(round: &RoundDef, field: Vec<CompetitorRef>) -> FormatConfig {
     let mut config = FormatConfig::new(field);
     config.params = round.params.clone();
+    if let Some(metric) = qual_metric_for(&round.format, round.win_condition) {
+        config
+            .params
+            .insert("metric".to_string(), metric.to_string());
+    }
     config
+}
+
+/// The qualifying-generator **`metric` param derived from a round's win condition** (Rounds form
+/// redesign: the qualifying metric *is* the win condition), or `None` for a non-qualifying format
+/// (whose params are taken verbatim).
+///
+/// The win condition is the single source of truth for how the qualifying ranking aggregates:
+///
+/// - `timed_qual` ([`QualMetric`](gridfpv_engine::timed_qual::QualMetric)):
+///   - [`WinCondition::BestLap`] → `"best-lap"` (fastest single lap),
+///   - [`WinCondition::BestConsecutive`] → `"best-consecutive"` (fastest N-lap window),
+///   - [`WinCondition::Timed`] (Most Laps) → `"most-laps"`,
+///   - [`WinCondition::FirstToLaps`] is **not** a qualifying metric → the default `"best-lap"`.
+/// - `round_robin` ([`RrMetric`](gridfpv_engine::round_robin::RrMetric)):
+///   - [`WinCondition::Timed`] (Most Laps) → `"total-laps"`,
+///   - every other condition → the default `"points"` standing.
+fn qual_metric_for(
+    format: &str,
+    win_condition: gridfpv_engine::scoring::WinCondition,
+) -> Option<&'static str> {
+    use gridfpv_engine::scoring::WinCondition as WC;
+    match format {
+        "timed_qual" => Some(match win_condition {
+            WC::BestConsecutive { .. } => "best-consecutive",
+            WC::Timed { .. } => "most-laps",
+            // Best lap and the non-qualifying First-to-N both fall to the fast-lap default.
+            WC::BestLap | WC::FirstToLaps { .. } => "best-lap",
+        }),
+        "round_robin" => Some(match win_condition {
+            WC::Timed { .. } => "total-laps",
+            // Best lap / best-consecutive / first-to-N all rank by the points standing.
+            _ => "points",
+        }),
+        _ => None,
+    }
 }
 
 /// The completed heats of a round, **read back from the log** and scored under the round's
@@ -1297,6 +1346,118 @@ mod tests {
             fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]),
             Err(FillError::EmptyField(_))
         ));
+    }
+
+    // --- Qualifying metric is derived from the win condition (Rounds form redesign) --------------
+
+    #[test]
+    fn qual_metric_for_timed_qual_maps_each_win_condition() {
+        // The qualifying metric IS the win condition: each maps to the matching QualMetric string,
+        // and First-to-N (not a qualifying metric) falls to the best-lap default.
+        assert_eq!(
+            qual_metric_for("timed_qual", WinCondition::BestLap),
+            Some("best-lap")
+        );
+        assert_eq!(
+            qual_metric_for("timed_qual", WinCondition::BestConsecutive { n: 3 }),
+            Some("best-consecutive")
+        );
+        assert_eq!(
+            qual_metric_for(
+                "timed_qual",
+                WinCondition::Timed {
+                    window_micros: 120_000_000
+                }
+            ),
+            Some("most-laps")
+        );
+        assert_eq!(
+            qual_metric_for("timed_qual", WinCondition::FirstToLaps { n: 5 }),
+            Some("best-lap")
+        );
+    }
+
+    #[test]
+    fn qual_metric_for_round_robin_maps_timed_to_total_laps_else_points() {
+        // round_robin: Timed (most laps) → total-laps; everything else → the points standing.
+        assert_eq!(
+            qual_metric_for(
+                "round_robin",
+                WinCondition::Timed {
+                    window_micros: 60_000_000
+                }
+            ),
+            Some("total-laps")
+        );
+        assert_eq!(
+            qual_metric_for("round_robin", WinCondition::BestLap),
+            Some("points")
+        );
+        assert_eq!(
+            qual_metric_for("round_robin", WinCondition::BestConsecutive { n: 3 }),
+            Some("points")
+        );
+        assert_eq!(
+            qual_metric_for("round_robin", WinCondition::FirstToLaps { n: 4 }),
+            Some("points")
+        );
+    }
+
+    #[test]
+    fn qual_metric_for_non_qualifying_format_is_none() {
+        // A bracket format keeps its params verbatim — no derived metric.
+        assert_eq!(qual_metric_for("single_elim", WinCondition::BestLap), None);
+        assert_eq!(
+            qual_metric_for("open_practice", WinCondition::BestLap),
+            None
+        );
+    }
+
+    #[test]
+    fn format_config_injects_the_win_condition_derived_metric() {
+        // The built FormatConfig carries the metric derived from the win condition (the single
+        // source of truth), overriding any stale stored `metric` param.
+        let mut round = qual_round("q1", "open");
+        round.win_condition = WinCondition::Timed {
+            window_micros: 90_000_000,
+        };
+        // A stale stored metric must be overridden by the win-condition-derived one.
+        round.params.insert("metric".into(), "best-lap".into());
+        let config = format_config(&round, vec![CompetitorRef("A".into())]);
+        assert_eq!(
+            config.params.get("metric").map(String::as_str),
+            Some("most-laps")
+        );
+    }
+
+    #[test]
+    fn round_ranking_ranks_by_the_win_condition_derived_metric() {
+        // A timed_qual round scored under Timed (Most Laps): the ranking must rank by most-laps
+        // (the win-condition-derived metric), NOT the best-lap default — even with no stored metric.
+        let mut round = qual_round("q1", "open");
+        round.win_condition = WinCondition::Timed {
+            window_micros: 100_000_000,
+        };
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+
+        // One heat over A,B where B completes more laps inside the window than A.
+        // Passes (lap-gate): A holeshot then 2 more laps (2 counted); B holeshot then 3 more (3).
+        let mut events = vec![scheduled("q1-h", "q1", "open", &["A", "B"])];
+        let passes = vec![
+            pass("A", 0, 0),
+            pass("B", 0, 1),
+            pass("A", 10_000_000, 2),
+            pass("B", 10_000_000, 3),
+            pass("A", 20_000_000, 4),
+            pass("B", 20_000_000, 5),
+            pass("B", 30_000_000, 6),
+        ];
+        events.extend(run_heat_events("q1-h", passes));
+
+        let ranking = round_ranking(&meta, &round, &events).unwrap();
+        // B banked more laps → ranks ahead of A under the most-laps qualifying metric.
+        assert_eq!(ranking[0].competitor, CompetitorRef("B".into()));
+        assert_eq!(ranking[0].position, 1);
     }
 
     /// An **open-practice** round fixture (open-practice format, Slice 1): `format: "open_practice"`

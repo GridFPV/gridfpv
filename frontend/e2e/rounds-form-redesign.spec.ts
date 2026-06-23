@@ -155,3 +155,96 @@ test('the win-condition selector labels the Timed condition "Timed — Most Laps
   // Clean up the shared Director's event back to empty (no round was saved).
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
 });
+
+test('a qualifying round: win condition IS the metric, "Heats per pilot", heats named "<Round> Heat N"', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  const OPEN_CLASS = 'mgp-open';
+
+  // ── Set up (via the open API): select the Open Class, roster two pilots, make them its members,
+  //    and add a Qualifying (timed_qual) round, PerHeat so each format-round is one whole-field heat.
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [OPEN_CLASS] } });
+  const mk = async (callsign: string): Promise<string> => {
+    const r = await page.request.post(`${base}/pilots`, { ...json, data: { callsign } });
+    return (await r.json()).id as string;
+  };
+  const p1 = await mk('QualAce');
+  const p2 = await mk('QualBolt');
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [p1, p2] } });
+  await page.request.put(`${ev}/classes/${OPEN_CLASS}/membership`, {
+    ...json,
+    data: { pilots: [{ pilot: p1 }, { pilot: p2 }] }
+  });
+  // Two format-rounds so the round produces two heats; PerHeat so each is one whole-field heat.
+  const roundRes = await page.request.post(`${ev}/rounds`, {
+    ...json,
+    data: {
+      label: 'Qualifying',
+      classes: [OPEN_CLASS],
+      format: 'timed_qual',
+      params: { rounds: '2' },
+      win_condition: 'BestLap',
+      channel_mode: 'PerHeat'
+    }
+  });
+  const roundId = (await roundRes.json()).id as string;
+
+  await page.goto('/');
+  await enterPractice(page);
+  await openTab(page, 'Rounds & Heats');
+
+  // ── The form for the Qualifying (timed_qual) format: the win condition IS the metric ───────────
+  await page.getByRole('button', { name: '+ Add round' }).click();
+  const form = page.getByRole('form', { name: 'Add round' });
+  await expect(form).toBeVisible();
+  await form.getByLabel('Format').selectOption('timed_qual');
+
+  // The win-condition selector shows only the qualifying conditions (no First-to-N), and there is
+  // NO separate "qualifying metric" field — the win condition drives the qualifying ranking.
+  const win = form.getByLabel('Win condition');
+  await expect(win).toBeVisible();
+  await expect(win.locator('option', { hasText: 'Best lap' })).toHaveCount(1);
+  await expect(win.locator('option', { hasText: 'Best N consecutive' })).toHaveCount(1);
+  await expect(win.locator('option', { hasText: 'Timed — Most Laps' })).toHaveCount(1);
+  await expect(win.locator('option', { hasText: 'First to N laps' })).toHaveCount(0);
+  await expect(form.getByLabel('Qualifying metric value')).toBeHidden();
+  await expect(form.getByLabel('Ranking metric value')).toBeHidden();
+  // The `rounds` param is relabeled "Heats per pilot".
+  await expect(form.getByLabel('Heats per pilot value')).toBeVisible();
+  await form.screenshot({ path: `${SHOTS}rounds-form-qualifying.png` });
+  // Close the add-form without saving (the round was created via the API above).
+  await form.getByRole('button', { name: 'Cancel' }).click();
+
+  // ── Two heats in the round → named by position: "Qualifying Heat 1" / "Qualifying Heat 2".
+  // Schedule them via the control API tagged with the round (the generator only emits the next heat
+  // once the prior is finalized; two ScheduleHeats give the two heats this naming test needs without
+  // running them). The Heats list re-reads on the live-state push, so the names appear.
+  for (const heatId of ['round-1', 'round-2']) {
+    await page.request.post(`${ev}/control`, {
+      ...json,
+      data: {
+        ScheduleHeat: { heat: heatId, lineup: [p1, p2], class: OPEN_CLASS, round: roundId }
+      }
+    });
+  }
+  await expect(page.getByText('Qualifying Heat 1')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('Qualifying Heat 2')).toBeVisible({ timeout: 15_000 });
+  // The raw generated heat ids are not shown.
+  await expect(page.getByText('round-1', { exact: true })).toHaveCount(0);
+  await page
+    .getByRole('region', { name: 'Heats for Qualifying' })
+    .screenshot({ path: `${SHOTS}rounds-qualifying-heat-names.png` });
+
+  // Clean up the shared Director's event back to empty.
+  await page.request.delete(`${ev}/rounds/${roundId}`);
+  await page.request.put(`${ev}/classes/${OPEN_CLASS}/membership`, {
+    ...json,
+    data: { pilots: [] }
+  });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
+});

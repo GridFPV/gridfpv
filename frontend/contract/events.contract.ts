@@ -1408,14 +1408,19 @@ describe('race Slice 2a: rounds', () => {
     ]);
     // open_practice declares no params (its active channels are the field, via AllChannels seeding).
     expect(schemas.find((s) => s.name === 'open_practice')!.params).toEqual([]);
-    // timed_qual declares `rounds` (number, default 3) and an enum `metric` with its options.
+    // timed_qual declares `rounds` (number, default 3) relabeled "Heats per pilot". It declares NO
+    // `metric` param: the qualifying metric is derived from the round's win condition (the qualifying
+    // metric IS the win condition — Rounds form redesign), not a separate stored knob.
     const tq = schemas.find((s) => s.name === 'timed_qual')!;
     const rounds = tq.params.find((p) => p.key === 'rounds')!;
     expect(rounds.kind).toBe('number');
     expect(rounds.default).toBe('3');
-    const metric = tq.params.find((p) => p.key === 'metric')!;
-    expect(metric.kind).toBe('enum');
-    expect(metric.options).toContain('best-lap');
+    expect(rounds.label).toBe('Heats per pilot');
+    expect(tq.params.find((p) => p.key === 'metric')).toBeUndefined();
+    // round_robin likewise declares no `metric` param (its `rounds` is also "Heats per pilot").
+    const rr = schemas.find((s) => s.name === 'round_robin')!;
+    expect(rr.params.find((p) => p.key === 'metric')).toBeUndefined();
+    expect(rr.params.find((p) => p.key === 'rounds')?.label).toBe('Heats per pilot');
     // double_elim declares a bool `bracket_reset`.
     const de = schemas.find((s) => s.name === 'double_elim')!;
     expect(de.params.find((p) => p.key === 'bracket_reset')?.kind).toBe('bool');

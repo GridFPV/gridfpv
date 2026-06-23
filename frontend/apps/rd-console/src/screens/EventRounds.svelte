@@ -44,7 +44,12 @@
   } from '@gridfpv/types';
   import { channelLabel, nodeChannelLabel } from '../lib/channels.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
-  import { fieldsForFormat, formatLabel, OPEN_PRACTICE } from '../lib/formats.js';
+  import {
+    fieldsForFormat,
+    formatLabel,
+    isQualifyingFormat,
+    OPEN_PRACTICE
+  } from '../lib/formats.js';
   import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -187,13 +192,21 @@
   // controls for it and shows the practice heat as ready to Start.
   const isOpenPracticeRound = (round: RoundDef): boolean => round.format === OPEN_PRACTICE;
 
-  // The display name for a heat in the Heats list. An open-practice round auto-creates a single
-  // heat (its lineup = the active channels); it reads better as "Open Practice Heat" than the
-  // generated id. Heats carry no backend label, so this is derived from the round's format —
-  // every other round shows the heat's own id.
+  // The display name for a heat in the Heats list. Heats carry no backend label, so the name is
+  // derived from the round + the heat's position within that round:
+  //  - an open-practice round auto-creates a single channel heat → "Open Practice Heat";
+  //  - every other round → "<round label> Heat <N>", where N is the heat's 1-based position in the
+  //    round's heat list (a Qualifying round → "Qualifying Heat 1", "Qualifying Heat 2", …).
+  // This reads far better than the generated heat id, and matches how an RD thinks of the round's
+  // heats ("Qualifying Heat 2") rather than the engine's internal id.
   const OPEN_PRACTICE_HEAT_NAME = 'Open Practice Heat';
   function heatDisplayName(round: RoundDef, h: HeatSummary): string {
-    return isOpenPracticeRound(round) ? OPEN_PRACTICE_HEAT_NAME : h.heat;
+    if (isOpenPracticeRound(round)) return OPEN_PRACTICE_HEAT_NAME;
+    // 1-based position of this heat within the round's heats (by their order in the list).
+    const heatsInRound = heatsByRound(round.id);
+    const index = heatsInRound.findIndex((x) => x.heat === h.heat);
+    const n = index >= 0 ? index + 1 : heatsInRound.length + 1;
+    return `${round.label} Heat ${n}`;
   }
 
   // A heat's per-pilot channel assignment, resolved to a band+channel label (race redesign Slice
@@ -457,6 +470,12 @@
   // Open-practice format (open-practice Slice 2): submittable on a label + at least one active
   // channel (no classes).
   const isOpenPractice = $derived(format === OPEN_PRACTICE);
+  // A **qualifying** format (timed_qual / round_robin): the cross-round ranking metric *is* the win
+  // condition (the qualifying metric is derived from the win condition, not a separate field —
+  // Rounds form redesign). So the win-condition dropdown offers only the qualifying-applicable
+  // conditions (Best lap, Best N consecutive, Timed — Most Laps); First-to-N-laps is not a
+  // qualifying metric and is hidden for these formats.
+  const isQualifying = $derived(isQualifyingFormat(format));
   const canSubmitOpenPractice = $derived(
     isOpenPractice && label.trim().length > 0 && selectedNodes.size > 0
   );
@@ -502,6 +521,14 @@
       }
       paramValues = next;
     }
+  });
+
+  // Keep the win condition valid for the chosen format: a qualifying format (timed_qual /
+  // round_robin) offers only the qualifying conditions, so if the form is sitting on First-to-N-laps
+  // when a qualifying format is selected, snap it to Best lap (the qualifying default). The win
+  // condition then drives the qualifying ranking metric (Rounds form redesign).
+  $effect(() => {
+    if (isQualifying && winKind === 'FirstToLaps') winKind = 'BestLap';
   });
 
   function setParamValue(key: string, value: string) {
@@ -887,13 +914,23 @@
         {/if}
 
         <!-- Open practice does no scoring (open-practice refinement): hide the win-condition input and
-             offer the practice **Time limit** instead. A normal round keeps its win condition. -->
+             offer the practice **Time limit** instead. A normal round keeps its win condition.
+             For a **qualifying** format the win condition IS the qualifying metric, so only the
+             qualifying-applicable conditions are offered (First-to-N-laps is hidden) and there is no
+             separate "qualifying metric" field — the win condition drives the ranking. -->
         {#if fields.winCondition}
           <div class="form-grid">
-            <Field label="Win condition">
+            <Field
+              label="Win condition"
+              hint={isQualifying
+                ? 'The qualifying metric — the win condition is how this round’s ranking is decided.'
+                : undefined}
+            >
               <Select bind:value={winKind} aria-label="Win condition">
                 <option value="Timed">Timed — Most Laps</option>
-                <option value="FirstToLaps">First to N laps</option>
+                {#if !isQualifying}
+                  <option value="FirstToLaps">First to N laps</option>
+                {/if}
                 <option value="BestLap">Best lap</option>
                 <option value="BestConsecutive">Best N consecutive</option>
               </Select>
