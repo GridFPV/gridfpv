@@ -40,9 +40,22 @@
 
     <div class="callout">
       <p>
+        <strong>As built (v0.4) — the Rounds form.</strong> A bracket round is created on the
+        Rounds+Heats stage-page: a <strong>Label</strong>, a <strong>Format</strong> (friendly name —
+        <em>Single/Double Elimination</em>, <em>Multi-Main</em>, <em>Round Robin</em>, <em>ZippyQ</em>),
+        then dynamic per-format fields — a <strong>single-select class</strong> (a round targets one
+        class), a <strong>win condition</strong>, a <strong>seeding</strong> rule (<em>From roster</em>
+        or <em>From ranking</em> with a source round + top-N), a <strong>channel mode</strong>
+        (Static / Per-heat), the format's declared params, and a Start&nbsp;&amp;&nbsp;Timing block
+        (staging timer default <strong>5:00</strong>, randomized start delay entered in
+        <strong>seconds</strong> default 2–5&nbsp;s, grace window default <strong>30&nbsp;s</strong>).
+        Selections auto-save where the page auto-saves; the round form itself is an explicit
+        add/save.
+      </p>
+      <p>
         <strong>Planned — rounds are event-level, class-tagged, and dynamic.</strong> In the
         race-running redesign, <strong>rounds live on the event</strong> (not buried inside one
-        bracket structure) and each round is <strong>tagged with the class(es) it is eligible for</strong>.
+        bracket structure) and each round is <strong>tagged with the class it is eligible for</strong>.
         Rounds are added <em>dynamically as the event goes</em>: practice and qualifying rounds are
         appended as-you-go, and <strong>advancing to brackets generates the full bracket from the
         qualifying ranking (top-N)</strong> as a set of rounds — then editable by the RD (the #84
@@ -83,9 +96,11 @@
 
     <h3>Win condition &amp; scoring</h3>
     <ul>
-      <li>Configurable per heat/round: <strong>first to X laps (default)</strong>, or a
-        <strong>time limit</strong> (most laps wins, with the
-        <a href="pipeline-qualifying.html">last-lap rule</a> and total time as the tiebreak).</li>
+      <li>Configurable per round via the <em>Win condition</em> dropdown — <em>as built</em> the four
+        options are <strong>Timed — Most Laps</strong> (a time window in seconds; most laps wins, with
+        the <a href="pipeline-qualifying.html">last-lap rule</a> and total time as the tiebreak),
+        <strong>First to N laps</strong>, <strong>Best lap</strong>, and <strong>Best N
+        consecutive</strong>.</li>
       <li>Advancement is determined by <strong>top-N finishing positions</strong> per the
         generator's rules.</li>
       <li>Leaderboard formats (e.g. GQ) instead score each pack by the
@@ -135,7 +150,11 @@
         seed order and the RD can override.</li>
       <li>At race time GridFPV <strong>dynamically tunes the timer's nodes</strong> to the assigned
         channels: the engine decides the assignment, the adapter applies the tuning to the hardware
-        (<a href="race-engine.html">Race Engine</a> §5; <a href="timer-adapters.html">Timer Adapters</a> §5).</li>
+        (<a href="channel-model.html">Channel Model</a> §6; <a href="race-engine.html">Race Engine</a> §5;
+        <a href="timer-adapters.html">Timer Adapters</a> §5).</li>
+      <li>The number of pilots in a heat is capped by the timer's <strong>node count</strong>, but the
+        timer's <strong>available channels can exceed</strong> that — the pool the engine first-fits
+        from (<a href="channel-model.html">Channel Model</a> §2).</li>
       <li>Sim has no channel step (the sim timer declares no channel capability).</li>
     </ul>
 
