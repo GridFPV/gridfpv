@@ -131,6 +131,53 @@ describe('LiveRaceControl', () => {
     expect(taggedButtons).not.toContain(btn('Start'));
   });
 
+  describe('heat picker (manual current-heat selection)', () => {
+    // Two heats in the same round: heat-1 (current) and heat-2 (filled, on deck).
+    const HEAT_2: HeatSummary = {
+      heat: 'heat-2',
+      lineup: ['CARLA', 'DAN'],
+      round: 'r1',
+      class: 'c1',
+      frequencies: [],
+      phase: 'Scheduled',
+      is_current: false
+    };
+
+    it('lists the round heats by their shared display name, marking the current one', async () => {
+      const { session } = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: liveAt('Staged', 'heat-1'),
+        listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND, HEAT_2])
+      });
+      render(LiveRaceControl, { session });
+
+      const select = (await screen.findByRole('combobox', {
+        name: 'Select current heat'
+      })) as HTMLSelectElement;
+      const labels = Array.from(select.options).map((o) => o.textContent?.trim());
+      // "<Round> Heat N" names from the shared helper; the current heat is flagged.
+      expect(labels).toContain('Qualifying R1 Heat 1 (current)');
+      expect(labels).toContain('Qualifying R1 Heat 2');
+      // The select tracks the live current heat.
+      expect(select.value).toBe('heat-1');
+    });
+
+    it('sends SetCurrentHeat for the picked heat', async () => {
+      const { session, sendSpy } = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: liveAt('Staged', 'heat-1'),
+        listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND, HEAT_2])
+      });
+      render(LiveRaceControl, { session });
+
+      const select = (await screen.findByRole('combobox', {
+        name: 'Select current heat'
+      })) as HTMLSelectElement;
+      await fireEvent.change(select, { target: { value: 'heat-2' } });
+      expect(sendSpy).toHaveBeenCalledWith({ SetCurrentHeat: { heat: 'heat-2' } });
+    });
+  });
+
   describe('staging countdown (Slice 3)', () => {
     const stagingClock = () => screen.getByLabelText('Staging time remaining').textContent?.trim();
 

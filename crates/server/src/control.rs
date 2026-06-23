@@ -114,6 +114,18 @@ pub enum Command {
         heat: HeatId,
     },
 
+    // --- Live-control selection ---
+    /// **Manually select the current heat** in Live control (the RD's explicit "show/control
+    /// *this* heat"). Validates the heat exists in the event and appends an
+    /// [`Event::CurrentHeatSelected`](gridfpv_events::Event::CurrentHeatSelected) — the live
+    /// `current_heat` derivation then follows the RD's choice. Not a heat-loop transition: it
+    /// only moves Live control's focus (the sheet/clock/leaderboard + the transition buttons
+    /// target the chosen heat); it does not change the heat's state.
+    SetCurrentHeat {
+        /// The heat to bring into focus — one already scheduled in the event.
+        heat: HeatId,
+    },
+
     // --- Scheduling ---
     /// Create a heat with its lineup (`Event::HeatScheduled`). Additively carries the
     /// class/round the heat runs in and the per-pilot frequency assignment; all three
@@ -281,6 +293,9 @@ mod tests {
                 heat: HeatId("q-1".into()),
             },
             Command::Discard {
+                heat: HeatId("q-1".into()),
+            },
+            Command::SetCurrentHeat {
                 heat: HeatId("q-1".into()),
             },
         ];

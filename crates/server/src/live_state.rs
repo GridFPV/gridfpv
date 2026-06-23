@@ -11,13 +11,16 @@
 //!
 //! The event log carries [`Event::HeatScheduled`] and
 //! [`Event::HeatStateChanged`](gridfpv_events::Event::HeatStateChanged) for every heat
-//! (race-engine.html §2). The **current heat** is the most-recently-active one: the heat
-//! whose latest state-changing event appears last in the log and that is not yet
-//! `Final`/`Advanced` past the timer. We resolve it by scanning the log in order and
-//! tracking the last heat to receive a `HeatScheduled` or `HeatStateChanged`. A heat
-//! that has reached the terminal `Final` phase is still reported as the current heat
-//! until a *newer* heat takes the timer (a freshly-scheduled or transitioned heat),
-//! which mirrors what an overlay shows between heats ("last heat, now scored").
+//! (race-engine.html §2). The **current heat** is the one the RD is showing/controlling in
+//! Live control. A freshly-**scheduled** heat must not steal focus (filling a heat only
+//! adds it to the list / on-deck), so the current heat is the one referenced by the **last
+//! event among `{HeatStateChanged, CurrentHeatSelected}`** — a real heat-loop transition
+//! (Stage/Start/…) or the RD's explicit manual selection
+//! ([`Event::CurrentHeatSelected`](gridfpv_events::Event::CurrentHeatSelected)). Before
+//! either has occurred we fall back to the **first `HeatScheduled`**, so the very first
+//! heat is controllable. A heat that has reached the terminal `Final` phase is still
+//! reported as the current heat until a *newer* heat takes the timer (a transition or a
+//! selection), which mirrors what an overlay shows between heats ("last heat, now scored").
 //!
 //! # On-deck
 //!
@@ -282,19 +285,29 @@ fn phase_of(state: HeatState) -> HeatPhase {
     }
 }
 
-/// The current heat: the heat whose latest `HeatScheduled` / `HeatStateChanged` event
-/// appears last in the log. `None` if no heat was ever scheduled.
+/// The current heat: the heat the RD is showing/controlling in Live control.
+///
+/// A brand-new **scheduled** heat must *not* grab focus (filling heats only adds them to
+/// the list / on-deck), so the current heat is the one referenced by the **last event
+/// among `{HeatStateChanged, CurrentHeatSelected}`** — a real heat-loop transition
+/// (Stage/Start/…) or an explicit manual selection. If there has been neither yet, fall
+/// back to the **first `HeatScheduled`** so the very first heat is controllable before any
+/// transition. `None` if no heat was ever scheduled.
 fn current_heat(events: &[Event]) -> Option<HeatId> {
-    let mut current: Option<HeatId> = None;
+    let mut active: Option<HeatId> = None;
+    let mut first_scheduled: Option<HeatId> = None;
     for event in events {
         match event {
-            Event::HeatScheduled { heat, .. } | Event::HeatStateChanged { heat, .. } => {
-                current = Some(heat.clone());
+            Event::HeatStateChanged { heat, .. } | Event::CurrentHeatSelected { heat } => {
+                active = Some(heat.clone());
+            }
+            Event::HeatScheduled { heat, .. } if first_scheduled.is_none() => {
+                first_scheduled = Some(heat.clone());
             }
             _ => {}
         }
     }
-    current
+    active.or(first_scheduled)
 }
 
 /// The lineup of a heat: the competitors from its most recent `HeatScheduled`.
@@ -614,8 +627,38 @@ mod tests {
     }
 
     #[test]
-    fn current_heat_follows_the_most_recently_active_heat() {
-        // q-1 runs and scores; q-2 is then scheduled and becomes current.
+    fn current_heat_defaults_to_the_first_scheduled_heat() {
+        // Before any transition or selection, the first scheduled heat is the controllable one
+        // even when a later heat was scheduled afterwards (filling adds, it does not steal focus).
+        let events = vec![scheduled("q-1", &["A", "B"]), scheduled("q-2", &["C", "D"])];
+        let s = live_state(&events);
+        assert_eq!(s.current_heat, Some(HeatId("q-1".into())));
+        assert_eq!(
+            s.active_pilots,
+            vec![CompetitorRef("A".into()), CompetitorRef("B".into())]
+        );
+    }
+
+    #[test]
+    fn freshly_scheduled_heat_does_not_steal_focus() {
+        // q-1 is staged (it's the active heat). Filling q-2 (a bare HeatScheduled) must NOT move
+        // the current heat — focus only moves on a real transition or an explicit selection.
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            scheduled("q-2", &["C", "D"]),
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.current_heat, Some(HeatId("q-1".into())));
+        assert_eq!(s.phase, HeatPhase::Staged);
+        // q-2 is on deck, not current.
+        assert_eq!(s.on_deck, Some(HeatId("q-2".into())));
+    }
+
+    #[test]
+    fn current_heat_follows_a_heat_state_change() {
+        // q-1 runs and scores; q-2 is scheduled (no focus steal) then transitioned (Staged),
+        // which moves the current heat to q-2.
         let events = vec![
             scheduled("q-1", &["A", "B"]),
             changed("q-1", HeatTransition::Staged),
@@ -625,6 +668,32 @@ mod tests {
             changed("q-1", HeatTransition::Finalized),
             scheduled("q-2", &["C", "D"]),
         ];
+        // After the bare schedule, focus is still on q-1 (last transition).
+        assert_eq!(live_state(&events).current_heat, Some(HeatId("q-1".into())));
+        // A real transition on q-2 moves focus to it.
+        let mut events = events;
+        events.push(changed("q-2", HeatTransition::Staged));
+        let s = live_state(&events);
+        assert_eq!(s.current_heat, Some(HeatId("q-2".into())));
+        assert_eq!(s.phase, HeatPhase::Staged);
+        assert_eq!(
+            s.active_pilots,
+            vec![CompetitorRef("C".into()), CompetitorRef("D".into())]
+        );
+    }
+
+    #[test]
+    fn current_heat_follows_an_explicit_selection() {
+        // q-1 is active (staged); the RD manually selects q-2 in Live control. The current heat
+        // follows the explicit CurrentHeatSelected even though q-2 has not transitioned.
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            scheduled("q-2", &["C", "D"]),
+            Event::CurrentHeatSelected {
+                heat: HeatId("q-2".into()),
+            },
+        ];
         let s = live_state(&events);
         assert_eq!(s.current_heat, Some(HeatId("q-2".into())));
         assert_eq!(s.phase, HeatPhase::Scheduled);
@@ -632,6 +701,12 @@ mod tests {
             s.active_pilots,
             vec![CompetitorRef("C".into()), CompetitorRef("D".into())]
         );
+        // A later selection back to q-1 follows again (last selection wins).
+        let mut events = events;
+        events.push(Event::CurrentHeatSelected {
+            heat: HeatId("q-1".into()),
+        });
+        assert_eq!(live_state(&events).current_heat, Some(HeatId("q-1".into())));
     }
 
     #[test]
@@ -724,7 +799,9 @@ mod tests {
             scheduled_tagged("q-2", &["C", "D"], "open", "r1"),
             scheduled("q-x", &["E"]),
         ];
-        // q-x was scheduled last, so it is the current heat; q-2 is not current.
+        // q-1's last event is a transition (Finalized); q-2 and q-x are bare schedules that don't
+        // steal focus — so the current heat is q-1 (its `Final` heat stays on the timer between
+        // heats, "last heat, now scored"), not the freshly-scheduled q-x.
         let summaries = heat_summaries(&events);
         assert_eq!(summaries.len(), 3);
 
@@ -741,7 +818,7 @@ mod tests {
         assert_eq!(q1.round, Some(RoundId("r1".into())));
         assert_eq!(q1.class, Some(ClassId("open".into())));
         assert_eq!(q1.phase, HeatPhase::Final);
-        assert!(!q1.is_current);
+        assert!(q1.is_current);
         assert_eq!(
             q1.lineup,
             vec![CompetitorRef("A".into()), CompetitorRef("B".into())]
@@ -755,7 +832,7 @@ mod tests {
         let qx = &summaries[2];
         assert_eq!(qx.round, None);
         assert_eq!(qx.class, None);
-        assert!(qx.is_current);
+        assert!(!qx.is_current);
     }
 
     #[test]

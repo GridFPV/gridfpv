@@ -788,6 +788,17 @@ export class Session {
   }
 
   /**
+   * **Select the current heat** in Live control (`Command::SetCurrentHeat`) — the RD's explicit
+   * "show/control *this* heat". The live `current_heat` derivation then follows the choice, so the
+   * sheet/clock/leaderboard and the transition buttons target the selected heat. Sent through the
+   * control path (full-trust first → lazy token); returns the raw {@link CommandAck} like
+   * {@link send}.
+   */
+  setCurrentHeat(heat: HeatId): Promise<CommandAck> {
+    return this.send({ SetCurrentHeat: { heat } });
+  }
+
+  /**
    * Schedule a heat by hand (`Command::ScheduleHeat`) — race redesign Slice 3b, the manual build that
    * replaces the retired free-text NewHeat form. The lineup is real {@link CompetitorRef}s drawn from
    * a round's eligible class members (no typed names), and the heat is **tagged** with the round and

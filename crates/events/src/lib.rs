@@ -331,6 +331,15 @@ pub enum Event {
         heat: HeatId,
         transition: HeatTransition,
     },
+    /// The RD **manually selected the current heat** in Live control — the explicit
+    /// "show/control *this* heat" the console appends so the live projection follows the
+    /// RD's choice rather than auto-following a freshly-scheduled heat.
+    ///
+    /// Event-sourced like every other RD action: the live `current_heat` derivation folds
+    /// the last of these (alongside `HeatStateChanged`) to decide which heat is on the
+    /// timer, so a replay is deterministic. Filling a new heat only adds it to the list /
+    /// on-deck; focus moves on a real transition or on this explicit selection.
+    CurrentHeatSelected { heat: HeatId },
     /// The **start procedure fired** for a heat that just entered `Armed` (heat-lifecycle
     /// redesign, Slice 2). The Director runtime chooses the randomized start delay **once**, at
     /// the moment the heat is armed, and writes it here as a *fact* — so the console can cue the
@@ -489,6 +498,9 @@ mod tests {
             Event::HeatStateChanged {
                 heat: HeatId("q-1".into()),
                 transition: HeatTransition::Aborted,
+            },
+            Event::CurrentHeatSelected {
+                heat: HeatId("q-2".into()),
             },
             Event::DetectionVoided { target: LogRef(42) },
             Event::LapInserted {

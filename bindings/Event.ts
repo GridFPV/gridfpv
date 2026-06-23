@@ -37,7 +37,7 @@ round?: RoundId,
  * Per-pilot frequency assignment in raw MHz (e.g. `5800`). Empty when none is
  * assigned (a simulator, or the free-text path that does not assign channels).
  */
-frequencies?: Array<[CompetitorRef, number]>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "HeatStarting": { 
+frequencies?: Array<[CompetitorRef, number]>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "CurrentHeatSelected": { heat: HeatId, } } | { "HeatStarting": { 
 /**
  * The heat whose start procedure fired (it is in `Armed`).
  */
