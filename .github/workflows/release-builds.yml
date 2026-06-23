@@ -1,0 +1,91 @@
+name: Release builds
+
+# Gated, cost-aware native-app build pipeline — produces the Tauri desktop
+# installers (the RELEASE form of GridFPV; see src-tauri/README.md). This is
+# DELIBERATELY NOT part of the per-push CI (ci.yml): it does NOT run on devel,
+# on pull_request, or on every push, so dev velocity and Actions cost are
+# preserved. It only runs:
+#   - manually (workflow_dispatch — the "Run workflow" button / `gh workflow run`)
+#   - on merge to main (release builds)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }} — Tauri bundle
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: gridfpv-linux # AppImage + .deb
+          - os: windows-latest
+            artifact: gridfpv-windows # .msi + NSIS .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Linux-only: Tauri's webkit2gtk/GTK system deps (Windows uses the bundled
+      # WebView2 runtime and needs none of these). Mirror src-tauri/README.md.
+      - name: Install Tauri Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Cache keyed per-OS; src-tauri is a standalone workspace, so point the
+      # cache at its own lockfile so the matrix legs don't collide.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.os }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Build the frontend (the workspace packages + the rd-console dist that the
+      # app bundles). This is exactly what tauri.conf.json's beforeBuildCommand
+      # runs (`cd frontend && npm ci && npm run build`); doing it explicitly here
+      # makes the dist build a visible, cached step and matches ci.yml's
+      # conventions (npm ci + npm run build under frontend/).
+      - name: Build frontend (rd-console dist)
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+
+      # Official Tauri action: runs `cargo tauri build` under projectPath, which
+      # re-runs beforeBuildCommand (idempotent — frontend already built above),
+      # compiles the gridfpv-desktop crate and emits the per-OS bundles into
+      # src-tauri/target/release/bundle/ as configured by bundle.targets
+      # (appimage+deb on Linux, msi+nsis on Windows).
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: src-tauri
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: src-tauri/target/release/bundle/**
+          if-no-files-found: error

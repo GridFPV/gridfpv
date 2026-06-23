@@ -17,7 +17,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
+    "targets": ["appimage", "deb", "msi", "nsis"],
     "resources": {
       "../frontend/apps/rd-console/dist": "rd-console-dist"
     },
