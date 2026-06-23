@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { HeatSummary, RoundDef } from '@gridfpv/types';
-import {
-  heatDisplayName,
-  isOpenPracticeRound,
-  OPEN_PRACTICE_HEAT_NAME
-} from '../src/lib/heats.js';
+import { heatDisplayName, isOpenPracticeRound, OPEN_PRACTICE_HEAT_NAME } from '../src/lib/heats.js';
 
 const round = (over: Partial<RoundDef> = {}): RoundDef =>
   ({
