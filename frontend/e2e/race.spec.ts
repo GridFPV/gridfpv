@@ -61,15 +61,6 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // through connecting → snapshotting on the way).
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
-  // ── #90: the active event is Director state — a reload RESUMES into it, not the picker ──
-  // Entering Practice persisted it as the Director's active event (`PUT /active-event`), so a
-  // full page reload reads `GET /active-event` and re-enters the workspace directly — the
-  // picker's "Choose an event" heading must NOT reappear.
-  await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeHidden();
-  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
-
   // ── Schedule a heat with named pilots over the real control path ──────────────────────
   // The free-text NewHeat form is retired (race redesign Slice 3b); heats are built from real
   // round/class members in the Rounds & Heats stage (covered by `rounds.spec.ts`). This race
@@ -80,6 +71,24 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
     data: { ScheduleHeat: { heat: HEAT_ID, lineup: PILOTS } }
   });
   expect(ack.ok()).toBeTruthy();
+  // Explicitly focus THIS heat as the current heat (SetCurrentHeat) over the control path. The
+  // shared worker Director's `current_heat` stays pinned to whatever heat a prior spec last touched
+  // (it never resets between specs), and filling a heat does NOT steal Live focus (current-heat.spec.ts)
+  // — so this server-side selection keeps the run independent of spec order.
+  const focused = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: { SetCurrentHeat: { heat: HEAT_ID } }
+  });
+  expect(focused.ok()).toBeTruthy();
+
+  // ── #90: the active event is Director state — a reload RESUMES into it, not the picker ──
+  // Entering Practice persisted it as the Director's active event (`PUT /active-event`), so a
+  // full page reload reads `GET /active-event` and re-enters the workspace directly — the
+  // picker's "Choose an event" heading must NOT reappear.
+  await page.reload();
+  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeHidden();
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   // The heat lands on the timer: current heat + the lineup show, phase Scheduled.
   await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID);

@@ -99,6 +99,33 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   // It displays under the friendly name "Open Practice Heat", not its generated heat id.
   await expect(heatSection.getByText('Open Practice Heat').first()).toBeVisible();
 
+  // ── Make this round's auto-created heat the current heat (SetCurrentHeat) ────────────────────
+  // The per-channel board only renders when the open-practice heat is the current heat on the
+  // timer. On the shared worker Director `current_heat` stays pinned to whatever heat a prior spec
+  // last transitioned/selected (it never resets between specs), and creating a heat does NOT steal
+  // Live focus (current-heat.spec.ts). The auto-created heat's id is generated, so resolve it: find
+  // the round by label off /events, then its heat off the heats list (tagged with the round id), and
+  // focus it over the control path — keeping the run independent of spec order.
+  const events = (await (await page.request.get('/events')).json()) as Array<{
+    id: string;
+    rounds?: Array<{ id: string; label: string }>;
+  }>;
+  const roundId = events
+    .find((e) => e.id === 'practice')
+    ?.rounds?.find((r) => r.label === LABEL)?.id;
+  expect(roundId, 'the open-practice round exists').toBeTruthy();
+  const heats = (await (await page.request.get('/events/practice/heats')).json()) as Array<{
+    heat: string;
+    round?: string;
+  }>;
+  const opHeatId = heats.find((h) => h.round === roundId)?.heat;
+  expect(opHeatId, 'the open-practice round has an auto-created heat').toBeTruthy();
+  const focused = await page.request.post('/events/practice/control', {
+    headers: { 'Content-Type': 'application/json' },
+    data: { SetCurrentHeat: { heat: opHeatId } }
+  });
+  expect(focused.ok()).toBeTruthy();
+
   // ── Live control → the per-channel practice board ───────────────────────────────────────────
   await openTab(page, 'Live control');
   const board = page.getByRole('list', { name: 'Per-channel practice board' });

@@ -37,16 +37,25 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
   page,
   director
 }) => {
-  await page.goto('/');
-  await enterPractice(page);
-  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
-
   // ── Schedule a heat over the open control path (no round tag ⇒ default 5:00 staging) ──────────
   const ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: 's3-1', lineup: ['Ace', 'Bee', 'Cee'] } }
   });
   expect(ack.ok()).toBeTruthy();
+  // Explicitly focus THIS heat as the current heat (SetCurrentHeat) over the control path. The
+  // shared worker Director's `current_heat` stays pinned to whatever heat a prior spec last touched
+  // (it never resets between specs), and filling a heat does NOT steal Live focus (current-heat.spec.ts)
+  // — so this server-side selection keeps the run independent of spec order.
+  const focused = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: { SetCurrentHeat: { heat: 's3-1' } }
+  });
+  expect(focused.ok()).toBeTruthy();
+
+  await page.goto('/');
+  await enterPractice(page);
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
   await expect(page.locator('.heat-id .value')).toHaveText('s3-1', { timeout: 15_000 });
 
   // ── Staging countdown ────────────────────────────────────────────────────────────────────────
