@@ -26,6 +26,26 @@ jobs:
       # fmt --check && clippy -D warnings && test --all && ts-rs bindings drift-check
       - run: cargo xtask ci
 
+  audit:
+    name: Security — cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # Cache the cargo-audit binary (and the advisory-db it fetches) so the job
+      # stays fast — it only reads Cargo.lock, it never builds the workspace.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # cargo-audit lives in ~/.cargo/bin and the advisory-db under
+          # ~/.cargo/advisory-db; key the cache so a fresh install is rare.
+          cache-bin: true
+          shared-key: cargo-audit
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      # Triaged/accepted advisories are enumerated in ./audit.toml; this fails
+      # the job on any new advisory (including real vulnerabilities).
+      - run: cargo audit
+
   frontend:
     name: Frontend — build/check/lint/test/contract
     runs-on: ubuntu-latest
