@@ -26,8 +26,14 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: gridfpv-linux # AppImage + .deb
+            # Single-file portable: the raw self-contained gridfpv-desktop binary
+            # (frontend embedded via the embed-assets feature — no external dist).
+            portable-artifact: gridfpv-linux-portable
+            portable-path: src-tauri/target/release/gridfpv-desktop
           - os: windows-latest
             artifact: gridfpv-windows # .msi + NSIS .exe
+            portable-artifact: gridfpv-windows-portable
+            portable-path: src-tauri/target/release/gridfpv-desktop.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -88,4 +94,16 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: src-tauri/target/release/bundle/**
+          if-no-files-found: error
+
+      # Single-file portable: the raw gridfpv-desktop binary. Because gridfpv-app is
+      # built with the embed-assets feature, the frontend dist is baked into the
+      # binary, so it self-serves the RD console with no external assets folder — a
+      # standalone executable. Published ALONGSIDE the installers above so users can
+      # grab either form.
+      - name: Upload portable binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.portable-artifact }}
+          path: ${{ matrix.portable-path }}
           if-no-files-found: error

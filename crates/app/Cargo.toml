@@ -19,6 +19,20 @@ path = "src/main.rs"
 # the live variant with `cargo build -p gridfpv-app --features live`.
 live = ["dep:gridfpv-adapters", "gridfpv-adapters/live"]
 
+# `embed-assets` bakes the built RD console SPA (`frontend/apps/rd-console/dist`) **into the
+# binary** at compile time (via `rust-embed`), so the Director serves the frontend from memory
+# with **no external assets folder** beside the executable. This is how the native desktop
+# (`gridfpv-desktop`) build becomes a single self-contained file.
+#
+# It is **OFF by default**: the team's hosted dev loop
+# (`cargo build -p gridfpv-app --features live`, then serve a `GRIDFPV_ASSETS` dist from disk)
+# must keep working byte-for-byte — rebuild the dist without rebuilding the binary — so the
+# default build serves from the filesystem exactly as before and `cargo xtask ci` (default
+# features) never needs a built dist at compile time. The dist must exist at compile time
+# ONLY when this feature is enabled (the Tauri / release-builds workflow builds the frontend
+# first, so that holds).
+embed-assets = ["dep:rust-embed", "dep:mime_guess"]
+
 [dependencies]
 gridfpv-events.workspace = true
 gridfpv-storage.workspace = true
@@ -43,6 +57,13 @@ gridfpv-server.workspace = true
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+
+# Only compiled in under `--features embed-assets`: `rust-embed` bakes the built RD console
+# `dist/` into the binary at compile time, and `mime_guess` resolves each embedded file's
+# Content-Type by extension. The default build pulls neither — it serves from the filesystem
+# via `tower-http`'s `ServeDir` exactly as before, so the hosted dev loop is unchanged.
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
