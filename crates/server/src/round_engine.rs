@@ -115,8 +115,8 @@ pub enum FillError {
     /// [`FormatRegistry::standard`] name (should have been caught at add/update; a
     /// defensive check so a stale log can't panic).
     UnknownFormat(String),
-    /// A [`SeedingRule::FromRanking`] names a `source_round` that does not exist in this
-    /// event.
+    /// A [`SeedingRule::FromRanking`] names a source round (in its `source_rounds`) that does not
+    /// exist in this event.
     UnknownSourceRound(String),
     /// A [`ChannelMode::Static`](crate::events::ChannelMode::Static) round has a member with **no
     /// assigned channel** (race redesign Slice 7a): static channel-balanced formation needs every
@@ -300,10 +300,11 @@ fn single_class(round: &RoundDef) -> Option<ClassId> {
 ///   membership (roster/seed) order, de-duplicated so a pilot in two eligible classes
 ///   appears once. Each pilot id maps straight to a [`CompetitorRef`] of the same string
 ///   — the handle the lineup carries and the timer emits passes for.
-/// - [`SeedingRule::FromRanking`]: the **top-N** of the source round's ranking (the
-///   qualifying→bracket carry), reusing [`advance_top_n`] over the ranking
-///   [`round_ranking`] computes from the source round's completed heats — exactly the
-///   phase-2 seeding [`run_event`](gridfpv_engine::event::run_event) does.
+/// - [`SeedingRule::FromRanking`]: the **top-N** of the source rounds' **aggregated** ranking (the
+///   qualifying→bracket carry). For a single source round this is exactly that round's ranking; for
+///   several (issue #51 multi-select) the rankings are merged **best-per-pilot** by
+///   [`aggregate_rankings`] before taking the top-N — exactly the phase-2 seeding
+///   [`run_event`](gridfpv_engine::event::run_event) does over the combined field.
 fn round_field(
     meta: &EventMeta,
     round: &RoundDef,
@@ -326,13 +327,19 @@ fn round_field(
             Ok(field)
         }
         SeedingRule::FromRanking {
-            source_round,
+            source_rounds,
             top_n,
         } => {
-            let source = round_of(meta, source_round)
-                .map_err(|_| FillError::UnknownSourceRound(source_round.0.clone()))?;
-            let ranking = round_ranking(meta, source, events)?;
-            Ok(advance_top_n(&ranking, *top_n))
+            // Compute each source round's ranking (the same provisional-or-final ranking the engine
+            // seeds a single-source bracket from), then merge them best-per-pilot into one ranking.
+            let mut rankings: Vec<Vec<RankEntry>> = Vec::with_capacity(source_rounds.len());
+            for source_id in source_rounds {
+                let source = round_of(meta, source_id)
+                    .map_err(|_| FillError::UnknownSourceRound(source_id.0.clone()))?;
+                rankings.push(round_ranking(meta, source, events)?);
+            }
+            let merged = aggregate_rankings(&rankings);
+            Ok(advance_top_n(&merged, *top_n))
         }
         // Open practice (open-practice format): the field is the active **channels**, each node
         // index laid out as a `node-{i}` competitor ref (the timer-seat handle) in the given order.
@@ -342,6 +349,59 @@ fn round_field(
             .map(|i| CompetitorRef(format!("node-{i}")))
             .collect()),
     }
+}
+
+/// Merge several rounds' rankings into **one aggregated ranking, best-per-pilot** (issue #51
+/// multi-select seeding).
+///
+/// The aggregation rule: each pilot's standing in the merged ranking is their **best (lowest)
+/// 1-based position across the source rounds they appear in** — e.g. a pilot who placed 3rd in one
+/// qualifying round and 1st in another is seeded as a 1. A pilot is included if they ranked in *any*
+/// source round; a pilot absent from a round simply does not contribute a position from it. The
+/// merged competitors are then ordered by that best position (ascending), ties broken by
+/// [`CompetitorRef`] string for a **total, deterministic** order (so the same logs always yield the
+/// same seeding), and re-numbered with the same dense, tie-aware "1, 2, 2, 4" convention as a single
+/// round's ranking. For a single source round this reproduces that round's ranking unchanged (modulo
+/// the deterministic ref tie-break, which a single ranking already satisfies).
+///
+/// "Best position" — rather than summing points or averaging — keeps the seam **simple and
+/// monotonic**: seeding a bracket from multiple qualifiers rewards a pilot's strongest qualifying
+/// result, the usual "your best run carries you into the bracket" semantics, without depending on
+/// how many rounds each pilot happened to enter.
+fn aggregate_rankings(rankings: &[Vec<RankEntry>]) -> Vec<RankEntry> {
+    // Best (lowest) position seen per competitor across all source rounds.
+    let mut best: BTreeMap<CompetitorRef, u32> = BTreeMap::new();
+    for ranking in rankings {
+        for entry in ranking {
+            best.entry(entry.competitor.clone())
+                .and_modify(|p| *p = (*p).min(entry.position))
+                .or_insert(entry.position);
+        }
+    }
+
+    // Order by best position, then by competitor ref — a total, deterministic order. The BTreeMap
+    // already yields ref order, so a stable sort by position alone keeps refs as the tie-break.
+    let mut rows: Vec<(CompetitorRef, u32)> = best.into_iter().collect();
+    rows.sort_by(|(a_ref, a_pos), (b_ref, b_pos)| {
+        a_pos.cmp(b_pos).then_with(|| a_ref.0.cmp(&b_ref.0))
+    });
+
+    // Re-number with dense, tie-aware positions (1, 2, 2, 4): rows sharing a best position share a
+    // merged position, the next distinct row skips past them.
+    let mut merged = Vec::with_capacity(rows.len());
+    let mut position = 0u32;
+    let mut prev_best: Option<u32> = None;
+    for (index, (competitor, best_pos)) in rows.into_iter().enumerate() {
+        if prev_best != Some(best_pos) {
+            position = index as u32 + 1;
+            prev_best = Some(best_pos);
+        }
+        merged.push(RankEntry {
+            competitor,
+            position,
+        });
+    }
+    merged
 }
 
 /// Whether `round` is an **open-practice** round (open-practice format): `format ==
@@ -354,6 +414,17 @@ fn round_field(
 pub fn is_open_practice(round: &RoundDef) -> bool {
     round.format == gridfpv_engine::format::OpenPractice::NAME
         && matches!(round.seeding, SeedingRule::AllChannels { .. })
+}
+
+/// The **round-scoped** heat id for an open-practice round (issue #54): `"<round_id>-heat"`.
+///
+/// The open-practice format generator emits a fixed `"open-practice"` heat id, so two open-practice
+/// rounds in one event would both try to auto-create a heat under that one id and the second round
+/// would get no distinct heat. Deriving the id from the round id makes each open-practice round's
+/// heat unique while staying deterministic (the same round id always yields the same heat id, so the
+/// auto-create is idempotent per round).
+fn open_practice_heat_id(round_id: &RoundId) -> HeatId {
+    HeatId(format!("{}-heat", round_id.0))
 }
 
 /// Build a [`FormatConfig`] for a round over `field`: the round's
@@ -786,13 +857,28 @@ fn fill_round_per_heat(
             // plans at once (a bracket round) still advances one heat at a time: take the
             // first not-yet-scheduled plan. Dedup against already-tagged heats so a repeated
             // FillRound before the prior heat is scored does not double-schedule it.
+            // Open practice (issue #54): the format generator emits a fixed `"open-practice"` heat
+            // id, which collides when an event has two open-practice rounds — both would claim the
+            // same id, so the second round auto-creates no distinct heat. Scope the id to the round
+            // so each open-practice round gets its own heat; other formats keep the generator's id
+            // verbatim. Rewritten **before** the dedup so `already`/`scheduled_round_heats` (which
+            // read the round-scoped id from the log) match it and the auto-create stays idempotent
+            // per round.
+            let open_practice = is_open_practice(round);
+            let mut plans = plans;
+            if open_practice {
+                let scoped = open_practice_heat_id(round_id);
+                for plan in &mut plans {
+                    plan.heat = scoped.clone();
+                }
+            }
             let already: Vec<HeatId> = scheduled_round_heats(events, round_id);
             let next = plans.into_iter().find(|p| !already.contains(&p.heat));
             // Open practice (open-practice format): the heat carries **empty** frequencies — its
             // lineup is the active *channels* themselves (`node-{i}` seats), so there is nothing to
             // allocate. Force `Some(empty)` so the handler appends the logged `HeatScheduled` with no
             // frequencies regardless of the timer's channel pool.
-            let open_practice_frequencies = is_open_practice(round).then(Vec::new);
+            let open_practice_frequencies = open_practice.then(Vec::new);
             match next {
                 Some(plan) => Ok(FillOutcome::Scheduled {
                     heat: plan.heat,
@@ -1460,6 +1546,59 @@ mod tests {
         assert_eq!(ranking[0].position, 1);
     }
 
+    /// A `RankEntry` for a competitor at a 1-based position (aggregation test helper).
+    fn rank(competitor: &str, position: u32) -> RankEntry {
+        RankEntry {
+            competitor: CompetitorRef(competitor.into()),
+            position,
+        }
+    }
+
+    #[test]
+    fn aggregate_rankings_of_a_single_round_is_that_ranking() {
+        // One source round → the merged ranking is that round's ranking unchanged.
+        let r1 = vec![rank("A", 1), rank("B", 2), rank("C", 3)];
+        let merged = aggregate_rankings(std::slice::from_ref(&r1));
+        assert_eq!(merged, r1);
+    }
+
+    #[test]
+    fn aggregate_rankings_takes_each_pilots_best_position_across_rounds() {
+        // A placed 1 then 3 → best 1; B placed 2 then 2 → best 2; C placed 3 then 1 → best 1.
+        // A and C tie at best-position 1 (dense, tie-aware: 1, 1, then B at 3).
+        let r1 = vec![rank("A", 1), rank("B", 2), rank("C", 3)];
+        let r2 = vec![rank("C", 1), rank("B", 2), rank("A", 3)];
+        let merged = aggregate_rankings(&[r1, r2]);
+        assert_eq!(
+            merged,
+            vec![
+                rank("A", 1), // best 1, ref tie-break before C
+                rank("C", 1), // best 1
+                rank("B", 3), // best 2 → dense position 3 (skips past the two 1s)
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregate_rankings_includes_pilots_present_in_only_some_rounds() {
+        // D only raced round 2; they still seed from their best (and only) position there.
+        let r1 = vec![rank("A", 1), rank("B", 2)];
+        let r2 = vec![rank("D", 1), rank("A", 2)];
+        let merged = aggregate_rankings(&[r1, r2]);
+        // A best 1, D best 1 (tie, ref order A then D), B best 2 → position 3.
+        assert_eq!(merged, vec![rank("A", 1), rank("D", 1), rank("B", 3)]);
+    }
+
+    #[test]
+    fn aggregate_rankings_is_deterministic_regardless_of_round_order() {
+        let r1 = vec![rank("A", 1), rank("B", 2), rank("C", 3)];
+        let r2 = vec![rank("C", 1), rank("B", 2), rank("A", 3)];
+        assert_eq!(
+            aggregate_rankings(&[r1.clone(), r2.clone()]),
+            aggregate_rankings(&[r2, r1])
+        );
+    }
+
     /// An **open-practice** round fixture (open-practice format, Slice 1): `format: "open_practice"`
     /// + `seeding: AllChannels { channels }`, with no eligible classes (it is not a class round).
     fn open_practice_round(id: &str, channels: &[usize]) -> RoundDef {
@@ -1493,7 +1632,9 @@ mod tests {
                 lineup,
                 frequencies,
             } => {
-                assert_eq!(heat.0, "open-practice");
+                // Issue #54: the heat id is **round-scoped** (`<round_id>-heat`), not the generator's
+                // fixed `"open-practice"`, so two open-practice rounds get distinct heats.
+                assert_eq!(heat.0, "op1-heat");
                 assert_eq!(
                     lineup,
                     vec![
@@ -1518,17 +1659,38 @@ mod tests {
         // (open practice is one heat, ever — no advancement).
         let round = open_practice_round("op1", &[0, 1]);
         let meta = meta_with(vec![round], vec![]);
-        let mut log = vec![scheduled(
-            "open-practice",
-            "op1",
-            "open",
-            &["node-0", "node-1"],
-        )];
+        let mut log = vec![scheduled("op1-heat", "op1", "open", &["node-0", "node-1"])];
         // The schedule above tags a class for the test helper; re-tag without a class is unnecessary
         // — `finalized_heat_ids` keys on the round, not the class.
-        log.extend(run_heat_events("open-practice", vec![]));
+        log.extend(run_heat_events("op1-heat", vec![]));
         let next = fill_round(&meta, &no_timers(), &RoundId("op1".into()), &log).unwrap();
         assert_eq!(next, FillOutcome::Complete);
+    }
+
+    #[test]
+    fn two_open_practice_rounds_yield_distinct_round_scoped_heat_ids() {
+        // Issue #54: two open-practice rounds in one event must auto-create **two distinct** heats.
+        // Before the fix both claimed the generator's fixed `"open-practice"` id, so the second round
+        // got no heat of its own. The id is now derived from the round id.
+        let op1 = open_practice_round("op1", &[0, 1]);
+        let op2 = open_practice_round("op2", &[2, 3]);
+        let meta = meta_with(vec![op1, op2], vec![]);
+
+        let heat1 = match fill_round(&meta, &no_timers(), &RoundId("op1".into()), &[]).unwrap() {
+            FillOutcome::Scheduled { heat, .. } => heat,
+            other => panic!("expected op1 to schedule a heat, got {other:?}"),
+        };
+        let heat2 = match fill_round(&meta, &no_timers(), &RoundId("op2".into()), &[]).unwrap() {
+            FillOutcome::Scheduled { heat, .. } => heat,
+            other => panic!("expected op2 to schedule a heat, got {other:?}"),
+        };
+
+        assert_eq!(heat1.0, "op1-heat");
+        assert_eq!(heat2.0, "op2-heat");
+        assert_ne!(
+            heat1, heat2,
+            "each open-practice round gets its own heat id"
+        );
     }
 
     #[test]
@@ -1591,7 +1753,7 @@ mod tests {
             params: BTreeMap::new(),
             win_condition: WinCondition::FirstToLaps { n: 3 },
             seeding: SeedingRule::FromRanking {
-                source_round: RoundId("q1".into()),
+                source_rounds: vec![RoundId("q1".into())],
                 top_n: 2,
             },
             channel_mode: ChannelMode::PerHeat,
@@ -1634,6 +1796,86 @@ mod tests {
                     lineup,
                     vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
                     "the bracket seeds from the qual ranking (top 2)"
+                );
+            }
+            other => panic!("expected a scheduled bracket heat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bracket_round_seeds_best_per_pilot_across_multiple_source_rounds() {
+        // Issue #51: a bracket seeded `FromRanking` from TWO qual rounds. Q1 ranks A,B,C,D;
+        // Q2 ranks C,D,A,B. Best-per-pilot positions: A=1 (Q1), C=1 (Q2) → both seed 1; B=2 (Q1),
+        // D=2 (Q2) → both seed 2 (well, dense). top_n=2 takes the best two by aggregated rank.
+        let q1 = qual_round("q1", "open");
+        let q2 = qual_round("q2", "open");
+        let bracket = RoundDef {
+            id: RoundId("b1".into()),
+            label: "Bracket".into(),
+            classes: vec![ScopeClassId("open".into())],
+            format: "single_elim".into(),
+            params: BTreeMap::new(),
+            win_condition: WinCondition::FirstToLaps { n: 3 },
+            seeding: SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("q1".into()), RoundId("q2".into())],
+                top_n: 2,
+            },
+            channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
+            time_limit_secs: None,
+        };
+        let meta = meta_with(
+            vec![q1, q2, bracket],
+            vec![member("open", &["A", "B", "C", "D"])],
+        );
+
+        // Pre-build the log with each qual round's finalized heat under a DISTINCT heat id (the
+        // `timed_qual` generator emits the same `"round-1"` id per round, so we tag explicit ids to
+        // keep the two rounds' heats from merging in the heat-state machine — a separate concern from
+        // the aggregation under test). `round_ranking` reads each round's finalized heats by the
+        // round tag, so the explicit ids drive the per-round ranking exactly as a real run would.
+        //
+        // Q1 → A fastest, then B, C, D. Q2 → C fastest, then D, A, B (C/D outrank A/B there).
+        let mut log = vec![scheduled("q1-heat", "q1", "open", &["A", "B", "C", "D"])];
+        log.extend(run_heat_events(
+            "q1-heat",
+            vec![
+                pass("A", 0, 0),
+                pass("B", 10, 0),
+                pass("C", 20, 0),
+                pass("D", 30, 0),
+                pass("A", 1_000_000, 1),
+                pass("B", 1_200_000, 1),
+                pass("C", 1_400_000, 1),
+                pass("D", 1_600_000, 1),
+            ],
+        ));
+        log.push(scheduled("q2-heat", "q2", "open", &["A", "B", "C", "D"]));
+        log.extend(run_heat_events(
+            "q2-heat",
+            vec![
+                pass("C", 0, 0),
+                pass("D", 10, 0),
+                pass("A", 20, 0),
+                pass("B", 30, 0),
+                pass("C", 1_000_000, 1),
+                pass("D", 1_200_000, 1),
+                pass("A", 1_400_000, 1),
+                pass("B", 1_600_000, 1),
+            ],
+        ));
+
+        // FillRound the bracket: best-per-pilot is A=1 (Q1), C=1 (Q2), B=2 (Q1), D=2 (Q2). top_n=2
+        // takes the two best-ranked, ref tie-break A before C among the position-1 pilots.
+        let outcome = fill_round(&meta, &no_timers(), &RoundId("b1".into()), &log).unwrap();
+        match outcome {
+            FillOutcome::Scheduled { lineup, .. } => {
+                assert_eq!(
+                    lineup,
+                    vec![CompetitorRef("A".into()), CompetitorRef("C".into())],
+                    "the bracket seeds the best-per-pilot top-2 aggregated across q1 + q2"
                 );
             }
             other => panic!("expected a scheduled bracket heat, got {other:?}"),

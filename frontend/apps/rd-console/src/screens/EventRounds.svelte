@@ -423,7 +423,11 @@
   let winSeconds = $state(120); // Timed window, in seconds (converted to micros on submit).
   let winLaps = $state(3); // FirstToLaps target / BestConsecutive span.
   let seedKind = $state<SeedKind>('FromRoster');
-  let seedSource = $state<RoundId | ''>('');
+  // The source rounds a `FromRanking` seed aggregates (issue #51): a **multi-select** of prior rounds
+  // — the field is seeded from the best-per-pilot ranking across all the selected rounds. Held as a
+  // Set of round ids for toggle ergonomics; serialized to the wire `source_rounds: RoundId[]`. A
+  // single selection (the common bracket-from-one-qual case) is just a one-element set.
+  let seedSources = $state<Set<RoundId>>(new Set());
   let seedTopN = $state(8);
   // The chosen format's params, as a `key → value` map (Rounds form redesign item 4): every param
   // the format declares is shown inline as a proper labeled field, seeded from its schema default
@@ -533,7 +537,7 @@
     winSeconds = 120;
     winLaps = 3;
     seedKind = 'FromRoster';
-    seedSource = '';
+    seedSources = new Set();
     seedTopN = 8;
     selectedNodes = new Set();
     paramValues = {};
@@ -586,7 +590,9 @@
       seedKind = 'FromRoster';
     } else if ('FromRanking' in seed) {
       seedKind = 'FromRanking';
-      seedSource = seed.FromRanking.source_round;
+      // `source_rounds` is the current multi-select shape; a round stored before issue #51 is read
+      // back by the server as a one-element list, so the form always sees an array here.
+      seedSources = new Set(seed.FromRanking.source_rounds);
       seedTopN = seed.FromRanking.top_n;
     } else {
       // AllChannels (open-practice format): reflect the round's active node selection into the
@@ -648,12 +654,24 @@
   }
 
   function buildSeeding(): SeedingRule {
-    if (seedKind === 'FromRanking' && seedSource) {
+    if (seedKind === 'FromRanking' && seedSources.size > 0) {
+      // Serialize the multi-select in a stable order: the order the source rounds are defined on the
+      // event (so the same selection always produces the same `source_rounds`, independent of click
+      // order). The server aggregates best-per-pilot across them regardless of order.
+      const ordered = rounds.filter((r) => seedSources.has(r.id)).map((r) => r.id);
       return {
-        FromRanking: { source_round: seedSource, top_n: Math.max(1, Math.round(seedTopN)) }
+        FromRanking: { source_rounds: ordered, top_n: Math.max(1, Math.round(seedTopN)) }
       };
     }
     return 'FromRoster';
+  }
+
+  /** Toggle a source round in/out of the `FromRanking` multi-select (issue #51). */
+  function toggleSeedSource(id: RoundId) {
+    const next = new Set(seedSources);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    seedSources = next;
   }
 
   /**
@@ -706,14 +724,14 @@
   }
 
   // The form is submittable once it has a label, a single eligible class, a format, and — when
-  // seeding from a ranking — a chosen source round.
+  // seeding from a ranking — at least one chosen source round (the multi-select, issue #51).
   const canSubmit = $derived(
     isOpenPractice
       ? canSubmitOpenPractice
       : label.trim().length > 0 &&
           selectedClass !== '' &&
           format.length > 0 &&
-          (seedKind === 'FromRoster' || (seedKind === 'FromRanking' && !!seedSource))
+          (seedKind === 'FromRoster' || (seedKind === 'FromRanking' && seedSources.size > 0))
   );
 
   async function submit() {
@@ -798,8 +816,12 @@
       // Open practice (open-practice format): seeded from the active channels (node indices).
       return `Open practice · ${seed.AllChannels.channels.length} channel(s)`;
     }
-    const { source_round, top_n } = seed.FromRanking;
-    return `Top ${top_n} from ${roundLabel(source_round)}`;
+    const { source_rounds, top_n } = seed.FromRanking;
+    // One source round reads "Top N from <round>"; several read "Top N from <a>, <b>" (issue #51
+    // aggregated seeding). An empty list (shouldn't occur — the form requires one) degrades cleanly.
+    const labels = source_rounds.map(roundLabel);
+    const from = labels.length > 0 ? labels.join(', ') : '—';
+    return `Top ${top_n} from ${from}`;
   }
 </script>
 
@@ -1004,12 +1026,13 @@
         {/if}
 
         <!-- Seeding (Rounds form redesign item 2): roster-seeded (qual) or ranking-seeded (bracket).
-             The FromRanking source-round + top-N reveals for the bracket / cut case. -->
+             The FromRanking source-rounds multi-select + top-N reveals for the bracket / cut case;
+             several source rounds are aggregated best-per-pilot (issue #51). -->
         {#if fields.seeding}
           <Field
             label="Seeding"
             hint={seedKind === 'FromRanking'
-              ? 'Draw this round from a prior round’s ranking (the bracket / cut case).'
+              ? 'Draw this round from one or more prior rounds’ rankings (the bracket / cut case).'
               : 'Draw straight from the eligible class’ roster membership.'}
           >
             <Select bind:value={seedKind} aria-label="Seeding">
@@ -1020,16 +1043,29 @@
 
           {#if seedKind === 'FromRanking'}
             <div class="form-grid">
-              <Field label="Source round" required>
+              <Field
+                label="Source rounds"
+                required
+                hint={sourceCandidates.length === 0
+                  ? undefined
+                  : 'Pick one or more rounds to seed from. Several are aggregated by each pilot’s best result.'}
+              >
                 {#if sourceCandidates.length === 0}
                   <p class="inline-note">Add another round first to seed from its ranking.</p>
                 {:else}
-                  <Select bind:value={seedSource} aria-label="Source round">
-                    <option value="" disabled>Choose a round…</option>
+                  <div class="source-picker" role="group" aria-label="Source rounds">
                     {#each sourceCandidates as r (r.id)}
-                      <option value={r.id}>{r.label}</option>
+                      <label class="source-chip">
+                        <input
+                          type="checkbox"
+                          checked={seedSources.has(r.id)}
+                          onchange={() => toggleSeedSource(r.id)}
+                          aria-label={`Seed from ${r.label}`}
+                        />
+                        <span class="source-name">{r.label}</span>
+                      </label>
                     {/each}
-                  </Select>
+                  </div>
                 {/if}
               </Field>
               <Field label="Top N advance">
@@ -1607,6 +1643,34 @@
     font-variant-numeric: tabular-nums;
   }
   .channel-name {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-medium);
+    color: var(--gf-text);
+  }
+  /* Source-rounds multi-select (issue #51): a wrapped checkbox group, same chip styling as the
+     open-practice channel picker so the two pickers read consistently. */
+  .source-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+  }
+  .source-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    cursor: pointer;
+  }
+  .source-chip input {
+    width: 1.05rem;
+    height: 1.05rem;
+    accent-color: var(--gf-accent);
+    cursor: pointer;
+  }
+  .source-name {
     font-size: var(--gf-font-size-md);
     font-weight: var(--gf-font-weight-medium);
     color: var(--gf-text);

@@ -1364,7 +1364,7 @@ describe('race Slice 2a: rounds', () => {
     );
     expect(badClass.status).toBe(400);
 
-    // FromRanking with a dangling source_round → 400.
+    // FromRanking with a dangling source round → 400.
     const dangling = await addRound(
       event.id,
       {
@@ -1372,7 +1372,7 @@ describe('race Slice 2a: rounds', () => {
         classes: ['mgp-open'],
         format: 'single_elim',
         win_condition: 'BestLap',
-        seeding: { FromRanking: { source_round: 'does-not-exist', top_n: 4 } }
+        seeding: { FromRanking: { source_rounds: ['does-not-exist'], top_n: 4 } }
       },
       TOKEN
     );

@@ -47,16 +47,16 @@ describe('advanceRoundReq — the seeded single_elim payload', () => {
       format: 'single_elim',
       params: {},
       win_condition: { Timed: { window_micros: 120_000_000 } },
-      seeding: { FromRanking: { source_round: 'r1', top_n: 8 } }
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 8 } }
     });
   });
 
   it('clamps a non-integer / sub-1 top_n to at least 1', () => {
     expect(advanceRoundReq(SOURCE, 0, 'x').seeding).toEqual({
-      FromRanking: { source_round: 'r1', top_n: 1 }
+      FromRanking: { source_rounds: ['r1'], top_n: 1 }
     });
     expect(advanceRoundReq(SOURCE, 4.7, 'x').seeding).toEqual({
-      FromRanking: { source_round: 'r1', top_n: 5 }
+      FromRanking: { source_rounds: ['r1'], top_n: 5 }
     });
   });
 

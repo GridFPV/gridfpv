@@ -12,11 +12,12 @@ import type { RoundId } from "./RoundId";
  */
 export type SeedingRule = "FromRoster" | { "FromRanking": { 
 /**
- * The prior round this round seeds from — must exist in [`EventMeta::rounds`].
+ * The prior rounds this round seeds from — each must exist in [`EventMeta::rounds`].
+ * Aggregated best-per-pilot when more than one is named. Always at least one entry.
  */
-source_round: RoundId, 
+source_rounds: Array<RoundId>, 
 /**
- * How many of the source ranking's top places advance into this round.
+ * How many of the aggregated ranking's top places advance into this round.
  */
 top_n: number, } } | { "AllChannels": { 
 /**

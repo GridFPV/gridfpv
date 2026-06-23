@@ -142,6 +142,109 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
 });
 
 /**
+ * **Multi-select seeding source rounds** (issue #51) — the deliverable proof for aggregated seeding.
+ *
+ * Enter Practice, select the Open Class, then add two qualifying rounds and a `single_elim` bracket
+ * seeded `FromRanking`. The seeding control reveals a **checkbox multi-select** of the prior rounds;
+ * tick both quals and add the bracket. Assert the persisted bracket carries `source_rounds` with
+ * BOTH qual ids (the server aggregates best-per-pilot across them). Cleans up after itself.
+ */
+test('RD seeds a bracket from multiple source rounds via the multi-select', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  const stamp = Date.now();
+  const QUAL_A = `E2E-QualA-${stamp}`;
+  const QUAL_B = `E2E-QualB-${stamp}`;
+  const BRACKET = `E2E-Bracket-${stamp}`;
+  await page.goto('/');
+  await enterPractice(page);
+
+  // Select the Open Class so the rounds have an eligible class.
+  await openTab(page, 'Classes & Roster');
+  const classBox = page
+    .getByRole('list', { name: 'Class directory' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Open Class' })
+    .getByRole('checkbox', { name: 'Select Open Class' });
+  if (!(await classBox.isChecked())) {
+    const classesSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/classes$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await classBox.check();
+    await classesSaved;
+  }
+  await expect(classBox).toBeChecked();
+
+  await openTab(page, 'Rounds & Heats');
+  await expect(page.getByRole('heading', { name: 'Rounds', exact: true })).toBeVisible({
+    timeout: 15_000
+  });
+
+  // Add a qualifying round by label (helper, defined below).
+  const addQual = async (label: string) => {
+    await page.getByRole('button', { name: '+ Add round' }).click();
+    const form = page.getByRole('form', { name: 'Add round' });
+    await expect(form).toBeVisible();
+    await form.getByLabel('Label').fill(label);
+    await form.getByLabel('Format').selectOption('timed_qual');
+    await form.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
+    await form.getByLabel('Win condition').selectOption('BestLap');
+    await page.getByRole('button', { name: 'Add round', exact: true }).click();
+    await expect(
+      page.getByRole('list').getByRole('listitem').filter({ hasText: label })
+    ).toBeVisible({ timeout: 15_000 });
+  };
+  await addQual(QUAL_A);
+  await addQual(QUAL_B);
+
+  // Add a single_elim bracket seeded FromRanking from BOTH quals via the checkbox multi-select.
+  await page.getByRole('button', { name: '+ Add round' }).click();
+  const form = page.getByRole('form', { name: 'Add round' });
+  await expect(form).toBeVisible();
+  await form.getByLabel('Label').fill(BRACKET);
+  await form.getByLabel('Format').selectOption('single_elim');
+  await form.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
+  await form.getByLabel('Seeding').selectOption('FromRanking');
+  // The source-rounds multi-select reveals as a checkbox per prior round (issue #51); tick both.
+  await form.getByLabel(`Seed from ${QUAL_A}`).check();
+  await form.getByLabel(`Seed from ${QUAL_B}`).check();
+  await form.getByLabel('Top N').fill('2');
+  await page.getByRole('button', { name: 'Add round', exact: true }).click();
+  await expect(
+    page.getByRole('list').getByRole('listitem').filter({ hasText: BRACKET })
+  ).toBeVisible({ timeout: 15_000 });
+
+  // It persisted on the Director with `source_rounds` carrying BOTH qual ids.
+  const practiceRounds = async () => {
+    const events = (await (await page.request.get(`${base}/events`)).json()) as Array<{
+      id: string;
+      rounds?: Array<{ id: string; label: string; seeding: unknown }>;
+    }>;
+    return events.find((e) => e.id === 'practice')?.rounds ?? [];
+  };
+  const rounds = await practiceRounds();
+  const qualAId = rounds.find((r) => r.label === QUAL_A)?.id;
+  const qualBId = rounds.find((r) => r.label === QUAL_B)?.id;
+  const bracket = rounds.find((r) => r.label === BRACKET);
+  expect(qualAId).toBeTruthy();
+  expect(qualBId).toBeTruthy();
+  const seeding = bracket?.seeding as { FromRanking?: { source_rounds: string[]; top_n: number } };
+  expect(seeding?.FromRanking?.top_n).toBe(2);
+  expect(new Set(seeding?.FromRanking?.source_rounds)).toEqual(new Set([qualAId, qualBId]));
+
+  // ── Clean up: remove the three rounds + deselect the class. ─────────────────────────────────
+  for (const label of [BRACKET, QUAL_A, QUAL_B]) {
+    const id = (await practiceRounds()).find((r) => r.label === label)?.id;
+    if (id) await page.request.delete(`${ev}/rounds/${id}`);
+  }
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
+});
+
+/**
  * **Guided round params + channel-mode toggle** (race redesign Slice 7b) — the deliverable proof.
  *
  * Enter Practice, select the Open Class, open Rounds & Heats and add a `timed_qual` round driving
