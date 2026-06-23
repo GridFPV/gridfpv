@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Channel Model</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Channel Model</h1>
+      <p class="doc-kind">Internal design doc · channels ≠ nodes, defined on the timer, dynamically tuned</p>
+    </header>
+
+    <p class="lead">
+      How GridFPV models video channels and timer seats — the one distinction the rest of the
+      race-running redesign leans on: <strong>a channel is not a node</strong>. The timer's
+      node count caps how many pilots can fly a heat; its available channels are the pool the
+      engine assigns from, and that pool may be <em>larger</em> than the node count.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>channel / node model</strong> and how channels are assigned.
+        It is the deep dive behind the channel notes in <a href="pipeline-setup.html">Setup</a>
+        §Channels, <a href="pipeline-mains.html">Mains</a> §Channel assignment, and
+        <a href="timer-adapters.html">Timer Adapters</a> §5. When this doc and
+        <a href="architecture.html">Architecture</a> disagree on shape, follow Architecture;
+        when either disagrees with the <a href="vision.html">Vision</a>, the Vision wins.
+        <em>This is the as-built (v0.4) Timer-registry model (#73/#117).</em>
+      </p>
+    </div>
+
+    <h2>1. The principle — channels belong to the timer, not the event</h2>
+    <div class="principle">
+      <p><span class="name">Channels are a property of the selected timer.</span> GridFPV does not
+      declare a free-floating &ldquo;frequency pool&rdquo; on the event. Each timer in the app-level
+      Timer registry carries its own channel configuration — a built-in standard FPV catalog, the
+      adapter's <em>fixed</em> or <em>flexible</em> capability, the timer's <strong>available
+      channels</strong>, and its <strong>node count</strong>. An event simply <em>selects</em> a
+      timer; the channels come with it.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">The engine allocates; the adapter tunes.</span> The race engine decides
+      who flies on which channel (it knows the field and avoids conflicts). The adapter
+      <strong>advertises</strong> the hardware's capability and node count and, at race time,
+      <strong>dynamically tunes</strong> the device's nodes to the assignment. Neither owns the other's
+      job (<a href="race-engine.html">Race Engine</a> §5, <a href="timer-adapters.html">Timer Adapters</a> §5).</p>
+    </div>
+
+    <h2>2. Channels ≠ nodes</h2>
+    <p>
+      The two numbers a timer carries are independent, and conflating them is the bug this model
+      exists to prevent:
+    </p>
+    <dl class="entities">
+      <dt><code>node_count</code> — caps pilots-per-heat</dt>
+      <dd>The hardware seat count: the most pilots you can put in one heat on this timer. Defaults to
+      <strong>8</strong> (<code>DEFAULT_NODE_COUNT</code>, the ubiquitous Raceband R1–R8 width). A heat
+      with more competitors than the node count is rejected (<code>TooManyForNodes</code>).</dd>
+      <dt><code>available_channels</code> — the assignable pool</dt>
+      <dd>The raw-MHz channels the RD has made available on <em>this</em> timer, in preference order.
+      This pool <strong>can exceed</strong> <code>node_count</code>: a 4-node timer may legitimately
+      offer 8 channels, so the RD can choose which four of those eight a given heat uses. The Mock timer
+      seeds this with the 8-entry Raceband grid out of the box.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>Why they differ:</strong> nodes are physical receivers (how many can be timed at once);
+        channels are tunable frequencies (what each receiver can be set to). A timer can know about more
+        frequencies than it has receivers. Assignment first-fits from the pool, using at most
+        <code>node_count</code> of its entries per heat.
+      </p>
+    </div>
+
+    <h2>3. The standard FPV catalog</h2>
+    <p>
+      A built-in catalog of the common analog bands ships with the app (served from
+      <code>GET /channels</code>). Each entry is <code>{ band, channel, mhz }</code>, where
+      <code>mhz</code> (a <code>u16</code> centre frequency) is the authoritative value; <code>band</code>
+      and <code>channel</code> are the friendly label (e.g. <em>Raceband R1</em>, <em>Fatshark F4</em>).
+      A raw MHz with no catalog match renders as a bare <em>&ldquo;5800 MHz&rdquo;</em>.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Band</th><th>Channels</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Raceband</td><td>R1–R8 (5658…5917)</td><td>The default racing grid</td></tr>
+        <tr><td>Fatshark</td><td>F1–F8 (5740…5880)</td><td></td></tr>
+        <tr><td>Boscam A / B / E</td><td>A1–A8 / B1–B8 / E1–E8</td><td>Legacy analog bands</td></tr>
+        <tr><td>DJI</td><td>R1–R4 (5660…5770)</td><td>Clean digital channels</td></tr>
+        <tr><td>HDZero</td><td>R1–R8</td><td>Digital, on the Raceband grid</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Beyond the catalog, a flexible timer accepts <strong>arbitrary custom raw-MHz</strong> entries
+      (the UI guards them to a sane VTX range, roughly 5300–6000&nbsp;MHz). This is how a RotorHazard
+      timer can be set to frequencies the catalog never named.
+    </p>
+
+    <h2>4. Per-timer capability — Fixed vs Flexible</h2>
+    <p>
+      Each timer adapter declares <em>how</em> it manages channels, beyond the yes/no
+      &ldquo;frequency / channel mgmt&rdquo; capability:
+    </p>
+    <dl class="entities">
+      <dt>Fixed</dt>
+      <dd>The timer supports only an explicit <strong>built-in allowed set</strong> of catalog
+      frequencies (<code>Fixed { channels: Vec&lt;u16&gt; }</code>) — e.g. a hardware timer locked to
+      certain channels. The picker offers only those; no custom raw-MHz.</dd>
+      <dt>Flexible <em>(default)</em></dt>
+      <dd>The timer accepts <strong>any</strong> frequency — the standard catalog plus custom raw-MHz,
+      as RotorHazard allows. The permissive default, and what Mock uses.</dd>
+    </dl>
+    <p>
+      A sim timer (Velocidrone) declares <strong>no channel capability</strong> at all: its
+      available-channels pool is empty and the channel step disappears from the UI.
+    </p>
+
+    <h2>5. Assignment — static vs per-heat</h2>
+    <p>
+      A round declares a <strong>channel mode</strong> that decides how its heats get their channels:
+    </p>
+    <dl class="entities">
+      <dt>Static — qualifying / GQ-style</dt>
+      <dd>Each member has a <strong>fixed per-membership channel</strong> (a <code>MemberSlot</code>'s
+      <code>channel</code>, validated against the primary timer's <code>available_channels</code>). Heats
+      are <strong>channel-balanced</strong>: one pilot per distinct channel per heat, capped at
+      <code>node_count</code>. The default for <code>timed_qual</code> and <code>round_robin</code>.</dd>
+      <dt>Per-heat — brackets <em>(default)</em></dt>
+      <dd>Channels are assigned <strong>per heat</strong> from the timer's pool by
+      <strong>first-fit</strong> in seed order (<code>assign_frequencies</code>), and the RD may
+      override. The default for the elimination / multi-main / ZippyQ bracket formats.</dd>
+    </dl>
+    <p>
+      Either way, <strong>open practice</strong> is the special case: its &ldquo;lineup&rdquo; <em>is</em>
+      the active channels (the chosen node seats, as <code>node-i</code> refs), so its heats carry no
+      separate channel assignment — the channels are the seats (see
+      <a href="pipeline-practice.html">Practice</a>).
+    </p>
+
+    <h2>6. Tuning at race time</h2>
+    <p>
+      When a heat is armed, the engine's per-node <code>(node_index, frequency_mhz)</code> assignment
+      is handed to the adapter, which applies it to the hardware — for RotorHazard, emitting a
+      <code>set_frequency</code> per node before the race stages. The engine decides; the adapter tunes.
+      Sim sources skip this entirely (no channels to set).
+    </p>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>The primary timer's node seats are tuned to the assigned channels
+      before each heat; conflicts are avoided within the heat by construction.</p>
+      <p><span class="label">Sim</span>No channels, no tuning — the active-channels picker is empty and
+      the channel step is hidden.</p>
+    </div>
+
+    <h2>7. Open decisions</h2>
+    <ol class="decisions">
+      <li><span class="resolved">Resolved — channels live on the timer, not the event.</span> The
+        Timer registry (#73/#117) holds each timer's catalog capability, available channels, and node
+        count; an event selects a timer and inherits them.</li>
+      <li><span class="resolved">Resolved — <code>node_count</code> caps the heat; the pool may exceed
+        it.</span> Pilots-per-heat is capped by the node count; <code>available_channels</code> is an
+        independent, possibly larger pool the assignment first-fits from.</li>
+      <li><span class="resolved">Resolved — static vs per-heat assignment.</span> Static (fixed
+        per-pilot channels, channel-balanced heats) for qualifying / GQ; per-heat first-fit for
+        brackets; open practice seats channels directly.</li>
+      <li><span class="q">Custom-MHz validation range.</span> The exact accepted custom raw-MHz bounds
+        and whether they should be per-adapter rather than a single UI guard.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="timer-adapters.html">Timer Adapters</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

@@ -85,11 +85,14 @@
         <code>Analog | HDZero | DJI | Walksnail | Other</code>), MultiGP and Velocidrone ids, and
         free-form custom attributes (any field is clearable via a null edit). An event
         <strong>selects</strong> pilots from the directory rather than re-typing them.</li>
-      <li><strong>Guided setup wizard <em>(planned, built last)</em>.</strong> Make the common path
-        effortless (a table stake against the incumbents) while leaving every choice editable
-        afterward. In the redesign the wizard is a thin guided <em>first pass over the event
-        workspace's stage-pages</em> (Classes → Roster → Rounds+Heats → …), not a separate setup
-        screen — so it is built <strong>last</strong> (v0.4 Slice&nbsp;7), after the pages it walks.</li>
+      <li><strong>Guided setup wizard <em>(built)</em>.</strong> Make the common path effortless (a
+        table stake against the incumbents) while leaving every choice editable afterward. As built the
+        wizard is a thin guided <em>first pass over the event workspace's stage-pages</em> —
+        <em>Classes&nbsp;&amp;&nbsp;Roster → Timer&nbsp;&amp;&nbsp;channels → First round → Review</em>,
+        embedding the same stage components — and is <strong>Next-only</strong> (Back / Skip / Next /
+        Finish); every selection <strong>auto-saves</strong>, so there are no Save buttons. The Review
+        step is a live readiness check (a class selected, a pilot placed, a timer chosen, a round
+        defined) but never blocks finishing.</li>
     </ul>
 
     <h3>Assemble the field — roster = per-class membership = presence</h3>
@@ -143,15 +146,21 @@
         channels) or <em>flexible</em> (the standard catalog plus arbitrary custom raw-MHz entries,
         as RotorHazard allows). A sim timer (Velocidrone) declares <strong>none</strong>.</li>
       <li><strong>Channels are configured in the timer's own config</strong> — what this timer can
-        tune to is set up once with the timer in the registry, not re-declared per event.</li>
-      <li><strong>The timer's node/slot count caps the field per heat</strong> — you can assign at
-        most as many pilots to a heat as the timer has nodes.</li>
+        tune to is set up once with the timer in the registry (its <code>available_channels</code> pool),
+        not re-declared per event.</li>
+      <li><strong>The timer's node count caps the field per heat — but the channel pool can exceed
+        it.</strong> You can assign at most as many pilots to a heat as the timer has nodes
+        (<code>node_count</code>), yet a timer may offer <em>more</em> available channels than nodes (a
+        4-node timer can list 8 channels). <strong>Channels are not nodes</strong>; the full model has
+        its own deep dive (<a href="channel-model.html">Channel Model</a>).</li>
     </ul>
     <p>
-      Per-heat channel <em>assignment</em> (engine first-fit + manual) and the <strong>dynamic
-      tuning</strong> of the timer's nodes at race time are detailed in
-      <a href="pipeline-mains.html">Mains</a> and <a href="race-engine.html">Race Engine</a> §5: the
-      engine decides who flies on which channel, and the adapter applies the tuning to the hardware.
+      Per-pilot channels (the Classes&nbsp;+&nbsp;Roster page's channel dropdown, fed by the
+      <strong>primary timer</strong>) and per-heat channel <em>assignment</em> (engine first-fit +
+      manual) plus the <strong>dynamic tuning</strong> of the timer's nodes at race time are detailed in
+      <a href="channel-model.html">Channel Model</a>, <a href="pipeline-mains.html">Mains</a>, and
+      <a href="race-engine.html">Race Engine</a> §5: the engine decides who flies on which channel, and
+      the adapter applies the tuning to the hardware.
     </p>
 
     <h2>Sim vs IRL</h2>
@@ -191,9 +200,11 @@
       <dt>Track</dt>
       <dd>one per event — a physical layout reference (IRL) or a Velocidrone spec track + id (sim).</dd>
       <dt>Timer (app registry) &amp; its channels</dt>
-      <dd>the selected timer defines the channels (a standard catalog + the adapter's fixed/flexible
-      capability + custom raw-MHz) and the node/slot count that caps a heat; channels live in the
-      timer config, not an event-level pool.</dd>
+      <dd>one of <strong>Mock</strong> or <strong>RotorHazard&nbsp;{ url }</strong>. The selected timer
+      defines the channels — a standard catalog + the adapter's fixed/flexible capability + custom
+      raw-MHz, held as an <code>available_channels</code> pool — and a <code>node_count</code> that caps
+      pilots-per-heat (the pool may exceed it). Channels live in the timer config, not an event-level
+      pool (<a href="channel-model.html">Channel Model</a>).</dd>
     </dl>
 
     <h2>Open decisions</h2>
