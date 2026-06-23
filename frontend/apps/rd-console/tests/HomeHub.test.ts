@@ -6,8 +6,8 @@ import HomeHub from '../src/screens/HomeHub.svelte';
 import { makeTestSession } from './support.js';
 
 const PILOTS: Pilot[] = [
-  { id: 'p1', callsign: 'Ace', vtx_types: [], attributes: {} },
-  { id: 'p2', callsign: 'Bee', vtx_types: [], attributes: {} }
+  { id: 'p1', callsign: 'Ace', vtx_types: [] },
+  { id: 'p2', callsign: 'Bee', vtx_types: [] }
 ];
 const CLASSES: Class[] = [
   { id: 'c1', name: 'Open', source: 'MultiGP' },

@@ -45,9 +45,4 @@ multigp_id?: string,
 /**
  * Optional Velocidrone id, stored on [`Pilot::velocidrone_id`].
  */
-velocidrone_id?: string, 
-/**
- * Optional custom-attributes bag, stored on [`Pilot::attributes`]. Empty keys are rejected;
- * keys and values are trimmed. Defaults empty.
- */
-attributes: { [key in string]: string }, };
+velocidrone_id?: string, };

@@ -92,34 +92,17 @@
 
   // ── The add / edit dialog ──────────────────────────────────────────────────
   // One dialog drives both create and edit; `editing` (the pilot, or undefined for "add") chooses
-  // which protocol call submit makes. The form holds plain strings + the attributes bag; on submit
-  // it maps to a create request or a clear-via-null update diff (see ../lib/pilots.ts).
+  // which protocol call submit makes. The form holds plain strings; on submit it maps to a create
+  // request or a clear-via-null update diff (see ../lib/pilots.ts).
   let formOpen = $state(false);
   let editing = $state<Pilot | undefined>(undefined);
   let form = $state<PilotFormValues>(emptyForm());
   let saving = $state(false);
   let formError = $state<string | undefined>(undefined);
-  // The custom-attributes editor works on an ordered array of [key, value] rows so blank/duplicate
-  // keys are editable; it is folded back into `form.attributes` on every change.
-  let attrRows = $state<Array<{ key: string; value: string }>>([]);
-
-  function syncAttributes() {
-    const bag: Record<string, string> = {};
-    for (const r of attrRows) {
-      const k = r.key.trim();
-      if (k) bag[k] = r.value;
-    }
-    form.attributes = bag;
-  }
-
-  function rowsFromBag(bag: Record<string, string>): Array<{ key: string; value: string }> {
-    return Object.entries(bag).map(([key, value]) => ({ key, value }));
-  }
 
   export function openAdd() {
     editing = undefined;
     form = emptyForm();
-    attrRows = [];
     formError = undefined;
     formOpen = true;
   }
@@ -127,7 +110,6 @@
   function openEdit(pilot: Pilot) {
     editing = pilot;
     form = formFromPilot(pilot);
-    attrRows = rowsFromBag(form.attributes);
     formError = undefined;
     formOpen = true;
   }
@@ -137,14 +119,6 @@
     form.vtx_types = toggleVtxType(form.vtx_types, vtx);
   }
 
-  function addAttrRow() {
-    attrRows = [...attrRows, { key: '', value: '' }];
-  }
-  function removeAttrRow(i: number) {
-    attrRows = attrRows.filter((_, idx) => idx !== i);
-    syncAttributes();
-  }
-
   async function submitForm(e?: Event) {
     e?.preventDefault();
     if (saving) return;
@@ -152,7 +126,6 @@
       formError = 'A callsign is required.';
       return;
     }
-    syncAttributes();
     saving = true;
     formError = undefined;
     try {
@@ -352,42 +325,6 @@
         <Input bind:value={form.velocidrone_id} aria-label="Velocidrone ID" autocomplete="off" />
       </Field>
     </div>
-
-    <fieldset class="attrs">
-      <legend>Custom attributes</legend>
-      <p class="attrs-hint">Anything else — insurance #, FAA/FCC license, bib, sponsor…</p>
-      {#if attrRows.length > 0}
-        <ul class="attr-list" aria-label="Custom attributes">
-          {#each attrRows as row, i (i)}
-            <li class="attr-row">
-              <Input
-                bind:value={row.key}
-                placeholder="Key"
-                aria-label={`Attribute ${i + 1} key`}
-                size="sm"
-                autocomplete="off"
-                oninput={syncAttributes}
-              />
-              <Input
-                bind:value={row.value}
-                placeholder="Value"
-                aria-label={`Attribute ${i + 1} value`}
-                size="sm"
-                autocomplete="off"
-                oninput={syncAttributes}
-              />
-              <Button
-                variant="ghost"
-                size="sm"
-                onclick={() => removeAttrRow(i)}
-                aria-label={`Remove attribute ${i + 1}`}>Remove</Button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-      <Button variant="secondary" size="sm" onclick={addAttrRow}>+ Add attribute</Button>
-    </fieldset>
   </form>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (formOpen = false)} disabled={saving}>Cancel</Button>
@@ -630,43 +567,6 @@
     color: var(--gf-text-muted);
     font-variant-numeric: tabular-nums;
     min-width: 4.5rem;
-  }
-
-  .attrs {
-    margin: 0;
-    padding: var(--gf-space-3);
-    border: 1px solid var(--gf-border-subtle);
-    border-radius: var(--gf-radius-md);
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-2);
-  }
-  .attrs legend {
-    font-size: var(--gf-font-size-xs);
-    font-weight: var(--gf-font-weight-semibold);
-    text-transform: uppercase;
-    letter-spacing: var(--gf-tracking-caps);
-    color: var(--gf-text-muted);
-    padding: 0 var(--gf-space-1);
-  }
-  .attrs-hint {
-    margin: 0;
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-faint);
-  }
-  .attr-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-2);
-  }
-  .attr-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr auto;
-    gap: var(--gf-space-2);
-    align-items: center;
   }
 
   .confirm-text {

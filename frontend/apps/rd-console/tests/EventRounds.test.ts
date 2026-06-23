@@ -16,8 +16,8 @@ import { makeTestSession } from './support.js';
 const OPEN: Class = { id: 'c1', name: 'Open', source: 'MultiGP' };
 const SPEC: Class = { id: 'c2', name: 'Spec', source: 'Custom' };
 
-const ACE: Pilot = { id: 'p1', callsign: 'AceOne', vtx_types: [], attributes: {} };
-const BOLT: Pilot = { id: 'p2', callsign: 'Bolt', vtx_types: [], attributes: {} };
+const ACE: Pilot = { id: 'p1', callsign: 'AceOne', vtx_types: [] };
+const BOLT: Pilot = { id: 'p2', callsign: 'Bolt', vtx_types: [] };
 
 const QUAL: RoundDef = {
   id: 'r1',

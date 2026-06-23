@@ -7,8 +7,8 @@ import { heatResult, standings, eventOutcome } from './fixtures.js';
 import { makeTestSession } from './support.js';
 
 const OPEN: Class = { id: 'c1', name: 'Open', source: 'MultiGP' };
-const ACE: Pilot = { id: 'p1', callsign: 'AceOne', vtx_types: [], attributes: {} };
-const BOLT: Pilot = { id: 'p2', callsign: 'Bolt', vtx_types: [], attributes: {} };
+const ACE: Pilot = { id: 'p1', callsign: 'AceOne', vtx_types: [] };
+const BOLT: Pilot = { id: 'p2', callsign: 'Bolt', vtx_types: [] };
 
 const EVENT: EventMeta = {
   id: 'e1',

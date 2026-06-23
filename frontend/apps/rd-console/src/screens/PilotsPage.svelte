@@ -32,8 +32,8 @@
         <h1 class="page-title">Pilots</h1>
         <p class="lead">
           The application-level pilot directory — maintained once here, rostered per event. Each
-          pilot needs only a <strong>callsign</strong>; the rest (team, country, color, VTX, IDs,
-          custom attributes) is optional.
+          pilot needs only a <strong>callsign</strong>; the rest (team, country, color, VTX, IDs) is
+          optional.
         </p>
       </div>
       <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add pilot</Button>

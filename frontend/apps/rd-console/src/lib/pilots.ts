@@ -42,8 +42,8 @@ function sameVtxSet(a: readonly VtxType[], b: readonly VtxType[]): boolean {
 
 /**
  * The editable shape the form holds while open — every text field a string (the form binds plain
- * inputs) plus the attributes bag and the `vtx_types` **set** (the toggle chips). The form diffs this
- * against the pilot being edited to build the {@link UpdatePilotRequest}, or maps it straight to a
+ * inputs) plus the `vtx_types` **set** (the toggle chips). The form diffs this against the pilot
+ * being edited to build the {@link UpdatePilotRequest}, or maps it straight to a
  * {@link CreatePilotRequest}.
  */
 export interface PilotFormValues {
@@ -56,7 +56,6 @@ export interface PilotFormValues {
   country: string;
   multigp_id: string;
   velocidrone_id: string;
-  attributes: Record<string, string>;
 }
 
 /** Blank form values for the **Add** flow. */
@@ -70,8 +69,7 @@ export function emptyForm(): PilotFormValues {
     color: '',
     country: '',
     multigp_id: '',
-    velocidrone_id: '',
-    attributes: {}
+    velocidrone_id: ''
   };
 }
 
@@ -86,8 +84,7 @@ export function formFromPilot(p: Pilot): PilotFormValues {
     color: p.color ?? '',
     country: p.country ?? '',
     multigp_id: p.multigp_id ?? '',
-    velocidrone_id: p.velocidrone_id ?? '',
-    attributes: { ...p.attributes }
+    velocidrone_id: p.velocidrone_id ?? ''
   };
 }
 
@@ -98,27 +95,15 @@ export function toggleVtxType(types: readonly VtxType[], vtx: VtxType): VtxType[
     : normalizeVtxTypes([...types, vtx]);
 }
 
-/** Drop attribute rows with a blank key; trim keys (values are kept verbatim). */
-export function cleanAttributes(attrs: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(attrs)) {
-    const key = k.trim();
-    if (key) out[key] = v;
-  }
-  return out;
-}
-
 /**
  * Build the **create** body from the form: the required callsign plus only the optional text fields
  * the user filled (a blank optional is simply omitted — `POST /pilots` treats absent as unset). The
- * attributes bag and the `vtx_types` set are always sent (an empty `{}` / `[]` is fine — both default
- * empty server-side).
+ * `vtx_types` set is always sent (an empty `[]` is fine — it defaults empty server-side).
  */
 export function buildCreateRequest(v: PilotFormValues): CreatePilotRequest {
   const req: CreatePilotRequest = {
     callsign: v.callsign.trim(),
-    vtx_types: normalizeVtxTypes(v.vtx_types),
-    attributes: cleanAttributes(v.attributes)
+    vtx_types: normalizeVtxTypes(v.vtx_types)
   };
   const name = v.name.trim();
   if (name) req.name = name;
@@ -147,7 +132,7 @@ export function buildCreateRequest(v: PilotFormValues): CreatePilotRequest {
  *  - send the **value** when the user changed it → set it.
  *
  * `callsign` is special: a present non-empty value replaces it; a blank one is omitted (the callsign
- * is required and never cleared). `attributes` is a **full replacement** — sent whenever it differs.
+ * is required and never cleared).
  */
 export function buildUpdateRequest(prev: Pilot, v: PilotFormValues): UpdatePilotRequest {
   const req: UpdatePilotRequest = {};
@@ -181,22 +166,10 @@ export function buildUpdateRequest(prev: Pilot, v: PilotFormValues): UpdatePilot
   const prevCountry = prev.country ?? '';
   if (nextCountry !== prevCountry) req.country = nextCountry === '' ? null : nextCountry;
 
-  // VTX: a full-replacement set (like attributes) — send the array whenever it differs as a set;
-  // a now-empty set is sent as `[]` (clears it). There is no "None" / null case.
+  // VTX: a full-replacement set — send the array whenever it differs as a set; a now-empty set is
+  // sent as `[]` (clears it). There is no "None" / null case.
   const nextVtx = normalizeVtxTypes(v.vtx_types);
   if (!sameVtxSet(nextVtx, prev.vtx_types ?? [])) req.vtx_types = nextVtx;
 
-  // Attributes: a full-replacement map — send it whenever the cleaned bag differs.
-  const nextAttrs = cleanAttributes(v.attributes);
-  if (!shallowEqualRecord(nextAttrs, prev.attributes)) req.attributes = nextAttrs;
-
   return req;
-}
-
-/** Whether two `string → string` records have identical keys and values. */
-function shallowEqualRecord(a: Record<string, string>, b: Record<string, string>): boolean {
-  const ak = Object.keys(a);
-  const bk = Object.keys(b);
-  if (ak.length !== bk.length) return false;
-  return ak.every((k) => a[k] === b[k]);
 }
