@@ -24,9 +24,13 @@
     <div class="callout">
       <p>
         This doc owns the <strong>heat loop</strong>, the <strong>format / generator
-        interface</strong>, and how heats are <strong>scored and advanced</strong>. It
-        defers the exact rules of each named format (MultiGP P9–P16, FAI, Chase-the-Ace,
-        ZippyQ specifics) to per-format specs written as they're built; here we define the
+        interface</strong>, and how heats are <strong>scored and advanced</strong>. The
+        heat FSM has a deep-dive of its own — the six-phase lifecycle, the runtime clock
+        that drives the auto-transitions, and the off-ramps — in
+        <a href="heat-lifecycle.html">Heat Lifecycle</a>; the engine-area decisions and
+        their rationale are logged in <a href="decisions.html">Decisions</a>. It defers the
+        exact rules of each named format (MultiGP P9–P16, FAI, Chase-the-Ace, ZippyQ
+        specifics) to per-format specs written as they're built; here we define the
         interface they plug into. It builds on canonical events from
         <a href="timer-adapters.html">Timer Adapters</a> and the append-only spine from
         <a href="architecture.html">Architecture</a> §3. When this doc and the
@@ -62,42 +66,71 @@ flowchart LR
 
     <h2>2. The heat loop</h2>
     <p>
-      One reusable state machine runs every heat, in every phase. Each transition is an
-      appended race-state event, so a heat's whole history — including an abort or a re-run —
-      is reconstructible from the log, and live race control is just commands that drive
-      these transitions.
+      One reusable state machine runs every heat, in every phase — six states:
+      <code>Scheduled → Staged → Armed → Running → Unofficial → Final</code>. Each transition
+      is an appended race-state event, so a heat's whole history — including an abort or a
+      re-run — is reconstructible from the log, and live race control is just commands that
+      drive these transitions. The FSM itself is <strong>pure</strong> (it reads no clock and
+      rolls no dice); the two middle forward steps are appended by the Director's
+      <strong>runtime clock</strong>, not by an RD command. The full deep-dive — the runtime
+      clock, the start procedure, and the grace-window completion — is
+      <a href="heat-lifecycle.html">Heat Lifecycle</a>; this section is the engine-level summary.
     </p>
 
     <pre class="mermaid">
 stateDiagram-v2
   [*] --> Scheduled
-  Scheduled --> Staged: stage
-  Staged --> Armed: arm
-  Armed --> Running: start
-  Running --> Finished: time elapsed / all landed
-  Finished --> Scored: score
-  Scored --> [*]: advance
-  Staged --> Scheduled: abort
-  Armed --> Staged: abort
-  Running --> Staged: abort / restart
-  Scored --> Scheduled: discard &amp; re-run
+  Scheduled  --> Staged     : Stage
+  Staged     --> Armed      : Start (runs the start procedure)
+  Armed      --> Running    : (auto) countdown elapsed / SkipCountdown
+  Running    --> Unofficial : (auto) win condition + grace / ForceEnd
+  Unofficial --> Final      : Finalize
+  Final      --> Unofficial : Revert
+  Final      --> [*]        : Advance
+  Staged     --> Scheduled  : Abort
+  Armed      --> Scheduled  : Abort / Restart
+  Running    --> Scheduled  : Abort / Restart
+  Unofficial --> Scheduled  : Restart
+  Final      --> Scheduled  : Discard
     </pre>
 
     <p>
       Passes are consumed only while a heat is <em>Running</em> (and during a grace window
-      after — late crossings still count until the heat is scored; the window is configurable,
-      default until scored). <em>Staging</em> is the countdown; <em>arm</em> opens the gate to
-      detections; <em>finish</em> closes the race (time elapsed / all landed); <em>score</em>
-      finalizes the result; <em>advance</em> hands results to the format. Abort, restart, and
-      discard-and-re-run are first-class transitions, recorded like any other.
+      after it goes <em>Unofficial</em> — late crossings still count; the window is
+      configurable). The phases: <em>Stage</em> begins the (informational) staging countdown
+      and, for IRL, assigns frequencies; <em>Start</em> arms the heat and <strong>runs the
+      start procedure</strong> (announce → randomized hold → tone), after which the runtime
+      auto-advances <code>Armed → Running</code>; the heat closes itself when the win
+      condition plus grace window are met (the runtime auto-advances
+      <code>Running → Unofficial</code>); <em>Finalize</em> locks the result
+      (<code>Final</code>); <em>Advance</em> hands results to the format generator. The result
+      is <strong>Unofficial</strong> (not "Scored"/"Completed") while the grace window is open
+      and corrections may still land; <code>Final</code> is the locked terminal.
+    </p>
+    <p>
+      <strong>The command set.</strong> The RD's commands are <code>Stage</code>,
+      <code>Start</code>, <code>Finalize</code>, <code>Advance</code>, plus the off-ramps
+      <code>Abort</code>, <code>Restart</code>, <code>Discard</code>, <code>Revert</code>, and
+      the two race-day overrides <code>SkipCountdown</code> (force
+      <code>Armed → Running</code> now) and <code>ForceEnd</code> (force
+      <code>Running → Unofficial</code> now) for when the clock can't be trusted. Notably,
+      <strong>both <code>Abort</code> and <code>Restart</code> now reset the heat all the way
+      to <code>Scheduled</code></strong> (the RD re-Stages it): <code>Abort</code> is legal
+      from <code>Staged</code>/<code>Armed</code>/<code>Running</code>, <code>Restart</code>
+      from <code>Armed</code>/<code>Running</code>/<code>Unofficial</code>.
+      <code>Revert</code> re-opens a finalized result (<code>Final → Unofficial</code>);
+      <code>Discard</code> queues a finalized heat for a clean re-run
+      (<code>Final → Scheduled</code>).
     </p>
     <p>
       In the log these are canonical events: a heat is created by a <code>HeatScheduled</code>
-      event (carrying its lineup — the <code>[*] → Scheduled</code> entry), and every transition
-      after is a <code>HeatStateChanged</code> carrying the state entered
-      (<code>Staged / Armed / Running / Finished / Scored / Advanced</code>) or the off-ramp taken
-      (<code>Aborted / Restarted / Discarded</code>). Live race control is just commands that
-      drive these transitions.
+      event (carrying its lineup, plus its class/round tag and per-pilot frequency assignments
+      — the <code>[*] → Scheduled</code> entry), and every transition after is a
+      <code>HeatStateChanged</code> carrying the recorded <code>HeatTransition</code>
+      (<code>Staged / Armed / Running / Finished / Finalized / Advanced</code>, or the off-ramp
+      <code>Aborted / Restarted / Discarded / Reverted</code>). The start procedure also
+      appends a <code>HeatStarting { delay_ms }</code> fact when the heat is armed, recording
+      the randomized hold once so a replay reproduces the start exactly (§6).
     </p>
     <div class="sim-note">
       <p><span class="label">IRL</span>Staging assigns frequencies/channels and avoids
@@ -138,8 +171,43 @@ stateDiagram-v2
       generator runs rounds and aggregates flights into a ranking; a bracket generator emits
       heats and advances seeds toward a winner. Both <em>emit heats, consume results, and
       expose an ordering</em> — so the heat loop, scheduling, and advancement machinery are
-      written once and shared.
+      written once and shared. Concretely, a <code>Generator</code> exposes
+      <code>next(&amp;completed) → Run(plans) | Complete</code> and
+      <code>ranking(&amp;completed)</code>; the <code>FormatRegistry::standard()</code> maps each
+      format name to a constructor.
     </p>
+    <h3>The built-in formats</h3>
+    <p>
+      The standard registry ships seven formats. Each is identified by a stable
+      <strong>format key</strong> (used in a round's <code>RoundDef</code> and the log); the
+      RD console renders a <strong>friendly label</strong>.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Friendly name</th><th>Format key</th><th>Shape &amp; config params</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Qualifying</strong></td><td><code>timed_qual</code></td><td>Each pilot flies <code>rounds</code> flights; the per-pilot best flight aggregates into a ranking under the round's qualifying metric.</td></tr>
+        <tr><td><strong>Round Robin</strong></td><td><code>round_robin</code></td><td><code>rounds</code> × <code>heat_size</code>; a <code>metric</code> (points / total-laps) aggregates within the rotation.</td></tr>
+        <tr><td><strong>ZippyQ</strong></td><td><code>zippyq</code></td><td>Rolling / on-demand — the RD adds rounds as pilots are ready (<code>rounds</code> = initial rounds, default&nbsp;0).</td></tr>
+        <tr><td><strong>Single Elimination</strong></td><td><code>single_elim</code></td><td>Bracket; <code>heat_size</code> (default 2, head-to-head).</td></tr>
+        <tr><td><strong>Double Elimination</strong></td><td><code>double_elim</code></td><td>Winners + losers bracket; <code>bracket_reset</code>.</td></tr>
+        <tr><td><strong>Multi-Main</strong></td><td><code>multi_main</code></td><td>Tiered A/B/C/… mains; <code>main_size</code>.</td></tr>
+        <tr><td><strong>Open Practice</strong></td><td><code>open_practice</code></td><td>One open heat over the active <em>channels</em> (not pilots); no scoring (see §4).</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <p>
+        <strong>The qualifying → bracket carry (#84).</strong> A bracket round seeds from a
+        prior round's ranking: a <code>RoundDef</code> with a
+        <code>FromRanking { source_round, top_n }</code> seeding rule draws the
+        <strong>top-N</strong> of the source round's ranking (reusing <code>advance_top_n</code>,
+        the same phase-2 seeding the wholesale <code>run_event</code> does). The full bracket is
+        generated from that ranking and is then editable as event-level rounds. Rounds are
+        <strong>event-level and class-tagged</strong>, added <em>as-you-go</em> for practice /
+        qualifying.
+      </p>
+    </div>
 
     <h2>4. Scoring &amp; lap derivation</h2>
     <p>
@@ -154,13 +222,38 @@ stateDiagram-v2
       projection (<code>lap_list_marshaled</code>), with each adjudication targeting a prior
       pass by its append offset (<code>LogRef</code>), last-writer-wins by log order; the raw
       passes stay byte-identical.</li>
-      <li><strong>Win condition (per-heat / format config).</strong> Most laps in a time
-      window, first to N laps, or best single / consecutive lap (qualifying). The engine
-      applies the configured condition; ties break by a recorded rule. For the <em>timed</em>
-      condition the window is anchored to a shared race clock from the start with a
-      <strong>hard cutoff</strong> — a lap counts only if its completing crossing falls strictly
-      before the window closes; an in-progress lap at the cutoff does not count.</li>
+      <li><strong>Win condition (per-round scoring rule).</strong> The catalogue is the
+      <code>WinCondition</code> enum — <code>Timed { window_micros }</code> (displayed
+      <strong>"Timed — Most Laps"</strong>: most laps in a set time),
+      <code>FirstToLaps { n }</code>, <code>BestLap</code> (fastest single lap, qualifying),
+      and <code>BestConsecutive { n }</code> (fastest N consecutive laps, qualifying). The
+      engine applies the configured condition; ties break by a recorded rule (earlier
+      completion of the deciding lap, then next-best). For the <em>Timed</em> condition the
+      window is anchored to a shared race clock from the start with a <strong>hard cutoff</strong>
+      — a lap counts only if its completing crossing falls strictly before the window closes;
+      an in-progress lap at the cutoff does not count.</li>
     </ul>
+    <div class="principle">
+      <p><span class="name">The qualifying metric <em>is</em> the win condition (unified).</span>
+      A round no longer carries a separate "qualifying metric" knob alongside a win condition.
+      The round's one <code>WinCondition</code> is the scoring rule for both per-heat results
+      and the cross-flight qualifying ranking: the qualifying generator
+      (<code>timed_qual</code>) ranks each pilot on their best flight under that same condition
+      (<code>BestLap</code> → fastest lap, <code>BestConsecutive</code> → fastest N-lap window,
+      <code>Timed</code> → most laps). <strong>Open Practice does no scoring</strong>, so its
+      round stores an inert win condition that is never consulted — it ends on a time limit or
+      the RD's <code>ForceEnd</code>.</p>
+    </div>
+    <h3>Penalties, disqualification &amp; heat-void</h3>
+    <p>
+      On top of the pure on-track scoring, a heat's adjudication events fold in: a
+      <code>PenaltyApplied { TimeAdded }</code> worsens a competitor's deciding time
+      (penalties accumulate); a <code>PenaltyApplied { Disqualify }</code> sinks them below
+      every non-disqualified competitor (flagged, on-track laps preserved); a
+      <code>HeatVoided</code> flags the whole result voided while still showing the standing.
+      These compose with marshaling corrections (void / insert / adjust on the pass stream)
+      without either fold knowing about the other.
+    </p>
 
     <div class="callout">
       <p><strong>Needs further discussion — signal-level marshaling &amp; the adapter boundary.</strong>
@@ -206,20 +299,30 @@ stateDiagram-v2
       the log (§6).
     </p>
     <p>
-      <strong>Rounds are event-level and class-tagged (planned).</strong> The engine's rounds-and-heats
-      are promoted to the <em>event</em> level and each round is tagged with the class(es) it is
-      eligible for; rounds are added dynamically (practice / quali as-you-go), and the quali→bracket
-      step <strong>generates the full bracket from the top-N quali ranking</strong> as a set of
-      editable event-level rounds (the #84 carry, reusing <code>run_event</code>'s existing
-      quali→bracket logic). The generator interface (§3) and advancement above are unchanged — the
-      redesign wires them per-event and tags the log entries with class/round.
+      <strong>Rounds are event-level and class-tagged.</strong> The engine's rounds-and-heats
+      live at the <em>event</em> level and each round (<code>RoundDef</code>) is tagged with the
+      class(es) it is eligible for; rounds are added dynamically (practice / quali as-you-go),
+      and the quali→bracket step <strong>generates the full bracket from the top-N quali
+      ranking</strong> as a set of editable event-level rounds (the #84 carry, reusing
+      <code>run_event</code>'s quali→bracket logic). A per-event <strong>round engine</strong>
+      wires the format generators into a live, RD-driven flow: a <code>FillRound</code> command
+      rebuilds the round's generator from its <code>RoundDef</code> + the event's class
+      membership and the round's completed heats read back from the log, then asks the generator
+      for the next heat — so the advance closes through the log and stays a pure function of it.
+    </p>
+    <p>
+      <strong>Static vs per-heat channels.</strong> A round declares a channel mode: a
+      <em>static</em> round (qualifying / time-trial, GQ-style) gives each member a fixed
+      per-membership channel and forms <strong>channel-balanced</strong> heats (one pilot per
+      channel per heat); a <em>per-heat</em> round (brackets) assigns channels per heat from the
+      timer's pool by first-fit. Either way the timer's node count caps the heat field.
     </p>
     <p>
       <strong>Manual adjustments.</strong> Re-seeding, moving a pilot between heats before
       they fly, and discard-and-re-run are RD actions appended as events the generator
-      respects on its next step — never edits to past truth. (In v0.3 discard-and-re-run is a
-      real <code>HeatTransition::Discarded</code> event; the remaining RD-action event variants
-      land with the RD console.)
+      respects on its next step — never edits to past truth. Discard-and-re-run is a real
+      <code>HeatTransition::Discarded</code> event; <code>Abort</code> and <code>Restart</code>
+      both reset a heat to <code>Scheduled</code> for a clean re-Stage.
     </p>
 
     <h2>6. Determinism &amp; replay</h2>
@@ -227,20 +330,33 @@ stateDiagram-v2
       <p><span class="name">The engine is a pure function of the log.</span> Given the same
       events, it produces the same heats, results, and standings — that's what lets
       projections rebuild and recorded sessions replay (the testing backbone). Anything
-      non-deterministic — a random draw for seeding, a coin-flip tie-break — is resolved
-      once and its <em>outcome</em> recorded, so replay never re-rolls it. In v0.3 this is the
-      <code>SeedingOutcome</code> — a recorded permutation a generator is constructed with and
-      applies deterministically; promoting it to a first-class log event is deferred, and will
-      not change the generator contract.</p>
+      non-deterministic — a random draw for seeding, a coin-flip tie-break, the start
+      procedure's randomized hold — is resolved once <em>in the runtime</em> and its
+      <em>outcome</em> recorded as a fact, so replay never re-rolls it. The
+      <code>SeedingOutcome</code> is a recorded permutation a generator is constructed with and
+      applies deterministically; the start procedure's hold is logged as
+      <code>HeatStarting { delay_ms }</code> when the heat is armed, and the completion clock
+      decides <code>Running → Unofficial</code> from a pure predicate over the logged passes
+      (<code>race_end_reached</code>) — so a recorded session reaches each transition at exactly
+      the same point. The runtime clock (which reads wall-time and rolls the start delay) lives
+      <em>outside</em> the pure engine; everything it decides lands in the log as a fact the fold
+      can replay.</p>
     </div>
 
     <h2>7. Open decisions</h2>
     <ol class="decisions">
       <li><span class="resolved">Resolved — Win-condition catalogue &amp; tie-breaks.</span>
-      The catalogue is timed (most laps in a window), first-to-N laps, and best-single /
-      fastest-consecutive (qualifying). Ties break by earlier completion of the deciding lap
-      (timed) or next-best lap (qualifying), and tie-break outcomes are recorded so replay is
-      deterministic.</li>
+      The catalogue is <code>Timed</code> ("Timed — Most Laps"), <code>FirstToLaps</code>,
+      <code>BestLap</code>, and <code>BestConsecutive</code> (qualifying). Ties break by earlier
+      completion of the deciding lap (timed) or next-best lap (qualifying), recorded so replay
+      is deterministic. The qualifying metric is unified into this one condition (see §4).</li>
+      <li><span class="resolved">Resolved — Heat lifecycle &amp; the runtime clock.</span>
+      Six phases <code>Scheduled → Staged → Armed → Running → Unofficial → Final</code>; the two
+      middle forward steps are runtime-driven (start procedure, grace-window completion), with
+      <code>SkipCountdown</code>/<code>ForceEnd</code> overrides; <code>Abort</code> and
+      <code>Restart</code> both reset to <code>Scheduled</code>. Full deep-dive in
+      <a href="heat-lifecycle.html">Heat Lifecycle</a>; rationale in
+      <a href="decisions.html">Decisions</a>.</li>
       <li><span class="resolved">Resolved — Start / holeshot &amp; lap model.</span> Start
       type is configurable (gate-start vs staggered); the first crossing of the start/finish
       gate after arming opens lap 1; splits derive per the gate model in
