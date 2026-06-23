@@ -187,8 +187,8 @@ stateDiagram-v2
         <tr><th>Friendly name</th><th>Format key</th><th>Shape &amp; config params</th></tr>
       </thead>
       <tbody>
-        <tr><td><strong>Qualifying</strong></td><td><code>timed_qual</code></td><td>Each pilot flies <code>rounds</code> flights; the per-pilot best flight aggregates into a ranking under the round's qualifying metric.</td></tr>
-        <tr><td><strong>Round Robin</strong></td><td><code>round_robin</code></td><td><code>rounds</code> × <code>heat_size</code>; a <code>metric</code> (points / total-laps) aggregates within the rotation.</td></tr>
+        <tr><td><strong>Qualifying</strong></td><td><code>timed_qual</code></td><td><code>rounds</code> (labeled <em>&ldquo;Heats per pilot&rdquo;</em>) flights per pilot; the per-pilot best flight aggregates into a ranking under the metric <em>derived from the round's win condition</em> (best-lap / best-consecutive / most-laps) — no separate metric param.</td></tr>
+        <tr><td><strong>Round Robin</strong></td><td><code>round_robin</code></td><td><code>rounds</code> (<em>&ldquo;Heats per pilot&rdquo;</em>) × <code>heat_size</code>; the ranking metric is <em>derived from the win condition</em> (Timed → total-laps, else points) — no separate metric param.</td></tr>
         <tr><td><strong>ZippyQ</strong></td><td><code>zippyq</code></td><td>Rolling / on-demand — the RD adds rounds as pilots are ready (<code>rounds</code> = initial rounds, default&nbsp;0).</td></tr>
         <tr><td><strong>Single Elimination</strong></td><td><code>single_elim</code></td><td>Bracket; <code>heat_size</code> (default 2, head-to-head).</td></tr>
         <tr><td><strong>Double Elimination</strong></td><td><code>double_elim</code></td><td>Winners + losers bracket; <code>bracket_reset</code>.</td></tr>
