@@ -10,7 +10,8 @@
 //! 1. Builds a multi-thread tokio runtime and spawns the **same** Director the hosted
 //!    `gridfpv` binary runs — via the shared [`gridfpv_app::director::run_director`] — as a
 //!    background task. It binds **loopback on an ephemeral free port** (`127.0.0.1:0`), uses
-//!    a **per-user app-data dir** (Tauri's resolved app-data path) for created events, and
+//!    a **true-portable data dir** (`gridfpv-data/` beside the running executable, with a
+//!    per-user app-data fallback when the exe dir isn't writable) for created events, and
 //!    serves the `rd-console` SPA **embedded into the binary** (`gridfpv-app`'s `embed-assets`
 //!    feature) — so this executable is self-contained, with no external dist folder beside it.
 //!    Loopback ⇒ the control path is open (no auth), per the GridFPV auth model (loopback =
@@ -38,12 +39,13 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Resolve the per-user app-data dir (created events' SQLite files live here). The
-            // RD-console SPA is **embedded in the binary** (`gridfpv-app`'s `embed-assets`
-            // feature), so there is no on-disk dist to resolve — the Director serves it from
-            // memory. We still pass an `assets` path to `run_director` (it's part of the shared
-            // signature), but with embedded assets the path is ignored. See
-            // `gridfpv_app::director::ASSETS_EMBEDDED`.
+            // Resolve the portable data dir (created events' SQLite files live here): a
+            // `gridfpv-data/` folder beside the running executable, with a per-user app-data
+            // fallback when the exe's directory isn't writable. The RD-console SPA is
+            // **embedded in the binary** (`gridfpv-app`'s `embed-assets` feature), so there is
+            // no on-disk dist to resolve — the Director serves it from memory. We still pass an
+            // `assets` path to `run_director` (it's part of the shared signature), but with
+            // embedded assets the path is ignored. See `gridfpv_app::director::ASSETS_EMBEDDED`.
             let data_dir = resolve_data_dir(&handle);
             let assets_dir = PathBuf::new();
 
@@ -125,13 +127,60 @@ fn tauri_plugin_log_shim() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("gridfpv-noop").build()
 }
 
-/// Resolve the per-user app-data directory for created events' SQLite files, creating it if
-/// needed. Falls back to a temp dir if the platform path can't be resolved (never fatal).
+/// Resolve the data directory for created events' SQLite files (created if needed).
+///
+/// **True-portable first:** prefer a `gridfpv-data/` folder *beside the running executable*
+/// (`current_exe()`'s parent), so a portable copy carries its own data. If that directory
+/// can't be resolved or isn't writable (e.g. the exe lives on a read-only mount, or
+/// `current_exe()` fails), fall back to the **per-user app-data** dir. Either way the chosen
+/// location is logged so it's obvious where data lives. The final fallback is a temp dir, so
+/// this is never fatal.
 fn resolve_data_dir(handle: &tauri::AppHandle) -> PathBuf {
+    if let Some(dir) = portable_data_dir() {
+        eprintln!(
+            "gridfpv-desktop: using PORTABLE data dir (next to executable): {}",
+            dir.display()
+        );
+        return dir;
+    }
+
     let dir = handle
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir().join("gridfpv"));
     let _ = std::fs::create_dir_all(&dir);
+    eprintln!(
+        "gridfpv-desktop: exe dir not writable — using per-user app-data dir: {}",
+        dir.display()
+    );
     dir
+}
+
+/// Try to resolve (and create) the portable `gridfpv-data/` dir beside the executable,
+/// returning `Some(path)` only if it exists and is **writable**. Returns `None` when
+/// `current_exe()` fails, has no parent, or the directory can't be created / written to —
+/// signalling the caller to fall back to the per-user app-data dir.
+fn portable_data_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("gridfpv-data");
+    std::fs::create_dir_all(&dir).ok()?;
+    if is_writable(&dir) {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
+/// Probe whether `dir` is writable by creating (and immediately removing) a marker file.
+/// Cheap and reliable across platforms — `std::fs::Permissions` alone can't tell us whether
+/// the *filesystem* (vs. the inode) is read-only.
+fn is_writable(dir: &std::path::Path) -> bool {
+    let marker = dir.join(".gridfpv-write-test");
+    match std::fs::File::create(&marker) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&marker);
+            true
+        }
+        Err(_) => false,
+    }
 }

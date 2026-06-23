@@ -21,9 +21,9 @@ On launch the app:
 
 1. Builds a multi-thread tokio runtime and spawns the **same** Director the hosted `gridfpv`
    binary runs — via the shared `gridfpv_app::director::run_director` — as a background task.
-   It binds **loopback on an ephemeral free port** (`127.0.0.1:0`), uses a **per-user
-   app-data dir** for created events' SQLite files, and serves the **bundled** `rd-console`
-   dist as the SPA.
+   It binds **loopback on an ephemeral free port** (`127.0.0.1:0`), uses a **true-portable
+   data dir** (`gridfpv-data/` next to the executable, with a per-user app-data fallback) for
+   created events' SQLite files, and serves the **bundled** `rd-console` dist as the SPA.
 2. Waits for the Director to report its OS-assigned port, then opens the main window pointed
    at `http://127.0.0.1:<port>/`.
 
@@ -51,14 +51,27 @@ lap-source bridge, presence reconciler, router, CORS).
 
 ## Data-dir location
 
-Created events persist as SQLite files under the OS per-user **app-data** directory (Tauri's
-`app_data_dir`):
+This is a **true-portable** build: created events persist as SQLite files in a
+**`gridfpv-data/` folder next to the running executable**. Copy the executable to a USB stick
+or any folder and its data travels with it — nothing is written to per-user locations as long
+as the executable's directory is writable.
 
-| OS      | Path                                                          |
+**Fallback.** If the executable's directory isn't writable (e.g. it's run from a read-only
+mount, or `current_exe()` can't be resolved), the app falls back to the OS per-user
+**app-data** directory (Tauri's `app_data_dir`) and logs which location is in use:
+
+| OS      | Fallback path                                                |
 | ------- | ------------------------------------------------------------ |
 | Linux   | `~/.local/share/org.gridfpv.desktop/`                        |
 | Windows | `%APPDATA%\org.gridfpv.desktop\` (deferred — not yet built)  |
 | macOS   | `~/Library/Application Support/org.gridfpv.desktop/`          |
+
+On startup the app prints one of:
+
+```
+gridfpv-desktop: using PORTABLE data dir (next to executable): <path>/gridfpv-data
+gridfpv-desktop: exe dir not writable — using per-user app-data dir: <path>
+```
 
 The built-in **Practice** event is always in-memory (non-persistent), matching the hosted
 Director.
@@ -75,17 +88,23 @@ sudo apt-get install -y \
 cargo install tauri-cli --version '^2' --locked   # provides `cargo tauri`
 ```
 
-Build the bundles (the `beforeBuildCommand` builds the frontend dist first):
+Build the **portable** binary (the `beforeBuildCommand` builds the frontend dist first). This
+is a **portable-only** build — no installers (msi/nsis/appimage/deb) are produced — so pass
+`--no-bundle`:
 
 ```sh
 cd src-tauri
-cargo tauri build
+cargo tauri build --no-bundle
 ```
 
-Artifacts land under `src-tauri/target/release/bundle/`:
+The single self-contained executable lands at:
 
-- `appimage/GridFPV_<version>_amd64.AppImage`
-- `deb/GridFPV_<version>_amd64.deb`
+- `src-tauri/target/release/gridfpv-desktop` (Linux)
+- `src-tauri/target/release/gridfpv-desktop.exe` (Windows)
+
+Because `gridfpv-app` is built with the `embed-assets` feature, the frontend dist is baked
+into the binary — so it self-serves the RD console with no external assets folder, and writes
+its data to `gridfpv-data/` beside itself (see **Data-dir location** above).
 
 > **CI note:** `src-tauri` is **excluded** from the root Cargo workspace, so
 > `cargo xtask ci` (which runs `cargo {clippy,test} --all` / `--workspace`) never tries to
@@ -96,17 +115,14 @@ Artifacts land under `src-tauri/target/release/bundle/`:
 ## Running the produced artifact
 
 ```sh
-# AppImage (self-contained):
-chmod +x src-tauri/target/release/bundle/appimage/GridFPV_*_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/GridFPV_*_amd64.AppImage
-
-# or install the .deb:
-sudo dpkg -i src-tauri/target/release/bundle/deb/GridFPV_*_amd64.deb
-gridfpv-desktop
+# Portable single-file binary (self-contained):
+chmod +x src-tauri/target/release/gridfpv-desktop
+./src-tauri/target/release/gridfpv-desktop
 ```
 
 A native window opens with the RD console, backed by the in-process Director on a private
-loopback port. The maintainer runs this over RDP (which provides a display).
+loopback port. The maintainer runs this over RDP (which provides a display). A `gridfpv-data/`
+folder appears next to the binary, holding created events' SQLite files.
 
 > **Headless note:** the GUI window needs a display, so on a headless VM the window itself
 > can't render. The **server half** (the embedded Director) needs no display and is covered
