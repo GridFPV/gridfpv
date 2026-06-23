@@ -50,6 +50,7 @@
     isQualifyingFormat,
     OPEN_PRACTICE
   } from '../lib/formats.js';
+  import { heatDisplayName as sharedHeatDisplayName, isOpenPracticeRound } from '../lib/heats.js';
   import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -189,24 +190,12 @@
 
   // Whether a saved round is an **open-practice** round (open-practice refinement): its heat is
   // auto-created on round creation, so the Heats area drops the manual Fill / Standings / Advance
-  // controls for it and shows the practice heat as ready to Start.
-  const isOpenPracticeRound = (round: RoundDef): boolean => round.format === OPEN_PRACTICE;
-
-  // The display name for a heat in the Heats list. Heats carry no backend label, so the name is
-  // derived from the round + the heat's position within that round:
-  //  - an open-practice round auto-creates a single channel heat → "Open Practice Heat";
-  //  - every other round → "<round label> Heat <N>", where N is the heat's 1-based position in the
-  //    round's heat list (a Qualifying round → "Qualifying Heat 1", "Qualifying Heat 2", …).
-  // This reads far better than the generated heat id, and matches how an RD thinks of the round's
-  // heats ("Qualifying Heat 2") rather than the engine's internal id.
-  const OPEN_PRACTICE_HEAT_NAME = 'Open Practice Heat';
+  // controls for it and shows the practice heat as ready to Start. Shared with the Live-control
+  // heat picker via `../lib/heats.js`.
+  // The heat-name rule (round + position → "Qualifying Heat 2" / "Open Practice Heat") is shared
+  // with the Live-control heat picker so both render the same label — see `../lib/heats.js`.
   function heatDisplayName(round: RoundDef, h: HeatSummary): string {
-    if (isOpenPracticeRound(round)) return OPEN_PRACTICE_HEAT_NAME;
-    // 1-based position of this heat within the round's heats (by their order in the list).
-    const heatsInRound = heatsByRound(round.id);
-    const index = heatsInRound.findIndex((x) => x.heat === h.heat);
-    const n = index >= 0 ? index + 1 : heatsInRound.length + 1;
-    return `${round.label} Heat ${n}`;
+    return sharedHeatDisplayName(round, h, heatsByRound(round.id));
   }
 
   // A heat's per-pilot channel assignment, resolved to a band+channel label (race redesign Slice

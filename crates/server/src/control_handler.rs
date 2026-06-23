@@ -16,6 +16,7 @@
 //! |---------------|------------|----------------|
 //! | heat-loop (`Stage`/`Start`/`SkipCountdown`/`ForceEnd`/`Finalize`/`Advance`/`Revert`/`Abort`/`Restart`/`Discard`) | [`heat::heat_state`] folds the heat's current state; [`heat::apply`] checks the transition is legal | [`Event::HeatStateChanged`] with the engine-returned [`HeatTransition`](gridfpv_events::HeatTransition) |
 //! | [`Command::ScheduleHeat`] | none (it creates the heat) | [`Event::HeatScheduled`] |
+//! | [`Command::SetCurrentHeat`] | the heat exists in the log | [`Event::CurrentHeatSelected`] |
 //! | [`Command::Register`] | none (the binding is always recordable; last-registration-wins folds downstream) | [`Event::CompetitorRegistered`] |
 //! | [`Command::VoidDetection`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::DetectionVoided`] |
 //! | [`Command::AdjustLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::LapAdjusted`] |
@@ -501,6 +502,13 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::Restart { heat } => heat_transition(state, heat, HeatCommand::Restart),
         Command::Discard { heat } => heat_transition(state, heat, HeatCommand::Discard),
 
+        // --- Live-control selection: validate the heat exists, then record the choice.
+        // Not a heat-loop transition — it moves Live control's focus, not the heat's state. ---
+        Command::SetCurrentHeat { heat } => {
+            require_scheduled_heat(state, &heat)?;
+            Ok(Event::CurrentHeatSelected { heat })
+        }
+
         // --- Scheduling: creates the heat, so no prior-state check. The class/round/
         // frequency tags are carried straight through (default-absent for the
         // free-text path). ---
@@ -807,6 +815,69 @@ mod tests {
                     && *r == RoundId("r1".into())
                     && *frequencies == freqs
         )));
+    }
+
+    /// `SetCurrentHeat` validates the heat exists, then appends a `CurrentHeatSelected` — and the
+    /// live `current_heat` derivation follows it on replay (event-sourced / deterministic).
+    #[test]
+    fn set_current_heat_validates_appends_and_drives_the_live_current_heat() {
+        use crate::live_state::live_state;
+
+        // Two scheduled heats; q-1 is the first (the default current heat before any selection).
+        let mut log = InMemoryLog::default();
+        for id in ["q-1", "q-2"] {
+            EventLog::append(
+                &mut log,
+                Event::HeatScheduled {
+                    heat: HeatId(id.into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        }
+        let state = AppState::new(log);
+
+        // Selecting q-2 acks ok and appends the CurrentHeatSelected.
+        let ack = apply_command(
+            &state,
+            Command::SetCurrentHeat {
+                heat: HeatId("q-2".into()),
+            },
+        );
+        assert!(ack.ok, "got {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::CurrentHeatSelected { heat } if *heat == HeatId("q-2".into())
+        )));
+
+        // The live state now follows the selection (replay-deterministic).
+        assert_eq!(live_state(&events).current_heat, Some(HeatId("q-2".into())));
+    }
+
+    /// `SetCurrentHeat` on a heat that was never scheduled is an `UnknownScope` rejection (no append).
+    #[test]
+    fn set_current_heat_on_unknown_heat_is_rejected() {
+        let state = scheduled_state();
+        let (before, _) = state.read().unwrap();
+        let ack = apply_command(
+            &state,
+            Command::SetCurrentHeat {
+                heat: HeatId("does-not-exist".into()),
+            },
+        );
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, ErrorCode::UnknownScope);
+        let (after, _) = state.read().unwrap();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "a rejected select appends nothing"
+        );
     }
 
     /// (c) A marshaling command appends the right adjudication event.

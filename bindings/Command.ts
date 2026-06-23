@@ -75,6 +75,10 @@ heat: HeatId, } } | { "Discard": {
 /**
  * The heat to transition.
  */
+heat: HeatId, } } | { "SetCurrentHeat": { 
+/**
+ * The heat to bring into focus — one already scheduled in the event.
+ */
 heat: HeatId, } } | { "ScheduleHeat": { 
 /**
  * The id the new heat will carry.

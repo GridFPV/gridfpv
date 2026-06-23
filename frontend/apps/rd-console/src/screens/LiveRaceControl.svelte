@@ -29,6 +29,7 @@
     RoundDef
   } from '@gridfpv/types';
   import { channelLabel, nodeChannelLabel, nodeIndexOf } from '../lib/channels.js';
+  import { heatDisplayName } from '../lib/heats.js';
   import {
     ACTION_ORDER,
     actionDescription,
@@ -84,6 +85,37 @@
   });
   const lineup = $derived<CompetitorRef[]>(live?.active_pilots ?? []);
   const hasChannels = $derived(currentChannels.size > 0);
+
+  // ── Heat picker (manual current-heat selection) ──────────────────────────────────────────────
+  // Filling a new heat no longer steals Live control's focus (the backend's current_heat only moves
+  // on a real transition or an explicit selection), so the RD picks which heat to show/control here.
+  // Each option is labelled with the shared "<Round> Heat N" / "Open Practice Heat" name (the same
+  // helper the Rounds & Heats stage uses), derived from the heat's round off `currentEvent.rounds`
+  // and its position within that round's heats. Untagged/free-text heats fall back to the bare id.
+  interface HeatOption {
+    heat: HeatId;
+    label: string;
+    isCurrent: boolean;
+  }
+  const heatOptions = $derived.by<HeatOption[]>(() => {
+    const rounds = session.currentEvent?.rounds ?? [];
+    return heats.map((h) => {
+      const round = h.round ? rounds.find((r) => r.id === h.round) : undefined;
+      const inRound = round ? heats.filter((x) => x.round === round.id) : [];
+      const label = round ? heatDisplayName(round, h, inRound) : h.heat;
+      return { heat: h.heat, label, isCurrent: h.heat === heat };
+    });
+  });
+
+  // Picking a heat records `SetCurrentHeat`; the live stream then re-folds and follows it (the select
+  // re-syncs to `current_heat`, so a stale selection or a server-side change reconciles on its own).
+  async function pickHeat(target: HeatId) {
+    if (!target || target === heat) return;
+    await session.setCurrentHeat(target);
+  }
+  function onPick(e: Event & { currentTarget: HTMLSelectElement }) {
+    void pickHeat(e.currentTarget.value as HeatId);
+  }
 
   // ── Race clock (#62) ────────────────────────────────────────────────────────────────
   // The phase-driven elapsed clock lives in the shared `useRaceClock` helper so the persistent
@@ -317,6 +349,26 @@
           <span class="value none">— none on the timer —</span>
         {/if}
       </div>
+      {#if heatOptions.length > 0}
+        <!-- Heat picker: choose which heat Live control shows/controls (records SetCurrentHeat). The
+             value is bound to the live current heat, so it follows transitions/selections too. -->
+        <label class="heat-pick">
+          <span class="visually-hidden">Select current heat</span>
+          <select
+            class="heat-pick-select"
+            aria-label="Select current heat"
+            value={heat ?? ''}
+            onchange={onPick}
+          >
+            {#if !heat}
+              <option value="" disabled>— pick a heat —</option>
+            {/if}
+            {#each heatOptions as opt (opt.heat)}
+              <option value={opt.heat}>{opt.label}{opt.isCurrent ? ' (current)' : ''}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
     </div>
 
     <div class="hud-phase">
@@ -571,6 +623,38 @@
     font-size: var(--gf-font-size-md);
     font-weight: var(--gf-font-weight-medium);
     color: var(--gf-text-faint);
+  }
+
+  /* ── Heat picker ─────────────────────────────────────────────────────────── */
+  .heat-pick {
+    display: block;
+    margin-top: var(--gf-space-2);
+  }
+  .heat-pick-select {
+    width: 100%;
+    max-width: 18rem;
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface);
+    color: var(--gf-text);
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
+    cursor: pointer;
+  }
+  .heat-pick-select:hover {
+    border-color: var(--gf-accent);
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
   }
   .phase {
     display: inline-flex;
