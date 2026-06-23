@@ -16,8 +16,8 @@
 
     <p class="lead">
       Everything that renders GridFPV is a <strong>web client of the one protocol</strong>:
-      the RD console (destined for a Tauri window, shipped as a web app in v0.4), the
-      racer/spectator PWA, the OBS overlays, and (future)
+      the RD console (now shipping in a native Tauri desktop app as the release form; PRs #195,
+      #204), the racer/spectator PWA, the OBS overlays, and (future)
       a privileged RD mobile-control surface on the LAN. They
       differ only in <em>permissions</em>, <em>transport</em>, and <em>what they emphasize</em> —
       not in how they talk to the Director. This doc settles the frontend stack those surfaces
@@ -59,7 +59,7 @@ flowchart TB
     ui["Component library&lt;br/&gt;leaderboard · bracket · clock"]
   end
 
-  rd["RD console&lt;br/&gt;control · dense · loopback-trusted&lt;br/&gt;web app (Tauri deferred)"]
+  rd["RD console&lt;br/&gt;control · dense · loopback-trusted&lt;br/&gt;native Tauri app (release) · web app (dev)"]
   pwa["Racer / spectator PWA&lt;br/&gt;read · installable · push"]
   ovl["OBS overlays&lt;br/&gt;read-only · lean · browser source"]
 
@@ -86,10 +86,12 @@ flowchart TB
 
     <h3>The RD console — control-oriented, dense, loopback-trusted</h3>
     <p>
-      The race director's cockpit, designed to load inside the <strong>Tauri window</strong>
-      (Architecture §2). <strong>The Tauri shell and 3-OS single-binary packaging are deferred
-      (#57/#58); v0.4 ships the RD console as a web app served by the Director.</strong> It is the
-      only surface that exercises the protocol's privileged write/control path —
+      The race director's cockpit, loaded inside the <strong>Tauri window</strong>
+      (Architecture §2). <strong>The Tauri shell has landed (PRs #195, #204) as the release form — a
+      self-contained, portable single-file binary with the Director embedded in-process (see the
+      native-desktop section below); the hosted web app served by the Director remains the
+      development path.</strong> It is the only surface that exercises the protocol's privileged
+      write/control path —
       arming heats, marshaling, configuring the pipeline. Because it runs on the Director's own
       machine, it is trusted by <strong>loopback</strong> and needs <strong>no login at all</strong>:
       the RD opens it and is in (Architecture §9; mechanics in <a href="protocol.html">Protocol</a> §5).
@@ -148,14 +150,65 @@ flowchart TB
     </div>
     <div class="callout">
       <p>
-        The console is "just a co-located web client" (Architecture §2): once the Tauri shell
-        lands it will load over the Tauri webview, but either way it talks to the same local
-        <code>axum</code> server, over the same protocol, as everyone else. The Tauri shell will
-        buy a friendly native window and OS integration (file dialogs for export, single-binary
-        packaging) — it does <strong>not</strong> buy a private back channel. Control authority is
-        a protocol role, not a shell privilege. <em>As built (v0.4): the Tauri shell and
-        single-binary packaging are deferred (#57/#58); the console is served as a web app by the
-        Director.</em>
+        The console is "just a co-located web client" (Architecture §2): in the native app it loads
+        over the Tauri webview, but either way it talks to the same local <code>axum</code> server,
+        over the same protocol, as everyone else. The Tauri shell buys a friendly native window and
+        a self-contained single-file binary — it does <strong>not</strong> buy a private back
+        channel. Control authority is a protocol role, not a shell privilege. <em>The native shell
+        has now landed (PRs #195, #204) as the release form — see the native-desktop section below;
+        the hosted web app remains the development path.</em>
+      </p>
+    </div>
+
+    <h4>The native desktop app — the release form <em>(as built; PRs #195, #204)</em></h4>
+    <p>
+      The console's <strong>release form</strong> is a <strong>Tauri 2 desktop app</strong>
+      (<code>src-tauri/</code>) that <strong>embeds the Director in-process</strong>. On launch it
+      runs the <em>same</em> <code>gridfpv_app::director::run_director</code> the hosted
+      <code>gridfpv</code> binary runs, on a tokio task bound to a <strong>loopback ephemeral
+      port</strong> (<code>127.0.0.1:0</code>), then opens a native window pointed at
+      <code>http://127.0.0.1:&lt;port&gt;/</code>. The window loads the Director's own HTTP origin
+      directly, so the SPA's same-origin API (<code>/snapshot/…</code>, <code>/control/…</code>) and
+      the realtime WebSocket work with no cross-origin shims. Because it is
+      <strong>loopback</strong>, the control path is open with <strong>no auth</strong> — there is no
+      passphrase prompt (per the auth model; §1, <a href="protocol.html">Protocol</a> §5). The shell
+      reuses the exact same core rather than duplicating it: one <code>run_director</code> serves both
+      the hosted binary and the desktop app, so the two cannot drift. <em>(The decision and its
+      rationale are recorded as D9 in <a href="decisions.html">Decisions</a>.)</em>
+    </p>
+    <div class="callout">
+      <p>
+        <strong>Self-contained &amp; portable-only.</strong> The frontend dist is baked into the
+        binary via the <code>embed-assets</code> cargo feature, so the produced
+        <code>gridfpv-desktop</code> / <code>.exe</code> is a single self-contained executable that
+        serves the console from memory — no external assets folder. Distribution is
+        <strong>portable-only</strong>: the gated release workflow builds with
+        <code>--no-bundle</code> and publishes <em>only</em> that binary. The msi/nsis/appimage/deb
+        <strong>installers were dropped</strong> — there is nothing to install, which removes setup
+        friction for a non-technical RD and makes the app trivially movable.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Data lives next to the executable.</strong> Created events persist as SQLite files in
+        a <strong><code>gridfpv-data/</code> folder beside the running binary</strong> — copy the exe
+        and that folder together (e.g. to a USB stick) and the events travel with them, true-portable.
+        If the executable's directory isn't writable (a read-only mount, or
+        <code>current_exe()</code> can't be resolved), the app <strong>falls back</strong> to the OS
+        per-user app-data directory and <strong>logs</strong> which location is in use. (The built-in
+        Practice event stays in-memory, matching the hosted Director.)
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>The hosted Director stays the development path.</strong> The native app is
+        <strong>purely additive</strong> — it is the release form, not a replacement for the dev loop.
+        Day-to-day work is unchanged: <code>cargo build -p gridfpv-app --features live</code> serves
+        the API + RD console at <code>:8080</code>. The desktop crate is <strong>excluded</strong>
+        from the root Cargo workspace, so <code>cargo xtask ci</code> never compiles it (CI runners
+        have no webkit2gtk/GTK); the Tauri build is a separate, deliberate command. Windows packaging
+        is deferred — the crate is Windows-ready in principle, but no Windows artifact is built and no
+        cross-compile is attempted.
       </p>
     </div>
 
@@ -227,7 +280,7 @@ flowchart TB
         <tr><th>Surface</th><th>Direction</th><th>Auth</th><th>Transport</th><th>Shell</th><th>Emphasis</th></tr>
       </thead>
       <tbody>
-        <tr><td>RD console</td><td>read + <strong>control</strong></td><td><strong>loopback-trusted</strong>, no login</td><td>LAN (local)</td><td>web app (Tauri deferred, #57/#58)</td><td>dense, keyboard, working tool</td></tr>
+        <tr><td>RD console</td><td>read + <strong>control</strong></td><td><strong>loopback-trusted</strong>, no login</td><td>LAN (local)</td><td>native Tauri app (release) · web app (dev)</td><td>dense, keyboard, working tool</td></tr>
         <tr><td>Racer / spectator PWA</td><td>read</td><td>open / join token (LAN) · account (Cloud)</td><td>LAN <em>or</em> Cloud</td><td>browser → future Capacitor</td><td>approachable, mobile-first, installable</td></tr>
         <tr><td>OBS overlay</td><td>read-only</td><td>open / join token</td><td>LAN <em>or</em> Cloud</td><td>OBS browser source</td><td>transparent, fixed canvas, lean</td></tr>
         <tr><td>RD mobile-control <em>(opt-in, v0.5)</em></td><td><strong>control</strong></td><td>RD <strong>passphrase</strong> (opt-in, off by default)</td><td>LAN-only</td><td>mobile browser / PWA</td><td>focused live-control</td></tr>
@@ -423,11 +476,11 @@ flowchart LR
 
     <h2>6. Native deferral via Capacitor</h2>
     <p>
-      Native apps are deferred but kept cheap, by deliberate symmetry with the Director
-      (Architecture §7). The Director's RD console is a web UI destined to be wrapped in
-      <strong>Tauri</strong> (the shell and 3-OS single-binary packaging are deferred, #57/#58 —
-      v0.4 serves it as a web app); the racer/spectator PWA can later be wrapped in
-      <strong>Capacitor</strong> to ship a native app to the app stores. In both cases the
+      Native apps follow a deliberate symmetry with the Director (Architecture §7). The Director's
+      RD console is a web UI wrapped in <strong>Tauri</strong> (now shipped as the release form — a
+      self-contained portable binary with the Director embedded; PRs #195, #204, see §1); the
+      racer/spectator PWA can later be wrapped in <strong>Capacitor</strong> to ship a native app to
+      the app stores. In both cases the
       <em>web protocol-client is the constant</em>, and the native shell is an optional
       enhancement, not a rewrite.
     </p>

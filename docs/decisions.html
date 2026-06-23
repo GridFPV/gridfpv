@@ -208,6 +208,61 @@
       everything stays a pure function of the log so the bracket recomputes deterministically.</dd>
     </dl>
 
+    <h2>D9 · The native desktop app embeds the Director, ships portable-only, stores data next to the exe — <em>implemented</em></h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The RD console was always destined for a native shell (<a href="clients.html">Clients</a>;
+      <a href="architecture.html">Architecture</a> §2), shipped as a plain web app in v0.4 while the
+      Tauri work was deferred. A release form needs to answer three questions at once: how a
+      non-technical RD <em>gets and runs</em> the app, how the shell relates to the Director that
+      actually runs races, and where an event's data lives. The hosted Director
+      (<code>cargo build -p gridfpv-app --features live</code> serving the dist at <code>:8080</code>)
+      is the fast development loop and must not be disturbed.</dd>
+      <dt>Decision</dt>
+      <dd>The release form is a <strong>Tauri 2 desktop app</strong> (<code>src-tauri/</code>; PRs
+      #195, #204) that <strong>embeds the Director in-process</strong>. On launch it runs the
+      <em>same</em> <code>gridfpv_app::director::run_director</code> the hosted binary runs, on a
+      tokio task bound to a <strong>loopback ephemeral port</strong> (<code>127.0.0.1:0</code>), and
+      opens a native window pointed at <code>http://127.0.0.1:&lt;port&gt;/</code>. The
+      <strong>frontend is baked into the binary</strong> via the <code>embed-assets</code> cargo
+      feature, so the executable is a single self-contained file. Distribution is
+      <strong>portable-only</strong>: the gated release workflow
+      (<code>.github/workflows/release-builds.yml</code>) builds with <code>--no-bundle</code> and
+      publishes <em>only</em> the self-contained binary (<code>gridfpv-desktop</code> /
+      <code>.exe</code>) — the msi/nsis/appimage/deb installers were dropped. Data is stored in a
+      <strong><code>gridfpv-data/</code> folder next to the executable</strong> (created events'
+      SQLite files), with a <strong>graceful fallback</strong> to the per-user app-data dir when the
+      exe's directory isn't writable (the chosen location is logged on startup). The hosted Director
+      stays the development/testing path, unchanged; <code>cargo xtask ci</code> excludes
+      <code>src-tauri</code> (CI runners have no webkit2gtk/GTK).</dd>
+      <dt>Rationale</dt>
+      <dd><strong>Embed the Director</strong> because the app is then self-contained and reuses the
+      exact same core — one <code>run_director</code> serves both the hosted binary and the desktop
+      shell, so the two can't drift, and loading the Director's own HTTP origin keeps the SPA's
+      same-origin API and WebSocket calls working with no cross-origin shims. Loopback also means
+      <strong>no auth</strong> (per the auth model, loopback = trusted), so the RD opens the window
+      and is in. <strong>Portable-only</strong> removes install friction for a club volunteer — there
+      is nothing to install, no admin rights, no uninstaller; the single file is the app, and it is
+      trivially movable (copy it to a USB stick). <strong>Data next to the exe</strong> makes the
+      build <em>truly</em> portable: copy the exe and its <code>gridfpv-data/</code> folder together
+      and the events travel with them — the maintainer's deliberate call, with the per-user app-data
+      fallback so a read-only mount still works rather than failing. Keeping the hosted Director as
+      the dev path means the native app is <strong>purely additive</strong>: it is the release form,
+      never a replacement for the day-to-day loop.</dd>
+      <dt>Realized (as built)</dt>
+      <dd>Implemented on <code>devel</code> (PRs #195, #204). The shared entry point is
+      <code>gridfpv_app::director::run_director(addr, data_dir, assets, on_ready, shutdown)</code>,
+      called by both the hosted <code>gridfpv</code> binary (<code>crates/app/src/main.rs</code>) and
+      the desktop app (<code>src-tauri/src/lib.rs</code>). The desktop crate carries its own
+      standalone <code>[workspace]</code> so it resolves outside the root spine (which excludes it),
+      and depends on <code>gridfpv-app</code> with <code>features = ["embed-assets"]</code>. The
+      release workflow runs on <code>workflow_dispatch</code> and on merge to <code>main</code>,
+      building <code>--no-bundle</code> and uploading only the portable binary as the sole artifact.
+      Windows packaging is deferred (the crate is Windows-ready in principle; no artifact is built and
+      no cross-compile is attempted). The server half is covered headless by
+      <code>crates/app/tests/director.rs</code>.</dd>
+    </dl>
+
     <footer class="doc-footer">
       <p>
         Internal design documentation · <a href="index.html">&larr; back to docs index</a>
