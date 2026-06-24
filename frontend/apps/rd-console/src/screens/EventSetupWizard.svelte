@@ -36,18 +36,20 @@
 
   // The ordered steps. Each reuses an existing stage component (or, for Review, reads the live
   // event) — the wizard is pure orchestration, it reimplements none of the stage logic.
-  type StepId = 'classes-roster' | 'timers' | 'rounds' | 'review';
+  // Timer & channels comes FIRST: classes/roster assign per-pilot channels that come from the
+  // timer, so the timer must be picked before pilots get channels.
+  type StepId = 'timers' | 'classes-roster' | 'rounds' | 'review';
   const STEPS: { id: StepId; label: string; blurb: string }[] = [
+    {
+      id: 'timers',
+      label: 'Timer & channels',
+      blurb: 'Choose the timer(s) that feed this event and confirm their channels / node count.'
+    },
     {
       id: 'classes-roster',
       label: 'Classes & Roster',
       blurb:
         'Pick the classes this event runs, mark who is present, and place pilots into each class with their channel. Add new classes or pilots inline.'
-    },
-    {
-      id: 'timers',
-      label: 'Timer & channels',
-      blurb: 'Choose the timer(s) that feed this event and confirm their channels / node count.'
     },
     {
       id: 'rounds',
@@ -94,6 +96,8 @@
     if (step > 0) step -= 1;
   }
   function next() {
+    // The Timer step gates on ≥1 timer (see `advanceBlocked`); never advance while blocked.
+    if (advanceBlocked) return;
     if (step < STEPS.length - 1) step += 1;
   }
   function skip() {
@@ -141,6 +145,25 @@
     { label: 'At least one round defined', met: roundCount >= 1, detail: `${roundCount} defined` }
   ]);
   const ready = $derived(checks.every((c) => c.met));
+
+  // The Timer step is the one hard gate: an event must end with ≥1 timer (the per-pilot channels
+  // assigned in the next step come from it), so we block advancing past the Timer step until one is
+  // chosen. Every other step stays freely skippable. New events default to the Mock timer, so this
+  // only bites if the RD clears the selection.
+  //
+  // We gate on the embedded Timers stage's **live** working selection, not `currentEvent.timers`:
+  // clearing the last timer keeps the empty selection local (it isn't persisted), so only the
+  // live count reflects it. The stage reports it via `onselectionchange` (firing on mount with the
+  // seeded count); we mirror the saved count when off the Timer step so the gate only ever reflects
+  // a live selection while it actually matters.
+  let liveTimerCount = $state(0);
+  $effect(() => {
+    // Mirror the saved count when away from the Timer step so a stale live count can't linger; on
+    // the Timer step the embedded stage drives `liveTimerCount` via `onselectionchange`.
+    if (current.id !== 'timers') liveTimerCount = timerCount;
+  });
+  const onTimerStep = $derived(current.id === 'timers');
+  const advanceBlocked = $derived(onTimerStep && liveTimerCount < 1);
 </script>
 
 <!-- svelte:window must be top-level; the handler no-ops while the wizard is closed. -->
@@ -189,7 +212,7 @@
         {#if current.id === 'classes-roster'}
           <EventClassesRoster {session} />
         {:else if current.id === 'timers'}
-          <EventTimers {session} />
+          <EventTimers {session} onselectionchange={(n) => (liveTimerCount = n)} />
         {:else if current.id === 'rounds'}
           <EventRounds bind:this={roundsStage} {session} />
         {:else}
@@ -223,8 +246,12 @@
         </div>
         <div class="foot-right">
           {#if !isLast}
-            <Button variant="ghost" onclick={skip}>Skip</Button>
-            <Button variant="primary" onclick={next}>Next</Button>
+            {#if advanceBlocked}
+              <span class="foot-hint" aria-live="polite">Select at least one timer to continue</span
+              >
+            {/if}
+            <Button variant="ghost" onclick={skip} disabled={advanceBlocked}>Skip</Button>
+            <Button variant="primary" onclick={next} disabled={advanceBlocked}>Next</Button>
           {:else}
             <Button variant="primary" onclick={finish}>Finish setup</Button>
           {/if}
@@ -476,5 +503,9 @@
     display: flex;
     align-items: center;
     gap: var(--gf-space-2);
+  }
+  .foot-hint {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
   }
 </style>
