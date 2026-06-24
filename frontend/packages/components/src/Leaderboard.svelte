@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { HeatResult } from '@gridfpv/types';
+  import type { CompetitorRef, HeatResult } from '@gridfpv/types';
   import { formatMetric, medalFor } from './format.js';
 
   /**
@@ -8,12 +8,22 @@
    * Source type: `HeatResult` (`places: Placement[]`), best position first with
    * ties sharing a position. Each row shows finishing position, competitor, the
    * laps that counted, and the condition-specific deciding metric.
+   *
+   * `nameFor` optionally resolves a row's source-local competitor ref to a friendly display name
+   * (e.g. a pilot callsign or a channel label). When omitted, the bare ref shows, so callers without
+   * a directory (or that pre-resolve) still render correctly.
    */
   let {
     result,
     /** Optional column heading for the deciding metric (e.g. "Best lap"). */
-    metricLabel = 'Metric'
-  }: { result: HeatResult; metricLabel?: string } = $props();
+    metricLabel = 'Metric',
+    /** Optional ref → display-name resolver; falls back to the bare competitor ref. */
+    nameFor
+  }: {
+    result: HeatResult;
+    metricLabel?: string;
+    nameFor?: (ref: CompetitorRef) => string;
+  } = $props();
 </script>
 
 <table class="gridfpv-leaderboard" aria-label="Heat leaderboard">
@@ -30,7 +40,9 @@
       {@const medal = medalFor(place.position)}
       <tr class:medal={medal !== null} data-medal={medal}>
         <td class="pos"><span class="badge">{place.position}</span></td>
-        <td class="pilot">{place.competitor.competitor}</td>
+        <td class="pilot"
+          >{nameFor?.(place.competitor.competitor) ?? place.competitor.competitor}</td
+        >
         <td class="laps">{place.laps}</td>
         <td class="metric">{formatMetric(place.metric)}</td>
       </tr>

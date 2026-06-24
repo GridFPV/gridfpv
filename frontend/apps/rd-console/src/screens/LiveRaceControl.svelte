@@ -25,11 +25,13 @@
     HeatResult,
     HeatSummary,
     LiveRaceState,
+    Pilot,
+    PilotId,
     PilotProgress,
     RoundDef
   } from '@gridfpv/types';
   import { channelLabel, nodeChannelLabel, nodeIndexOf } from '../lib/channels.js';
-  import { heatDisplayName } from '../lib/heats.js';
+  import { heatDisplayName, heatNameById } from '../lib/heats.js';
   import {
     ACTION_ORDER,
     actionDescription,
@@ -91,6 +93,74 @@
   });
   const lineup = $derived<CompetitorRef[]>(live?.active_pilots ?? []);
   const hasChannels = $derived(currentChannels.size > 0);
+
+  // ── Friendly names everywhere (heat names + pilot callsigns) ─────────────────────────────────
+  // Live Control knows heats and competitors only as raw ids/refs (the live `LiveRaceState` carries
+  // no human labels). Resolve them here, at the one call site that has the directory + round context,
+  // and pass display strings down — so every panel reads callsigns / "<Round> Heat N", never an id.
+
+  // The app-level pilots directory (callsigns). An open read like the heats/channels lists above;
+  // re-read whenever the stream advances so a freshly-registered pilot's callsign appears live.
+  let pilots = $state<Pilot[]>([]);
+  $effect(() => {
+    void session.protocolState;
+    session
+      .listPilots()
+      .then((p) => (pilots = p))
+      .catch(() => (pilots = []));
+  });
+  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
+  // A competitor ref → its bound pilot id (from the live `progress`, which carries `pilot` when a
+  // registration bound it). Unbound seats (open practice) have no entry here.
+  const pilotByRef = $derived(
+    new Map<CompetitorRef, PilotId>(
+      (live?.progress ?? [])
+        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
+        .map((p) => [p.competitor, p.pilot])
+    )
+  );
+
+  // `heatName(id)` → the friendly "<Round> Heat N" / "Open Practice Heat" name for a heat id (the
+  // same helper the picker uses), falling back to the bare id for an untagged/free-text heat. Used
+  // for the current-heat title and the on-deck heat.
+  function heatName(id: HeatId | undefined): string {
+    if (!id) return '';
+    return heatNameById(id, heats, session.currentEvent?.rounds ?? []);
+  }
+
+  // `competitorName(ref)` → the **callsign** when the ref is bound to a directory pilot; else, for an
+  // **unbound channel seat** (an open-practice `node-{i}` ref with no pilot), its **channel label**;
+  // else the bare ref (already a human-entered competitor handle in a normal heat). The single
+  // resolver every pilot/lineup/leaderboard row goes through.
+  //
+  // The channel-label fallback is scoped to `node-{i}` seats deliberately: a normal competition heat
+  // *also* assigns a channel to each pilot, but there the ref is the pilot's own handle and must show
+  // as-is — only the anonymous open-practice seats (which would otherwise read "node-0") get labelled
+  // by their channel.
+  function competitorName(ref: CompetitorRef): string {
+    const pid = pilotByRef.get(ref);
+    const callsign = pid ? pilotById.get(pid)?.callsign : undefined;
+    if (callsign) return callsign;
+    if (nodeIndexOf(ref) !== undefined) {
+      const channel = currentChannels.get(ref);
+      if (channel) return channel;
+    }
+    return ref;
+  }
+
+  // A plain ref → display-name record for the shared `HeatSheet` (which takes `names`). Built over
+  // the union of the lineup and the progress rows so every rendered row resolves.
+  const resolvedNames = $derived.by<Record<CompetitorRef, string>>(() => {
+    const out: Record<CompetitorRef, string> = {};
+    const refs = new Set<CompetitorRef>([
+      ...lineup,
+      ...(live?.running_order ?? []),
+      ...(live?.progress ?? []).map((p) => p.competitor)
+    ]);
+    for (const ref of refs) out[ref] = competitorName(ref);
+    // A caller-supplied `names` override still wins (e.g. a future explicit mapping).
+    return { ...out, ...names };
+  });
 
   // ── Heat picker (manual current-heat selection) ──────────────────────────────────────────────
   // Filling a new heat no longer steals Live control's focus (the backend's current_heat only moves
@@ -378,7 +448,7 @@
       <span class="label">Current heat</span>
       <div class="heat-id">
         {#if heat}
-          <span class="value">{heat}</span>
+          <span class="value">{heatName(heat)}</span>
         {:else}
           <span class="value none">— none on the timer —</span>
         {/if}
@@ -428,7 +498,7 @@
     {#if live?.on_deck}
       <div class="hud-ondeck">
         <span class="label">On deck</span>
-        <span class="value">{live.on_deck}</span>
+        <span class="value">{heatName(live.on_deck)}</span>
       </div>
     {/if}
 
@@ -559,7 +629,7 @@
         <ul class="channels" aria-label="Heat channels">
           {#each lineup as ref (ref)}
             <li class="channel-row">
-              <span class="channel-pilot">{names[ref] ?? ref}</span>
+              <span class="channel-pilot">{competitorName(ref)}</span>
               <span class="channel-label" class:none={!currentChannels.get(ref)}>
                 {currentChannels.get(ref) ?? '—'}
               </span>
@@ -575,14 +645,14 @@
     <div class="panels">
       <Card title="Heat sheet" pad={false}>
         {#if live}
-          <HeatSheet state={live} {names} />
+          <HeatSheet state={live} names={resolvedNames} heatName={heatName(heat)} />
         {:else}
           <p class="empty">Waiting for a live heat…</p>
         {/if}
       </Card>
       <Card title="Live standing" pad={false}>
         {#if liveResult}
-          <Leaderboard result={liveResult} metricLabel="Last lap" />
+          <Leaderboard result={liveResult} metricLabel="Last lap" nameFor={competitorName} />
         {:else}
           <p class="empty">No laps yet.</p>
         {/if}

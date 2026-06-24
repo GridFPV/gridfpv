@@ -226,6 +226,103 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
 });
 
 /**
+ * Friendly names everywhere in Live control — the human-readable-identifiers fix.
+ *
+ * The bug: Live control rendered raw ids/refs. This proves the fix end-to-end against a real
+ * Director: a heat whose seats are bound (via `Register`) to **directory pilots** renders those
+ * pilots' **callsigns** in the lineup/heat-sheet — not the bare competitor refs — and an **on-deck**
+ * heat shows its name. The pilots directory + the registration both go over the real REST/control
+ * paths; the browser's own live stream drives the render (nothing mocked).
+ */
+test('Live control shows pilot callsigns (not refs) and an on-deck heat', async ({
+  page,
+  director
+}) => {
+  await page.goto('/');
+
+  // Enter Practice (handle the active-event-resume / picker branches like the main race test).
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  await page.getByRole('button', { name: /Events/ }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
+  ).toBeVisible({ timeout: 15_000 });
+  if (
+    await page
+      .getByRole('heading', { name: 'Choose an event' })
+      .isVisible()
+      .catch(() => false)
+  ) {
+    await page
+      .getByRole('button', { name: /Practice/ })
+      .first()
+      .click();
+  }
+  await expect(liveNav).toBeVisible();
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
+
+  const control = (cmd: unknown) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: cmd
+    });
+
+  // Two directory pilots (real callsigns) created over the open `POST /pilots` path.
+  const mkPilot = async (callsign: string) =>
+    (
+      await (
+        await page.request.post(`${director.baseUrl}/pilots`, {
+          headers: { 'Content-Type': 'application/json' },
+          data: { callsign }
+        })
+      ).json()
+    ).id as string;
+  const maverick = await mkPilot(`Maverick-${Date.now()}`);
+  const goose = await mkPilot(`Goose-${Date.now()}`);
+
+  // A heat whose two seats are the bare refs `fn-a`/`fn-b`; bind each to a directory pilot via the
+  // real `Register` command, then focus this heat. The lineup must then render the callsigns.
+  const HEAT = `fn-${Date.now()}`;
+  const ONDECK = `fn-deck-${Date.now()}`;
+  expect(
+    (await control({ ScheduleHeat: { heat: HEAT, lineup: ['fn-a', 'fn-b'] } })).ok()
+  ).toBeTruthy();
+  expect(
+    (await control({ Register: { adapter: '', competitor: 'fn-a', pilot: maverick } })).ok()
+  ).toBeTruthy();
+  expect(
+    (await control({ Register: { adapter: '', competitor: 'fn-b', pilot: goose } })).ok()
+  ).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat: HEAT } })).ok()).toBeTruthy();
+  // A second heat appended keeps it in the schedule as a candidate on-deck (fill-no-steal keeps
+  // focus on HEAT). Which heat is *on deck* depends on the shared Director's leftover schedule, so
+  // the assertions below don't pin it to ONDECK — only that the on-deck renders a heat name.
+  expect((await control({ ScheduleHeat: { heat: ONDECK, lineup: ['fn-c'] } })).ok()).toBeTruthy();
+
+  // The current-heat title is friendly-named (an untagged heat falls back to its bare id, here HEAT).
+  await expect(page.locator('.heat-id .value')).toHaveText(HEAT, { timeout: 15_000 });
+
+  // The heat-sheet lineup now reads the CALLSIGNS — never the raw `fn-a`/`fn-b` refs.
+  const heatSheet = page.getByRole('region', { name: 'Heat sheet' });
+  await expect(heatSheet.getByText(/^Maverick-/)).toBeVisible({ timeout: 15_000 });
+  await expect(heatSheet.getByText(/^Goose-/)).toBeVisible();
+  await expect(heatSheet.getByText('fn-a', { exact: true })).toHaveCount(0);
+  await expect(heatSheet.getByText('fn-b', { exact: true })).toHaveCount(0);
+
+  // The HeatSheet heading is the friendly heat name (here the id fallback for an untagged heat) —
+  // resolved by the screen, not the raw `current_heat` straight off the stream.
+  await expect(heatSheet.getByRole('heading')).toHaveText(HEAT);
+
+  // The on-deck slot renders a heat (a friendly name / id) and never an empty value or a raw seat
+  // ref — proving on-deck goes through the same resolver. (The exact heat depends on the shared
+  // Director's schedule, so we assert it's a non-empty heat label, not a specific id.)
+  const onDeck = page.locator('.hud-ondeck .value');
+  if (await onDeck.count()) {
+    await expect(onDeck).not.toHaveText('');
+    await expect(onDeck).not.toHaveText(/^node-\d+$/);
+  }
+});
+
+/**
  * The home-hub navigation itself (#118): from the hub, each of the three cards opens its page and
  * the breadcrumb's "Home" crumb returns to the hub; the Timers page renders the registry manager.
  * No event is entered here — this exercises the app-level shell, not the workspace.

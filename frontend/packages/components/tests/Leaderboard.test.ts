@@ -33,4 +33,17 @@ describe('Leaderboard', () => {
     expect(container.querySelector('tr[data-medal="silver"]')).not.toBeNull();
     expect(container.querySelector('tr[data-medal="bronze"]')).not.toBeNull();
   });
+
+  it('resolves competitor refs to display names via nameFor when provided', () => {
+    render(Leaderboard, { result: heatResult, nameFor: (ref) => `★ ${ref}` });
+    expect(screen.getByText('★ ALICE')).toBeInTheDocument();
+    expect(screen.getByText('★ BOB')).toBeInTheDocument();
+    // The bare ref no longer shows on its own.
+    expect(screen.queryByText('ALICE')).not.toBeInTheDocument();
+  });
+
+  it('renders the bare competitor ref when no nameFor is given (backward-compatible)', () => {
+    render(Leaderboard, { result: heatResult });
+    expect(screen.getByText('ALICE')).toBeInTheDocument();
+  });
 });

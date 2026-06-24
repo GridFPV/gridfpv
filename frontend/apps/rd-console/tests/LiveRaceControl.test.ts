@@ -785,3 +785,156 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
     expect(screen.queryByText('Live standing')).not.toBeInTheDocument();
   });
 });
+
+// ── Friendly names everywhere (heat names, on-deck, pilot callsigns) ───────────────────────────
+
+describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
+  // A round + two of its heats, so the heat id resolves to "<Round> Heat N".
+  const FN_ROUND: RoundDef = {
+    id: 'r1',
+    label: 'Qualifying R1',
+    classes: ['c1'],
+    format: 'timed_qual',
+    params: {},
+    win_condition: { Timed: { window_micros: 120_000_000 } },
+    seeding: 'FromRoster',
+    channel_mode: 'Static',
+    staging_timer_secs: 300,
+    start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+    grace_window: { Duration: { micros: 3_000_000 } }
+  };
+  const FN_EVENT: EventMeta = {
+    id: 'e1',
+    name: 'Friday',
+    created_at: 0,
+    persistent: true,
+    timers: ['mock'],
+    roster: [],
+    classes: ['c1'],
+    rounds: [FN_ROUND]
+  };
+  const HEAT_1: HeatSummary = {
+    heat: 'p1-939hvr-heat',
+    lineup: ['node-0', 'node-1'],
+    round: 'r1',
+    class: 'c1',
+    frequencies: [],
+    phase: 'Running',
+    is_current: true
+  };
+  const HEAT_2: HeatSummary = {
+    heat: 'p2-deadbeef-heat',
+    lineup: ['node-0'],
+    round: 'r1',
+    class: 'c1',
+    frequencies: [],
+    phase: 'Scheduled',
+    is_current: false
+  };
+
+  // The pilots directory: one bound pilot. node-0 is bound to it; node-1 is an unbound seat.
+  const PILOTS = [{ id: 'pilot-1', callsign: 'Maverick', vtx_types: [] }];
+
+  // A live heat: node-0 bound to pilot-1 (renders "Maverick"); node-1 unbound (renders its channel
+  // label, NOT "node-1"). The heat is in a round so the title resolves to "Qualifying R1 Heat 1",
+  // and an on-deck heat resolves to its own friendly name.
+  const fnLive: LiveRaceState = {
+    current_heat: 'p1-939hvr-heat',
+    phase: 'Running',
+    active_pilots: ['node-0', 'node-1'],
+    progress: [
+      { competitor: 'node-0', pilot: 'pilot-1', laps_completed: 2, last_lap_micros: 40_000_000 },
+      { competitor: 'node-1', laps_completed: 1, last_lap_micros: 42_000_000 }
+    ],
+    running_order: ['node-0', 'node-1'],
+    on_deck: 'p2-deadbeef-heat'
+  };
+  // A timer + catalog so the unbound node-1 seat resolves to a channel label (not "node-1"). The
+  // heat carries per-seat frequencies so the channels panel + the seat name resolve to the band.
+  const FN_TIMER: Timer = {
+    id: 'mock',
+    name: 'Mock',
+    kind: { Mock: { laps: 3, lap_ms: 30000 } },
+    status: 'Ready',
+    channel_capability: 'Flexible',
+    node_count: 2,
+    available_channels: [5658, 5800]
+  };
+  const FN_CATALOG: ChannelCatalogEntry[] = [
+    { band: 'Raceband', channel: 'R1', mhz: 5658 },
+    { band: 'Fatshark', channel: 'F4', mhz: 5800 }
+  ];
+  // The current heat's per-seat frequencies (node-0 → R1, node-1 → F4), so the channel-label
+  // fallback has something to resolve for the unbound node-1 seat.
+  const HEAT_1_FREQ: HeatSummary = {
+    ...HEAT_1,
+    frequencies: [
+      ['node-0', 5658],
+      ['node-1', 5800]
+    ]
+  };
+
+  function renderFN() {
+    return makeTestSession({
+      event: FN_EVENT,
+      live: fnLive,
+      listHeatsImpl: vi.fn(async () => [HEAT_1_FREQ, HEAT_2]),
+      listChannelsImpl: vi.fn(async () => FN_CATALOG),
+      listTimersImpl: vi.fn(async () => [FN_TIMER]),
+      listPilotsImpl: vi.fn(async () => PILOTS as unknown as never)
+    });
+  }
+
+  it('renders the current-heat title as its "<Round> Heat N" name, not the raw heat id', async () => {
+    const { session } = renderFN();
+    render(LiveRaceControl, { session });
+    const title = document.querySelector('.heat-id .value') as HTMLElement;
+    await waitFor(() => expect(title.textContent?.trim()).toBe('Qualifying R1 Heat 1'));
+    expect(title.textContent).not.toContain('p1-939hvr-heat');
+  });
+
+  it('renders the on-deck heat by its friendly name, not the raw id', async () => {
+    const { session } = renderFN();
+    render(LiveRaceControl, { session });
+    const ondeck = await screen.findByText('On deck');
+    const value = ondeck.parentElement?.querySelector('.value') as HTMLElement;
+    await waitFor(() => expect(value.textContent?.trim()).toBe('Qualifying R1 Heat 2'));
+  });
+
+  it('renders the HeatSheet heading as the friendly heat name', async () => {
+    const { session } = renderFN();
+    render(LiveRaceControl, { session });
+    const sheet = screen.getByRole('region', { name: 'Heat sheet' });
+    await waitFor(() =>
+      expect(within(sheet).getByRole('heading')).toHaveTextContent('Qualifying R1 Heat 1')
+    );
+  });
+
+  it('renders a bound seat by its pilot callsign in the heat sheet (not the ref)', async () => {
+    const { session } = renderFN();
+    render(LiveRaceControl, { session });
+    const sheet = screen.getByRole('region', { name: 'Heat sheet' });
+    await waitFor(() => expect(within(sheet).getByText('Maverick')).toBeInTheDocument());
+    // The raw ref never shows for the bound seat.
+    expect(within(sheet).queryByText('node-0')).not.toBeInTheDocument();
+  });
+
+  it('renders an unbound seat by its channel label, never "node-1"', async () => {
+    const { session } = renderFN();
+    render(LiveRaceControl, { session });
+    const sheet = screen.getByRole('region', { name: 'Heat sheet' });
+    // node-1 is unbound → its channel label (Fatshark F4 · 5800) shows; the raw seat ref does not.
+    await waitFor(() => expect(within(sheet).getByText(/Fatshark F4/)).toBeInTheDocument());
+    expect(within(sheet).queryByText('node-1')).not.toBeInTheDocument();
+  });
+
+  it('renders the live standing rows by callsign / channel label, not refs', async () => {
+    const { session } = renderFN();
+    render(LiveRaceControl, { session });
+    const standing = screen.getByRole('table', { name: 'Heat leaderboard' });
+    await waitFor(() => expect(within(standing).getByText('Maverick')).toBeInTheDocument());
+    expect(within(standing).getByText(/Fatshark F4/)).toBeInTheDocument();
+    expect(within(standing).queryByText('node-0')).not.toBeInTheDocument();
+    expect(within(standing).queryByText('node-1')).not.toBeInTheDocument();
+  });
+});

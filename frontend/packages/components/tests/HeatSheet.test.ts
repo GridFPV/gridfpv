@@ -27,4 +27,16 @@ describe('HeatSheet', () => {
     render(HeatSheet, { state: liveState, names: { ALICE: 'Alice A.' } });
     expect(screen.getByText('Alice A.')).toBeInTheDocument();
   });
+
+  it('uses the friendly heatName for the heading when provided (id otherwise)', () => {
+    render(HeatSheet, { state: liveState, heatName: 'Qualifying Heat 1' });
+    expect(screen.getByRole('heading')).toHaveTextContent('Qualifying Heat 1');
+    // The raw id is no longer the heading.
+    expect(screen.queryByRole('heading', { name: 'heat-1' })).not.toBeInTheDocument();
+  });
+
+  it('falls back to the raw heat id when no heatName is given (backward-compatible)', () => {
+    render(HeatSheet, { state: liveState });
+    expect(screen.getByRole('heading')).toHaveTextContent('heat-1');
+  });
 });
