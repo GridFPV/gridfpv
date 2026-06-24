@@ -11,13 +11,17 @@
    * order when available, otherwise lineup order; a leading place number shows
    * the live standing.
    *
-   * `names` optionally maps a `CompetitorRef` to a display name.
+   * `names` optionally maps a `CompetitorRef` to a display name; `heatName` optionally overrides the
+   * heading (otherwise the raw `current_heat` id shows — callers with the round context pass the
+   * friendly "<Round> Heat N" name).
    */
   let {
     state,
     /** Optional display names keyed by source-local competitor ref. */
-    names = {}
-  }: { state: LiveRaceState; names?: Record<CompetitorRef, string> } = $props();
+    names = {},
+    /** Optional friendly heading for the heat (e.g. "Qualifying Heat 1"); falls back to the id. */
+    heatName
+  }: { state: LiveRaceState; names?: Record<CompetitorRef, string>; heatName?: string } = $props();
 
   const lineup = $derived(state.active_pilots ?? []);
   const progressByRef = $derived(
@@ -32,7 +36,7 @@
 
 <section class="gridfpv-heat-sheet" aria-label="Heat sheet">
   <header>
-    <h3>{state.current_heat ?? 'No heat'}</h3>
+    <h3>{heatName ?? state.current_heat ?? 'No heat'}</h3>
     <span class="phase" data-phase={state.phase}>{state.phase}</span>
   </header>
   <ol class="lineup">

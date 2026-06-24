@@ -642,8 +642,11 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
   await page.goto('/');
   await enterPractice(page);
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
-  // The scheduled heat is now the current heat; run it.
-  await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID, { timeout: 15_000 });
+  // The scheduled heat is now the current heat; run it. The current-heat title renders the friendly
+  // "<Round> Heat N" name (the heat is round-tagged), not the raw heat id.
+  await expect(page.locator('.heat-id .value')).toHaveText(`${ROUND_LABEL} Heat 1`, {
+    timeout: 15_000
+  });
   // Heat-lifecycle Slices 1–3: Stage → Start (arms; the runtime auto-advances to Running after a
   // randomized hold). No manual Arm/Start→Running button; ForceEnd is the end-window override.
   await page.getByRole('button', { name: 'Stage', exact: true }).click();

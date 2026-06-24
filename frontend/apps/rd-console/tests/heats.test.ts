@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { HeatSummary, RoundDef } from '@gridfpv/types';
-import { heatDisplayName, isOpenPracticeRound, OPEN_PRACTICE_HEAT_NAME } from '../src/lib/heats.js';
+import {
+  heatDisplayName,
+  heatNameById,
+  isOpenPracticeRound,
+  OPEN_PRACTICE_HEAT_NAME
+} from '../src/lib/heats.js';
 
 const round = (over: Partial<RoundDef> = {}): RoundDef =>
   ({
@@ -51,5 +56,27 @@ describe('heats — shared heat-name helper', () => {
 
   it('reports a non-practice round as not open-practice', () => {
     expect(isOpenPracticeRound(round())).toBe(false);
+  });
+});
+
+describe('heats — heatNameById (by-id resolution for Live control)', () => {
+  it('resolves a heat id to its "<Round> Heat N" name via the heats list + rounds', () => {
+    const r = round();
+    const list = [heat('h-a'), heat('h-b')];
+    expect(heatNameById('h-b', list, [r])).toBe('Qualifying R1 Heat 2');
+  });
+
+  it('resolves an open-practice heat id to the fixed practice name', () => {
+    const r = round({ format: 'open_practice', label: 'Open Practice' });
+    expect(heatNameById('p-1', [heat('p-1')], [r])).toBe(OPEN_PRACTICE_HEAT_NAME);
+  });
+
+  it('falls back to the bare id when the heat is not in the list', () => {
+    expect(heatNameById('unknown', [heat('h-a')], [round()])).toBe('unknown');
+  });
+
+  it('falls back to the bare id when the heat carries no resolvable round (sim/free-text)', () => {
+    const untagged: HeatSummary = { ...heat('q-1'), round: undefined };
+    expect(heatNameById('q-1', [untagged], [round()])).toBe('q-1');
   });
 });

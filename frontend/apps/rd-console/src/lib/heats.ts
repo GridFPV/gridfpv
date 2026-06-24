@@ -13,7 +13,7 @@
  * This reads far better than the generated heat id, and matches how an RD thinks of a round's
  * heats ("Qualifying Heat 2") rather than the engine's internal id.
  */
-import type { HeatSummary, RoundDef } from '@gridfpv/types';
+import type { HeatId, HeatSummary, RoundDef } from '@gridfpv/types';
 
 import { OPEN_PRACTICE } from './formats.js';
 
@@ -41,4 +41,24 @@ export function heatDisplayName(
   const index = heatsInRound.findIndex((x) => x.heat === heat.heat);
   const n = index >= 0 ? index + 1 : heatsInRound.length + 1;
   return `${round.label} Heat ${n}`;
+}
+
+/**
+ * Resolve a bare {@link HeatId} to its friendly display name, given the scheduled `heats` list and
+ * the event's `rounds`.
+ *
+ * This is the by-id convenience the Live-control screen needs for the **current-heat title** and the
+ * **on-deck** heat, which it knows only as ids (off the live `LiveRaceState`). It joins the id → its
+ * {@link HeatSummary} → that heat's {@link RoundDef} (off `rounds`), then defers to
+ * {@link heatDisplayName} for the same "<Round> Heat N" / "Open Practice Heat" name the picker and
+ * the Rounds & Heats stage use. Falls back to the bare id when the heat isn't in the list or carries
+ * no resolvable round (a sim / free-text heat) — never an empty string.
+ */
+export function heatNameById(heatId: HeatId, heats: HeatSummary[], rounds: RoundDef[]): string {
+  const summary = heats.find((h) => h.heat === heatId);
+  if (!summary) return heatId;
+  const round = summary.round ? rounds.find((r) => r.id === summary.round) : undefined;
+  if (!round) return heatId;
+  const inRound = heats.filter((h) => h.round === round.id);
+  return heatDisplayName(round, summary, inRound);
 }

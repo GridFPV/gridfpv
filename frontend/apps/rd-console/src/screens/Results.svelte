@@ -189,7 +189,7 @@
 
   {#if heatResult}
     <Card title="Heat result" pad={false}>
-      <Leaderboard result={heatResult} {metricLabel} />
+      <Leaderboard result={heatResult} {metricLabel} nameFor={callsign} />
     </Card>
   {/if}
 
