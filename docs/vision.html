@@ -49,7 +49,7 @@
       to the engine.
     </p>
 
-    <p>The product vision rests on four pillars:</p>
+    <p>The product vision rests on five pillars:</p>
 
     <div class="principle">
       <p><span class="name">All-in-one &amp; FOSS.</span> One open, self-hostable app
@@ -74,6 +74,13 @@
       exist today are powerful but dated and clunky. A clean, approachable, modern
       interface is a deliberate goal and a real differentiator — race directors and
       pilots should enjoy using it.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Defensible results — accountability by design.</span> Results are
+      not disposable. Because the truth is an append-only log and the system is a deterministic
+      fold over it, every call — a detected lap, a marshal's correction, a penalty, a lock — is a
+      recorded, attributable, reversible fact. This is foundational, not a marshaling sub-feature;
+      see <a href="#defensible-results">§7</a>.</p>
     </div>
 
     <h2>2. The thesis</h2>
@@ -208,6 +215,48 @@
       with automatic standings; live marshaling; and heat/channel push notifications.
       We are honest that the incumbents lead on some of this polish today — closing that
       gap, in the open, is the work.
+    </p>
+
+    <h2 id="defensible-results">7. Defensible results — accountability by design</h2>
+    <p>
+      Every other FPV timing system treats results as disposable — corrections overwrite data,
+      nothing records who changed what, and "official" is a verbal convention. GridFPV is the
+      opposite: because the <a href="architecture.html">event log is append-only</a> and the whole
+      system is a <strong>deterministic fold</strong> over it, every action — a detected lap, a
+      marshal's correction, a penalty, a result being locked — is a recorded, attributable,
+      reversible fact. Marshaling is <strong>evidence-backed</strong> (the raw timer signal is
+      preserved as the ground truth you review against); results move through an explicit
+      <strong>provisional → official</strong> lifecycle with a protest window, role-gated so only
+      the RD commits while pilots see but cannot change the record. The payoff: results are
+      <strong>defensible</strong> — every call traces to evidence and to a person, nothing is
+      silently lost, disputes are settled by replaying the record. The architecture was chosen for
+      this; <a href="marshaling.html">marshaling</a> is where it becomes visible.
+    </p>
+    <p>
+      This theme is not a new mechanism bolted on — it is what the existing foundations already
+      buy us, named and made first-class:
+    </p>
+    <div class="principle">
+      <p><span class="name">Log-sourced &amp; replay-deterministic is the enabler.</span> The
+      append-only spine (<a href="architecture.html">Architecture</a> §3) means corrections are
+      <em>appended</em> facts that reference the raw observations they adjudicate — never
+      destructive edits. The deterministic fold means current truth is always recomputable from
+      the record, so audit, provenance, reversibility, and recompute-after-a-ruling come natively.
+      Every marshaling action is a logged event with who/when/source, for free.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">The auth tiers are the other enabler.</span> The
+      <a href="protocol.html">protocol's</a> control/read split (<a href="protocol.html">Protocol</a>
+      §5) makes "only the RD commits, pilots see but cannot change the record" a real, enforced
+      boundary rather than a convention: the RD holds the privileged control path while the
+      read-only pilot tier is first-class. Defensibility needs both — an immutable record
+      <em>and</em> a role model over who may write to it.</p>
+    </div>
+    <p>
+      The dedicated design is in <a href="marshaling.html">Marshaling</a>: timer-agnostic
+      lap-level corrections, signal-as-evidence where the timer provides a trace, and the
+      governance layer (provisional → official, audit trail, reversibility, roles, adjudication)
+      that no existing system has.
     </p>
 
     <footer class="doc-footer">

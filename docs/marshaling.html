@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Marshaling</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Marshaling</h1>
+      <p class="doc-kind">Internal design doc · how raw timer output becomes a defensible result</p>
+    </header>
+
+    <p class="lead">
+      Marshaling is the human-in-the-loop review that turns a timer's raw, fallible output into
+      results a chapter can stand behind. This doc records the research behind the direction and
+      the decided plan: a three-layer design — timer-agnostic lap-level corrections, signal-as-evidence
+      where a trace exists, and the governance layer (provisional&nbsp;→&nbsp;official, audit, reversibility,
+      roles, adjudication) that no existing system has. It is the concrete realization of the
+      <a href="vision.html#defensible-results">Vision</a>'s "defensible results — accountability by design" theme.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc builds directly on the append-only spine and the corrections/marshaling semantics
+        in <a href="architecture.html">Architecture</a> §3, the provisional <code>Unofficial</code> →
+        locked <code>Final</code> states in <a href="heat-lifecycle.html">Heat Lifecycle</a>, the
+        control/read auth split in <a href="protocol.html">Protocol</a> §5, and the canonical passes
+        from <a href="timer-adapters.html">Timer Adapters</a>. When this doc and the
+        <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>1. Why marshaling exists</h2>
+    <p>
+      RF/RSSI timers are <strong>statistical, not exact</strong>. A node decides a pilot passed the
+      gate when the received signal crosses an enter/exit threshold — and that signal is noisy. The
+      two failure modes are unavoidable in the physics:
+    </p>
+    <ul>
+      <li><strong>Missed laps</strong> — a real pass whose signal never cleared the threshold (low
+      power, bad antenna angle, a pilot far from the node) is simply not recorded.</li>
+      <li><strong>False triggers</strong> — interference, a neighbouring pilot's video, or a
+      reflection crosses the threshold and fabricates a lap that never happened.</li>
+    </ul>
+    <div class="principle">
+      <p><span class="name">Raw timer output is not trustworthy as results.</span> The unreviewed
+      stream of passes is a <em>draft</em>, not a verdict. Every serious timing system therefore
+      puts a human between the detector and the official result — the marshal — whose job is to
+      reconcile what the timer reported against what actually happened. GridFPV's differentiator is
+      not that it marshals, but <em>how</em>: every reconciliation is a recorded, attributable,
+      reversible fact rather than a silent overwrite.</p>
+    </div>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>Marshaling is heavy: recover missed laps from signal history,
+      re-time enter/exit points, kill phantom laps from interference. The signal is the evidence.</p>
+      <p><span class="label">Sim</span>Light: a Velocidrone heat's detection is exact, so marshaling
+      is mostly abort / restart and discard-and-re-run. There is no signal trace to review.</p>
+    </div>
+
+    <h2>2. Research synthesis</h2>
+    <p>
+      We surveyed how the established systems handle marshaling. The short version: one nails the
+      <em>signal review</em>, one nails the <em>lap model</em>, one is a results <em>backbone</em>
+      and not a marshaling tool at all — and <strong>none</strong> of them encodes governance.
+    </p>
+
+    <h3>2.1 RotorHazard — the signal-based gold standard</h3>
+    <p>
+      <a href="https://github.com/RotorHazard/RotorHazard">RotorHazard</a> is the reference for
+      <strong>signal-grounded</strong> marshaling. Per node it persists the <strong>RSSI trace</strong>
+      together with the enter/exit thresholds, and per lap it keeps the peak RSSI, the detection
+      source, and a soft-delete flag. The marshal reviews the <strong>RSSI graph</strong> for a node
+      and add / deletes / adjusts laps <em>against the visible signal</em>; the <strong>"Recalculate"</strong>
+      action re-runs the pass-detection algorithm over the stored signal (optionally with adjusted
+      thresholds) to re-derive laps. Because the raw trace is retained, the review is evidence-based
+      rather than guesswork.
+    </p>
+    <div class="principle">
+      <p><span class="name">RotorHazard's weak spot: no adjudication, no audit, no roles.</span>
+      Penalties are modelled only as <code>+time</code> or a free-text note — there is no first-class
+      DQ / penalty-points / lap-throwout framework. There is <strong>no audit trail</strong> of who
+      changed what when, and <strong>no role model</strong> — anyone with the page can edit. The
+      signal review is excellent; the governance around the result is absent.</p>
+    </div>
+
+    <h3>2.2 FPVTrackside — the richest lap-level model</h3>
+    <p>
+      <a href="https://github.com/FPVTrackside/FPVTrackside">FPVTrackside</a> has the most refined
+      <strong>lap-level</strong> model. A lap is <strong>two detections</strong> — an enter and an
+      exit — and the marshal can:
+    </p>
+    <ul>
+      <li><strong>Add</strong> / <strong>remove</strong> a detection;</li>
+      <li><strong>Split</strong> one over-long lap into two (a missed mid-lap detection);</li>
+      <li><strong>Edit a lap's time</strong>, with the <strong>neighbouring lap auto-adjusting</strong>
+      so total race time stays consistent;</li>
+      <li><strong>DQ a pilot reversibly</strong> — disqualification is a toggle, not a destructive op.</li>
+    </ul>
+    <p>
+      It also uses a <strong>deferred "smart-minimum"</strong>: rather than immediately invalidating a
+      too-fast lap, it waits for the next detection before deciding, so a borderline double-trigger
+      isn't thrown out prematurely. Calls are grounded in <strong>video replay</strong> — the marshal
+      watches the footage to adjudicate.
+    </p>
+
+    <h3>2.3 MultiGP RaceSync — a results backbone, not a marshaling tool</h3>
+    <p>
+      <a href="https://www.multigp.com/">MultiGP RaceSync</a> is the <strong>results backbone</strong>
+      for US chapter racing (and our <a href="integrations.html">push target</a>), but it is not a
+      marshaling surface. Its provisional → official notion is a <strong>rulebook convention</strong>
+      ("results become official 10 minutes after the race unless the RD opens a review"), enforced by
+      humans, <em>not</em> by software. And its results-lock-on-save is a <strong>destructive
+      footgun</strong>: saving can overwrite without an undo path. It tells us what the <em>backbone</em>
+      needs, and warns us what <em>not</em> to do at the lock boundary.
+    </p>
+
+    <h3>2.4 The cross-system white-space</h3>
+    <div class="principle">
+      <p><span class="name">No system has roles or an audit trail; almost none encode a
+      provisional&nbsp;→&nbsp;official state in software.</span> RotorHazard has the best signal
+      review but no governance; FPVTrackside has the best lap model but no audit/roles; RaceSync has
+      the backbone but treats provisional→official as a human convention. The gap none of them fills —
+      <strong>who-changed-what-when, role-gated commits, an explicit software lifecycle, and full
+      reversibility</strong> — is exactly GridFPV's differentiation, and it falls out of the
+      append-only architecture almost for free.</p>
+    </div>
+
+    <h2>3. GridFPV's decided direction — three layers</h2>
+    <p>
+      The design stacks in three layers. Each is independently valuable; together they are the
+      "defensible results" theme made real.
+    </p>
+
+    <pre class="mermaid">
+flowchart TB
+  L1["Layer 1 — Foundation<br/>timer-agnostic lap-level marshaling"]
+  L2["Layer 2 — Evidence<br/>signal-as-evidence (RotorHazard first)"]
+  L3["Layer 3 — Differentiator<br/>the governance layer"]
+  L1 --> L2 --> L3
+  log[("Append-only log")] -.->|every action is a logged fact| L1
+  log -.-> L2
+  log -.-> L3
+    </pre>
+
+    <h3>3.1 Foundation — timer-agnostic lap-level marshaling</h3>
+    <p>
+      FPVTrackside-grade lap editing, but for <em>any</em> timer. Laps are enter/exit detections; the
+      marshal can add, remove, split, edit-time (with the neighbour auto-adjusting), and reversibly DQ,
+      with the deferred smart-minimum so borderline laps aren't invalidated prematurely. This is built
+      on the logged correction primitives that already exist in
+      <a href="architecture.html">Architecture</a> §3 — <code>DetectionVoided</code>,
+      <code>LapInserted</code>, <code>LapAdjusted</code>, <code>PenaltyApplied</code> — extended with
+      new <strong>split</strong>, <strong>edit-time</strong>, and <strong>reversible-DQ</strong> facts.
+    </p>
+    <div class="principle">
+      <p><span class="name">Every correction is a logged fact with provenance — for free.</span>
+      Because corrections are appended events that reference the raw observations they adjudicate (never
+      destructive edits), who / when / source ride along on every one without extra plumbing. This layer
+      is timer-agnostic: it works for RotorHazard, LapRF, Velocidrone, or manual entry, because it
+      operates on canonical passes, not hardware specifics.</p>
+    </div>
+
+    <h3>3.2 Evidence — signal-as-evidence where the timer provides a trace</h3>
+    <p>
+      Where a timer exposes a signal trace — <strong>RotorHazard first</strong> — we capture and persist
+      the per-node <strong>RSSI trace plus its enter/exit thresholds</strong> for the heat as
+      <strong>immutable facts</strong> in the log. The Marshaling UI then renders the RSSI graph with the
+      lap markers and thresholds overlaid, and corrections stay <strong>lap-level against the visual</strong>:
+      the marshal sees <em>why</em> the timer called (or missed) a lap and adjusts accordingly.
+    </p>
+    <div class="principle">
+      <p><span class="name">Decision: v1 is signal-AS-EVIDENCE, not a re-implemented detector.</span>
+      We persist and <em>display</em> the trace as the ground truth to review against, but we do
+      <strong>not</strong> re-run detection in v1. The full RotorHazard-style "Recalculate" with
+      draggable thresholds (re-deriving laps from the stored signal) is <strong>explicitly deferred</strong>
+      — it is a clean later add-on on top of the stored trace, not a v1 requirement. Building evidence
+      first, re-detection later, keeps the differentiating governance layer from waiting on a signal
+      algorithm we don't yet need.</p>
+    </div>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>RotorHazard heats carry an RSSI trace; the graph is the evidence
+      surface and corrections are made against it.</p>
+      <p><span class="label">Sim</span>Velocidrone heats are deterministic with exact detection — there
+      is no trace, so the Marshaling UI <strong>skips the graph</strong> entirely and falls back to the
+      lap-level layer alone.</p>
+    </div>
+
+    <h3>3.3 Differentiator — the governance layer nobody has</h3>
+    <p>
+      This is the layer that sets GridFPV apart, and it is mostly architecture we already have, named
+      and surfaced:
+    </p>
+    <dl class="entities">
+      <dt>Provisional → official lifecycle</dt>
+      <dd>Results move through an explicit, software-enforced state with a <strong>configurable protest
+      window</strong> — not a rulebook convention. This builds on the heat FSM's provisional
+      <code>Unofficial</code> → locked <code>Final</code> transition (<a href="heat-lifecycle.html">Heat
+      Lifecycle</a>), which already has <code>Revert</code> to re-open a locked result.</dd>
+      <dt>Full audit trail</dt>
+      <dd>Who changed what, when — recoverable for every action, because every action is a logged event.
+      Nothing is silently lost.</dd>
+      <dt>Everything reversible</dt>
+      <dd>No destructive operations. The raw observation layer is immutable; corrections are appended and
+      can themselves be superseded (void the void). This is the opposite of RaceSync's lock-on-save
+      footgun.</dd>
+      <dt>Role-gated</dt>
+      <dd>The RD commits; the read-only pilot tier sees the record but cannot change it. Enforced by the
+      control/read split in <a href="protocol.html">Protocol</a> §5 — a real boundary, not a UI courtesy.</dd>
+      <dt>A real adjudication framework</dt>
+      <dd>First-class DQ states, penalty time <em>and</em> points, lap throw-outs, and protests — richer
+      than RotorHazard's <code>+time</code>/note model.</dd>
+    </dl>
+
+    <h2>4. Architectural fit</h2>
+    <p>
+      Most of this design is not new machinery — it is what the
+      <a href="architecture.html">append-only log + deterministic replay</a> already give us, made
+      visible. Audit, provenance, reversibility, and recompute-after-a-ruling are <strong>native</strong>:
+      corrections are facts that fold into the projection, so the result recomputes deterministically after
+      any change, and the full history is always intact. The auth tiers
+      (<a href="protocol.html">Protocol</a> §5) supply the role boundary. The lifecycle states
+      (<a href="heat-lifecycle.html">Heat Lifecycle</a>) supply provisional → official.
+    </p>
+    <div class="principle">
+      <p><span class="name">The one genuinely new plumbing: capturing and storing the raw RSSI trace.</span>
+      The <a href="timer-adapters.html">RotorHazard adapter</a> today ingests <em>passes</em>, not the
+      underlying signal history. Layer 2 requires the adapter to additionally capture and persist the
+      per-node RSSI trace and thresholds as immutable facts. Everything else reuses existing primitives.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Fidelity / quantization caution.</strong> RotorHazard's own worst marshaling bug was its
+        <em>recorded</em> signal history diverging from the <em>realtime</em> signal — quantization and
+        sampling differences meant the trace a marshal reviewed didn't match what the detector actually
+        saw live, so "Recalculate" could disagree with the original call. If we capture the trace, we must
+        capture it at a fidelity that matches realtime detection, or the evidence layer undermines the very
+        trust it exists to provide. This is the load-bearing risk in Layer 2.
+      </p>
+    </div>
+
+    <h2>5. Deferred / future seams</h2>
+    <ul>
+      <li><strong>Full signal re-detect.</strong> The RotorHazard-style "Recalculate" with draggable
+      thresholds, re-deriving laps from the stored trace. The v1 evidence layer stores the trace precisely
+      so this is a clean later add-on.</li>
+      <li><strong>Video / DVR evidence linkage.</strong> FPVTrackside grounds calls in video; we want the
+      same. Designed as a <strong>timestamp-flag seam</strong> now — marshaling facts carry timestamps that
+      a future DVR layer can pivot on — without building the capture pipeline yet.</li>
+      <li><strong>Richer adjudication.</strong> Deeper protest workflows, multi-step rulings, and
+      penalty-points models beyond the v1 framework.</li>
+    </ul>
+
+    <h2>6. Open product questions</h2>
+    <ol class="decisions">
+      <li><span class="q">Adjudication depth for v1.</span> How much of the DQ / penalty-points /
+        lap-throwout / protest framework ships in the first cut versus follows later.</li>
+      <li><span class="q">Protest-window default.</span> The default configurable window length before a
+        provisional result becomes official, and whether it varies by phase (qualifying vs. mains).</li>
+      <li><span class="q">Exact role model at Finalize.</span> Precisely which roles may commit, revert, or
+        protest at the <code>Unofficial → Final</code> boundary, and how that maps onto the loopback-RD /
+        remote-passphrase / read-only-pilot tiers.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation ·
+        <a href="vision.html#defensible-results">Vision §7</a> ·
+        <a href="architecture.html">Architecture</a> ·
+        <a href="heat-lifecycle.html">Heat Lifecycle</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>
