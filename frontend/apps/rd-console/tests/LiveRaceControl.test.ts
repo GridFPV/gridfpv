@@ -207,6 +207,33 @@ describe('LiveRaceControl', () => {
       });
     }
 
+    // The drift/defer-apply bug (#…): while locked, forcing the select's value to a different heat
+    // must (a) never send SetCurrentHeat, and (b) snap the displayed value straight back to the
+    // current heat — so nothing stale survives to apply once the picker unlocks (e.g. after Abort).
+    it('snaps the value back to the current heat when a change is attempted while locked', async () => {
+      const { session, sendSpy } = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: liveAt('Staged', 'heat-1'),
+        listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND, HEAT_2])
+      });
+      render(LiveRaceControl, { session });
+
+      const select = (await screen.findByRole('combobox', {
+        name: 'Select current heat'
+      })) as HTMLSelectElement;
+      expect(select.disabled).toBe(true);
+      expect(select.value).toBe('heat-1');
+
+      // Force the value to the other heat (as a stuck-drift would) and fire change.
+      select.value = 'heat-2';
+      await fireEvent.change(select, { target: { value: 'heat-2' } });
+      await tick();
+
+      // It snapped back to the current heat and never sent — no drifted selection lingers.
+      expect(select.value).toBe('heat-1');
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+
     for (const phase of ['Scheduled', 'Unofficial', 'Final'] as const) {
       it(`enables the picker (no lock hint) while the current heat is ${phase}`, async () => {
         const { session } = makeTestSession({

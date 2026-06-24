@@ -120,10 +120,31 @@
   // server would refuse.
   const pickerLocked = $derived(phase === 'Staged' || phase === 'Armed' || phase === 'Running');
 
-  // Picking a heat records `SetCurrentHeat`; the live stream then re-folds and follows it (the select
-  // re-syncs to `current_heat`, so a stale selection or a server-side change reconciles on its own).
+  // The select's displayed value is a LOCAL `$state` pinned to the true current heat — never a raw
+  // one-way `value={heat}` binding. A one-way binding only re-asserts the shown value when `heat`
+  // itself changes, so if a pick is *rejected* (locked here, or the backend's
+  // `reject_if_current_heat_committed`) or interacted with during the brief window before
+  // `pickerLocked`/`phase` catch up from the stream, the `<select>` would stick on the user's drifted
+  // choice — and that stale selection would then take effect once the picker unlocks (e.g. after an
+  // Abort). Pinning `pickValue` and snapping it back closes that defer-apply gap.
+  let pickValue = $state<HeatId | ''>('');
+  $effect(() => {
+    // Reset to the true current heat whenever it changes OR whenever the picker is locked: any drift
+    // (a rejected/locked interaction, or a timing-window change) snaps straight back to `heat`, so no
+    // stale/pending selection can survive to apply after the picker unlocks.
+    void pickerLocked;
+    pickValue = heat ?? '';
+  });
+
+  // Picking a heat records `SetCurrentHeat`; the live stream then re-folds and follows it. Only sends
+  // when NOT locked and the target differs from the current heat; a no-op/locked attempt leaves the
+  // pinned `pickValue` to snap back to the current heat via the effect above.
   async function pickHeat(target: HeatId) {
-    if (!target || target === heat || pickerLocked) return;
+    if (!target || target === heat || pickerLocked) {
+      // Re-pin immediately so a rejected/no-op attempt cannot leave a drifted selection behind.
+      pickValue = heat ?? '';
+      return;
+    }
     await session.setCurrentHeat(target);
   }
   function onPick(e: Event & { currentTarget: HTMLSelectElement }) {
@@ -370,7 +391,7 @@
           <select
             class="heat-pick-select"
             aria-label="Select current heat"
-            value={heat ?? ''}
+            bind:value={pickValue}
             onchange={onPick}
             disabled={pickerLocked}
           >
