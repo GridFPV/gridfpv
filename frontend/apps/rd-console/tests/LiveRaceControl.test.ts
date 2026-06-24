@@ -162,20 +162,67 @@ describe('LiveRaceControl', () => {
       expect(select.value).toBe('heat-1');
     });
 
-    it('sends SetCurrentHeat for the picked heat', async () => {
+    it('sends SetCurrentHeat for the picked heat (when the current heat is Scheduled)', async () => {
       const { session, sendSpy } = makeTestSession({
         event: EVENT_WITH_ROUND,
-        live: liveAt('Staged', 'heat-1'),
-        listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND, HEAT_2])
+        live: liveAt('Scheduled', 'heat-1'),
+        listHeatsImpl: vi.fn(async () => [
+          { ...HEAT_IN_ROUND, phase: 'Scheduled' as const },
+          HEAT_2
+        ])
       });
       render(LiveRaceControl, { session });
 
       const select = (await screen.findByRole('combobox', {
         name: 'Select current heat'
       })) as HTMLSelectElement;
+      expect(select.disabled).toBe(false);
       await fireEvent.change(select, { target: { value: 'heat-2' } });
       expect(sendSpy).toHaveBeenCalledWith({ SetCurrentHeat: { heat: 'heat-2' } });
     });
+
+    // The picker is LOCKED once the current heat is mid-commit (Staged/Armed/Running): after
+    // Stage you're committed to that race, so the only way to switch is to abort it back to
+    // Scheduled or finish to Unofficial/Final. Mirrors the backend's authoritative rejection.
+    for (const phase of ['Staged', 'Armed', 'Running'] as const) {
+      it(`disables the picker and shows the lock hint while the current heat is ${phase}`, async () => {
+        const { session, sendSpy } = makeTestSession({
+          event: EVENT_WITH_ROUND,
+          live: liveAt(phase, 'heat-1'),
+          listHeatsImpl: vi.fn(async () => [{ ...HEAT_IN_ROUND, phase }, HEAT_2])
+        });
+        render(LiveRaceControl, { session });
+
+        const select = (await screen.findByRole('combobox', {
+          name: 'Select current heat'
+        })) as HTMLSelectElement;
+        expect(select.disabled).toBe(true);
+        // The inline hint explains why and how to switch.
+        expect(screen.getByTestId('heat-pick-lock-hint')).toHaveTextContent(
+          /Locked while a heat is staged\/running/
+        );
+        // A guarded change does not send (belt-and-suspenders with the disabled attribute).
+        await fireEvent.change(select, { target: { value: 'heat-2' } });
+        expect(sendSpy).not.toHaveBeenCalled();
+      });
+    }
+
+    for (const phase of ['Scheduled', 'Unofficial', 'Final'] as const) {
+      it(`enables the picker (no lock hint) while the current heat is ${phase}`, async () => {
+        const { session } = makeTestSession({
+          event: EVENT_WITH_ROUND,
+          live: liveAt(phase, 'heat-1'),
+          listHeatsImpl: vi.fn(async () => [{ ...HEAT_IN_ROUND, phase }, HEAT_2])
+        });
+        render(LiveRaceControl, { session });
+
+        const select = (await screen.findByRole('combobox', {
+          name: 'Select current heat'
+        })) as HTMLSelectElement;
+        expect(select.disabled).toBe(false);
+        expect(screen.queryByTestId('heat-pick-lock-hint')).not.toBeInTheDocument();
+      });
+    }
   });
 
   describe('staging countdown (Slice 3)', () => {

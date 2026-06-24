@@ -113,10 +113,17 @@
     });
   });
 
+  // The picker is **locked** once the current heat is mid-commit — its phase is Staged/Armed/Running.
+  // After Stage you're committed to that race; you switch only by aborting it back to Scheduled or
+  // after it finishes to Unofficial/Final (or when there is no current heat). This mirrors the
+  // backend's authoritative rejection (control_handler.rs) so the disabled control matches what the
+  // server would refuse.
+  const pickerLocked = $derived(phase === 'Staged' || phase === 'Armed' || phase === 'Running');
+
   // Picking a heat records `SetCurrentHeat`; the live stream then re-folds and follows it (the select
   // re-syncs to `current_heat`, so a stale selection or a server-side change reconciles on its own).
   async function pickHeat(target: HeatId) {
-    if (!target || target === heat) return;
+    if (!target || target === heat || pickerLocked) return;
     await session.setCurrentHeat(target);
   }
   function onPick(e: Event & { currentTarget: HTMLSelectElement }) {
@@ -365,6 +372,7 @@
             aria-label="Select current heat"
             value={heat ?? ''}
             onchange={onPick}
+            disabled={pickerLocked}
           >
             {#if !heat}
               <option value="" disabled>— pick a heat —</option>
@@ -374,6 +382,11 @@
             {/each}
           </select>
         </label>
+        {#if pickerLocked}
+          <p class="heat-pick-hint" data-testid="heat-pick-lock-hint">
+            Locked while a heat is staged/running — abort or finish to switch
+          </p>
+        {/if}
       {/if}
     </div>
 
@@ -648,8 +661,18 @@
     font-weight: var(--gf-font-weight-semibold);
     cursor: pointer;
   }
-  .heat-pick-select:hover {
+  .heat-pick-select:hover:not(:disabled) {
     border-color: var(--gf-accent);
+  }
+  .heat-pick-select:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+  .heat-pick-hint {
+    margin: var(--gf-space-1) 0 0;
+    max-width: 18rem;
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
   }
   .visually-hidden {
     position: absolute;
