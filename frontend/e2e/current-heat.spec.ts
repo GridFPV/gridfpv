@@ -123,6 +123,61 @@ test('the heat picker is locked while a heat is staged, and re-enabled after an 
   await expect(page.locator('.heat-id .value')).toHaveText('lk-2', { timeout: 15_000 });
 });
 
+test('a value change attempted while the picker is locked does not apply after an abort (no drift / defer-apply)', async ({
+  page,
+  director
+}) => {
+  // The drift bug: while a heat is Staged the picker is disabled, but a forced value change used to
+  // stick on the select (the one-way `value={heat}` binding never re-asserted), so after an Abort
+  // unlocked the picker Live control switched straight to that drifted heat. The value is now pinned
+  // to the current heat, so a locked attempt snaps back and nothing stale survives the abort.
+  await page.goto('/');
+  await enterPractice(page);
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
+
+  const schedule = (heat: string, lineup: string[]) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { ScheduleHeat: { heat, lineup } }
+    });
+
+  const select = page.getByRole('combobox', { name: 'Select current heat' });
+
+  // 1) Two heats; pin dr-1 as the current heat via the picker (deterministic, no leftover dep).
+  expect((await schedule('dr-1', ['Ace', 'Bee'])).ok()).toBeTruthy();
+  expect((await schedule('dr-2', ['Cee', 'Dee'])).ok()).toBeTruthy();
+  await expect(select.locator('option', { hasText: 'dr-1' })).toHaveCount(1, { timeout: 15_000 });
+  await select.selectOption('dr-1');
+  await expect(page.locator('.heat-id .value')).toHaveText('dr-1', { timeout: 15_000 });
+
+  // 2) Stage dr-1 ⇒ the picker locks.
+  await page.getByRole('button', { name: 'Stage', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Staged', { timeout: 15_000 });
+  await expect(select).toBeDisabled();
+
+  // 3) Force the (disabled) select's value to dr-2, as a drift would — then fire change. The pinned
+  //    value snaps straight back to the current heat (dr-1); no SetCurrentHeat is recorded.
+  await select.evaluate((el, value) => {
+    const sel = el as HTMLSelectElement;
+    sel.value = value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }, 'dr-2');
+  await expect(select).toHaveValue('dr-1');
+
+  // 4) Abort dr-1 back to Scheduled ⇒ the picker unlocks. Live control must NOT have switched to the
+  //    attempted dr-2 — the current heat is still dr-1 (the drifted selection did not defer-apply).
+  await page.getByRole('button', { name: 'Abort', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Scheduled', { timeout: 15_000 });
+  await expect(select).toBeEnabled();
+  await expect(page.locator('.heat-id .value')).toHaveText('dr-1');
+  await expect(select).toHaveValue('dr-1');
+
+  // 5) A normal unlocked pick still switches (no regression of the happy path).
+  await select.selectOption('dr-2');
+  await expect(page.locator('.heat-id .value')).toHaveText('dr-2', { timeout: 15_000 });
+});
+
 test('scheduling a heat that does not move on-deck still appears in the picker without a transition', async ({
   page,
   director
