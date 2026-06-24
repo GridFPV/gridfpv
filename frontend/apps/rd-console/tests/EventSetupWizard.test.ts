@@ -57,31 +57,34 @@ const READY_EVENT: EventMeta = {
 } as unknown as EventMeta;
 
 describe('EventSetupWizard (guided first-pass stepper)', () => {
-  it('opens on the first step (Classes & Roster) and shows the event name', async () => {
+  it('opens on the first step (Timer & channels) and shows the event name', async () => {
     const { session } = makeTestSession({ ...impls(), event: EMPTY_EVENT });
     render(EventSetupWizard, { session, open: true });
 
-    // The header names the event being set up and the first step is the combined Classes & Roster.
+    // The header names the event being set up and the first step is now Timer & channels (the
+    // per-pilot channels assigned in the next step come from the timer, so it's picked first).
     expect(screen.getByText(/Set up · Spring Cup/)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Classes & Roster', level: 2 })).toBeInTheDocument();
-    // It embeds the real combined stage (its three labelled boxes + a card heading), not a
-    // reimplementation: the top-level Classes / Pilots / Channels boxes and the roster card.
-    expect(await screen.findByRole('button', { name: /^Classes/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Pilots/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Channels/ })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Present pilots' })).toBeInTheDocument();
-  });
-
-  it('walks Next through the stages to Review, then Back', async () => {
-    const { session } = makeTestSession({ ...impls(), event: EMPTY_EVENT });
-    render(EventSetupWizard, { session, open: true });
-
-    const nextBtn = () => screen.getByRole('button', { name: 'Next' });
-    // Classes & Roster → Timer & channels → First round → Review.
-    await fireEvent.click(nextBtn());
+    expect(screen.getByRole('heading', { name: 'Timer & channels', level: 2 })).toBeInTheDocument();
+    // It embeds the real Timers stage (its card heading + the Mock timer's checkbox).
     expect(
       await screen.findByRole('heading', { name: 'Timers for this event' })
     ).toBeInTheDocument();
+    expect(await screen.findByLabelText('Use Mock')).toBeInTheDocument();
+  });
+
+  it('walks Next through the stages to Review, then Back', async () => {
+    // Seed a timer so the Timer-step gate is satisfied and Next is enabled.
+    const { session } = makeTestSession({
+      ...impls(),
+      event: { ...EMPTY_EVENT, timers: ['mock'] }
+    });
+    render(EventSetupWizard, { session, open: true });
+
+    const nextBtn = () => screen.getByRole('button', { name: 'Next' });
+    // Timer & channels → Classes & Roster → First round → Review.
+    await screen.findByRole('heading', { name: 'Timers for this event' });
+    await fireEvent.click(nextBtn());
+    expect(await screen.findByRole('heading', { name: 'Present pilots' })).toBeInTheDocument();
     await fireEvent.click(nextBtn());
     expect(await screen.findByRole('heading', { name: 'Rounds', level: 3 })).toBeInTheDocument();
     await fireEvent.click(nextBtn());
@@ -96,7 +99,10 @@ describe('EventSetupWizard (guided first-pass stepper)', () => {
   });
 
   it('advances through every stage with only Next — no Save button anywhere (auto-save)', async () => {
-    const { session } = makeTestSession({ ...impls(), event: EMPTY_EVENT });
+    const { session } = makeTestSession({
+      ...impls(),
+      event: { ...EMPTY_EVENT, timers: ['mock'] }
+    });
     render(EventSetupWizard, { session, open: true });
 
     const noSaveButtons = () => {
@@ -107,12 +113,12 @@ describe('EventSetupWizard (guided first-pass stepper)', () => {
       expect(screen.queryByRole('button', { name: 'Save selection' })).toBeNull();
     };
 
-    // Step 1: Classes & Roster.
-    await screen.findByRole('button', { name: /^Classes/ });
-    noSaveButtons();
-    // Next → Timers.
-    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    // Step 1: Timer & channels.
     await screen.findByRole('heading', { name: 'Timers for this event' });
+    noSaveButtons();
+    // Next → Classes & Roster.
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByRole('heading', { name: 'Present pilots' });
     noSaveButtons();
     // Next → First round.
     await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
@@ -124,13 +130,41 @@ describe('EventSetupWizard (guided first-pass stepper)', () => {
   });
 
   it('Skip advances a step just like Next (steps are optional)', async () => {
-    const { session } = makeTestSession({ ...impls(), event: EMPTY_EVENT });
+    // From the Timer step, Skip (like Next) requires a timer; seed one so it's enabled.
+    const { session } = makeTestSession({
+      ...impls(),
+      event: { ...EMPTY_EVENT, timers: ['mock'] }
+    });
     render(EventSetupWizard, { session, open: true });
 
+    await screen.findByRole('heading', { name: 'Timers for this event' });
     await fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
-    expect(
-      await screen.findByRole('heading', { name: 'Timers for this event' })
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Present pilots' })).toBeInTheDocument();
+  });
+
+  it('gates the Timer step: Next/Skip disabled with a hint until ≥1 timer is selected', async () => {
+    // A fresh event with no timers selected → the gate blocks advancing off step 1. Ticking the
+    // Mock re-homes the event with `timers: ['mock']`, which `timerCount` reads to clear the gate.
+    const setEventTimersImpl = vi.fn(async () => ({ ...EMPTY_EVENT, timers: ['mock'] }));
+    const { session } = makeTestSession({ ...impls(), setEventTimersImpl, event: EMPTY_EVENT });
+    render(EventSetupWizard, { session, open: true });
+
+    await screen.findByRole('heading', { name: 'Timers for this event' });
+    expect((screen.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Skip' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Select at least one timer to continue/i)).toBeInTheDocument();
+
+    // Ticking the Mock timer satisfies the gate → Next/Skip enable and the hint clears.
+    await fireEvent.click(await screen.findByLabelText('Use Mock'));
+    await waitFor(() =>
+      expect((screen.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(
+        false
+      )
+    );
+    expect((screen.getByRole('button', { name: 'Skip' }) as HTMLButtonElement).disabled).toBe(
+      false
+    );
+    expect(screen.queryByText(/Select at least one timer to continue/i)).toBeNull();
   });
 
   it('the progress indicator jumps directly to a step', async () => {

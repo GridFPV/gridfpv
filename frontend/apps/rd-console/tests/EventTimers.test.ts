@@ -97,20 +97,27 @@ describe('EventTimers (in-event CRUD + selection)', () => {
     expect(setEventTimersImpl).toHaveBeenCalledWith('http://d.local', 'e1', ['mock'], 'tok');
   });
 
-  it('refuses to auto-clear the last timer (an event needs at least one)', async () => {
+  it('clears the last timer with no snap-back (skips the empty auto-save)', async () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
     const setEventTimersImpl = vi.fn(async () => EVENT);
     const { session } = makeTestSession({ listTimersImpl, setEventTimersImpl, event: EVENT });
     render(EventTimers, { session });
 
     const mockBox = (await screen.findByLabelText('Use Mock')) as HTMLInputElement;
-    await fireEvent.click(mockBox); // unselect the only selected → would be empty
+    await fireEvent.click(mockBox); // unselect the only selected → selection empties
 
-    // The toggle is refused: the selection still holds the one timer (the count line reflects it)
-    // and no wholesale save goes out.
-    expect(screen.getByText(/1 selected/)).toBeInTheDocument();
+    // No snap-back: the box stays unchecked, the count reflects an empty selection, and (because an
+    // empty selection is kept local, not persisted) no wholesale save goes out.
+    expect(mockBox.checked).toBe(false);
+    expect(screen.getByText(/0 selected/)).toBeInTheDocument();
     await new Promise((r) => setTimeout(r, 400));
     expect(setEventTimersImpl).not.toHaveBeenCalled();
+
+    // Re-ticking it resumes the wholesale save with the restored selection.
+    await fireEvent.click(mockBox);
+    expect(mockBox.checked).toBe(true);
+    await waitFor(() => expect(setEventTimersImpl).toHaveBeenCalledTimes(1));
+    expect(setEventTimersImpl).toHaveBeenCalledWith('http://d.local', 'e1', ['mock'], 'tok');
   });
 
   it('reverts the optimistic toggle when the save fails', async () => {

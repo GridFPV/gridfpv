@@ -63,13 +63,44 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   await expect(setupBox).toBeChecked();
   await page.getByRole('button', { name: 'Create & enter' }).click();
 
-  // ── The wizard overlay opens on its first step (Classes & Roster) ───────────────────────────
+  // ── The wizard overlay opens on its first step (Timer & channels) ───────────────────────────
   const wizard = page.getByRole('dialog', { name: 'Event setup wizard' });
   await expect(wizard).toBeVisible({ timeout: 15_000 });
   await expect(wizard.getByText(`Set up · ${EVENT}`)).toBeVisible();
-  if (shots) await wizard.screenshot({ path: `${shots}/wizard-classes-roster.png` });
+  await expect(wizard.getByRole('heading', { name: 'Timers for this event' })).toBeVisible({
+    timeout: 15_000
+  });
+  if (shots) await wizard.screenshot({ path: `${shots}/wizard-timers.png` });
 
-  // Step 1 — Classes & Roster: tick the built-in Open Class — this AUTO-SAVES (no Save button).
+  // Step 1 — Timer & channels (now FIRST: per-pilot channels come from the timer). The built-in
+  // Mock is selectable; ensure it's chosen (auto-saves, no Save button).
+  const mockBox = wizard.getByRole('checkbox', { name: 'Use Mock' });
+  await expect(mockBox).toBeVisible({ timeout: 15_000 });
+  if (!(await mockBox.isChecked())) {
+    const timersSaved = page.waitForResponse(
+      (r) => /\/events\/.+\/timers$/.test(r.url()) && r.request().method() === 'PUT'
+    );
+    await mockBox.check();
+    await timersSaved;
+  }
+  await expect(mockBox).toBeChecked();
+
+  // The ≥1-timer gate: clearing every timer empties the selection (no stale green), disables Next,
+  // and shows the hint; re-ticking the Mock clears the row highlight back and re-enables Next.
+  const nextBtn = wizard.getByRole('button', { name: 'Next', exact: true });
+  await mockBox.uncheck();
+  await expect(mockBox).not.toBeChecked();
+  await expect(wizard.getByText(/Select at least one timer to continue/i)).toBeVisible();
+  await expect(nextBtn).toBeDisabled();
+  const timersResaved = page.waitForResponse(
+    (r) => /\/events\/.+\/timers$/.test(r.url()) && r.request().method() === 'PUT'
+  );
+  await mockBox.check();
+  await timersResaved;
+  await expect(nextBtn).toBeEnabled();
+
+  // Step 2 — Classes & Roster: tick the built-in Open Class — this AUTO-SAVES (no Save button).
+  await nextBtn.click();
   const classBox = wizard.getByRole('checkbox', { name: 'Select Open Class' });
   await expect(classBox).toBeVisible({ timeout: 15_000 });
   if (!(await classBox.isChecked())) {
@@ -100,20 +131,6 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   // With a single class the pilot is auto-placed (no "Place …" checkbox) and the membership
   // auto-saves — the channel selector simply appears, no Save click needed.
   await expect(wizard.getByLabel(`Channel for ${PILOT}`)).toBeVisible({ timeout: 15_000 });
-
-  // Step 2 — Timer & channels: the built-in Mock is selectable; ensure it's chosen (auto-saves).
-  await wizard.getByRole('button', { name: 'Next', exact: true }).click();
-  await expect(wizard.getByRole('heading', { name: 'Timers for this event' })).toBeVisible();
-  const mockBox = wizard.getByRole('checkbox', { name: 'Use Mock' });
-  await expect(mockBox).toBeVisible({ timeout: 15_000 });
-  if (!(await mockBox.isChecked())) {
-    const timersSaved = page.waitForResponse(
-      (r) => /\/events\/.+\/timers$/.test(r.url()) && r.request().method() === 'PUT'
-    );
-    await mockBox.check();
-    await timersSaved;
-  }
-  await expect(mockBox).toBeChecked();
 
   // Step 3 — First round: the add-round form is pre-opened; define one and add it.
   await wizard.getByRole('button', { name: 'Next', exact: true }).click();

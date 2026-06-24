@@ -25,7 +25,19 @@
   import { AutoSaver } from '../lib/autosave.js';
   import TimerManager from './TimerManager.svelte';
 
-  let { session }: { session: Session } = $props();
+  let {
+    session,
+    onselectionchange = undefined
+  }: {
+    session: Session;
+    /**
+     * Fires the **live** working-selection count whenever it changes — including the local-only
+     * empty state the setup wizard gates on (an empty selection is kept local, not persisted, so
+     * `currentEvent.timers` alone can't see it). The wizard uses this to block advancing past the
+     * Timer step until ≥1 timer is ticked. Inert for the standalone Timers page (no callback).
+     */
+    onselectionchange?: (count: number) => void;
+  } = $props();
 
   let manager = $state<TimerManager | undefined>(undefined);
 
@@ -45,6 +57,12 @@
   // Seed the selection from the event on mount; the manager loads the registry itself.
   $effect(() => {
     syncFromEvent();
+  });
+
+  // Surface the live selection size (including the local-only empty state) to any embedder — the
+  // setup wizard reads this to gate advancing past the Timer step.
+  $effect(() => {
+    onselectionchange?.(selected.size);
   });
 
   /**
@@ -70,15 +88,12 @@
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
     else next.add(id);
-    // An event must keep at least one timer — refuse to auto-clear the last one (revert + nudge).
-    if (next.size === 0) {
-      toast.error('An event needs at least one timer.');
-      // Re-seed from the event so the bound checkbox reliably snaps back to checked (the native
-      // click already flipped the DOM; re-seeding restores the saved selection).
-      syncFromEvent();
-      return;
-    }
     selected = next;
+    // The RD may uncheck everything: we let the selection empty out (the row highlight clears since
+    // it derives from `selected.has(id)` — no stale green) but **skip the auto-save** while empty.
+    // We keep the empty state purely local rather than persisting/erroring; the setup-wizard's gate
+    // guarantees an event still ends with ≥1 timer, and re-ticking one resumes the wholesale save.
+    if (next.size === 0) return;
     scheduleSave();
   }
 
