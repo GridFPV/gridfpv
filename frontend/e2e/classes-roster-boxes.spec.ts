@@ -1,16 +1,18 @@
 /**
- * Classes / Pilots / Channels — the three labelled collapsible boxes on the Classes & Roster stage,
- * plus the bulk roster select-all and the channel auto-assign (ui: Classes/Pilots/Channels boxes).
+ * Classes / Pilots — the two labelled collapsible boxes on the Classes & Roster stage, plus the bulk
+ * roster select-all and the per-class channel auto-assign (ui: Classes/Pilots boxes).
  *
- * The stage is restructured into exactly three top-level collapsible boxes — **Classes**, **Pilots**,
- * **Channels** — each persisting its open state per stable section id in `localStorage`
- * (gf.collapse.<event>.<section>). This spec drives the real UI against a real Director:
+ * The stage is restructured into exactly two top-level collapsible boxes — **Classes** and
+ * **Pilots** — each persisting its open state per stable section id in `localStorage`
+ * (gf.collapse.<event>.<section>). The per-class "Channels" card (inside Pilots) is where pilots get
+ * channels, with its own per-class **Auto-assign channels** button (no standalone Channels box). This
+ * spec drives the real UI against a real Director:
  *
- *   1. **Collapse each of the three boxes**, assert their content hides, reload, and assert all three
+ *   1. **Collapse each of the two boxes**, assert their content hides, reload, and assert both
  *      stayed collapsed (the persisted state stuck).
  *   2. Re-open them, **Select all** in the Pilots box and save the roster, then
- *   3. **Auto-assign channels** in the Channels box and assert every placed pilot got a channel
- *      (its `<select>` carries a non-empty value).
+ *   3. **Auto-assign channels** in the per-class Channels card and assert every placed pilot got a
+ *      channel (its `<select>` carries a non-empty value).
  *
  * Nothing about the boxes / bulk actions is mocked. Cleans the shared Director's event back to empty.
  */
@@ -50,7 +52,7 @@ function boxToggle(page: import('@playwright/test').Page, title: string) {
     .filter({ has: page.getByText(title, { exact: true }) });
 }
 
-test('three labelled boxes collapse + persist; select-all roster; auto-assign channels', async ({
+test('two labelled boxes collapse + persist; select-all roster; per-class auto-assign channels', async ({
   page,
   director
 }) => {
@@ -79,17 +81,16 @@ test('three labelled boxes collapse + persist; select-all roster; auto-assign ch
   await enterPractice(page);
   await openTab(page, 'Classes & Roster');
 
-  // ── 1. The three labelled boxes exist; collapse each one and assert its body hides. ────────────
+  // ── 1. The two labelled boxes exist; collapse each one and assert its body hides. ──────────────
   const classesBox = boxToggle(page, 'Classes');
   const pilotsBox = boxToggle(page, 'Pilots');
-  const channelsBox = boxToggle(page, 'Channels');
-  for (const box of [classesBox, pilotsBox, channelsBox]) {
+  for (const box of [classesBox, pilotsBox]) {
     await expect(box).toBeVisible({ timeout: 15_000 });
     await expect(box).toHaveAttribute('aria-expanded', 'true');
   }
 
-  // Collapse all three.
-  for (const box of [classesBox, pilotsBox, channelsBox]) {
+  // Collapse both.
+  for (const box of [classesBox, pilotsBox]) {
     await box.click();
     await expect(box).toHaveAttribute('aria-expanded', 'false');
   }
@@ -98,11 +99,11 @@ test('three labelled boxes collapse + persist; select-all roster; auto-assign ch
       .getByRole('region', { name: 'Classes and roster' })
       .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/classes-roster-boxes-collapsed.png` });
 
-  // ── It persisted: a reload keeps all three boxes collapsed. ────────────────────────────────────
+  // ── It persisted: a reload keeps both boxes collapsed. ─────────────────────────────────────────
   await page.reload();
   await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
   await openTab(page, 'Classes & Roster');
-  for (const title of ['Classes', 'Pilots', 'Channels']) {
+  for (const title of ['Classes', 'Pilots']) {
     await expect(boxToggle(page, title)).toHaveAttribute('aria-expanded', 'false', {
       timeout: 15_000
     });
@@ -131,11 +132,9 @@ test('three labelled boxes collapse + persist; select-all roster; auto-assign ch
       .getByRole('region', { name: 'Classes and roster' })
       .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/classes-roster-boxes-expanded.png` });
 
-  // ── 3. Auto-assign channels in the Channels box; every placed pilot ends up with a channel. ────
-  await boxToggle(page, 'Channels').click();
-  await expect(boxToggle(page, 'Channels')).toHaveAttribute('aria-expanded', 'true');
-
-  await page.getByRole('button', { name: 'Auto-assign channels' }).click();
+  // ── 3. Auto-assign channels in the per-class Channels card; every placed pilot gets a channel. ─
+  // Single-class event → one "Auto-assign channels" button (in the lone class's Channels card).
+  await page.getByRole('button', { name: 'Auto-assign channels' }).first().click();
   for (const callsign of PILOTS) {
     await expect(page.getByLabel(`Channel for ${callsign}`)).not.toHaveValue('', {
       timeout: 15_000

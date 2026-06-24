@@ -233,7 +233,35 @@ describe('EventClassesRoster — auto-save (no Save buttons)', () => {
   });
 });
 
-describe('EventClassesRoster — auto-assign channels', () => {
+describe('EventClassesRoster — Channels restructure (no standalone box; per-class card)', () => {
+  it('renders no standalone Channels box and titles the per-class card "Channels"', async () => {
+    const { session } = makeTestSession({ ...impls(), event: SINGLE });
+    render(EventClassesRoster, { session });
+
+    // The per-class placement card is now titled "Channels" (a heading), where pilots get channels.
+    expect(await screen.findByRole('heading', { name: 'Channels' })).toBeInTheDocument();
+
+    // The old standalone Channels box (its "Channel assignment" card + explanatory copy) is gone.
+    expect(screen.queryByRole('heading', { name: 'Channel assignment' })).toBeNull();
+    expect(screen.queryByText(/pilots placed/i)).toBeNull();
+    // The per-pilot channel dropdowns survive the restructure.
+    expect(screen.getByLabelText('Channel for Ace')).toBeInTheDocument();
+  });
+
+  it('exposes the per-class auto-assign button inside the multi-class Channels card', async () => {
+    const { session } = makeTestSession({
+      ...impls(),
+      event: { ...SINGLE, classes: ['open', 'spec'] }
+    });
+    render(EventClassesRoster, { session });
+
+    // Each class grid carries its own "Auto-assign channels" button (one per selected class).
+    await screen.findByLabelText('Place Ace in Open Class');
+    expect(screen.getAllByRole('button', { name: 'Auto-assign channels' })).toHaveLength(2);
+  });
+});
+
+describe('EventClassesRoster — auto-assign channels (per class)', () => {
   it('fills every placed pilot from the channel pool (round-robin) and saves each class', async () => {
     const setClassMembershipImpl = vi.fn(async () => SINGLE);
     const { session } = makeTestSession({

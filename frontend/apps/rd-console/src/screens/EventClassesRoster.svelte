@@ -52,10 +52,9 @@
     return s;
   }
 
-  // The three top-level boxes (Classes / Pilots / Channels) each persist their own collapse state.
+  // The two top-level boxes (Classes / Pilots) each persist their own collapse state.
   const classesBox = $derived(collapse('classes-box'));
   const pilotsBox = $derived(collapse('pilots-box'));
-  const channelsBox = $derived(collapse('channels-box'));
 
   let classManager = $state<ClassManager | undefined>(undefined);
   let pilotManager = $state<PilotManager | undefined>(undefined);
@@ -378,53 +377,48 @@
     lastMembershipKey = ' ';
   }
 
-  // ── Auto-assign channels ───────────────────────────────────────────────────
-  // Deterministically fill every *placed* pilot's channel from the source timer's available pool
-  // (round-robin / first-fit, in roster order): the i-th placed pilot in a class gets pool[i % N], so
-  // N pilots spread across the channels and repeats are fine (they fly in different heats). Then save
-  // each touched class's membership via the existing setClassMembership. Manual per-pilot overrides
-  // afterwards stay intact — this only fills in one batch.
-  let autoAssigning = $state(false);
-  const placedTotal = $derived(eventClasses.reduce((n, c) => n + membersOf(c).size, 0));
-  const canAutoAssign = $derived(hasChannelPool && placedTotal > 0 && !autoAssigning);
-  async function autoAssignChannels() {
-    if (!canAutoAssign) return;
-    autoAssigning = true;
+  // ── Auto-assign channels (per class) ───────────────────────────────────────
+  // Deterministically fill one class's *placed* pilots' channels from the source timer's available
+  // pool (round-robin / first-fit, in roster order): the i-th placed pilot gets pool[i % N], so the
+  // class's pilots spread across the channels and repeats are fine (they fly in different heats). Then
+  // save that class's membership via the existing setClassMembership. Manual per-pilot overrides
+  // afterwards stay intact — this only fills the class in one batch.
+  let autoAssigning = $state<ClassId | undefined>(undefined);
+  function placedCount(classId: ClassId): number {
+    return membersOf(classId).size;
+  }
+  function canAutoAssign(classId: ClassId): boolean {
+    return hasChannelPool && placedCount(classId) > 0 && autoAssigning === undefined;
+  }
+  async function autoAssignChannels(classId: ClassId) {
+    if (!canAutoAssign(classId)) return;
+    autoAssigning = classId;
     try {
       const pool = channelPool;
-      // Build the next membership map with channels filled, and remember which classes changed.
-      const next = new Map<ClassId, Map<PilotId, number | undefined>>();
-      const touched: ClassId[] = [];
-      for (const classId of eventClasses) {
-        const inner = membersOf(classId);
-        // Stable roster order — the order the slots save in, so the assignment is reproducible.
-        const placed = eventRoster.filter((id) => inner.has(id));
-        const assigned = assignChannelsRoundRobin(placed, pool);
-        const filled = new Map(inner);
-        for (const [id, mhz] of assigned) filled.set(id, mhz);
-        next.set(classId, filled);
-        if (placed.length > 0) touched.push(classId);
-      }
+      const inner = membersOf(classId);
+      // Stable roster order — the order the slots save in, so the assignment is reproducible.
+      const placed = eventRoster.filter((id) => inner.has(id));
+      if (placed.length === 0) return;
+      const assigned = assignChannelsRoundRobin(placed, pool);
+      const filled = new Map(inner);
+      for (const [id, mhz] of assigned) filled.set(id, mhz);
+      const next = new Map(membership);
+      next.set(classId, filled);
       membership = next;
 
-      if (touched.length === 0) return;
-      // Drop any pending debounced membership save for the touched classes — auto-assign saves
-      // them itself, immediately, with the freshly-assigned channels (so we don't double-save).
-      for (const c of touched) autosaver.cancel(`membership:${c}`);
-      const results = await Promise.all(
-        touched.map((c) => session.setClassMembership(c, orderedSlots(c)))
-      );
-      if (results.some((r) => !r)) {
+      // Drop any pending debounced membership save for this class — auto-assign saves it itself,
+      // immediately, with the freshly-assigned channels (so we don't double-save).
+      autosaver.cancel(`membership:${classId}`);
+      const saved = await session.setClassMembership(classId, orderedSlots(classId));
+      if (!saved) {
         toast.info('A control token is required to assign channels.');
         return;
       }
-      toast.success(
-        `Auto-assigned channels across ${touched.length === 1 ? '1 class' : `${touched.length} classes`}.`
-      );
+      toast.success(`Auto-assigned channels for ${classNameOf(classId)}.`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
-      autoAssigning = false;
+      autoAssigning = undefined;
     }
   }
 </script>
@@ -557,11 +551,24 @@
       </Collapsible>
     </Card>
 
-    <!-- Per-class placement -->
+    <!-- Per-class channels (placement + each placed pilot's fixed channel) -->
     <Card
-      title="Placement"
-      subtitle="Place present pilots into each class. Use the channel selectors (or the Channels box below) to assign each one a fixed channel for time-trial / qualifying rounds."
+      title="Channels"
+      subtitle="Place present pilots into each class and give each one a fixed channel for time-trial / qualifying rounds. Auto-assign spreads the available channels across a class's placed pilots, or set any pilot's channel by hand."
     >
+      {#snippet actions()}
+        {#if selectedTimers.length > 1}
+          <label class="source-pick">
+            <span class="source-label">Channels from</span>
+            <Select bind:value={channelSource} size="sm" aria-label="Channel source timer">
+              {#each selectedTimers as t (t.id)}
+                <option value={t.id}>{t.name}{t.id === primaryTimerId ? ' (primary)' : ''}</option>
+              {/each}
+            </Select>
+          </label>
+        {/if}
+      {/snippet}
+
       {#if eventClasses.length === 0}
         <div class="nudge" role="status">
           <p>This event has no classes selected yet.</p>
@@ -584,7 +591,24 @@
             <Badge tone="neutral">{rosterPilots.length} placed</Badge>
           {/snippet}
           <fieldset class="class-grid" aria-label={`Placement for ${classNameOf(singleClass)}`}>
-            <p class="auto-tag">all present pilots (single class)</p>
+            <div class="grid-bulk">
+              <p class="auto-tag">all present pilots (single class)</p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onclick={() => autoAssignChannels(singleClass)}
+                loading={autoAssigning === singleClass}
+                disabled={!canAutoAssign(singleClass)}
+              >
+                Auto-assign channels
+              </Button>
+            </div>
+            {#if !hasChannelPool}
+              <p class="auto-tag">
+                No channels to assign yet — configure a timer's available channels on the Timers
+                tab.
+              </p>
+            {/if}
             <ul class="member-list">
               {#each rosterPilots as pilot (pilot.id)}
                 <li class="member-row">
@@ -640,6 +664,15 @@
                   >
                     Clear all
                   </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onclick={() => autoAssignChannels(classId)}
+                    loading={autoAssigning === classId}
+                    disabled={!canAutoAssign(classId)}
+                  >
+                    Auto-assign channels
+                  </Button>
                 </div>
                 <ul class="member-list">
                   {#each rosterPilots as pilot (pilot.id)}
@@ -684,62 +717,6 @@
           {/each}
         </div>
       {/if}
-    </Card>
-  </Collapsible>
-
-  <!-- ════ BOX 3 · Channels ═══════════════════════════════════════════════ -->
-  <Collapsible title="Channels" id="box-channels" bind:open={channelsBox.open}>
-    {#snippet summary()}
-      <Badge tone="neutral">{channelOptions.length} available</Badge>
-    {/snippet}
-    {#snippet actions()}
-      {#if selectedTimers.length > 1}
-        <label class="source-pick">
-          <span class="source-label">Channels from</span>
-          <Select bind:value={channelSource} size="sm" aria-label="Channel source timer">
-            {#each selectedTimers as t (t.id)}
-              <option value={t.id}>{t.name}{t.id === primaryTimerId ? ' (primary)' : ''}</option>
-            {/each}
-          </Select>
-        </label>
-      {/if}
-    {/snippet}
-
-    <Card
-      title="Channel assignment"
-      subtitle="The channel each placed pilot flies — their fixed binding for time-trial / qualifying rounds. Auto-assign spreads the available channels across every placed pilot; override any pilot's channel in the Placement grid above."
-    >
-      {#if !hasChannelPool}
-        <div class="nudge subtle" role="status">
-          <p>No channels to assign yet.</p>
-          <p class="nudge-sub">
-            Pick a timer and give it some <strong>available channels</strong> on the
-            <strong>Timers</strong> tab — then each pilot can be assigned one.
-          </p>
-        </div>
-      {:else if sourceTimer}
-        <p class="source-note" aria-live="polite">
-          Channels drawn from <strong>{sourceTimer.name}</strong>
-          {sourceTimer.id === primaryTimerId ? '(the primary timer)' : ''} — {channelOptions.length}
-          available.
-        </p>
-      {/if}
-
-      <div class="channels-foot">
-        <span class="count" aria-live="polite">
-          {placedTotal}
-          {placedTotal === 1 ? 'pilot placed' : 'pilots placed'}
-        </span>
-        <Button
-          variant="primary"
-          size="sm"
-          onclick={autoAssignChannels}
-          loading={autoAssigning}
-          disabled={!canAutoAssign}
-        >
-          Auto-assign channels
-        </Button>
-      </div>
     </Card>
   </Collapsible>
 </section>
@@ -790,23 +767,19 @@
   .bulk-actions,
   .grid-bulk {
     display: flex;
+    align-items: center;
     gap: var(--gf-space-2);
   }
   .grid-bulk {
+    flex-wrap: wrap;
     padding-bottom: var(--gf-space-1);
   }
-
-  /* ── Channels box: placed-count + auto-assign ─────────────────────────── */
-  .channels-foot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--gf-space-3);
-    margin-top: var(--gf-space-3);
-    padding-top: var(--gf-space-4);
-    border-top: 1px solid var(--gf-border-subtle);
+  /* The single-class auto-tag fills, pushing the auto-assign button to the right edge. */
+  .grid-bulk .auto-tag {
+    flex: 1;
   }
 
+  /* ── Channel source picker (Card action) ──────────────────────────────── */
   .source-pick {
     display: inline-flex;
     align-items: center;
@@ -816,14 +789,6 @@
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
     white-space: nowrap;
-  }
-  .source-note {
-    margin: 0 0 var(--gf-space-2);
-    font-size: var(--gf-font-size-sm);
-    color: var(--gf-text-muted);
-  }
-  .source-note strong {
-    color: var(--gf-text-secondary);
   }
 
   /* ── Nudge / empty states ─────────────────────────────────────────────── */
@@ -835,10 +800,6 @@
     border: 1px dashed var(--gf-border);
     border-radius: var(--gf-radius-lg);
     background: var(--gf-surface-alt);
-  }
-  .nudge.subtle {
-    margin-bottom: var(--gf-space-4);
-    padding: var(--gf-space-4);
   }
   .nudge p {
     margin: 0;
