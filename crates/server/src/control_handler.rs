@@ -502,10 +502,12 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::Restart { heat } => heat_transition(state, heat, HeatCommand::Restart),
         Command::Discard { heat } => heat_transition(state, heat, HeatCommand::Discard),
 
-        // --- Live-control selection: validate the heat exists, then record the choice.
-        // Not a heat-loop transition — it moves Live control's focus, not the heat's state. ---
+        // --- Live-control selection: validate the heat exists, reject while the current heat
+        // is mid-commit, then record the choice. Not a heat-loop transition — it moves Live
+        // control's focus, not the heat's state. ---
         Command::SetCurrentHeat { heat } => {
             require_scheduled_heat(state, &heat)?;
+            reject_if_current_heat_committed(state)?;
             Ok(Event::CurrentHeatSelected { heat })
         }
 
@@ -605,6 +607,40 @@ fn heat_transition(
     let transition = heat::apply(current, command)
         .map_err(|illegal| ProtocolError::new(ErrorCode::BadRequest, illegal.to_string()))?;
     Ok(Event::HeatStateChanged { heat, transition })
+}
+
+/// Reject a current-heat change while the **current heat is mid-commit** — its folded phase
+/// is `Staged`, `Armed`, or `Running` (race-engine.html §2). After Stage the RD is committed
+/// to that race; switching focus is only allowed once it is aborted back to `Scheduled` or
+/// finishes to `Unofficial`/`Final` (and is always allowed when there is no current heat, or
+/// the current heat is still `Scheduled`).
+///
+/// Computed from the same live-state derivation the read path uses (the `current_heat` fold +
+/// `heat::heat_state`/[`HeatState`](gridfpv_engine::heat::HeatState)), so the lock matches what
+/// the live view shows and replays deterministically. A locked phase maps to a typed
+/// [`ErrorCode::BadRequest`]; nothing is appended.
+fn reject_if_current_heat_committed(state: &AppState) -> Result<(), ProtocolError> {
+    use gridfpv_engine::heat::HeatState;
+
+    let (events, _cursor) = state.read()?;
+    // The current heat is whatever the live view is focused on (the last heat-loop transition
+    // or explicit selection, else the first scheduled heat). Reuse that exact derivation.
+    let Some(current) = crate::live_state::live_state(&events).current_heat else {
+        return Ok(()); // no current heat → always free to select
+    };
+    let committed = matches!(
+        heat::heat_state(&events, &current),
+        Some(HeatState::Staged | HeatState::Armed | HeatState::Running)
+    );
+    if committed {
+        Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            "cannot change the current heat while a heat is staged or running — \
+             abort it or finish to Unofficial first",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// Require that `heat` was scheduled in the log (a `HeatScheduled` for it), else
@@ -878,6 +914,189 @@ mod tests {
             after.len(),
             "a rejected select appends nothing"
         );
+    }
+
+    /// A log with two scheduled heats (`q-1`, `q-2`); `q-1` is the default current heat.
+    fn two_heats_state() -> AppState {
+        let mut log = InMemoryLog::default();
+        for id in ["q-1", "q-2"] {
+            EventLog::append(
+                &mut log,
+                Event::HeatScheduled {
+                    heat: HeatId(id.into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        }
+        AppState::new(log)
+    }
+
+    /// Drive `q-1` to the given terminal transition through the command path (so the FSM
+    /// legality is honoured), then return the state.
+    fn drive_current_to(transitions: &[HeatTransition]) -> AppState {
+        let state = two_heats_state();
+        let commands: &[Command] = &[
+            Command::Stage {
+                heat: HeatId("q-1".into()),
+            },
+            Command::Start {
+                heat: HeatId("q-1".into()),
+            },
+            Command::SkipCountdown {
+                heat: HeatId("q-1".into()),
+            },
+            Command::ForceEnd {
+                heat: HeatId("q-1".into()),
+            },
+            Command::Finalize {
+                heat: HeatId("q-1".into()),
+            },
+        ];
+        // Map the requested transition path to the matching prefix of the loop commands.
+        let steps = match transitions {
+            [HeatTransition::Staged] => 1,
+            [HeatTransition::Staged, HeatTransition::Armed] => 2,
+            [.., HeatTransition::Running] => 3,
+            [.., HeatTransition::Finished] => 4,
+            [.., HeatTransition::Finalized] => 5,
+            _ => panic!("unsupported transition path {transitions:?}"),
+        };
+        for command in &commands[..steps] {
+            let ack = apply_command(&state, command.clone());
+            assert!(ack.ok, "driving q-1 failed: {ack:?}");
+        }
+        state
+    }
+
+    /// `SetCurrentHeat` is **rejected** with a typed `BadRequest` while the current heat is in
+    /// a committed phase (`Staged`/`Armed`/`Running`) — abort it or finish first. Nothing is
+    /// appended.
+    #[test]
+    fn set_current_heat_is_rejected_while_current_is_staged_armed_or_running() {
+        let paths: &[&[HeatTransition]] = &[
+            &[HeatTransition::Staged],
+            &[HeatTransition::Staged, HeatTransition::Armed],
+            &[
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+            ],
+        ];
+        for path in paths {
+            let state = drive_current_to(path);
+            let (before, _) = state.read().unwrap();
+            let ack = apply_command(
+                &state,
+                Command::SetCurrentHeat {
+                    heat: HeatId("q-2".into()),
+                },
+            );
+            assert!(!ack.ok, "{path:?}: expected rejection, got {ack:?}");
+            assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest, "{path:?}");
+            let (after, _) = state.read().unwrap();
+            assert_eq!(before.len(), after.len(), "{path:?}: nothing appended");
+        }
+    }
+
+    /// `SetCurrentHeat` is **accepted** when the current heat is `Scheduled`, `Unofficial`, or
+    /// `Final` — and when there is no current heat — and the selection replays deterministically.
+    #[test]
+    fn set_current_heat_is_accepted_when_current_is_idle_or_scored() {
+        use crate::live_state::live_state;
+
+        // Scheduled (the default current heat before any transition).
+        let state = two_heats_state();
+        let ack = apply_command(
+            &state,
+            Command::SetCurrentHeat {
+                heat: HeatId("q-2".into()),
+            },
+        );
+        assert!(ack.ok, "scheduled current must allow a switch: {ack:?}");
+
+        // Unofficial (Running → Finished) and Final (→ Finalized): each allows the switch.
+        for path in [
+            &[
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ][..],
+            &[
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+                HeatTransition::Finalized,
+            ][..],
+        ] {
+            let state = drive_current_to(path);
+            let ack = apply_command(
+                &state,
+                Command::SetCurrentHeat {
+                    heat: HeatId("q-2".into()),
+                },
+            );
+            assert!(
+                ack.ok,
+                "{path:?}: a scored current must allow a switch: {ack:?}"
+            );
+            let (events, _) = state.read().unwrap();
+            // Replay-deterministic: the live current heat follows the accepted selection.
+            assert_eq!(
+                live_state(&events).current_heat,
+                Some(HeatId("q-2".into())),
+                "{path:?}"
+            );
+        }
+
+        // No current heat (empty log): a select still only fails the existence check, not the lock.
+        let empty = AppState::new(InMemoryLog::default());
+        let ack = apply_command(
+            &empty,
+            Command::SetCurrentHeat {
+                heat: HeatId("q-1".into()),
+            },
+        );
+        // The heat does not exist, so this is UnknownScope — *not* the BadRequest lock.
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, ErrorCode::UnknownScope);
+    }
+
+    /// After aborting a staged current heat back to `Scheduled`, the picker is free again — the
+    /// switch is accepted (the abort-to-switch path).
+    #[test]
+    fn set_current_heat_is_accepted_after_abort_back_to_scheduled() {
+        let state = drive_current_to(&[HeatTransition::Staged]);
+        // While staged it is locked.
+        let ack = apply_command(
+            &state,
+            Command::SetCurrentHeat {
+                heat: HeatId("q-2".into()),
+            },
+        );
+        assert!(!ack.ok, "staged current is locked");
+
+        // Abort q-1 back to Scheduled, then the switch is accepted.
+        let ack = apply_command(
+            &state,
+            Command::Abort {
+                heat: HeatId("q-1".into()),
+            },
+        );
+        assert!(ack.ok, "abort failed: {ack:?}");
+        let ack = apply_command(
+            &state,
+            Command::SetCurrentHeat {
+                heat: HeatId("q-2".into()),
+            },
+        );
+        assert!(ack.ok, "after abort the switch must be allowed: {ack:?}");
     }
 
     /// (c) A marshaling command appends the right adjudication event.

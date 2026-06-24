@@ -66,18 +66,61 @@ test('filling a heat does not steal Live focus; the heat picker selects the curr
   await expect(page.locator('.phase').first()).toHaveText('Staged');
   await shot(page.locator('.hud-heat'), 'live-heat-picker');
 
-  // ── 3) Pick ch-2 in the picker ⇒ it becomes the current heat ─────────────────────────────────
-  await select.selectOption('ch-2');
-  await expect(page.locator('.heat-id .value')).toHaveText('ch-2', { timeout: 15_000 });
-
-  // ── Clean up: discard both heats so the shared Director is left tidy ──────────────────────────
-  // ch-1 is staged → abort back to scheduled, then both are harmless leftover scheduled heats; an
-  // open practice Director resets per-spec, so leaving them scheduled is fine. Abort ch-1 to clear
-  // its staged state via the picker + transition.
-  await select.selectOption('ch-1');
-  await expect(page.locator('.heat-id .value')).toHaveText('ch-1', { timeout: 15_000 });
+  // ── 3) Abort ch-1 back to Scheduled, then pick ch-2 ⇒ it becomes the current heat ─────────────
+  // The picker is locked while ch-1 is Staged (you're committed to that race), so first abort it
+  // back to Scheduled — then the switch to ch-2 is allowed.
+  await expect(select).toBeDisabled();
   await page.getByRole('button', { name: 'Abort', exact: true }).click();
   await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Scheduled', { timeout: 15_000 });
+  await expect(select).toBeEnabled();
+  await select.selectOption('ch-2');
+  await expect(page.locator('.heat-id .value')).toHaveText('ch-2', { timeout: 15_000 });
+});
+
+test('the heat picker is locked while a heat is staged, and re-enabled after an abort back to Scheduled', async ({
+  page,
+  director
+}) => {
+  // The lock: once the current heat is Staged/Armed/Running you're committed to that race — the
+  // picker is disabled and a hint says so. Aborting it back to Scheduled re-enables the picker.
+  await page.goto('/');
+  await enterPractice(page);
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
+
+  const schedule = (heat: string, lineup: string[]) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { ScheduleHeat: { heat, lineup } }
+    });
+
+  const select = page.getByRole('combobox', { name: 'Select current heat' });
+
+  // ── 1) Two heats; pin lk-1 as the current heat via the picker (deterministic, no leftover dep) ──
+  expect((await schedule('lk-1', ['Ace', 'Bee'])).ok()).toBeTruthy();
+  expect((await schedule('lk-2', ['Cee', 'Dee'])).ok()).toBeTruthy();
+  await expect(select.locator('option', { hasText: 'lk-1' })).toHaveCount(1, { timeout: 15_000 });
+  await select.selectOption('lk-1');
+  await expect(page.locator('.heat-id .value')).toHaveText('lk-1', { timeout: 15_000 });
+  // While Scheduled the picker is enabled.
+  await expect(select).toBeEnabled();
+
+  // ── 2) Stage lk-1 ⇒ the picker locks (disabled) and the lock hint appears ───────────────────────
+  await page.getByRole('button', { name: 'Stage', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Staged', { timeout: 15_000 });
+  await expect(select).toBeDisabled();
+  await expect(page.getByTestId('heat-pick-lock-hint')).toBeVisible();
+
+  // ── 3) Abort lk-1 back to Scheduled ⇒ the picker re-enables, hint gone ──────────────────────────
+  await page.getByRole('button', { name: 'Abort', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Scheduled', { timeout: 15_000 });
+  await expect(select).toBeEnabled();
+  await expect(page.getByTestId('heat-pick-lock-hint')).toHaveCount(0);
+
+  // Now the switch works again.
+  await select.selectOption('lk-2');
+  await expect(page.locator('.heat-id .value')).toHaveText('lk-2', { timeout: 15_000 });
 });
 
 test('scheduling a heat that does not move on-deck still appears in the picker without a transition', async ({
