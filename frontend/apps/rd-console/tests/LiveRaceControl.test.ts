@@ -938,3 +938,137 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
     expect(within(standing).queryByText('node-1')).not.toBeInTheDocument();
   });
 });
+
+// ── Roster-seeded pilot callsigns resolve from the roster binding, BEFORE the heat runs ──────────
+//
+// The bug #212's e2e missed: a normal `FromRoster` heat seeds each competitor ref to the **pilot id
+// itself** and emits NO `CompetitorRegistered` event, so `progress[].pilot` is `null` in *every*
+// phase (confirmed on a throwaway Director — Scheduled, Staged, Armed, AND Running all carry a
+// null `pilot`). #212 resolved the callsign only from `progress[].pilot`, so it fell back to the raw
+// id (`maverick-4d9rp8`) everywhere a pilot appears — heat sheet, leaderboard, channels panel. The
+// callsign must instead resolve from the **always-available roster binding**: the ref *is* the
+// pilot id, looked up in the `/pilots` directory — independent of the race phase / progress.
+describe('LiveRaceControl — roster-seeded callsigns (resolve pre-race, no progress binding)', () => {
+  const RS_ROUND: RoundDef = {
+    id: 'r1',
+    label: 'Qualifying R1',
+    classes: ['c1'],
+    format: 'timed_qual',
+    params: {},
+    win_condition: { Timed: { window_micros: 120_000_000 } },
+    seeding: 'FromRoster',
+    channel_mode: 'Static',
+    staging_timer_secs: 300,
+    start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+    grace_window: { Duration: { micros: 3_000_000 } }
+  };
+  const RS_EVENT: EventMeta = {
+    id: 'e1',
+    name: 'Friday',
+    created_at: 0,
+    persistent: true,
+    timers: ['mock'],
+    roster: ['maverick-4d9rp8', 'goose-yla6dp'],
+    classes: ['c1'],
+    rounds: [RS_ROUND]
+  };
+  // The directory: callsigns keyed by the pilot id (which IS the competitor ref for a roster heat).
+  const RS_PILOTS = [
+    { id: 'maverick-4d9rp8', callsign: 'Maverick', vtx_types: [] },
+    { id: 'goose-yla6dp', callsign: 'Goose', vtx_types: [] }
+  ];
+  // The wire shape a real roster-seeded heat produces: refs are the pilot ids, frequencies are
+  // assigned, and crucially `progress[].pilot` is ABSENT (no registration event was ever emitted).
+  const rsHeat = (phase: HeatSummary['phase']): HeatSummary => ({
+    heat: 'qualifying-r1-tj8x88-r1-h1',
+    lineup: ['maverick-4d9rp8', 'goose-yla6dp'],
+    round: 'r1',
+    class: 'c1',
+    frequencies: [
+      ['maverick-4d9rp8', 5658],
+      ['goose-yla6dp', 5695]
+    ],
+    phase,
+    is_current: true
+  });
+  // A live state with NO `pilot` binding on its progress rows — exactly what the backend emits for a
+  // roster-seeded heat (verified on a throwaway). Defaults to the not-yet-running Scheduled phase.
+  const rsLive = (phase: LiveRaceState['phase'] = 'Scheduled'): LiveRaceState => ({
+    current_heat: 'qualifying-r1-tj8x88-r1-h1',
+    phase,
+    active_pilots: ['maverick-4d9rp8', 'goose-yla6dp'],
+    progress: [
+      { competitor: 'maverick-4d9rp8', laps_completed: 0 },
+      { competitor: 'goose-yla6dp', laps_completed: 0 }
+    ],
+    running_order: ['maverick-4d9rp8', 'goose-yla6dp']
+  });
+  const RS_CATALOG: ChannelCatalogEntry[] = [
+    { band: 'Raceband', channel: 'R1', mhz: 5658 },
+    { band: 'Raceband', channel: 'R2', mhz: 5695 }
+  ];
+  function renderRS(phase: LiveRaceState['phase'] = 'Scheduled') {
+    return makeTestSession({
+      event: RS_EVENT,
+      live: rsLive(phase),
+      listHeatsImpl: vi.fn(async () => [rsHeat(phase as HeatSummary['phase'])]),
+      listChannelsImpl: vi.fn(async () => RS_CATALOG),
+      listPilotsImpl: vi.fn(async () => RS_PILOTS as unknown as never)
+    });
+  }
+
+  // The KEY regression: a Scheduled (NOT running) heat of rostered pilots renders callsigns.
+  it('renders callsigns in the heat sheet of a NOT-running (Scheduled) heat', async () => {
+    const { session } = renderRS('Scheduled');
+    render(LiveRaceControl, { session });
+    const sheet = screen.getByRole('region', { name: 'Heat sheet' });
+    await waitFor(() => expect(within(sheet).getByText('Maverick')).toBeInTheDocument());
+    expect(within(sheet).getByText('Goose')).toBeInTheDocument();
+    // The raw pilot-id refs never show.
+    expect(within(sheet).queryByText('maverick-4d9rp8')).not.toBeInTheDocument();
+    expect(within(sheet).queryByText('goose-yla6dp')).not.toBeInTheDocument();
+  });
+
+  it('renders callsigns in the channels panel of a NOT-running (Scheduled) heat', async () => {
+    const { session } = renderRS('Scheduled');
+    render(LiveRaceControl, { session });
+    const channels = await screen.findByRole('list', { name: 'Heat channels' });
+    await waitFor(() => expect(within(channels).getByText('Maverick')).toBeInTheDocument());
+    expect(within(channels).getByText('Goose')).toBeInTheDocument();
+    expect(within(channels).queryByText('maverick-4d9rp8')).not.toBeInTheDocument();
+  });
+
+  // Staged (still not running) resolves the same way.
+  it('renders callsigns in the heat sheet of a Staged heat', async () => {
+    const { session } = renderRS('Staged');
+    render(LiveRaceControl, { session });
+    const sheet = screen.getByRole('region', { name: 'Heat sheet' });
+    await waitFor(() => expect(within(sheet).getByText('Maverick')).toBeInTheDocument());
+    expect(within(sheet).queryByText('maverick-4d9rp8')).not.toBeInTheDocument();
+  });
+
+  // The running case (which #212's progress-only resolver also could not satisfy for a real roster
+  // heat, since progress.pilot is null) stays green via the same roster binding.
+  it('renders callsigns when the roster heat IS running (progress still carries no pilot)', async () => {
+    const { session } = makeTestSession({
+      event: RS_EVENT,
+      // Running, with laps banked but STILL no `pilot` binding on the progress rows.
+      live: {
+        ...rsLive('Running'),
+        progress: [
+          { competitor: 'maverick-4d9rp8', laps_completed: 2, last_lap_micros: 2_500_000 },
+          { competitor: 'goose-yla6dp', laps_completed: 2, last_lap_micros: 2_600_000 }
+        ]
+      },
+      listHeatsImpl: vi.fn(async () => [rsHeat('Running')]),
+      listChannelsImpl: vi.fn(async () => RS_CATALOG),
+      listPilotsImpl: vi.fn(async () => RS_PILOTS as unknown as never)
+    });
+    render(LiveRaceControl, { session });
+    const sheet = screen.getByRole('region', { name: 'Heat sheet' });
+    await waitFor(() => expect(within(sheet).getByText('Maverick')).toBeInTheDocument());
+    const standing = screen.getByRole('table', { name: 'Heat leaderboard' });
+    expect(within(standing).getByText('Goose')).toBeInTheDocument();
+    expect(within(standing).queryByText('goose-yla6dp')).not.toBeInTheDocument();
+  });
+});

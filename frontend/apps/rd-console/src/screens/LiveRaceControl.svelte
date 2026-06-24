@@ -110,9 +110,12 @@
       .catch(() => (pilots = []));
   });
   const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  // A competitor ref → its bound pilot id (from the live `progress`, which carries `pilot` when a
-  // registration bound it). Unbound seats (open practice) have no entry here.
-  const pilotByRef = $derived(
+  // A competitor ref → its bound pilot id from the live `progress`, which carries an **explicit**
+  // `pilot` only when a `Register` command bound it (the open-practice / manual-registration path).
+  // This is empty for the common roster-seeded heat: `FromRoster` seeding makes each competitor ref
+  // *equal to the pilot id itself* and emits **no** `CompetitorRegistered` event, so `progress.pilot`
+  // stays `null` in every phase (Scheduled → Running) — see `competitorName` for the roster fallback.
+  const explicitPilotByRef = $derived(
     new Map<CompetitorRef, PilotId>(
       (live?.progress ?? [])
         .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
@@ -128,18 +131,28 @@
     return heatNameById(id, heats, session.currentEvent?.rounds ?? []);
   }
 
-  // `competitorName(ref)` → the **callsign** when the ref is bound to a directory pilot; else, for an
+  // `competitorName(ref)` → the **callsign** when the ref resolves to a directory pilot; else, for an
   // **unbound channel seat** (an open-practice `node-{i}` ref with no pilot), its **channel label**;
   // else the bare ref (already a human-entered competitor handle in a normal heat). The single
   // resolver every pilot/lineup/leaderboard row goes through.
+  //
+  // The binding resolves from the **always-available roster binding**, not the race progress, so a
+  // callsign shows whether the heat is Scheduled, Staged, Running, or done. Two sources, in order:
+  //  1. an **explicit** `Register` binding carried on `progress.pilot` (the manual-registration /
+  //     open-practice path), then
+  //  2. the **roster-seeded** binding: `FromRoster` seeding makes the competitor ref *equal to the
+  //     pilot id*, so a ref that names a directory pilot resolves to its callsign directly — this is
+  //     the common case, and it carries no `CompetitorRegistered` event (so progress.pilot is null).
   //
   // The channel-label fallback is scoped to `node-{i}` seats deliberately: a normal competition heat
   // *also* assigns a channel to each pilot, but there the ref is the pilot's own handle and must show
   // as-is — only the anonymous open-practice seats (which would otherwise read "node-0") get labelled
   // by their channel.
   function competitorName(ref: CompetitorRef): string {
-    const pid = pilotByRef.get(ref);
-    const callsign = pid ? pilotById.get(pid)?.callsign : undefined;
+    // (1) Explicit registration binding, then (2) the ref interpreted as a directory pilot id (the
+    // roster-seeded binding, available pre-race independent of `progress`).
+    const pid = explicitPilotByRef.get(ref) ?? ref;
+    const callsign = pilotById.get(pid)?.callsign;
     if (callsign) return callsign;
     if (nodeIndexOf(ref) !== undefined) {
       const channel = currentChannels.get(ref);
