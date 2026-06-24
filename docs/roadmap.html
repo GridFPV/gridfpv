@@ -196,9 +196,12 @@ flowchart LR
     </ul>
     <p>
       <strong>Deferred out of v0.4:</strong> ZippyQ-style rolling fills and PWA self-register; channel
-      management as a standalone feature (#117 is folded into the Timer registry instead); seasons
-      (#129) stay local-first for now; multi-cloud (#132) is later. Packaging follows alongside: a
-      <strong>Tauri</strong> shell + single-binary build for Windows/Linux/macOS (#57/#58).
+      management as a standalone feature (#117 is folded into the Timer registry instead);
+      <strong>IMD-aware channel assignment</strong> — scoring a heat's channels by third-order intermod
+      gap and auto-picking the cleanest set (#209), a race-quality refinement on top of the v0.4 channel
+      model that cuts interference-related video dropouts; seasons (#129) stay local-first for now;
+      multi-cloud (#132) is later. Packaging follows alongside: a <strong>Tauri</strong> shell +
+      single-binary build for Windows/Linux/macOS (#57/#58).
     </p>
     <p><strong>Done when:</strong> a complete event — registration → heats → live races → marshaling → results, across a multi-heat format — runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
 
