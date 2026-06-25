@@ -29,11 +29,12 @@ import type { SourceTime } from "./SourceTime";
  *   lineup ([`Event::HeatScheduled`](gridfpv_events::Event::HeatScheduled)).
  * - **Registration** — [`Register`](Command::Register) binds a source-local
  *   competitor to a pilot (the binding the adapter never does itself; Architecture §9).
- * - **Marshaling adjudications** — the five corrections
+ * - **Marshaling adjudications** — the corrections
  *   ([`VoidDetection`](Command::VoidDetection), [`InsertLap`](Command::InsertLap),
- *   [`AdjustLap`](Command::AdjustLap), [`VoidHeat`](Command::VoidHeat),
- *   [`ApplyPenalty`](Command::ApplyPenalty)), each requesting the corresponding
- *   marshaling event the projection folds in (never a mutation; architecture.html §3).
+ *   [`AdjustLap`](Command::AdjustLap), [`SplitLap`](Command::SplitLap),
+ *   [`VoidHeat`](Command::VoidHeat), [`ApplyPenalty`](Command::ApplyPenalty),
+ *   [`ReverseRuling`](Command::ReverseRuling)), each requesting the corresponding
+ *   marshaling event the projection/scorer folds in (never a mutation; architecture.html §3).
  */
 export type Command = { "Stage": { 
 /**
@@ -140,6 +141,14 @@ target: LogRef,
 /**
  * The corrected crossing time, on the source clock.
  */
+at: SourceTime, } } | { "SplitLap": { 
+/**
+ * The log offset of the pass that ends the over-long lap to split.
+ */
+target: LogRef, 
+/**
+ * When the inserted mid-lap crossing happened, on the source clock.
+ */
 at: SourceTime, } } | { "VoidHeat": { 
 /**
  * The heat to void.
@@ -156,4 +165,8 @@ competitor: CompetitorRef,
 /**
  * The penalty applied.
  */
-penalty: Penalty, } };
+penalty: Penalty, } } | { "ReverseRuling": { 
+/**
+ * The log offset of the ruling (a `PenaltyApplied`) to reverse.
+ */
+target: LogRef, } };

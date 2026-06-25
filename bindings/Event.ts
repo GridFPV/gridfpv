@@ -46,4 +46,17 @@ heat: HeatId,
  * The chosen randomized start delay, in **milliseconds**, from this event to the
  * `Armed → Running` transition. Written once by the runtime; deterministic on replay.
  */
-delay_ms: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "HeatVoided": { heat: HeatId, } } | { "PenaltyApplied": { heat: HeatId, competitor: CompetitorRef, penalty: Penalty, } };
+delay_ms: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "LapSplit": { 
+/**
+ * The log offset of the pass that *ends* the over-long lap being split.
+ */
+target: LogRef, 
+/**
+ * When the inserted mid-lap crossing happened, on the source clock — between the
+ * `target` lap's start and `target` itself.
+ */
+at: SourceTime, } } | { "HeatVoided": { heat: HeatId, } } | { "PenaltyApplied": { heat: HeatId, competitor: CompetitorRef, penalty: Penalty, } } | { "RulingReversed": { 
+/**
+ * The log offset of the ruling (a [`PenaltyApplied`](Event::PenaltyApplied)) to reverse.
+ */
+target: LogRef, } };
