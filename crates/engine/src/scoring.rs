@@ -326,21 +326,33 @@ impl Adjudications {
     /// heat window in append order, the same convention `corrected_passes` uses). Reversals
     /// are gathered first so they apply regardless of whether they precede or follow the
     /// penalty in the slice, keeping the fold order-independent.
-    fn collect(events: &[Event]) -> Self {
+    /// Collect adjudications from `(global offset, event)` pairs.
+    ///
+    /// A [`Event::RulingReversed { target }`] is matched against the **global append offset** the
+    /// penalty was logged at — the same offset a [`LogRef`](gridfpv_events::LogRef) command carries
+    /// and the audit/lap projections expose (#55). The caller MUST feed the true global offsets (not
+    /// a re-enumerated window), or a reversal targets the wrong penalty: the result snapshot threads
+    /// the heat window's preserved global offsets exactly for this reason.
+    fn collect<'a, I>(events: I) -> Self
+    where
+        I: IntoIterator<Item = (u64, &'a Event)>,
+    {
+        // Materialize once so we can scan reversals first, then apply (order-independent).
+        let events: Vec<(u64, &Event)> = events.into_iter().collect();
         // First, the offsets every `RulingReversed` targets — a penalty at one of these is
         // un-applied. Scoped to penalty reversal this slice (marshaling.html §3.1).
         let reversed: BTreeSet<u64> = events
             .iter()
-            .filter_map(|e| match e {
+            .filter_map(|(_, e)| match e {
                 Event::RulingReversed { target } => Some(target.0),
                 _ => None,
             })
             .collect();
 
         let mut adj = Adjudications::default();
-        for (offset, event) in events.iter().enumerate() {
+        for (offset, event) in events {
             // A penalty whose own append offset was reversed is dropped from the result.
-            if reversed.contains(&(offset as u64)) {
+            if reversed.contains(&offset) {
                 continue;
             }
             match event {
@@ -408,9 +420,36 @@ pub fn score_with_adjudications(
     condition: WinCondition,
     race_start: SourceTime,
 ) -> HeatResult {
+    // Positional offsets: callers of this entry point pass the *full* log (or a window that is the
+    // whole log), so the slice index equals the global append offset. The snapshot's windowed path
+    // uses [`score_with_global_offsets`] instead, which carries the real global offsets so a
+    // `RulingReversed` matches the right penalty (#55).
+    score_with_global_offsets(
+        events.iter().enumerate().map(|(i, e)| (i as u64, e)),
+        condition,
+        race_start,
+    )
+}
+
+/// Score a heat's events under `condition`, applying adjudications keyed on the **global append
+/// offset** each event carries (#55).
+///
+/// This is the offset-correct sibling of [`score_with_adjudications`]: it is fed `(global_offset,
+/// &Event)` pairs (e.g. a heat window that preserved its global offsets), so a
+/// [`Event::RulingReversed`] un-applies the penalty at its true global `target` — not a
+/// window-relative position. The result snapshot uses this so a UI reversal hits the right ruling.
+pub fn score_with_global_offsets<'a, I>(
+    events: I,
+    condition: WinCondition,
+    race_start: SourceTime,
+) -> HeatResult
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    let events: Vec<(u64, &Event)> = events.into_iter().collect();
     let passes: Vec<Pass> = events
         .iter()
-        .filter_map(|e| match e {
+        .filter_map(|(_, e)| match e {
             Event::Pass(p) if p.gate.is_lap_gate() => Some(p.clone()),
             _ => None,
         })
@@ -419,7 +458,7 @@ pub fn score_with_adjudications(
         &passes,
         condition,
         race_start,
-        &Adjudications::collect(events),
+        &Adjudications::collect(events.iter().map(|(o, e)| (*o, *e))),
     )
 }
 
@@ -435,11 +474,13 @@ pub(crate) fn apply_adjudications(
     race_start: SourceTime,
     events: &[Event],
 ) -> HeatResult {
+    // Positional offsets — `score_marshaled` passes the full heat log, so slice index == global
+    // append offset (the same convention `corrected_passes` uses for the marshaling fold).
     score_inner(
         passes,
         condition,
         race_start,
-        &Adjudications::collect(events),
+        &Adjudications::collect(events.iter().enumerate().map(|(i, e)| (i as u64, e))),
     )
 }
 
@@ -1349,6 +1390,51 @@ mod tests {
         assert_eq!(place(&r, "A").position, 1);
         assert!(!place(&r, "A").disqualified);
         assert_eq!(place(&r, "B").position, 2);
+    }
+
+    #[test]
+    fn ruling_reversed_targets_the_global_offset_not_a_window_position() {
+        // The load-bearing #55 offset fix in the scoring path: when scoring a heat WINDOW (events
+        // that start at a non-zero global offset), a `RulingReversed` must match the penalty by its
+        // GLOBAL offset, not by the window-relative index. We score via `score_with_global_offsets`
+        // feeding offsets that start at 100 — the DQ at global 107, reversed by targeting 107.
+        use gridfpv_events::LogRef;
+
+        let mut events = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]); // window idx 0..3
+        events.extend(pass_events("B", &[0, 5_000_000, 10_000_000])); // window idx 4..6
+        events.push(penalty("A", Penalty::Disqualify)); // window idx 7 → GLOBAL 107
+        events.push(Event::RulingReversed {
+            target: LogRef(107), // the DQ's GLOBAL offset, NOT window index 7
+        });
+
+        // Tag with global offsets 100.. (as a heat window that preserved them would).
+        let r = score_with_global_offsets(
+            events.iter().enumerate().map(|(i, e)| (100 + i as u64, e)),
+            WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            start(),
+        );
+        // The reversal hit the right penalty: A is restored to the lead, not flagged.
+        assert_eq!(place(&r, "A").position, 1);
+        assert!(!place(&r, "A").disqualified);
+
+        // Sanity: targeting the *window-relative* offset (7) would NOT reverse the global-107 DQ.
+        let mut wrong = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]);
+        wrong.extend(pass_events("B", &[0, 5_000_000, 10_000_000]));
+        wrong.push(penalty("A", Penalty::Disqualify));
+        wrong.push(Event::RulingReversed { target: LogRef(7) }); // wrong: a window index
+        let r2 = score_with_global_offsets(
+            wrong.iter().enumerate().map(|(i, e)| (100 + i as u64, e)),
+            WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            start(),
+        );
+        assert!(
+            place(&r2, "A").disqualified,
+            "a window-relative target must NOT reverse the global-offset DQ"
+        );
     }
 
     #[test]

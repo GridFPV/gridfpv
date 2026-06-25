@@ -3,6 +3,7 @@
  * contract change surfaces as a compile error here too.
  */
 import type {
+  AuditEntry,
   CommandAck,
   EventOutcome,
   HeatResult,
@@ -51,17 +52,29 @@ export const lapList: LapList = {
   competitors: [
     {
       competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+      // Global pass offsets: ALICE's three passes at 10, 12, 14.
       laps: [
-        { number: 1, duration_micros: 41_000_000 },
-        { number: 2, duration_micros: 40_500_000 }
+        { number: 1, duration_micros: 41_000_000, start_ref: 10, end_ref: 12 },
+        { number: 2, duration_micros: 40_500_000, start_ref: 12, end_ref: 14 }
       ]
     },
     {
       competitor: { adapter: 'rh-1', competitor: 'BOB' },
-      laps: [{ number: 1, duration_micros: 43_000_000 }]
+      // BOB's two passes at 11, 13.
+      laps: [{ number: 1, duration_micros: 43_000_000, start_ref: 11, end_ref: 13 }]
     }
   ]
 };
+
+export const marshalingAudit: AuditEntry[] = [
+  {
+    kind: 'PenaltyApplied',
+    at: 1_700_000_000_000_000,
+    at_ref: 20,
+    summary: 'DQ applied for CARMEN'
+  },
+  { kind: 'Voided', at: 1_700_000_000_000_000, at_ref: 18, summary: 'Detection voided (ref 12)' }
+];
 
 export const eventOutcome: EventOutcome = {
   qualifying: standings,

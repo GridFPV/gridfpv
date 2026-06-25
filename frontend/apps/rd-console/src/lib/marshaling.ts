@@ -43,6 +43,22 @@ export function adjustLapCommand(target: LogRef, at: SourceTime): Command {
   return { AdjustLap: { target, at } };
 }
 
+/**
+ * Split the over-long lap *ending* at `target` (a logged pass's offset) by inserting a
+ * synthetic mid-lap crossing at `at` — the FPVTrackside "split" for a missed mid-lap detection.
+ */
+export function splitLapCommand(target: LogRef, at: SourceTime): Command {
+  return { SplitLap: { target, at } };
+}
+
+/**
+ * Reverse a prior ruling (a `PenaltyApplied` — a DQ or time penalty), identified by its log
+ * offset. The reversed ruling no longer affects the result — a reversible DQ (marshaling.html §3.1).
+ */
+export function reverseRulingCommand(target: LogRef): Command {
+  return { ReverseRuling: { target } };
+}
+
 /** Void a whole heat (it should never have counted). */
 export function voidHeatCommand(heat: HeatId): Command {
   return { VoidHeat: { heat } };

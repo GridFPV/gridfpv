@@ -27,6 +27,8 @@
 
 export type * from '@bindings/ActiveEvent';
 export type * from '@bindings/AdapterId';
+export type * from '@bindings/AuditEntry';
+export type * from '@bindings/AuditKind';
 export type * from '@bindings/Change';
 export type * from '@bindings/ChangeEnvelope';
 export type * from '@bindings/ChannelCapability';

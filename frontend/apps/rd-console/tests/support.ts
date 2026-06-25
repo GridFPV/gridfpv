@@ -41,8 +41,15 @@ import type {
   roundRanking,
   classStandings
 } from '@gridfpv/protocol-client';
-import type { Command, CommandAck, EventMeta, LiveRaceState } from '@gridfpv/types';
-import { Session } from '../src/lib/session.svelte.js';
+import type {
+  AuditEntry,
+  Command,
+  CommandAck,
+  EventMeta,
+  LapList,
+  LiveRaceState
+} from '@gridfpv/types';
+import { Session, type SessionRole } from '../src/lib/session.svelte.js';
 
 /** The built-in Practice event the screen tests render inside. */
 const PRACTICE: EventMeta = {
@@ -122,6 +129,12 @@ export function makeTestSession(
     event?: EventMeta;
     /** Skip entering an event — for the app-level hub/page tests that render with no event. */
     noEnter?: boolean;
+    /** Seed the marshaling lap list (#55) — the Marshaling screen reads `session.lapList`. */
+    laps?: LapList;
+    /** Seed the marshaling audit trail (#55) — the screen reads `session.marshalingAudit`. */
+    audit?: AuditEntry[];
+    /** The session role (#80). Defaults to `'rd'`; pass `'readonly'` to assert gating. */
+    role?: SessionRole;
   } & TimerImpls
 ): TestSession {
   const ack: CommandAck = opts?.ack ?? { ok: true };
@@ -199,6 +212,18 @@ export function makeTestSession(
   // unless the test wants the app-level (no-event) context.
   session.setToken('tok');
   if (!opts?.noEnter) session.selectEvent(opts?.event ?? PRACTICE);
+
+  // Marshaling (#55): seed the lap list / audit / role the screen reads, and stub `fetch` so the
+  // screen's `refreshMarshaling` (a heat-scope snapshot read) is inert in tests — it re-affirms the
+  // seeded values rather than hitting a server. A test that wants to assert a *re-fold* re-seeds the
+  // values and dispatches a stream tick.
+  if (opts?.role) session.setRole(opts.role);
+  if (opts?.laps) session.lapList = opts.laps;
+  if (opts?.audit) session.marshalingAudit = opts.audit;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => ({ ok: false, json: async () => ({}) }) as unknown as Response)
+  );
 
   const pushLive = (state: LiveRaceState) =>
     listener?.({ body: { LiveRaceState: state }, cursor: 1, status: 'live', error: undefined });

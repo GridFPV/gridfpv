@@ -4,7 +4,9 @@ import {
   applyPenaltyCommand,
   DISQUALIFY,
   insertLapCommand,
+  reverseRulingCommand,
   secondsToSourceTime,
+  splitLapCommand,
   timeAddedPenalty,
   voidDetectionCommand,
   voidHeatCommand
@@ -23,6 +25,14 @@ describe('marshaling command builders', () => {
 
   it('adjustLapCommand re-times a logged pass', () => {
     expect(adjustLapCommand(3, 2_000_000)).toEqual({ AdjustLap: { target: 3, at: 2_000_000 } });
+  });
+
+  it('splitLapCommand splits the lap ending at a logged pass', () => {
+    expect(splitLapCommand(5, 4_000_000)).toEqual({ SplitLap: { target: 5, at: 4_000_000 } });
+  });
+
+  it('reverseRulingCommand reverses a prior ruling by its offset', () => {
+    expect(reverseRulingCommand(9)).toEqual({ ReverseRuling: { target: 9 } });
   });
 
   it('voidHeatCommand voids the whole heat', () => {
