@@ -263,6 +263,135 @@
       <code>crates/app/tests/director.rs</code>.</dd>
     </dl>
 
+    <div class="callout">
+      <p>
+        The entries below (D10–D14) are <strong>decided, not yet built</strong>. They settle the
+        format set, the qualifying-vs-time-trials naming, generate-all-heats, and the bracket round
+        model. The <em>build</em> follows the marshaling slices (see the
+        <a href="marshaling-plan.html">Marshaling Build Plan</a>); these are recorded now so the
+        plan of record is unambiguous when the work starts. Tracking issues are referenced inline.
+      </p>
+    </div>
+
+    <h2>D10 · The format set is finalized; ZippyQ is shelved</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The generator registry has carried seven formats, one of which —
+      <code>zippyq</code> (rolling "fly when ready") — was only ever a <em>deferred seam</em>: it
+      proved the dynamic-generator shape (rounds added on demand, see
+      <a href="race-engine.html">Race Engine</a> §3) but no surface uses it, and the rolling-queue
+      engine it would need is out of scope (<a href="pipeline-qualifying.html">Qualifying</a>,
+      <a href="roadmap.html">Roadmap</a> v0.4 deferrals). Carrying an unused, half-wired format in
+      the active set muddies the format picker and the build plan.</dd>
+      <dt>Decision</dt>
+      <dd>The active format set is fixed at six: <strong>Open Practice · Time Trials · Single
+      Elimination · Double Elimination · Multi-Main · Round Robin</strong>. <strong>ZippyQ is
+      shelved</strong> — removed from the active set for now. It remains re-addable later (the
+      generator code and its honesty-check rationale stay on the shelf, not deleted); it simply
+      leaves the picker and the plan until a rolling surface actually needs it.</dd>
+      <dt>Rationale</dt>
+      <dd>The set should name what GridFPV actually offers. ZippyQ was a seam, not a feature — keeping
+      it "active" implied a rolling-queue capability that does not exist. Shelving it (rather than
+      deleting) keeps the deferred seam honest: the option is preserved without pretending it ships.
+      (Tracking: <strong>#218</strong> — rename Time Trials + remove ZippyQ from the active set.)</dd>
+    </dl>
+
+    <h2>D11 · "Qualifying" → "Time Trials": name the format, not the purpose</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The <code>timed_qual</code> format carries the friendly name <em>"Qualifying"</em>. But
+      "qualifying" names a <em>purpose</em> — to qualify, to produce a seeding — not a
+      <em>format</em>. The format itself is individual-best-ranked heats: every pilot flies their own
+      best flight and is ranked on it. That <em>is</em> time-trial scoring, and a round can be a time
+      trial without its output ever feeding a bracket.</dd>
+      <dt>Decision</dt>
+      <dd>The format's friendly name becomes <strong>"Time Trials"</strong> (the engine key
+      <code>timed_qual</code> is unchanged). The format is the time-trial scorer; <em>qualifying</em>
+      is one thing you <em>do</em> with it. It pairs with the round's win-condition metric exactly as
+      before (the metric is derived from the win condition, D6). The
+      <strong>MultiGP Global Qualifier</strong> is then named precisely as
+      <strong>Time Trials + Best&nbsp;3&nbsp;Consecutive</strong>. The
+      <strong>"Heats per pilot"</strong> param (key <code>rounds</code>, default 3) stays as-is.</dd>
+      <dt>Rationale</dt>
+      <dd>Naming the format for what it <em>is</em> (not what it's <em>for</em>) makes the picker
+      honest and lets a Time-Trials round stand alone — a practice-style ranked session, a GQ
+      leaderboard, or the seeding for a bracket — without the name presupposing the bracket. It also
+      makes "GQ = Time Trials + Best 3 Consecutive" a clean, composable statement rather than a
+      special case. (Tracking: <strong>#218</strong>.)</dd>
+    </dl>
+
+    <h2>D12 · "Generate heats" fills the whole round at once</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Heat-filling has a per-heat primitive: the backend's <code>FillRound</code> appends the
+      next heat and acks whether the round merely <em>appended</em> a heat or is now
+      <em>complete</em>. For the deterministic formats — Time Trials, Round Robin, Multi-Main, and the
+      bracket structure — the whole round's heats are a pure function of the field, so clicking
+      "fill next heat" repeatedly to lay down a round the engine could compute in one pass is
+      busywork.</dd>
+      <dt>Decision</dt>
+      <dd>A single <strong>"Generate heats"</strong> action fills the <strong>whole round at
+      once</strong>: the backend <strong>loops the generator</strong> (calling the existing
+      <code>FillRound</code> step until the round reports complete) and the UI gets one filled round.
+      It applies to the <strong>deterministic formats</strong> (Time Trials, Round Robin, Multi-Main,
+      and the bracket structure). The incremental <strong>"next heat"</strong> path remains <em>only</em>
+      for inherently <strong>dynamic</strong> formats — Open Practice — where the next heat depends on
+      who shows up, so there is nothing to compute ahead.</dd>
+      <dt>Rationale</dt>
+      <dd>It reuses the primitive that already exists: <code>FillRound</code> already distinguishes
+      appended-vs-complete, so "generate the round" is just a backend loop over it, not a new code
+      path. The deterministic formats know their full shape up front, so one action should produce it;
+      keeping incremental fill for Open Practice matches the one format whose heats genuinely can't be
+      computed in advance. (Tracking: <strong>#216</strong>.)</dd>
+    </dl>
+
+    <h2>D13 · Brackets: one round per bracket <em>level</em> (supersedes one-round-per-bracket)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The original carry (D8) generated a bracket as <strong>one round for the whole bracket</strong>,
+      with intra-round advancement logic walking the bracket tree inside that single round. That makes
+      the bracket round a special, internally-stateful shape unlike every other round in the model.</dd>
+      <dt>Decision</dt>
+      <dd><strong>Each round is one bracket level</strong> — Quarters, Semis, Final are three rounds,
+      seeded round-to-round via the existing <code>FromRanking</code> rule (D8). This
+      <strong>supersedes</strong> the one-round-per-whole-bracket structure.
+      <strong>Single elimination</strong> becomes a clean chain of winners-rounds: each level seeds
+      from the prior level's ranking, no intra-round bracket-walking. <strong>Double
+      elimination is the design problem</strong>: a losers-bracket round is fed by <em>both</em> the
+      prior LB round's winners <em>and</em> the current WB round's losers (a cross-bracket,
+      "losers-of" feed), so <code>FromRanking</code> must grow from single-source top-N into
+      <strong>multi-source winner/loser selection</strong>. <strong>Single-elim ships first;
+      double-elim seeding is designed carefully</strong> before it's built.</dd>
+      <dt>Rationale</dt>
+      <dd>One level per round is more uniform with the round model — a bracket becomes an ordinary
+      chain of rounds, each a pure function of the previous round's ranking — and is likely simpler
+      per round because it removes the intra-round advancement machinery. The cost is concentrated and
+      named: double-elim's cross-bracket feed is the one place the seeding rule must genuinely grow, so
+      it's called out as the design problem and deferred until that growth is designed rather than
+      improvised. (Tracking: <strong>#217</strong>, which notes it supersedes one-round-per-bracket.)</dd>
+    </dl>
+
+    <h2>D14 · Double-elim and MultiGP Multi-Main are first-class next-iteration must-haves</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The format set (D10) includes Double Elimination and Multi-Main, but they are the two with
+      genuine design depth left. They must not slip into "someday" — they are the formats serious
+      chapters expect.</dd>
+      <dt>Decision</dt>
+      <dd><strong>Double elimination</strong> (its cross-bracket losers-of seeding, D13) and
+      <strong>MultiGP Multi-Main</strong> are <strong>first-class, next-iteration must-haves</strong>.
+      Multi-Main is distinct from elimination: it is a <strong>finals split by qualifying rank</strong>
+      — A/B/C-mains racing in <strong>parallel</strong> for placement within their tier, with
+      <strong>bump-ups</strong> between tiers — so it gets <strong>its own design</strong>, not a
+      reuse of the elimination chain.</dd>
+      <dt>Rationale</dt>
+      <dd>Both are table-stakes for the formats GridFPV claims, and both carry real model work
+      (double-elim's seeding, multi-main's parallel-tier-with-bump-up structure) that shouldn't be
+      improvised under race-day pressure. Flagging them as next-iteration must-haves keeps them on the
+      near plan with the design done up front. (Tracking: <strong>#219</strong> — Multi-Main as a
+      first-class finals format.)</dd>
+    </dl>
+
     <footer class="doc-footer">
       <p>
         Internal design documentation · <a href="index.html">&larr; back to docs index</a>
