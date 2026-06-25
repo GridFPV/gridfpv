@@ -367,7 +367,32 @@ pub enum Event {
         at: SourceTime,
     },
     /// Marshaling: re-time a previously-detected pass (referenced by log offset).
+    ///
+    /// Because a lap is two consecutive passes, re-timing a pass shifts the *two*
+    /// adjacent lap durations that share it — the projection's `corrected_passes`
+    /// recomputes those durations naturally from the moved pass (no extra event).
+    ///
+    /// NOTE: FPVTrackside's alternative keeps *total race time* constant by also
+    /// shifting the neighbour's far boundary; that is a deferred product nuance — the
+    /// default here is the natural per-edit duration shift (marshaling.html §3.1).
     LapAdjusted { target: LogRef, at: SourceTime },
+    /// Marshaling: **split** one over-long lap (the lap *ending* at `target`) into two by
+    /// inserting a synthetic mid-lap pass at `at` — the FPVTrackside "split" action for a
+    /// missed mid-lap detection (marshaling.html §3.1).
+    ///
+    /// A distinct event from [`LapInserted`](Event::LapInserted) (not sugar over it) so the
+    /// Slice 3 audit trail can name the action — "lap split" reads cleaner than a bare
+    /// insert. The projection folds it by emitting the synthetic pass into the corrected
+    /// stream **addressable by this event's own offset**, so it is fully reversible: a later
+    /// [`DetectionVoided`](Event::DetectionVoided) of this offset removes the split again
+    /// (and "void the void" restores it).
+    LapSplit {
+        /// The log offset of the pass that *ends* the over-long lap being split.
+        target: LogRef,
+        /// When the inserted mid-lap crossing happened, on the source clock — between the
+        /// `target` lap's start and `target` itself.
+        at: SourceTime,
+    },
     /// Marshaling: void an entire heat.
     HeatVoided { heat: HeatId },
     /// Marshaling: apply a penalty to a competitor in a heat.
@@ -375,6 +400,21 @@ pub enum Event {
         heat: HeatId,
         competitor: CompetitorRef,
         penalty: Penalty,
+    },
+    /// Marshaling: **reverse a prior ruling**, referenced by its log offset — primarily a
+    /// [`PenaltyApplied`](Event::PenaltyApplied) (a DQ or a time penalty) the RD is undoing
+    /// (marshaling.html §3.1 "reversible DQ").
+    ///
+    /// A distinct event from [`DetectionVoided`](Event::DetectionVoided) so the Slice 3 audit
+    /// reads cleanly — "DQ reversed" rather than overloading the lap-level void. Scoring
+    /// un-applies the penalty at `target`: a `Disqualify`/`TimeAdded` whose offset is reversed
+    /// no longer affects the result.
+    ///
+    /// NOTE: scoped to penalty reversal for this slice; it can generalize to other rulings
+    /// (e.g. reversing a `HeatVoided`) when those need a first-class undo.
+    RulingReversed {
+        /// The log offset of the ruling (a [`PenaltyApplied`](Event::PenaltyApplied)) to reverse.
+        target: LogRef,
     },
 }
 
@@ -512,6 +552,11 @@ mod tests {
                 target: LogRef(43),
                 at: SourceTime::from_micros(5_100_000),
             },
+            Event::LapSplit {
+                target: LogRef(44),
+                at: SourceTime::from_micros(5_050_000),
+            },
+            Event::RulingReversed { target: LogRef(45) },
             Event::HeatVoided {
                 heat: HeatId("q-1".into()),
             },
@@ -630,6 +675,54 @@ mod tests {
         assert!(json.contains("class") && json.contains("round") && json.contains("frequencies"));
         let back: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn lap_split_and_ruling_reversed_round_trip() {
+        // The two new Slice-2 marshaling facts round-trip through the externally-tagged JSON.
+        let events = vec![
+            Event::LapSplit {
+                target: LogRef(7),
+                at: SourceTime::from_micros(3_500_000),
+            },
+            Event::RulingReversed { target: LogRef(9) },
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let back: Event = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, back);
+        }
+    }
+
+    #[test]
+    fn legacy_log_without_split_or_reversal_reads_back() {
+        // An old log written before `LapSplit`/`RulingReversed` existed carries only the
+        // pre-Slice-2 marshaling variants. Adding the new variants is purely additive on the
+        // externally-tagged `Event` enum, so every pre-existing serialized event still
+        // deserializes unchanged — mirrors `legacy_heat_scheduled_reads_back_with_defaults`.
+        let legacy_void = r#"{"DetectionVoided":{"target":42}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(legacy_void).unwrap(),
+            Event::DetectionVoided { target: LogRef(42) }
+        );
+        let legacy_adjust = r#"{"LapAdjusted":{"target":43,"at":5100000}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(legacy_adjust).unwrap(),
+            Event::LapAdjusted {
+                target: LogRef(43),
+                at: SourceTime::from_micros(5_100_000),
+            }
+        );
+        let legacy_penalty =
+            r#"{"PenaltyApplied":{"heat":"main-a","competitor":"Bee","penalty":"Disqualify"}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(legacy_penalty).unwrap(),
+            Event::PenaltyApplied {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("Bee".into()),
+                penalty: Penalty::Disqualify,
+            }
+        );
     }
 
     #[test]
