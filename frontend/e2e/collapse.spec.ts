@@ -126,7 +126,7 @@ test('RD collapses a class placement section and a round; both persist across a 
   const roundToggle = roundRegion.locator('.gf-collapsible-toggle').first();
   await expect(roundToggle).toHaveAttribute('aria-expanded', 'true');
   // Its body (the "no heats yet" nudge, which lives in the collapsible region — not the header
-  // "Fill next heat" button) is visible while expanded.
+  // "Generate heats" button) is visible while expanded.
   const roundBodyText = roundRegion.getByText(/No heats yet/).first();
   await expect(roundBodyText).toBeVisible();
   if (process.env.GRIDFPV_SHOTS)

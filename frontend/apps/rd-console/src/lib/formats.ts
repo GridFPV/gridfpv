@@ -109,6 +109,21 @@ export function isOpenPracticeFormat(format: string | undefined | null): boolean
 }
 
 /**
+ * Whether a format's heats are **deterministic** — its whole set of heats is a pure function of the
+ * field (and, across rounds, the prior heats' results), so the round can be filled in **one action**
+ * ("Generate heats", #216). Every format *except* Open Practice is deterministic: Time Trials, Round
+ * Robin, Multi-Main, and the bracket structures all draw a fixed schedule from the roster/ranking.
+ *
+ * Open Practice is the lone **dynamic** format — its channel-seated practice heats are created on
+ * demand, with no fixed set — so it single-steps ("Add next heat") instead. Defined as "not open
+ * practice" (with a guard for a missing format) so a future deterministic format is included by
+ * default rather than silently excluded.
+ */
+export function isDeterministicFormat(format: string | undefined | null): boolean {
+  return !!format && !isOpenPracticeFormat(format);
+}
+
+/**
  * The set of fields the Rounds form shows for `format`. Open practice swaps the class/win/seeding/
  * channel-mode block for the active-channels picker + time limit; every other format shows the full
  * roster/bracket block plus its declared params.

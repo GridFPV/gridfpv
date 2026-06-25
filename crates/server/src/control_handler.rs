@@ -96,7 +96,7 @@ use gridfpv_engine::heat::{self, HeatCommand};
 use gridfpv_events::{Event, HeatId, LogRef};
 
 use crate::app::{AppState, resolve_event};
-use crate::control::{Command, CommandAck};
+use crate::control::{Command, CommandAck, FillMode};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::EventRegistry;
 use crate::scope::EventId;
@@ -287,7 +287,9 @@ pub fn apply_command_in_event(
     command: Command,
 ) -> CommandAck {
     match command {
-        Command::FillRound { round } => apply_fill_round(registry, event_id, state, round),
+        Command::FillRound { round, mode } => {
+            apply_fill_round(registry, event_id, state, round, mode)
+        }
         // `ScheduleHeat` also needs the event meta + timer registry (the channel cap + assignment),
         // so it is handled here rather than in the log-only `apply_command`.
         Command::ScheduleHeat {
@@ -380,43 +382,48 @@ fn apply_schedule_heat(
     }
 }
 
-/// Handle [`Command::FillRound`] (race redesign Slice 3a): build the round's generator from
-/// the event meta + the log, append the next tagged [`Event::HeatScheduled`] the generator
-/// emits, and ack.
-///
-/// - A `Scheduled` outcome appends the heat tagged with `round` (and `class` when the round
-///   is single-class), lineup from the generator's plan — then acks ok.
-/// - A `Complete` or `AlreadyScheduled` outcome appends **nothing** and acks ok (a finished
-///   round, or one whose outstanding heat must be scored first, are expected terminal/no-op
-///   states — typed oks, not errors).
-/// - A fill error (unknown round, empty field, unknown format) acks failed with a
-///   [`ProtocolError`] — `UnknownScope` for a missing round, `BadRequest` otherwise.
-pub fn apply_fill_round(
+/// The defensive cap on `FillMode::All`'s loop (#216): a real deterministic format always
+/// converges to `Complete` in far fewer than this, so hitting it means the generator never
+/// reported done — a logic bug, not a request for a 1000th heat. We stop and log rather than
+/// spin unbounded. (Mirrors [`round_engine::MAX_HEATS_PER_ROUND`].)
+const MAX_FILL_ALL_HEATS: usize = 1_000;
+
+/// One iteration of filling a round: build the generator from the current log, and if it emits
+/// the next heat, append the tagged [`Event::HeatScheduled`]. Returns whether a heat was
+/// appended (so the `All` loop knows to draw again) or the round reached a terminal/no-op state,
+/// or a failed ack to surface verbatim.
+enum FillStep {
+    /// A heat was appended — re-fold and draw the next (the `All` loop continues here).
+    Appended,
+    /// `Complete`/`AlreadyScheduled` — nothing to append now; the round's done for this command.
+    Terminal,
+    /// A fill or append error; carries the ack to return as-is.
+    Failed(CommandAck),
+}
+
+/// Run the generator once against the current log and append at most one heat. Re-reads the log
+/// each call so a just-appended heat is folded in on the next — this is what lets `FillMode::All`
+/// iterate by simply calling this until it reports [`FillStep::Terminal`].
+fn fill_round_once(
     registry: &EventRegistry,
-    event_id: &EventId,
+    meta: &crate::events::EventMeta,
     state: &AppState,
-    round: gridfpv_events::RoundId,
-) -> CommandAck {
+    round: &gridfpv_events::RoundId,
+) -> FillStep {
     use crate::round_engine::{self, FillError, FillOutcome};
 
-    let Some(meta) = registry.meta_of(event_id) else {
-        return CommandAck::failed(ProtocolError::new(
-            ErrorCode::UnknownScope,
-            format!("no event with id {:?}", event_id.0),
-        ));
-    };
     let events = match state.read() {
         Ok((events, _cursor)) => events,
-        Err(err) => return CommandAck::failed(err),
+        Err(err) => return FillStep::Failed(CommandAck::failed(err)),
     };
 
-    match round_engine::fill_round(&meta, &registry.timers(), &round, &events) {
+    match round_engine::fill_round(meta, &registry.timers(), round, &events) {
         Ok(FillOutcome::Scheduled {
             heat,
             lineup,
             frequencies: static_freqs,
         }) => {
-            let class = round_engine::round_class(&meta, &round);
+            let class = round_engine::round_class(meta, round);
             // Channel assignment differs by the round's channel mode (race redesign Slice 7a):
             //
             // - **Static** (`static_freqs` is `Some`): the channel-balanced builder already chose
@@ -427,27 +434,27 @@ pub fn apply_fill_round(
             //   which also enforces the node-count cap.
             let frequencies = match static_freqs {
                 Some(freqs) => {
-                    if let Some(timer) = round_engine::assignment_timer(&meta, &registry.timers()) {
+                    if let Some(timer) = round_engine::assignment_timer(meta, &registry.timers()) {
                         if lineup.len() > timer.node_count as usize {
-                            return CommandAck::failed(ProtocolError::new(
+                            return FillStep::Failed(CommandAck::failed(ProtocolError::new(
                                 ErrorCode::BadRequest,
                                 round_engine::AssignError::TooManyForNodes {
                                     lineup: lineup.len(),
                                     nodes: timer.node_count as usize,
                                 }
                                 .to_string(),
-                            ));
+                            )));
                         }
                     }
                     freqs
                 }
-                None => match round_engine::assign_for_event(&meta, &registry.timers(), &lineup) {
+                None => match round_engine::assign_for_event(meta, &registry.timers(), &lineup) {
                     Ok(freqs) => freqs,
                     Err(err) => {
-                        return CommandAck::failed(ProtocolError::new(
+                        return FillStep::Failed(CommandAck::failed(ProtocolError::new(
                             ErrorCode::BadRequest,
                             err.to_string(),
-                        ));
+                        )));
                     }
                 },
             };
@@ -455,20 +462,81 @@ pub fn apply_fill_round(
                 heat,
                 lineup,
                 class,
-                round: Some(round),
+                round: Some(round.clone()),
                 frequencies,
             };
             match state.append(event, None) {
-                Ok(_offset) => CommandAck::ok(),
-                Err(err) => CommandAck::failed(err),
+                Ok(_offset) => FillStep::Appended,
+                Err(err) => FillStep::Failed(CommandAck::failed(err)),
             }
         }
-        // Complete / AlreadyScheduled: nothing to append, a successful typed ack.
-        Ok(FillOutcome::Complete) | Ok(FillOutcome::AlreadyScheduled) => CommandAck::ok(),
-        Err(err @ FillError::UnknownRound(_)) => {
-            CommandAck::failed(ProtocolError::new(ErrorCode::UnknownScope, err.to_string()))
+        // Complete / AlreadyScheduled: nothing to append, a successful terminal state.
+        Ok(FillOutcome::Complete) | Ok(FillOutcome::AlreadyScheduled) => FillStep::Terminal,
+        Err(err @ FillError::UnknownRound(_)) => FillStep::Failed(CommandAck::failed(
+            ProtocolError::new(ErrorCode::UnknownScope, err.to_string()),
+        )),
+        Err(err) => FillStep::Failed(CommandAck::failed(ProtocolError::new(
+            ErrorCode::BadRequest,
+            err.to_string(),
+        ))),
+    }
+}
+
+/// Handle [`Command::FillRound`] (race redesign Slice 3a; fill-all added #216): build the round's
+/// generator from the event meta + the log and append heat(s) per `mode`, then ack.
+///
+/// - [`FillMode::Next`] runs the generator **once**: a `Scheduled` outcome appends the heat tagged
+///   with `round` (and `class` when single-class), lineup from the generator's plan; a
+///   `Complete`/`AlreadyScheduled` appends nothing. The interactive single-step (Open Practice, and
+///   the building block).
+/// - [`FillMode::All`] loops [`fill_round_once`] — append, re-fold, draw again — until the round
+///   reports terminal (`Complete`/`AlreadyScheduled`), filling a whole deterministic round in one
+///   command. The loop re-reads the log each pass so the generator sees the just-appended heat, is
+///   idempotent on an already-complete round (appends nothing), and is capped at
+///   [`MAX_FILL_ALL_HEATS`] defensively (logged if hit).
+///
+/// Either mode acks ok once it reaches the terminal state, or acks failed (verbatim) with a
+/// [`ProtocolError`] on a fill/append error — `UnknownScope` for a missing round, `BadRequest`
+/// otherwise. Any heat appended before an error mid-batch stays in the log (each append is its own
+/// committed event); the ack reports the failure.
+pub fn apply_fill_round(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    round: gridfpv_events::RoundId,
+    mode: FillMode,
+) -> CommandAck {
+    let Some(meta) = registry.meta_of(event_id) else {
+        return CommandAck::failed(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        ));
+    };
+
+    match mode {
+        // The original single-step fill — one generator draw, at most one heat appended.
+        FillMode::Next => match fill_round_once(registry, &meta, state, &round) {
+            FillStep::Appended | FillStep::Terminal => CommandAck::ok(),
+            FillStep::Failed(ack) => ack,
+        },
+        // Iterate the single step until the round is terminal, capped defensively.
+        FillMode::All => {
+            for _ in 0..MAX_FILL_ALL_HEATS {
+                match fill_round_once(registry, &meta, state, &round) {
+                    FillStep::Appended => continue,
+                    FillStep::Terminal => return CommandAck::ok(),
+                    FillStep::Failed(ack) => return ack,
+                }
+            }
+            eprintln!(
+                "FillRound(All) for round {:?} hit the {MAX_FILL_ALL_HEATS}-heat cap without the \
+                 generator reporting complete — stopping. A real format converges in far fewer; \
+                 this indicates a generator bug, not a {MAX_FILL_ALL_HEATS}-heat round.",
+                round.0,
+            );
+            // We still appended up to the cap; ack ok so the RD sees the heats that were drawn.
+            CommandAck::ok()
         }
-        Err(err) => CommandAck::failed(ProtocolError::new(ErrorCode::BadRequest, err.to_string())),
     }
 }
 
@@ -1682,6 +1750,7 @@ mod tests {
             &state,
             Command::FillRound {
                 round: round.id.clone(),
+                mode: FillMode::Next,
             },
         );
         assert!(ack.ok, "FillRound rejected: {ack:?}");
@@ -1726,6 +1795,7 @@ mod tests {
             &state,
             Command::FillRound {
                 round: RoundId("nope".into()),
+                mode: FillMode::Next,
             },
         );
         assert!(!ack.ok);
@@ -1837,6 +1907,7 @@ mod tests {
             &state,
             Command::FillRound {
                 round: round.clone(),
+                mode: FillMode::Next,
             },
         );
         assert!(ack.ok, "FillRound rejected: {ack:?}");
@@ -1874,11 +1945,288 @@ mod tests {
             event_with_timer_and_round(timer_req, &["a", "b", "c", "d"]);
         let state = registry.resolve(&event_id).unwrap();
         let before = state.read().unwrap().0.len();
-        let ack =
-            apply_command_in_event(&registry, &event_id, &state, Command::FillRound { round });
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round,
+                mode: FillMode::Next,
+            },
+        );
         assert!(!ack.ok, "an oversized heat must be rejected");
         assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
         let after = state.read().unwrap().0.len();
         assert_eq!(before, after, "a rejected FillRound appends nothing");
+    }
+
+    /// Build an event with an 8-node Raceband timer over a class of `pilots`, plus a single
+    /// **round_robin** round (`rounds=1`, `heat_size=2`) — a *deterministic* format whose one
+    /// generator step emits the whole round's heats. Returns the registry, event id, and round id.
+    /// Used by the fill-all (#216) tests.
+    #[cfg(test)]
+    fn round_robin_event(
+        pilots: &[&str],
+        heat_size: u32,
+    ) -> (EventRegistry, EventId, gridfpv_events::RoundId) {
+        use crate::classes::CreateClassRequest;
+        use crate::events::{
+            ChannelMode, CreateEventRequest, MemberSlot, NewRoundReq, SeedingRule,
+        };
+        use crate::pilots::CreatePilotRequest;
+        use crate::timers::{ChannelCapability, CreateTimerRequest, TimerKind};
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let registry = EventRegistry::new(None).unwrap();
+        let timer = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "8-node".into(),
+                kind: TimerKind::Mock { laps: 1, lap_ms: 1 },
+                channel_capability: Some(ChannelCapability::Flexible),
+                node_count: Some(8),
+                available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+            })
+            .unwrap();
+        let class = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Open".into(),
+                source: Default::default(),
+                reference: None,
+                description: None,
+            })
+            .unwrap()
+            .id;
+        let pilot_ids: Vec<_> = pilots
+            .iter()
+            .map(|cs| {
+                registry
+                    .pilots()
+                    .create(&CreatePilotRequest {
+                        callsign: (*cs).into(),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        let event = registry
+            .create(&CreateEventRequest {
+                name: "E".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap()
+            .id;
+        registry.set_classes(&event, vec![class.clone()]).unwrap();
+        registry
+            .set_class_membership(
+                &event,
+                class.clone(),
+                pilot_ids.into_iter().map(MemberSlot::new).collect(),
+            )
+            .unwrap();
+        registry.set_timers(&event, vec![timer.id]).unwrap();
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    label: "Round Robin".into(),
+                    classes: vec![class],
+                    format: "round_robin".into(),
+                    params: BTreeMap::from([
+                        ("rounds".into(), "1".into()),
+                        ("heat_size".into(), heat_size.to_string()),
+                    ]),
+                    win_condition: Some(WinCondition::BestLap),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: None,
+                    channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                },
+            )
+            .unwrap();
+        (registry, EventId(event.0.clone()), round.id)
+    }
+
+    /// Count the heats tagged with `round` currently in the log.
+    #[cfg(test)]
+    fn heats_in_round(state: &AppState, round: &gridfpv_events::RoundId) -> usize {
+        let (events, _) = state.read().unwrap();
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::HeatScheduled { round: Some(r), .. } if r == round))
+            .count()
+    }
+
+    /// `FillRound { mode: All }` (#216) on a deterministic format fills the **whole** round in one
+    /// command: a round_robin (`rounds=1`, `heat_size=2`) over 4 pilots partitions the field into
+    /// **2 heats**, and one fill-all command schedules both — where the single-step `Next` would
+    /// schedule only the first.
+    #[test]
+    fn fill_round_all_fills_the_whole_deterministic_round() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.clone(),
+                mode: FillMode::All,
+            },
+        );
+        assert!(ack.ok, "FillRound(All) rejected: {ack:?}");
+        // 4 pilots at heat_size 2 → 2 heats, both scheduled by the one fill-all command.
+        assert_eq!(
+            heats_in_round(&state, &round),
+            2,
+            "fill-all schedules the whole round's heats in one command"
+        );
+    }
+
+    /// Determinism + idempotency (#216): a second `FillRound { mode: All }` on a round already
+    /// filled to its terminal state appends **nothing more** (the generator is deterministic, and
+    /// every plan it wants now is already scheduled), and the heats are unchanged.
+    #[test]
+    fn fill_round_all_is_idempotent_on_a_filled_round() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        let all = || {
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::All,
+                },
+            )
+        };
+
+        assert!(all().ok);
+        let after_first: Vec<_> = {
+            let (events, _) = state.read().unwrap();
+            events.to_vec()
+        };
+        assert_eq!(heats_in_round(&state, &round), 2);
+
+        // Re-run: still ok, but nothing new — the log is byte-identical.
+        assert!(all().ok, "re-filling a complete round is a typed ok");
+        let after_second: Vec<_> = {
+            let (events, _) = state.read().unwrap();
+            events.to_vec()
+        };
+        assert_eq!(
+            heats_in_round(&state, &round),
+            2,
+            "a re-run of fill-all adds no heats"
+        );
+        assert_eq!(
+            after_first, after_second,
+            "fill-all is idempotent: the second run appends nothing"
+        );
+    }
+
+    /// Open practice still **single-steps** (#216): its one channel heat is one draw, so a `Next`
+    /// fill schedules exactly that heat — fill-all is not used for the (dynamic) practice format.
+    /// (Open practice rounds also auto-create their heat on creation; here we drive `Next` against
+    /// a fresh round to assert the single-step path appends exactly one heat.)
+    #[test]
+    fn open_practice_fills_a_single_heat_per_step() {
+        use crate::events::{CreateEventRequest, NewRoundReq, SeedingRule};
+        use std::collections::BTreeMap;
+
+        let registry = EventRegistry::new(None).unwrap();
+        let event = registry
+            .create(&CreateEventRequest {
+                name: "Practice".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap()
+            .id;
+        // An open-practice round: channel-seated (`AllChannels` seeding), no class membership.
+        // Its single channel heat is one draw — the (dynamic) format the RD single-steps, never
+        // fill-all.
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    label: "Open Practice".into(),
+                    classes: vec![],
+                    format: "open_practice".into(),
+                    params: BTreeMap::new(),
+                    win_condition: None,
+                    seeding: SeedingRule::AllChannels {
+                        channels: vec![0, 1, 2],
+                    },
+                    time_limit_secs: None,
+                    channel_mode: None,
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                },
+            )
+            .unwrap();
+        let event_id = EventId(event.0.clone());
+        let state = registry.resolve(&event_id).unwrap();
+        let next = || {
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.id.clone(),
+                    mode: FillMode::Next,
+                },
+            )
+        };
+
+        // The registry `add_round` does not auto-fill (that is the HTTP handler's job), so the
+        // round starts empty. The single-step Next schedules exactly the one channel heat.
+        assert_eq!(heats_in_round(&state, &round.id), 0);
+        assert!(next().ok, "open-practice Next rejected");
+        assert_eq!(
+            heats_in_round(&state, &round.id),
+            1,
+            "a single-step fill schedules open practice's one channel heat"
+        );
+
+        // It does not multiply: a second Next is idempotent (the heat is already scheduled).
+        assert!(next().ok);
+        assert_eq!(
+            heats_in_round(&state, &round.id),
+            1,
+            "open practice stays at its single heat — single-stepping it never adds more"
+        );
+    }
+
+    /// Wire-compat (#216): an older `FillRound` payload with **no `mode`** deserializes to the
+    /// single-step default (`Next`), so existing clients keep working unchanged.
+    #[test]
+    fn fill_round_without_mode_defaults_to_next() {
+        let cmd: Command =
+            serde_json::from_str(r#"{ "FillRound": { "round": "qual-r1" } }"#).unwrap();
+        assert_eq!(
+            cmd,
+            Command::FillRound {
+                round: gridfpv_events::RoundId("qual-r1".into()),
+                mode: FillMode::Next,
+            }
+        );
     }
 }

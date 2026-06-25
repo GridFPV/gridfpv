@@ -2,6 +2,7 @@
 import type { AdapterId } from "./AdapterId";
 import type { ClassId } from "./ClassId";
 import type { CompetitorRef } from "./CompetitorRef";
+import type { FillMode } from "./FillMode";
 import type { HeatId } from "./HeatId";
 import type { LogRef } from "./LogRef";
 import type { Penalty } from "./Penalty";
@@ -106,7 +107,21 @@ frequencies?: Array<[CompetitorRef, number]>, } } | { "FillRound": {
 /**
  * The round to fill — one of the event's [`rounds`](crate::events::EventMeta::rounds).
  */
-round: RoundId, } } | { "Register": { 
+round: RoundId, 
+/**
+ * How much of the round to fill in this one command (#216):
+ *
+ * - [`FillMode::Next`] (the default — wire-compatible with the original `{ round }`
+ *   shape) schedules the **single** next heat the generator emits.
+ * - [`FillMode::All`] loops the generator — append a heat, re-fold the round's state,
+ *   draw the next — until the round reports **complete** (no more heats producible now),
+ *   filling a whole deterministic round in one round-trip.
+ *
+ * Either way an already-complete round (or one whose outstanding heat must be scored
+ * first) appends nothing and acks a typed ok — `All` is just `Next` iterated to that
+ * terminal state, so it stays idempotent on re-run.
+ */
+mode: FillMode, } } | { "Register": { 
 /**
  * The timing source the competitor belongs to.
  */

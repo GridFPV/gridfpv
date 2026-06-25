@@ -165,6 +165,19 @@ pub enum Command {
     FillRound {
         /// The round to fill — one of the event's [`rounds`](crate::events::EventMeta::rounds).
         round: RoundId,
+        /// How much of the round to fill in this one command (#216):
+        ///
+        /// - [`FillMode::Next`] (the default — wire-compatible with the original `{ round }`
+        ///   shape) schedules the **single** next heat the generator emits.
+        /// - [`FillMode::All`] loops the generator — append a heat, re-fold the round's state,
+        ///   draw the next — until the round reports **complete** (no more heats producible now),
+        ///   filling a whole deterministic round in one round-trip.
+        ///
+        /// Either way an already-complete round (or one whose outstanding heat must be scored
+        /// first) appends nothing and acks a typed ok — `All` is just `Next` iterated to that
+        /// terminal state, so it stays idempotent on re-run.
+        #[serde(default)]
+        mode: FillMode,
     },
 
     // --- Registration ---
@@ -278,6 +291,22 @@ pub enum Command {
         /// The log offset of the ruling to reverse.
         target: LogRef,
     },
+}
+
+/// How much of a round a [`Command::FillRound`] fills (#216). Externally tagged like the rest
+/// of the control vocabulary, so it maps to a TS string-union (`"Next" | "All"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum FillMode {
+    /// Schedule the **single** next heat the round's generator emits — the original
+    /// (interactive) fill, and the building block `All` iterates. The default, so an older
+    /// `FillRound { round }` payload (no `mode`) still deserializes to it.
+    #[default]
+    Next,
+    /// Fill the **whole** round: loop the generator (append a heat → re-fold the round's
+    /// state → draw the next) until it reports complete — a deterministic round drawn in one
+    /// command. Idempotent on a round already at its terminal state (appends nothing).
+    All,
 }
 
 /// The acknowledgement of a [`Command`] (protocol.html §5): commands up,
@@ -396,6 +425,11 @@ mod tests {
             },
             Command::FillRound {
                 round: RoundId("qualifying-r1-abc".into()),
+                mode: FillMode::Next,
+            },
+            Command::FillRound {
+                round: RoundId("qualifying-r1-abc".into()),
+                mode: FillMode::All,
             },
             Command::Register {
                 adapter: AdapterId("rh".into()),
