@@ -42,7 +42,7 @@
       <p>
         <strong>As built (v0.4) — the Rounds form.</strong> A bracket round is created on the
         Rounds+Heats stage-page: a <strong>Label</strong>, a <strong>Format</strong> (friendly name —
-        <em>Single/Double Elimination</em>, <em>Multi-Main</em>, <em>Round Robin</em>, <em>ZippyQ</em>),
+        <em>Single/Double Elimination</em>, <em>Multi-Main</em>, <em>Round Robin</em>),
         then dynamic per-format fields — a <strong>single-select class</strong> (a round targets one
         class), a <strong>win condition</strong>, a <strong>seeding</strong> rule (<em>From roster</em>
         or <em>From ranking</em> with a source round + top-N), a <strong>channel mode</strong>
@@ -59,9 +59,15 @@
         Rounds are added <em>dynamically as the event goes</em>: practice and qualifying rounds are
         appended as-you-go, and <strong>advancing to brackets generates the full bracket from the
         qualifying ranking (top-N)</strong> as a set of rounds — then editable by the RD (the #84
-        Class→Rounds carry). Heat-filling has two v1 modes: <strong>manual</strong> and
-        <strong>format-generated</strong> (the six generators). ZippyQ-style rolling fills and PWA
-        self-register are <strong>deferred</strong>. (Data model in <a href="architecture.html">Architecture</a>
+        Class→Rounds carry). <strong>Decided (not yet built):</strong> a bracket generates as
+        <strong>one round per level</strong> (Quarters/Semis/Final), seeded round-to-round via
+        <code>FromRanking</code> — single-elim is a clean winners-chain, double-elim's cross-bracket
+        losers-of feed is the design problem (<a href="decisions.html">D13</a>, #217). Heat-filling has
+        two v1 modes: <strong>manual</strong> and <strong>format-generated</strong> (the generators);
+        a <strong>&ldquo;Generate heats&rdquo;</strong> action fills the whole deterministic round in
+        one pass (backend loops <code>FillRound</code>; <a href="decisions.html">D12</a>, #216).
+        ZippyQ is <strong>shelved</strong> (<a href="decisions.html">D10</a>) and PWA
+        self-register is <strong>deferred</strong>. (Data model in <a href="architecture.html">Architecture</a>
         §4; engine carry in <a href="race-engine.html">Race Engine</a> §3/§5; UI is the combined
         Rounds+Heats stage-page, <a href="clients.html">Clients</a> §1.)
       </p>
@@ -82,10 +88,11 @@
         single elimination, double elimination, multi-tier mains (A/B/C/D/E with top-N advancing up
         a tier), Chase-the-Ace finals, and MultiGP/FAI P9–P16 style brackets.</li>
       <li><strong>Leaderboard formats</strong> — e.g. the <strong>MultiGP Global Qualifier
-        (GQ)</strong>: not an elimination bracket but a ranked leaderboard. Each pilot flies a fixed
-        number of <strong>packs</strong> (battery runs / attempts; default 10) and is ranked by
-        their best <a href="pipeline-qualifying.html">fastest 3 consecutive laps</a> across those
-        packs. There is no seeding bracket and no round-to-round advancement — the leaderboard is
+        (GQ)</strong> = <strong>Time Trials + Best&nbsp;3&nbsp;Consecutive</strong>
+        (<a href="decisions.html">D11</a>): not an elimination bracket but a ranked leaderboard. Each
+        pilot flies a fixed number of <strong>packs</strong> (battery runs / attempts; default 10) and
+        is ranked by their best <a href="pipeline-qualifying.html">fastest 3 consecutive laps</a> across
+        those packs. There is no seeding bracket and no round-to-round advancement — the leaderboard is
         the result. GQ events typically <strong>skip qualifying</strong> (the GQ <em>is</em> the
         ranking) and pair with practice.</li>
       <li><strong>Configuration</strong> — pilots per heat (4 / 6 / 8 / 10), how many seeds advance

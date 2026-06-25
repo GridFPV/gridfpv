@@ -139,7 +139,7 @@ flowchart LR
     <p><strong>Goal:</strong> turn passes + a format into a run race. (<a href="race-engine.html">Race Engine</a>)</p>
     <ul>
       <li>The logged <strong>heat-loop state machine</strong>; scoring/lap-derivation + win conditions; marshaling adjudications.</li>
-      <li>The unified <strong>format/generator interface</strong> + first formats (timed qualifying, single-elim; ZippyQ as the honesty check); advancement; multi-class + engine-side frequency allocation.</li>
+      <li>The unified <strong>format/generator interface</strong> + first formats (Time Trials, single-elim; ZippyQ built then <strong>shelved</strong> as the dynamic-generator honesty check — <a href="decisions.html">D10</a>); advancement; multi-class + engine-side frequency allocation.</li>
     </ul>
     <p><strong>Done when:</strong> a full event (qualifying → bracket → winner) runs from a recorded source with correct results and marshaling; generators are table-tested.</p>
 
@@ -195,7 +195,8 @@ flowchart LR
       built last.</li>
     </ul>
     <p>
-      <strong>Deferred out of v0.4:</strong> ZippyQ-style rolling fills and PWA self-register; channel
+      <strong>Deferred out of v0.4:</strong> ZippyQ <strong>shelved</strong> from the active format
+      set (<a href="decisions.html">D10</a>, #218) and PWA self-register; channel
       management as a standalone feature (#117 is folded into the Timer registry instead);
       <strong>IMD-aware channel assignment</strong> — scoring a heat's channels by third-order intermod
       gap and auto-picking the cleanest set (#209), a race-quality refinement on top of the v0.4 channel
