@@ -80,7 +80,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use gridfpv_engine::format::{FormatRegistry, FormatSchema};
-use gridfpv_engine::scoring::{WinCondition, score_events};
+use gridfpv_engine::scoring::{WinCondition, score_with_global_offsets};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{LapList, lap_list_marshaled, marshaling_log, registrations};
 use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
@@ -1528,8 +1528,11 @@ async fn snapshot_heat(
                 .filter_map(first_pass_at)
                 .min()
                 .unwrap_or(SourceTime::from_micros(0));
-            ProjectionBody::HeatResult(score_events(
-                &heat_events,
+            // Score with the window's PRESERVED global offsets so a `RulingReversed` (a UI
+            // reverse-DQ) un-applies the penalty at its true global `LogRef` target (#55) — a
+            // re-enumerated window would match the wrong offset.
+            ProjectionBody::HeatResult(score_with_global_offsets(
+                heat_offsets.iter().map(|(o, e)| (*o, e)),
                 WinCondition::BestLap,
                 race_start,
             ))
