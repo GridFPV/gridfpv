@@ -2,6 +2,7 @@
 import type { ChannelMode } from "./ChannelMode";
 import type { ClassId } from "./ClassId";
 import type { GraceWindow } from "./GraceWindow";
+import type { ProtestWindow } from "./ProtestWindow";
 import type { SeedingRule } from "./SeedingRule";
 import type { StartProcedure } from "./StartProcedure";
 import type { WinCondition } from "./WinCondition";
@@ -61,4 +62,9 @@ start_procedure?: StartProcedure,
  * The new grace window (heat-lifecycle Slice 2). Optional — omit for the
  * [`default_grace_window`].
  */
-grace_window?: GraceWindow, };
+grace_window?: GraceWindow, 
+/**
+ * The new protest window (marshaling Slice 5). Optional — omit for the default
+ * [`ProtestWindow::Off`] (manual finalize only).
+ */
+protest_window?: ProtestWindow, };

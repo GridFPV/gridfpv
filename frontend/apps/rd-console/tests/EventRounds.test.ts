@@ -30,7 +30,8 @@ const QUAL: RoundDef = {
   channel_mode: 'Static',
   staging_timer_secs: 300,
   start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-  grace_window: { Duration: { micros: 3000000 } }
+  grace_window: { Duration: { micros: 3000000 } },
+  protest_window: 'Off'
 };
 
 /** An event selecting both classes, with one existing round. */
@@ -116,7 +117,8 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-      grace_window: { Duration: { micros: 3000000 } }
+      grace_window: { Duration: { micros: 3000000 } },
+      protest_window: 'Off'
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session } = makeTestSession({
@@ -297,7 +299,8 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       ...QUAL,
       staging_timer_secs: 75,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2500, max_delay_ms: 6000 },
-      grace_window: { Duration: { micros: 5_000_000 } }
+      grace_window: { Duration: { micros: 5_000_000 } },
+      protest_window: 'Off'
     };
     const updateRoundImpl = vi.fn(async (_b, _e, _id, req) => ({ ...tuned, ...req }));
     const { session } = makeTestSession({
@@ -592,7 +595,8 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
       grace_window: { Duration: { micros: 3000000 } },
-      time_limit_secs: 5400
+      time_limit_secs: 5400,
+      protest_window: 'Off'
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session } = makeTestSession({
@@ -646,7 +650,8 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-      grace_window: { Duration: { micros: 3000000 } }
+      grace_window: { Duration: { micros: 3000000 } },
+      protest_window: 'Off'
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session } = makeTestSession({
@@ -685,7 +690,8 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
       grace_window: { Duration: { micros: 3000000 } },
-      time_limit_secs: 3600
+      time_limit_secs: 3600,
+      protest_window: 'Off'
     };
     const { session } = makeTestSession({
       ...opImpls(),
@@ -717,7 +723,8 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
       grace_window: { Duration: { micros: 3000000 } },
-      time_limit_secs: 5400
+      time_limit_secs: 5400,
+      protest_window: 'Off'
     };
     const updateRoundImpl = vi.fn(async (_b, _e, _id, req) => ({ ...op, ...req }));
     const { session } = makeTestSession({
@@ -873,7 +880,8 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-      grace_window: { Duration: { micros: 3000000 } }
+      grace_window: { Duration: { micros: 3000000 } },
+      protest_window: 'Off'
     };
     const heat: HeatSummary = {
       heat: 'op1-heat-7x2',
@@ -1014,7 +1022,8 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-      grace_window: { Duration: { micros: 3000000 } }
+      grace_window: { Duration: { micros: 3000000 } },
+      protest_window: 'Off'
     };
     const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
     const { session, sendSpy } = makeTestSession({

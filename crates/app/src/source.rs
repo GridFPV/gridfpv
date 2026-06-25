@@ -1005,6 +1005,22 @@ fn handle_transition(
                 // Wake-on-clear: re-fold without the overlay so the laps drop immediately.
                 state.wake_streams();
             }
+            // Auto-official timer (marshaling Slice 5): the two transitions that land the heat in
+            // `Unofficial` — `Finished` (race-end) and `Reverted` (a finalized result re-opened) —
+            // (re)arm the protest window. The `cancel_for(&heat)` at the top already dropped any prior
+            // protest driver, so a `Revert` cleanly re-opens the window from the new `Unofficial`
+            // instant. A round with no protest window spawns an inert driver that returns immediately.
+            // The other transitions here (`Finalized`/`Aborted`/`Restarted`/`Discarded`/`Advanced`)
+            // leave `Unofficial`, so they were cancelled above and are not re-armed.
+            if matches!(
+                transition,
+                HeatTransition::Finished | HeatTransition::Reverted
+            ) {
+                clock.protest = Some((
+                    heat.clone(),
+                    spawn_auto_official_driver(state, registry, event_id, heat.clone()),
+                ));
+            }
         }
         // Staged is pre-Running: the heat isn't emitting yet, but it is the moment to **tune** the
         // device to the heat's assigned channels (race redesign Slice 4a — "the engine allocates,
@@ -1049,12 +1065,16 @@ struct HeatClock {
     start: Option<(HeatId, JoinHandle<()>)>,
     /// The completion clock for a heat in `Running` (appends auto `Finished` on win + grace).
     completion: Option<(HeatId, JoinHandle<()>)>,
+    /// The **auto-official timer** for a heat in `Unofficial` (marshaling Slice 5): when the round
+    /// armed a protest window, it logs the deadline (`HeatFinalizing`) then appends the auto
+    /// `Finalized` once the window elapses. Absent for a round with no protest window (the default).
+    protest: Option<(HeatId, JoinHandle<()>)>,
 }
 
 impl HeatClock {
-    /// Cancel any in-flight start/completion driver belonging to `heat` (it just changed state, so a
-    /// pending auto-transition for the *old* state must not land). Drivers for other heats are left
-    /// running. Aborting a finished task is a harmless no-op.
+    /// Cancel any in-flight start/completion/protest driver belonging to `heat` (it just changed
+    /// state, so a pending auto-transition for the *old* state must not land). Drivers for other
+    /// heats are left running. Aborting a finished task is a harmless no-op.
     fn cancel_for(&mut self, heat: &HeatId) {
         if let Some((h, task)) = &self.start {
             if h == heat {
@@ -1066,6 +1086,12 @@ impl HeatClock {
             if h == heat {
                 task.abort();
                 self.completion = None;
+            }
+        }
+        if let Some((h, task)) = &self.protest {
+            if h == heat {
+                task.abort();
+                self.protest = None;
             }
         }
     }
@@ -1196,7 +1222,7 @@ fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
 // Wall-clock (tokio time) decides only *when* the runtime appends; the delay and the criterion are
 // facts in the log, so the replay is deterministic (race-engine.html §6).
 
-use gridfpv_engine::heat::GraceWindow;
+use gridfpv_engine::heat::{GraceWindow, ProtestWindow};
 use gridfpv_engine::scoring::race_end_reached;
 use gridfpv_server::events::{RoundDef, StartProcedure};
 
@@ -1216,6 +1242,10 @@ struct HeatClockConfig {
     /// condition (or the RD's `ForceEnd`). Carried for every heat but acted on for the open-practice
     /// case (a practice with no win condition relies on it).
     time_limit_secs: Option<u32>,
+    /// The round's **protest window** (marshaling Slice 5): when [`ProtestWindow::After`], the
+    /// auto-official driver arms the auto-finalize timer once the heat enters `Unofficial`. The
+    /// default [`ProtestWindow::Off`] means manual finalize only (no auto-official driver work).
+    protest_window: ProtestWindow,
 }
 
 /// Resolve the clock config for `heat`: find the heat's most-recent `HeatScheduled.round`, look that
@@ -1240,6 +1270,7 @@ fn heat_clock_config(
             win_condition: r.win_condition,
             grace_window: r.grace_window,
             time_limit_secs: r.time_limit_secs,
+            protest_window: r.protest_window,
         },
         // No round (sim/free-text): default the start procedure + grace so the auto-start still
         // fires; the win condition defaults to the sim's `FirstToLaps` over the sim lap count so a
@@ -1250,6 +1281,8 @@ fn heat_clock_config(
             win_condition: default_sim_win_condition(),
             grace_window: gridfpv_server::events::default_grace_window(),
             time_limit_secs: None,
+            // A round-less heat (sim/free-text) has no protest window: manual finalize only.
+            protest_window: ProtestWindow::Off,
         },
     }
 }
@@ -1480,6 +1513,78 @@ fn spawn_completion_driver(
                 }
                 return;
             }
+        }
+    })
+}
+
+/// Server wall-clock time in **microseconds** since the Unix epoch — the basis for the auto-official
+/// deadline (marshaling Slice 5). Matches the server's own `recorded_at` stamping (the `Finalize` the
+/// driver appends is stamped from the same clock), so `at` and the eventual transition's
+/// `recorded_at` agree to within the hold's scheduling jitter.
+fn now_micros() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+/// Spawn the **auto-official driver** for a heat that just entered `Unofficial` (marshaling Slice 5).
+///
+/// Reads the heat's round [`ProtestWindow`]. With the default [`ProtestWindow::Off`] there is no
+/// auto-official timer — the driver returns immediately and the heat stays provisional until the RD
+/// finalizes manually (today's behaviour). With [`ProtestWindow::After { micros }`] it:
+///   1. logs the **deadline** as a fact — `Event::HeatFinalizing { at: now + micros }` — so the
+///      console can render a live "auto-official in M:SS" countdown and a replay reads the same
+///      deadline (mirroring how the start driver logs `HeatStarting`);
+///   2. holds `micros` of real time;
+///   3. appends the auto `HeatStateChanged { Finalized }` (the `Unofficial → Final` step).
+///
+/// The returned task is cancelled by the bridge (`cancel_for`) the moment the heat leaves
+/// `Unofficial` — a manual early `Finalize`, a `Revert`, an abort/restart — so a superseded window
+/// never appends a stale `Finalized`. A `Revert` back to `Unofficial` re-arms a fresh driver (a new
+/// window from the new race-end instant). This is an **additive auto-finalize**, never a gate: the
+/// RD's manual `Finalize` stays available and simply pre-empts the timer.
+fn spawn_auto_official_driver(
+    state: &AppState,
+    registry: &EventRegistry,
+    event_id: &EventId,
+    heat: HeatId,
+) -> JoinHandle<()> {
+    let config = heat_clock_config(state, registry, event_id, &heat);
+    let state = state.clone();
+    tokio::spawn(async move {
+        let ProtestWindow::After { micros } = config.protest_window else {
+            // Off (the default): no auto-official timer — manual finalize only. Nothing to do.
+            return;
+        };
+        // A non-positive window auto-finalizes immediately (defensive — the form clamps to ≥ 0).
+        let hold = Duration::from_micros(micros.max(0) as u64);
+        let deadline = now_micros().saturating_add(micros.max(0));
+        // Log the deadline as a fact *before* the hold, so the console can count down to it and a
+        // replay reads the same instant; only the append timing below uses wall-clock.
+        if let Err(e) = state.append(
+            Event::HeatFinalizing {
+                heat: heat.clone(),
+                at: deadline,
+            },
+            None,
+        ) {
+            eprintln!("gridfpv: auto-official driver could not log HeatFinalizing: {e:?}");
+            return;
+        }
+        tokio::time::sleep(hold).await;
+        // Auto-finalize Unofficial → Final. If the heat already left Unofficial (a manual early
+        // Finalize, a Revert, an abort), this task has been cancelled by the bridge and never reaches
+        // here — so the auto-finalize never fights a manual action.
+        if let Err(e) = state.append(
+            Event::HeatStateChanged {
+                heat,
+                transition: HeatTransition::Finalized,
+            },
+            None,
+        ) {
+            eprintln!("gridfpv: auto-official driver could not append Finalized: {e:?}");
         }
     })
 }
@@ -2094,6 +2199,7 @@ mod tests {
             staging_timer_secs: None,
             start_procedure: None,
             grace_window: None,
+            protest_window: None,
         };
         registry
             .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)

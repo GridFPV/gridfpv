@@ -2,6 +2,7 @@
 import type { ChannelMode } from "./ChannelMode";
 import type { ClassId } from "./ClassId";
 import type { GraceWindow } from "./GraceWindow";
+import type { ProtestWindow } from "./ProtestWindow";
 import type { RoundId } from "./RoundId";
 import type { SeedingRule } from "./SeedingRule";
 import type { StartProcedure } from "./StartProcedure";
@@ -103,6 +104,18 @@ start_procedure: StartProcedure,
  * auto-completion actually fires). Additive.
  */
 grace_window: GraceWindow, 
+/**
+ * The **protest window** for the provisional → official lifecycle (marshaling Slice 5,
+ * marshaling.html §3.3) — an optional, **OFF-by-default auto-official timer**. When set to
+ * [`ProtestWindow::After`], the runtime auto-finalizes the heat (`Unofficial → Final`) once the
+ * window elapses from the race-end instant; the RD can always finalize early or correct during
+ * the window, and `Revert` re-opens a finalized result. The default [`ProtestWindow::Off`] is
+ * today's behaviour — **manual `Finalize` only**, nothing auto-finalizes.
+ *
+ * Per-round so it can vary by phase (e.g. a protest window on the mains, none on practice).
+ * Additive (`#[serde(default)]`) so a round persisted before this field reads back as `Off`.
+ */
+protest_window: ProtestWindow, 
 /**
  * The **practice duration** for an open-practice round, in seconds (open-practice refinement).
  * When set, the runtime clock **auto-ends the practice** (`Running → Unofficial`) once the

@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use gridfpv_engine::format::FormatRegistry;
-use gridfpv_engine::heat::GraceWindow;
+use gridfpv_engine::heat::{GraceWindow, ProtestWindow};
 use gridfpv_engine::scoring::WinCondition;
 use gridfpv_events::RoundId;
 use gridfpv_storage::{InMemoryLog, SqliteLog};
@@ -392,6 +392,17 @@ pub struct RoundDef {
     /// auto-completion actually fires). Additive.
     #[serde(default = "default_grace_window")]
     pub grace_window: GraceWindow,
+    /// The **protest window** for the provisional → official lifecycle (marshaling Slice 5,
+    /// marshaling.html §3.3) — an optional, **OFF-by-default auto-official timer**. When set to
+    /// [`ProtestWindow::After`], the runtime auto-finalizes the heat (`Unofficial → Final`) once the
+    /// window elapses from the race-end instant; the RD can always finalize early or correct during
+    /// the window, and `Revert` re-opens a finalized result. The default [`ProtestWindow::Off`] is
+    /// today's behaviour — **manual `Finalize` only**, nothing auto-finalizes.
+    ///
+    /// Per-round so it can vary by phase (e.g. a protest window on the mains, none on practice).
+    /// Additive (`#[serde(default)]`) so a round persisted before this field reads back as `Off`.
+    #[serde(default)]
+    pub protest_window: ProtestWindow,
     /// The **practice duration** for an open-practice round, in seconds (open-practice refinement).
     /// When set, the runtime clock **auto-ends the practice** (`Running → Unofficial`) once the
     /// heat's elapsed running time reaches this limit — independent of any win condition (the time is
@@ -699,6 +710,12 @@ pub struct NewRoundReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub grace_window: Option<GraceWindow>,
+    /// The round's protest window (marshaling Slice 5). Optional — omit for the default
+    /// [`ProtestWindow::Off`] (manual finalize only); supply [`ProtestWindow::After`] to arm the
+    /// auto-official timer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub protest_window: Option<ProtestWindow>,
 }
 
 /// The body of `PUT /events/{id}/rounds/{round}` — the editable fields of an existing round (race
@@ -749,6 +766,11 @@ pub struct UpdateRoundReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub grace_window: Option<GraceWindow>,
+    /// The new protest window (marshaling Slice 5). Optional — omit for the default
+    /// [`ProtestWindow::Off`] (manual finalize only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub protest_window: Option<ProtestWindow>,
 }
 
 impl EventMeta {
@@ -1273,6 +1295,8 @@ impl EventRegistry {
                 .unwrap_or_else(default_staging_timer_secs),
             start_procedure: req.start_procedure.unwrap_or_default(),
             grace_window: req.grace_window.unwrap_or_else(default_grace_window),
+            // The protest window (marshaling Slice 5): omitted ⇒ `Off` (manual finalize only).
+            protest_window: req.protest_window.unwrap_or_default(),
             // The optional open-practice duration (open-practice refinement): carried through as-is.
             time_limit_secs: req.time_limit_secs,
         };
@@ -1338,6 +1362,8 @@ impl EventRegistry {
                 .unwrap_or_else(default_staging_timer_secs),
             start_procedure: req.start_procedure.unwrap_or_default(),
             grace_window: req.grace_window.unwrap_or_else(default_grace_window),
+            // The protest window (marshaling Slice 5): omitted ⇒ `Off` (manual finalize only).
+            protest_window: req.protest_window.unwrap_or_default(),
             // The optional open-practice duration (open-practice refinement): replaced wholesale.
             time_limit_secs: req.time_limit_secs,
         };
@@ -2538,6 +2564,7 @@ mod tests {
             staging_timer_secs: None,
             start_procedure: None,
             grace_window: None,
+            protest_window: None,
         }
     }
 
@@ -2602,6 +2629,7 @@ mod tests {
                     staging_timer_secs: None,
                     start_procedure: None,
                     grace_window: None,
+                    protest_window: None,
                 },
             )
             .expect("an open-practice round with no win condition saves");
@@ -2681,6 +2709,7 @@ mod tests {
                     staging_timer_secs: None,
                     start_procedure: None,
                     grace_window: None,
+                    protest_window: None,
                 },
             )
             .unwrap();
@@ -2794,6 +2823,7 @@ mod tests {
                 staging_timer_secs: None,
                 start_procedure: None,
                 grace_window: None,
+                protest_window: None,
             },
         );
         assert!(matches!(self_ref, Err(RoundError::Invalid(_))));

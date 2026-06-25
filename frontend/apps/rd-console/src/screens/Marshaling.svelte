@@ -40,6 +40,7 @@
     voidHeatCommand
   } from '../lib/marshaling.js';
   import type { Session } from '../lib/session.svelte.js';
+  import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
   import RssiGraph from '../lib/RssiGraph.svelte';
@@ -50,6 +51,12 @@
   const laps = $derived<LapList | undefined>(session.lapList);
   const audit = $derived<AuditEntry[] | undefined>(session.marshalingAudit);
   const canControl = $derived(session.canControl);
+
+  // The result lifecycle (marshaling Slice 5): Provisional (Unofficial) vs Official (Final), with the
+  // auto-official countdown when the round armed a protest window. Read-only display — it surfaces the
+  // governance state; the Finalize/Revert *transitions* live on Live control and enforce the role.
+  const lifecycle = $derived(session.liveState?.lifecycle);
+  const protest = useProtestClock(() => session.liveState?.lifecycle);
 
   // The captured RSSI trace for this heat (`?projection=signal`, Slice 1), pulled alongside the
   // lap list + audit by `refreshMarshaling`. A heat that captured signal (a RotorHazard heat) has
@@ -218,6 +225,17 @@
   <header>
     <h2>
       Marshaling{#if heat}<span class="heat"> — {heat}</span>{/if}
+      {#if lifecycle}
+        {#if lifecycle === 'Official'}
+          <span class="lifecycle-badge official" aria-label="Result lifecycle">Official</span>
+        {:else if protest.active}
+          <span class="lifecycle-badge provisional" aria-label="Result lifecycle"
+            >Provisional — auto-official in {formatProtest(protest.remainingMs)}</span
+          >
+        {:else}
+          <span class="lifecycle-badge provisional" aria-label="Result lifecycle">Provisional</span>
+        {/if}
+      {/if}
     </h2>
     <p class="muted">
       {#if canControl}
@@ -397,6 +415,28 @@
   .heat {
     color: var(--gf-text-muted);
     font-weight: var(--gf-font-weight-normal);
+  }
+  /* Result lifecycle badge (marshaling Slice 5): Provisional (blue) vs Official (violet). */
+  .lifecycle-badge {
+    display: inline-block;
+    margin-left: var(--gf-space-3);
+    padding: 0.1em 0.6em;
+    border-radius: var(--gf-radius-md);
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    letter-spacing: var(--gf-tracking-normal);
+    vertical-align: middle;
+    font-variant-numeric: tabular-nums;
+  }
+  .lifecycle-badge.provisional {
+    color: color-mix(in srgb, var(--gf-phase-finished) 92%, var(--gf-text));
+    background: color-mix(in srgb, var(--gf-phase-finished) 18%, var(--gf-elevated));
+    border: 1px solid color-mix(in srgb, var(--gf-phase-finished) 45%, var(--gf-border));
+  }
+  .lifecycle-badge.official {
+    color: color-mix(in srgb, var(--gf-phase-scored) 92%, var(--gf-text));
+    background: color-mix(in srgb, var(--gf-phase-scored) 18%, var(--gf-elevated));
+    border: 1px solid color-mix(in srgb, var(--gf-phase-scored) 45%, var(--gf-border));
   }
   .muted {
     color: var(--gf-text-muted);

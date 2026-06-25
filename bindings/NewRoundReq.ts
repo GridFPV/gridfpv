@@ -2,6 +2,7 @@
 import type { ChannelMode } from "./ChannelMode";
 import type { ClassId } from "./ClassId";
 import type { GraceWindow } from "./GraceWindow";
+import type { ProtestWindow } from "./ProtestWindow";
 import type { SeedingRule } from "./SeedingRule";
 import type { StartProcedure } from "./StartProcedure";
 import type { WinCondition } from "./WinCondition";
@@ -70,4 +71,10 @@ start_procedure?: StartProcedure,
  * The round's grace window (heat-lifecycle Slice 2). Optional — omit for the
  * [`default_grace_window`] (a bounded 3s).
  */
-grace_window?: GraceWindow, };
+grace_window?: GraceWindow, 
+/**
+ * The round's protest window (marshaling Slice 5). Optional — omit for the default
+ * [`ProtestWindow::Off`] (manual finalize only); supply [`ProtestWindow::After`] to arm the
+ * auto-official timer.
+ */
+protest_window?: ProtestWindow, };

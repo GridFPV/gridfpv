@@ -45,6 +45,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import { useRaceClock } from '../lib/raceClock.svelte.js';
   import { useStagingClock, formatStaging } from '../lib/stagingClock.svelte.js';
+  import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
   import { StartTonePlayer } from '../lib/startTone.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
@@ -55,6 +56,10 @@
   const phase = $derived(live?.phase ?? 'Scheduled');
   const heat = $derived<HeatId | undefined>(live?.current_heat);
   const primary = $derived(primaryAction(phase));
+  // Role-gate the heat transitions (marshaling Slice 5, mirroring Slice 3): the RD commits; a
+  // read-only pilot session sees the live race + lifecycle but the transition controls (Finalize /
+  // Revert / …) are hidden — the Director is the enforced boundary, this reflects it client-side.
+  const canControl = $derived(session.canControl);
 
   // ── Per-heat channels (race redesign Slice 4b) ───────────────────────────────
   // The live stream carries only `LiveRaceState` (no frequencies), so resolve the current heat's
@@ -364,6 +369,12 @@
     () => stagingSecs
   );
 
+  // ── Auto-official countdown (marshaling Slice 5) ─────────────────────────────────────────────
+  // While the heat is Unofficial (provisional) and the round armed a protest window, count the wall
+  // clock down to the logged auto-official deadline so the RD sees "auto-official in M:SS". Inactive
+  // (no countdown) when the window is Off — the result then stays provisional until manual Finalize.
+  const protest = useProtestClock(() => live?.lifecycle);
+
   // ── Start tone synced to race-go (heat-lifecycle Slice 3; robustness + late-join fix) ──────────
   // A short Web-Audio beep the moment a heat goes live (race-go). The runtime logs
   // `HeatStarting { delay_ms }` then auto-appends the Running transition after the (hidden) random
@@ -566,30 +577,70 @@
     </div>
   {/if}
 
+  {#if heat && (phase === 'Unofficial' || phase === 'Final')}
+    <!-- Provisional → official lifecycle (marshaling Slice 5). Provisional (Unofficial): correctable;
+         when a protest window is armed, count down to the auto-official deadline; the RD can finalize
+         early via the Finalize transition below. Official (Final): the result is locked (Revert
+         re-opens it). Pure display — read-only pilots see the state but the transitions enforce the
+         role. -->
+    <div
+      class="lifecycle"
+      class:official={phase === 'Final'}
+      role="status"
+      aria-label="Result lifecycle"
+    >
+      <span class="lifecycle-dot" aria-hidden="true"></span>
+      {#if phase === 'Final'}
+        <div class="lifecycle-copy">
+          <span class="lifecycle-title">Official</span>
+          <span class="lifecycle-sub"
+            >The result is locked. Revert to re-open it for correction.</span
+          >
+        </div>
+      {:else if protest.active}
+        <div class="lifecycle-copy">
+          <span class="lifecycle-title"
+            >Provisional — auto-official in <span class="lifecycle-countdown"
+              >{formatProtest(protest.remainingMs)}</span
+            ></span
+          >
+          <span class="lifecycle-sub">Correct now if needed, or finalize early.</span>
+        </div>
+      {:else}
+        <div class="lifecycle-copy">
+          <span class="lifecycle-title">Provisional</span>
+          <span class="lifecycle-sub">Correctable. Finalize when the result is settled.</span>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   {#if session.lastCommandError}
     <ErrorBanner error={session.lastCommandError} ondismiss={() => session.clearCommandError()} />
   {/if}
 
-  <div class="controls" role="group" aria-label="Heat transitions">
-    <span class="controls-label">Transitions</span>
-    <div class="controls-row">
-      {#each ACTION_ORDER as action (action)}
-        {@const legal = isActionLegal(phase, action)}
-        <ConfirmButton
-          onconfirm={() => fire(action)}
-          confirm={isDestructive(action)}
-          disabled={!legal || !heat}
-          variant={action === primary ? 'primary' : isDestructive(action) ? 'danger' : 'default'}
-          title={actionDescription(action)}
-        >
-          <span class="action-btn" class:override={isOverride(action)}>
-            {#if isOverride(action)}<span class="override-tag" aria-hidden="true">override</span
-              >{/if}{action}
-          </span>
-        </ConfirmButton>
-      {/each}
+  {#if canControl}
+    <div class="controls" role="group" aria-label="Heat transitions">
+      <span class="controls-label">Transitions</span>
+      <div class="controls-row">
+        {#each ACTION_ORDER as action (action)}
+          {@const legal = isActionLegal(phase, action)}
+          <ConfirmButton
+            onconfirm={() => fire(action)}
+            confirm={isDestructive(action)}
+            disabled={!legal || !heat}
+            variant={action === primary ? 'primary' : isDestructive(action) ? 'danger' : 'default'}
+            title={actionDescription(action)}
+          >
+            <span class="action-btn" class:override={isOverride(action)}>
+              {#if isOverride(action)}<span class="override-tag" aria-hidden="true">override</span
+                >{/if}{action}
+            </span>
+          </ConfirmButton>
+        {/each}
+      </div>
     </div>
-  </div>
+  {/if}
 
   {#if isOpenPractice}
     <!-- Open-practice per-channel board (open-practice Slice 2): one row per active channel
@@ -981,6 +1032,50 @@
     color: color-mix(in srgb, var(--_arm) 90%, var(--gf-text));
   }
   .arming-sub {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+
+  /* ── Result lifecycle (provisional → official, marshaling Slice 5) ─────────── */
+  .lifecycle {
+    --_life: var(--gf-phase-finished); /* provisional (Unofficial) — blue */
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-4);
+    padding: var(--gf-space-5) var(--gf-space-6);
+    border: 1px solid color-mix(in srgb, var(--_life) 45%, var(--gf-border));
+    border-radius: var(--gf-radius-lg);
+    background: linear-gradient(
+      100deg,
+      color-mix(in srgb, var(--_life) 14%, var(--gf-elevated)),
+      var(--gf-elevated) 60%
+    );
+  }
+  .lifecycle.official {
+    --_life: var(--gf-phase-scored); /* official (Final) — violet */
+  }
+  .lifecycle-dot {
+    flex-shrink: 0;
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    background: var(--_life);
+  }
+  .lifecycle-copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-1);
+  }
+  .lifecycle-title {
+    font-size: var(--gf-font-size-xl);
+    font-weight: var(--gf-font-weight-bold);
+    letter-spacing: var(--gf-tracking-tight);
+    color: color-mix(in srgb, var(--_life) 90%, var(--gf-text));
+  }
+  .lifecycle-countdown {
+    font-variant-numeric: tabular-nums;
+  }
+  .lifecycle-sub {
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
   }
