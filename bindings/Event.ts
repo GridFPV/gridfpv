@@ -8,6 +8,7 @@ import type { LogRef } from "./LogRef";
 import type { Pass } from "./Pass";
 import type { Penalty } from "./Penalty";
 import type { PilotId } from "./PilotId";
+import type { ProtestOutcome } from "./ProtestOutcome";
 import type { RoundId } from "./RoundId";
 import type { SessionId } from "./SessionId";
 import type { SignalChunk } from "./SignalChunk";
@@ -67,8 +68,33 @@ target: LogRef,
  * When the inserted mid-lap crossing happened, on the source clock — between the
  * `target` lap's start and `target` itself.
  */
-at: SourceTime, } } | { "HeatVoided": { heat: HeatId, } } | { "PenaltyApplied": { heat: HeatId, competitor: CompetitorRef, penalty: Penalty, } } | { "RulingReversed": { 
+at: SourceTime, } } | { "LapThrownOut": { 
 /**
- * The log offset of the ruling (a [`PenaltyApplied`](Event::PenaltyApplied)) to reverse.
+ * The log offset of the pass that *ends* the lap to exclude from the scored count.
+ */
+target: LogRef, } } | { "HeatVoided": { heat: HeatId, } } | { "PenaltyApplied": { heat: HeatId, competitor: CompetitorRef, penalty: Penalty, } } | { "ProtestFiled": { 
+/**
+ * The heat the protest concerns.
+ */
+heat: HeatId, 
+/**
+ * The competitor the protest is about (whose result is contested).
+ */
+competitor: CompetitorRef, 
+/**
+ * A free-text note describing the protest.
+ */
+note: string, } } | { "ProtestResolved": { 
+/**
+ * The log offset of the [`ProtestFiled`](Event::ProtestFiled) this resolves.
+ */
+target: LogRef, 
+/**
+ * How the protest was resolved.
+ */
+outcome: ProtestOutcome, } } | { "RulingReversed": { 
+/**
+ * The log offset of the ruling to reverse (a penalty, throw-out, protest resolution, or
+ * heat-void).
  */
 target: LogRef, } };

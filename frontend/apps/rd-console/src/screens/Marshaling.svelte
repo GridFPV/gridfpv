@@ -30,15 +30,20 @@
   import {
     adjustLapCommand,
     applyPenaltyCommand,
-    DISQUALIFY,
+    deductPointsCommand,
+    disqualifyPenalty,
+    fileProtestCommand,
     insertLapCommand,
+    resolveProtestCommand,
     reverseRulingCommand,
     secondsToSourceTime,
     splitLapCommand,
+    throwOutLapCommand,
     timeAddedPenalty,
     voidDetectionCommand,
     voidHeatCommand
   } from '../lib/marshaling.js';
+  import type { ProtestOutcome } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
@@ -154,25 +159,85 @@
     if (ack.ok) await afterCorrection();
   }
 
-  // ── Per-competitor rulings ──
-  let penaltyTarget = $state<CompetitorRef | ''>('');
-  let penaltyKind = $state<'dq' | 'time'>('dq');
-  let penaltySeconds = $state(2);
-  async function doPenalty(): Promise<void> {
-    if (!heat || !penaltyTarget) return;
-    const penalty = penaltyKind === 'dq' ? DISQUALIFY : timeAddedPenalty(penaltySeconds);
-    const ack = await session.send(applyPenaltyCommand(heat, penaltyTarget, penalty));
-    if (ack.ok) await afterCorrection();
+  // Throw out the selected lap from the SCORED count — distinct from "Remove (void)": the lap stays
+  // a real lap, it just no longer counts (marshaling.html §3.3). Targets the lap's end pass.
+  async function doThrowOutSelected(): Promise<void> {
+    if (!selected) return;
+    const ack = await session.send(throwOutLapCommand(selected.lap.end_ref));
+    if (ack.ok) {
+      selected = null;
+      await afterCorrection();
+    }
   }
 
-  // Reverse a prior reversible ruling (a penalty) selected from the audit trail.
-  const reversiblePenalties = $derived((audit ?? []).filter((e) => e.kind === 'PenaltyApplied'));
+  // ── Per-competitor rulings ──
+  let penaltyTarget = $state<CompetitorRef | ''>('');
+  // 'dq' = disqualify (status), 'time' = added time (per-heat), 'points' = standings deduction.
+  let penaltyKind = $state<'dq' | 'time' | 'points'>('dq');
+  let penaltySeconds = $state(2);
+  let penaltyPoints = $state(1);
+  let dqReason = $state('');
+  async function doPenalty(): Promise<void> {
+    if (!heat || !penaltyTarget) return;
+    let ack;
+    if (penaltyKind === 'points') {
+      // Points affect SEASON/EVENT standings, not the per-heat lap result.
+      ack = await session.send(deductPointsCommand(heat, penaltyTarget, penaltyPoints));
+    } else {
+      const penalty =
+        penaltyKind === 'dq' ? disqualifyPenalty(dqReason) : timeAddedPenalty(penaltySeconds);
+      ack = await session.send(applyPenaltyCommand(heat, penaltyTarget, penalty));
+    }
+    if (ack.ok) {
+      dqReason = '';
+      await afterCorrection();
+    }
+  }
+
+  // Reverse any prior reversible ruling — a penalty, a lap throw-out, a protest resolution, or a
+  // heat-void — selected from the audit trail (generalized reversibility, marshaling.html §3.3).
+  const REVERSIBLE_KINDS: AuditKind[] = [
+    'PenaltyApplied',
+    'LapThrownOut',
+    'ProtestResolved',
+    'HeatVoided'
+  ];
+  const reversibleRulings = $derived(
+    (audit ?? []).filter((e) => REVERSIBLE_KINDS.includes(e.kind))
+  );
   let reverseTargetRef = $state<number | ''>('');
   async function doReverse(): Promise<void> {
     if (reverseTargetRef === '') return;
     const ack = await session.send(reverseRulingCommand(reverseTargetRef as LogRef));
     if (ack.ok) {
       reverseTargetRef = '';
+      await afterCorrection();
+    }
+  }
+
+  // ── Protests (file → resolve) ──
+  let protestTarget = $state<CompetitorRef | ''>('');
+  let protestNote = $state('');
+  async function doFileProtest(): Promise<void> {
+    if (!heat || !protestTarget || protestNote.trim() === '') return;
+    const ack = await session.send(fileProtestCommand(heat, protestTarget, protestNote.trim()));
+    if (ack.ok) {
+      protestNote = '';
+      protestTarget = '';
+      await afterCorrection();
+    }
+  }
+  // Filed protests are resolvable by their log offset (the audit entry's `at_ref`).
+  const filedProtests = $derived((audit ?? []).filter((e) => e.kind === 'ProtestFiled'));
+  let resolveProtestRef = $state<number | ''>('');
+  let protestOutcome = $state<ProtestOutcome>('Upheld');
+  async function doResolveProtest(): Promise<void> {
+    if (resolveProtestRef === '') return;
+    const ack = await session.send(
+      resolveProtestCommand(resolveProtestRef as LogRef, protestOutcome)
+    );
+    if (ack.ok) {
+      resolveProtestRef = '';
       await afterCorrection();
     }
   }
@@ -203,6 +268,12 @@
         return 'Split';
       case 'PenaltyApplied':
         return 'Penalty';
+      case 'LapThrownOut':
+        return 'Thrown out';
+      case 'ProtestFiled':
+        return 'Protest filed';
+      case 'ProtestResolved':
+        return 'Protest resolved';
       case 'RulingReversed':
         return 'Reversed';
       case 'HeatVoided':
@@ -322,6 +393,13 @@
             <button type="button" onclick={doInsertAfterSelected} disabled={!selected}
               >Insert after</button
             >
+            <button
+              type="button"
+              onclick={doThrowOutSelected}
+              disabled={!selected}
+              title="Exclude this valid lap from the scored count (the lap stays real)"
+              >Throw out lap</button
+            >
           </div>
         </fieldset>
 
@@ -341,21 +419,46 @@
               <select bind:value={penaltyKind} aria-label="Penalty kind">
                 <option value="dq">Disqualify</option>
                 <option value="time">Time added</option>
+                <option value="points">Points deducted</option>
               </select>
             </label>
             {#if penaltyKind === 'time'}
               <label>Seconds <input type="number" step="0.1" bind:value={penaltySeconds} /></label>
+            {:else if penaltyKind === 'points'}
+              <label
+                >Points
+                <input
+                  type="number"
+                  step="1"
+                  min="0"
+                  bind:value={penaltyPoints}
+                  aria-label="Points to deduct"
+                />
+              </label>
+            {:else}
+              <label
+                >Reason (optional)
+                <input
+                  type="text"
+                  bind:value={dqReason}
+                  placeholder="e.g. cut the course"
+                  aria-label="DQ reason"
+                />
+              </label>
             {/if}
             <button type="button" onclick={doPenalty} disabled={!penaltyTarget || !heat}
               >Apply</button
             >
           </div>
+          {#if penaltyKind === 'points'}
+            <p class="muted hint">Points affect season / event standings, not this heat's laps.</p>
+          {/if}
           <div class="row">
             <label
               >Reverse a ruling
               <select bind:value={reverseTargetRef} aria-label="Reverse ruling">
                 <option value="" disabled>—</option>
-                {#each reversiblePenalties as p (p.at_ref)}
+                {#each reversibleRulings as p (p.at_ref)}
                   <option value={p.at_ref}>{p.summary}</option>
                 {/each}
               </select>
@@ -363,8 +466,61 @@
             <button
               type="button"
               onclick={doReverse}
-              disabled={reverseTargetRef === '' || reversiblePenalties.length === 0}
+              disabled={reverseTargetRef === '' || reversibleRulings.length === 0}
               >Reverse ruling</button
+            >
+          </div>
+        </fieldset>
+
+        <!-- Protest sub-panel: file → resolve (append-only fact pair) -->
+        <fieldset>
+          <legend>Protests</legend>
+          <div class="row">
+            <label
+              >Against
+              <select bind:value={protestTarget} aria-label="Protest competitor">
+                <option value="" disabled>—</option>
+                {#each competitors as c (c)}<option value={c}>{c}</option>{/each}
+              </select>
+            </label>
+            <label class="grow"
+              >Note
+              <input
+                type="text"
+                bind:value={protestNote}
+                placeholder="What is being protested"
+                aria-label="Protest note"
+              />
+            </label>
+            <button
+              type="button"
+              onclick={doFileProtest}
+              disabled={!protestTarget || protestNote.trim() === '' || !heat}>File protest</button
+            >
+          </div>
+          <div class="row">
+            <label
+              >Resolve
+              <select bind:value={resolveProtestRef} aria-label="Resolve protest">
+                <option value="" disabled>—</option>
+                {#each filedProtests as p (p.at_ref)}
+                  <option value={p.at_ref}>{p.summary}</option>
+                {/each}
+              </select>
+            </label>
+            <label
+              >Outcome
+              <select bind:value={protestOutcome} aria-label="Protest outcome">
+                <option value="Upheld">Upheld</option>
+                <option value="Denied">Denied</option>
+                <option value="Withdrawn">Withdrawn</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              onclick={doResolveProtest}
+              disabled={resolveProtestRef === '' || filedProtests.length === 0}
+              >Resolve protest</button
             >
           </div>
         </fieldset>
@@ -528,6 +684,15 @@
   }
   .row + .row {
     margin-top: var(--gf-space-3);
+  }
+  .grow {
+    flex: 1 1 12rem;
+  }
+  .grow input {
+    width: 100%;
+  }
+  .hint {
+    margin: var(--gf-space-2) 0 0;
   }
   legend {
     font-weight: var(--gf-font-weight-semibold);

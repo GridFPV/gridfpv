@@ -1868,7 +1868,7 @@ mod tests {
         events.push(Event::PenaltyApplied {
             heat: HeatId("q-1".into()),
             competitor: CompetitorRef("A".into()),
-            penalty: gridfpv_events::Penalty::Disqualify,
+            penalty: gridfpv_events::Penalty::Disqualify { reason: None },
         });
         let (registry, _state, _) = state_with(events);
         let (status, snap) = get_snapshot(

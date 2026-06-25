@@ -184,6 +184,9 @@ struct ScoredLap {
     at: SourceTime,
     /// Lap duration in microseconds (`at - previous_pass.at`).
     duration_micros: i64,
+    /// The append offset of this lap's **end pass** — its stable identity, and the offset a
+    /// [`Event::LapThrownOut`](gridfpv_events::Event::LapThrownOut) targets to exclude it.
+    end_ref: u64,
 }
 
 /// One competitor's ordered completed laps, derived from their lap-gate passes.
@@ -193,16 +196,22 @@ struct Run {
 }
 
 impl Run {
-    /// Build per-competitor runs from lap-gate passes: group by `(adapter,
-    /// competitor)`, order within a group, then each pass after the holeshot
-    /// completes a lap.
-    fn group(passes: &[Pass]) -> Vec<Run> {
+    /// Build per-competitor runs from `(offset, lap-gate pass)` pairs: group by `(adapter,
+    /// competitor)`, order within a group, then each pass after the holeshot completes a lap. Each
+    /// lap carries its **end pass offset** so a [`thrown-out`](Adjudications::is_thrown) lap can be
+    /// excluded by stable identity downstream.
+    ///
+    /// The offset is the pass's global append offset on the offset-aware paths
+    /// ([`score_with_global_offsets`] / [`apply_adjudications`]); the offset-free [`score`] entry
+    /// supplies synthetic positional offsets, which is harmless because throw-outs only arrive via
+    /// the offset-aware adjudicated paths.
+    fn group(passes: &[(u64, Pass)]) -> Vec<Run> {
         use std::collections::BTreeMap;
 
         // BTreeMap keeps competitors in deterministic key order regardless of
         // arrival order — the same total-order tie-break the projection uses.
-        let mut by_competitor: BTreeMap<CompetitorKey, Vec<&Pass>> = BTreeMap::new();
-        for pass in passes {
+        let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, &Pass)>> = BTreeMap::new();
+        for (offset, pass) in passes {
             if pass.gate.is_lap_gate() {
                 by_competitor
                     .entry(CompetitorKey {
@@ -210,7 +219,7 @@ impl Run {
                         competitor: pass.competitor.clone(),
                     })
                     .or_default()
-                    .push(pass);
+                    .push((*offset, pass));
             }
         }
 
@@ -219,16 +228,26 @@ impl Run {
             .map(|(competitor, mut group)| {
                 // Same ordering rule as `gridfpv_projection::lap_list`: sequenced
                 // passes first (ascending sequence), then unsequenced, `at` last.
-                group.sort_by_key(|p| (p.sequence.is_none(), p.sequence, p.at));
+                group.sort_by_key(|(_, p)| (p.sequence.is_none(), p.sequence, p.at));
                 let laps = group
                     .windows(2)
                     .map(|pair| ScoredLap {
-                        at: pair[1].at,
-                        duration_micros: pair[1].at.micros_since(pair[0].at),
+                        at: pair[1].1.at,
+                        duration_micros: pair[1].1.at.micros_since(pair[0].1.at),
+                        end_ref: pair[1].0,
                     })
                     .collect();
                 Run { competitor, laps }
             })
+            .collect()
+    }
+
+    /// This competitor's **counted** laps — those not thrown out — in order. The single place the
+    /// throw-out exclusion is applied, so every win condition counts the same set.
+    fn counted<'a>(&'a self, adj: &'a Adjudications) -> Vec<&'a ScoredLap> {
+        self.laps
+            .iter()
+            .filter(|lap| !adj.is_thrown(lap.end_ref))
             .collect()
     }
 }
@@ -269,7 +288,9 @@ pub fn race_end_reached(passes: &[Pass], condition: WinCondition, race_start: So
             }
             // A competitor reaches `n` laps after `n + 1` lap-gate crossings (the holeshot opens
             // the count). Reuse the scorer's grouping so the lap model matches the ranking exactly.
-            Run::group(passes)
+            // `race_end_reached` runs on the *live* pass stream (no adjudications yet), so positional
+            // offsets suffice — it only counts laps, never resolves a throw-out.
+            Run::group(&with_positional_offsets(passes))
                 .iter()
                 .any(|run| run.laps.len() as u32 >= n)
         }
@@ -289,7 +310,24 @@ pub fn race_end_reached(passes: &[Pass], condition: WinCondition, race_start: So
 /// a position. Called on a partial pass list this is the **provisional / live
 /// ranking** (see the module docs).
 pub fn score(passes: &[Pass], condition: WinCondition, race_start: SourceTime) -> HeatResult {
-    score_inner(passes, condition, race_start, &Adjudications::default())
+    score_inner(
+        &with_positional_offsets(passes),
+        condition,
+        race_start,
+        &Adjudications::default(),
+    )
+}
+
+/// Pair each pass with its **positional** index as a synthetic offset — the offset-free entry
+/// points' bridge to the offset-aware [`Run::group`]. Safe for the non-adjudicated paths because a
+/// throw-out (the only ruling that reads a lap's offset) only ever arrives through the
+/// offset-aware paths that thread the *true* global offsets.
+fn with_positional_offsets(passes: &[Pass]) -> Vec<(u64, Pass)> {
+    passes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i as u64, p.clone()))
+        .collect()
 }
 
 /// The adjudications a heat's [`Event::PenaltyApplied`] / [`Event::HeatVoided`] log
@@ -308,6 +346,11 @@ struct Adjudications {
     /// Competitors disqualified by a [`Penalty::Disqualify`] — ranked after everyone not
     /// disqualified and flagged [`Placement::disqualified`].
     disqualified: BTreeSet<CompetitorRef>,
+    /// Lap-gate pass **offsets** whose lap was [`thrown out`](Event::LapThrownOut): the lap
+    /// *ending* at one of these offsets is a real lap but is excluded from the scored count
+    /// (marshaling.html §3.3). A set, so the exclusion is a pure, order-independent membership
+    /// test (the throw-out determinism risk, marshaling-plan.html §4).
+    thrown_out: BTreeSet<u64>,
     /// Whether the whole heat was voided ([`Event::HeatVoided`]).
     voided: bool,
 }
@@ -329,18 +372,25 @@ impl Adjudications {
     /// Collect adjudications from `(global offset, event)` pairs.
     ///
     /// A [`Event::RulingReversed { target }`] is matched against the **global append offset** the
-    /// penalty was logged at — the same offset a [`LogRef`](gridfpv_events::LogRef) command carries
+    /// ruling was logged at — the same offset a [`LogRef`](gridfpv_events::LogRef) command carries
     /// and the audit/lap projections expose (#55). The caller MUST feed the true global offsets (not
-    /// a re-enumerated window), or a reversal targets the wrong penalty: the result snapshot threads
+    /// a re-enumerated window), or a reversal targets the wrong ruling: the result snapshot threads
     /// the heat window's preserved global offsets exactly for this reason.
+    ///
+    /// **Generalized reversal (Slice 6):** a reversal un-applies *any* targeted ruling — a
+    /// [`PenaltyApplied`](Event::PenaltyApplied) (DQ / time; points are standings-only and folded
+    /// elsewhere), a [`LapThrownOut`](Event::LapThrownOut), or a [`HeatVoided`](Event::HeatVoided) —
+    /// keyed purely on the target's offset, so the throw-out / void / penalty all undo through the
+    /// one structural mechanism.
     fn collect<'a, I>(events: I) -> Self
     where
         I: IntoIterator<Item = (u64, &'a Event)>,
     {
         // Materialize once so we can scan reversals first, then apply (order-independent).
         let events: Vec<(u64, &Event)> = events.into_iter().collect();
-        // First, the offsets every `RulingReversed` targets — a penalty at one of these is
-        // un-applied. Scoped to penalty reversal this slice (marshaling.html §3.1).
+        // First, the offsets every `RulingReversed` targets — a ruling at one of these is
+        // un-applied. Gathered first so a reversal applies whether it precedes or follows its
+        // target in the slice, keeping the fold order-independent.
         let reversed: BTreeSet<u64> = events
             .iter()
             .filter_map(|(_, e)| match e {
@@ -351,7 +401,7 @@ impl Adjudications {
 
         let mut adj = Adjudications::default();
         for (offset, event) in events {
-            // A penalty whose own append offset was reversed is dropped from the result.
+            // A ruling whose own append offset was reversed is dropped from the result.
             if reversed.contains(&offset) {
                 continue;
             }
@@ -361,13 +411,22 @@ impl Adjudications {
                     penalty,
                     ..
                 } => match penalty {
-                    Penalty::Disqualify => {
+                    Penalty::Disqualify { .. } => {
                         adj.disqualified.insert(competitor.clone());
                     }
                     Penalty::TimeAdded { micros } => {
                         *adj.time_added.entry(competitor.clone()).or_default() += *micros;
                     }
+                    // Points penalties are **standings-only** (marshaling.html §3.3): they never
+                    // touch the per-heat lap result, so the heat scorer ignores them here. The
+                    // standings projection (`class_standings`) folds them instead.
+                    Penalty::PointsDeducted { .. } | Penalty::PointsAdded { .. } => {}
                 },
+                // A thrown-out lap: record its end-pass offset; the per-condition scorers exclude
+                // the lap ending there from the counted set (order-independent set membership).
+                Event::LapThrownOut { target } => {
+                    adj.thrown_out.insert(target.0);
+                }
                 Event::HeatVoided { .. } => adj.voided = true,
                 _ => {}
             }
@@ -384,6 +443,12 @@ impl Adjudications {
     fn is_dq(&self, competitor: &CompetitorRef) -> bool {
         self.disqualified.contains(competitor)
     }
+
+    /// Whether the lap whose **end pass** is at append offset `end_ref` was thrown out — excluded
+    /// from the scored count (a pure, order-independent membership test).
+    fn is_thrown(&self, end_ref: u64) -> bool {
+        self.thrown_out.contains(&end_ref)
+    }
 }
 
 /// Score `passes` under `condition`, then apply `adj`'s adjudications: [`Penalty::TimeAdded`]
@@ -391,7 +456,7 @@ impl Adjudications {
 /// competitor below every non-disqualified one (flagging [`Placement::disqualified`]), and
 /// [`Event::HeatVoided`] flags the whole [`HeatResult`] voided.
 fn score_inner(
-    passes: &[Pass],
+    passes: &[(u64, Pass)],
     condition: WinCondition,
     race_start: SourceTime,
     adj: &Adjudications,
@@ -447,10 +512,12 @@ where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
     let events: Vec<(u64, &Event)> = events.into_iter().collect();
-    let passes: Vec<Pass> = events
+    // Keep each lap-gate pass paired with its **global** offset, so a `LapThrownOut` targeting that
+    // pass's offset excludes the right lap (the throw-out's target is the lap's end-pass offset).
+    let passes: Vec<(u64, Pass)> = events
         .iter()
-        .filter_map(|(_, e)| match e {
-            Event::Pass(p) if p.gate.is_lap_gate() => Some(p.clone()),
+        .filter_map(|(o, e)| match e {
+            Event::Pass(p) if p.gate.is_lap_gate() => Some((*o, p.clone())),
             _ => None,
         })
         .collect();
@@ -469,13 +536,15 @@ where
 /// adjudications from the same log and apply them — penalties and heat-void compose with
 /// marshaling without either fold knowing about the other.
 pub(crate) fn apply_adjudications(
-    passes: &[Pass],
+    passes: &[(u64, Pass)],
     condition: WinCondition,
     race_start: SourceTime,
     events: &[Event],
 ) -> HeatResult {
     // Positional offsets — `score_marshaled` passes the full heat log, so slice index == global
-    // append offset (the same convention `corrected_passes` uses for the marshaling fold).
+    // append offset (the same convention `corrected_passes` uses for the marshaling fold). The
+    // `passes` carry each corrected pass's addressable offset (its `end_ref`), so a `LapThrownOut`
+    // targeting that offset excludes the matching lap from the count.
     score_inner(
         passes,
         condition,
@@ -577,10 +646,11 @@ fn score_timed(
         .into_iter()
         .map(|run| {
             // HARD cutoff: strictly-before. A lap completing exactly at the cutoff
-            // (or after) does not count — no finishing the in-progress lap.
+            // (or after) does not count — no finishing the in-progress lap. Thrown-out laps are
+            // already excluded by `counted` before the cutoff filter.
             let counted: Vec<&ScoredLap> = run
-                .laps
-                .iter()
+                .counted(adj)
+                .into_iter()
                 .filter(|lap| lap.at.micros < cutoff)
                 .collect();
             let count = counted.len() as u32;
@@ -611,14 +681,17 @@ fn score_first_to_laps(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatResul
     let rows = runs
         .into_iter()
         .map(|run| {
-            let count = run.laps.len() as u32;
+            // Score the **counted** laps (thrown-out laps excluded) — so a throw-out can drop a
+            // reacher below `n`, exactly as if the lap had not been flown for scoring purposes.
+            let laps = run.counted(adj);
+            let count = laps.len() as u32;
             // `n` laps means the n-th completed lap (1-based) — index n-1.
             let reached_at = if n >= 1 && count >= n {
-                Some(run.laps[(n - 1) as usize].at)
+                Some(laps[(n - 1) as usize].at)
             } else {
                 None
             };
-            let last_at = run.laps.last().map(|lap| lap.at);
+            let last_at = laps.last().map(|lap| lap.at);
             let added = adj.added(&run.competitor.competitor);
             // Reachers (group 0) sort ahead of non-reachers (group 1). Within
             // reachers, earlier (penalty-worsened) reach-time wins. Within non-reachers,
@@ -649,10 +722,11 @@ fn score_best_lap(runs: Vec<Run>, adj: &Adjudications) -> HeatResult {
     let rows = runs
         .into_iter()
         .map(|run| {
-            let count = run.laps.len() as u32;
+            // A thrown-out lap is not eligible to be a competitor's best lap.
+            let laps = run.counted(adj);
+            let count = laps.len() as u32;
             // Fastest lap = smallest duration; tie-break on the earlier-set one.
-            let best = run
-                .laps
+            let best = laps
                 .iter()
                 .min_by(|a, b| {
                     a.duration_micros
@@ -693,11 +767,13 @@ fn score_best_consecutive(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatRe
     let rows = runs
         .into_iter()
         .map(|run| {
-            let count = run.laps.len() as u32;
+            // Consecutive windows are over the **counted** laps — a thrown-out lap breaks the run
+            // of consecutiveness (it is excluded, not skipped-over), matching the lap-count model.
+            let laps = run.counted(adj);
+            let count = laps.len() as u32;
             // Slide an `n`-wide window over the laps; pick the smallest sum, tie-
             // broken by the earlier window-end (last lap's completion time).
-            let best = run
-                .laps
+            let best = laps
                 .windows(n)
                 .map(|w| {
                     let sum: i64 = w.iter().map(|lap| lap.duration_micros).sum();
@@ -727,7 +803,7 @@ fn score_best_consecutive(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex, HeatId};
+    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex, HeatId, LogRef};
 
     const ADAPTER: &str = "vd";
 
@@ -1204,7 +1280,7 @@ mod tests {
         let mut events = pass_events("A", &[0, 5_000_000, 10_000_000, 15_000_000]);
         events.extend(pass_events("B", &[0, 6_000_000, 13_000_000]));
         events.extend(pass_events("C", &[0, 7_000_000]));
-        events.push(penalty("A", Penalty::Disqualify));
+        events.push(penalty("A", Penalty::Disqualify { reason: None }));
 
         let r = score_events(
             &events,
@@ -1232,8 +1308,8 @@ mod tests {
         let mut events = pass_events("A", &[0, 5_000_000, 10_000_000, 15_000_000]);
         events.extend(pass_events("B", &[0, 6_000_000, 13_000_000]));
         events.extend(pass_events("C", &[0, 7_000_000]));
-        events.push(penalty("A", Penalty::Disqualify));
-        events.push(penalty("B", Penalty::Disqualify));
+        events.push(penalty("A", Penalty::Disqualify { reason: None }));
+        events.push(penalty("B", Penalty::Disqualify { reason: None }));
 
         let r = score_events(
             &events,
@@ -1345,7 +1421,7 @@ mod tests {
         events.push(Event::Pass(pass("A", 6_000_000, 2))); // offset 2
         events.extend(pass_events("B", &[0, 4_000_000, 8_000_000])); // B: 2 laps
         events.push(Event::DetectionVoided { target: LogRef(1) });
-        events.push(penalty("B", Penalty::Disqualify));
+        events.push(penalty("B", Penalty::Disqualify { reason: None }));
 
         let r = score_marshaled(
             &events,
@@ -1374,7 +1450,7 @@ mod tests {
         let mut events = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]); // offsets 0..3
         events.extend(pass_events("B", &[0, 5_000_000, 10_000_000])); // offsets 4..6
         let dq_offset = events.len() as u64; // offset 7
-        events.push(penalty("A", Penalty::Disqualify)); // offset 7
+        events.push(penalty("A", Penalty::Disqualify { reason: None })); // offset 7
         events.push(Event::RulingReversed {
             target: LogRef(dq_offset),
         }); // offset 8 — reverse the DQ
@@ -1402,7 +1478,7 @@ mod tests {
 
         let mut events = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]); // window idx 0..3
         events.extend(pass_events("B", &[0, 5_000_000, 10_000_000])); // window idx 4..6
-        events.push(penalty("A", Penalty::Disqualify)); // window idx 7 → GLOBAL 107
+        events.push(penalty("A", Penalty::Disqualify { reason: None })); // window idx 7 → GLOBAL 107
         events.push(Event::RulingReversed {
             target: LogRef(107), // the DQ's GLOBAL offset, NOT window index 7
         });
@@ -1422,7 +1498,7 @@ mod tests {
         // Sanity: targeting the *window-relative* offset (7) would NOT reverse the global-107 DQ.
         let mut wrong = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]);
         wrong.extend(pass_events("B", &[0, 5_000_000, 10_000_000]));
-        wrong.push(penalty("A", Penalty::Disqualify));
+        wrong.push(penalty("A", Penalty::Disqualify { reason: None }));
         wrong.push(Event::RulingReversed { target: LogRef(7) }); // wrong: a window index
         let r2 = score_with_global_offsets(
             wrong.iter().enumerate().map(|(i, e)| (100 + i as u64, e)),
@@ -1472,7 +1548,7 @@ mod tests {
 
         // Reversal at offset 0, the penalty it targets at offset 1 — reversal comes first.
         let mut events: Vec<Event> = vec![Event::RulingReversed { target: LogRef(1) }];
-        events.push(penalty("A", Penalty::Disqualify)); // offset 1 — reversed by offset 0
+        events.push(penalty("A", Penalty::Disqualify { reason: None })); // offset 1 — reversed by offset 0
         events.extend(pass_events("A", &[0, 3_000_000, 6_000_000])); // A: 2 laps
         events.extend(pass_events("B", &[0, 5_000_000])); // B: 1 lap
 
@@ -1485,5 +1561,147 @@ mod tests {
         // The DQ was un-applied despite the reversal preceding it: A leads, not flagged.
         assert_eq!(place(&first, "A").position, 1);
         assert!(!place(&first, "A").disqualified);
+    }
+
+    // --- LapThrownOut (Slice 6): exclude a valid lap from the scored count -----------------------
+
+    #[test]
+    fn lap_thrown_out_excludes_a_valid_lap_from_the_count() {
+        // A flies 3 laps (4 passes at offsets 0..3); throw out A's 2nd lap (the lap ENDING at the
+        // pass at offset 2). A's counted laps drop 3 → 2, but the lap stays a real lap on track.
+        let mut events = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]); // offsets 0..3
+        events.push(Event::LapThrownOut { target: LogRef(2) }); // throw out lap ending at offset 2
+
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        let r = score_events(&events, cond, start());
+        assert_eq!(
+            place(&r, "A").laps,
+            2,
+            "the thrown-out lap is excluded from the counted set"
+        );
+    }
+
+    #[test]
+    fn lap_thrown_out_recompute_is_order_independent() {
+        // Determinism risk (marshaling-plan §4): the thrown-out set is a pure membership test, so
+        // the order the throw-out appears in the log cannot change the result. Fold the same facts
+        // in two different orders and assert identical scores.
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+
+        // Order 1: passes then the throw-out.
+        let mut a = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]);
+        a.push(Event::LapThrownOut { target: LogRef(2) });
+        let ra = score_events(&a, cond, start());
+
+        // Order 2: the throw-out FIRST (offset 0), then the passes (offsets 1..4). The target must
+        // move to the new end-pass offset (4) — the throw-out is keyed on the lap's end-pass offset.
+        let mut b: Vec<Event> = vec![Event::LapThrownOut { target: LogRef(4) }];
+        b.extend(pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000])); // offsets 1..4
+        let rb = score_events(&b, cond, start());
+
+        assert_eq!(place(&ra, "A").laps, 2);
+        assert_eq!(place(&rb, "A").laps, 2);
+        // Folding either twice is identical (no clock/RNG); the scorer stays pure.
+        assert_eq!(score_events(&a, cond, start()), ra);
+        assert_eq!(score_events(&b, cond, start()), rb);
+    }
+
+    #[test]
+    fn lap_thrown_out_reorders_a_first_to_laps_result() {
+        // First-to-3: A reaches lap 3 at 9.0s, B at 10.0s → A wins. Throw out A's lap-2 (ending at
+        // offset 2): A now has only 2 *counted* laps and never reaches 3, so B (who reached 3) wins.
+        let mut events = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]); // offsets 0..3
+        events.extend(pass_events("B", &[0, 4_000_000, 7_000_000, 10_000_000])); // offsets 4..7
+        events.push(Event::LapThrownOut { target: LogRef(2) }); // throw out A's lap ending at offset 2
+
+        let r = score_events(&events, WinCondition::FirstToLaps { n: 3 }, start());
+        assert_eq!(
+            place(&r, "B").position,
+            1,
+            "B reached 3 counted laps; A did not"
+        );
+        assert_eq!(place(&r, "A").position, 2);
+        assert_eq!(place(&r, "A").laps, 2);
+    }
+
+    #[test]
+    fn lap_thrown_out_is_reversible() {
+        // Generalized reversal (Slice 6): reversing the `LapThrownOut` restores the excluded lap.
+        let mut events = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]); // offsets 0..3
+        let throw_offset = events.len() as u64; // offset 4
+        events.push(Event::LapThrownOut { target: LogRef(2) }); // offset 4
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        assert_eq!(place(&score_events(&events, cond, start()), "A").laps, 2);
+
+        events.push(Event::RulingReversed {
+            target: LogRef(throw_offset),
+        }); // reverse the throw-out
+        assert_eq!(
+            place(&score_events(&events, cond, start()), "A").laps,
+            3,
+            "reversing the throw-out restores the lap"
+        );
+    }
+
+    #[test]
+    fn dq_time_and_throwout_stack_predictably() {
+        // All three per-heat adjudications compose on one log, deterministically. Timed window.
+        // A: 3 laps, throw out one → 2 counted. B: 3 laps, +big time penalty (worsens tie-break).
+        // C: 3 laps clean. D: 3 laps but DQ'd. Expected order: C (clean 3), A (2 counted),
+        //   B (3 but penalty-worsened tie-break still beats A's lower count), then D (DQ) last.
+        // Concretely we assert the DQ sinks D last, the throw-out drops A's count, and the result
+        // is identical across two runs (purity).
+        let mut events = pass_events("A", &[0, 5_000_000, 10_000_000, 15_000_000]); // 0..3, 3 laps
+        events.extend(pass_events("B", &[0, 5_000_000, 10_000_000, 15_000_000])); // 4..7, 3 laps
+        events.extend(pass_events("C", &[0, 5_000_000, 10_000_000, 15_000_000])); // 8..11, 3 laps
+        events.extend(pass_events("D", &[0, 5_000_000, 10_000_000, 15_000_000])); // 12..15, 3 laps
+        events.push(Event::LapThrownOut { target: LogRef(3) }); // throw A's last lap → A: 2 counted
+        events.push(penalty("B", Penalty::TimeAdded { micros: 50_000_000 })); // worsen B's tie-break
+        events.push(penalty("D", Penalty::Disqualify { reason: None })); // DQ D
+
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        let r = score_events(&events, cond, start());
+        assert_eq!(place(&r, "A").laps, 2, "A lost a lap to the throw-out");
+        assert_eq!(place(&r, "C").laps, 3);
+        assert!(place(&r, "D").disqualified, "D is DQ'd");
+        // The DQ sinks D below everyone non-DQ'd.
+        let d_pos = place(&r, "D").position;
+        for p in &r.places {
+            if !p.disqualified {
+                assert!(p.position < d_pos);
+            }
+        }
+        // C (clean 3 laps) leads.
+        assert_eq!(place(&r, "C").position, 1);
+        // Deterministic on replay.
+        assert_eq!(score_events(&events, cond, start()), r);
+    }
+
+    #[test]
+    fn points_penalties_do_not_touch_the_heat_result() {
+        // PointsDeducted / PointsAdded are standings-only (folded by `class_standings`): the per-heat
+        // scorer must ignore them, so a heat result with a points penalty equals the clean result.
+        let mut with_points = pass_events("A", &[0, 3_000_000, 6_000_000]);
+        with_points.extend(pass_events("B", &[0, 4_000_000]));
+        let clean = with_points.clone();
+        with_points.push(penalty("A", Penalty::PointsDeducted { points: 10 }));
+        with_points.push(penalty("B", Penalty::PointsAdded { points: 5 }));
+
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        assert_eq!(
+            score_events(&with_points, cond, start()),
+            score_events(&clean, cond, start()),
+            "points penalties leave the per-heat result unchanged"
+        );
     }
 }

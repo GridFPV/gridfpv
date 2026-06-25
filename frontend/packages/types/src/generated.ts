@@ -87,6 +87,7 @@ export type * from '@bindings/PilotProgress';
 export type * from '@bindings/Placement';
 export type * from '@bindings/ProjectionBody';
 export type * from '@bindings/ProjectionKind';
+export type * from '@bindings/ProtestOutcome';
 export type * from '@bindings/ProtestWindow';
 export type * from '@bindings/ProtocolError';
 export type * from '@bindings/RankEntry';

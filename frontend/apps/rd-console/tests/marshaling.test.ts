@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest';
 import {
   adjustLapCommand,
   applyPenaltyCommand,
+  deductPointsCommand,
+  disqualifyPenalty,
   DISQUALIFY,
+  fileProtestCommand,
   insertLapCommand,
+  pointsDeductedPenalty,
+  resolveProtestCommand,
   reverseRulingCommand,
   secondsToSourceTime,
   splitLapCommand,
+  throwOutLapCommand,
   timeAddedPenalty,
   voidDetectionCommand,
   voidHeatCommand
@@ -49,9 +55,41 @@ describe('marshaling command builders', () => {
     });
   });
 
-  it('applyPenaltyCommand carries a Disqualify penalty', () => {
+  it('applyPenaltyCommand carries a reason-less Disqualify penalty', () => {
     expect(applyPenaltyCommand('heat-1', 'BOB', DISQUALIFY)).toEqual({
-      ApplyPenalty: { heat: 'heat-1', competitor: 'BOB', penalty: 'Disqualify' }
+      ApplyPenalty: { heat: 'heat-1', competitor: 'BOB', penalty: { Disqualify: {} } }
+    });
+  });
+
+  it('disqualifyPenalty carries an optional reason', () => {
+    expect(disqualifyPenalty()).toEqual({ Disqualify: {} });
+    expect(disqualifyPenalty('  cut the course ')).toEqual({
+      Disqualify: { reason: 'cut the course' }
+    });
+  });
+
+  it('pointsDeductedPenalty builds a standings points penalty', () => {
+    expect(pointsDeductedPenalty(5)).toEqual({ PointsDeducted: { points: 5 } });
+    // Clamps to a non-negative integer.
+    expect(pointsDeductedPenalty(-2.6)).toEqual({ PointsDeducted: { points: 0 } });
+  });
+
+  it('deductPointsCommand is sugar over a points penalty', () => {
+    expect(deductPointsCommand('heat-1', 'BOB', 3)).toEqual({
+      DeductPoints: { heat: 'heat-1', competitor: 'BOB', points: 3 }
+    });
+  });
+
+  it('throwOutLapCommand targets the lap end-pass offset', () => {
+    expect(throwOutLapCommand(11)).toEqual({ ThrowOutLap: { target: 11 } });
+  });
+
+  it('fileProtestCommand and resolveProtestCommand build the protest pair', () => {
+    expect(fileProtestCommand('heat-1', 'BOB', 'contact')).toEqual({
+      FileProtest: { heat: 'heat-1', competitor: 'BOB', note: 'contact' }
+    });
+    expect(resolveProtestCommand(12, 'Upheld')).toEqual({
+      ResolveProtest: { target: 12, outcome: 'Upheld' }
     });
   });
 

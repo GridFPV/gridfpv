@@ -22,7 +22,7 @@
 //! > control endpoints (#45) and the doc-reconciliation pass.
 
 use gridfpv_events::{
-    AdapterId, ClassId, CompetitorRef, HeatId, LogRef, Penalty, RoundId, SourceTime,
+    AdapterId, ClassId, CompetitorRef, HeatId, LogRef, Penalty, ProtestOutcome, RoundId, SourceTime,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -217,7 +217,10 @@ pub enum Command {
         /// The heat to void.
         heat: HeatId,
     },
-    /// Apply a penalty to a competitor in a heat (`Event::PenaltyApplied`).
+    /// Apply a penalty to a competitor in a heat (`Event::PenaltyApplied`). Covers the full
+    /// penalty set: a (reversible) DQ with an optional reason, added time, and the standings-only
+    /// points adjustments (`PointsDeducted` / `PointsAdded`). `DeductPoints` is sugar over this for
+    /// the points case; either path appends the same `PenaltyApplied`.
     ApplyPenalty {
         /// The heat the penalty applies in.
         heat: HeatId,
@@ -226,12 +229,53 @@ pub enum Command {
         /// The penalty applied.
         penalty: Penalty,
     },
-    /// **Reverse a prior ruling** (`Event::RulingReversed`), referenced by its log offset —
-    /// for this slice a [`PenaltyApplied`](gridfpv_events::Event::PenaltyApplied) (a DQ or a
-    /// time penalty) the RD is undoing. A distinct command from `VoidDetection` so the audit
-    /// reads "DQ reversed". (A DQ itself is still applied via `ApplyPenalty { Disqualify }`.)
+    /// **Deduct standings points** from a competitor in a heat (marshaling Slice 6) — sugar over
+    /// [`ApplyPenalty`](Command::ApplyPenalty) with a
+    /// [`Penalty::PointsDeducted`](gridfpv_events::Penalty::PointsDeducted), so the console can offer
+    /// a dedicated points control. Points affect the **season / event standings**, not the per-heat
+    /// lap result.
+    DeductPoints {
+        /// The heat the deduction is recorded against.
+        heat: HeatId,
+        /// The competitor losing points.
+        competitor: CompetitorRef,
+        /// How many standings points to deduct.
+        points: u32,
+    },
+    /// **Throw out a single valid lap** from a competitor's scored count (`Event::LapThrownOut`),
+    /// referenced by the lap's **end-pass** log offset. The lap stays real in the lap list/audit;
+    /// it is only excluded from scoring. Distinct from `VoidDetection` (which removes the pass).
+    ThrowOutLap {
+        /// The log offset of the pass that *ends* the lap to throw out.
+        target: LogRef,
+    },
+    /// **File a protest** against a heat result (`Event::ProtestFiled`) — the append-only filing
+    /// half of the protest pair (resolved later by `ResolveProtest`). No actor (no-login; filed at
+    /// the RD console on a pilot's behalf).
+    FileProtest {
+        /// The heat the protest concerns.
+        heat: HeatId,
+        /// The competitor the protest is about.
+        competitor: CompetitorRef,
+        /// A free-text note describing the protest.
+        note: String,
+    },
+    /// **Resolve a filed protest** (`Event::ProtestResolved`), referenced by the
+    /// `ProtestFiled`'s log offset, recording the `outcome`.
+    ResolveProtest {
+        /// The log offset of the `ProtestFiled` this resolves.
+        target: LogRef,
+        /// How the protest was resolved.
+        outcome: ProtestOutcome,
+    },
+    /// **Reverse a prior ruling** (`Event::RulingReversed`), referenced by its log offset.
+    /// Generalized (Slice 6) to undo **any** ruling — a [`PenaltyApplied`](gridfpv_events::Event::PenaltyApplied)
+    /// (DQ / time / points), a [`LapThrownOut`](gridfpv_events::Event::LapThrownOut), a
+    /// [`ProtestResolved`](gridfpv_events::Event::ProtestResolved), or a
+    /// [`HeatVoided`](gridfpv_events::Event::HeatVoided). A distinct command from `VoidDetection` so
+    /// the audit reads "DQ reversed" / "throw-out reversed".
     ReverseRuling {
-        /// The log offset of the ruling (a `PenaltyApplied`) to reverse.
+        /// The log offset of the ruling to reverse.
         target: LogRef,
     },
 }
@@ -390,6 +434,28 @@ mod tests {
                 heat: HeatId("main-a".into()),
                 competitor: CompetitorRef("A".into()),
                 penalty: Penalty::TimeAdded { micros: 2_000_000 },
+            },
+            Command::ApplyPenalty {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("A".into()),
+                penalty: Penalty::Disqualify {
+                    reason: Some("unsafe".into()),
+                },
+            },
+            Command::DeductPoints {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("A".into()),
+                points: 5,
+            },
+            Command::ThrowOutLap { target: LogRef(46) },
+            Command::FileProtest {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("B".into()),
+                note: "contact on lap 2".into(),
+            },
+            Command::ResolveProtest {
+                target: LogRef(47),
+                outcome: ProtestOutcome::Denied,
             },
             Command::ReverseRuling { target: LogRef(45) },
         ];

@@ -24,7 +24,11 @@
 //! | [`Command::SplitLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) (the lap's ending pass) | [`Event::LapSplit`] |
 //! | [`Command::VoidHeat`] | the heat exists in the log | [`Event::HeatVoided`] |
 //! | [`Command::ApplyPenalty`] | the heat exists in the log | [`Event::PenaltyApplied`] |
-//! | [`Command::ReverseRuling`] | the `target` offset exists and is a [`Event::PenaltyApplied`] | [`Event::RulingReversed`] |
+//! | [`Command::DeductPoints`] | the heat exists in the log | [`Event::PenaltyApplied`] (`PointsDeducted`) |
+//! | [`Command::ThrowOutLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::LapThrownOut`] |
+//! | [`Command::FileProtest`] | the heat exists in the log | [`Event::ProtestFiled`] |
+//! | [`Command::ResolveProtest`] | the `target` offset exists and is a [`Event::ProtestFiled`] | [`Event::ProtestResolved`] |
+//! | [`Command::ReverseRuling`] | the `target` offset exists and is a reversible ruling (penalty / throw-out / protest resolution / heat-void) | [`Event::RulingReversed`] |
 //!
 //! ## Legality lives in the engine (reused, not re-implemented)
 //!
@@ -590,9 +594,50 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
                 penalty,
             })
         }
+        // Sugar over `ApplyPenalty` with a points-deduction penalty (standings-only, Slice 6).
+        Command::DeductPoints {
+            heat,
+            competitor,
+            points,
+        } => {
+            require_scheduled_heat(state, &heat)?;
+            Ok(Event::PenaltyApplied {
+                heat,
+                competitor,
+                penalty: gridfpv_events::Penalty::PointsDeducted { points },
+            })
+        }
+        // Throw out a valid lap: the target is the lap's end pass. Unlike `VoidDetection`, an
+        // *inserted* or *split* lap is also throw-out-able (its `end_ref` addresses the synthetic
+        // pass the projection emits from the `LapInserted`/`LapSplit` event), so validate against
+        // any lap-end-producing event, not only a raw `Pass`.
+        Command::ThrowOutLap { target } => {
+            require_lap_end_target(state, target)?;
+            Ok(Event::LapThrownOut { target })
+        }
+        // File a protest against a heat result — the append-only filing fact.
+        Command::FileProtest {
+            heat,
+            competitor,
+            note,
+        } => {
+            require_scheduled_heat(state, &heat)?;
+            Ok(Event::ProtestFiled {
+                heat,
+                competitor,
+                note,
+            })
+        }
+        // Resolve a filed protest — the target must be a real `ProtestFiled`.
+        Command::ResolveProtest { target, outcome } => {
+            require_protest_target(state, target)?;
+            Ok(Event::ProtestResolved { target, outcome })
+        }
         Command::ReverseRuling { target } => {
-            // The reversal targets a prior ruling — for this slice a `PenaltyApplied`.
-            require_penalty_target(state, target)?;
+            // Generalized reversal (Slice 6): the target must be a real *ruling* — a penalty, a
+            // throw-out, a protest resolution, or a heat-void. Validated so an out-of-range or
+            // non-ruling offset is a typed BadRequest (nothing appended).
+            require_ruling_target(state, target)?;
             Ok(Event::RulingReversed { target })
         }
     }
@@ -673,6 +718,30 @@ fn require_scheduled_heat(state: &AppState, heat: &HeatId) -> Result<(), Protoco
     }
 }
 
+/// Require that `target` names a real lap **end** in the log — a raw [`Pass`](gridfpv_events::Pass)
+/// *or* a marshaling event that synthesises a lap-gate pass ([`Event::LapInserted`] /
+/// [`Event::LapSplit`]), since those are addressable lap ends in the corrected lap list
+/// (`corrected_passes`) and so are legitimately throw-out-able. The cheap target check for
+/// [`Command::ThrowOutLap`](crate::control::Command::ThrowOutLap). An out-of-range or non-lap-end
+/// offset is [`ErrorCode::BadRequest`]; nothing is appended.
+fn require_lap_end_target(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    match events.get(target.0 as usize) {
+        Some(Event::Pass(_) | Event::LapInserted { .. } | Event::LapSplit { .. }) => Ok(()),
+        Some(_) => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "log offset {} is not a lap end (a pass, inserted, or split lap)",
+                target.0
+            ),
+        )),
+        None => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!("log offset {} is out of range", target.0),
+        )),
+    }
+}
+
 /// Require that `target` names a real [`Pass`](gridfpv_events::Pass) in the log — the cheap
 /// target check for the offset-addressed marshaling commands (`VoidDetection`,
 /// `AdjustLap`). An out-of-range or non-pass offset is [`ErrorCode::BadRequest`]; nothing
@@ -692,20 +761,45 @@ fn require_pass_target(state: &AppState, target: LogRef) -> Result<(), ProtocolE
     }
 }
 
-/// Require that `target` names a real [`Event::PenaltyApplied`] in the log — the cheap target
-/// check for [`Command::ReverseRuling`](crate::control::Command::ReverseRuling). A reversal is
-/// scoped to penalties this slice (marshaling.html §3.1), so an out-of-range or non-penalty
-/// offset is [`ErrorCode::BadRequest`]; nothing is appended.
-fn require_penalty_target(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+/// Require that `target` names a **reversible ruling** in the log — the cheap target check for the
+/// generalized [`Command::ReverseRuling`](crate::control::Command::ReverseRuling) (marshaling Slice
+/// 6). A ruling is a [`PenaltyApplied`](Event::PenaltyApplied) (DQ / time / points), a
+/// [`LapThrownOut`](Event::LapThrownOut), a [`ProtestResolved`](Event::ProtestResolved), or a
+/// [`HeatVoided`](Event::HeatVoided). An out-of-range or non-ruling offset is
+/// [`ErrorCode::BadRequest`]; nothing is appended.
+fn require_ruling_target(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
     let (events, _cursor) = state.read()?;
     match events.get(target.0 as usize) {
-        Some(Event::PenaltyApplied { .. }) => Ok(()),
+        Some(
+            Event::PenaltyApplied { .. }
+            | Event::LapThrownOut { .. }
+            | Event::ProtestResolved { .. }
+            | Event::HeatVoided { .. },
+        ) => Ok(()),
         Some(_) => Err(ProtocolError::new(
             ErrorCode::BadRequest,
             format!(
-                "log offset {} is not a reversible ruling (a penalty)",
+                "log offset {} is not a reversible ruling (penalty, throw-out, protest resolution, or heat-void)",
                 target.0
             ),
+        )),
+        None => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!("log offset {} is out of range", target.0),
+        )),
+    }
+}
+
+/// Require that `target` names a real [`Event::ProtestFiled`] in the log — the cheap target check
+/// for [`Command::ResolveProtest`](crate::control::Command::ResolveProtest). An out-of-range or
+/// non-protest offset is [`ErrorCode::BadRequest`]; nothing is appended.
+fn require_protest_target(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    match events.get(target.0 as usize) {
+        Some(Event::ProtestFiled { .. }) => Ok(()),
+        Some(_) => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!("log offset {} is not a filed protest", target.0),
         )),
         None => Err(ProtocolError::new(
             ErrorCode::BadRequest,
@@ -1144,7 +1238,7 @@ mod tests {
             Command::ApplyPenalty {
                 heat: heat(),
                 competitor: CompetitorRef("A".into()),
-                penalty,
+                penalty: penalty.clone(),
             },
         );
         assert!(ack.ok, "got {ack:?}");
@@ -1264,7 +1358,7 @@ mod tests {
             Command::ApplyPenalty {
                 heat: heat(),
                 competitor: CompetitorRef("A".into()),
-                penalty: Penalty::Disqualify,
+                penalty: Penalty::Disqualify { reason: None },
             },
         );
         assert!(ack.ok, "got {ack:?}");
@@ -1294,6 +1388,185 @@ mod tests {
         assert!(!ack.ok);
         let (after, _) = state.read().unwrap();
         assert_eq!(before.len(), after.len());
+    }
+
+    // --- Slice 6 adjudication commands ---------------------------------------------------------
+
+    /// `DeductPoints` appends a `PenaltyApplied { PointsDeducted }` for the competitor.
+    #[test]
+    fn deduct_points_appends_a_points_penalty() {
+        let state = scheduled_state();
+        let ack = apply_command(
+            &state,
+            Command::DeductPoints {
+                heat: heat(),
+                competitor: CompetitorRef("A".into()),
+                points: 5,
+            },
+        );
+        assert!(ack.ok, "got {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::PenaltyApplied { competitor, penalty: Penalty::PointsDeducted { points }, .. }
+                if *competitor == CompetitorRef("A".into()) && *points == 5
+        )));
+    }
+
+    /// `ThrowOutLap` validates the target is a real pass, then appends `LapThrownOut`. A non-pass
+    /// or out-of-range target is rejected and appends nothing.
+    #[test]
+    fn throw_out_lap_validates_pass_target_and_appends() {
+        let mut log = InMemoryLog::default();
+        EventLog::append(&mut log, pass("A", 1_000_000, 1), None).unwrap(); // offset 0: a pass
+        EventLog::append(
+            &mut log,
+            Event::HeatScheduled {
+                heat: heat(),
+                lineup: vec![],
+                class: None,
+                round: None,
+                frequencies: vec![],
+            },
+            None,
+        )
+        .unwrap(); // offset 1: not a pass
+        let state = AppState::new(log);
+
+        let ack = apply_command(&state, Command::ThrowOutLap { target: LogRef(0) });
+        assert!(ack.ok, "got {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::LapThrownOut { target } if *target == LogRef(0)))
+        );
+
+        // A non-pass target (the HeatScheduled at offset 1) is rejected, nothing appended.
+        let (before, _) = state.read().unwrap();
+        let ack = apply_command(&state, Command::ThrowOutLap { target: LogRef(1) });
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        let (after, _) = state.read().unwrap();
+        assert_eq!(before.len(), after.len());
+    }
+
+    /// A throw-out may target an *inserted* lap (whose `end_ref` is the `LapInserted` event's
+    /// offset, not a raw `Pass`) — `require_lap_end_target` accepts it.
+    #[test]
+    fn throw_out_lap_accepts_an_inserted_lap_target() {
+        let mut log = InMemoryLog::default();
+        EventLog::append(
+            &mut log,
+            Event::LapInserted {
+                adapter: AdapterId("vd".into()),
+                competitor: CompetitorRef("A".into()),
+                at: SourceTime::from_micros(3_000_000),
+            },
+            None,
+        )
+        .unwrap(); // offset 0: an inserted lap (a synthetic lap end)
+        let state = AppState::new(log);
+
+        let ack = apply_command(&state, Command::ThrowOutLap { target: LogRef(0) });
+        assert!(ack.ok, "an inserted lap must be throw-out-able: {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::LapThrownOut { target } if *target == LogRef(0)))
+        );
+    }
+
+    /// `FileProtest` then `ResolveProtest` append the protest pair; resolving validates the target
+    /// is a real `ProtestFiled`, and a non-protest / out-of-range target is rejected.
+    #[test]
+    fn file_then_resolve_protest_appends_the_pair() {
+        use gridfpv_events::ProtestOutcome;
+        let state = scheduled_state(); // offset 0: HeatScheduled
+
+        let ack = apply_command(
+            &state,
+            Command::FileProtest {
+                heat: heat(),
+                competitor: CompetitorRef("A".into()),
+                note: "cut the course".into(),
+            },
+        );
+        assert!(ack.ok, "got {ack:?}"); // ProtestFiled lands at offset 1
+        let (events, _) = state.read().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::ProtestFiled { competitor, note, .. }
+                if *competitor == CompetitorRef("A".into()) && note == "cut the course"
+        )));
+
+        // Resolve the protest at offset 1.
+        let ack = apply_command(
+            &state,
+            Command::ResolveProtest {
+                target: LogRef(1),
+                outcome: ProtestOutcome::Upheld,
+            },
+        );
+        assert!(ack.ok, "got {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::ProtestResolved { target, outcome: ProtestOutcome::Upheld }
+                if *target == LogRef(1)
+        )));
+
+        // Resolving a non-protest (the HeatScheduled at offset 0) is rejected, nothing appended.
+        let (before, _) = state.read().unwrap();
+        let ack = apply_command(
+            &state,
+            Command::ResolveProtest {
+                target: LogRef(0),
+                outcome: ProtestOutcome::Denied,
+            },
+        );
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        let (after, _) = state.read().unwrap();
+        assert_eq!(before.len(), after.len());
+    }
+
+    /// The **generalized** `ReverseRuling` (Slice 6) accepts a throw-out, a protest resolution, and
+    /// a heat-void as targets — not just a penalty — and still rejects a non-ruling.
+    #[test]
+    fn reverse_ruling_accepts_any_ruling_target() {
+        let mut log = InMemoryLog::default();
+        // offset 0: a pass (so a throw-out has a valid target)
+        EventLog::append(&mut log, pass("A", 1_000_000, 1), None).unwrap();
+        // offset 1: the heat
+        EventLog::append(
+            &mut log,
+            Event::HeatScheduled {
+                heat: heat(),
+                lineup: vec![CompetitorRef("A".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
+            },
+            None,
+        )
+        .unwrap();
+        let state = AppState::new(log);
+
+        // Append a throw-out (offset 2), a heat-void (offset 3) — both reversible rulings.
+        assert!(apply_command(&state, Command::ThrowOutLap { target: LogRef(0) }).ok);
+        assert!(apply_command(&state, Command::VoidHeat { heat: heat() }).ok);
+
+        // Reversing the throw-out (offset 2) and the heat-void (offset 3) both succeed.
+        for target in [LogRef(2), LogRef(3)] {
+            let ack = apply_command(&state, Command::ReverseRuling { target });
+            assert!(ack.ok, "reversing ruling at {target:?} failed: {ack:?}");
+        }
+        // But reversing the pass at offset 0 (not a ruling) is rejected.
+        let ack = apply_command(&state, Command::ReverseRuling { target: LogRef(0) });
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
     }
 
     /// `Register` acks ok and appends the `CompetitorRegistered` binding (#60).
