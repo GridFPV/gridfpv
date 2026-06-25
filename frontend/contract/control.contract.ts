@@ -118,6 +118,24 @@ describe('seam 5: control command shape + headers', () => {
     expect(voidHeat.ok).toBe(true);
   });
 
+  it('the Slice-2 primitives (SplitLap/ReverseRuling) are wired and validate their target', async () => {
+    // SplitLap targets the pass that *ends* the over-long lap; ReverseRuling targets a prior
+    // penalty. No real pass/penalty is appended here, so both must be *rejected* with a typed
+    // BadRequest (the target validation) — proving the commands route through the handler and
+    // are not silent no-ops. (The happy-path fold is covered exhaustively by the Rust tests.)
+    const split = await rdControl(director.baseUrl, TOKEN, {
+      SplitLap: { target: 999_999, at: 5_000_000 }
+    });
+    expect(split.ok).toBe(false);
+    expect(split.error?.code).toBe('BadRequest');
+
+    const reverse = await rdControl(director.baseUrl, TOKEN, {
+      ReverseRuling: { target: 999_999 }
+    });
+    expect(reverse.ok).toBe(false);
+    expect(reverse.error?.code).toBe('BadRequest');
+  });
+
   it('a missing Content-Type → a JSON ProtocolError(BadRequest), not a bare-text 4xx', async () => {
     const { status, body } = await postControl(
       director.baseUrl,

@@ -293,7 +293,8 @@ pub fn score(passes: &[Pass], condition: WinCondition, race_start: SourceTime) -
 }
 
 /// The adjudications a heat's [`Event::PenaltyApplied`] / [`Event::HeatVoided`] log
-/// distils to, applied on top of the pure on-track scoring (race-engine.html §7.1, #13).
+/// distils to (with any [`Event::RulingReversed`] un-applying a targeted penalty), applied
+/// on top of the pure on-track scoring (race-engine.html §7.1, #13).
 ///
 /// Built by [`Adjudications::collect`] from a heat's events; pure data, so the same log
 /// always yields the same adjudications and the scored result replays identically (no
@@ -313,11 +314,35 @@ struct Adjudications {
 
 impl Adjudications {
     /// Distil a heat's event log into its adjudications. Ignores everything that is not a
-    /// [`Event::PenaltyApplied`] / [`Event::HeatVoided`]; `TimeAdded` penalties accumulate,
-    /// any `Disqualify` disqualifies, any `HeatVoided` voids. Deterministic — pure fold.
+    /// [`Event::PenaltyApplied`] / [`Event::HeatVoided`] / [`Event::RulingReversed`];
+    /// `TimeAdded` penalties accumulate, any `Disqualify` disqualifies, any `HeatVoided`
+    /// voids. Deterministic — pure fold (no clock / RNG), order-independent in effect.
+    ///
+    /// A [`Event::RulingReversed { target }`](Event::RulingReversed) **un-applies** the
+    /// penalty at the `target` offset: a reversed `Disqualify` no longer disqualifies and a
+    /// reversed `TimeAdded` is excluded from the accumulation — so "DQ reversed" reads as a
+    /// first-class undo rather than overloading the lap-level void. The offset is the event's
+    /// slice index (the storage layer assigns dense append offsets; the scorer is fed the
+    /// heat window in append order, the same convention `corrected_passes` uses). Reversals
+    /// are gathered first so they apply regardless of whether they precede or follow the
+    /// penalty in the slice, keeping the fold order-independent.
     fn collect(events: &[Event]) -> Self {
+        // First, the offsets every `RulingReversed` targets — a penalty at one of these is
+        // un-applied. Scoped to penalty reversal this slice (marshaling.html §3.1).
+        let reversed: BTreeSet<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::RulingReversed { target } => Some(target.0),
+                _ => None,
+            })
+            .collect();
+
         let mut adj = Adjudications::default();
-        for event in events {
+        for (offset, event) in events.iter().enumerate() {
+            // A penalty whose own append offset was reversed is dropped from the result.
+            if reversed.contains(&(offset as u64)) {
+                continue;
+            }
             match event {
                 Event::PenaltyApplied {
                     competitor,
@@ -1295,5 +1320,84 @@ mod tests {
         assert_eq!(place(&r, "A").position, 1);
         assert_eq!(place(&r, "B").position, 2);
         assert!(place(&r, "B").disqualified);
+    }
+
+    // --- RulingReversed (Slice 2): un-apply a targeted penalty -----------------
+
+    #[test]
+    fn ruling_reversed_unapplies_a_dq() {
+        // A leads on track (3 laps), B has 2. DQ A — A sinks to last — then REVERSE that DQ:
+        // A is restored to the lead and no longer flagged disqualified.
+        use gridfpv_events::LogRef;
+
+        let mut events = pass_events("A", &[0, 3_000_000, 6_000_000, 9_000_000]); // offsets 0..3
+        events.extend(pass_events("B", &[0, 5_000_000, 10_000_000])); // offsets 4..6
+        let dq_offset = events.len() as u64; // offset 7
+        events.push(penalty("A", Penalty::Disqualify)); // offset 7
+        events.push(Event::RulingReversed {
+            target: LogRef(dq_offset),
+        }); // offset 8 — reverse the DQ
+
+        let r = score_events(
+            &events,
+            WinCondition::Timed {
+                window_micros: 60_000_000,
+            },
+            start(),
+        );
+        // The DQ is un-applied: A leads and is not flagged.
+        assert_eq!(place(&r, "A").position, 1);
+        assert!(!place(&r, "A").disqualified);
+        assert_eq!(place(&r, "B").position, 2);
+    }
+
+    #[test]
+    fn ruling_reversed_unapplies_a_time_penalty() {
+        // BestLap: A 2.0s, B 1.5s. A +1.0s time penalty would let B win; reversing it
+        // restores A's raw 2.0s deciding time? No — B is faster, so reversal lets B win on
+        // its raw lap. Concretely: with the penalty, A(2.0) beats B(1.5+1.0=2.5); reversed,
+        // B(1.5) beats A(2.0). The reversal flips the order — proof it was un-applied.
+        use gridfpv_events::LogRef;
+
+        let mut events = pass_events("A", &[0, 2_000_000]); // offsets 0..1
+        events.extend(pass_events("B", &[0, 1_500_000])); // offsets 2..3
+        let pen_offset = events.len() as u64; // offset 4
+        events.push(penalty("B", Penalty::TimeAdded { micros: 1_000_000 })); // offset 4
+
+        // With the penalty in force, A wins.
+        let with_pen = score_events(&events, WinCondition::BestLap, start());
+        assert_eq!(place(&with_pen, "A").position, 1);
+
+        // Reverse B's time penalty: B's raw 1.5s now wins.
+        events.push(Event::RulingReversed {
+            target: LogRef(pen_offset),
+        }); // offset 5
+        let reversed = score_events(&events, WinCondition::BestLap, start());
+        assert_eq!(place(&reversed, "B").position, 1);
+        assert_eq!(place(&reversed, "A").position, 2);
+    }
+
+    #[test]
+    fn ruling_reversed_is_order_independent_and_deterministic() {
+        // The fold gathers reversals first, so a reversal that PRECEDES its penalty in the
+        // slice un-applies it just the same — and scoring the same log twice is identical
+        // (no clock / RNG; the scorer-purity invariant holds with reversals folded in).
+        use gridfpv_events::LogRef;
+
+        // Reversal at offset 0, the penalty it targets at offset 1 — reversal comes first.
+        let mut events: Vec<Event> = vec![Event::RulingReversed { target: LogRef(1) }];
+        events.push(penalty("A", Penalty::Disqualify)); // offset 1 — reversed by offset 0
+        events.extend(pass_events("A", &[0, 3_000_000, 6_000_000])); // A: 2 laps
+        events.extend(pass_events("B", &[0, 5_000_000])); // B: 1 lap
+
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        let first = score_events(&events, cond, start());
+        let second = score_events(&events, cond, start());
+        assert_eq!(first, second, "scoring with a reversal replays identically");
+        // The DQ was un-applied despite the reversal preceding it: A leads, not flagged.
+        assert_eq!(place(&first, "A").position, 1);
+        assert!(!place(&first, "A").disqualified);
     }
 }

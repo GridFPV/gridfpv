@@ -217,7 +217,13 @@ where
 ///   a synthetic lap-gate pass for that competitor at `at` (a lap the timer missed).
 ///   The insert's own offset becomes a valid `target` for a later ruling.
 /// - [`Event::LapAdjusted { target, at }`](Event::LapAdjusted) — re-time the pass
-///   at `target` offset to `at`.
+///   at `target` offset to `at`. Because a lap is two consecutive passes, this shifts
+///   *both* adjacent lap durations sharing the moved pass (the duration recompute is
+///   structural — no extra event needed).
+/// - [`Event::LapSplit { target, at }`](Event::LapSplit) — split the over-long lap
+///   *ending* at the `target` pass by adding a synthetic mid-lap pass at `at`, attributed
+///   to the target pass's competitor. Like an insert, the split's own offset is a valid
+///   `target` for a later ruling (so it is reversible via "void the void").
 ///
 /// # Offsets and last-writer-wins
 ///
@@ -248,10 +254,10 @@ where
 ///
 /// # Heat / result-level rulings
 ///
-/// [`Event::HeatVoided`] and [`Event::PenaltyApplied`] are *not* lap-level — they
-/// reshape the heat result, not the per-competitor lap list — so this fold ignores
-/// them. They are consumed by scoring/results (#30, #33+), which fold the same log
-/// alongside this corrected view.
+/// [`Event::HeatVoided`], [`Event::PenaltyApplied`], and [`Event::RulingReversed`] are
+/// *not* lap-level — they reshape the heat result, not the per-competitor lap list — so
+/// this fold ignores them. They are consumed by scoring/results (#30, #33+), which fold
+/// the same log alongside this corrected view.
 pub fn corrected_passes<'a, I>(events: I) -> Vec<Pass>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
@@ -267,6 +273,10 @@ where
         Inserted(Pass),
         /// A re-time ruling: the target pass's `at` is overridden to this value.
         Adjusted { target: u64, at: SourceTime },
+        /// A split ruling: insert a synthetic mid-lap pass at `at`, attributed to the
+        /// competitor whose lap *ends* at the `target` pass. Resolved to a concrete
+        /// [`Pass`] in the second loop, where the target's adapter/competitor are known.
+        Split { target: u64, at: SourceTime },
         /// A void ruling: the target entry is dropped from the corrected view.
         Voided { target: u64 },
     }
@@ -307,8 +317,21 @@ where
             Event::DetectionVoided { target } => {
                 entries.insert(offset, Entry::Voided { target: target.0 });
             }
-            // Splits, lifecycle, heat transitions, and the heat/result-level
-            // rulings (`HeatVoided`, `PenaltyApplied`) never touch the lap view.
+            Event::LapSplit { target, at } => {
+                // A split inserts a synthetic mid-lap pass at `at` for the competitor whose
+                // lap (the one *ending* at `target`) is being split — so the synthetic pass
+                // carries the target pass's adapter/competitor. It is addressable by *this*
+                // event's offset (just like an insert), so "void the void" reverses it.
+                entries.insert(
+                    offset,
+                    Entry::Split {
+                        target: target.0,
+                        at: *at,
+                    },
+                );
+            }
+            // Lifecycle, heat transitions, and the heat/result-level rulings
+            // (`HeatVoided`, `PenaltyApplied`, `RulingReversed`) never touch the lap view.
             _ => {}
         }
     }
@@ -323,7 +346,10 @@ where
     let mut retime: BTreeMap<u64, SourceTime> = BTreeMap::new();
     for entry in entries.values() {
         match entry {
-            Entry::RawPass(_) | Entry::Inserted(_) => {}
+            // Passes (raw, inserted, or split) carry no ruling of their own; the split is
+            // resolved to a concrete pass in the emit loop. A void/adjust *targeting* a split
+            // is handled below via `entries.get(target)` falling into the pass arms.
+            Entry::RawPass(_) | Entry::Inserted(_) | Entry::Split { .. } => {}
             Entry::Adjusted { target, at } => {
                 // Re-time the target raw/inserted pass, and un-void it: an adjust is
                 // the newest ruling on that target, so it supersedes an earlier void.
@@ -380,6 +406,27 @@ where
                     p.at = *at;
                 }
                 out.push(p);
+            }
+            Entry::Split { target, at } => {
+                // Attribute the synthetic mid-lap pass to the competitor whose lap ends at
+                // `target` (the target pass's adapter/competitor). A later adjust of *this*
+                // split's offset re-times the synthetic pass; a void drops it. If the target
+                // pass is unknown (a dangling ref — the command layer rejects these), skip.
+                let src = match entries.get(target) {
+                    Some(Entry::RawPass(p)) => Some((*p).clone()),
+                    Some(Entry::Inserted(p)) => Some(p.clone()),
+                    _ => None,
+                };
+                if let Some(src) = src {
+                    out.push(Pass {
+                        adapter: src.adapter,
+                        competitor: src.competitor,
+                        at: retime.get(offset).copied().unwrap_or(*at),
+                        sequence: None,
+                        gate: gridfpv_events::GateIndex::LAP,
+                        signal: None,
+                    });
+                }
             }
             Entry::Adjusted { .. } | Entry::Voided { .. } => {}
         }
@@ -815,6 +862,13 @@ mod marshaling_tests {
         }
     }
 
+    fn split(target: u64, at: i64) -> Event {
+        Event::LapSplit {
+            target: LogRef(target),
+            at: SourceTime::from_micros(at),
+        }
+    }
+
     fn key(adapter: &str, competitor: &str) -> CompetitorKey {
         CompetitorKey {
             adapter: AdapterId(adapter.into()),
@@ -1087,6 +1141,163 @@ mod marshaling_tests {
         assert_eq!(
             before, after,
             "raw passes must be byte-identical after folding"
+        );
+    }
+
+    // --- LapSplit (Slice 2) ----------------------------------------------------
+
+    #[test]
+    fn lap_split_makes_two_laps_from_one() {
+        // One over-long lap (1.0s → 7.0s) ending at the offset-1 pass; the timer missed a
+        // mid-lap detection. Splitting it at 4.0s — attributed to the target's competitor —
+        // turns the single 6.0s lap into two 3.0s laps.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 7_000_000, Some(2)), // offset 1 — ends the over-long lap
+            split(1, 4_000_000),                 // offset 2 — split at 4.0s
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        assert_eq!(
+            laps_of(&result, "vd", "A"),
+            vec![
+                Lap {
+                    number: 1,
+                    duration_micros: 3_000_000, // 4.0s - 1.0s
+                },
+                Lap {
+                    number: 2,
+                    duration_micros: 3_000_000, // 7.0s - 4.0s
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lap_split_attributes_to_the_target_competitor_only() {
+        // Two competitors interleaved; splitting B's lap must add a pass for B, never A.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "B", 2_000_000, Some(1)), // offset 1
+            pass("vd", "A", 4_000_000, Some(2)), // offset 2
+            pass("vd", "B", 8_000_000, Some(2)), // offset 3 — ends B's over-long lap
+            split(3, 5_000_000),                 // offset 4 — split B's lap at 5.0s
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        // A is untouched: one 3.0s lap.
+        assert_eq!(
+            laps_of(&result, "vd", "A"),
+            vec![Lap {
+                number: 1,
+                duration_micros: 3_000_000,
+            }]
+        );
+        // B's single 6.0s lap becomes two (2.0→5.0, 5.0→8.0).
+        assert_eq!(
+            laps_of(&result, "vd", "B"),
+            vec![
+                Lap {
+                    number: 1,
+                    duration_micros: 3_000_000,
+                },
+                Lap {
+                    number: 2,
+                    duration_micros: 3_000_000,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn void_the_split_removes_the_synthetic_pass() {
+        // The split's synthetic pass is addressable by the split's own offset, so a later
+        // void of that offset removes it — the single over-long lap is restored.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 7_000_000, Some(2)), // offset 1
+            split(1, 4_000_000),                 // offset 2 — synthetic mid-lap pass
+            voided(2),                           // offset 3 — void the split
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        assert_eq!(
+            laps_of(&result, "vd", "A"),
+            vec![Lap {
+                number: 1,
+                duration_micros: 6_000_000, // 7.0s - 1.0s, the split is gone
+            }]
+        );
+    }
+
+    #[test]
+    fn void_the_void_of_a_split_restores_it() {
+        // "Void the void" works on a split: void the split (offset 3), then void *that*
+        // void (offset 4) — the synthetic pass comes back and the lap is two again.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 7_000_000, Some(2)), // offset 1
+            split(1, 4_000_000),                 // offset 2 — synthetic
+            voided(2),                           // offset 3 — void the split
+            voided(3),                           // offset 4 — void the void
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        assert_eq!(
+            laps_of(&result, "vd", "A"),
+            vec![
+                Lap {
+                    number: 1,
+                    duration_micros: 3_000_000,
+                },
+                Lap {
+                    number: 2,
+                    duration_micros: 3_000_000,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn folding_the_same_events_twice_is_identical_with_a_split() {
+        // Determinism-on-replay (mirrors `fold_is_idempotent_recompute_equivalence`): a log
+        // mixing a split with the other rulings folds to the identical result twice over.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)),
+            pass("vd", "A", 7_000_000, Some(2)),
+            pass("vd", "A", 10_000_000, Some(3)),
+            split(1, 4_000_000),
+            adjusted(2, 9_500_000),
+            inserted("vd", "A", 12_000_000),
+        ];
+        let first = lap_list_marshaled(tagged(&events));
+        let second = lap_list_marshaled(tagged(&events));
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn edit_time_shifts_both_neighbour_lap_durations() {
+        // Slice-2 "edit-time": re-timing a *middle* pass shifts BOTH adjacent lap durations
+        // that share it — no new event, the duration recompute is structural in
+        // `corrected_passes`. Verify the prior-lap and next-lap durations both change.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 5_000_000, Some(2)), // offset 1 — the shared middle pass
+            pass("vd", "A", 9_000_000, Some(3)), // offset 2
+        ];
+        // Before the edit: laps are 4.0s (1→5) and 4.0s (5→9).
+        let before = laps_of(&lap_list_marshaled(tagged(&events)), "vd", "A");
+        assert_eq!(before[0].duration_micros, 4_000_000);
+        assert_eq!(before[1].duration_micros, 4_000_000);
+
+        // Re-time the middle pass from 5.0s to 6.0s — the prior lap lengthens and the next
+        // lap shortens by the same 1.0s, both neighbours moving off one edit.
+        let mut edited = events.clone();
+        edited.push(adjusted(1, 6_000_000)); // offset 3
+        let after = laps_of(&lap_list_marshaled(tagged(&edited)), "vd", "A");
+        assert_eq!(
+            after[0].duration_micros, 5_000_000,
+            "prior lap lengthened 4→5s"
+        );
+        assert_eq!(
+            after[1].duration_micros, 3_000_000,
+            "next lap shortened 4→3s"
         );
     }
 

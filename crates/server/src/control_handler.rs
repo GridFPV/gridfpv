@@ -21,8 +21,10 @@
 //! | [`Command::VoidDetection`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::DetectionVoided`] |
 //! | [`Command::AdjustLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::LapAdjusted`] |
 //! | [`Command::InsertLap`] | none (it adds a pass) | [`Event::LapInserted`] |
+//! | [`Command::SplitLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) (the lap's ending pass) | [`Event::LapSplit`] |
 //! | [`Command::VoidHeat`] | the heat exists in the log | [`Event::HeatVoided`] |
 //! | [`Command::ApplyPenalty`] | the heat exists in the log | [`Event::PenaltyApplied`] |
+//! | [`Command::ReverseRuling`] | the `target` offset exists and is a [`Event::PenaltyApplied`] | [`Event::RulingReversed`] |
 //!
 //! ## Legality lives in the engine (reused, not re-implemented)
 //!
@@ -557,6 +559,12 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             require_pass_target(state, target)?;
             Ok(Event::LapAdjusted { target, at })
         }
+        Command::SplitLap { target, at } => {
+            // The split's target is the pass that *ends* the over-long lap — a real Pass,
+            // validated exactly like `VoidDetection`/`AdjustLap`.
+            require_pass_target(state, target)?;
+            Ok(Event::LapSplit { target, at })
+        }
         Command::InsertLap {
             adapter,
             competitor,
@@ -581,6 +589,11 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
                 competitor,
                 penalty,
             })
+        }
+        Command::ReverseRuling { target } => {
+            // The reversal targets a prior ruling — for this slice a `PenaltyApplied`.
+            require_penalty_target(state, target)?;
+            Ok(Event::RulingReversed { target })
         }
     }
 }
@@ -671,6 +684,28 @@ fn require_pass_target(state: &AppState, target: LogRef) -> Result<(), ProtocolE
         Some(_) => Err(ProtocolError::new(
             ErrorCode::BadRequest,
             format!("log offset {} is not a detected pass", target.0),
+        )),
+        None => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!("log offset {} is out of range", target.0),
+        )),
+    }
+}
+
+/// Require that `target` names a real [`Event::PenaltyApplied`] in the log — the cheap target
+/// check for [`Command::ReverseRuling`](crate::control::Command::ReverseRuling). A reversal is
+/// scoped to penalties this slice (marshaling.html §3.1), so an out-of-range or non-penalty
+/// offset is [`ErrorCode::BadRequest`]; nothing is appended.
+fn require_penalty_target(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    match events.get(target.0 as usize) {
+        Some(Event::PenaltyApplied { .. }) => Ok(()),
+        Some(_) => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "log offset {} is not a reversible ruling (a penalty)",
+                target.0
+            ),
         )),
         None => Err(ProtocolError::new(
             ErrorCode::BadRequest,
@@ -1167,6 +1202,98 @@ mod tests {
             },
         );
         assert!(!ack.ok);
+    }
+
+    /// `SplitLap` validates the target is a real pass (the lap's ending pass), then appends
+    /// `LapSplit`. A non-pass / out-of-range target is rejected and appends nothing.
+    #[test]
+    fn split_lap_validates_target_and_appends() {
+        let mut log = InMemoryLog::default();
+        EventLog::append(&mut log, pass("A", 1_000_000, 1), None).unwrap(); // offset 0: a pass
+        EventLog::append(
+            &mut log,
+            Event::HeatScheduled {
+                heat: heat(),
+                lineup: vec![],
+                class: None,
+                round: None,
+                frequencies: vec![],
+            },
+            None,
+        )
+        .unwrap(); // offset 1: not a pass
+        let state = AppState::new(log);
+
+        let at = SourceTime::from_micros(500_000);
+        let ack = apply_command(
+            &state,
+            Command::SplitLap {
+                target: LogRef(0),
+                at,
+            },
+        );
+        assert!(ack.ok, "got {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(events.iter().any(
+            |e| matches!(e, Event::LapSplit { target, at: a } if *target == LogRef(0) && *a == at)
+        ));
+
+        // A non-pass target is rejected, nothing appended.
+        let (before, _) = state.read().unwrap();
+        let ack = apply_command(
+            &state,
+            Command::SplitLap {
+                target: LogRef(1),
+                at,
+            },
+        );
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        let (after, _) = state.read().unwrap();
+        assert_eq!(before.len(), after.len());
+    }
+
+    /// `ReverseRuling` validates the target is a real `PenaltyApplied`, then appends
+    /// `RulingReversed`. A non-penalty / out-of-range target is rejected and appends nothing.
+    #[test]
+    fn reverse_ruling_validates_penalty_target_and_appends() {
+        let state = scheduled_state(); // offset 0: HeatScheduled
+        // Apply a penalty so there is a real ruling to reverse (lands at offset 1).
+        let ack = apply_command(
+            &state,
+            Command::ApplyPenalty {
+                heat: heat(),
+                competitor: CompetitorRef("A".into()),
+                penalty: Penalty::Disqualify,
+            },
+        );
+        assert!(ack.ok, "got {ack:?}");
+
+        // Reversing the penalty at offset 1 succeeds and appends `RulingReversed`.
+        let ack = apply_command(&state, Command::ReverseRuling { target: LogRef(1) });
+        assert!(ack.ok, "got {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::RulingReversed { target } if *target == LogRef(1)))
+        );
+
+        // Reversing a non-penalty (the HeatScheduled at offset 0) is rejected, nothing appended.
+        let (before, _) = state.read().unwrap();
+        let ack = apply_command(&state, Command::ReverseRuling { target: LogRef(0) });
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        // And an out-of-range target is rejected too.
+        let ack = apply_command(
+            &state,
+            Command::ReverseRuling {
+                target: LogRef(999),
+            },
+        );
+        assert!(!ack.ok);
+        let (after, _) = state.read().unwrap();
+        assert_eq!(before.len(), after.len());
     }
 
     /// `Register` acks ok and appends the `CompetitorRegistered` binding (#60).

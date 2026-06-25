@@ -48,11 +48,12 @@ use crate::error::ProtocolError;
 ///   lineup ([`Event::HeatScheduled`](gridfpv_events::Event::HeatScheduled)).
 /// - **Registration** — [`Register`](Command::Register) binds a source-local
 ///   competitor to a pilot (the binding the adapter never does itself; Architecture §9).
-/// - **Marshaling adjudications** — the five corrections
+/// - **Marshaling adjudications** — the corrections
 ///   ([`VoidDetection`](Command::VoidDetection), [`InsertLap`](Command::InsertLap),
-///   [`AdjustLap`](Command::AdjustLap), [`VoidHeat`](Command::VoidHeat),
-///   [`ApplyPenalty`](Command::ApplyPenalty)), each requesting the corresponding
-///   marshaling event the projection folds in (never a mutation; architecture.html §3).
+///   [`AdjustLap`](Command::AdjustLap), [`SplitLap`](Command::SplitLap),
+///   [`VoidHeat`](Command::VoidHeat), [`ApplyPenalty`](Command::ApplyPenalty),
+///   [`ReverseRuling`](Command::ReverseRuling)), each requesting the corresponding
+///   marshaling event the projection/scorer folds in (never a mutation; architecture.html §3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum Command {
@@ -202,6 +203,15 @@ pub enum Command {
         /// The corrected crossing time, on the source clock.
         at: SourceTime,
     },
+    /// **Split** one over-long lap (the lap *ending* at `target`) into two by inserting a
+    /// synthetic mid-lap pass at `at` (`Event::LapSplit`) — the FPVTrackside split action for
+    /// a missed mid-lap detection. A distinct command from `InsertLap` so the audit names it.
+    SplitLap {
+        /// The log offset of the pass that ends the over-long lap to split.
+        target: LogRef,
+        /// When the inserted mid-lap crossing happened, on the source clock.
+        at: SourceTime,
+    },
     /// Void an entire heat (`Event::HeatVoided`).
     VoidHeat {
         /// The heat to void.
@@ -215,6 +225,14 @@ pub enum Command {
         competitor: CompetitorRef,
         /// The penalty applied.
         penalty: Penalty,
+    },
+    /// **Reverse a prior ruling** (`Event::RulingReversed`), referenced by its log offset —
+    /// for this slice a [`PenaltyApplied`](gridfpv_events::Event::PenaltyApplied) (a DQ or a
+    /// time penalty) the RD is undoing. A distinct command from `VoidDetection` so the audit
+    /// reads "DQ reversed". (A DQ itself is still applied via `ApplyPenalty { Disqualify }`.)
+    ReverseRuling {
+        /// The log offset of the ruling (a `PenaltyApplied`) to reverse.
+        target: LogRef,
     },
 }
 
@@ -349,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn all_five_marshaling_adjudications_round_trip() {
+    fn all_marshaling_adjudications_round_trip() {
         let commands = vec![
             Command::VoidDetection { target: LogRef(42) },
             Command::InsertLap {
@@ -361,6 +379,10 @@ mod tests {
                 target: LogRef(43),
                 at: SourceTime::from_micros(5_100_000),
             },
+            Command::SplitLap {
+                target: LogRef(44),
+                at: SourceTime::from_micros(5_050_000),
+            },
             Command::VoidHeat {
                 heat: HeatId("q-1".into()),
             },
@@ -369,6 +391,7 @@ mod tests {
                 competitor: CompetitorRef("A".into()),
                 penalty: Penalty::TimeAdded { micros: 2_000_000 },
             },
+            Command::ReverseRuling { target: LogRef(45) },
         ];
         for command in commands {
             let json = serde_json::to_string(&command).unwrap();
