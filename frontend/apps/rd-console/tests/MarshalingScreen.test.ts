@@ -59,10 +59,10 @@ describe('Marshaling (Slice 3)', () => {
     await fireEvent.change(screen.getByLabelText('Ruling competitor'), {
       target: { value: 'BOB' }
     });
-    // Kind defaults to Disqualify.
+    // Kind defaults to Disqualify (no reason entered → the bare struct form).
     await fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     expect(sendSpy).toHaveBeenCalledWith({
-      ApplyPenalty: { heat: 'heat-1', competitor: 'BOB', penalty: 'Disqualify' }
+      ApplyPenalty: { heat: 'heat-1', competitor: 'BOB', penalty: { Disqualify: {} } }
     });
   });
 
@@ -78,6 +78,107 @@ describe('Marshaling (Slice 3)', () => {
     await fireEvent.change(screen.getByLabelText('Reverse ruling'), { target: { value: '20' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Reverse ruling' }));
     expect(sendSpy).toHaveBeenCalledWith({ ReverseRuling: { target: 20 } });
+  });
+
+  // ── Slice 6: full adjudication (DQ reason / points / throw-out / protests) ──────────────
+
+  it('throws out the SELECTED lap (distinct from void) by its end_ref', async () => {
+    const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
+    render(Marshaling, { session });
+    // Select ALICE's lap 2 (end_ref 14) and throw it out — keeps the lap but drops it from scoring.
+    await fireEvent.click(screen.getByRole('button', { name: /Lap 2\s*40\.500/ }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Throw out lap' }));
+    expect(sendSpy).toHaveBeenCalledWith({ ThrowOutLap: { target: 14 } });
+  });
+
+  it('applies a DQ with a reason when one is entered', async () => {
+    const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
+    render(Marshaling, { session });
+    await fireEvent.change(screen.getByLabelText('Ruling competitor'), {
+      target: { value: 'BOB' }
+    });
+    await fireEvent.input(screen.getByLabelText('DQ reason'), {
+      target: { value: 'cut the course' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(sendSpy).toHaveBeenCalledWith({
+      ApplyPenalty: {
+        heat: 'heat-1',
+        competitor: 'BOB',
+        penalty: { Disqualify: { reason: 'cut the course' } }
+      }
+    });
+  });
+
+  it('deducts standings points (not a per-heat effect)', async () => {
+    const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
+    render(Marshaling, { session });
+    await fireEvent.change(screen.getByLabelText('Ruling competitor'), {
+      target: { value: 'BOB' }
+    });
+    await fireEvent.change(screen.getByLabelText('Penalty kind'), { target: { value: 'points' } });
+    await fireEvent.input(screen.getByLabelText('Points to deduct'), { target: { value: '4' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(sendSpy).toHaveBeenCalledWith({
+      DeductPoints: { heat: 'heat-1', competitor: 'BOB', points: 4 }
+    });
+  });
+
+  it('files a protest against a competitor with a note', async () => {
+    const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
+    render(Marshaling, { session });
+    await fireEvent.change(screen.getByLabelText('Protest competitor'), {
+      target: { value: 'BOB' }
+    });
+    await fireEvent.input(screen.getByLabelText('Protest note'), {
+      target: { value: 'contact on lap 2' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'File protest' }));
+    expect(sendSpy).toHaveBeenCalledWith({
+      FileProtest: { heat: 'heat-1', competitor: 'BOB', note: 'contact on lap 2' }
+    });
+  });
+
+  it('resolves a filed protest from the audit with an outcome', async () => {
+    const audit = [
+      {
+        kind: 'ProtestFiled' as const,
+        at: 1_700_000_000_000_000,
+        at_ref: 22,
+        summary: 'Protest filed against BOB: contact'
+      }
+    ];
+    const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList, audit });
+    render(Marshaling, { session });
+    await fireEvent.change(screen.getByLabelText('Resolve protest'), { target: { value: '22' } });
+    await fireEvent.change(screen.getByLabelText('Protest outcome'), {
+      target: { value: 'Denied' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Resolve protest' }));
+    expect(sendSpy).toHaveBeenCalledWith({ ResolveProtest: { target: 22, outcome: 'Denied' } });
+  });
+
+  it('the reverse-ruling select offers throw-outs and heat-voids too (generalized reversal)', async () => {
+    const audit = [
+      {
+        kind: 'LapThrownOut' as const,
+        at: 1_700_000_000_000_000,
+        at_ref: 30,
+        summary: 'Lap thrown out (ref 14)'
+      },
+      {
+        kind: 'HeatVoided' as const,
+        at: 1_700_000_000_000_000,
+        at_ref: 31,
+        summary: 'Heat voided'
+      }
+    ];
+    const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList, audit });
+    render(Marshaling, { session });
+    // The throw-out is reversible — pick it and reverse.
+    await fireEvent.change(screen.getByLabelText('Reverse ruling'), { target: { value: '30' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Reverse ruling' }));
+    expect(sendSpy).toHaveBeenCalledWith({ ReverseRuling: { target: 30 } });
   });
 
   it('void heat confirms first, then emits VoidHeat', async () => {

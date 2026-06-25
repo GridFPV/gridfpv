@@ -6,6 +6,7 @@ import type { HeatId } from "./HeatId";
 import type { LogRef } from "./LogRef";
 import type { Penalty } from "./Penalty";
 import type { PilotId } from "./PilotId";
+import type { ProtestOutcome } from "./ProtestOutcome";
 import type { RoundId } from "./RoundId";
 import type { SourceTime } from "./SourceTime";
 
@@ -165,8 +166,44 @@ competitor: CompetitorRef,
 /**
  * The penalty applied.
  */
-penalty: Penalty, } } | { "ReverseRuling": { 
+penalty: Penalty, } } | { "DeductPoints": { 
 /**
- * The log offset of the ruling (a `PenaltyApplied`) to reverse.
+ * The heat the deduction is recorded against.
+ */
+heat: HeatId, 
+/**
+ * The competitor losing points.
+ */
+competitor: CompetitorRef, 
+/**
+ * How many standings points to deduct.
+ */
+points: number, } } | { "ThrowOutLap": { 
+/**
+ * The log offset of the pass that *ends* the lap to throw out.
+ */
+target: LogRef, } } | { "FileProtest": { 
+/**
+ * The heat the protest concerns.
+ */
+heat: HeatId, 
+/**
+ * The competitor the protest is about.
+ */
+competitor: CompetitorRef, 
+/**
+ * A free-text note describing the protest.
+ */
+note: string, } } | { "ResolveProtest": { 
+/**
+ * The log offset of the `ProtestFiled` this resolves.
+ */
+target: LogRef, 
+/**
+ * How the protest was resolved.
+ */
+outcome: ProtestOutcome, } } | { "ReverseRuling": { 
+/**
+ * The log offset of the ruling to reverse.
  */
 target: LogRef, } };

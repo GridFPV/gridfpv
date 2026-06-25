@@ -43,7 +43,7 @@
 //! the bracket carry, where the *source* round's completed heats produce the ranking the
 //! bracket seeds from.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gridfpv_engine::event::score_marshaled;
 use gridfpv_engine::format::{
@@ -653,6 +653,92 @@ impl StandingAcc {
     }
 }
 
+/// Fold the log's **standings points adjustments** (marshaling Slice 6) for the heats in
+/// `class_heats` into a per-competitor signed delta: every
+/// [`Penalty::PointsDeducted`](gridfpv_events::Penalty::PointsDeducted) subtracts and
+/// [`PointsAdded`](gridfpv_events::Penalty::PointsAdded) adds, **unless** the
+/// [`PenaltyApplied`](Event::PenaltyApplied) that carried it was reversed by a
+/// [`RulingReversed`](Event::RulingReversed) targeting its offset.
+///
+/// Points penalties are **standings-only** (marshaling.html §3.3): they never touch the per-heat
+/// lap result (the heat scorer ignores them), so this is the *one* place they land. They are
+/// **scoped to the class** by `class_heats` — only a penalty recorded against a heat that belongs
+/// to *this* class's rounds counts, so a points deduction in one class's heat does not leak into a
+/// pilot's standings in another class they also race. Pure and order-independent — reversals are
+/// gathered first, so a reversal preceding or following its penalty drops it the same way,
+/// mirroring the heat scorer's adjudication fold. The delta is signed (`i64`) so additions and
+/// deductions net out; the caller saturates the final total at zero.
+fn points_adjustments(
+    events: &[Event],
+    class_heats: &BTreeSet<HeatId>,
+) -> BTreeMap<CompetitorRef, i64> {
+    use gridfpv_events::Penalty;
+
+    // The offsets every `RulingReversed` targets — a points penalty at one of these is dropped.
+    let reversed: BTreeSet<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::RulingReversed { target } => Some(target.0),
+            _ => None,
+        })
+        .collect();
+
+    let mut deltas: BTreeMap<CompetitorRef, i64> = BTreeMap::new();
+    for (offset, event) in events.iter().enumerate() {
+        if reversed.contains(&(offset as u64)) {
+            continue; // this ruling was reversed — it contributes nothing
+        }
+        if let Event::PenaltyApplied {
+            heat,
+            competitor,
+            penalty,
+        } = event
+        {
+            // Only penalties recorded against this class's heats adjust this class's standings.
+            if !class_heats.contains(heat) {
+                continue;
+            }
+            match penalty {
+                Penalty::PointsDeducted { points } => {
+                    *deltas.entry(competitor.clone()).or_default() -= i64::from(*points);
+                }
+                Penalty::PointsAdded { points } => {
+                    *deltas.entry(competitor.clone()).or_default() += i64::from(*points);
+                }
+                // DQ / time penalties are per-heat (the heat scorer applies them); not standings.
+                Penalty::Disqualify { .. } | Penalty::TimeAdded { .. } => {}
+            }
+        }
+    }
+    deltas
+}
+
+/// The set of heat ids that belong to `class`'s rounds — the heats whose adjudications scope to
+/// this class's standings. A heat belongs when it was scheduled tagged with a round eligible for
+/// `class` (the same round set [`class_standings`] aggregates), or tagged directly with `class`.
+fn class_heat_ids(meta: &EventMeta, class: &ClassId, events: &[Event]) -> BTreeSet<HeatId> {
+    let class_rounds: BTreeSet<&gridfpv_events::RoundId> = rounds_for_class(meta, class)
+        .iter()
+        .map(|r| &r.id)
+        .collect();
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::HeatScheduled {
+                heat,
+                class: c,
+                round: r,
+                ..
+            } if c.as_ref() == Some(class)
+                || r.as_ref().is_some_and(|r| class_rounds.contains(r)) =>
+            {
+                Some(heat.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The rounds of `meta` whose eligible classes **include** `class` — the class's rounds, in the
 /// order they are defined on the event. A round shared by several classes (an open / practice
 /// round) contributes to each of its classes' standings.
@@ -756,6 +842,20 @@ pub fn class_standings(
             acc.entry(entry.competitor.clone())
                 .or_default()
                 .add_round(points, laps, best_lap);
+        }
+    }
+
+    // Apply the marshaling **standings points adjustments** (Slice 6): a `PointsDeducted` /
+    // `PointsAdded` penalty shifts a competitor's *season/event* points without touching their
+    // per-heat lap result. Scoped to this class's heats so a deduction in one class never leaks
+    // into another class the pilot also races. A deduction only applies to a competitor who
+    // actually accrued round points (is in `acc`); a points award/deduction for a non-entrant is a
+    // no-op here (they have no standings row to adjust). The total saturates at zero.
+    let class_heats = class_heat_ids(meta, class, events);
+    let adjustments = points_adjustments(events, &class_heats);
+    for (competitor, delta) in adjustments {
+        if let Some(a) = acc.get_mut(&competitor) {
+            a.points = (i64::from(a.points) + delta).max(0) as u32;
         }
     }
 
@@ -2072,6 +2172,134 @@ mod tests {
         assert_eq!(standings.standings[0].best_lap_micros, Some(1_000_000));
         assert_eq!(standings.standings[0].rounds_entered, 1);
         assert_eq!(standings.standings[0].total_laps, 1);
+    }
+
+    /// A `PenaltyApplied { PointsDeducted }` for a competitor in a heat.
+    fn points_deducted(heat: &str, competitor: &str, points: u32) -> Event {
+        Event::PenaltyApplied {
+            heat: HeatId(heat.into()),
+            competitor: CompetitorRef(competitor.into()),
+            penalty: gridfpv_events::Penalty::PointsDeducted { points },
+        }
+    }
+
+    #[test]
+    fn class_standings_apply_points_deduction_to_the_season_total() {
+        // Slice 6: a points deduction shifts the *standings* total (not the per-heat lap result).
+        // A wins the round (4 pts) but is docked 3 → 1 pt, sinking A below B(3) and C(2). The
+        // re-fold is deterministic and order-independent (the deduction is keyed by competitor).
+        let round = qual_round("q1", "open");
+        let meta = meta_with(vec![round], vec![member("open", &["A", "B", "C", "D"])]);
+        let mut log = scored_qual_heat("q-1", "q1", "open", &["A", "B", "C", "D"]);
+        log.push(points_deducted("q-1", "A", 3)); // dock A 3 points
+
+        let standings = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        let a = standings
+            .standings
+            .iter()
+            .find(|s| s.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(a.points, 1, "4 round points − 3 deducted");
+        // B (3 pts) now leads; A drops to 1 pt — tied with D (also 1 pt), but A's faster best lap
+        // breaks the tie ahead of D, so the docked A lands at position 3 (B, C, A, D).
+        assert_eq!(standings.standings[0].competitor.0, "B");
+        assert_eq!(a.position, 3);
+        let d = standings
+            .standings
+            .iter()
+            .find(|s| s.competitor.0 == "D")
+            .unwrap();
+        assert_eq!(d.points, 1);
+        assert_eq!(
+            d.position, 4,
+            "D ties A on points but loses the best-lap tie-break"
+        );
+        // Deterministic on replay.
+        assert_eq!(
+            class_standings(&meta, &ClassId("open".into()), &log).unwrap(),
+            standings
+        );
+    }
+
+    #[test]
+    fn class_standings_points_deduction_saturates_at_zero_and_reversal_restores() {
+        // A huge deduction floors the total at zero (never negative); reversing the deduction
+        // (generalized `RulingReversed`) restores the original points — both standings-only.
+        let round = qual_round("q1", "open");
+        let meta = meta_with(vec![round], vec![member("open", &["A", "B"])]);
+        let base = scored_qual_heat("q-1", "q1", "open", &["A", "B"]);
+
+        // Floor at zero: deduct 100 from A (who earned 2 round points).
+        let mut floored = base.clone();
+        floored.push(points_deducted("q-1", "A", 100));
+        let s = class_standings(&meta, &ClassId("open".into()), &floored).unwrap();
+        let a = s.standings.iter().find(|x| x.competitor.0 == "A").unwrap();
+        assert_eq!(a.points, 0, "saturates at zero, never negative");
+
+        // Reverse the deduction (target its offset, the last event) → A's points restored.
+        let mut reversed = floored.clone();
+        let deduction_offset = (floored.len() - 1) as u64;
+        reversed.push(Event::RulingReversed {
+            target: gridfpv_events::LogRef(deduction_offset),
+        });
+        let s2 = class_standings(&meta, &ClassId("open".into()), &reversed).unwrap();
+        let a2 = s2.standings.iter().find(|x| x.competitor.0 == "A").unwrap();
+        assert_eq!(a2.points, 2, "reversing the deduction restores the points");
+    }
+
+    #[test]
+    fn class_standings_points_added_and_deducted_net_out() {
+        // PointsAdded and PointsDeducted on the same competitor net together (order-independent).
+        let round = qual_round("q1", "open");
+        let meta = meta_with(vec![round], vec![member("open", &["A", "B"])]);
+        let mut log = scored_qual_heat("q-1", "q1", "open", &["A", "B"]);
+        // A earned 2 round points; +3 then −1 nets +2 → 4 total.
+        log.push(Event::PenaltyApplied {
+            heat: HeatId("q-1".into()),
+            competitor: CompetitorRef("A".into()),
+            penalty: gridfpv_events::Penalty::PointsAdded { points: 3 },
+        });
+        log.push(points_deducted("q-1", "A", 1));
+        let s = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        let a = s.standings.iter().find(|x| x.competitor.0 == "A").unwrap();
+        assert_eq!(a.points, 4, "2 + 3 − 1");
+    }
+
+    #[test]
+    fn class_standings_points_deduction_is_scoped_to_the_class_heat() {
+        // A pilot "A" races BOTH classes. A points deduction recorded against the OPEN heat must
+        // dock A only in the open standings, never leak into the sport standings (Slice 6 fix).
+        let open = qual_round("q1", "open");
+        let mut sport = qual_round("q2", "sport");
+        sport.classes = vec![ScopeClassId("sport".into())];
+        let meta = meta_with(
+            vec![open, sport],
+            vec![member("open", &["A", "B"]), member("sport", &["A", "B"])],
+        );
+        let mut log = scored_qual_heat("q1-1", "q1", "open", &["A", "B"]);
+        log.extend(scored_qual_heat("q2-1", "q2", "sport", &["A", "B"]));
+        // Deduct 2 points from A, recorded against the OPEN heat (q1-1).
+        log.push(points_deducted("q1-1", "A", 2));
+
+        // Open: A earned 2 round points, docked 2 → 0.
+        let open_s = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        let open_a = open_s
+            .standings
+            .iter()
+            .find(|x| x.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(open_a.points, 0, "open deduction applies to open");
+        // Sport: A's 2 round points are UNTOUCHED — the open-heat deduction must not leak.
+        let sport_s = class_standings(&meta, &ClassId("sport".into()), &log).unwrap();
+        let sport_a = sport_s
+            .standings
+            .iter()
+            .find(|x| x.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            sport_a.points, 2,
+            "open-heat deduction must not leak into sport"
+        );
     }
 
     #[test]

@@ -274,6 +274,118 @@ test('the Marshaling screen corrects laps and the audit + standings update live'
     .toBe(false);
 });
 
+// ── Slice 6: the full adjudication framework (DQ / points / throw-out / protests) ─────────────
+//
+// Drives the complete adjudication surface through the Marshaling screen against a real Director:
+// file a protest, throw out a lap, DQ + reverse — asserting the AUDIT panel and the result
+// snapshot re-fold at each step. Points deduction is driven over the control API and asserted on
+// the class STANDINGS snapshot (points are season/event-level, not per-heat). The append→re-fold
+// path is the load-bearing proof: every ruling is a recorded, reversible fact (marshaling.html §3).
+const S6_PILOTS = ['Sol', 'Tama', 'Uma'];
+const S6_HEAT = `marshal-s6-${Date.now()}`;
+
+test('the full adjudication framework: protest, throw-out, DQ+reverse re-fold audit and standings', async ({
+  page,
+  director
+}) => {
+  await enterPractice(page);
+
+  const control = (cmd: unknown) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: cmd
+    });
+
+  expect((await control({ ScheduleHeat: { heat: S6_HEAT, lineup: S6_PILOTS } })).ok()).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat: S6_HEAT } })).ok()).toBeTruthy();
+
+  await page.reload();
+  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.heat-id .value')).toHaveText(S6_HEAT, { timeout: 15_000 });
+  await runToUnofficial(page);
+
+  await page.getByRole('button', { name: /Marshaling/ }).click();
+  const marshaling = page.getByRole('region', { name: 'Marshaling' });
+  await expect(marshaling).toBeVisible();
+  const audit = page.getByRole('complementary', { name: 'Audit trail' });
+  await expect(marshaling.locator('button.lap').first()).toBeVisible({ timeout: 15_000 });
+
+  const result = async () => {
+    const res = await page.request.get(
+      `${director.baseUrl}/events/practice/snapshot/heat/${S6_HEAT}?projection=result`
+    );
+    expect(res.ok()).toBeTruthy();
+    return (await res.json()).body.HeatResult as {
+      places: { competitor: { competitor: string }; laps: number; disqualified?: boolean }[];
+    };
+  };
+  const lapsOf = (r: Awaited<ReturnType<typeof result>>, pilot: string) =>
+    r.places.find((p) => p.competitor.competitor === pilot)?.laps ?? 0;
+
+  // ── FILE A PROTEST against Sol → the audit gains a "Protest filed" entry ─────────────────────
+  await marshaling.getByLabel('Protest competitor').selectOption(S6_PILOTS[0]);
+  await marshaling.getByLabel('Protest note').fill('cut the course on lap 2');
+  await marshaling.getByRole('button', { name: 'File protest' }).click();
+  await expect(audit.getByText(/Protest filed/i).first()).toBeVisible({ timeout: 10_000 });
+
+  // ── THROW OUT a lap → the audit gains "Thrown out" and the scored lap count drops ───────────
+  const beforeThrow = await result();
+  const firstLapPilot = S6_PILOTS.find((p) => lapsOf(beforeThrow, p) > 0)!;
+  const beforeLaps = lapsOf(beforeThrow, firstLapPilot);
+  // Select that pilot's first lap and throw it out (the throw-out targets the lap's end pass).
+  const pilotCard = marshaling.locator('.comp', { hasText: firstLapPilot });
+  await pilotCard.locator('button.lap').first().click();
+  await marshaling.getByRole('button', { name: 'Throw out lap' }).click();
+  await expect(audit.getByText(/Thrown out/i).first()).toBeVisible({ timeout: 10_000 });
+  // The scored count for that pilot drops by one (the lap stays real, just uncounted).
+  await expect
+    .poll(async () => lapsOf(await result(), firstLapPilot), {
+      timeout: 10_000,
+      message: 'the throw-out should drop the scored lap count'
+    })
+    .toBe(beforeLaps - 1);
+
+  // ── DQ a competitor, then REVERSE it — the result re-folds both ways ─────────────────────────
+  await marshaling.getByLabel('Ruling competitor').selectOption(S6_PILOTS[1]);
+  // Kind defaults to Disqualify; add a reason.
+  await marshaling.getByLabel('DQ reason').fill('unsafe flying');
+  await marshaling.getByRole('button', { name: 'Apply' }).click();
+  await expect(audit.getByText(/DQ applied/i).first()).toBeVisible({ timeout: 10_000 });
+  await expect
+    .poll(
+      async () =>
+        (await result()).places.find((p) => p.competitor.competitor === S6_PILOTS[1])
+          ?.disqualified ?? false,
+      { timeout: 10_000, message: 'the DQ should re-fold the result' }
+    )
+    .toBe(true);
+  // Reverse the DQ (it is offered in the generalized reverse-ruling list).
+  await marshaling.getByLabel('Reverse ruling').selectOption({ index: 1 });
+  await marshaling.getByRole('button', { name: 'Reverse ruling' }).click();
+  await expect(audit.getByText(/Reversed/i).first()).toBeVisible({ timeout: 10_000 });
+  await expect
+    .poll(
+      async () =>
+        (await result()).places.find((p) => p.competitor.competitor === S6_PILOTS[1])
+          ?.disqualified ?? false,
+      { timeout: 10_000, message: 'reversing the DQ should re-fold the result back' }
+    )
+    .toBe(false);
+
+  // ── DEDUCT POINTS over the control API → the audit shows it (points are standings-level) ─────
+  expect(
+    (await control({ DeductPoints: { heat: S6_HEAT, competitor: S6_PILOTS[2], points: 3 } })).ok()
+  ).toBeTruthy();
+  await expect(
+    page
+      .getByLabel('Marshaling')
+      .getByText(/-3 points/i)
+      .first()
+  ).toBeVisible({
+    timeout: 10_000
+  });
+});
+
 test('a read-only session sees the laps + audit but cannot mutate', async ({ page, director }) => {
   // Reuse the heat the UI test created if present, else schedule a fresh one so the screen has laps.
   const roHeat = `marshal-ro-${Date.now()}`;
@@ -310,6 +422,10 @@ test('a read-only session sees the laps + audit but cannot mutate', async ({ pag
   await expect(marshaling.getByRole('button', { name: 'Remove (void)' })).toHaveCount(0);
   await expect(marshaling.getByRole('button', { name: 'Apply' })).toHaveCount(0);
   await expect(marshaling.getByRole('button', { name: 'Void heat' })).toHaveCount(0);
+  // Slice 6 mutating controls are equally hidden for a read-only pilot.
+  await expect(marshaling.getByRole('button', { name: 'Throw out lap' })).toHaveCount(0);
+  await expect(marshaling.getByRole('button', { name: 'File protest' })).toHaveCount(0);
+  await expect(marshaling.getByRole('button', { name: 'Resolve protest' })).toHaveCount(0);
   // The audit panel is still present (read access is unrestricted).
   await expect(page.getByRole('complementary', { name: 'Audit trail' })).toBeVisible();
 });

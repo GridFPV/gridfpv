@@ -14,4 +14,4 @@
  * the RD, so naming an actor would be a false precision (marshaling.html §3.3, the audit records
  * what-changed-when, and the single-RD trust model supplies the who).
  */
-export type AuditKind = "Voided" | "Inserted" | "Adjusted" | "Split" | "PenaltyApplied" | "RulingReversed" | "HeatVoided" | "Pass";
+export type AuditKind = "Voided" | "Inserted" | "Adjusted" | "Split" | "PenaltyApplied" | "LapThrownOut" | "ProtestFiled" | "ProtestResolved" | "RulingReversed" | "HeatVoided" | "Pass";

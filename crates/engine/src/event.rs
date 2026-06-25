@@ -185,14 +185,12 @@ pub fn score_marshaled(
     // tag each event with its positional append offset and fold there, then score the
     // corrected lap-gate passes it returns. The scorer re-groups/re-orders by competitor.
     // `corrected_passes` pairs each surviving pass with the global offset that addresses it
-    // (for UI targeting); scoring only needs the passes, so drop the offset here.
-    let corrected: Vec<gridfpv_events::Pass> =
-        gridfpv_projection::corrected_passes(events.iter().enumerate().map(|(i, e)| (i as u64, e)))
-            .into_iter()
-            .map(|(_, pass)| pass)
-            .collect();
-    // Penalties / heat-void are a *separate* fold from the marshaling corrections above:
-    // apply them on the corrected pass stream so an adjudicated, marshaled heat reflects
+    // — **kept** here so a `LapThrownOut` (whose target is a lap's end-pass offset) excludes
+    // the matching lap from the scored count.
+    let corrected: Vec<(u64, gridfpv_events::Pass)> =
+        gridfpv_projection::corrected_passes(events.iter().enumerate().map(|(i, e)| (i as u64, e)));
+    // Penalties / heat-void / throw-outs are a *separate* fold from the marshaling corrections
+    // above: apply them on the corrected pass stream so an adjudicated, marshaled heat reflects
     // both (#13). A log with no penalties scores exactly as before.
     apply_adjudications(&corrected, condition, race_start, events)
 }
@@ -291,6 +289,54 @@ mod tests {
         };
         assert_eq!(score_events(&log, cond, start).places[0].laps, 1);
         assert_eq!(score_marshaled(&log, cond, start).places[0].laps, 2);
+    }
+
+    #[test]
+    fn lap_thrown_out_excludes_a_lap_through_the_marshaled_path() {
+        // The marshaled scorer (corrected_passes → apply_adjudications) excludes a thrown-out lap
+        // by its corrected end-pass offset. A has 3 laps (4 passes at offsets 0..3); throw out the
+        // lap ending at offset 2 → 2 counted laps. Proves the offset is preserved end-to-end.
+        let clean = vec![
+            pass("A", 0, 0),         // offset 0
+            pass("A", 3_000_000, 1), // offset 1
+            pass("A", 6_000_000, 2), // offset 2
+            pass("A", 9_000_000, 3), // offset 3
+        ];
+        let mut thrown = clean.clone();
+        thrown.push(Event::LapThrownOut {
+            target: gridfpv_events::LogRef(2),
+        }); // offset 4
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        let start = SourceTime::from_micros(0);
+        // Clean: 3 laps. With the throw-out: 2 counted laps (via the marshaled path).
+        assert_eq!(score_marshaled(&clean, cond, start).places[0].laps, 3);
+        assert_eq!(score_marshaled(&thrown, cond, start).places[0].laps, 2);
+    }
+
+    #[test]
+    fn lap_thrown_out_excludes_an_inserted_lap_through_the_marshaled_path() {
+        // A throw-out targeting an INSERTED lap (its end_ref is the LapInserted offset) is excluded
+        // by the marshaled scorer — the corrected synthetic pass carries that offset.
+        let log = vec![
+            pass("A", 0, 0),         // offset 0
+            pass("A", 6_000_000, 1), // offset 1
+            Event::LapInserted {
+                adapter: AdapterId(ADAPTER.into()),
+                competitor: cref("A"),
+                at: SourceTime::from_micros(3_000_000),
+            }, // offset 2 — inserts a lap → A has 2 laps
+            Event::LapThrownOut {
+                target: gridfpv_events::LogRef(2),
+            }, // offset 3 — throw out the lap ending at the inserted pass
+        ];
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        let start = SourceTime::from_micros(0);
+        // The insert gives 2 laps; throwing out the inserted lap's end drops it back to 1 counted.
+        assert_eq!(score_marshaled(&log, cond, start).places[0].laps, 1);
     }
 
     // --- run_format / run_event --------------------------------------------

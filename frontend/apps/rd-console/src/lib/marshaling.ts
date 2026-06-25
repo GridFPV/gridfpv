@@ -21,6 +21,7 @@ import type {
   HeatId,
   LogRef,
   Penalty,
+  ProtestOutcome,
   SourceTime
 } from '@gridfpv/types';
 
@@ -52,8 +53,18 @@ export function splitLapCommand(target: LogRef, at: SourceTime): Command {
 }
 
 /**
- * Reverse a prior ruling (a `PenaltyApplied` — a DQ or time penalty), identified by its log
- * offset. The reversed ruling no longer affects the result — a reversible DQ (marshaling.html §3.1).
+ * Throw out a single **valid** lap from a competitor's scored count (marshaling.html §3.3),
+ * identified by the lap's end-pass log offset. Distinct from `voidDetectionCommand`: the lap stays
+ * real in the lap list/audit — it is only excluded from scoring.
+ */
+export function throwOutLapCommand(target: LogRef): Command {
+  return { ThrowOutLap: { target } };
+}
+
+/**
+ * Reverse **any** prior ruling — a penalty (DQ / time / points), a lap throw-out, a protest
+ * resolution, or a heat-void — identified by its log offset. The reversed ruling no longer affects
+ * the result (generalized reversibility, marshaling.html §3.3).
  */
 export function reverseRulingCommand(target: LogRef): Command {
   return { ReverseRuling: { target } };
@@ -64,7 +75,7 @@ export function voidHeatCommand(heat: HeatId): Command {
   return { VoidHeat: { heat } };
 }
 
-/** Apply a penalty (disqualification or added time) to a competitor in a heat. */
+/** Apply a penalty (DQ, added time, or points) to a competitor in a heat. */
 export function applyPenaltyCommand(
   heat: HeatId,
   competitor: CompetitorRef,
@@ -73,13 +84,49 @@ export function applyPenaltyCommand(
   return { ApplyPenalty: { heat, competitor, penalty } };
 }
 
+/**
+ * Deduct **standings** points from a competitor (marshaling.html §3.3) — points affect the
+ * season/event standings, not the per-heat lap result.
+ */
+export function deductPointsCommand(
+  heat: HeatId,
+  competitor: CompetitorRef,
+  points: number
+): Command {
+  return { DeductPoints: { heat, competitor, points: Math.max(0, Math.round(points)) } };
+}
+
+/** File a protest against a competitor's result in a heat (the append-only filing fact). */
+export function fileProtestCommand(heat: HeatId, competitor: CompetitorRef, note: string): Command {
+  return { FileProtest: { heat, competitor, note } };
+}
+
+/** Resolve a filed protest (identified by the `ProtestFiled`'s log offset) with an outcome. */
+export function resolveProtestCommand(target: LogRef, outcome: ProtestOutcome): Command {
+  return { ResolveProtest: { target, outcome } };
+}
+
 /** Build a `TimeAdded` penalty from a whole-second amount (the console's input unit). */
 export function timeAddedPenalty(seconds: number): Penalty {
   return { TimeAdded: { micros: Math.round(seconds * 1_000_000) } };
 }
 
-/** The disqualification penalty. */
-export const DISQUALIFY: Penalty = 'Disqualify';
+/** Build a `PointsDeducted` standings penalty (season/event points, not per-heat). */
+export function pointsDeductedPenalty(points: number): Penalty {
+  return { PointsDeducted: { points: Math.max(0, Math.round(points)) } };
+}
+
+/**
+ * Build a disqualification penalty, optionally carrying a reason. A reason-less DQ serialises as
+ * the compact legacy form; a reason rides along when given.
+ */
+export function disqualifyPenalty(reason?: string): Penalty {
+  const trimmed = reason?.trim();
+  return { Disqualify: trimmed ? { reason: trimmed } : {} };
+}
+
+/** The bare disqualification penalty (no reason) — the common quick-DQ. */
+export const DISQUALIFY: Penalty = { Disqualify: {} };
 
 /** Convert the console's whole-second time input to `SourceTime` microseconds. */
 export function secondsToSourceTime(seconds: number): SourceTime {

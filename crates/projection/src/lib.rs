@@ -564,9 +564,15 @@ pub enum AuditKind {
     Adjusted,
     /// An over-long lap was split into two.
     Split,
-    /// A penalty (DQ or added time) was applied to a competitor.
+    /// A penalty (DQ, added time, or points) was applied to a competitor.
     PenaltyApplied,
-    /// A prior ruling (a penalty) was reversed.
+    /// A valid lap was thrown out of a competitor's scored count (not a void — the lap stays real).
+    LapThrownOut,
+    /// A protest was filed against a heat result.
+    ProtestFiled,
+    /// A filed protest was resolved (upheld / denied / withdrawn).
+    ProtestResolved,
+    /// A prior ruling (a penalty, throw-out, protest resolution, or heat-void) was reversed.
     RulingReversed,
     /// The whole heat was voided.
     HeatVoided,
@@ -644,6 +650,22 @@ where
                 AuditKind::PenaltyApplied,
                 format!("{} for {}", fmt_penalty(penalty), competitor.0),
             ),
+            Event::LapThrownOut { target } => (
+                AuditKind::LapThrownOut,
+                format!("Lap thrown out (ref {})", target.0),
+            ),
+            Event::ProtestFiled {
+                heat: h,
+                competitor,
+                note,
+            } if h == heat => (
+                AuditKind::ProtestFiled,
+                format!("Protest filed against {}: {}", competitor.0, note),
+            ),
+            Event::ProtestResolved { target, outcome } => (
+                AuditKind::ProtestResolved,
+                format!("Protest {} (ref {})", fmt_outcome(*outcome), target.0),
+            ),
             Event::RulingReversed { target } => (
                 AuditKind::RulingReversed,
                 format!("Ruling reversed (ref {})", target.0),
@@ -676,10 +698,28 @@ fn fmt_secs(t: SourceTime) -> String {
 /// Format a [`Penalty`](gridfpv_events::Penalty) for an audit summary.
 fn fmt_penalty(penalty: &gridfpv_events::Penalty) -> String {
     match penalty {
-        gridfpv_events::Penalty::Disqualify => "DQ applied".to_string(),
+        gridfpv_events::Penalty::Disqualify { reason } => match reason {
+            Some(r) => format!("DQ applied ({r})"),
+            None => "DQ applied".to_string(),
+        },
         gridfpv_events::Penalty::TimeAdded { micros } => {
             format!("+{:.3}s penalty", *micros as f64 / 1_000_000.0)
         }
+        gridfpv_events::Penalty::PointsDeducted { points } => {
+            format!("-{points} points")
+        }
+        gridfpv_events::Penalty::PointsAdded { points } => {
+            format!("+{points} points")
+        }
+    }
+}
+
+/// Format a [`ProtestOutcome`](gridfpv_events::ProtestOutcome) for an audit summary.
+fn fmt_outcome(outcome: gridfpv_events::ProtestOutcome) -> &'static str {
+    match outcome {
+        gridfpv_events::ProtestOutcome::Upheld => "upheld",
+        gridfpv_events::ProtestOutcome::Denied => "denied",
+        gridfpv_events::ProtestOutcome::Withdrawn => "withdrawn",
     }
 }
 
@@ -1665,7 +1705,7 @@ mod marshaling_tests {
                 Event::PenaltyApplied {
                     heat: HeatId(heat.into()),
                     competitor: CompetitorRef("B".into()),
-                    penalty: Penalty::Disqualify,
+                    penalty: Penalty::Disqualify { reason: None },
                 },
             ),
             (Some(4), Event::RulingReversed { target: LogRef(2) }),
@@ -1691,6 +1731,66 @@ mod marshaling_tests {
     }
 
     #[test]
+    fn marshaling_log_covers_slice6_ruling_kinds() {
+        use gridfpv_events::{Penalty, ProtestOutcome};
+        let heat = "q-1";
+        let log = vec![
+            (Some(1), Event::LapThrownOut { target: LogRef(0) }),
+            (
+                Some(2),
+                Event::PenaltyApplied {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("A".into()),
+                    penalty: Penalty::PointsDeducted { points: 5 },
+                },
+            ),
+            (
+                Some(3),
+                Event::ProtestFiled {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("B".into()),
+                    note: "cut the course".into(),
+                },
+            ),
+            (
+                Some(4),
+                Event::ProtestResolved {
+                    target: LogRef(2),
+                    outcome: ProtestOutcome::Upheld,
+                },
+            ),
+        ];
+        let entries = audit(&log, heat);
+        // Newest first.
+        let kinds: Vec<AuditKind> = entries.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                AuditKind::ProtestResolved,
+                AuditKind::ProtestFiled,
+                AuditKind::PenaltyApplied,
+                AuditKind::LapThrownOut,
+            ]
+        );
+        // The summaries read cleanly: the points penalty, the protest text, the outcome.
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.kind == AuditKind::PenaltyApplied && e.summary.contains("-5 points"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.kind == AuditKind::ProtestFiled && e.summary.contains("cut the course"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.kind == AuditKind::ProtestResolved && e.summary.contains("upheld"))
+        );
+    }
+
+    #[test]
     fn marshaling_log_excludes_other_heats_penalties_and_voids() {
         use gridfpv_events::Penalty;
         let heat = "q-1";
@@ -1700,7 +1800,7 @@ mod marshaling_tests {
                 Event::PenaltyApplied {
                     heat: HeatId("q-2".into()), // a DIFFERENT heat — excluded
                     competitor: CompetitorRef("B".into()),
-                    penalty: Penalty::Disqualify,
+                    penalty: Penalty::Disqualify { reason: None },
                 },
             ),
             (
@@ -1743,7 +1843,7 @@ mod marshaling_tests {
                 Event::PenaltyApplied {
                     heat: HeatId(heat.into()),
                     competitor: CompetitorRef("B".into()),
-                    penalty: Penalty::Disqualify,
+                    penalty: Penalty::Disqualify { reason: None },
                 },
             ),
             (Some(3), Event::RulingReversed { target: LogRef(1) }),

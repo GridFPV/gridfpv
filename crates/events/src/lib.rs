@@ -297,17 +297,201 @@ pub enum HeatTransition {
     Discarded,
 }
 
-/// A marshaling penalty applied to a competitor in a heat.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+/// A marshaling penalty applied to a competitor in a heat (marshaling.html §3.3 — the
+/// adjudication framework: DQ, penalty time *and* points, richer than RotorHazard's
+/// `+time`/note model).
+///
+/// The variants split by **where they land**:
+/// - [`Disqualify`](Penalty::Disqualify) and [`TimeAdded`](Penalty::TimeAdded) reshape the
+///   **per-heat** lap/time result (the heat scorer, `gridfpv_engine::scoring`): a DQ sinks a
+///   competitor below the field, a time penalty worsens their deciding time.
+/// - [`PointsDeducted`](Penalty::PointsDeducted) / [`PointsAdded`](Penalty::PointsAdded) do
+///   **not** touch the per-heat lap result — they adjust the competitor's **season / event
+///   standings** points, folded by the standings projection
+///   (`gridfpv_server::round_engine::class_standings`), leaving the heat's lap/time/DQ intact.
+///
+/// All variants are reversible via [`RulingReversed`](Event::RulingReversed) and read back on a
+/// legacy log (the enum is externally tagged, so the new variants are purely additive).
+///
+/// # Legacy `Disqualify` compatibility
+///
+/// Adding the optional `reason` made [`Disqualify`](Penalty::Disqualify) a *struct* variant,
+/// which serde would otherwise serialise as `{"Disqualify":{}}` and refuse to read from the
+/// legacy bare string `"Disqualify"`. A hand-written [`Deserialize`] (see the impl below) accepts
+/// **both** the legacy bare `"Disqualify"` and the struct form, and [`Serialize`] keeps emitting
+/// the compact bare `"Disqualify"` when there is no reason — so old logs round-trip byte-for-byte
+/// and a reason-less DQ stays on the wire exactly as before.
+#[derive(Debug, Clone, PartialEq, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum Penalty {
-    /// Disqualified from the heat.
-    Disqualify,
+    /// Disqualified from the heat. A first-class, reversible competitor **status** (not just a
+    /// time effect): the scorer sinks a DQ'd competitor below every non-disqualified one and
+    /// flags the placement, and a [`RulingReversed`](Event::RulingReversed) of the
+    /// [`PenaltyApplied`](Event::PenaltyApplied) cleanly restores them. An optional `reason`
+    /// carries *why* — surfaced in the result + audit; default-absent so a bare `Disqualify`
+    /// (and every legacy DQ) reads back unchanged.
+    Disqualify {
+        /// Why the competitor was disqualified (e.g. "cut the course", "unsafe flying"). `None`
+        /// when no reason was recorded — the common quick-DQ, and the legacy shape. (`Penalty`
+        /// hand-rolls serde — see the impls below — so the optional/skip behaviour lives there;
+        /// `#[ts(optional)]` keeps the generated TS field `reason?:`.)
+        #[ts(optional)]
+        reason: Option<String>,
+    },
     /// Time added to the competitor's result, in microseconds.
     TimeAdded {
         #[ts(type = "number")]
         micros: i64,
     },
+    /// **Points deducted** from the competitor's season / event **standings** (marshaling.html
+    /// §3.3). Distinct from a time penalty: it does *not* change the per-heat lap result — it
+    /// subtracts from the points the competitor accrued across the class's rounds, folded by the
+    /// standings projection (`class_standings`). Reversible like any ruling.
+    PointsDeducted {
+        /// How many standings points to subtract (saturating at zero).
+        points: u32,
+    },
+    /// **Points added** to the competitor's season / event **standings** — the symmetric
+    /// counterpart of [`PointsDeducted`](Penalty::PointsDeducted) (e.g. a goodwill / appeal
+    /// award). Also standings-only; does not touch the per-heat lap result.
+    PointsAdded {
+        /// How many standings points to add.
+        points: u32,
+    },
+}
+
+impl Penalty {
+    /// Whether this penalty is a disqualification (regardless of any reason). The first-class
+    /// DQ-status predicate the scorer / UI use without matching the inner `reason`.
+    pub const fn is_disqualify(&self) -> bool {
+        matches!(self, Penalty::Disqualify { .. })
+    }
+}
+
+// `Penalty` hand-rolls serde so the legacy bare `"Disqualify"` string and a reason-carrying
+// `{"Disqualify":{"reason":...}}` both round-trip, while a reason-less DQ still serialises as the
+// compact bare string (see the `Penalty` doc, "Legacy `Disqualify` compatibility"). The other
+// variants serialise/deserialise exactly as the derived externally-tagged form would, so adding
+// `PointsDeducted` / `PointsAdded` stays purely additive on the wire.
+impl Serialize for Penalty {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStructVariant;
+        match self {
+            // A reason-less DQ stays the bare `"Disqualify"` string (legacy-identical); a DQ with a
+            // reason serialises as the struct form so the reason rides along.
+            Penalty::Disqualify { reason: None } => {
+                serializer.serialize_unit_variant("Penalty", 0, "Disqualify")
+            }
+            Penalty::Disqualify {
+                reason: Some(reason),
+            } => {
+                let mut sv = serializer.serialize_struct_variant("Penalty", 0, "Disqualify", 1)?;
+                sv.serialize_field("reason", reason)?;
+                sv.end()
+            }
+            Penalty::TimeAdded { micros } => serializer.serialize_newtype_variant(
+                "Penalty",
+                1,
+                "TimeAdded",
+                &TimeAddedRepr { micros: *micros },
+            ),
+            Penalty::PointsDeducted { points } => serializer.serialize_newtype_variant(
+                "Penalty",
+                2,
+                "PointsDeducted",
+                &PointsRepr { points: *points },
+            ),
+            Penalty::PointsAdded { points } => serializer.serialize_newtype_variant(
+                "Penalty",
+                3,
+                "PointsAdded",
+                &PointsRepr { points: *points },
+            ),
+        }
+    }
+}
+
+/// The body of a serialized `TimeAdded` — its single `micros` field, so the externally-tagged
+/// wire shape stays `{"TimeAdded":{"micros":N}}` exactly as the derived form produced.
+#[derive(Serialize, Deserialize)]
+struct TimeAddedRepr {
+    micros: i64,
+}
+
+/// The body of a serialized `PointsDeducted` / `PointsAdded` — its single `points` field.
+#[derive(Serialize, Deserialize)]
+struct PointsRepr {
+    points: u32,
+}
+
+impl<'de> Deserialize<'de> for Penalty {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        struct PenaltyVisitor;
+
+        impl<'de> Visitor<'de> for PenaltyVisitor {
+            type Value = Penalty;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a Penalty: the string \"Disqualify\" or a tagged variant object")
+            }
+
+            // The legacy bare string `"Disqualify"` (a unit variant on the wire).
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Penalty, E> {
+                match value {
+                    "Disqualify" => Ok(Penalty::Disqualify { reason: None }),
+                    other => Err(de::Error::unknown_variant(other, &["Disqualify"])),
+                }
+            }
+
+            // The externally-tagged object form `{"Variant": <body>}` for every variant
+            // (including a reason-carrying `Disqualify`).
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Penalty, A::Error> {
+                let tag: String = map
+                    .next_key()?
+                    .ok_or_else(|| de::Error::custom("empty Penalty object"))?;
+                let penalty = match tag.as_str() {
+                    "Disqualify" => Penalty::Disqualify {
+                        reason: map.next_value::<DisqualifyRepr>()?.reason,
+                    },
+                    "TimeAdded" => Penalty::TimeAdded {
+                        micros: map.next_value::<TimeAddedRepr>()?.micros,
+                    },
+                    "PointsDeducted" => Penalty::PointsDeducted {
+                        points: map.next_value::<PointsRepr>()?.points,
+                    },
+                    "PointsAdded" => Penalty::PointsAdded {
+                        points: map.next_value::<PointsRepr>()?.points,
+                    },
+                    other => {
+                        return Err(de::Error::unknown_variant(
+                            other,
+                            &["Disqualify", "TimeAdded", "PointsDeducted", "PointsAdded"],
+                        ));
+                    }
+                };
+                // Reject a trailing second key — an externally-tagged variant is a single entry.
+                if map.next_key::<String>()?.is_some() {
+                    return Err(de::Error::custom(
+                        "Penalty object has more than one variant",
+                    ));
+                }
+                Ok(penalty)
+            }
+        }
+
+        deserializer.deserialize_any(PenaltyVisitor)
+    }
+}
+
+/// The body of a serialized `Disqualify { reason }` — its optional `reason` field, defaulting to
+/// `None` so `{"Disqualify":{}}` (an empty body) reads back as a reason-less DQ.
+#[derive(Deserialize)]
+struct DisqualifyRepr {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// A canonical event in the append-only log.
@@ -487,6 +671,25 @@ pub enum Event {
         /// `target` lap's start and `target` itself.
         at: SourceTime,
     },
+    /// Marshaling: **throw out a single valid lap** from a competitor's *scored* count
+    /// (marshaling.html §3.3, the adjudication framework). The lap *ending* at `target` is a
+    /// **real** lap — it stays in the lap list and the audit — but it is **excluded from the
+    /// scored result** (the counted-lap set / best-lap / consecutive window).
+    ///
+    /// This is **distinct from [`DetectionVoided`](Event::DetectionVoided)**: a void says "this
+    /// detection was never real" and *removes the pass* (merging the two adjacent laps); a
+    /// throw-out says "this lap really happened but does not count for this competitor" and leaves
+    /// the lap intact, only dropping it from scoring. (It is also distinct from a future season
+    /// "drop-worst-round" rule — that is round-level; this is **lap-level**, within one heat.)
+    ///
+    /// The scorer excludes the lap whose **end pass** is `target` **deterministically and
+    /// order-independently** (a pure set membership, not an evaluation-order effect — the
+    /// throw-out determinism risk, marshaling-plan.html §4). Reversible like any ruling via
+    /// [`RulingReversed`](Event::RulingReversed) of *this* event's offset.
+    LapThrownOut {
+        /// The log offset of the pass that *ends* the lap to exclude from the scored count.
+        target: LogRef,
+    },
     /// Marshaling: void an entire heat.
     HeatVoided { heat: HeatId },
     /// Marshaling: apply a penalty to a competitor in a heat.
@@ -495,21 +698,62 @@ pub enum Event {
         competitor: CompetitorRef,
         penalty: Penalty,
     },
-    /// Marshaling: **reverse a prior ruling**, referenced by its log offset — primarily a
-    /// [`PenaltyApplied`](Event::PenaltyApplied) (a DQ or a time penalty) the RD is undoing
-    /// (marshaling.html §3.1 "reversible DQ").
+    /// Marshaling: a **protest was filed** against a heat result (marshaling.html §3.3 — the
+    /// adjudication framework's protest workflow). An **append-only fact**: filing records that a
+    /// protest exists; resolving it is a *separate* [`ProtestResolved`](Event::ProtestResolved)
+    /// fact targeting this one. There is **no `by` / actor** — per the no-login model every action
+    /// is the RD at the console (filed on a pilot's behalf), so naming an actor would be false
+    /// precision (marshaling-plan.html §2). Reversible via [`RulingReversed`](Event::RulingReversed)
+    /// and rendered in the audit.
+    ProtestFiled {
+        /// The heat the protest concerns.
+        heat: HeatId,
+        /// The competitor the protest is about (whose result is contested).
+        competitor: CompetitorRef,
+        /// A free-text note describing the protest.
+        note: String,
+    },
+    /// Marshaling: a **protest was resolved** — the second half of the append-only protest pair,
+    /// targeting the [`ProtestFiled`](Event::ProtestFiled) it closes by its log offset. The
+    /// `outcome` records the ruling ([`Upheld`](ProtestOutcome::Upheld) /
+    /// [`Denied`](ProtestOutcome::Denied) / [`Withdrawn`](ProtestOutcome::Withdrawn)). Like the
+    /// filing it carries no actor, is reversible, and renders in the audit.
+    ProtestResolved {
+        /// The log offset of the [`ProtestFiled`](Event::ProtestFiled) this resolves.
+        target: LogRef,
+        /// How the protest was resolved.
+        outcome: ProtestOutcome,
+    },
+    /// Marshaling: **reverse a prior ruling**, referenced by its log offset — the generalized,
+    /// structural undo for **any** adjudication (marshaling.html §3.3 "everything reversible").
     ///
-    /// A distinct event from [`DetectionVoided`](Event::DetectionVoided) so the Slice 3 audit
-    /// reads cleanly — "DQ reversed" rather than overloading the lap-level void. Scoring
-    /// un-applies the penalty at `target`: a `Disqualify`/`TimeAdded` whose offset is reversed
-    /// no longer affects the result.
+    /// Originally scoped to penalties (Slice 2); now generalized (Slice 6) so a reversal can target
+    /// **any** ruling — a [`PenaltyApplied`](Event::PenaltyApplied) (DQ / time / points), a
+    /// [`LapThrownOut`](Event::LapThrownOut), a [`ProtestResolved`](Event::ProtestResolved), or a
+    /// [`HeatVoided`](Event::HeatVoided). The reversal is **structural** ("void the void"): the fold
+    /// drops the ruling at `target` from the result, and a reversal can itself be reversed.
     ///
-    /// NOTE: scoped to penalty reversal for this slice; it can generalize to other rulings
-    /// (e.g. reversing a `HeatVoided`) when those need a first-class undo.
+    /// A distinct event from [`DetectionVoided`](Event::DetectionVoided) so the audit reads cleanly
+    /// — "DQ reversed" / "throw-out reversed" rather than overloading the lap-level void.
     RulingReversed {
-        /// The log offset of the ruling (a [`PenaltyApplied`](Event::PenaltyApplied)) to reverse.
+        /// The log offset of the ruling to reverse (a penalty, throw-out, protest resolution, or
+        /// heat-void).
         target: LogRef,
     },
+}
+
+/// How a [`ProtestFiled`](Event::ProtestFiled) was resolved (marshaling.html §3.3). A small,
+/// closed enum recorded by [`ProtestResolved`](Event::ProtestResolved); externally tagged on the
+/// wire like the rest of the event vocabulary, so it maps to a TS string union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum ProtestOutcome {
+    /// The protest was **upheld** — the contesting party's claim was accepted.
+    Upheld,
+    /// The protest was **denied** — the result stands as adjudicated.
+    Denied,
+    /// The protest was **withdrawn** before a ruling.
+    Withdrawn,
 }
 
 #[cfg(test)]
@@ -662,7 +906,7 @@ mod tests {
             Event::PenaltyApplied {
                 heat: HeatId("main-a".into()),
                 competitor: CompetitorRef("Bee".into()),
-                penalty: Penalty::Disqualify,
+                penalty: Penalty::Disqualify { reason: None },
             },
         ];
         for event in events {
@@ -789,6 +1033,130 @@ mod tests {
     }
 
     #[test]
+    fn slice6_adjudication_events_round_trip() {
+        // Every new Slice-6 fact round-trips through the externally-tagged JSON.
+        let events = vec![
+            Event::LapThrownOut { target: LogRef(11) },
+            Event::ProtestFiled {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("AcroAce".into()),
+                note: "cut the chicane on lap 3".into(),
+            },
+            Event::ProtestResolved {
+                target: LogRef(12),
+                outcome: ProtestOutcome::Upheld,
+            },
+            Event::PenaltyApplied {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("Bee".into()),
+                penalty: Penalty::PointsDeducted { points: 5 },
+            },
+            Event::PenaltyApplied {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("Bee".into()),
+                penalty: Penalty::PointsAdded { points: 2 },
+            },
+            Event::PenaltyApplied {
+                heat: HeatId("main-a".into()),
+                competitor: CompetitorRef("Cee".into()),
+                penalty: Penalty::Disqualify {
+                    reason: Some("unsafe flying".into()),
+                },
+            },
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let back: Event = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, back);
+        }
+    }
+
+    #[test]
+    fn protest_outcomes_round_trip() {
+        for outcome in [
+            ProtestOutcome::Upheld,
+            ProtestOutcome::Denied,
+            ProtestOutcome::Withdrawn,
+        ] {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let back: ProtestOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(outcome, back);
+        }
+    }
+
+    #[test]
+    fn disqualify_without_reason_serializes_as_the_legacy_bare_string() {
+        // A reason-less DQ stays byte-compatible with the legacy `"Disqualify"` wire form, so old
+        // consumers and old logs round-trip unchanged. A DQ *with* a reason takes the struct form.
+        let bare = Penalty::Disqualify { reason: None };
+        assert_eq!(serde_json::to_string(&bare).unwrap(), r#""Disqualify""#);
+        assert_eq!(
+            serde_json::from_str::<Penalty>(r#""Disqualify""#).unwrap(),
+            bare
+        );
+
+        let with_reason = Penalty::Disqualify {
+            reason: Some("cut the course".into()),
+        };
+        let json = serde_json::to_string(&with_reason).unwrap();
+        assert_eq!(json, r#"{"Disqualify":{"reason":"cut the course"}}"#);
+        assert_eq!(serde_json::from_str::<Penalty>(&json).unwrap(), with_reason);
+        // An empty struct body also reads back as a reason-less DQ.
+        assert_eq!(
+            serde_json::from_str::<Penalty>(r#"{"Disqualify":{}}"#).unwrap(),
+            bare
+        );
+    }
+
+    #[test]
+    fn points_penalties_round_trip_on_the_wire() {
+        // The two standings-only penalties carry their `points` as a bare integer.
+        let deducted = Penalty::PointsDeducted { points: 7 };
+        assert_eq!(
+            serde_json::to_string(&deducted).unwrap(),
+            r#"{"PointsDeducted":{"points":7}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Penalty>(r#"{"PointsDeducted":{"points":7}}"#).unwrap(),
+            deducted
+        );
+        let added = Penalty::PointsAdded { points: 3 };
+        assert_eq!(
+            serde_json::from_str::<Penalty>(r#"{"PointsAdded":{"points":3}}"#).unwrap(),
+            added
+        );
+    }
+
+    #[test]
+    fn time_added_wire_shape_is_unchanged() {
+        // Hand-rolling serde for `Penalty` must not change `TimeAdded`'s legacy wire shape.
+        let p = Penalty::TimeAdded { micros: 2_000_000 };
+        assert_eq!(
+            serde_json::to_string(&p).unwrap(),
+            r#"{"TimeAdded":{"micros":2000000}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Penalty>(r#"{"TimeAdded":{"micros":2000000}}"#).unwrap(),
+            p
+        );
+    }
+
+    #[test]
+    fn legacy_log_without_slice6_variants_reads_back() {
+        // A log written before the Slice-6 facts existed carries none of them; the additive
+        // variants leave every pre-existing serialized event deserializing unchanged.
+        let legacy_penalty = r#"{"PenaltyApplied":{"heat":"m","competitor":"B","penalty":{"TimeAdded":{"micros":500000}}}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(legacy_penalty).unwrap(),
+            Event::PenaltyApplied {
+                heat: HeatId("m".into()),
+                competitor: CompetitorRef("B".into()),
+                penalty: Penalty::TimeAdded { micros: 500_000 },
+            }
+        );
+    }
+
+    #[test]
     fn legacy_log_without_split_or_reversal_reads_back() {
         // An old log written before `LapSplit`/`RulingReversed` existed carries only the
         // pre-Slice-2 marshaling variants. Adding the new variants is purely additive on the
@@ -814,7 +1182,7 @@ mod tests {
             Event::PenaltyApplied {
                 heat: HeatId("main-a".into()),
                 competitor: CompetitorRef("Bee".into()),
-                penalty: Penalty::Disqualify,
+                penalty: Penalty::Disqualify { reason: None },
             }
         );
     }
