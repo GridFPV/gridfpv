@@ -1,48 +1,50 @@
-//! Single-elimination bracket generator (#34) — a [`Generator`] that seeds a field
-//! into a knockout bracket and advances winners round by round until one remains.
+//! Single-elimination bracket generator (#34, #217) — a [`Generator`] for **one bracket
+//! level**: it seeds a field, pairs strong-vs-weak, and runs that level's heats. Advancement
+//! to the next level is **round-to-round** (each level is its own round), not intra-round.
 //!
-//! # The format (race-engine.html §3, §5)
+//! # Level-per-round (decisions D13, #217)
 //!
-//! A single-elimination bracket is the archetypal **fixed-but-state-driven** format
-//! (RE §3): the whole bracket is determined by the seeded field, yet every round is
-//! still derived from the results so far — `next` reads the completed heats, takes
-//! each heat's winner(s), and lays out the next round (RE §5, "winners advance toward
-//! a final"). It never reads a clock or an RNG: any seeding draw is resolved once and
-//! injected as a [`SeedingOutcome`] at construction (RE §6), so the bracket replays
-//! identically.
+//! A single-elimination bracket used to be **one round for the whole bracket**, with
+//! intra-round advancement walking the bracket tree inside a single generator. That made the
+//! bracket round a special, internally-stateful shape unlike every other round. The model is
+//! now **one round per bracket level**: Quarters, Semis, Final are three rounds, each seeded
+//! from the previous level's heat winners (`SeedingRule::FromHeatWinners` server-side). This
+//! generator therefore produces a **single level**:
 //!
-//! # Seeding & round layout
+//! 1. **Seed the field.** The config carries the level's field in seed order (best first); a
+//!    recorded [`SeedingOutcome`] is applied first (identity if none), giving the draw order
+//!    the level actually uses. For the **first** level this is the quali top-N; for a later
+//!    level it is the prior level's heat winners (in heat order).
+//! 2. **Pair strong-vs-weak.** [`bracket_pairs`] reorders the seeds `[1, 8, 2, 7, …]` so
+//!    consecutive entries are match-ups (1 v 8, 2 v 7, …) — the standard bracket seeding that
+//!    keeps top seeds apart. (For a winners-seeded later level whose field is already in heat
+//!    order this still produces a deterministic, stable pairing.)
+//! 3. **Chunk into heats.** The bracket order is split into heats of `heat_size` competitors
+//!    (default **2**, i.e. head-to-head; set `heat_size=4` for 4-up heats). Each heat advances
+//!    its **top half** (`heat_size / 2`, at least one): head-to-head advances the winner; a
+//!    4-up heat advances its top two.
 //!
-//! 1. **Seed the field.** The config carries the field in seed order (best first); a
-//!    recorded [`SeedingOutcome`] is applied first (identity if none), giving the
-//!    draw order the bracket actually uses.
-//! 2. **Pair strong-vs-weak.** [`bracket_pairs`] reorders the seeds `[1, 8, 2, 7, …]`
-//!    so consecutive entries are match-ups (1 v 8, 2 v 7, …) — the standard bracket
-//!    seeding that keeps top seeds apart until late rounds.
-//! 3. **Chunk into heats.** The bracket order is split into heats of `heat_size`
-//!    competitors (default **2**, i.e. head-to-head; set `heat_size=4` for 4-up
-//!    heats). Each heat advances its **top half** (`heat_size / 2`, at least one):
-//!    head-to-head advances the winner; a 4-up heat advances its top two.
+//! The generator emits exactly that one level's heats, then declares the level
+//! [`Complete`](GeneratorStep::Complete). There is **no** next-level layout inside it; the next
+//! level is a separate round seeded from this level's [`Generator::ranking`] / heat winners.
 //!
 //! # Byes (odd / short fields)
 //!
-//! When the bracket order does not divide evenly into full heats, the **trailing**
-//! competitors form a short final chunk. A chunk that ends up with a *single*
-//! competitor is a **bye**: that competitor advances to the next round without flying
-//! a heat, deterministically. Because [`bracket_pairs`] places an odd field's middle
-//! seed last, the bye naturally falls to that seed (e.g. a 5-field head-to-head lays
-//! out `1 v 5`, `2 v 4`, and `3` byes). A short chunk that still has two or more
-//! competitors is run as a smaller heat (e.g. a 6-field 4-up round runs a 4-up heat
-//! and a 2-up heat).
+//! When the bracket order does not divide evenly into full heats, the **trailing** competitors
+//! form a short final chunk. A chunk that ends up with a *single* competitor is a **bye**: that
+//! competitor advances out of the level without flying a heat, deterministically. Because
+//! [`bracket_pairs`] places an odd field's middle seed last, the bye naturally falls to that
+//! seed (e.g. a 5-field head-to-head lays out `1 v 5`, `2 v 4`, and `3` byes). A short chunk
+//! that still has two or more competitors is run as a smaller heat.
 //!
-//! # Ranking
+//! # Ranking (one level's placement)
 //!
-//! [`Generator::ranking`] is the **bracket placement**: the eventual winner first, the
-//! runner-up (whoever lost the final) second, then everyone else ordered by **how far
-//! they advanced** — competitors eliminated in a later round outrank those knocked out
-//! earlier. Within a round, finishers are ordered by the [`HeatResult`] that knocked
-//! them out (better in-heat position first), with the competitor ref as the final
-//! deterministic tie-break. Provisional before the bracket completes, final after.
+//! [`Generator::ranking`] is this **level's** placement: the competitors who **advance** out of
+//! the level first — in **heat order** (each heat's top half, then the byes) — then the
+//! competitors the level eliminated (heat losers, in heat order), each ordered by the
+//! [`HeatResult`] within their heat with the competitor ref as the final deterministic
+//! tie-break. The advancing set, in this order, is exactly what the next level seeds from.
+//! Provisional (the bracket order) before the level's heats complete, final after.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -55,16 +57,17 @@ use crate::format::{
 };
 use crate::scoring::HeatResult;
 
-/// A single-elimination bracket over a seeded field.
+/// A single-elimination bracket **level** over a seeded field.
 ///
-/// Constructed with the seeded field (draw order already applied) and a `heat_size`;
-/// `next` drives the rounds and `ranking` reports the bracket placement. See the
-/// module docs for the seeding / bye / advancement rules.
+/// Constructed with the seeded field (draw order already applied) and a `heat_size`; `next`
+/// emits this one level's heats (then completes) and `ranking` reports the level placement
+/// (advancers first, in heat order). See the module docs for the seeding / bye / advancement
+/// rules. Advancement to the next level is a separate round (server-side `FromHeatWinners`).
 pub struct SingleElim {
     /// The field in seed/draw order (the recorded [`SeedingOutcome`] already applied).
     field: Vec<CompetitorRef>,
-    /// Competitors per heat (default 2 = head-to-head). Each heat advances its top
-    /// half (`heat_size / 2`, at least one).
+    /// Competitors per heat (default 2 = head-to-head). Each heat advances its top half
+    /// (`heat_size / 2`, at least one).
     heat_size: usize,
 }
 
@@ -72,8 +75,8 @@ impl SingleElim {
     /// The format name this registers under.
     pub const NAME: &'static str = "single_elim";
 
-    /// Build over a `field` in seed order with the given `heat_size` (clamped to a
-    /// minimum of 2 — a heat needs at least two competitors to eliminate anyone).
+    /// Build over a `field` in seed order with the given `heat_size` (clamped to a minimum of
+    /// 2 — a heat needs at least two competitors to eliminate anyone).
     pub fn new(field: Vec<CompetitorRef>, heat_size: usize) -> Self {
         Self {
             field,
@@ -81,8 +84,8 @@ impl SingleElim {
         }
     }
 
-    /// The registry constructor: applies the recorded `seeding` draw to `field` and
-    /// reads the optional `heat_size` param (default 2 = head-to-head).
+    /// The registry constructor: applies the recorded `seeding` draw to `field` and reads the
+    /// optional `heat_size` param (default 2 = head-to-head).
     pub fn from_config(config: &FormatConfig) -> Box<dyn Generator> {
         let field = config.seeding.apply(&config.field);
         let heat_size = config.param_usize("heat_size", 2);
@@ -94,158 +97,166 @@ impl SingleElim {
         registry.register(Self::NAME, Self::from_config);
     }
 
-    /// How many competitors advance out of a heat of `n` competitors: the top half,
-    /// at least one. (Head-to-head → 1; 4-up → 2; a short 3-up chunk → 1.)
+    /// How many competitors advance out of a heat of `n` competitors: the top half, at least
+    /// one. (Head-to-head → 1; 4-up → 2; a short 3-up chunk → 1.)
     fn advance_count(&self, n: usize) -> usize {
         (self.heat_size / 2).min(n.saturating_sub(1)).max(1).min(n)
     }
 
-    /// The heat id for heat `index` (0-based) of round `round` (1-based).
-    fn heat_id(round: usize, index: usize) -> String {
-        format!("se-r{round}-h{index}")
+    /// The heat id for heat `index` (0-based) of this level. A single level numbers its heats
+    /// `se-h{index}`; round-to-round advancement is expressed by *separate rounds*, each with
+    /// its own [`crate::format::HeatPlan`] ids (the server scopes them per round).
+    fn heat_id(index: usize) -> String {
+        format!("se-h{index}")
     }
 
-    /// Lay `order` (a round's bracket order) into heats of `heat_size`, returning the
-    /// heat plans **and** the byes (single-competitor chunks that advance for free).
+    /// Lay the level's bracket `order` into heats of `heat_size`, returning the heat plans
+    /// **and** the byes (single-competitor chunks that advance for free).
     ///
-    /// A trailing chunk with two or more competitors is a (possibly short) heat; a
-    /// trailing chunk of exactly one is a bye. The split is deterministic: chunks are
-    /// taken left-to-right in `order`.
-    fn lay_out_round(
-        &self,
-        round: usize,
-        order: &[CompetitorRef],
-    ) -> (Vec<HeatPlan>, Vec<CompetitorRef>) {
+    /// A trailing chunk with two or more competitors is a (possibly short) heat; a trailing
+    /// chunk of exactly one is a bye. The split is deterministic: chunks are taken
+    /// left-to-right in `order`.
+    fn lay_out(&self, order: &[CompetitorRef]) -> (Vec<HeatPlan>, Vec<CompetitorRef>) {
         let mut heats = Vec::new();
         let mut byes = Vec::new();
         for (index, chunk) in order.chunks(self.heat_size).enumerate() {
             if chunk.len() == 1 {
                 byes.push(chunk[0].clone());
             } else {
-                heats.push(HeatPlan::new(Self::heat_id(round, index), chunk.to_vec()));
+                heats.push(HeatPlan::new(Self::heat_id(index), chunk.to_vec()));
             }
         }
         (heats, byes)
     }
 
-    /// Replay the bracket from the completed history, returning, for each round that
-    /// has *fully* completed, the competitors advancing out of it (in bracket order),
-    /// plus the bracket order of the round currently awaiting heats (if any).
+    /// Replay the level from the completed history: the heats this level needs run, whether
+    /// they are all complete, and — once they are — who advanced (in heat order, then byes)
+    /// and who was eliminated (heat losers, in heat order).
     ///
-    /// This is the pure core both [`next`](Generator::next) and
-    /// [`ranking`](Generator::ranking) build on: it walks round by round, matching each
-    /// round's emitted heats against `completed` by heat id, and only advances to the
-    /// next round once every heat of the current one has come back.
+    /// The pure core both [`next`](Generator::next) and [`ranking`](Generator::ranking) build
+    /// on. A level with a single competitor (or empty field) has no heats and completes with
+    /// that lone survivor as the sole advancer.
     fn replay(&self, completed: &[CompletedHeat]) -> Replay {
         let by_id: BTreeMap<&str, &HeatResult> = completed
             .iter()
             .map(|c| (c.heat.0.as_str(), &c.result))
             .collect();
 
-        let mut round = 1usize;
-        let mut order = bracket_pairs(&self.field);
-        let mut eliminated_by_round: Vec<Vec<RankEntry>> = Vec::new();
+        let order = bracket_pairs(&self.field);
 
-        loop {
-            // A single survivor (or empty field) ends the bracket — no more heats.
-            if order.len() <= 1 {
-                return Replay {
-                    pending: None,
-                    survivors: order,
-                    eliminated_by_round,
-                };
-            }
-
-            let (heats, byes) = self.lay_out_round(round, &order);
-
-            // Are all of this round's heats complete? If any is missing, this round is
-            // the one we are waiting on — return it as pending.
-            let results: Option<Vec<&HeatResult>> = heats
-                .iter()
-                .map(|h| by_id.get(h.heat.0.as_str()).copied())
-                .collect();
-            let Some(results) = results else {
-                return Replay {
-                    pending: Some((round, heats)),
-                    survivors: order,
-                    eliminated_by_round,
-                };
+        // A single competitor (or empty field) is already the level's survivor — no heats.
+        if order.len() <= 1 {
+            return Replay {
+                heats: Vec::new(),
+                complete: true,
+                advanced: order,
+                eliminated: Vec::new(),
             };
+        }
 
-            // Round complete: advance each heat's top half, in heat order, then the
-            // byes; record who this round eliminated (heat losers, in heat order).
-            let mut next_order = Vec::new();
-            let mut eliminated = Vec::new();
-            for (heat, result) in heats.iter().zip(results) {
-                let ranking = result_ranking(result);
-                let advance = self.advance_count(heat.lineup.len());
-                for (i, entry) in ranking.iter().enumerate() {
-                    if i < advance {
-                        next_order.push(entry.competitor.clone());
-                    } else {
-                        eliminated.push(entry.clone());
-                    }
+        let (heats, byes) = self.lay_out(&order);
+
+        // Are all of this level's heats complete? If any is missing, the level is still
+        // running: its advancers/eliminated are not yet known.
+        let results: Option<Vec<&HeatResult>> = heats
+            .iter()
+            .map(|h| by_id.get(h.heat.0.as_str()).copied())
+            .collect();
+        let Some(results) = results else {
+            return Replay {
+                heats,
+                complete: false,
+                advanced: Vec::new(),
+                eliminated: Vec::new(),
+            };
+        };
+
+        // Level complete: advance each heat's top half (in heat order), then the byes; record
+        // who the level eliminated (heat losers, in heat order).
+        let mut advanced = Vec::new();
+        let mut eliminated = Vec::new();
+        for (heat, result) in heats.iter().zip(results) {
+            let ranking = result_ranking(result);
+            let advance = self.advance_count(heat.lineup.len());
+            for (i, entry) in ranking.iter().enumerate() {
+                if i < advance {
+                    advanced.push(entry.competitor.clone());
+                } else {
+                    eliminated.push(entry.clone());
                 }
             }
-            next_order.extend(byes);
-            eliminated_by_round.push(eliminated);
+        }
+        advanced.extend(byes);
 
-            order = next_order;
-            round += 1;
+        Replay {
+            heats,
+            complete: true,
+            advanced,
+            eliminated,
         }
     }
 }
 
-/// The outcome of replaying the completed history (see [`SingleElim::replay`]).
+/// The outcome of replaying one level's completed history (see [`SingleElim::replay`]).
 struct Replay {
-    /// The round awaiting heats and the heats it needs run, if the bracket is still
-    /// in progress; `None` once one survivor remains.
-    pending: Option<(usize, Vec<HeatPlan>)>,
-    /// The competitors still in the bracket, in bracket order — one entry once the
-    /// bracket is complete (the winner).
-    survivors: Vec<CompetitorRef>,
-    /// Per round (earliest first), the competitors that round eliminated, each with
-    /// the in-heat [`RankEntry`] that knocked them out.
-    eliminated_by_round: Vec<Vec<RankEntry>>,
+    /// The heats this level needs run (empty for a single-competitor level).
+    heats: Vec<HeatPlan>,
+    /// Whether every heat of the level has come back (so advancers / eliminated are known).
+    complete: bool,
+    /// The competitors advancing out of the level, in heat order then byes — what the next
+    /// level seeds from. Empty until the level is complete.
+    advanced: Vec<CompetitorRef>,
+    /// The competitors the level eliminated (heat losers, in heat order), each with the
+    /// in-heat [`RankEntry`] that knocked them out. Empty until the level is complete.
+    eliminated: Vec<RankEntry>,
 }
 
 impl Generator for SingleElim {
     fn next(&mut self, completed: &[CompletedHeat]) -> GeneratorStep {
-        match self.replay(completed).pending {
-            Some((_round, heats)) => GeneratorStep::Run(heats),
-            None => GeneratorStep::Complete,
+        let replay = self.replay(completed);
+        // Emit this level's heats until they are all complete, then the level is done — the
+        // next level is a separate round, not another step here.
+        if !replay.complete && !replay.heats.is_empty() {
+            GeneratorStep::Run(replay.heats)
+        } else {
+            GeneratorStep::Complete
         }
     }
 
     fn ranking(&self, completed: &[CompletedHeat]) -> Vec<RankEntry> {
         let replay = self.replay(completed);
 
-        // Bands, best first: the survivors still in (the winner once complete, or the
-        // current field mid-bracket), then each round's eliminated set from the latest
-        // round (advanced furthest) back to the first (knocked out earliest).
-        //
-        // Rows carry a (band, in_band_key) sort key; `rank_by` turns equal-band rows
-        // into shared positions and the competitor ref is the final tie-break.
+        // Before the level's heats complete, the provisional ranking is the bracket order.
+        if !replay.complete {
+            return seed_ranking(&bracket_pairs(&self.field));
+        }
+
+        // Bands, best first: the advancers (in heat order, then byes) lead — they are exactly
+        // the next level's field, in seed order — then the eliminated (heat losers, in heat
+        // order). Rows carry a (band, in_band_key) sort key; `rank_by` turns equal-band rows
+        // into shared positions with the competitor ref as the final tie-break.
         let mut rows: Vec<(CompetitorRef, (u32, u32))> = Vec::new();
-        let mut band = 0u32;
-
-        // Survivors: still in the bracket. With a single survivor this is the winner
-        // alone at band 0; mid-bracket it is the live field in bracket order.
-        for (i, competitor) in replay.survivors.iter().enumerate() {
-            rows.push((competitor.clone(), (band, i as u32)));
+        for (i, competitor) in replay.advanced.iter().enumerate() {
+            rows.push((competitor.clone(), (0, i as u32)));
         }
-        band += 1;
-
-        // Eliminated, latest round first (they advanced furthest, so rank higher).
-        for eliminated in replay.eliminated_by_round.iter().rev() {
-            for entry in eliminated {
-                rows.push((entry.competitor.clone(), (band, entry.position)));
-            }
-            band += 1;
+        for entry in &replay.eliminated {
+            rows.push((entry.competitor.clone(), (1, entry.position)));
         }
-
         rank_by(rows)
     }
+}
+
+/// A trivial 1, 2, 3, … ranking straight from a seed/bracket order — the provisional ranking
+/// the level exposes before its heats are flown.
+fn seed_ranking(order: &[CompetitorRef]) -> Vec<RankEntry> {
+    order
+        .iter()
+        .enumerate()
+        .map(|(index, competitor)| RankEntry {
+            competitor: competitor.clone(),
+            position: (index as u32) + 1,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -311,173 +322,143 @@ mod tests {
         }
     }
 
-    // --- Round-1 layout -----------------------------------------------------
+    // --- One level's layout -------------------------------------------------
 
     #[test]
-    fn round_one_pairs_strong_vs_weak_head_to_head() {
+    fn level_pairs_strong_vs_weak_head_to_head() {
         let mut g = SingleElim::new(field(&["1", "2", "3", "4"]), 2);
-        // bracket order 1,4,2,3 → heats (1 v 4), (2 v 3).
+        // bracket order 1,4,2,3 → heats (1 v 4), (2 v 3). One level only.
         assert_eq!(
             lineups(&g.next(&[])),
             vec![
-                ("se-r1-h0".to_string(), vec!["1".into(), "4".into()]),
-                ("se-r1-h1".to_string(), vec!["2".into(), "3".into()]),
+                ("se-h0".to_string(), vec!["1".into(), "4".into()]),
+                ("se-h1".to_string(), vec!["2".into(), "3".into()]),
             ]
         );
     }
 
     #[test]
-    fn round_one_odd_field_gives_the_middle_seed_a_bye() {
+    fn level_odd_field_gives_the_middle_seed_a_bye() {
         // 5 seeds: bracket order 1,5,2,4,3 → heats (1 v 5), (2 v 4), and 3 byes.
         let mut g = SingleElim::new(field(&["1", "2", "3", "4", "5"]), 2);
         assert_eq!(
             lineups(&g.next(&[])),
             vec![
-                ("se-r1-h0".to_string(), vec!["1".into(), "5".into()]),
-                ("se-r1-h1".to_string(), vec!["2".into(), "4".into()]),
+                ("se-h0".to_string(), vec!["1".into(), "5".into()]),
+                ("se-h1".to_string(), vec!["2".into(), "4".into()]),
             ]
         );
     }
 
     #[test]
-    fn four_up_heats_chunk_the_bracket_order() {
+    fn four_up_heats_chunk_the_level() {
         // 8 seeds, 4-up: bracket order 1,8,2,7,3,6,4,5 → two 4-up heats.
         let mut g = SingleElim::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]), 4);
         assert_eq!(
             lineups(&g.next(&[])),
             vec![
                 (
-                    "se-r1-h0".to_string(),
+                    "se-h0".to_string(),
                     vec!["1".into(), "8".into(), "2".into(), "7".into()]
                 ),
                 (
-                    "se-r1-h1".to_string(),
+                    "se-h1".to_string(),
                     vec!["3".into(), "6".into(), "4".into(), "5".into()]
                 ),
             ]
         );
     }
 
-    // --- Advancement --------------------------------------------------------
+    // --- Level completes after its heats ------------------------------------
 
     #[test]
-    fn winners_advance_to_the_next_round() {
-        let mut g = SingleElim::new(field(&["1", "2", "3", "4"]), 2);
-        // Round 1: seed 1 beats 4, seed 2 beats 3.
-        let r1 = vec![
-            CompletedHeat::new("se-r1-h0", h2h("1", "4")),
-            CompletedHeat::new("se-r1-h1", h2h("2", "3")),
-        ];
-        // The final lines up the two winners in heat order: 1 v 2.
-        assert_eq!(
-            lineups(&g.next(&r1)),
-            vec![("se-r2-h0".to_string(), vec!["1".into(), "2".into()])]
-        );
-    }
-
-    #[test]
-    fn bye_competitor_advances_without_a_heat() {
-        // 3 seeds: round 1 is (1 v 3) plus a bye for seed 2.
-        let mut g = SingleElim::new(field(&["1", "2", "3"]), 2);
-        assert_eq!(
-            lineups(&g.next(&[])),
-            vec![("se-r1-h0".to_string(), vec!["1".into(), "3".into()])]
-        );
-        // Seed 1 wins its heat; seed 2 had the bye → final is 1 v 2.
-        let r1 = vec![CompletedHeat::new("se-r1-h0", h2h("1", "3"))];
-        assert_eq!(
-            lineups(&g.next(&r1)),
-            vec![("se-r2-h0".to_string(), vec!["1".into(), "2".into()])]
-        );
-    }
-
-    #[test]
-    fn four_up_advances_top_two_of_each_heat() {
-        let mut g = SingleElim::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]), 4);
-        let _ = g.next(&[]);
-        // Heat h0 (1,8,2,7): order 2,1,8,7 → 2,1 advance. Heat h1 (3,6,4,5): order
-        // 4,5,3,6 → 4,5 advance. Next round (4-up) is one heat of those four.
-        let r1 = vec![
-            CompletedHeat::new(
-                "se-r1-h0",
-                result(&[("2", 1, 6), ("1", 2, 5), ("8", 3, 4), ("7", 4, 3)]),
-            ),
-            CompletedHeat::new(
-                "se-r1-h1",
-                result(&[("4", 1, 6), ("5", 2, 5), ("3", 3, 4), ("6", 4, 3)]),
-            ),
-        ];
-        assert_eq!(
-            lineups(&g.next(&r1)),
-            vec![(
-                "se-r2-h0".to_string(),
-                vec!["2".into(), "1".into(), "4".into(), "5".into()]
-            )]
-        );
-    }
-
-    // --- Completion ---------------------------------------------------------
-
-    #[test]
-    fn bracket_completes_when_one_remains() {
+    fn level_completes_once_its_heats_are_in() {
+        // A 4-seed level is ONE round of two heats; once both come back the level is done —
+        // there is no second round inside this generator (the next level is a new round).
         let mut g = SingleElim::new(field(&["1", "2", "3", "4"]), 2);
         let completed = vec![
-            CompletedHeat::new("se-r1-h0", h2h("1", "4")),
-            CompletedHeat::new("se-r1-h1", h2h("2", "3")),
-            // Final: seed 2 beats seed 1.
-            CompletedHeat::new("se-r2-h0", h2h("2", "1")),
+            CompletedHeat::new("se-h0", h2h("1", "4")),
+            CompletedHeat::new("se-h1", h2h("2", "3")),
         ];
         assert_eq!(g.next(&completed), GeneratorStep::Complete);
     }
 
     #[test]
-    fn single_competitor_field_completes_immediately() {
+    fn single_competitor_level_completes_immediately() {
+        // A one-competitor level (a final's lone survivor seeded into a degenerate level) has
+        // no heat and completes, ranking that competitor first.
         let mut g = SingleElim::new(field(&["1"]), 2);
         assert_eq!(g.next(&[]), GeneratorStep::Complete);
         assert_eq!(names(&g.ranking(&[])), vec!["1"]);
     }
 
-    // --- Final ranking ------------------------------------------------------
+    // --- Level ranking = advancers first, then eliminated -------------------
 
     #[test]
-    fn final_ranking_is_winner_runner_up_then_by_round_eliminated() {
+    fn level_ranking_is_advancers_in_heat_order_then_losers() {
         let mut g = SingleElim::new(field(&["1", "2", "3", "4"]), 2);
         let completed = vec![
-            // Round 1: 1 beats 4, 2 beats 3.
-            CompletedHeat::new("se-r1-h0", h2h("1", "4")),
-            CompletedHeat::new("se-r1-h1", h2h("2", "3")),
-            // Final: 2 beats 1.
-            CompletedHeat::new("se-r2-h0", h2h("2", "1")),
+            // Heat 0: 1 beats 4. Heat 1: 2 beats 3.
+            CompletedHeat::new("se-h0", h2h("1", "4")),
+            CompletedHeat::new("se-h1", h2h("2", "3")),
         ];
         assert_eq!(g.next(&completed), GeneratorStep::Complete);
 
         let ranking = g.ranking(&completed);
-        // Winner 2, runner-up 1 (lost the final), then the round-1 losers (3, 4)
-        // ordered by competitor ref as the final tie-break.
-        assert_eq!(names(&ranking), vec!["2", "1", "3", "4"]);
-        assert_eq!(ranking[0].position, 1);
-        assert_eq!(ranking[1].position, 2);
-        assert_eq!(ranking[2].position, 3);
-        assert_eq!(ranking[3].position, 3); // 3 and 4 share the round-1 elimination band
-    }
-
-    #[test]
-    fn provisional_ranking_tracks_state() {
-        let g = SingleElim::new(field(&["1", "2", "3", "4"]), 2);
-        // Before any heat: bracket order is the provisional ranking.
-        assert_eq!(names(&g.ranking(&[])), vec!["1", "4", "2", "3"]);
-        // After round 1: the two winners lead (still in), then the two losers.
-        let r1 = vec![
-            CompletedHeat::new("se-r1-h0", h2h("1", "4")),
-            CompletedHeat::new("se-r1-h1", h2h("2", "3")),
-        ];
-        let ranking = g.ranking(&r1);
-        // Survivors 1, 2 lead (band 0, bracket order); losers 3, 4 share the next band.
+        // Advancers 1, 2 lead (in heat order, band 0 → positions 1, 2); losers 4, 3 share the
+        // eliminated band, ordered by ref as the final tie-break (3 before 4).
         assert_eq!(&names(&ranking)[..2], &["1".to_string(), "2".to_string()]);
         assert_eq!(ranking[0].position, 1);
         assert_eq!(ranking[1].position, 2);
         assert_eq!(ranking[2].position, 3);
-        assert_eq!(ranking[3].position, 3);
+        assert_eq!(ranking[3].position, 3); // 3 and 4 share the eliminated band
+    }
+
+    #[test]
+    fn four_up_level_advances_top_two_of_each_heat() {
+        let mut g = SingleElim::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]), 4);
+        let _ = g.next(&[]);
+        // Heat h0 (1,8,2,7): order 2,1,8,7 → 2,1 advance. Heat h1 (3,6,4,5): order 4,5,3,6 →
+        // 4,5 advance. The level's advancers (the next level's field) are 2,1,4,5 in heat order.
+        let completed = vec![
+            CompletedHeat::new(
+                "se-h0",
+                result(&[("2", 1, 6), ("1", 2, 5), ("8", 3, 4), ("7", 4, 3)]),
+            ),
+            CompletedHeat::new(
+                "se-h1",
+                result(&[("4", 1, 6), ("5", 2, 5), ("3", 3, 4), ("6", 4, 3)]),
+            ),
+        ];
+        assert_eq!(g.next(&completed), GeneratorStep::Complete);
+        let ranking = g.ranking(&completed);
+        assert_eq!(&names(&ranking)[..4], &["2", "1", "4", "5"]);
+        assert_eq!(ranking[0].position, 1);
+        assert_eq!(ranking[3].position, 4);
+    }
+
+    #[test]
+    fn bye_competitor_advances_without_a_heat() {
+        // 3 seeds: the level is (1 v 3) plus a bye for seed 2.
+        let mut g = SingleElim::new(field(&["1", "2", "3"]), 2);
+        assert_eq!(
+            lineups(&g.next(&[])),
+            vec![("se-h0".to_string(), vec!["1".into(), "3".into()])]
+        );
+        // Seed 1 wins; the bye (seed 2) advances. Advancers in heat order then byes: 1, 2.
+        let completed = vec![CompletedHeat::new("se-h0", h2h("1", "3"))];
+        assert_eq!(g.next(&completed), GeneratorStep::Complete);
+        let ranking = g.ranking(&completed);
+        assert_eq!(&names(&ranking)[..2], &["1".to_string(), "2".to_string()]);
+    }
+
+    // --- Provisional ranking ------------------------------------------------
+
+    #[test]
+    fn provisional_ranking_is_the_bracket_order() {
+        let g = SingleElim::new(field(&["1", "2", "3", "4"]), 2);
+        // Before any heat: bracket order is the provisional ranking.
+        assert_eq!(names(&g.ranking(&[])), vec!["1", "4", "2", "3"]);
     }
 
     // --- Determinism --------------------------------------------------------
@@ -490,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn seeding_draw_reorders_the_bracket_deterministically() {
+    fn seeding_draw_reorders_the_level_deterministically() {
         let cfg = FormatConfig::new(field(&["1", "2", "3", "4"]))
             .with_seeding(SeedingOutcome::drawn(field(&["3", "1", "4", "2"])));
         let mut g1 = SingleElim::from_config(&cfg);
@@ -501,10 +482,82 @@ mod tests {
         assert_eq!(
             lineups(&s1),
             vec![
-                ("se-r1-h0".to_string(), vec!["3".into(), "2".into()]),
-                ("se-r1-h1".to_string(), vec!["1".into(), "4".into()]),
+                ("se-h0".to_string(), vec!["3".into(), "2".into()]),
+                ("se-h1".to_string(), vec!["1".into(), "4".into()]),
             ]
         );
+    }
+
+    // --- A single-elim CHAIN: level → level → final (the level-per-round model) ----
+
+    #[test]
+    fn a_chain_of_levels_progresses_to_a_final() {
+        // 8 seeds. Level 1 (quarters): one SingleElim over the quali top-8. Its advancers seed
+        // level 2 (semis); their advancers seed level 3 (the final). Each level is its own
+        // generator, seeded from the prior level's advancers (heat winners) — exactly what the
+        // server's FromHeatWinners carry does round-to-round.
+
+        // Level 1 — quarters.
+        let mut quarters = SingleElim::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]), 2);
+        // bracket 1,8,2,7,3,6,4,5 → heats (1v8),(2v7),(3v6),(4v5).
+        assert_eq!(
+            lineups(&quarters.next(&[])),
+            vec![
+                ("se-h0".to_string(), vec!["1".into(), "8".into()]),
+                ("se-h1".to_string(), vec!["2".into(), "7".into()]),
+                ("se-h2".to_string(), vec!["3".into(), "6".into()]),
+                ("se-h3".to_string(), vec!["4".into(), "5".into()]),
+            ]
+        );
+        let q_completed = vec![
+            CompletedHeat::new("se-h0", h2h("1", "8")),
+            CompletedHeat::new("se-h1", h2h("2", "7")),
+            CompletedHeat::new("se-h2", h2h("3", "6")),
+            CompletedHeat::new("se-h3", h2h("4", "5")),
+        ];
+        assert_eq!(quarters.next(&q_completed), GeneratorStep::Complete);
+        // The level's advancers (winners in heat order) seed the next level: 1,2,3,4.
+        let semis_seeds: Vec<CompetitorRef> = quarters
+            .ranking(&q_completed)
+            .iter()
+            .take(4)
+            .map(|e| e.competitor.clone())
+            .collect();
+        assert_eq!(semis_seeds, field(&["1", "2", "3", "4"]));
+
+        // Level 2 — semis, seeded from the quarters' winners.
+        let mut semis = SingleElim::new(semis_seeds, 2);
+        // bracket 1,4,2,3 → heats (1v4),(2v3).
+        assert_eq!(
+            lineups(&semis.next(&[])),
+            vec![
+                ("se-h0".to_string(), vec!["1".into(), "4".into()]),
+                ("se-h1".to_string(), vec!["2".into(), "3".into()]),
+            ]
+        );
+        let s_completed = vec![
+            CompletedHeat::new("se-h0", h2h("1", "4")),
+            CompletedHeat::new("se-h1", h2h("2", "3")),
+        ];
+        assert_eq!(semis.next(&s_completed), GeneratorStep::Complete);
+        let final_seeds: Vec<CompetitorRef> = semis
+            .ranking(&s_completed)
+            .iter()
+            .take(2)
+            .map(|e| e.competitor.clone())
+            .collect();
+        assert_eq!(final_seeds, field(&["1", "2"]));
+
+        // Level 3 — the final, seeded from the semis' winners.
+        let mut decider = SingleElim::new(final_seeds, 2);
+        assert_eq!(
+            lineups(&decider.next(&[])),
+            vec![("se-h0".to_string(), vec!["1".into(), "2".into()])]
+        );
+        let f_completed = vec![CompletedHeat::new("se-h0", h2h("2", "1"))];
+        assert_eq!(decider.next(&f_completed), GeneratorStep::Complete);
+        // The final's ranking: winner 2, runner-up 1.
+        assert_eq!(names(&decider.ranking(&f_completed)), vec!["2", "1"]);
     }
 
     // --- Registry -----------------------------------------------------------
@@ -522,8 +575,8 @@ mod tests {
         assert_eq!(
             lineups(&g.next(&[])),
             vec![
-                ("se-r1-h0".to_string(), vec!["1".into(), "4".into()]),
-                ("se-r1-h1".to_string(), vec!["2".into(), "3".into()]),
+                ("se-h0".to_string(), vec!["1".into(), "4".into()]),
+                ("se-h1".to_string(), vec!["2".into(), "3".into()]),
             ]
         );
     }
@@ -539,57 +592,5 @@ mod tests {
         // 4-up: two heats of four.
         assert_eq!(lineups(&step).len(), 2);
         assert_eq!(lineups(&step)[0].1.len(), 4);
-    }
-
-    // --- Larger bracket end-to-end (table) ----------------------------------
-
-    #[test]
-    fn full_eight_seed_bracket_runs_to_a_single_winner() {
-        let mut g = SingleElim::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]), 2);
-        // Round 1: bracket 1,8,2,7,3,6,4,5 → heats (1v8),(2v7),(3v6),(4v5).
-        let r1 = vec![
-            CompletedHeat::new("se-r1-h0", h2h("1", "8")),
-            CompletedHeat::new("se-r1-h1", h2h("2", "7")),
-            CompletedHeat::new("se-r1-h2", h2h("3", "6")),
-            CompletedHeat::new("se-r1-h3", h2h("4", "5")),
-        ];
-        // Round 2 (semis): winners 1,2,3,4 → heats (1v2),(3v4).
-        assert_eq!(
-            lineups(&g.next(&r1)),
-            vec![
-                ("se-r2-h0".to_string(), vec!["1".into(), "2".into()]),
-                ("se-r2-h1".to_string(), vec!["3".into(), "4".into()]),
-            ]
-        );
-        let mut completed = r1;
-        completed.push(CompletedHeat::new("se-r2-h0", h2h("1", "2")));
-        completed.push(CompletedHeat::new("se-r2-h1", h2h("4", "3")));
-        // Round 3 (final): 1 v 4.
-        assert_eq!(
-            lineups(&g.next(&completed)),
-            vec![("se-r3-h0".to_string(), vec!["1".into(), "4".into()])]
-        );
-        completed.push(CompletedHeat::new("se-r3-h0", h2h("1", "4")));
-        assert_eq!(g.next(&completed), GeneratorStep::Complete);
-
-        // Final ranking: winner 1, runner-up 4, then the semi losers (2,3), then the
-        // round-1 losers (5,6,7,8), each band sharing a position.
-        let ranking = g.ranking(&completed);
-        assert_eq!(ranking[0].competitor, cref("1"));
-        assert_eq!(ranking[0].position, 1);
-        assert_eq!(ranking[1].competitor, cref("4"));
-        assert_eq!(ranking[1].position, 2);
-        // Semi losers 2 and 3 share position 3.
-        let semi: Vec<&str> = ranking[2..4]
-            .iter()
-            .map(|e| e.competitor.0.as_str())
-            .collect();
-        assert_eq!(semi, vec!["2", "3"]);
-        assert_eq!(ranking[2].position, 3);
-        assert_eq!(ranking[3].position, 3);
-        // Round-1 losers 5,6,7,8 share position 5.
-        assert_eq!(ranking[4].position, 5);
-        assert_eq!(ranking[7].position, 5);
-        assert_eq!(ranking.len(), 8);
     }
 }

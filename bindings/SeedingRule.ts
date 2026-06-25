@@ -19,7 +19,12 @@ source_rounds: Array<RoundId>,
 /**
  * How many of the aggregated ranking's top places advance into this round.
  */
-top_n: number, } } | { "AllChannels": { 
+top_n: number, } } | { "FromHeatWinners": { 
+/**
+ * The prior bracket-level round whose heat winners seed this round — must exist in
+ * [`EventMeta::rounds`].
+ */
+source_round: RoundId, } } | { "AllChannels": { 
 /**
  * The active channels as **node indices** (the timer-seat indices the RD made live), laid
  * out as `node-{i}` competitor refs by the field builder, in this order.

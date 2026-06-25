@@ -215,11 +215,13 @@ fn full_event_runs_to_a_single_winner_over_real_heats() {
         "the busy node tops qualifying"
     );
 
-    // The bracket ran to a single winner — the top seed, busy in every heat.
+    // The bracket ran level-by-level to a single winner — the top seed, busy in every heat.
+    // Level-per-round (#217): `bracket` is the FINAL level's standings (the two finalists),
+    // winner first; each earlier level is its own round with its own standings.
     assert_eq!(
         outcome.bracket.len(),
-        4,
-        "every seed appears in the standings"
+        2,
+        "the final level's standings are the two finalists"
     );
     assert_eq!(
         outcome.bracket[0].position, 1,

@@ -580,6 +580,28 @@ pub enum SeedingRule {
         /// How many of the aggregated ranking's top places advance into this round.
         top_n: usize,
     },
+    /// Seed from the **heat winners** of a prior bracket-level round — the **bracket
+    /// advancement** carry (decisions D13, #217). The field is each completed heat's
+    /// **advancing** competitor(s) in `source_round`, taken **in heat order** (heat 0's winner
+    /// first, then heat 1's, …), plus any bye competitor the level advanced. This is exactly how
+    /// a single-elimination bracket advances **round-to-round** under the level-per-round model: a
+    /// level is one round, and the *next* level is a new round seeded from the prior level's
+    /// winners — no intra-round bracket-walking.
+    ///
+    /// "Winner" means the heat's **advancing set** under the source round's format (the heat's top
+    /// half — head-to-head advances one, a 4-up heat advances two), so a 4-up bracket carries the
+    /// right competitors forward. The order is the source level's
+    /// [`round_ranking`](crate::round_engine::round_ranking) advancers prefix, which a single-elim
+    /// level already lists winners-first in heat order. Unlike [`FromRanking`](Self::FromRanking)
+    /// (which takes a *top-N* slice of an aggregated ranking) this takes **exactly the winners** —
+    /// however many heats the level had — so the next level's size follows the bracket, not a
+    /// fixed `top_n`. Single source only (a single-elim level feeds exactly one next level);
+    /// double-elimination's cross-bracket losers-of feed is a separate, deferred design (D13).
+    FromHeatWinners {
+        /// The prior bracket-level round whose heat winners seed this round — must exist in
+        /// [`EventMeta::rounds`].
+        source_round: RoundId,
+    },
     /// Seed from a set of active **channels** rather than pilots — the **open-practice** seeding
     /// (open-practice format). The field builder lays each node index out as a `node-{i}`
     /// [`CompetitorRef`](gridfpv_events::CompetitorRef) (the timer-seat handle the timer emits
@@ -626,11 +648,15 @@ impl<'de> Deserialize<'de> for SeedingRule {
         enum Shadow {
             FromRoster,
             FromRanking(FromRankingBody),
+            FromHeatWinners { source_round: RoundId },
             AllChannels { channels: Vec<usize> },
         }
 
         match Shadow::deserialize(deserializer)? {
             Shadow::FromRoster => Ok(SeedingRule::FromRoster),
+            Shadow::FromHeatWinners { source_round } => {
+                Ok(SeedingRule::FromHeatWinners { source_round })
+            }
             Shadow::AllChannels { channels } => Ok(SeedingRule::AllChannels { channels }),
             Shadow::FromRanking(body) => {
                 let source_rounds = match (body.source_rounds, body.source_round) {
@@ -1848,24 +1874,36 @@ fn validate_round_fields(
         return Err(RoundError::Invalid(format!("unknown format {format:?}")));
     }
 
-    if let SeedingRule::FromRanking { source_rounds, .. } = seeding {
-        if source_rounds.is_empty() {
-            return Err(RoundError::Invalid(
-                "FromRanking seeding must name at least one source round".to_string(),
-            ));
-        }
-        for source_round in source_rounds {
-            if Some(source_round) == editing {
+    // The seeding rules that name **source rounds** (the bracket/cut carries) must name rounds
+    // that exist in this event and may never name the round being edited (a round can't seed from
+    // itself). `FromRanking` may name several (issue #51 multi-select) and requires at least one;
+    // `FromHeatWinners` (bracket advancement, #217) names exactly one prior level.
+    let mut source_rounds: Vec<&RoundId> = Vec::new();
+    match seeding {
+        SeedingRule::FromRanking {
+            source_rounds: s, ..
+        } => {
+            if s.is_empty() {
                 return Err(RoundError::Invalid(
-                    "a round cannot seed from itself".to_string(),
+                    "FromRanking seeding must name at least one source round".to_string(),
                 ));
             }
-            if !meta.rounds.iter().any(|r| &r.id == source_round) {
-                return Err(RoundError::Invalid(format!(
-                    "seeding source round {:?} does not exist in this event",
-                    source_round.0
-                )));
-            }
+            source_rounds.extend(s.iter());
+        }
+        SeedingRule::FromHeatWinners { source_round } => source_rounds.push(source_round),
+        SeedingRule::FromRoster | SeedingRule::AllChannels { .. } => {}
+    }
+    for source_round in source_rounds {
+        if Some(source_round) == editing {
+            return Err(RoundError::Invalid(
+                "a round cannot seed from itself".to_string(),
+            ));
+        }
+        if !meta.rounds.iter().any(|r| &r.id == source_round) {
+            return Err(RoundError::Invalid(format!(
+                "seeding source round {:?} does not exist in this event",
+                source_round.0
+            )));
         }
     }
 
@@ -2827,6 +2865,53 @@ mod tests {
             },
         );
         assert!(matches!(self_ref, Err(RoundError::Invalid(_))));
+
+        // FromHeatWinners (bracket advancement, #217) validates its single source the same way:
+        // a dangling source is rejected, an existing one is accepted, and self-seeding is caught.
+        let mut dangling_winners = round_req("Next level", vec![bracket.classes[0].clone()]);
+        dangling_winners.format = "single_elim".to_string();
+        dangling_winners.seeding = SeedingRule::FromHeatWinners {
+            source_round: RoundId("does-not-exist".into()),
+        };
+        assert!(matches!(
+            reg.add_round(&event.id, dangling_winners),
+            Err(RoundError::Invalid(_))
+        ));
+
+        let mut next_level = round_req("Next level", vec![bracket.classes[0].clone()]);
+        next_level.format = "single_elim".to_string();
+        next_level.seeding = SeedingRule::FromHeatWinners {
+            source_round: bracket.id.clone(),
+        };
+        let next_level = reg.add_round(&event.id, next_level).unwrap();
+        assert_eq!(
+            next_level.seeding,
+            SeedingRule::FromHeatWinners {
+                source_round: bracket.id.clone(),
+            }
+        );
+
+        let self_winners = reg.update_round(
+            &event.id,
+            &next_level.id,
+            UpdateRoundReq {
+                label: next_level.label.clone(),
+                classes: next_level.classes.clone(),
+                format: next_level.format.clone(),
+                params: BTreeMap::new(),
+                win_condition: Some(next_level.win_condition),
+                seeding: SeedingRule::FromHeatWinners {
+                    source_round: next_level.id.clone(),
+                },
+                time_limit_secs: None,
+                channel_mode: None,
+                staging_timer_secs: None,
+                start_procedure: None,
+                grace_window: None,
+                protest_window: None,
+            },
+        );
+        assert!(matches!(self_winners, Err(RoundError::Invalid(_))));
     }
 
     #[test]
@@ -2911,6 +2996,24 @@ mod tests {
             SeedingRule::AllChannels {
                 channels: vec![0, 1, 2]
             }
+        );
+
+        // FromHeatWinners (bracket advancement, #217) deserializes from its single source round
+        // and round-trips through serialize.
+        let winners: SeedingRule =
+            serde_json::from_str(r#"{ "FromHeatWinners": { "source_round": "quarters" } }"#)
+                .unwrap();
+        assert_eq!(
+            winners,
+            SeedingRule::FromHeatWinners {
+                source_round: RoundId("quarters".into()),
+            }
+        );
+        let json = serde_json::to_string(&winners).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SeedingRule>(&json).unwrap(),
+            winners,
+            "FromHeatWinners round-trips through serialize → deserialize"
         );
     }
 

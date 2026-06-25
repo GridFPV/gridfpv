@@ -330,6 +330,8 @@ fn single_class(round: &RoundDef) -> Option<ClassId> {
 ///   several (issue #51 multi-select) the rankings are merged **best-per-pilot** by
 ///   [`aggregate_rankings`] before taking the top-N — exactly the phase-2 seeding
 ///   [`run_event`](gridfpv_engine::event::run_event) does over the combined field.
+/// - [`SeedingRule::FromHeatWinners`]: the source (bracket-level) round's **heat winners**, in heat
+///   order — the bracket **advancement** carry (decisions D13, #217). See [`heat_winners`].
 fn round_field(
     meta: &EventMeta,
     round: &RoundDef,
@@ -366,6 +368,15 @@ fn round_field(
             let merged = aggregate_rankings(&rankings);
             Ok(advance_top_n(&merged, *top_n))
         }
+        // Bracket advancement (decisions D13, #217): the field is the source level's **heat
+        // winners** — the competitors that advanced out of each heat, in heat order. This is how a
+        // single-elimination bracket advances round-to-round under the level-per-round model: the
+        // next level is a new round seeded from the prior level's winners.
+        SeedingRule::FromHeatWinners { source_round } => {
+            let source = round_of(meta, source_round)
+                .map_err(|_| FillError::UnknownSourceRound(source_round.0.clone()))?;
+            Ok(heat_winners(meta, source, events)?)
+        }
         // Open practice (open-practice format): the field is the active **channels**, each node
         // index laid out as a `node-{i}` competitor ref (the timer-seat handle) in the given order.
         // No pilots, no membership — laps are tracked per channel live in memory (not logged).
@@ -374,6 +385,37 @@ fn round_field(
             .map(|i| CompetitorRef(format!("node-{i}")))
             .collect()),
     }
+}
+
+/// The **heat winners** of a (bracket-level) source round, in heat order — the field a
+/// [`SeedingRule::FromHeatWinners`] successor level seeds from (decisions D13, #217).
+///
+/// A single-elimination *level* is one round whose [`round_ranking`] lists its **advancers**
+/// (each heat's winner — the top half — in heat order, then any bye) first, ahead of the
+/// **eliminated**, who all share the single worst position (each heat's losers tie at the bottom
+/// band). The winners are therefore exactly the ranking entries whose position is **strictly
+/// better than that worst band**, taken in ranking (heat) order. This carries forward however many
+/// heats the level had — head-to-head advances one per heat, a 4-up heat advances two — so the next
+/// level's size follows the bracket rather than a fixed top-N.
+///
+/// Before the source level is complete its ranking is provisional, so the winners are provisional
+/// too (the carry recomputes deterministically as the source level's heats finalize — the same
+/// off-the-log property [`FromRanking`](SeedingRule::FromRanking) has). A source round whose
+/// ranking is a single band (one competitor, or none finalized yet) advances no one.
+fn heat_winners(
+    meta: &EventMeta,
+    source: &RoundDef,
+    events: &[Event],
+) -> Result<Vec<CompetitorRef>, FillError> {
+    let ranking = round_ranking(meta, source, events)?;
+    let Some(worst) = ranking.iter().map(|e| e.position).max() else {
+        return Ok(Vec::new());
+    };
+    Ok(ranking
+        .iter()
+        .filter(|e| e.position < worst)
+        .map(|e| e.competitor.clone())
+        .collect())
 }
 
 /// Merge several rounds' rankings into **one aggregated ranking, best-per-pilot** (issue #51
@@ -534,9 +576,32 @@ pub fn completed_heats(round: &RoundDef, events: &[Event]) -> Vec<CompletedHeat>
             // generator sees matches a wholesale run.
             let pass_events: Vec<Event> = passes.into_iter().map(Event::Pass).collect();
             let result: HeatResult = score_marshaled(&pass_events, round.win_condition, race_start);
-            CompletedHeat::new(heat.0, result)
+            // The generator keys `next`/`ranking` on the heat ids it **emitted** (the unscoped
+            // `se-h0`, …). A `single_elim` round's logged heats carry the round-scoped id
+            // (`{round_id}-se-h0`, so two levels don't collide globally — see `fill_round_per_heat`),
+            // so un-scope it back to the generator's id before feeding the history; otherwise the
+            // bracket level would see no completed heats and never advance.
+            let generator_id = unscope_heat_id(round, &heat);
+            CompletedHeat::new(generator_id, result)
         })
         .collect()
+}
+
+/// Map a round's **logged** heat id back to the **generator's** id (the one the format emitted).
+///
+/// Most formats log the generator's id verbatim. A `single_elim` round scopes its per-level heat
+/// ids with the round id (`{round_id}-se-h0`) so two bracket levels in one event don't collide in
+/// the global heat-state fold (see [`fill_round_per_heat`]); this strips that prefix so the history
+/// fed to the generator matches the ids it keyed on. The prefix is stripped only when present, so a
+/// legacy/un-scoped id passes through unchanged.
+fn unscope_heat_id(round: &RoundDef, heat: &HeatId) -> String {
+    if round.format == gridfpv_engine::single_elim::SingleElim::NAME {
+        let prefix = format!("{}-", round.id.0);
+        if let Some(stripped) = heat.0.strip_prefix(&prefix) {
+            return stripped.to_string();
+        }
+    }
+    heat.0.clone()
 }
 
 /// The **finalized** heats of a round, in first-scheduled order — the heat ids both
@@ -989,12 +1054,23 @@ fn fill_round_per_heat(
             // verbatim. Rewritten **before** the dedup so `already`/`scheduled_round_heats` (which
             // read the round-scoped id from the log) match it and the auto-create stays idempotent
             // per round.
+            // Bracket levels (decisions D13, #217): a `single_elim` round is now **one bracket
+            // level**, and its generator numbers heats per level (`se-h0`, …) — so two level
+            // rounds in one event (Quarters → Semis → Final) would emit the *same* `se-h0` id and
+            // collide in the global heat-state fold. Scope every per-heat bracket id to the round
+            // (`{round_id}-{id}`) so each level's heats are unique, exactly as open-practice scopes
+            // its single heat. `completed_heats` already filters by round tag, so the scoped id is
+            // purely what makes the global heat-state lookup round-unique.
             let open_practice = is_open_practice(round);
             let mut plans = plans;
             if open_practice {
                 let scoped = open_practice_heat_id(round_id);
                 for plan in &mut plans {
                     plan.heat = scoped.clone();
+                }
+            } else if round.format == gridfpv_engine::single_elim::SingleElim::NAME {
+                for plan in &mut plans {
+                    plan.heat = HeatId(format!("{}-{}", round_id.0, plan.heat.0));
                 }
             }
             let already: Vec<HeatId> = scheduled_round_heats(events, round_id);
@@ -2046,6 +2122,303 @@ mod tests {
             }
             other => panic!("expected a scheduled bracket heat, got {other:?}"),
         }
+    }
+
+    // --- Level-per-round single-elim brackets (decisions D13, #217) ------------------------
+
+    /// A `single_elim` bracket-**level** round over `class` with the given `seeding` and id.
+    fn bracket_round(id: &str, class: &str, seeding: SeedingRule) -> RoundDef {
+        RoundDef {
+            id: RoundId(id.into()),
+            label: id.into(),
+            classes: vec![ScopeClassId(class.into())],
+            format: "single_elim".into(),
+            params: BTreeMap::new(),
+            win_condition: WinCondition::FirstToLaps { n: 3 },
+            seeding,
+            channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            time_limit_secs: None,
+        }
+    }
+
+    /// A finished bracket heat where `winner` reaches 3 laps and `loser` only 1 — so the round's
+    /// `FirstToLaps { n: 3 }` win condition makes `winner` the heat winner. Appends the full
+    /// schedule→run→finalize span under `heat_id`, tagged with `round`/`class`.
+    fn bracket_heat(
+        heat_id: &str,
+        round: &str,
+        class: &str,
+        winner: &str,
+        loser: &str,
+    ) -> Vec<Event> {
+        let mut out = vec![scheduled(heat_id, round, class, &[winner, loser])];
+        out.extend(run_heat_events(
+            heat_id,
+            vec![
+                pass(winner, 0, 0),
+                pass(loser, 10, 0),
+                pass(winner, 1_000_000, 1),
+                pass(winner, 2_000_000, 2),
+                pass(winner, 3_000_000, 3),
+                pass(loser, 1_500_000, 1),
+            ],
+        ));
+        out
+    }
+
+    #[test]
+    fn advancing_to_a_next_level_seeds_from_the_prior_levels_heat_winners() {
+        // The level-per-round flow (#217): quali → level-1 bracket (FromRanking top-4) → level-2
+        // bracket (FromHeatWinners of level 1). Advancing creates the next level seeded from the
+        // prior level's heat winners, in heat order.
+        let qual = qual_round("q1", "open");
+        let level1 = bracket_round(
+            "l1",
+            "open",
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("q1".into())],
+                top_n: 4,
+            },
+        );
+        let level2 = bracket_round(
+            "l2",
+            "open",
+            SeedingRule::FromHeatWinners {
+                source_round: RoundId("l1".into()),
+            },
+        );
+        let meta = meta_with(
+            vec![qual, level1, level2],
+            vec![member("open", &["A", "B", "C", "D"])],
+        );
+
+        // Run the quali heat to Final: A fastest, then B, C, D (by best lap).
+        let qfill = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
+        let qheat = match qfill {
+            FillOutcome::Scheduled { heat, .. } => heat.0,
+            other => panic!("expected scheduled quali heat, got {other:?}"),
+        };
+        let mut log = vec![scheduled(&qheat, "q1", "open", &["A", "B", "C", "D"])];
+        log.extend(run_heat_events(
+            &qheat,
+            vec![
+                pass("A", 0, 0),
+                pass("B", 10, 0),
+                pass("C", 20, 0),
+                pass("D", 30, 0),
+                pass("A", 1_000_000, 1),
+                pass("B", 1_200_000, 1),
+                pass("C", 1_400_000, 1),
+                pass("D", 1_600_000, 1),
+            ],
+        ));
+
+        // --- Level 1: seeded from the quali top-4 (A,B,C,D). bracket_pairs → A,D,B,C → two heats
+        // (A v D), (B v C). FillRound schedules one heat at a time; the ids are round-scoped.
+        let l1h0 = match fill_round(&meta, &no_timers(), &RoundId("l1".into()), &log).unwrap() {
+            FillOutcome::Scheduled { heat, lineup, .. } => {
+                assert_eq!(lineup, lineup_refs(&["A", "D"]), "level-1 heat 0 is A v D");
+                heat.0
+            }
+            other => panic!("expected level-1 heat 0, got {other:?}"),
+        };
+        assert_eq!(l1h0, "l1-se-h0", "bracket heat ids are scoped to the round");
+        // A wins heat 0. Append it, then fill the second heat.
+        log.extend(bracket_heat(&l1h0, "l1", "open", "A", "D"));
+        let l1h1 = match fill_round(&meta, &no_timers(), &RoundId("l1".into()), &log).unwrap() {
+            FillOutcome::Scheduled { heat, lineup, .. } => {
+                assert_eq!(lineup, lineup_refs(&["B", "C"]), "level-1 heat 1 is B v C");
+                heat.0
+            }
+            other => panic!("expected level-1 heat 1, got {other:?}"),
+        };
+        // B wins heat 1. Append it — level 1 is now complete (both heats finalized).
+        log.extend(bracket_heat(&l1h1, "l1", "open", "B", "C"));
+        assert_eq!(
+            fill_round(&meta, &no_timers(), &RoundId("l1".into()), &log).unwrap(),
+            FillOutcome::Complete,
+            "level 1 completes once both of its heats are in",
+        );
+
+        // --- Level 2 (the final): seeded FromHeatWinners of level 1. The winners in heat order are
+        // A (heat 0) then B (heat 1), so the final lines up A v B.
+        match fill_round(&meta, &no_timers(), &RoundId("l2".into()), &log).unwrap() {
+            FillOutcome::Scheduled { heat, lineup, .. } => {
+                assert_eq!(
+                    lineup,
+                    lineup_refs(&["A", "B"]),
+                    "the next level seeds from the prior level's heat winners, in heat order"
+                );
+                assert_eq!(
+                    heat.0, "l2-se-h0",
+                    "the final's heat id is scoped to level 2"
+                );
+            }
+            other => panic!("expected the level-2 final, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_single_elim_chain_progresses_level_to_level_to_a_final() {
+        // An 8-pilot single-elim chain: quarters (FromRanking top-8) → semis (FromHeatWinners of
+        // quarters) → final (FromHeatWinners of semis). Each level is its own round; advancement is
+        // round-to-round via heat winners. Asserts the chain reaches a single-heat final of the two
+        // top seeds.
+        let qual = qual_round("q1", "open");
+        let quarters = bracket_round(
+            "quarters",
+            "open",
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("q1".into())],
+                top_n: 8,
+            },
+        );
+        let semis = bracket_round(
+            "semis",
+            "open",
+            SeedingRule::FromHeatWinners {
+                source_round: RoundId("quarters".into()),
+            },
+        );
+        let decider = bracket_round(
+            "final",
+            "open",
+            SeedingRule::FromHeatWinners {
+                source_round: RoundId("semis".into()),
+            },
+        );
+        let pilots = ["A", "B", "C", "D", "E", "F", "G", "H"];
+        let meta = meta_with(
+            vec![qual, quarters, semis, decider],
+            vec![member("open", &pilots)],
+        );
+
+        // Quali: rank A..H in order (descending best lap so A is fastest).
+        let qheat = match fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap() {
+            FillOutcome::Scheduled { heat, .. } => heat.0,
+            other => panic!("expected quali heat, got {other:?}"),
+        };
+        let mut log = vec![scheduled(&qheat, "q1", "open", &pilots)];
+        let qpasses: Vec<Event> = pilots
+            .iter()
+            .enumerate()
+            .flat_map(|(i, p)| {
+                vec![
+                    pass(p, i as i64, 0),
+                    // Later index → slower (larger) lap, so A is fastest, H slowest.
+                    pass(p, 1_000_000 + (i as i64) * 100_000, 1),
+                ]
+            })
+            .collect();
+        log.extend(run_heat_events(&qheat, qpasses));
+
+        // Helper: fill+run every heat of a bracket level, with the lineup's FIRST entry (the higher
+        // seed, laid first by bracket_pairs) winning — then assert the level completes.
+        fn run_level(meta: &EventMeta, round: &str, class: &str, log: &mut Vec<Event>) {
+            loop {
+                match fill_round(meta, &no_timers(), &RoundId(round.into()), log).unwrap() {
+                    FillOutcome::Scheduled { heat, lineup, .. } => {
+                        let winner = lineup[0].0.clone();
+                        let loser = lineup[1].0.clone();
+                        log.extend(bracket_heat(&heat.0, round, class, &winner, &loser));
+                    }
+                    FillOutcome::Complete => break,
+                    other => panic!("unexpected fill outcome for {round}: {other:?}"),
+                }
+            }
+        }
+
+        // Quarters: bracket_pairs(A..H) = A,H,B,G,C,F,D,E → 4 heats; the first seed of each wins →
+        // A,B,C,D advance.
+        run_level(&meta, "quarters", "open", &mut log);
+        // Semis: seeded from the quarters' winners A,B,C,D → pairs A,D,B,C → heats (AvD),(BvC) →
+        // A,B advance.
+        run_level(&meta, "semis", "open", &mut log);
+
+        // Final: seeded from the semis' winners A,B → one heat A v B.
+        match fill_round(&meta, &no_timers(), &RoundId("final".into()), &log).unwrap() {
+            FillOutcome::Scheduled { lineup, heat, .. } => {
+                assert_eq!(
+                    lineup,
+                    lineup_refs(&["A", "B"]),
+                    "the chain reaches a final of the two surviving top seeds",
+                );
+                assert_eq!(heat.0, "final-se-h0");
+            }
+            other => panic!("expected the final, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_heat_winners_is_deterministic_on_replay() {
+        // The FromHeatWinners carry is a pure function of the log + meta: filling the next level
+        // twice over the same log yields the identical seeded lineup (no clock, no RNG).
+        let qual = qual_round("q1", "open");
+        let level1 = bracket_round(
+            "l1",
+            "open",
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("q1".into())],
+                top_n: 4,
+            },
+        );
+        let level2 = bracket_round(
+            "l2",
+            "open",
+            SeedingRule::FromHeatWinners {
+                source_round: RoundId("l1".into()),
+            },
+        );
+        let meta = meta_with(
+            vec![qual, level1, level2],
+            vec![member("open", &["A", "B", "C", "D"])],
+        );
+
+        let qheat = match fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap() {
+            FillOutcome::Scheduled { heat, .. } => heat.0,
+            other => panic!("expected quali heat, got {other:?}"),
+        };
+        let mut log = vec![scheduled(&qheat, "q1", "open", &["A", "B", "C", "D"])];
+        log.extend(run_heat_events(
+            &qheat,
+            vec![
+                pass("A", 0, 0),
+                pass("B", 10, 0),
+                pass("C", 20, 0),
+                pass("D", 30, 0),
+                pass("A", 1_000_000, 1),
+                pass("B", 1_200_000, 1),
+                pass("C", 1_400_000, 1),
+                pass("D", 1_600_000, 1),
+            ],
+        ));
+        // Level 1: A v D, B v C → A, B win.
+        let l1h0 = match fill_round(&meta, &no_timers(), &RoundId("l1".into()), &log).unwrap() {
+            FillOutcome::Scheduled { heat, .. } => heat.0,
+            other => panic!("expected level-1 heat 0, got {other:?}"),
+        };
+        log.extend(bracket_heat(&l1h0, "l1", "open", "A", "D"));
+        let l1h1 = match fill_round(&meta, &no_timers(), &RoundId("l1".into()), &log).unwrap() {
+            FillOutcome::Scheduled { heat, .. } => heat.0,
+            other => panic!("expected level-1 heat 1, got {other:?}"),
+        };
+        log.extend(bracket_heat(&l1h1, "l1", "open", "B", "C"));
+
+        let first = fill_round(&meta, &no_timers(), &RoundId("l2".into()), &log).unwrap();
+        let second = fill_round(&meta, &no_timers(), &RoundId("l2".into()), &log).unwrap();
+        assert_eq!(
+            first, second,
+            "the FromHeatWinners carry replays identically"
+        );
+    }
+
+    /// A lineup of [`CompetitorRef`]s from names — the bracket tests' expected-lineup builder.
+    fn lineup_refs(names: &[&str]) -> Vec<CompetitorRef> {
+        names.iter().map(|n| CompetitorRef((*n).into())).collect()
     }
 
     // --- Static channel-balanced formation (race redesign Slice 7a) ------------------------
