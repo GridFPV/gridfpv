@@ -31,6 +31,7 @@
     RoundDef
   } from '@gridfpv/types';
   import { channelLabel, nodeChannelLabel, nodeIndexOf } from '../lib/channels.js';
+  import { createCompetitorNameResolver } from '../lib/competitorName.js';
   import { heatDisplayName, heatNameById } from '../lib/heats.js';
   import {
     ACTION_ORDER,
@@ -136,35 +137,18 @@
     return heatNameById(id, heats, session.currentEvent?.rounds ?? []);
   }
 
-  // `competitorName(ref)` → the **callsign** when the ref resolves to a directory pilot; else, for an
-  // **unbound channel seat** (an open-practice `node-{i}` ref with no pilot), its **channel label**;
-  // else the bare ref (already a human-entered competitor handle in a normal heat). The single
-  // resolver every pilot/lineup/leaderboard row goes through.
-  //
-  // The binding resolves from the **always-available roster binding**, not the race progress, so a
-  // callsign shows whether the heat is Scheduled, Staged, Running, or done. Two sources, in order:
-  //  1. an **explicit** `Register` binding carried on `progress.pilot` (the manual-registration /
-  //     open-practice path), then
-  //  2. the **roster-seeded** binding: `FromRoster` seeding makes the competitor ref *equal to the
-  //     pilot id*, so a ref that names a directory pilot resolves to its callsign directly — this is
-  //     the common case, and it carries no `CompetitorRegistered` event (so progress.pilot is null).
-  //
-  // The channel-label fallback is scoped to `node-{i}` seats deliberately: a normal competition heat
-  // *also* assigns a channel to each pilot, but there the ref is the pilot's own handle and must show
-  // as-is — only the anonymous open-practice seats (which would otherwise read "node-0") get labelled
-  // by their channel.
-  function competitorName(ref: CompetitorRef): string {
-    // (1) Explicit registration binding, then (2) the ref interpreted as a directory pilot id (the
-    // roster-seeded binding, available pre-race independent of `progress`).
-    const pid = explicitPilotByRef.get(ref) ?? ref;
-    const callsign = pilotById.get(pid)?.callsign;
-    if (callsign) return callsign;
-    if (nodeIndexOf(ref) !== undefined) {
-      const channel = currentChannels.get(ref);
-      if (channel) return channel;
-    }
-    return ref;
-  }
+  // `competitorName(ref)` → the **callsign** (directory pilot), else an open-practice `node-{i}`
+  // seat's **channel label**, else the bare ref. The single shared resolver every pilot/lineup/
+  // leaderboard row goes through — the same one Marshaling uses (see `competitorName.ts` for the
+  // full rule and why the binding comes from the always-available roster binding, not race progress,
+  // so a callsign shows whether the heat is Scheduled, Staged, Running, or done).
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
+    createCompetitorNameResolver({
+      pilotById,
+      explicitPilotByRef,
+      channelByRef: currentChannels
+    })
+  );
 
   // A plain ref → display-name record for the shared `HeatSheet` (which takes `names`). Built over
   // the union of the lineup and the progress rows so every rendered row resolves.

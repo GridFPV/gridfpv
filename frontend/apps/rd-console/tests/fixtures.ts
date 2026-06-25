@@ -103,9 +103,18 @@ export const marshalingAudit: AuditEntry[] = [
     kind: 'PenaltyApplied',
     at: 1_700_000_000_000_000,
     at_ref: 20,
-    summary: 'DQ applied for CARMEN'
+    // The competitor is carried STRUCTURED (the client resolves it to a callsign + composes the
+    // line); the summary holds only the action description, no raw ref.
+    competitor: 'CARMEN',
+    summary: 'DQ applied'
   },
-  { kind: 'Voided', at: 1_700_000_000_000_000, at_ref: 18, summary: 'Detection voided (ref 12)' }
+  {
+    kind: 'Voided',
+    at: 1_700_000_000_000_000,
+    at_ref: 18,
+    competitor: null,
+    summary: 'Detection voided (ref 12)'
+  }
 ];
 
 export const eventOutcome: EventOutcome = {

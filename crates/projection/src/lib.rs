@@ -585,8 +585,15 @@ pub enum AuditKind {
 ///
 /// A thin, render-ready fact derived from one logged marshaling event. `at` is the event's
 /// `recorded_at` (the server wall-clock instant the log received it), so the panel can show
-/// "when"; `summary` is a short human string ("Lap split", "DQ applied to node-2"); `kind`
-/// drives the visual treatment. There is no actor field by design (see [`AuditKind`]).
+/// "when"; `summary` is a short human string ("Lap split", "DQ applied"); `kind` drives the visual
+/// treatment. There is no actor field by design (see [`AuditKind`]).
+///
+/// `competitor` carries the **structured** competitor ref the action targeted (when it targets one),
+/// kept *out* of `summary` on purpose: the ref is a source-local handle (a pilot id, a node seat),
+/// not a friendly name, so the client resolves it to the pilot's **callsign** and composes the final
+/// line (e.g. prepends "Ace · " to "DQ applied"). A server-baked `summary` cannot be re-resolved, so
+/// the name lives in this field, not in the string (the Marshaling raw-id bug, #214 follow-up). It is
+/// `None` for the lap-/heat-addressed actions that name no competitor (void, split, heat-void, …).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct AuditEntry {
@@ -599,7 +606,11 @@ pub struct AuditEntry {
     /// The global append offset of this fact — a stable identity for the entry (and what a
     /// later "reverse this" would target). Lets the UI key the list deterministically.
     pub at_ref: LogRef,
-    /// A short human-readable description of the change.
+    /// The competitor this action targeted, as a **structured ref** the client resolves to a
+    /// callsign and composes into the displayed line. `None` for actions that name no competitor.
+    pub competitor: Option<CompetitorRef>,
+    /// A short human-readable description of the change — **without** the raw competitor ref (that
+    /// is carried structured in `competitor` so the client can show the resolved callsign instead).
     pub summary: String,
 }
 
@@ -623,23 +634,29 @@ where
 {
     let mut entries: Vec<AuditEntry> = Vec::new();
     for (at, offset, event) in events {
-        let (kind, summary) = match event {
+        // `competitor` carries the structured ref the client resolves to a callsign; it is kept OUT
+        // of `summary` (the server can't resolve a friendly name; the client composes the final line).
+        let (kind, competitor, summary) = match event {
             Event::DetectionVoided { target } => (
                 AuditKind::Voided,
+                None,
                 format!("Detection voided (ref {})", target.0),
             ),
             Event::LapInserted {
                 competitor, at: t, ..
             } => (
                 AuditKind::Inserted,
-                format!("Lap inserted for {} at {}", competitor.0, fmt_secs(*t)),
+                Some(competitor.clone()),
+                format!("Lap inserted at {}", fmt_secs(*t)),
             ),
             Event::LapAdjusted { target, at: t } => (
                 AuditKind::Adjusted,
+                None,
                 format!("Lap re-timed (ref {}) to {}", target.0, fmt_secs(*t)),
             ),
             Event::LapSplit { target, at: t } => (
                 AuditKind::Split,
+                None,
                 format!("Lap split (ref {}) at {}", target.0, fmt_secs(*t)),
             ),
             Event::PenaltyApplied {
@@ -648,10 +665,12 @@ where
                 penalty,
             } if h == heat => (
                 AuditKind::PenaltyApplied,
-                format!("{} for {}", fmt_penalty(penalty), competitor.0),
+                Some(competitor.clone()),
+                fmt_penalty(penalty),
             ),
             Event::LapThrownOut { target } => (
                 AuditKind::LapThrownOut,
+                None,
                 format!("Lap thrown out (ref {})", target.0),
             ),
             Event::ProtestFiled {
@@ -660,18 +679,21 @@ where
                 note,
             } if h == heat => (
                 AuditKind::ProtestFiled,
-                format!("Protest filed against {}: {}", competitor.0, note),
+                Some(competitor.clone()),
+                format!("Protest filed: {note}"),
             ),
             Event::ProtestResolved { target, outcome } => (
                 AuditKind::ProtestResolved,
+                None,
                 format!("Protest {} (ref {})", fmt_outcome(*outcome), target.0),
             ),
             Event::RulingReversed { target } => (
                 AuditKind::RulingReversed,
+                None,
                 format!("Ruling reversed (ref {})", target.0),
             ),
             Event::HeatVoided { heat: h } if h == heat => {
-                (AuditKind::HeatVoided, "Heat voided".to_string())
+                (AuditKind::HeatVoided, None, "Heat voided".to_string())
             }
             // Passes and lifecycle/heat-loop events are not marshaling actions — skip them.
             _ => continue,
@@ -680,6 +702,7 @@ where
             kind,
             at,
             at_ref: LogRef(offset),
+            competitor,
             summary,
         });
     }
@@ -1788,6 +1811,25 @@ mod marshaling_tests {
                 .iter()
                 .any(|e| e.kind == AuditKind::ProtestResolved && e.summary.contains("upheld"))
         );
+        // Competitor-addressed actions carry the STRUCTURED ref (for client callsign resolution) and
+        // keep it out of the summary string; the client composes the resolved name into the line.
+        let penalty = entries
+            .iter()
+            .find(|e| e.kind == AuditKind::PenaltyApplied)
+            .unwrap();
+        assert_eq!(penalty.competitor, Some(CompetitorRef("A".into())));
+        let protest = entries
+            .iter()
+            .find(|e| e.kind == AuditKind::ProtestFiled)
+            .unwrap();
+        assert_eq!(protest.competitor, Some(CompetitorRef("B".into())));
+        assert!(!protest.summary.contains('B'));
+        // Lap-/heat-addressed actions name no competitor.
+        let resolved = entries
+            .iter()
+            .find(|e| e.kind == AuditKind::ProtestResolved)
+            .unwrap();
+        assert_eq!(resolved.competitor, None);
     }
 
     #[test]
@@ -1822,7 +1864,10 @@ mod marshaling_tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].kind, AuditKind::PenaltyApplied);
         assert!(entries[0].summary.contains("+2.000s"));
-        assert!(entries[0].summary.contains('A'));
+        // The competitor ref is carried STRUCTURED (for client callsign resolution), not baked into
+        // the summary string — the summary holds only the penalty description.
+        assert!(!entries[0].summary.contains('A'));
+        assert_eq!(entries[0].competitor, Some(CompetitorRef("A".into())));
     }
 
     #[test]
