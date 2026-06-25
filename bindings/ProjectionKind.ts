@@ -9,4 +9,4 @@
  * projection it advances without re-sending it. Keeping the kind separate from the
  * body lets a delta name its target cheaply.
  */
-export type ProjectionKind = "LiveRaceState" | "LapList" | "HeatResult" | "Ranking" | "EventOutcome" | "MarshalingAudit";
+export type ProjectionKind = "LiveRaceState" | "LapList" | "HeatResult" | "Ranking" | "EventOutcome" | "MarshalingAudit" | "SignalTrace";

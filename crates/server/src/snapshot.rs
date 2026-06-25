@@ -29,7 +29,7 @@
 use gridfpv_engine::event::EventOutcome;
 use gridfpv_engine::format::RankEntry;
 use gridfpv_engine::scoring::HeatResult;
-use gridfpv_projection::{AuditEntry, LapList};
+use gridfpv_projection::{AuditEntry, LapList, SignalTraceView};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -87,6 +87,9 @@ pub enum ProjectionKind {
     EventOutcome,
     /// A heat's marshaling audit trail (a [`AuditEntry`](gridfpv_projection::AuditEntry) list, #55).
     MarshalingAudit,
+    /// A heat's captured RSSI signal trace (a [`SignalTraceView`](gridfpv_projection::SignalTraceView),
+    /// marshaling Slice 1).
+    SignalTrace,
 }
 
 /// A served projection **with its value** (protocol.html §1) — the closed set of
@@ -114,6 +117,9 @@ pub enum ProjectionBody {
     /// A heat's marshaling audit trail — the reverse-chronological "what changed, when, what
     /// kind" the defensible-results panel renders (#55). Heat-scoped, fresh-value encoded.
     MarshalingAudit(Vec<AuditEntry>),
+    /// A heat's captured per-competitor RSSI trace + enter/exit thresholds — the signal-as-evidence
+    /// surface (marshaling Slice 1). Heat-scoped; append-heavy, so delta-preferring like the lap list.
+    SignalTrace(SignalTraceView),
 }
 
 impl ProjectionBody {
@@ -126,6 +132,7 @@ impl ProjectionBody {
             ProjectionBody::Ranking(_) => ProjectionKind::Ranking,
             ProjectionBody::EventOutcome(_) => ProjectionKind::EventOutcome,
             ProjectionBody::MarshalingAudit(_) => ProjectionKind::MarshalingAudit,
+            ProjectionBody::SignalTrace(_) => ProjectionKind::SignalTrace,
         }
     }
 }
@@ -204,10 +211,26 @@ mod tests {
             Ranking,
             EventOutcome,
             MarshalingAudit,
+            SignalTrace,
         ] {
             let json = serde_json::to_string(&kind).unwrap();
             let back: ProjectionKind = serde_json::from_str(&json).unwrap();
             assert_eq!(kind, back);
         }
+    }
+
+    #[test]
+    fn signal_trace_body_round_trips() {
+        let snap = Snapshot {
+            cursor: Cursor::new(3),
+            body: ProjectionBody::SignalTrace(SignalTraceView::default()),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, back);
+        assert_eq!(
+            ProjectionBody::SignalTrace(SignalTraceView::default()).kind(),
+            ProjectionKind::SignalTrace
+        );
     }
 }

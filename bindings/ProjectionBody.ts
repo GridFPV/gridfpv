@@ -5,6 +5,7 @@ import type { HeatResult } from "./HeatResult";
 import type { LapList } from "./LapList";
 import type { LiveRaceState } from "./LiveRaceState";
 import type { RankEntry } from "./RankEntry";
+import type { SignalTraceView } from "./SignalTraceView";
 
 /**
  * A served projection **with its value** (protocol.html §1) — the closed set of
@@ -16,4 +17,4 @@ import type { RankEntry } from "./RankEntry";
  * [`ChangeEnvelope`](crate::stream::ChangeEnvelope). Adding a new served projection is
  * an additive variant (§7); an older client ignores a kind it does not understand.
  */
-export type ProjectionBody = { "LiveRaceState": LiveRaceState } | { "LapList": LapList } | { "HeatResult": HeatResult } | { "Ranking": Array<RankEntry> } | { "EventOutcome": EventOutcome } | { "MarshalingAudit": Array<AuditEntry> };
+export type ProjectionBody = { "LiveRaceState": LiveRaceState } | { "LapList": LapList } | { "HeatResult": HeatResult } | { "Ranking": Array<RankEntry> } | { "EventOutcome": EventOutcome } | { "MarshalingAudit": Array<AuditEntry> } | { "SignalTrace": SignalTraceView };

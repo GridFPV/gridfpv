@@ -677,6 +677,138 @@ fn fmt_penalty(penalty: &gridfpv_events::Penalty) -> String {
     }
 }
 
+// --- Signal trace (marshaling Slice 1 — signal-as-evidence) -----------------------------------
+
+/// One competitor's reconstructed RSSI trace within a heat: the concatenated samples plus the
+/// enter/exit thresholds the timer detected against (marshaling.html §3.2).
+///
+/// The `samples` are the per-tick RSSI values in capture order; `from`/`period_micros` carry the
+/// time base of the **first** chunk so a UI can place each sample on the source clock (chunks are
+/// captured back-to-back at a fixed cadence, so the first chunk's base plus the running index
+/// reconstructs every sample's time — see [`signal_trace`] for the contiguity it assumes).
+/// `enter`/`exit` are the last thresholds seen for this competitor, `None` until one is captured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct CompetitorTrace {
+    /// Which source-local competitor this trace belongs to.
+    pub competitor: CompetitorKey,
+    /// The source-clock timestamp of the first captured sample, if any.
+    #[ts(optional)]
+    pub from: Option<SourceTime>,
+    /// Microseconds between consecutive samples (the capture cadence of the first chunk).
+    #[ts(type = "number")]
+    pub period_micros: u32,
+    /// The concatenated per-tick RSSI samples (filtered ADC counts), oldest first.
+    pub samples: Vec<u16>,
+    /// The enter detection threshold, where captured.
+    #[ts(optional)]
+    pub enter: Option<u16>,
+    /// The exit detection threshold, where captured.
+    #[ts(optional)]
+    pub exit: Option<u16>,
+}
+
+/// The signal-trace read model for a heat: one [`CompetitorTrace`] per competitor that produced
+/// any signal facts, ordered deterministically by [`CompetitorKey`] (marshaling Slice 1).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignalTraceView {
+    /// Per-competitor traces, ordered by competitor key.
+    pub competitors: Vec<CompetitorTrace>,
+}
+
+impl SignalTraceView {
+    /// Look up a single competitor's trace by key, if present.
+    pub fn competitor(&self, key: &CompetitorKey) -> Option<&CompetitorTrace> {
+        self.competitors.iter().find(|c| &c.competitor == key)
+    }
+}
+
+/// Fold a sequence of events into the per-heat [`SignalTraceView`] (marshaling Slice 1).
+///
+/// Folds only [`Event::SignalChunk`] and [`Event::SignalThresholds`] — chunks **append** to their
+/// competitor's running sample buffer in log order (so the trace reconstructs exactly the captured
+/// stream), and thresholds are **last-writer-wins** per competitor. Every other event (passes,
+/// lifecycle, marshaling) is ignored: this projection is purely the captured evidence.
+///
+/// Pure and deterministic — no clock, no hidden state — so folding the same events twice yields the
+/// identical view (the determinism-on-replay guarantee Slice 1 is built around). The `from`/
+/// `period_micros` of the **first** chunk seen for a competitor anchor the trace's time base;
+/// because a signal-capable adapter captures chunks back-to-back at a fixed cadence, the running
+/// sample index off that base places every later sample without storing a per-chunk timestamp.
+///
+/// `events` is the heat's window (the server scopes it before folding, exactly as the lap/audit
+/// projections do); the fold itself is window-agnostic, so it is equally correct over the full log.
+pub fn signal_trace<'a, I>(events: I) -> SignalTraceView
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    // Per competitor, in first-seen order; sorted by key at the end for a stable view.
+    struct Acc {
+        from: Option<SourceTime>,
+        period_micros: u32,
+        samples: Vec<u16>,
+        enter: Option<u16>,
+        exit: Option<u16>,
+    }
+    let mut by_competitor: BTreeMap<CompetitorKey, Acc> = BTreeMap::new();
+
+    for event in events {
+        match event {
+            Event::SignalChunk(chunk) => {
+                let key = CompetitorKey {
+                    adapter: chunk.adapter.clone(),
+                    competitor: chunk.competitor.clone(),
+                };
+                let acc = by_competitor.entry(key).or_insert_with(|| Acc {
+                    from: None,
+                    period_micros: chunk.period_micros,
+                    samples: Vec::new(),
+                    enter: None,
+                    exit: None,
+                });
+                // The first chunk anchors the time base; later chunks append onto it.
+                if acc.from.is_none() {
+                    acc.from = Some(chunk.from);
+                    acc.period_micros = chunk.period_micros;
+                }
+                acc.samples.extend_from_slice(&chunk.rssi);
+            }
+            Event::SignalThresholds(t) => {
+                let key = CompetitorKey {
+                    adapter: t.adapter.clone(),
+                    competitor: t.competitor.clone(),
+                };
+                let acc = by_competitor.entry(key).or_insert_with(|| Acc {
+                    from: None,
+                    period_micros: 0,
+                    samples: Vec::new(),
+                    enter: None,
+                    exit: None,
+                });
+                // Last writer wins.
+                acc.enter = Some(t.enter);
+                acc.exit = Some(t.exit);
+            }
+            _ => {}
+        }
+    }
+
+    SignalTraceView {
+        competitors: by_competitor
+            .into_iter()
+            .map(|(competitor, acc)| CompetitorTrace {
+                competitor,
+                from: acc.from,
+                period_micros: acc.period_micros,
+                samples: acc.samples,
+                enter: acc.enter,
+                exit: acc.exit,
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1611,5 +1743,100 @@ mod marshaling_tests {
             (Some(3), Event::RulingReversed { target: LogRef(1) }),
         ];
         assert_eq!(audit(&log, heat), audit(&log, heat));
+    }
+
+    // --- Signal trace (marshaling Slice 1) ----------------------------------------------------
+
+    use gridfpv_events::{SignalChunk, SignalThresholds};
+
+    fn chunk(adapter: &str, competitor: &str, from: i64, period: u32, rssi: &[u16]) -> Event {
+        Event::SignalChunk(SignalChunk {
+            adapter: AdapterId(adapter.into()),
+            competitor: CompetitorRef(competitor.into()),
+            from: SourceTime::from_micros(from),
+            period_micros: period,
+            rssi: rssi.to_vec(),
+        })
+    }
+
+    fn thresholds(adapter: &str, competitor: &str, enter: u16, exit: u16) -> Event {
+        Event::SignalThresholds(SignalThresholds {
+            adapter: AdapterId(adapter.into()),
+            competitor: CompetitorRef(competitor.into()),
+            enter,
+            exit,
+        })
+    }
+
+    #[test]
+    fn signal_trace_concatenates_chunks_in_log_order() {
+        // Two appended chunks for one node reconstruct into one contiguous sample buffer, anchored
+        // at the FIRST chunk's time base; thresholds fold in alongside.
+        let log = vec![
+            thresholds("rh", "node-0", 90, 80),
+            chunk("rh", "node-0", 1_000_000, 100_000, &[70, 72, 150]),
+            chunk("rh", "node-0", 1_300_000, 100_000, &[148, 71, 70]),
+        ];
+        let view = signal_trace(&log);
+        let key = CompetitorKey {
+            adapter: AdapterId("rh".into()),
+            competitor: CompetitorRef("node-0".into()),
+        };
+        let trace = view.competitor(&key).expect("node-0 trace present");
+        assert_eq!(trace.samples, vec![70, 72, 150, 148, 71, 70]);
+        assert_eq!(trace.from, Some(SourceTime::from_micros(1_000_000)));
+        assert_eq!(trace.period_micros, 100_000);
+        assert_eq!(trace.enter, Some(90));
+        assert_eq!(trace.exit, Some(80));
+    }
+
+    #[test]
+    fn signal_trace_thresholds_are_last_writer_wins() {
+        let log = vec![
+            thresholds("rh", "node-0", 90, 80),
+            thresholds("rh", "node-0", 95, 85),
+        ];
+        let view = signal_trace(&log);
+        let trace = &view.competitors[0];
+        assert_eq!((trace.enter, trace.exit), (Some(95), Some(85)));
+    }
+
+    #[test]
+    fn signal_trace_ignores_passes_and_other_events() {
+        // A heat full of passes/lifecycle/marshaling with no signal facts projects empty.
+        let log = vec![
+            pass("rh", "node-0", 1_000_000, Some(0)),
+            pass("rh", "node-0", 4_000_000, Some(1)),
+            voided(0),
+        ];
+        assert!(signal_trace(&log).competitors.is_empty());
+    }
+
+    #[test]
+    fn signal_trace_is_per_competitor_and_key_ordered() {
+        let log = vec![
+            chunk("rh", "node-1", 0, 100_000, &[60, 120]),
+            chunk("rh", "node-0", 0, 100_000, &[70, 150]),
+        ];
+        let view = signal_trace(&log);
+        // Ordered by CompetitorKey (node-0 before node-1) regardless of arrival order.
+        let keys: Vec<&str> = view
+            .competitors
+            .iter()
+            .map(|c| c.competitor.competitor.0.as_str())
+            .collect();
+        assert_eq!(keys, vec!["node-0", "node-1"]);
+    }
+
+    #[test]
+    fn signal_trace_fold_twice_identical() {
+        // Determinism-on-replay: the same log always yields the same view.
+        let log = vec![
+            chunk("rh", "node-0", 1_000_000, 100_000, &[70, 150, 71]),
+            thresholds("rh", "node-0", 90, 80),
+            chunk("rh", "node-1", 1_000_000, 100_000, &[60, 120, 61]),
+            chunk("rh", "node-0", 1_300_000, 100_000, &[70]),
+        ];
+        assert_eq!(signal_trace(&log), signal_trace(&log));
     }
 }
