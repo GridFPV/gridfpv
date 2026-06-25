@@ -8,3 +8,9 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+# `rh-mock`: the interactive RotorHazard mock-signal harness reuses the testkit's CSV
+# generators + dockerized-RH container, and parses the served `?projection=signal` JSON to
+# dump captured values. `serde_json` is the only network/parse dep — the HTTP GET itself is a
+# tiny std-only blocking request (see `rh_mock.rs`), so xtask stays free of an async stack.
+gridfpv-testkit = { workspace = true }
+serde_json = { workspace = true }

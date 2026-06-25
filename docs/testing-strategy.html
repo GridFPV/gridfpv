@@ -309,6 +309,49 @@ flowchart LR
       canonical-log fixtures (§4).</p>
     </div>
 
+    <h3>5.2 The interactive mock-signal harness — <code>cargo xtask rh-mock</code></h3>
+    <p>
+      The same emulated-signal mechanism (§5.1) is also a <strong>runnable, interactive tool</strong>
+      for hands-on marshaling testing: drive a <em>real</em> dockerized RotorHazard with a controllable
+      mock signal, run a heat against a Director, and <strong>see the exact RSSI/signal values that get
+      captured</strong>. It is a thin <code>xtask</code> wrapper over the <code>gridfpv-testkit</code>
+      scenario library and a read-only fetch of the existing <code>?projection=signal</code> route — it
+      modifies no adapter or projection code.
+    </p>
+    <p>Three subcommands:</p>
+    <table>
+      <thead><tr><th>Command</th><th>Does</th></tr></thead>
+      <tbody>
+        <tr><td><code>cargo xtask rh-mock list</code></td><td>print the scenario menu</td></tr>
+        <tr><td><code>cargo xtask rh-mock feed [scenario] [--port P] [--tick T]</code></td><td>generate the chosen mock signal, feed it to a fresh disposable RotorHazard, and stay running while you point a Director at the timer and run a heat (needs Docker)</td></tr>
+        <tr><td><code>cargo xtask rh-mock dump &lt;director-url&gt; &lt;event&gt; &lt;heat&gt;</code></td><td>after the heat, pretty-print the captured per-competitor RSSI samples, enter/exit thresholds, a sparkline, and the recorded lap list — the raw "what values flowed" view (the marshaling graph renders it visually)</td></tr>
+      </tbody>
+    </table>
+    <p>
+      The scenario menu reuses the testkit generators, so the same situations the e2e suite asserts on
+      can be driven by hand: <code>clean</code> (metronomic laps), <code>missed-lap</code> (a skipped
+      crossing), <code>false-pass</code> (a fast double-trigger to void), <code>noisy</code> (marginal
+      RSSI at the edge of detection), <code>strong-vs-weak</code> (two nodes to compare signal context),
+      <code>dnf</code> (one node drops out), and <code>pack</code> (simultaneous passes).
+    </p>
+    <p>A typical marshaling-testing session:</p>
+    <pre>
+# 1. Spin up a real RH fed a "missed lap" signal (parks until Ctrl-C):
+cargo xtask rh-mock feed missed-lap
+
+# 2. In another shell, start a Director and, in its console, add a RotorHazard
+#    timer pointing at the printed URL (e.g. http://localhost:5055), select it,
+#    build + stage a heat with the right seats, and run the race.
+cargo run -p gridfpv-app
+
+# 3. After the heat, dump the captured signal values for that heat:
+cargo xtask rh-mock dump http://localhost:3000 practice q-1</pre>
+    <p>
+      Like the rest of §5, this is a <strong>local class</strong>: <code>feed</code> needs Docker, so
+      it never runs in CI; the scenario menu + JSON-pointer extraction are unit-tested in the core
+      suite (no Docker, no server). See <code>xtask/src/rh_mock.rs</code>.
+    </p>
+
     <h2>6. The frontend wire-contract suite &amp; observability harness</h2>
     <p>
       Two test layers landed in v0.4 that sit <em>between</em> the mocked frontend unit tests and
