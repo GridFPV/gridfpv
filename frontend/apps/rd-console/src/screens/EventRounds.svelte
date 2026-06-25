@@ -929,7 +929,7 @@
         <!-- Field order (Rounds form redesign item 2): Label first, then Format, then the remaining
              fields shown dynamically per the chosen format (`fields` ← `fieldsForFormat`). -->
         <Field label="Label" required>
-          <Input bind:value={label} placeholder="e.g. Qualifying R1" aria-label="Label" />
+          <Input bind:value={label} placeholder="e.g. Time Trials R1" aria-label="Label" />
         </Field>
 
         <Field label="Format" required>

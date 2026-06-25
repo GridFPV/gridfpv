@@ -40,8 +40,13 @@ export function isQualifyingFormat(format: string | undefined | null): boolean {
  */
 export const FORMAT_LABELS: Readonly<Record<string, string>> = {
   open_practice: 'Open Practice',
-  timed_qual: 'Qualifying',
+  // The `timed_qual` wire key is unchanged (persistence-stable); only the friendly label was
+  // renamed Qualifying → Time Trials (#218 / decisions D11).
+  timed_qual: 'Time Trials',
   round_robin: 'Round Robin',
+  // NOTE: ZippyQ shelved (#218) — the generator stays registered (so persisted `zippyq` rounds
+  // still load) but the format is excluded from the offered set, so a new round can't select it.
+  // Its label is kept here so any persisted `zippyq` round still renders a friendly name.
   zippyq: 'ZippyQ',
   single_elim: 'Single Elimination',
   double_elim: 'Double Elimination',

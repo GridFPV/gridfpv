@@ -2830,6 +2830,47 @@ mod tests {
     }
 
     #[test]
+    fn shelved_zippyq_round_still_validates_and_round_trips() {
+        // #218: ZippyQ is **shelved** — removed from the offered format set (`standard_schemas`) so a
+        // new round can't pick it, but the generator stays **registered** in
+        // `FormatRegistry::standard()`. This is the persistence-stability guarantee: an event that
+        // already stored a `zippyq` round (or the renamed-display `timed_qual` round) must still load
+        // and validate. Adding a `zippyq` round through the same validation path the loader uses must
+        // therefore succeed, and the persisted on-disk shape must round-trip unchanged.
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Legacy Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+
+        // `timed_qual` (the format whose *display* name became "Time Trials" — wire key unchanged).
+        let tq = reg
+            .add_round(&event.id, round_req("Time Trials R1", vec![open.clone()]))
+            .unwrap();
+        assert_eq!(tq.format, "timed_qual");
+
+        // A `zippyq` round still passes validation (the generator is registered, just not offered).
+        let mut zippy = round_req("Legacy ZippyQ", vec![open]);
+        zippy.format = "zippyq".to_string();
+        let zippy = reg
+            .add_round(&event.id, zippy)
+            .expect("a persisted zippyq round must still validate (shelved, not removed)");
+        assert_eq!(zippy.format, "zippyq");
+
+        // The event with both formats serializes and deserializes unchanged (the on-disk shape an
+        // older Director wrote still loads bit-for-bit on the renamed/shelved build).
+        let meta = reg
+            .list()
+            .into_iter()
+            .find(|m| m.id == event.id)
+            .expect("event present");
+        let json = serde_json::to_string(&meta).unwrap();
+        let restored: EventMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, meta);
+        let formats: Vec<&str> = restored.rounds.iter().map(|r| r.format.as_str()).collect();
+        assert!(formats.contains(&"timed_qual") && formats.contains(&"zippyq"));
+    }
+
+    #[test]
     fn from_ranking_deserializes_legacy_single_source_round() {
         // A round stored before issue #51 wrote a single `source_round` string. It must still
         // deserialize, lifting the legacy key into a one-element `source_rounds` list.
