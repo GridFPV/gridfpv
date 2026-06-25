@@ -12,9 +12,11 @@ describe('formats — friendly-name mapping (Rounds form redesign item 1)', () =
     expect(formatLabel('double_elim')).toBe('Double Elimination');
     expect(formatLabel('open_practice')).toBe('Open Practice');
     expect(formatLabel('single_elim')).toBe('Single Elimination');
-    expect(formatLabel('timed_qual')).toBe('Qualifying');
+    // `timed_qual` is the stable wire key; only its friendly label was renamed (#218).
+    expect(formatLabel('timed_qual')).toBe('Time Trials');
     expect(formatLabel('round_robin')).toBe('Round Robin');
     expect(formatLabel('multi_main')).toBe('Multi-Main');
+    // ZippyQ is shelved (not offered) but a persisted `zippyq` round still resolves a friendly name.
     expect(formatLabel('zippyq')).toBe('ZippyQ');
   });
 

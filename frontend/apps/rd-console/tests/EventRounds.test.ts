@@ -46,7 +46,8 @@ const EVENT: EventMeta = {
   rounds: [QUAL]
 };
 
-const FORMATS = ['double_elim', 'multi_main', 'round_robin', 'single_elim', 'timed_qual', 'zippyq'];
+// The offered format set (`GET /formats`) — ZippyQ is shelved (#218) so it is **not** offered.
+const FORMATS = ['double_elim', 'multi_main', 'round_robin', 'single_elim', 'timed_qual'];
 
 // The format param schemas the screen reads (`GET /formats`). `timed_qual` declares its `rounds`
 // param labelled **"Heats per pilot"** (the qualifying-metric param is gone — the metric is derived
@@ -94,8 +95,8 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
     await within(roundsCard).findByText('Qualifying R1');
     // The friendly format name shows (not the raw `timed_qual` key); the resolved class name shows;
-    // FromRoster summarises as "From roster".
-    expect(within(roundsCard).getByText('Qualifying')).toBeInTheDocument();
+    // FromRoster summarises as "From roster". `timed_qual`'s friendly label is "Time Trials" (#218).
+    expect(within(roundsCard).getByText('Time Trials')).toBeInTheDocument();
     expect(within(roundsCard).queryByText('timed_qual')).toBeNull();
     expect(within(roundsCard).getByText('Open')).toBeInTheDocument();
     expect(within(roundsCard).getByText('From roster')).toBeInTheDocument();
@@ -108,9 +109,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     const impls = baseImpls();
     const created: RoundDef = {
       id: 'r2',
-      label: 'Open Practice',
+      label: 'RR Heats',
       classes: ['c1', 'c2'],
-      format: 'zippyq',
+      format: 'round_robin',
       params: {},
       win_condition: 'BestLap',
       seeding: 'FromRoster',
@@ -131,9 +132,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
 
     await fireEvent.input(await screen.findByLabelText('Label'), {
-      target: { value: 'Open Practice' }
+      target: { value: 'RR Heats' }
     });
-    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'zippyq' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'round_robin' } });
     // The eligible class is a single-select dropdown (Rounds form redesign item 6).
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
     await fireEvent.change(screen.getByLabelText('Win condition'), {
@@ -147,15 +148,15 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(eventId).toBe('e1');
     // The single-select class stores a one-element `classes` list.
     expect(req).toMatchObject({
-      label: 'Open Practice',
+      label: 'RR Heats',
       classes: ['c1'],
-      format: 'zippyq',
+      format: 'round_robin',
       win_condition: 'BestLap',
       seeding: 'FromRoster'
     });
     // The new round appears in the Rounds list (its label also seeds the Heats section).
     const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
-    await within(roundsCard).findByText('Open Practice');
+    await within(roundsCard).findByText('RR Heats');
   });
 
   it('reveals the FromRanking source-rounds multi-select (+ top N) and authors it', async () => {

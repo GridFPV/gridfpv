@@ -499,8 +499,12 @@ impl FormatRegistry {
         self.ctors.keys().map(String::as_str).collect()
     }
 
-    /// The **param schema** for every production format (race redesign Slice 7a), in the same sorted
-    /// name order as [`names`](Self::names) over [`standard`](Self::standard).
+    /// The **param schema** for every **offered** production format (race redesign Slice 7a), in
+    /// sorted name order. This is the **offered set** the Rounds UI picks from — a subset of the
+    /// registered formats in [`standard`](Self::standard): a format can be registered (so its
+    /// persisted rounds still validate and replay) yet excluded here so it can't be selected for a
+    /// new round. ZippyQ is currently in exactly that state — shelved (#218), registered but not
+    /// offered.
     ///
     /// Each entry declares the params that format's generator actually reads (with kind, options,
     /// and default), the single source of truth `GET /formats` returns so the Rounds UI renders a
@@ -516,7 +520,8 @@ impl FormatRegistry {
     /// - `multi_main`: `main_size` (number, 4).
     /// - `open_practice`: no params (the active channels are the field, carried by the round's
     ///   `AllChannels` seeding).
-    /// - `zippyq`: `rounds` (number, 0 — rounds are added on demand).
+    /// - `zippyq`: **not offered** — shelved (#218); still registered in
+    ///   [`standard`](Self::standard) so persisted rounds load, but omitted from this offered set.
     pub fn standard_schemas() -> Vec<FormatSchema> {
         vec![
             FormatSchema {
@@ -558,10 +563,10 @@ impl FormatRegistry {
                 // each pilot flies in the qualifying round (their best flight ranks).
                 params: vec![FormatParam::number("rounds", "Heats per pilot", "3")],
             },
-            FormatSchema {
-                name: "zippyq".into(),
-                params: vec![FormatParam::number("rounds", "Initial rounds", "0")],
-            },
+            // NOTE: ZippyQ shelved (#218) — re-add to the offered set when needed. The generator
+            // stays registered in [`standard`](Self::standard) (so persisted `zippyq` rounds still
+            // validate and replay), but it is deliberately omitted from the offered schema set here
+            // so the Rounds UI's format picker can't select it for a new round (decisions D10).
         ]
     }
 
@@ -1254,6 +1259,36 @@ mod tests {
         assert!(registry.contains("timed_qual"));
         assert!(!registry.contains("knockout-demo"));
         assert!(!registry.contains("no-such-format"));
+        // #218: ZippyQ stays **registered** even though it is shelved — so persisted `zippyq` rounds
+        // still build/validate/replay. It is only excluded from the *offered* set (see
+        // `standard_schemas_offer_every_format_except_shelved_zippyq`).
+        assert!(registry.contains("zippyq"));
+    }
+
+    #[test]
+    fn standard_schemas_offer_every_format_except_shelved_zippyq() {
+        // The **offered** set (`GET /formats`, the Rounds UI's picker source) is a subset of the
+        // registered formats: ZippyQ is shelved (#218) so it is registered but NOT offered, which is
+        // what keeps it un-selectable for a new round while persisted `zippyq` rounds still load.
+        let schemas = FormatRegistry::standard_schemas();
+        let offered: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            offered,
+            vec![
+                "double_elim",
+                "multi_main",
+                "open_practice",
+                "round_robin",
+                "single_elim",
+                "timed_qual",
+            ]
+        );
+        assert!(
+            !offered.contains(&"zippyq"),
+            "ZippyQ is shelved (#218) — must not be offered"
+        );
+        // …yet it remains registered, so it's the offered set that shrank, not the registry.
+        assert!(FormatRegistry::standard().contains("zippyq"));
     }
 
     #[test]

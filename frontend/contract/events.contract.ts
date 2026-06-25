@@ -1395,17 +1395,19 @@ describe('race Slice 2a: rounds', () => {
     const res = await fetch(`${director.baseUrl}/formats`);
     expect(res.status).toBe(200);
     const schemas = (await res.json()) as FormatSchema[];
-    // The production formats, in sorted name order (the same set `POST /rounds` validates against),
-    // including the casual `open_practice` (open-practice format) with no param knobs.
+    // The **offered** production formats, in sorted name order, including the casual `open_practice`
+    // (open-practice format) with no param knobs. ZippyQ is shelved (#218) — still registered (so
+    // persisted `zippyq` rounds validate, see the `POST /rounds` accepts-registered-format guard) but
+    // omitted from this offered set so a new round can't select it.
     expect(schemas.map((s) => s.name)).toEqual([
       'double_elim',
       'multi_main',
       'open_practice',
       'round_robin',
       'single_elim',
-      'timed_qual',
-      'zippyq'
+      'timed_qual'
     ]);
+    expect(schemas.map((s) => s.name)).not.toContain('zippyq');
     // open_practice declares no params (its active channels are the field, via AllChannels seeding).
     expect(schemas.find((s) => s.name === 'open_practice')!.params).toEqual([]);
     // timed_qual declares `rounds` (number, default 3) relabeled "Heats per pilot". It declares NO

@@ -91,8 +91,9 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   const list = page.getByRole('list').filter({ hasText: LABEL });
   const row = list.getByRole('listitem').filter({ hasText: LABEL });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  // The friendly format name shows in the list (Rounds form redesign item 1).
-  await expect(row.getByText('Qualifying', { exact: true })).toBeVisible();
+  // The friendly format name shows in the list (Rounds form redesign item 1); `timed_qual`'s
+  // friendly label is "Time Trials" (#218).
+  await expect(row.getByText('Time Trials', { exact: true })).toBeVisible();
   await expect(row.getByText('From roster')).toBeVisible();
 
   // ── It persisted on the Director: a reload resumes into the event with the round listed ─────
