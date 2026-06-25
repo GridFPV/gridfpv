@@ -34,14 +34,34 @@ fn sprint_session_matches_golden() {
     );
 }
 
-/// The fold is deterministic and order-independent: shuffling the recorded events
-/// yields the identical lap list (passes are grouped and ordered by the engine).
+/// The fold is deterministic and order-independent in its **lap shape**: shuffling the recorded
+/// events yields the identical per-competitor lap *durations* (passes are grouped and ordered by
+/// the engine on `at`/`sequence`, not log position).
+///
+/// The laps' `start_ref`/`end_ref` are append *offsets* — they legitimately track each pass's
+/// position in the log, so reversing the log re-indexes them (a UI never sees a reversed log; the
+/// offsets are stable for a given append order). So we compare the order-independent lap shape
+/// `(competitor, number, duration)` rather than the offset-bearing whole.
 #[test]
 fn replay_is_recomputable_regardless_of_event_order() {
     let session = include_str!("fixtures/sprint.events.json");
     let mut events: Vec<Event> = serde_json::from_str(session).unwrap();
+    let shape = |list: &gridfpv_projection::LapList| {
+        list.competitors
+            .iter()
+            .map(|c| {
+                (
+                    c.competitor.clone(),
+                    c.laps
+                        .iter()
+                        .map(|l| (l.number, l.duration_micros))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     let forward = lap_list(&events);
     events.reverse();
     let reversed = lap_list(&events);
-    assert_eq!(forward, reversed);
+    assert_eq!(shape(&forward), shape(&reversed));
 }

@@ -184,8 +184,13 @@ pub fn score_marshaled(
     // The single home of the marshaling fold is `gridfpv_projection::corrected_passes`;
     // tag each event with its positional append offset and fold there, then score the
     // corrected lap-gate passes it returns. The scorer re-groups/re-orders by competitor.
-    let corrected =
-        gridfpv_projection::corrected_passes(events.iter().enumerate().map(|(i, e)| (i as u64, e)));
+    // `corrected_passes` pairs each surviving pass with the global offset that addresses it
+    // (for UI targeting); scoring only needs the passes, so drop the offset here.
+    let corrected: Vec<gridfpv_events::Pass> =
+        gridfpv_projection::corrected_passes(events.iter().enumerate().map(|(i, e)| (i as u64, e)))
+            .into_iter()
+            .map(|(_, pass)| pass)
+            .collect();
     // Penalties / heat-void are a *separate* fold from the marshaling corrections above:
     // apply them on the corrected pass stream so an adjudicated, marshaled heat reflects
     // both (#13). A log with no penalties scores exactly as before.

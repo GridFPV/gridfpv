@@ -1,16 +1,37 @@
 {
   "competitors": [
     {
-      "competitor": { "adapter": "sim", "competitor": "Ace" },
+      "competitor": {
+        "adapter": "sim",
+        "competitor": "Ace"
+      },
       "laps": [
-        { "number": 1, "duration_micros": 30000000 },
-        { "number": 2, "duration_micros": 31000000 }
+        {
+          "number": 1,
+          "duration_micros": 30000000,
+          "start_ref": 3,
+          "end_ref": 6
+        },
+        {
+          "number": 2,
+          "duration_micros": 31000000,
+          "start_ref": 6,
+          "end_ref": 8
+        }
       ]
     },
     {
-      "competitor": { "adapter": "sim", "competitor": "Bee" },
+      "competitor": {
+        "adapter": "sim",
+        "competitor": "Bee"
+      },
       "laps": [
-        { "number": 1, "duration_micros": 33000000 }
+        {
+          "number": 1,
+          "duration_micros": 33000000,
+          "start_ref": 4,
+          "end_ref": 7
+        }
       ]
     }
   ]

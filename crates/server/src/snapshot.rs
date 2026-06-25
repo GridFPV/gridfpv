@@ -29,7 +29,7 @@
 use gridfpv_engine::event::EventOutcome;
 use gridfpv_engine::format::RankEntry;
 use gridfpv_engine::scoring::HeatResult;
-use gridfpv_projection::LapList;
+use gridfpv_projection::{AuditEntry, LapList};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -85,6 +85,8 @@ pub enum ProjectionKind {
     Ranking,
     /// The full-event outcome / standings ([`EventOutcome`](gridfpv_engine::event::EventOutcome)).
     EventOutcome,
+    /// A heat's marshaling audit trail (a [`AuditEntry`](gridfpv_projection::AuditEntry) list, #55).
+    MarshalingAudit,
 }
 
 /// A served projection **with its value** (protocol.html §1) — the closed set of
@@ -109,6 +111,9 @@ pub enum ProjectionBody {
     Ranking(Vec<RankEntry>),
     /// The full-event outcome: the qualifying ranking, bracket standings, and winner.
     EventOutcome(EventOutcome),
+    /// A heat's marshaling audit trail — the reverse-chronological "what changed, when, what
+    /// kind" the defensible-results panel renders (#55). Heat-scoped, fresh-value encoded.
+    MarshalingAudit(Vec<AuditEntry>),
 }
 
 impl ProjectionBody {
@@ -120,6 +125,7 @@ impl ProjectionBody {
             ProjectionBody::HeatResult(_) => ProjectionKind::HeatResult,
             ProjectionBody::Ranking(_) => ProjectionKind::Ranking,
             ProjectionBody::EventOutcome(_) => ProjectionKind::EventOutcome,
+            ProjectionBody::MarshalingAudit(_) => ProjectionKind::MarshalingAudit,
         }
     }
 }
@@ -191,7 +197,14 @@ mod tests {
     #[test]
     fn projection_kind_round_trips() {
         use ProjectionKind::*;
-        for kind in [LiveRaceState, LapList, HeatResult, Ranking, EventOutcome] {
+        for kind in [
+            LiveRaceState,
+            LapList,
+            HeatResult,
+            Ranking,
+            EventOutcome,
+            MarshalingAudit,
+        ] {
             let json = serde_json::to_string(&kind).unwrap();
             let back: ProjectionKind = serde_json::from_str(&json).unwrap();
             assert_eq!(kind, back);

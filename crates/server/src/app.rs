@@ -45,7 +45,7 @@
 //! |-------|-------|------|
 //! | event | `GET /snapshot/event/{event}` | [`LiveRaceState`] over the whole log |
 //! | class | `GET /snapshot/class/{event}/{class}` | [`LiveRaceState`] (class filtering deferred — see below) |
-//! | heat  | `GET /snapshot/heat/{heat}` | [`LiveRaceState`] for that heat, or — with `?projection=laps` / `?projection=result` — its [`LapList`] / [`HeatResult`] |
+//! | heat  | `GET /snapshot/heat/{heat}` | [`LiveRaceState`] for that heat, or — with `?projection=laps` / `?projection=audit` / `?projection=result` — its [`LapList`] / marshaling audit trail / [`HeatResult`] |
 //! | pilot | `GET /snapshot/pilot/{event}/{pilot}` | the pilot's [`LapList`] (their laps across the event) |
 //!
 //! A single connection may hold several scopes at once (§4); the multi-scope *subscribe*
@@ -82,7 +82,7 @@ use axum::routing::{get, post, put};
 use gridfpv_engine::format::{FormatRegistry, FormatSchema};
 use gridfpv_engine::scoring::{WinCondition, score_events};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
-use gridfpv_projection::{LapList, lap_list_marshaled, registrations};
+use gridfpv_projection::{LapList, lap_list_marshaled, marshaling_log, registrations};
 use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -1352,6 +1352,8 @@ enum HeatProjection {
     Live,
     /// The heat's per-pilot [`LapList`].
     Laps,
+    /// The heat's marshaling [`AuditEntry`](gridfpv_projection::AuditEntry) trail (#55).
+    Audit,
     /// The heat's scored [`HeatResult`].
     Result,
 }
@@ -1462,8 +1464,9 @@ pub(crate) fn class_window(events: &[Event], class: &ClassId) -> Vec<Event> {
 /// `GET /snapshot/heat/{heat}` — the tightest scope (§4 heat scope).
 ///
 /// `?projection=live` (default) returns the heat's [`LiveRaceState`]; `?projection=laps`
-/// its [`LapList`]; `?projection=result` its scored [`HeatResult`]. The log is filtered to
-/// the heat's window so the body is heat-local.
+/// its [`LapList`]; `?projection=audit` its marshaling audit trail
+/// ([`AuditEntry`](gridfpv_projection::AuditEntry) list, #55); `?projection=result` its scored
+/// [`HeatResult`]. The log is filtered to the heat's window so the body is heat-local.
 async fn snapshot_heat(
     State(registry): State<EventRegistry>,
     Path((event_id, heat)): Path<(EventId, HeatId)>,
@@ -1484,7 +1487,10 @@ async fn snapshot_heat(
         ));
     }
 
-    let heat_events = heat_window(&events, &heat);
+    // The heat's window, carrying each event's GLOBAL append offset — load-bearing for the
+    // marshaling lap/audit folds (their `LogRef`s must be global, not window-relative, #55).
+    let heat_offsets = heat_window_offsets(&events, &heat);
+    let heat_events: Vec<Event> = heat_offsets.iter().map(|(_, e)| e.clone()).collect();
 
     let body = match query.projection {
         HeatProjection::Live => {
@@ -1499,8 +1505,18 @@ async fn snapshot_heat(
             )
         }
         HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled(
-            heat_events.iter().enumerate().map(|(i, e)| (i as u64, e)),
+            heat_offsets.iter().map(|(o, e)| (*o, e)),
         )),
+        HeatProjection::Audit => {
+            // The defensible-results audit panel: fold the heat's rulings into a reverse-chrono
+            // trail, keyed on global offsets with each fact's `recorded_at` as "when" (#55).
+            ProjectionBody::MarshalingAudit(marshaling_log(
+                heat_offsets
+                    .iter()
+                    .map(|(o, e)| (stored.get(*o as usize).and_then(|s| s.recorded_at), *o, e)),
+                &heat,
+            ))
+        }
         HeatProjection::Result => {
             // The win condition is heat / format config not carried in the raw log; the
             // snapshot scores the heat's passes under a neutral best-lap qualifying rule
@@ -1594,34 +1610,49 @@ pub(crate) fn first_pass_at(event: &Event) -> Option<SourceTime> {
     }
 }
 
-/// Filter the log to a single heat's window: that heat's scheduling / state-change events,
-/// plus all passes and marshaling adjudications that fall *while the heat is the active
-/// one*.
+/// Filter the log to a single heat's window, **preserving each event's global append offset**:
+/// that heat's scheduling / state-change events, plus all passes and marshaling adjudications
+/// that fall *while the heat is the active one*, each paired with its position in the full log.
 ///
 /// With one heat per log in the common case this is the whole log; with several heats it
 /// scopes passes to the span between this heat's first scheduling/transition and the next
 /// heat's. Passes carry no heat id (they are raw observations), so attribution is by
 /// position in the log relative to heat-loop events — the same ordering the engine uses to
 /// decide which heat consumes a pass (race-engine.html §2).
-pub(crate) fn heat_window(events: &[Event], heat: &HeatId) -> Vec<Event> {
+///
+/// The retained **global offset** is load-bearing for marshaling (#55): the lap projection and
+/// audit fold are keyed on it, and a `LogRef` correction command targets that global offset. An
+/// earlier bug re-enumerated the window `0,1,2,…`, so a UI-selected lap in a later heat targeted
+/// the *wrong* pass; folding with the real offsets fixes that.
+pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, Event)> {
     let mut window = Vec::new();
     // `active` tracks whether the cursor is currently inside this heat's span: it opens on
     // a heat-loop event for `heat` and closes on a heat-loop event for a *different* heat.
     let mut active = false;
-    for event in events {
+    for (offset, event) in events.iter().enumerate() {
         match event {
             Event::HeatScheduled { heat: h, .. } | Event::HeatStateChanged { heat: h, .. } => {
                 active = h == heat;
                 if active {
-                    window.push(event.clone());
+                    window.push((offset as u64, event.clone()));
                 }
             }
             // Passes and adjudications belong to whichever heat is currently active.
-            _ if active => window.push(event.clone()),
+            _ if active => window.push((offset as u64, event.clone())),
             _ => {}
         }
     }
     window
+}
+
+/// The heat window as a bare `Vec<Event>` — the offset-agnostic view used where global offsets
+/// are not needed (live state, results scoring). The marshaling lap/audit folds use
+/// [`heat_window_offsets`] instead, so they target the correct global `LogRef`.
+pub(crate) fn heat_window(events: &[Event], heat: &HeatId) -> Vec<Event> {
+    heat_window_offsets(events, heat)
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect()
 }
 
 /// Render a [`ProtocolError`] as an HTTP error response (protocol.html §9.8): the JSON
@@ -1649,7 +1680,7 @@ mod tests {
     // `Body` and `Request` come in via `use super::*` (they are `use`d at module level for
     // the smart fallback); the tests reach them through the glob.
     use super::*;
-    use gridfpv_events::{AdapterId, GateIndex, HeatTransition, Pass};
+    use gridfpv_events::{AdapterId, GateIndex, HeatTransition, LogRef, Pass};
     use gridfpv_projection::CompetitorKey;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1808,6 +1839,37 @@ mod tests {
                 assert_eq!(result.places.len(), 2);
             }
             other => panic!("expected heat result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn heat_scope_audit_projection_returns_marshaling_trail() {
+        // Seed a heat plus two rulings: void B's first pass, then DQ A. The audit returns both,
+        // newest first, with NO automatic passes.
+        let mut events = recorded_heat();
+        events.push(Event::DetectionVoided {
+            target: LogRef(5), // global offset of B's first pass in `recorded_heat`
+        });
+        events.push(Event::PenaltyApplied {
+            heat: HeatId("q-1".into()),
+            competitor: CompetitorRef("A".into()),
+            penalty: gridfpv_events::Penalty::Disqualify,
+        });
+        let (registry, _state, _) = state_with(events);
+        let (status, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/heat/q-1?projection=audit",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::MarshalingAudit(trail) => {
+                assert_eq!(trail.len(), 2, "two rulings, no passes");
+                // Newest first: the DQ.
+                assert_eq!(trail[0].kind, gridfpv_projection::AuditKind::PenaltyApplied);
+                assert_eq!(trail[1].kind, gridfpv_projection::AuditKind::Voided);
+            }
+            other => panic!("expected marshaling audit, got {other:?}"),
         }
     }
 

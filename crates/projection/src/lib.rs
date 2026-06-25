@@ -32,7 +32,7 @@
 
 use std::collections::BTreeMap;
 
-use gridfpv_events::{AdapterId, CompetitorRef, Event, Pass, PilotId, SourceTime};
+use gridfpv_events::{AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SourceTime};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -63,6 +63,15 @@ impl CompetitorKey {
 }
 
 /// A single completed lap: the interval between two consecutive lap-gate passes.
+///
+/// The lap also carries the **global append offsets** ([`LogRef`]) of the two passes that
+/// bound it — `start_ref` (the opening pass) and `end_ref` (the closing pass). These are the
+/// *stable* log offsets a marshaling command targets (`VoidDetection`/`AdjustLap`/`SplitLap`
+/// all key on a single pass's offset), so a UI that selects a lap can address the correct pass
+/// without the operator hand-typing an offset (#55). They are real global offsets even when the
+/// lap list is folded from a heat window — the fold is fed `(global_offset, &Event)` pairs, so
+/// `end_ref`/`start_ref` are valid command targets across a multi-heat log (the heat-window
+/// re-enumeration bug this fixes).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct Lap {
@@ -73,6 +82,12 @@ pub struct Lap {
     /// Renders as a plain TS `number` (bounded far below 2^53).
     #[ts(type = "number")]
     pub duration_micros: i64,
+    /// Global append offset of the pass that **opens** this lap (the lap's start gate).
+    pub start_ref: LogRef,
+    /// Global append offset of the pass that **closes** this lap (the lap's end gate). This is
+    /// the natural correction target: voiding/adjusting it edits this lap's boundary, and a
+    /// `SplitLap` splits the over-long lap *ending* here.
+    pub end_ref: LogRef,
 }
 
 /// Every lap a single competitor completed, in order.
@@ -205,9 +220,13 @@ where
 ///
 /// Each event is paired with its append [`LogRef`](gridfpv_events::LogRef) offset;
 /// rulings reference the raw event they correct by that offset. The result is a fresh
-/// `Vec<Pass>` of the surviving lap-gate passes (synthetic inserts included, re-timed
-/// passes moved to their new instant), in **offset order** — the raw [`Pass`]es in the
-/// input are never mutated (architecture.html §3); callers re-group/re-order as needed.
+/// `Vec<(u64, Pass)>` of the surviving lap-gate passes (synthetic inserts included, re-timed
+/// passes moved to their new instant), in **offset order**, each paired with the **global
+/// append offset** that addresses it for a future correction — a raw/inserted/split pass's
+/// own offset (the split's synthetic pass is addressable by the split event's offset, exactly
+/// as "void the void" already relies on). The raw [`Pass`]es in the input are never mutated
+/// (architecture.html §3); callers re-group/re-order as needed and may carry the offset onto
+/// the projection (e.g. [`Lap::end_ref`]) so a UI can target the right pass.
 ///
 /// # Adjudications folded
 ///
@@ -258,7 +277,7 @@ where
 /// *not* lap-level — they reshape the heat result, not the per-competitor lap list — so
 /// this fold ignores them. They are consumed by scoring/results (#30, #33+), which fold
 /// the same log alongside this corrected view.
-pub fn corrected_passes<'a, I>(events: I) -> Vec<Pass>
+pub fn corrected_passes<'a, I>(events: I) -> Vec<(u64, Pass)>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
@@ -386,8 +405,9 @@ where
     }
 
     // Emit the surviving passes (raw + inserted) with any re-time applied, in offset
-    // order; callers re-group and re-order them as needed.
-    let mut out: Vec<Pass> = Vec::new();
+    // order, each paired with the global offset that addresses it for a future correction;
+    // callers re-group and re-order them as needed.
+    let mut out: Vec<(u64, Pass)> = Vec::new();
     for (offset, entry) in entries.iter() {
         if voided.get(offset).copied().unwrap_or(false) {
             continue;
@@ -398,34 +418,38 @@ where
                 if let Some(at) = retime.get(offset) {
                     p.at = *at;
                 }
-                out.push(p);
+                out.push((*offset, p));
             }
             Entry::Inserted(pass) => {
                 let mut p = pass.clone();
                 if let Some(at) = retime.get(offset) {
                     p.at = *at;
                 }
-                out.push(p);
+                out.push((*offset, p));
             }
             Entry::Split { target, at } => {
                 // Attribute the synthetic mid-lap pass to the competitor whose lap ends at
                 // `target` (the target pass's adapter/competitor). A later adjust of *this*
                 // split's offset re-times the synthetic pass; a void drops it. If the target
                 // pass is unknown (a dangling ref — the command layer rejects these), skip.
+                // The synthetic pass is addressable by *this* split's own offset.
                 let src = match entries.get(target) {
                     Some(Entry::RawPass(p)) => Some((*p).clone()),
                     Some(Entry::Inserted(p)) => Some(p.clone()),
                     _ => None,
                 };
                 if let Some(src) = src {
-                    out.push(Pass {
-                        adapter: src.adapter,
-                        competitor: src.competitor,
-                        at: retime.get(offset).copied().unwrap_or(*at),
-                        sequence: None,
-                        gate: gridfpv_events::GateIndex::LAP,
-                        signal: None,
-                    });
+                    out.push((
+                        *offset,
+                        Pass {
+                            adapter: src.adapter,
+                            competitor: src.competitor,
+                            at: retime.get(offset).copied().unwrap_or(*at),
+                            sequence: None,
+                            gate: gridfpv_events::GateIndex::LAP,
+                            signal: None,
+                        },
+                    ));
                 }
             }
             Entry::Adjusted { .. } | Entry::Voided { .. } => {}
@@ -450,19 +474,21 @@ where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
     // Group the corrected pass stream by competitor and derive laps. The fold itself
-    // lives in `corrected_passes`; here we only project it into the lap-list view.
-    let mut by_competitor: BTreeMap<CompetitorKey, Vec<Pass>> = BTreeMap::new();
-    for pass in corrected_passes(events) {
+    // lives in `corrected_passes`; here we only project it into the lap-list view. Each
+    // pass keeps the global offset that addresses it, so the derived laps carry their
+    // `start_ref`/`end_ref` command targets.
+    let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
+    for (offset, pass) in corrected_passes(events) {
         by_competitor
             .entry(CompetitorKey::from_pass(&pass))
             .or_default()
-            .push(pass);
+            .push((offset, pass));
     }
 
     let competitors = by_competitor
         .into_iter()
         .map(|(competitor, mut passes)| {
-            passes.sort_by_key(corrected_order_key);
+            passes.sort_by_key(|(_, p)| corrected_order_key(p));
             CompetitorLaps {
                 competitor,
                 laps: laps_from_corrected(&passes),
@@ -487,17 +513,168 @@ fn corrected_order_key(pass: &Pass) -> (SourceTime, bool, Option<u64>) {
     (pass.at, pass.sequence.is_none(), pass.sequence)
 }
 
-/// Turn an ordered run of corrected lap-gate passes into laps: `K` passes ⇒
-/// `K - 1` laps, each spanning a consecutive pair.
-fn laps_from_corrected(passes: &[Pass]) -> Vec<Lap> {
+/// Turn an ordered run of corrected lap-gate passes (each carrying its global offset) into
+/// laps: `K` passes ⇒ `K - 1` laps, each spanning a consecutive pair. The lap's
+/// `start_ref`/`end_ref` are the global offsets of the opening/closing pass — the stable
+/// command targets a UI uses to address this lap (the end pass is the natural target for
+/// void/adjust/split).
+fn laps_from_corrected(passes: &[(u64, Pass)]) -> Vec<Lap> {
     passes
         .windows(2)
         .enumerate()
-        .map(|(idx, pair)| Lap {
-            number: (idx + 1) as u32,
-            duration_micros: pair[1].at.micros_since(pair[0].at),
+        .map(|(idx, pair)| {
+            let (start_off, start_pass) = &pair[0];
+            let (end_off, end_pass) = &pair[1];
+            Lap {
+                number: (idx + 1) as u32,
+                duration_micros: end_pass.at.micros_since(start_pass.at),
+                start_ref: LogRef(*start_off),
+                end_ref: LogRef(*end_off),
+            }
         })
         .collect()
+}
+
+/// The kind of a marshaling audit entry — *what sort of action* a logged fact was (#55).
+///
+/// Derived purely from the event **type**, this is the "defensible results" surface: every
+/// marshaling correction is a recorded, attributable, reversible fact (marshaling.html §3.3).
+/// The automatic timer pass is included as [`AuditKind::Pass`] so the panel can distinguish a
+/// *human ruling* from an *automatic detection* — but note `marshaling_log` only folds the
+/// human rulings into entries (a heat has far too many passes to list); `Pass` exists so a
+/// future "show automatic detections too" toggle is an additive consumer, not a model change.
+///
+/// There is deliberately **no actor / who**: per the no-login decision every change is implicitly
+/// the RD, so naming an actor would be a false precision (marshaling.html §3.3, the audit records
+/// what-changed-when, and the single-RD trust model supplies the who).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum AuditKind {
+    /// A detection was voided (a phantom lap removed, or a "void the void" undo).
+    Voided,
+    /// A missed lap was inserted.
+    Inserted,
+    /// A lap's time was adjusted (re-timed).
+    Adjusted,
+    /// An over-long lap was split into two.
+    Split,
+    /// A penalty (DQ or added time) was applied to a competitor.
+    PenaltyApplied,
+    /// A prior ruling (a penalty) was reversed.
+    RulingReversed,
+    /// The whole heat was voided.
+    HeatVoided,
+    /// An automatic timer detection (NOT a marshal action). Folded only when a consumer asks for
+    /// the raw stream; `marshaling_log` omits these so the audit reads as a ruling history.
+    Pass,
+}
+
+/// A single reverse-chronological marshaling audit entry (#55): *what changed, when, what kind*.
+///
+/// A thin, render-ready fact derived from one logged marshaling event. `at` is the event's
+/// `recorded_at` (the server wall-clock instant the log received it), so the panel can show
+/// "when"; `summary` is a short human string ("Lap split", "DQ applied to node-2"); `kind`
+/// drives the visual treatment. There is no actor field by design (see [`AuditKind`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct AuditEntry {
+    /// What kind of marshaling action this was — derived from the event type.
+    pub kind: AuditKind,
+    /// When the log received this fact (microseconds since the Unix epoch), if recorded.
+    /// `None` when the append carried no arrival timestamp (e.g. a replay with none supplied).
+    #[ts(type = "number | null")]
+    pub at: Option<i64>,
+    /// The global append offset of this fact — a stable identity for the entry (and what a
+    /// later "reverse this" would target). Lets the UI key the list deterministically.
+    pub at_ref: LogRef,
+    /// A short human-readable description of the change.
+    pub summary: String,
+}
+
+/// Fold a **heat-scoped** sequence of `(recorded_at, offset, &Event)` into the marshaling
+/// audit trail (#55), newest first.
+///
+/// This is the "defensible results" panel's projection: it walks the heat's events and emits one
+/// [`AuditEntry`] per **marshaling action** (the human rulings — void/insert/adjust/split, penalty,
+/// reversal, heat-void), in **reverse-chronological** (offset-descending) order. Automatic passes
+/// are *not* emitted (a heat has too many to list, and they are not rulings); they fold into the
+/// lap list instead. The fold is pure and deterministic — folding the same heat window twice yields
+/// the same trail — so it recomputes from the log like every other projection.
+///
+/// `events` must already be scoped to the heat (e.g. via the server's heat window) so the audit
+/// reflects only this heat's rulings; `heat` is carried so the heat-addressed rulings
+/// ([`Event::PenaltyApplied`], [`Event::HeatVoided`]) that name a *different* heat are excluded
+/// even if they happen to fall inside the window.
+pub fn marshaling_log<'a, I>(events: I, heat: &HeatId) -> Vec<AuditEntry>
+where
+    I: IntoIterator<Item = (Option<i64>, u64, &'a Event)>,
+{
+    let mut entries: Vec<AuditEntry> = Vec::new();
+    for (at, offset, event) in events {
+        let (kind, summary) = match event {
+            Event::DetectionVoided { target } => (
+                AuditKind::Voided,
+                format!("Detection voided (ref {})", target.0),
+            ),
+            Event::LapInserted {
+                competitor, at: t, ..
+            } => (
+                AuditKind::Inserted,
+                format!("Lap inserted for {} at {}", competitor.0, fmt_secs(*t)),
+            ),
+            Event::LapAdjusted { target, at: t } => (
+                AuditKind::Adjusted,
+                format!("Lap re-timed (ref {}) to {}", target.0, fmt_secs(*t)),
+            ),
+            Event::LapSplit { target, at: t } => (
+                AuditKind::Split,
+                format!("Lap split (ref {}) at {}", target.0, fmt_secs(*t)),
+            ),
+            Event::PenaltyApplied {
+                heat: h,
+                competitor,
+                penalty,
+            } if h == heat => (
+                AuditKind::PenaltyApplied,
+                format!("{} for {}", fmt_penalty(penalty), competitor.0),
+            ),
+            Event::RulingReversed { target } => (
+                AuditKind::RulingReversed,
+                format!("Ruling reversed (ref {})", target.0),
+            ),
+            Event::HeatVoided { heat: h } if h == heat => {
+                (AuditKind::HeatVoided, "Heat voided".to_string())
+            }
+            // Passes and lifecycle/heat-loop events are not marshaling actions — skip them.
+            _ => continue,
+        };
+        entries.push(AuditEntry {
+            kind,
+            at,
+            at_ref: LogRef(offset),
+            summary,
+        });
+    }
+    // Reverse-chronological: newest action first. Offset is append order, so descending offset
+    // is descending time.
+    entries.reverse();
+    entries
+}
+
+/// Format a `SourceTime` as whole seconds for an audit summary ("4.000s").
+fn fmt_secs(t: SourceTime) -> String {
+    let micros = t.micros_since(SourceTime::from_micros(0));
+    format!("{:.3}s", micros as f64 / 1_000_000.0)
+}
+
+/// Format a [`Penalty`](gridfpv_events::Penalty) for an audit summary.
+fn fmt_penalty(penalty: &gridfpv_events::Penalty) -> String {
+    match penalty {
+        gridfpv_events::Penalty::Disqualify => "DQ applied".to_string(),
+        gridfpv_events::Penalty::TimeAdded { micros } => {
+            format!("+{:.3}s penalty", *micros as f64 / 1_000_000.0)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -536,6 +713,19 @@ mod tests {
         }
     }
 
+    /// Expected `(lap number, duration)` pair — the marshaling-irrelevant lap shape these
+    /// fold tests assert. Laps now also carry `start_ref`/`end_ref` global offsets (#55);
+    /// those are exercised by dedicated offset-targeting tests, so the duration folds compare
+    /// on `(number, duration)` via [`bare`] to stay focused on the fold arithmetic.
+    fn ld(number: u32, duration_micros: i64) -> (u32, i64) {
+        (number, duration_micros)
+    }
+
+    /// Project laps to their `(number, duration)` pairs, dropping the ref offsets.
+    fn bare(laps: &[Lap]) -> Vec<(u32, i64)> {
+        laps.iter().map(|l| (l.number, l.duration_micros)).collect()
+    }
+
     #[test]
     fn clean_multi_lap_run_yields_k_minus_one_laps() {
         // 4 lap-gate passes ⇒ 3 laps with exact integer-microsecond durations.
@@ -548,21 +738,8 @@ mod tests {
         let result = lap_list(&events);
         let laps = &result.competitor(&key("vd", "A")).unwrap().laps;
         assert_eq!(
-            laps,
-            &vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000,
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_500_000,
-                },
-                Lap {
-                    number: 3,
-                    duration_micros: 4_500_000,
-                },
-            ]
+            bare(laps),
+            vec![ld(1, 3_000_000), ld(2, 2_500_000), ld(3, 4_500_000),]
         );
         let cl = result.competitor(&key("vd", "A")).unwrap();
         assert_eq!(cl.lap_count(), 3);
@@ -575,7 +752,7 @@ mod tests {
         let events = vec![pass("vd", "A", 1_000_000, Some(1))];
         let result = lap_list(&events);
         let cl = result.competitor(&key("vd", "A")).unwrap();
-        assert_eq!(cl.laps, vec![]);
+        assert_eq!(bare(&cl.laps), vec![]);
         assert_eq!(cl.lap_count(), 0);
         assert_eq!(cl.total_micros(), 0);
         assert_eq!(cl.best(), None);
@@ -600,28 +777,10 @@ mod tests {
         let result = lap_list(&events);
 
         let a = result.competitor(&key("vd", "A")).unwrap();
-        assert_eq!(
-            a.laps,
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000,
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_000_000,
-                },
-            ]
-        );
+        assert_eq!(bare(&a.laps), vec![ld(1, 3_000_000), ld(2, 2_000_000),]);
 
         let b = result.competitor(&key("vd", "B")).unwrap();
-        assert_eq!(
-            b.laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 4_000_000,
-            }]
-        );
+        assert_eq!(bare(&b.laps), vec![ld(1, 4_000_000)]);
     }
 
     #[test]
@@ -636,18 +795,12 @@ mod tests {
         let result = lap_list(&events);
         assert_eq!(result.competitors.len(), 2);
         assert_eq!(
-            result.competitor(&key("rh-a", "node-2")).unwrap().laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 2_000_000,
-            }]
+            bare(&result.competitor(&key("rh-a", "node-2")).unwrap().laps),
+            vec![ld(1, 2_000_000)]
         );
         assert_eq!(
-            result.competitor(&key("rh-b", "node-2")).unwrap().laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 3_000_000,
-            }]
+            bare(&result.competitor(&key("rh-b", "node-2")).unwrap().laps),
+            vec![ld(1, 3_000_000)]
         );
     }
 
@@ -662,11 +815,8 @@ mod tests {
         ];
         let result = lap_list(&events);
         assert_eq!(
-            result.competitor(&key("vd", "A")).unwrap().laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 4_000_000,
-            }]
+            bare(&result.competitor(&key("vd", "A")).unwrap().laps),
+            vec![ld(1, 4_000_000)]
         );
     }
 
@@ -693,11 +843,8 @@ mod tests {
         ];
         let result = lap_list(&events);
         assert_eq!(
-            result.competitor(&key("vd", "A")).unwrap().laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 2_000_000,
-            }]
+            bare(&result.competitor(&key("vd", "A")).unwrap().laps),
+            vec![ld(1, 2_000_000)]
         );
     }
 
@@ -712,17 +859,8 @@ mod tests {
         ];
         let result = lap_list(&events);
         assert_eq!(
-            result.competitor(&key("vd", "A")).unwrap().laps,
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_000_000, // 6.0s - 4.0s
-                },
-            ]
+            bare(&result.competitor(&key("vd", "A")).unwrap().laps),
+            vec![ld(1, 3_000_000), ld(2, 2_000_000),]
         );
     }
 
@@ -736,17 +874,8 @@ mod tests {
         ];
         let result = lap_list(&events);
         assert_eq!(
-            result.competitor(&key("vd", "A")).unwrap().laps,
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 5.0s - 2.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_000_000, // 7.0s - 5.0s
-                },
-            ]
+            bare(&result.competitor(&key("vd", "A")).unwrap().laps),
+            vec![ld(1, 3_000_000), ld(2, 2_000_000),]
         );
     }
 
@@ -886,7 +1015,28 @@ mod marshaling_tests {
             .collect()
     }
 
-    fn laps_of(list: &LapList, adapter: &str, competitor: &str) -> Vec<Lap> {
+    /// Expected `(lap number, duration)` pair. Laps also carry `start_ref`/`end_ref` offsets
+    /// (#55); these fold goldens assert the duration arithmetic via [`laps_of`], and the
+    /// offset-targeting behaviour is checked by the dedicated `*_ref*` tests below.
+    fn ld(number: u32, duration_micros: i64) -> (u32, i64) {
+        (number, duration_micros)
+    }
+
+    /// A competitor's laps as `(number, duration)` pairs, dropping the ref offsets — the fold
+    /// goldens compare on lap arithmetic only.
+    fn laps_of(list: &LapList, adapter: &str, competitor: &str) -> Vec<(u32, i64)> {
+        list.competitor(&key(adapter, competitor))
+            .map(|c| {
+                c.laps
+                    .iter()
+                    .map(|l| (l.number, l.duration_micros))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A competitor's raw laps (with refs intact), for the offset-targeting tests.
+    fn raw_laps_of(list: &LapList, adapter: &str, competitor: &str) -> Vec<Lap> {
         list.competitor(&key(adapter, competitor))
             .map(|c| c.laps.clone())
             .unwrap_or_default()
@@ -914,13 +1064,7 @@ mod marshaling_tests {
             voided(1),                           // offset 3 — voids the phantom
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 5_000_000, // 6.0s - 1.0s, the 4.0s pass is gone
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 5_000_000)]);
     }
 
     #[test]
@@ -935,16 +1079,7 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 3_000_000, // 7.0s - 4.0s
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
         );
     }
 
@@ -960,16 +1095,7 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s (was 4.0s before adjust)
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 3_000_000, // 7.0s - 4.0s (was 2.0s before adjust)
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
         );
     }
 
@@ -985,13 +1111,7 @@ mod marshaling_tests {
             voided(1),                           // offset 4 — ...then void (wins)
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 7_000_000, // 8.0s - 1.0s, offset 1 voided
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 7_000_000)]);
     }
 
     #[test]
@@ -1009,16 +1129,7 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s — pass 1 is back
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_000_000, // 6.0s - 4.0s
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 2_000_000),]
         );
     }
 
@@ -1033,13 +1144,7 @@ mod marshaling_tests {
             voided(2),                           // offset 3 — void the insert
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 6_000_000, // 7.0s - 1.0s, the insert is gone
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 6_000_000)]);
     }
 
     #[test]
@@ -1053,13 +1158,7 @@ mod marshaling_tests {
             voided(2),                           // offset 3 — ...cancel the re-time
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 4_000_000, // 5.0s - 1.0s, reverted from the 4.0s adjust
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 4_000_000)]);
     }
 
     #[test]
@@ -1081,10 +1180,7 @@ mod marshaling_tests {
         assert_eq!(lap_list_marshaled(tagged(&events)), lap_list(&events));
         assert_eq!(
             laps_of(&lap_list_marshaled(tagged(&events)), "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 3_000_000,
-            }]
+            vec![ld(1, 3_000_000)]
         );
     }
 
@@ -1125,13 +1221,7 @@ mod marshaling_tests {
 
         // Fold — and use the result so the corrected view genuinely differs.
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 3_000_000, // 4.0s - 1.0s (adjusted), offset 2 voided
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 3_000_000)]);
 
         let after: Vec<String> = events
             .iter()
@@ -1159,16 +1249,7 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 3_000_000, // 7.0s - 4.0s
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
         );
     }
 
@@ -1184,26 +1265,11 @@ mod marshaling_tests {
         ];
         let result = lap_list_marshaled(tagged(&events));
         // A is untouched: one 3.0s lap.
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 3_000_000,
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 3_000_000)]);
         // B's single 6.0s lap becomes two (2.0→5.0, 5.0→8.0).
         assert_eq!(
             laps_of(&result, "vd", "B"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000,
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 3_000_000,
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
         );
     }
 
@@ -1218,13 +1284,7 @@ mod marshaling_tests {
             voided(2),                           // offset 3 — void the split
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 6_000_000, // 7.0s - 1.0s, the split is gone
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 6_000_000)]);
     }
 
     #[test]
@@ -1241,16 +1301,7 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000,
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 3_000_000,
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
         );
     }
 
@@ -1283,22 +1334,16 @@ mod marshaling_tests {
         ];
         // Before the edit: laps are 4.0s (1→5) and 4.0s (5→9).
         let before = laps_of(&lap_list_marshaled(tagged(&events)), "vd", "A");
-        assert_eq!(before[0].duration_micros, 4_000_000);
-        assert_eq!(before[1].duration_micros, 4_000_000);
+        assert_eq!(before[0].1, 4_000_000);
+        assert_eq!(before[1].1, 4_000_000);
 
         // Re-time the middle pass from 5.0s to 6.0s — the prior lap lengthens and the next
         // lap shortens by the same 1.0s, both neighbours moving off one edit.
         let mut edited = events.clone();
         edited.push(adjusted(1, 6_000_000)); // offset 3
         let after = laps_of(&lap_list_marshaled(tagged(&edited)), "vd", "A");
-        assert_eq!(
-            after[0].duration_micros, 5_000_000,
-            "prior lap lengthened 4→5s"
-        );
-        assert_eq!(
-            after[1].duration_micros, 3_000_000,
-            "next lap shortened 4→3s"
-        );
+        assert_eq!(after[0].1, 5_000_000, "prior lap lengthened 4→5s");
+        assert_eq!(after[1].1, 3_000_000, "next lap shortened 4→3s");
     }
 
     #[test]
@@ -1313,16 +1358,258 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
+            vec![ld(1, 4_000_000), ld(2, 4_000_000),]
+        );
+    }
+
+    // --- Lap end_ref/start_ref: the load-bearing UI-targeting offsets (#55) ----------
+
+    #[test]
+    fn lap_refs_carry_the_global_pass_offsets() {
+        // Each lap's start_ref/end_ref are the GLOBAL append offsets of its bounding passes —
+        // the stable command target a UI selects. 3 passes at offsets 0,1,2 ⇒ laps
+        // (start=0,end=1) and (start=1,end=2).
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 4_000_000, Some(2)), // offset 1
+            pass("vd", "A", 6_000_000, Some(3)), // offset 2
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let laps = raw_laps_of(&result, "vd", "A");
+        assert_eq!(laps[0].start_ref, LogRef(0));
+        assert_eq!(laps[0].end_ref, LogRef(1));
+        assert_eq!(laps[1].start_ref, LogRef(1));
+        assert_eq!(laps[1].end_ref, LogRef(2));
+    }
+
+    #[test]
+    fn lap_refs_are_global_offsets_not_window_relative() {
+        // THE BUG THIS FIXES: when the fold is fed real global offsets (a heat starting at
+        // offset 100, e.g. the heat-window path), the lap refs are those global offsets — NOT
+        // re-enumerated 0,1,2. A UI selecting lap 2's end targets global offset 102, and a void
+        // of that offset removes the right pass.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)),
+            pass("vd", "A", 4_000_000, Some(2)),
+            pass("vd", "A", 6_000_000, Some(3)),
+        ];
+        // Feed the fold global offsets 100,101,102 (as the heat window now does).
+        let tagged_global: Vec<(u64, &Event)> = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (100 + i as u64, e))
+            .collect();
+        let result = lap_list_marshaled(tagged_global);
+        let laps = raw_laps_of(&result, "vd", "A");
+        assert_eq!(
+            laps[1].end_ref,
+            LogRef(102),
+            "must be the global offset, not 2"
+        );
+
+        // And that ref is a valid void target: void lap 2's end pass (offset 102) and the lap is
+        // gone — proving the UI-selected ref hits the RIGHT pass.
+        let end_ref = laps[1].end_ref;
+        let mut log: Vec<Event> = events.clone();
+        // Append the void at its own real global offset; re-fold the same global window.
+        let mut full: Vec<(u64, Event)> = log
+            .drain(..)
+            .enumerate()
+            .map(|(i, e)| (100 + i as u64, e))
+            .collect();
+        full.push((103, Event::DetectionVoided { target: end_ref }));
+        let refolded = lap_list_marshaled(full.iter().map(|(o, e)| (*o, e)));
+        // Voiding the offset-102 pass leaves laps (100→101) only.
+        assert_eq!(laps_of(&refolded, "vd", "A"), vec![ld(1, 3_000_000)]);
+    }
+
+    #[test]
+    fn selecting_a_lap_to_split_targets_the_right_pass() {
+        // A UI selects an over-long lap and splits it: the split must target that lap's END pass.
+        // Two competitors interleaved with non-zero global offsets so a window-relative bug would
+        // target the wrong pass.
+        let events = [
+            pass("vd", "A", 1_000_000, Some(1)), // global 50
+            pass("vd", "B", 2_000_000, Some(1)), // global 51
+            pass("vd", "A", 4_000_000, Some(2)), // global 52
+            pass("vd", "B", 8_000_000, Some(2)), // global 53 — ends B's over-long lap
+        ];
+        let tagged_global: Vec<(u64, &Event)> = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (50 + i as u64, e))
+            .collect();
+        let list = lap_list_marshaled(tagged_global);
+        // The UI selects B's only lap and reads its end_ref to target.
+        let b_lap = raw_laps_of(&list, "vd", "B")[0].clone();
+        assert_eq!(b_lap.end_ref, LogRef(53));
+
+        // Split that lap at 5.0s, targeting end_ref — B's lap becomes two, A untouched.
+        let mut full: Vec<(u64, Event)> = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (50 + i as u64, e.clone()))
+            .collect();
+        full.push((
+            54,
+            Event::LapSplit {
+                target: b_lap.end_ref,
+                at: SourceTime::from_micros(5_000_000),
+            },
+        ));
+        let refolded = lap_list_marshaled(full.iter().map(|(o, e)| (*o, e)));
+        assert_eq!(laps_of(&refolded, "vd", "A"), vec![ld(1, 3_000_000)]);
+        assert_eq!(
+            laps_of(&refolded, "vd", "B"),
+            vec![ld(1, 3_000_000), ld(2, 3_000_000)]
+        );
+    }
+
+    // --- marshaling_log: the audit projection (#55) ---------------------------------
+
+    fn audit(events: &[(Option<i64>, Event)], heat: &str) -> Vec<AuditEntry> {
+        let heat = HeatId(heat.into());
+        let tagged: Vec<(Option<i64>, u64, &Event)> = events
+            .iter()
+            .enumerate()
+            .map(|(i, (at, e))| (*at, i as u64, e))
+            .collect();
+        marshaling_log(tagged, &heat)
+    }
+
+    #[test]
+    fn marshaling_log_lists_rulings_newest_first_no_passes() {
+        let heat = "q-1";
+        let log = vec![
+            (Some(10), pass("vd", "A", 1_000_000, Some(1))), // offset 0 — automatic, excluded
+            (Some(20), pass("vd", "A", 4_000_000, Some(2))), // offset 1 — automatic, excluded
+            (Some(30), Event::DetectionVoided { target: LogRef(1) }), // offset 2
+            (
+                Some(40),
+                Event::LapSplit {
+                    target: LogRef(1),
+                    at: SourceTime::from_micros(2_500_000),
+                },
+            ), // offset 3
+        ];
+        let entries = audit(&log, heat);
+        // Only the two rulings appear, newest (split, offset 3) first.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, AuditKind::Split);
+        assert_eq!(entries[0].at_ref, LogRef(3));
+        assert_eq!(entries[0].at, Some(40));
+        assert_eq!(entries[1].kind, AuditKind::Voided);
+        assert_eq!(entries[1].at_ref, LogRef(2));
+    }
+
+    #[test]
+    fn marshaling_log_covers_every_ruling_kind() {
+        use gridfpv_events::Penalty;
+        let heat = "q-1";
+        let log = vec![
+            (
+                Some(1),
+                Event::LapInserted {
+                    adapter: AdapterId("vd".into()),
+                    competitor: CompetitorRef("A".into()),
+                    at: SourceTime::from_micros(3_000_000),
+                },
+            ),
+            (
+                Some(2),
+                Event::LapAdjusted {
+                    target: LogRef(0),
+                    at: SourceTime::from_micros(4_000_000),
+                },
+            ),
+            (
+                Some(3),
+                Event::PenaltyApplied {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("B".into()),
+                    penalty: Penalty::Disqualify,
+                },
+            ),
+            (Some(4), Event::RulingReversed { target: LogRef(2) }),
+            (
+                Some(5),
+                Event::HeatVoided {
+                    heat: HeatId(heat.into()),
+                },
+            ),
+        ];
+        let kinds: Vec<AuditKind> = audit(&log, heat).into_iter().map(|e| e.kind).collect();
+        // Newest first.
+        assert_eq!(
+            kinds,
             vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 4_000_000, // 5.0s - 1.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 4_000_000, // 9.0s - 5.0s
-                },
+                AuditKind::HeatVoided,
+                AuditKind::RulingReversed,
+                AuditKind::PenaltyApplied,
+                AuditKind::Adjusted,
+                AuditKind::Inserted,
             ]
         );
+    }
+
+    #[test]
+    fn marshaling_log_excludes_other_heats_penalties_and_voids() {
+        use gridfpv_events::Penalty;
+        let heat = "q-1";
+        let log = vec![
+            (
+                Some(1),
+                Event::PenaltyApplied {
+                    heat: HeatId("q-2".into()), // a DIFFERENT heat — excluded
+                    competitor: CompetitorRef("B".into()),
+                    penalty: Penalty::Disqualify,
+                },
+            ),
+            (
+                Some(2),
+                Event::HeatVoided {
+                    heat: HeatId("q-2".into()),
+                },
+            ), // different heat — excluded
+            (
+                Some(3),
+                Event::PenaltyApplied {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("A".into()),
+                    penalty: Penalty::TimeAdded { micros: 2_000_000 },
+                },
+            ),
+        ];
+        let entries = audit(&log, heat);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, AuditKind::PenaltyApplied);
+        assert!(entries[0].summary.contains("+2.000s"));
+        assert!(entries[0].summary.contains('A'));
+    }
+
+    #[test]
+    fn marshaling_log_is_deterministic_fold_twice() {
+        use gridfpv_events::Penalty;
+        let heat = "q-1";
+        let log = vec![
+            (
+                Some(1),
+                Event::LapInserted {
+                    adapter: AdapterId("vd".into()),
+                    competitor: CompetitorRef("A".into()),
+                    at: SourceTime::from_micros(3_000_000),
+                },
+            ),
+            (
+                Some(2),
+                Event::PenaltyApplied {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("B".into()),
+                    penalty: Penalty::Disqualify,
+                },
+            ),
+            (Some(3), Event::RulingReversed { target: LogRef(1) }),
+        ];
+        assert_eq!(audit(&log, heat), audit(&log, heat));
     }
 }

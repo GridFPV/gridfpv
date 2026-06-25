@@ -122,9 +122,12 @@ impl Encoding {
     fn of(kind: ProjectionKind) -> Self {
         match kind {
             ProjectionKind::LiveRaceState | ProjectionKind::LapList => Encoding::DeltaPreferring,
-            ProjectionKind::HeatResult | ProjectionKind::Ranking | ProjectionKind::EventOutcome => {
-                Encoding::FreshValue
-            }
+            ProjectionKind::HeatResult
+            | ProjectionKind::Ranking
+            | ProjectionKind::EventOutcome
+            // The marshaling audit re-folds wholesale on each correction (it is short — one entry
+            // per ruling), so a delta would be no smaller; serve it fresh (#55).
+            | ProjectionKind::MarshalingAudit => Encoding::FreshValue,
         }
     }
 }
