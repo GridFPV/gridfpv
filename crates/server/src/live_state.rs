@@ -404,11 +404,18 @@ fn lineup_of(events: &[Event], heat: &HeatId) -> Vec<CompetitorRef> {
     lineup
 }
 
-/// The on-deck heat: the earliest still-`Scheduled` heat that is not the current one.
+/// The on-deck heat: the next still-`Scheduled` heat **after the current one** in schedule order.
 ///
 /// "Still scheduled" means its folded [`HeatState`] is `Scheduled` (it has been created
 /// but not staged). Heats are considered in the order they were first scheduled in the
-/// log, so the on-deck heat is the next one queued behind the current heat.
+/// log. The on-deck heat is the first scheduled heat positioned *after* the current heat —
+/// this is what both the on-deck display and the Advance control want: the next heat forward,
+/// never an earlier one.
+///
+/// **Fallback:** if there is no still-`Scheduled` heat after the current heat's position (the
+/// current heat is last, or it isn't in the schedule at all), fall back to the first
+/// still-`Scheduled` heat overall, so the RD can still advance to an earlier-scheduled-but-unrun
+/// heat rather than getting stuck. The "after current" candidate is always preferred.
 pub(crate) fn on_deck(events: &[Event], current: &HeatId) -> Option<HeatId> {
     let mut seen: Vec<HeatId> = Vec::new();
     for event in events {
@@ -418,8 +425,19 @@ pub(crate) fn on_deck(events: &[Event], current: &HeatId) -> Option<HeatId> {
             }
         }
     }
-    seen.into_iter()
-        .find(|heat| heat != current && heat_state(events, heat) == Some(HeatState::Scheduled))
+    let is_scheduled = |heat: &HeatId| heat_state(events, heat) == Some(HeatState::Scheduled);
+    // Position of the current heat in schedule order (if it appears at all).
+    let current_idx = seen.iter().position(|heat| heat == current);
+    // Prefer the first still-Scheduled heat positioned after the current heat.
+    if let Some(idx) = current_idx {
+        if let Some(next) = seen[idx + 1..].iter().find(|heat| is_scheduled(heat)) {
+            return Some(next.clone());
+        }
+    }
+    // Fallback: the first still-Scheduled heat that is not the current one.
+    seen.iter()
+        .find(|heat| *heat != current && is_scheduled(heat))
+        .cloned()
 }
 
 /// The round a heat was scheduled under, from its most recent `HeatScheduled` (`None` for a
@@ -810,6 +828,55 @@ mod tests {
         assert_eq!(s.phase, HeatPhase::Running);
         // q-2 is the next still-scheduled heat behind the current one.
         assert_eq!(s.on_deck, Some(HeatId("q-2".into())));
+    }
+
+    #[test]
+    fn on_deck_is_the_heat_after_current_not_an_earlier_scheduled_one() {
+        // The exact bug: the current heat (q-2) is mid-order, and an EARLIER heat (q-1) is still
+        // Scheduled (never staged/run). On-deck — and therefore Advance — must pick the heat
+        // *after* q-2 (q-3), NOT roll backward to the earlier still-scheduled q-1.
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            scheduled("q-2", &["C", "D"]),
+            scheduled("q-3", &["E", "F"]),
+            // q-2 is the current heat (it's running); q-1 was skipped and stays Scheduled.
+            Event::CurrentHeatSelected {
+                heat: HeatId("q-2".into()),
+            },
+            changed("q-2", HeatTransition::Staged),
+            changed("q-2", HeatTransition::Armed),
+            changed("q-2", HeatTransition::Running),
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.current_heat, Some(HeatId("q-2".into())));
+        // Forward, not backward: q-3 (after current), never q-1 (earlier-scheduled).
+        assert_eq!(s.on_deck, Some(HeatId("q-3".into())));
+    }
+
+    #[test]
+    fn on_deck_falls_back_to_an_earlier_scheduled_heat_when_current_is_last() {
+        // The current heat (q-3) is last in schedule order, so there is no scheduled heat after
+        // it. Rather than getting stuck, on-deck falls back to the first still-Scheduled heat
+        // overall (q-1, which was skipped) so the RD can still advance to it.
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            scheduled("q-2", &["C", "D"]),
+            scheduled("q-3", &["E", "F"]),
+            // q-2 already ran and finalized; q-1 was skipped (stays Scheduled).
+            changed("q-2", HeatTransition::Staged),
+            changed("q-2", HeatTransition::Armed),
+            changed("q-2", HeatTransition::Running),
+            changed("q-2", HeatTransition::Finished),
+            changed("q-2", HeatTransition::Finalized),
+            // q-3 is now the current heat and running (it's last in order).
+            changed("q-3", HeatTransition::Staged),
+            changed("q-3", HeatTransition::Armed),
+            changed("q-3", HeatTransition::Running),
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.current_heat, Some(HeatId("q-3".into())));
+        // No scheduled heat after q-3 → fall back to the first still-Scheduled heat overall.
+        assert_eq!(s.on_deck, Some(HeatId("q-1".into())));
     }
 
     #[test]
