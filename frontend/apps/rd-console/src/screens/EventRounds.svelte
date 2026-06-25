@@ -19,7 +19,17 @@
    *
    * Field-readable: large text, dark surfaces, consistent with the other stage screens.
    */
-  import { Button, Card, Collapsible, Field, Input, Select, toast } from '@gridfpv/components';
+  import {
+    BracketTree,
+    Button,
+    Card,
+    Collapsible,
+    Field,
+    Input,
+    Select,
+    toast
+  } from '@gridfpv/components';
+  import type { Bracket } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
     ChannelMode,
@@ -48,6 +58,7 @@
   import {
     fieldsForFormat,
     formatLabel,
+    isBracketFormat,
     isQualifyingFormat,
     OPEN_PRACTICE
   } from '../lib/formats.js';
@@ -56,7 +67,19 @@
     isDeterministicRound,
     isOpenPracticeRound
   } from '../lib/heats.js';
-  import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../lib/standings.js';
+  import {
+    bracketChainRounds,
+    buildBracketView,
+    isBracketRoot,
+    isLevelComplete,
+    nextLevelLabel
+  } from '../lib/brackets.js';
+  import {
+    advanceLevelReq,
+    advanceRoundLabel,
+    advanceRoundReq,
+    bracketTopNDefault
+  } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -344,6 +367,106 @@
     } finally {
       advancing = false;
     }
+  }
+
+  // --- Bracket level advancement + visualization (#217, decisions D13) ---------------------------
+  // A single-elim bracket is a **chain of rounds**, one per level: level 1 (created by Advance to
+  // bracket, seeded FromRanking) → each next level seeded FromHeatWinners of the prior. This block
+  // (a) surfaces an **Advance bracket** action on a bracket level once all its heats are Final,
+  // creating the next level seeded FromHeatWinners + generating its winners-paired heats, and
+  // (b) stitches the chain into a BracketTree view a sunlit-readable column-per-level.
+
+  // The id of the bracket level whose "Advance bracket" is in flight (creating the next level).
+  let advancingLevel = $state<RoundId | undefined>(undefined);
+
+  // Whether this round is the **first level** of a bracket chain — the anchor the chain view renders
+  // off. Each chain renders once, on its root; later levels show only their own heat rows (their
+  // bracket context lives in the root's BracketTree).
+  function isBracketChainRoot(round: RoundDef): boolean {
+    return isBracketRoot(round);
+  }
+  // Whether a bracket level is a **non-final** level whose heats are all scored — the gate the
+  // Advance-bracket action opens on (a complete final has no next level to advance to).
+  function canAdvanceLevel(round: RoundDef): boolean {
+    if (!isBracketFormat(round.format)) return false;
+    if (!isLevelComplete(round.id, heats)) return false;
+    // The level is the chain's last when nothing yet chains off it AND it has a single heat (a
+    // one-heat level is the final — there is no winners-pairing left to do).
+    const inLevel = heatsByRound(round.id);
+    const alreadyHasNext = rounds.some((r) => {
+      const seed = r.seeding;
+      return (
+        typeof seed === 'object' &&
+        'FromHeatWinners' in seed &&
+        seed.FromHeatWinners.source_round === round.id
+      );
+    });
+    return !alreadyHasNext && inLevel.length > 1;
+  }
+
+  // Create the next bracket level seeded FromHeatWinners of `level`, then generate its winners-paired
+  // heats (deterministic → fill-all, #216). The default label reads by the next level's size (a
+  // 1-heat next level is "Final", 2-heat "Semifinals", …); the round is editable thereafter.
+  async function advanceLevel(level: RoundDef) {
+    if (advancingLevel) return;
+    advancingLevel = level.id;
+    try {
+      const chain = bracketChainRounds(
+        rounds.find(
+          (r) =>
+            isBracketChainRoot(r) && bracketChainRounds(r, rounds).some((c) => c.id === level.id)
+        ) ?? level,
+        rounds
+      );
+      const levelIndex = chain.findIndex((r) => r.id === level.id);
+      // The next level holds half this level's heats (winners pair up), at least one.
+      const nextHeatCount = Math.max(1, Math.floor(heatsByRound(level.id).length / 2));
+      const rootLabel = chain[0]?.label ?? level.label;
+      const label = nextLevelLabel(rootLabel, nextHeatCount, levelIndex);
+      const created = await session.createRound(advanceLevelReq(level, label));
+      if (!created) {
+        toast.info('A control token is required to manage rounds.');
+        return;
+      }
+      const ack = await session.fillRound(created.id, 'All');
+      if (ack.ok) await refreshHeats();
+      toast.success(`“${created.label}” created from ${level.label}’s winners.`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      advancingLevel = undefined;
+    }
+  }
+
+  // The champion (overall winner) of a bracket chain whose final is scored, used to mark the final
+  // heat's advancing seat in the BracketTree. The final level is the chain's last; when it is a
+  // single, scored heat its position-1 ranking is the champion. Loaded lazily per root id.
+  let championByRoot = $state<Record<RoundId, CompetitorRef | undefined>>({});
+  $effect(() => {
+    // Touch heats so this re-runs as levels complete.
+    void heats;
+    for (const root of rounds.filter(isBracketChainRoot)) {
+      const chain = bracketChainRounds(root, rounds);
+      const final = chain[chain.length - 1];
+      const finalHeats = final ? heatsByRound(final.id) : [];
+      if (final && finalHeats.length === 1 && isLevelComplete(final.id, heats)) {
+        if (championByRoot[root.id] === undefined) {
+          session
+            .roundRanking(final.id)
+            .then((rows) => {
+              const top = rows.find((r) => r.position === 1)?.competitor;
+              if (top) championByRoot = { ...championByRoot, [root.id]: top };
+            })
+            .catch(() => {});
+        }
+      }
+    }
+  });
+
+  // The BracketTree view-model for a chain root — its level columns stitched from the chain rounds +
+  // their heats, winners inferred from the next level's lineups (the final's from the champion).
+  function bracketViewFor(root: RoundDef): Bracket {
+    return buildBracketView(root, rounds, heats, callsign, championByRoot[root.id]);
   }
 
   // --- Manual heat build (replaces the retired NewHeat free-text form) ---------------------------
@@ -1329,6 +1452,21 @@
                   >
                     Advance to bracket
                   </Button>
+                  <!-- Advance the bracket to its next level (#217, decisions D13): once a bracket
+                       level's heats are all Final, create the next level seeded FromHeatWinners +
+                       generate its winners-paired heats. Hidden until the level is complete and only
+                       on a non-final bracket level (a complete final has nowhere left to advance). -->
+                  {#if canAdvanceLevel(round)}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onclick={() => advanceLevel(round)}
+                      loading={advancingLevel === round.id}
+                      disabled={advancingLevel !== undefined}
+                    >
+                      Advance bracket
+                    </Button>
+                  {/if}
                   <!-- Format-aware fill (#216): a deterministic round generates all its heats in
                        one action; a dynamic round (Open Practice — gated out above, kept for any
                        future dynamic format) single-steps. -->
@@ -1345,6 +1483,21 @@
               {/snippet}
 
               <div class="heat-round-body">
+                <!-- Bracket chain view (#217, decisions D13): a single-elim bracket is a chain of
+                     level-rounds. Render the whole chain as one BracketTree on its FIRST level (the
+                     root), columns left-to-right (e.g. Quarterfinals → Semifinals → Final), each
+                     heat's competitors + the advancing seat. Later levels show only their own heat
+                     rows below — their bracket context lives here. -->
+                {#if isBracketChainRoot(round)}
+                  {@const view = bracketViewFor(round)}
+                  {#if view.rounds.length > 0}
+                    <div class="bracket-view" aria-label={`Bracket — ${round.label}`}>
+                      <h4 class="standings-title">Bracket</h4>
+                      <BracketTree bracket={view} />
+                    </div>
+                  {/if}
+                {/if}
+
                 {#if standingsRound === round.id}
                   <div class="round-standings" aria-label={`Standings for ${round.label}`}>
                     <h4 class="standings-title">Standings — seeds the bracket</h4>
@@ -1796,6 +1949,18 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-3);
+  }
+  /* Bracket chain view (#217): the level-column BracketTree, in a sunken, scrollable panel so a
+     wide chain (Quarters → Semis → Final) stays readable on a laptop. */
+  .bracket-view {
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+    overflow-x: auto;
   }
   .round-standings {
     padding: var(--gf-space-3);

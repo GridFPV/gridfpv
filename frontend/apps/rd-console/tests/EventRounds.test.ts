@@ -1098,6 +1098,96 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
   });
 });
 
+// ── Bracket level advancement + visualization (#217, decisions D13) ────────────────────────────
+
+describe('EventRounds (bracket levels — advance + visualization)', () => {
+  // A 4-pilot single-elim chain: a 2-heat Semifinals (the root, seeded FromRanking) → an empty
+  // Final (seeded FromHeatWinners of the semis). The semis heats seat A/D and B/C.
+  const SEMIS: RoundDef = {
+    ...QUAL,
+    id: 'semis',
+    label: 'Semifinals',
+    format: 'single_elim',
+    seeding: { FromRanking: { source_rounds: ['q'], top_n: 4 } }
+  };
+  const BRACKET_EVENT: EventMeta = {
+    ...EVENT,
+    roster: ['p1', 'p2'],
+    rounds: [SEMIS]
+  };
+  const SEMI_HEATS: HeatSummary[] = [
+    { heat: 'sf-1', lineup: ['p1', 'p2'], round: 'semis', phase: 'Final', is_current: false },
+    { heat: 'sf-2', lineup: ['p3', 'p4'], round: 'semis', phase: 'Final', is_current: false }
+  ];
+
+  function bracketImpls(heats: HeatSummary[]) {
+    return {
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => heats)
+    };
+  }
+
+  it('renders the chain as a BracketTree on the root level, with its level columns', async () => {
+    const { session } = makeTestSession({
+      ...bracketImpls(SEMI_HEATS),
+      event: BRACKET_EVENT
+    });
+    render(EventRounds, { session });
+
+    // The bracket panel renders under the root level (the Semifinals round).
+    const panel = (await screen.findByLabelText(/Bracket — Semifinals/i)) as HTMLElement;
+    // Its one column is the Semifinals level (no Final level round exists yet).
+    expect(within(panel).getByText('Semifinals')).toBeInTheDocument();
+  });
+
+  it('shows "Advance bracket" only when the level is complete, and creates the next level seeded FromHeatWinners', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
+      ...SEMIS,
+      id: 'final',
+      label: 'Final',
+      seeding: { FromHeatWinners: { source_round: 'semis' } }
+    }));
+    const { session, sendSpy } = makeTestSession({
+      ...bracketImpls(SEMI_HEATS),
+      createRoundImpl,
+      event: BRACKET_EVENT
+    });
+    render(EventRounds, { session });
+
+    // With both semis heats Final and >1 heat, the Advance-bracket action is offered.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Advance bracket' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    // It reuses the bracket format, seeded FromHeatWinners of the source level, labelled "Final"
+    // (the next level holds 1 heat → the final).
+    expect(req).toMatchObject({
+      format: 'single_elim',
+      label: 'Final',
+      seeding: { FromHeatWinners: { source_round: 'semis' } }
+    });
+    // The next level's winners-paired heats are then generated (fill-all FillRound, #216).
+    await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
+    expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
+      FillRound: { round: 'final', mode: 'All' }
+    });
+  });
+
+  it('hides "Advance bracket" while a level still has an unscored heat', async () => {
+    const incomplete: HeatSummary[] = [SEMI_HEATS[0], { ...SEMI_HEATS[1], phase: 'Running' }];
+    const { session } = makeTestSession({
+      ...bracketImpls(incomplete),
+      event: BRACKET_EVENT
+    });
+    render(EventRounds, { session });
+
+    // The bracket panel renders, but no advance action until every heat is Final.
+    await screen.findByLabelText(/Bracket — Semifinals/i);
+    expect(screen.queryByRole('button', { name: 'Advance bracket' })).toBeNull();
+  });
+});
+
 // ── Open-practice format: the active-channels picker (open-practice Slice 2) ───────────────────
 
 // A primary timer with 4 node seats, the first three configured to Raceband R1/R2 + a custom MHz.
