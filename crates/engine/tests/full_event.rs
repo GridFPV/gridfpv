@@ -214,8 +214,11 @@ fn full_event_runs_qualifying_through_bracket_to_a_single_winner() {
         1,
         "exactly one event winner"
     );
-    // Every seed appears in the final standings.
-    assert_eq!(outcome.bracket.len(), 4);
+    // Level-per-round (#217): `bracket` is the FINAL level's standings — the two finalists,
+    // winner first (the earlier levels' standings are each their own round). The two finalists
+    // are the bracket's top seeds B and A; B wins.
+    assert_eq!(names(&outcome.bracket), vec!["B", "A"]);
+    assert_eq!(outcome.bracket.len(), 2);
 }
 
 #[test]

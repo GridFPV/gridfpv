@@ -116,16 +116,28 @@ impl EventOutcome {
 }
 
 /// Run a full event: drive `qualifying` to completion, take the top `bracket_size` of
-/// its ranking into `bracket`, drive that to a single winner, and return both rankings.
+/// its ranking into the bracket, run the bracket **level by level** to a single winner, and
+/// return both rankings.
 ///
-/// The two generators are constructed by the caller (so the qualifying win condition /
-/// metric and the bracket's `heat_size` are the caller's choice); the same `run` closure
-/// scores every heat in both phases. `bracket_size` clamps to the qualifying field, so a
-/// short field simply takes everyone into the bracket. Pure orchestration over the
-/// existing pieces — deterministic given a deterministic `run`.
+/// The qualifying generator and a per-**level** bracket generator factory are supplied by the
+/// caller (so the qualifying win condition / metric and the bracket's `heat_size` are the
+/// caller's choice); the same `run` closure scores every heat in both phases. `bracket_size`
+/// clamps to the qualifying field, so a short field simply takes everyone into the bracket.
+///
+/// # Level-per-round (decisions D13, #217)
+///
+/// A single-elimination bracket is now **one round per level**, not one generator for the whole
+/// bracket: `make_level` builds a fresh per-level [`Generator`] seeded with that level's field,
+/// emits exactly that level's heats, and completes. This driver chains the levels — the **first**
+/// level is seeded from the quali top-N, and each **next** level is seeded from the prior level's
+/// advancers (its ranking, winners first — the same `FromHeatWinners` carry the live engine does
+/// round-to-round) — until a single competitor remains. The returned `bracket` ranking is the
+/// **final level's** placement (winner first), `bracket_heats` are every level's heats in order.
+///
+/// Pure orchestration over the existing pieces — deterministic given a deterministic `run`.
 pub fn run_event(
     qualifying: &mut dyn Generator,
-    make_bracket: impl FnOnce(Vec<gridfpv_events::CompetitorRef>) -> Box<dyn Generator>,
+    mut make_level: impl FnMut(Vec<gridfpv_events::CompetitorRef>) -> Box<dyn Generator>,
     bracket_size: usize,
     run: &mut dyn RunHeat,
     max_heats: usize,
@@ -133,12 +145,42 @@ pub fn run_event(
     // Phase 1 — qualifying to a ranking.
     let (qualifying_heats, qualifying) = run_format(qualifying, run, max_heats);
 
-    // Seed the bracket from the top of the qualifying ranking, in rank order.
+    // Seed the first bracket level from the top of the qualifying ranking, in rank order.
     let bracket_seeds = advance_top_n(&qualifying, bracket_size);
 
-    // Phase 2 — the bracket to a single winner.
-    let mut bracket_gen = make_bracket(bracket_seeds.clone());
-    let (bracket_heats, bracket) = run_format(bracket_gen.as_mut(), run, max_heats);
+    // Phase 2 — the bracket, level by level. Each level is its own generator seeded from the
+    // previous level's advancers (winners in heat order); the chain ends when a level produces
+    // a single survivor. `bracket` holds the latest level's ranking (the final standings).
+    let mut bracket_heats: Vec<CompletedHeat> = Vec::new();
+    let mut level_seeds = bracket_seeds.clone();
+    let mut bracket: Vec<RankEntry> = qualifying_seed_ranking(&level_seeds);
+
+    let mut level = 0usize;
+    while level_seeds.len() > 1 {
+        assert!(
+            level < max_heats,
+            "bracket ran more than {max_heats} levels without resolving a winner"
+        );
+        level += 1;
+
+        // Run this one level. Each level reuses the generator's own heat ids (`se-h0`, …), so
+        // scope them per level (`l{level}-…`) before scoring — mirroring how the live engine
+        // scopes heat ids per round — so a fixture keyed by heat id never collides across levels.
+        let mut level_gen = make_level(level_seeds.clone());
+        let (level_heats, level_ranking) = run_level(level_gen.as_mut(), run, max_heats, level);
+        bracket_heats.extend(level_heats);
+        bracket = level_ranking;
+
+        // The level's advancers (its ranking ahead of the eliminated) seed the next level. A
+        // single-elim level eliminates exactly the competitors tied at the worst position, so
+        // the advancers are everyone above that band — preserving winners-first heat order.
+        let advancers = level_advancers(&bracket);
+        // Guard against a degenerate level that fails to shrink the field (would loop forever).
+        if advancers.len() >= level_seeds.len() {
+            break;
+        }
+        level_seeds = advancers;
+    }
 
     EventOutcome {
         qualifying,
@@ -147,6 +189,65 @@ pub fn run_event(
         bracket,
         bracket_heats,
     }
+}
+
+/// Drive one bracket **level** to completion, scoping each emitted heat id with the level number
+/// (`l{level}-{id}`) so a fixture keyed by heat id never confuses two levels that reuse the same
+/// per-level ids — the engine analogue of the server scoping a round's heat ids per round.
+fn run_level(
+    generator: &mut dyn Generator,
+    run: &mut dyn RunHeat,
+    max_heats: usize,
+    level: usize,
+) -> (Vec<CompletedHeat>, Vec<RankEntry>) {
+    let mut completed: Vec<CompletedHeat> = Vec::new();
+    while let GeneratorStep::Run(plans) = generator.next(&completed) {
+        for plan in &plans {
+            assert!(
+                completed.len() < max_heats,
+                "level ran more than {max_heats} heats without completing"
+            );
+            // Scope the heat id with the level so the fixture / log can tell levels apart, but
+            // hand the generator back its OWN id (it keyed `next` on the unscoped ids).
+            let scoped = HeatPlan::new(format!("l{level}-{}", plan.heat.0), plan.lineup.clone());
+            let result = run.run(&scoped);
+            completed.push(CompletedHeat::new(plan.heat.0.clone(), result));
+        }
+    }
+    let ranking = generator.ranking(&completed);
+    (completed, ranking)
+}
+
+/// A trivial 1, 2, 3, … ranking from a seed order — the bracket standings before any level has
+/// run (the seeds in qualifying-rank order), so a degenerate (≤1-seed) bracket still reports a
+/// ranking.
+fn qualifying_seed_ranking(seeds: &[gridfpv_events::CompetitorRef]) -> Vec<RankEntry> {
+    seeds
+        .iter()
+        .enumerate()
+        .map(|(i, competitor)| RankEntry {
+            competitor: competitor.clone(),
+            position: i as u32 + 1,
+        })
+        .collect()
+}
+
+/// The competitors **advancing** out of a single-elim level — everyone the level did *not*
+/// eliminate. A level's [`Generator::ranking`] lists the advancers first (winners, in heat order,
+/// at distinct positions) and the eliminated last, all **tied at the worst position** (each heat's
+/// losers share the single bottom band). So the advancers are exactly the entries whose `position`
+/// is strictly better than that worst band — which preserves the winners-first heat order the next
+/// level seeds from. A degenerate level whose ranking is all one band advances no one (the loop
+/// guards against that).
+fn level_advancers(ranking: &[RankEntry]) -> Vec<gridfpv_events::CompetitorRef> {
+    let Some(worst) = ranking.iter().map(|e| e.position).max() else {
+        return Vec::new();
+    };
+    ranking
+        .iter()
+        .filter(|e| e.position < worst)
+        .map(|e| e.competitor.clone())
+        .collect()
 }
 
 // --- Marshaling-aware scoring ----------------------------------------------
@@ -439,11 +540,12 @@ mod tests {
                     ("D", Some(1_800_000)),
                 ]),
             ),
-            // Bracket round 1: A v D, B v C (bracket order A,D,B,C).
-            ("se-r1-h0", h2h("A", "D")),
-            ("se-r1-h1", h2h("B", "C")),
-            // Final: A v B.
-            ("se-r2-h0", h2h("A", "B")),
+            // Bracket level 1 (quarters/semis): A v D, B v C (bracket order A,D,B,C). Heat ids
+            // are scoped per level: `l1-se-h{index}`.
+            ("l1-se-h0", h2h("A", "D")),
+            ("l1-se-h1", h2h("B", "C")),
+            // Bracket level 2 (the final): A v B → `l2-se-h0`.
+            ("l2-se-h0", h2h("A", "B")),
         ]);
 
         let outcome = run_event(
@@ -479,9 +581,9 @@ mod tests {
                         ("D", Some(1_800_000)),
                     ]),
                 ),
-                ("se-r1-h0", h2h("A", "D")),
-                ("se-r1-h1", h2h("B", "C")),
-                ("se-r2-h0", h2h("A", "B")),
+                ("l1-se-h0", h2h("A", "D")),
+                ("l1-se-h1", h2h("B", "C")),
+                ("l2-se-h0", h2h("A", "B")),
             ])
         };
 
