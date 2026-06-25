@@ -433,6 +433,62 @@ describe('Marshaling (Slice 3)', () => {
       expect(panel.queryByText(/goose-yla6dp/)).not.toBeInTheDocument();
       expect(panel.queryByText(/maverick-4d9rp8/)).not.toBeInTheDocument();
     });
+
+    // ── The actual regression #236 left open: the context-load race ─────────────────────────────
+    //
+    // #236 wired the resolvers but its tests always rendered with the event + its heats/pilots
+    // available on the `$effect`s' FIRST run, so they never exercised a re-read. In the field the
+    // Marshaling tab can mount **while the active event is still resolving** (a cold reload straight
+    // onto it, or a remount before the live stream's first envelope): the heats/pilots reads then
+    // land empty (`listHeats()` resolves `[]` with no event in hand yet). Keyed **only** off
+    // `protocolState`, neither effect re-ran when `currentEvent` finally appeared — and a quiet
+    // Unofficial heat emits no further stream tick — so `heats` (the friendly heat name) and
+    // `pilots` (the callsigns) stayed empty and the header + lap headings showed raw ids.
+    //
+    // This test reproduces exactly that: the heats/pilots seams return EMPTY on their first call
+    // (the resolving-window read) and the real data only on the next, and the test then nudges
+    // `currentEvent` **without** touching `protocolState`. With the fix (the effects also depend on
+    // `currentEvent`) the re-read fires and the names resolve; pre-fix they stay raw ids.
+    it('re-reads heats + pilots when currentEvent settles, with no further stream tick', async () => {
+      let heatsCalls = 0;
+      let pilotsCalls = 0;
+      const { session } = makeTestSession({
+        event: EVENT,
+        live: FN_LIVE,
+        laps: FN_LAPS,
+        audit: FN_AUDIT,
+        // First read (the resolving-window race) lands empty; the settled read returns the data.
+        listHeatsImpl: vi.fn(async () => (heatsCalls++ === 0 ? [] : [FN_HEAT])),
+        listPilotsImpl: vi.fn(async () => (pilotsCalls++ === 0 ? [] : PILOTS) as unknown as never),
+        listChannelsImpl: vi.fn(async () => [])
+      });
+      render(Marshaling, { session });
+
+      // After the first (empty) read the names fall back to raw ids — the bug's visible symptom.
+      await waitFor(() => {
+        const header = screen.getByRole('region', { name: 'Marshaling' }).querySelector('.heat');
+        expect(header?.textContent).toContain('q1-heat');
+      });
+
+      // The active event settles — a fresh `EventMeta` assigned with no accompanying stream advance
+      // (the heat is a quiet Unofficial, so `protocolState` does not change). This is the moment the
+      // context must re-load.
+      session.currentEvent = { ...EVENT };
+
+      // The header heat name now resolves to its friendly "<Round> Heat N" and the lap-list headings
+      // to callsigns — proving the heats/pilots context re-read on the `currentEvent` change alone.
+      await waitFor(() => {
+        const header = screen.getByRole('region', { name: 'Marshaling' }).querySelector('.heat');
+        expect(header?.textContent).toContain('Qualifying R1 Heat 1');
+      });
+      const header = screen.getByRole('region', { name: 'Marshaling' }).querySelector('.heat')!;
+      expect(header.textContent).not.toContain('q1-heat');
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
+      );
+      expect(screen.getByRole('heading', { name: 'Goose' })).toBeInTheDocument();
+      expect(screen.queryByText('maverick-4d9rp8')).not.toBeInTheDocument();
+    });
   });
 
   it('a read-only session hides every mutating control but shows laps + audit', () => {

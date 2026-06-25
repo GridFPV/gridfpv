@@ -88,10 +88,22 @@
 
   // The app-level directories (callsigns) + scheduled heats + channel catalog — open reads, re-pulled
   // whenever the stream advances so a freshly-registered pilot / scheduled heat resolves live.
+  //
+  // Both reads re-run on `session.currentEvent` as well as `session.protocolState`. This is the fix
+  // for the raw-id regression (#236 follow-up): `listHeats()` resolves `[]` until an event is
+  // selected, and Marshaling can mount **while the active event is still resolving** (a cold reload
+  // straight onto the Marshaling tab, or a remount before the stream's first envelope). Keying the
+  // re-read off `protocolState` alone left `heats` (and so the friendly heat name) — and `pilots`
+  // (the callsigns) — empty whenever that first read raced ahead of `currentEvent`, since a quiet
+  // Unofficial heat then emits no further stream tick to retrigger it. Touching `currentEvent` makes
+  // the read fire again the moment the event resolves, so the header heat name and the lap-list
+  // headings populate even when no stream advance follows. Live control reads the same way; it just
+  // never hit this because it is the default tab that mounts after the event is already in hand.
   let pilots = $state<Pilot[]>([]);
   let heats = $state<HeatSummary[]>([]);
   let catalog = $state<ChannelCatalogEntry[]>([]);
   $effect(() => {
+    void session.currentEvent;
     void session.protocolState;
     session
       .listPilots()
@@ -99,6 +111,7 @@
       .catch(() => (pilots = []));
   });
   $effect(() => {
+    void session.currentEvent;
     void session.protocolState;
     session
       .listHeats()
