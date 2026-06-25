@@ -34,6 +34,7 @@
     NewRoundReq,
     Pilot,
     PilotId,
+    ProtestWindow,
     RankEntry,
     RoundDef,
     RoundId,
@@ -453,6 +454,12 @@
   let startMinSeconds = $state(2); // randomized start hold: shortest, in seconds (→ min_delay_ms)
   let startMaxSeconds = $state(5); // randomized start hold: longest, in seconds (→ max_delay_ms)
   let graceSeconds = $state(30); // grace window after the win condition, in seconds
+  // ── Protest window (marshaling Slice 5) ──────────────────────────────────────
+  // The **auto-official timer**, in seconds. 0 (the default) = OFF: the result stays provisional
+  // (Unofficial) until the RD finalizes manually — today's behaviour. A positive value arms the
+  // auto-official timer: the runtime auto-finalizes the heat that long after it ends (the RD can
+  // still finalize early). Maps to `RoundDef.protest_window` (`Off` / `After { micros }`).
+  let protestSeconds = $state(0);
   // ── Open-practice duration (open-practice refinement) ────────────────────────
   // The **time limit** for an open-practice round — the practice duration, entered as a single
   // "Minutes" field. Blank = no limit (the RD ends the practice manually). When set, the runtime
@@ -555,6 +562,7 @@
     startMinSeconds = 2;
     startMaxSeconds = 5;
     graceSeconds = 30;
+    protestSeconds = 0; // off by default — manual finalize only
     timeLimitMinutes = ''; // blank = no limit
   }
 
@@ -618,6 +626,12 @@
     const grace = round.grace_window;
     graceSeconds =
       grace && typeof grace !== 'string' ? Math.round(grace.Duration.micros / 1_000_000) : 30;
+
+    // Protest window (marshaling Slice 5): reflect an `After { micros }` back as seconds; `Off` (or a
+    // round that predates the field) reads back as 0 (the timer disabled — manual finalize only).
+    const protest = round.protest_window;
+    protestSeconds =
+      protest && typeof protest !== 'string' ? Math.round(protest.After.micros / 1_000_000) : 0;
 
     // Open-practice duration (open-practice refinement): reflect an existing time limit into the
     // single Minutes input. Unset (no limit) reads back as blank (`''`).
@@ -720,6 +734,15 @@
   }
 
   /**
+   * The protest window (marshaling Slice 5): `Off` when the input is 0/blank (manual finalize only —
+   * the default), else `After { micros }` to arm the auto-official timer (seconds → micros).
+   */
+  function buildProtestWindow(): ProtestWindow {
+    const secs = Math.max(0, Math.round(Number(protestSeconds) || 0));
+    return secs > 0 ? { After: { micros: secs * 1_000_000 } } : 'Off';
+  }
+
+  /**
    * The open-practice **time limit** in whole seconds from the single Minutes input, or `undefined`
    * when blank / zero (no limit — the RD ends the practice manually). Open-practice refinement.
    */
@@ -761,7 +784,8 @@
       channel_mode: channelMode,
       staging_timer_secs: buildStagingSecs(),
       start_procedure: buildStartProcedure(),
-      grace_window: buildGraceWindow()
+      grace_window: buildGraceWindow(),
+      protest_window: buildProtestWindow()
     };
     try {
       const result = editing
@@ -1173,6 +1197,17 @@
                 min="0"
                 bind:value={graceSeconds}
                 aria-label="Grace window seconds"
+              />
+            </Field>
+            <Field
+              label="Protest window (seconds)"
+              hint="0 = off (manual finalize). Otherwise the result auto-finalizes after this long."
+            >
+              <Input
+                type="number"
+                min="0"
+                bind:value={protestSeconds}
+                aria-label="Protest window seconds"
               />
             </Field>
           </div>

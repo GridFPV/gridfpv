@@ -2,6 +2,7 @@
 import type { CompetitorRef } from "./CompetitorRef";
 import type { HeatId } from "./HeatId";
 import type { HeatPhase } from "./HeatPhase";
+import type { LifecycleState } from "./LifecycleState";
 import type { PilotProgress } from "./PilotProgress";
 
 /**
@@ -63,4 +64,14 @@ race_started_at?: number,
  * duration a frozen clock reads (so a 60s limit reads `1:00.000`, not `1:00.100`).
  * Renders as a plain TS `number` (microseconds).
  */
-race_ended_at?: number, };
+race_ended_at?: number, 
+/**
+ * The **provisional → official lifecycle** of the current heat (marshaling Slice 5,
+ * marshaling.html §3.3), surfaced for the Marshaling/Live UI. `None` until the heat reaches the
+ * `Unofficial` phase (before that there is no result to be provisional about). Once provisional
+ * it carries the auto-official deadline (when a protest window is armed) so the console can show
+ * a "Provisional — auto-official in M:SS" countdown; `Official` once finalized. Derived from the
+ * heat's phase + the logged [`HeatFinalizing`](gridfpv_events::Event::HeatFinalizing) deadline,
+ * so it folds deterministically like the rest of this projection.
+ */
+lifecycle?: LifecycleState, };

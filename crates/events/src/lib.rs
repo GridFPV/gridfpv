@@ -428,6 +428,28 @@ pub enum Event {
         #[ts(type = "number")]
         delay_ms: u32,
     },
+    /// The **auto-official timer armed** for a heat that just entered `Unofficial` (marshaling
+    /// Slice 5 — the provisional → official lifecycle, marshaling.html §3.3). When the heat's round
+    /// configures a [`ProtestWindow::After`](gridfpv_engine::heat::ProtestWindow::After), the
+    /// Director runtime writes the **deadline** here as a *fact* — the server-clock instant at which
+    /// it will auto-append the `Unofficial → Final` `Finalize` — so the console can render a live
+    /// "auto-official in M:SS" countdown and a replay reads the **same** deadline instead of
+    /// recomputing it from a clock.
+    ///
+    /// Mirrors [`HeatStarting`](Event::HeatStarting): the runtime logs the chosen timing once, at
+    /// emission time, and the subsequent `Finalize` lands at the deadline; the engine/projection
+    /// fold never reads a clock (race-engine.html §6). Additive and default-absent — a heat whose
+    /// round has no protest window (the default) never emits this, and an older log round-trips
+    /// unchanged.
+    HeatFinalizing {
+        /// The heat whose protest window is open (it is in `Unofficial`).
+        heat: HeatId,
+        /// The **auto-official deadline**: the server wall-clock instant (microseconds since the
+        /// Unix epoch) at which the runtime appends the auto `Finalize`. The countdown the console
+        /// shows is `at − now`.
+        #[ts(type = "number")]
+        at: i64,
+    },
     /// Marshaling: void a previously-detected pass, referenced by log offset. The
     /// projection folds it out as if it never happened — the raw [`Pass`] stays in
     /// the log untouched.

@@ -48,7 +48,17 @@ heat: HeatId,
  * The chosen randomized start delay, in **milliseconds**, from this event to the
  * `Armed → Running` transition. Written once by the runtime; deterministic on replay.
  */
-delay_ms: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "LapSplit": { 
+delay_ms: number, } } | { "HeatFinalizing": { 
+/**
+ * The heat whose protest window is open (it is in `Unofficial`).
+ */
+heat: HeatId, 
+/**
+ * The **auto-official deadline**: the server wall-clock instant (microseconds since the
+ * Unix epoch) at which the runtime appends the auto `Finalize`. The countdown the console
+ * shows is `at − now`.
+ */
+at: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "LapSplit": { 
 /**
  * The log offset of the pass that *ends* the over-long lap being split.
  */

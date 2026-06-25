@@ -1396,6 +1396,7 @@ mod tests {
                     staging_timer_secs: None,
                     start_procedure: None,
                     grace_window: None,
+                    protest_window: None,
                 },
             )
             .unwrap();
@@ -1535,6 +1536,7 @@ mod tests {
                     staging_timer_secs: None,
                     start_procedure: None,
                     grace_window: None,
+                    protest_window: None,
                 },
             )
             .unwrap();

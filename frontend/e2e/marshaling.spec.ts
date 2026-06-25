@@ -377,3 +377,186 @@ test('a sim heat (no captured trace) shows no RSSI graph and keeps the lap-only 
   // …but the RSSI graph does NOT mount — no trace was captured for a Mock heat.
   await expect(page.getByLabel('RSSI signal graph')).toHaveCount(0);
 });
+
+// ── Slice 5: the provisional → official lifecycle + auto-official timer ───────────────────────
+//
+// The protest window is a per-round, OFF-by-default **auto-official timer**: when set, the runtime
+// auto-finalizes (Unofficial → Final) once the window elapses from the race-end instant; the RD can
+// always finalize early, and Revert re-opens a finalized result. These prove the four behaviours
+// the slice promises end-to-end against a real Director:
+//   • window ON  → the heat stays Unofficial (Provisional), then **auto-finalizes** after a short
+//                  (test-set) window;
+//   • the RD can **finalize early** (manual Finalize pre-empts the timer);
+//   • **Revert** re-opens a finalized result to provisional;
+//   • a **read-only** session sees the lifecycle but cannot finalize.
+//
+// The windowed heat needs a *round* carrying the protest window (a round-less free-text heat is
+// `Off` by design), so this seeds a class + a `timed_qual` round with a short `After` window over
+// the open REST API, then schedules the heat tagged with that round.
+
+/** Run the focused current heat from Scheduled to Unofficial (Stage → Start → bank laps → ForceEnd). */
+async function runToUnofficial(page: import('@playwright/test').Page): Promise<void> {
+  await page.getByRole('button', { name: 'Stage', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Staged');
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
+  const lapCells = page.getByRole('region', { name: 'Heat sheet' }).locator('.laps');
+  await expect
+    .poll(
+      async () =>
+        (await lapCells.allTextContents()).reduce(
+          (s, t) => s + (parseInt(t.match(/(\d+)/)?.[1] ?? '0', 10) || 0),
+          0
+        ),
+      { timeout: 30_000, message: 'live laps should bank before ending the heat' }
+    )
+    .toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial');
+}
+
+test('a configured protest window auto-finalizes the heat after the window elapses', async ({
+  page,
+  director
+}) => {
+  const post = (path: string, data: unknown) =>
+    page.request.post(`${director.baseUrl}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      data
+    });
+  const put = (path: string, data: unknown) =>
+    page.request.put(`${director.baseUrl}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      data
+    });
+  const control = (cmd: unknown) => post('/events/practice/control', cmd);
+
+  // Seed a class + select it on Practice, then a `timed_qual` round with a SHORT protest window
+  // (`After { micros }`) so the auto-official timer fires within the test, not minutes later.
+  const classRes = await post('/classes', { name: `protest-${Date.now()}` });
+  expect(classRes.ok()).toBeTruthy();
+  const classId = (await classRes.json()).id as string;
+  expect((await put('/events/practice/classes', { ids: [classId] })).ok()).toBeTruthy();
+
+  const roundRes = await post('/events/practice/rounds', {
+    label: 'Protest Qual',
+    classes: [classId],
+    format: 'timed_qual',
+    params: { rounds: '1' },
+    win_condition: { Timed: { window_micros: 60_000_000 } },
+    // A ~6s window — long enough to reliably observe "Provisional" + the countdown first, short
+    // enough that the auto-finalize lands well within the test's 15s wait for Final.
+    protest_window: { After: { micros: 6_000_000 } }
+  });
+  expect(roundRes.ok()).toBeTruthy();
+  const roundId = (await roundRes.json()).id as string;
+
+  const heat = `marshal-protest-${Date.now()}`;
+  expect(
+    (await control({ ScheduleHeat: { heat, lineup: UI_PILOTS, round: roundId } })).ok()
+  ).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat } })).ok()).toBeTruthy();
+
+  await enterPractice(page);
+  await page.reload();
+  // The heat is round-tagged, so the header shows its friendly "<Round> Heat N" name (not the raw id).
+  await expect(page.locator('.heat-id .value')).toHaveText('Protest Qual Heat 1', {
+    timeout: 15_000
+  });
+
+  await runToUnofficial(page);
+
+  // The lifecycle banner shows **Provisional** with a live auto-official countdown (the runtime
+  // armed the window and logged its deadline; the console counts down to it).
+  const lifecycle = page.getByRole('status', { name: 'Result lifecycle' });
+  await expect(lifecycle).toContainText(/Provisional/i, { timeout: 10_000 });
+  await expect(lifecycle).toContainText(/auto-official in/i);
+
+  // …and the runtime AUTO-FINALIZES once the window elapses: the heat folds to Final on its own,
+  // with no RD action. (The banner flips to Official.)
+  await expect(page.locator('.phase').first()).toHaveText('Final', { timeout: 15_000 });
+  await expect(lifecycle).toContainText(/Official/i);
+});
+
+test('the RD can finalize early, and Revert re-opens the result to provisional', async ({
+  page,
+  director
+}) => {
+  // No protest window needed for early-finalize / revert: a round-less heat is Provisional (manual
+  // finalize only), which is exactly the path this exercises through the open control path.
+  const control = (cmd: unknown) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: cmd
+    });
+  const heat = `marshal-early-${Date.now()}`;
+  expect((await control({ ScheduleHeat: { heat, lineup: UI_PILOTS } })).ok()).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat } })).ok()).toBeTruthy();
+
+  await enterPractice(page);
+  await page.reload();
+  await expect(page.locator('.heat-id .value')).toHaveText(heat, { timeout: 15_000 });
+
+  await runToUnofficial(page);
+
+  // Provisional (no window armed) — manual finalize only.
+  const lifecycle = page.getByRole('status', { name: 'Result lifecycle' });
+  await expect(lifecycle).toContainText(/Provisional/i, { timeout: 10_000 });
+
+  // ── Finalize EARLY: the RD presses Finalize → the result becomes Official immediately ──────────
+  await page.getByRole('button', { name: 'Finalize', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Final', { timeout: 10_000 });
+  await expect(lifecycle).toContainText(/Official/i);
+
+  // ── REVERT re-opens it to provisional (correctable again) ──────────────────────────────────────
+  // Revert is a destructive off-ramp, so it confirms before firing (ConfirmButton two-step).
+  await page.getByRole('button', { name: 'Revert', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 10_000 });
+  await expect(lifecycle).toContainText(/Provisional/i);
+});
+
+test('a read-only session sees the lifecycle but cannot finalize', async ({ page, director }) => {
+  // Schedule + run a heat to Unofficial as the open RD, then re-enter read-only and confirm the
+  // lifecycle is visible while the Finalize transition is not available to a pilot.
+  const control = (cmd: unknown) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: cmd
+    });
+  const heat = `marshal-ro-life-${Date.now()}`;
+  expect((await control({ ScheduleHeat: { heat, lineup: UI_PILOTS } })).ok()).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat } })).ok()).toBeTruthy();
+
+  await enterPractice(page);
+  await page.reload();
+  await expect(page.locator('.heat-id .value')).toHaveText(heat, { timeout: 15_000 });
+  await runToUnofficial(page);
+
+  // Re-enter as a read-only pilot via the role seam.
+  await page.goto('/?role=readonly');
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  await page.getByRole('button', { name: /Events/ }).click();
+  if (
+    await page
+      .getByRole('heading', { name: 'Choose an event' })
+      .isVisible()
+      .catch(() => false)
+  ) {
+    await page
+      .getByRole('button', { name: /Practice/ })
+      .first()
+      .click();
+  }
+  await expect(liveNav).toBeVisible({ timeout: 15_000 });
+  await liveNav.click();
+
+  // The lifecycle is visible to the read-only pilot (it surfaces the governance state)…
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 15_000 });
+  await expect(page.getByRole('status', { name: 'Result lifecycle' })).toContainText(
+    /Provisional/i
+  );
+  // …but the heat transitions are hidden for a pilot (read-only): no Finalize / Revert controls.
+  await expect(page.getByRole('group', { name: 'Heat transitions' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Finalize', exact: true })).toHaveCount(0);
+});

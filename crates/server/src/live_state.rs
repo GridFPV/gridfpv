@@ -107,6 +107,40 @@ pub struct LiveRaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub race_ended_at: Option<i64>,
+    /// The **provisional → official lifecycle** of the current heat (marshaling Slice 5,
+    /// marshaling.html §3.3), surfaced for the Marshaling/Live UI. `None` until the heat reaches the
+    /// `Unofficial` phase (before that there is no result to be provisional about). Once provisional
+    /// it carries the auto-official deadline (when a protest window is armed) so the console can show
+    /// a "Provisional — auto-official in M:SS" countdown; `Official` once finalized. Derived from the
+    /// heat's phase + the logged [`HeatFinalizing`](gridfpv_events::Event::HeatFinalizing) deadline,
+    /// so it folds deterministically like the rest of this projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub lifecycle: Option<LifecycleState>,
+}
+
+/// The provisional → official lifecycle of a heat's result (marshaling Slice 5), projected for the
+/// UI from the heat FSM + the logged auto-official deadline.
+///
+/// This is **not** a new FSM state: it reuses the heat's existing `Unofficial` (provisional,
+/// correctable) → `Final` (official) transition. [`Provisional`](Self::Provisional) maps onto
+/// `Unofficial`; [`Official`](Self::Official) onto `Final`. The optional `auto_official_at` is the
+/// server-clock instant the runtime will auto-finalize, present only when the round armed a
+/// [`ProtestWindow::After`](gridfpv_engine::heat::ProtestWindow::After).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum LifecycleState {
+    /// The result is **provisional** (the heat is `Unofficial`): correctable, not yet official. When
+    /// a protest window is armed, `auto_official_at` is the server wall-clock instant (microseconds
+    /// since the Unix epoch) at which the runtime auto-finalizes; the console renders `at − now` as a
+    /// countdown. `None` ⇒ no auto-official timer (manual finalize only — the default).
+    Provisional {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "number")]
+        auto_official_at: Option<i64>,
+    },
+    /// The result is **official** (the heat is `Final`). `Revert` can re-open it to `Provisional`.
+    Official,
 }
 
 impl Default for LiveRaceState {
@@ -121,6 +155,7 @@ impl Default for LiveRaceState {
             on_deck: None,
             race_started_at: None,
             race_ended_at: None,
+            lifecycle: None,
         }
     }
 }
@@ -219,6 +254,9 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
         // `&[Event]` — the open-practice synthetic path and the unit tests — leaves it `None`.
         race_started_at: None,
         race_ended_at: None,
+        // The lifecycle is likewise finished by [`with_heat_timing`] from the *stored* log (it needs
+        // the `HeatFinalizing` deadline's `recorded_at` context); the bare-event fold leaves it `None`.
+        lifecycle: None,
     }
 }
 
@@ -258,17 +296,57 @@ pub fn heat_timing(stored: &[StoredEvent], heat: &HeatId) -> (Option<i64>, Optio
     (started_at, ended_at)
 }
 
-/// Set a folded [`LiveRaceState`]'s server-authoritative timing from the stored log.
+/// The current heat's **auto-official deadline** (marshaling Slice 5): the `at` of the most-recent
+/// [`HeatFinalizing`](Event::HeatFinalizing) the runtime logged when it armed the protest window,
+/// cleared by any later `Running` for the heat (a re-run re-opens the window from scratch).
+///
+/// Pure and log-derivable like [`heat_timing`]: the runtime writes the deadline once, at emission
+/// time (mirroring `HeatStarting`'s logged delay), so a replay folds the same instant and the
+/// countdown is identical for every client. `None` when no protest window was armed.
+fn heat_finalizing_at(events: &[Event], heat: &HeatId) -> Option<i64> {
+    let mut at = None;
+    for event in events {
+        match event {
+            Event::HeatFinalizing { heat: h, at: a } if h == heat => at = Some(*a),
+            // A fresh run re-opens the window: drop a stale deadline so an aborted/reverted run's
+            // arming never lingers onto the new one (it re-arms with its own `HeatFinalizing`).
+            Event::HeatStateChanged {
+                heat: h,
+                transition: HeatTransition::Running,
+            } if h == heat => at = None,
+            _ => {}
+        }
+    }
+    at
+}
+
+/// Set a folded [`LiveRaceState`]'s server-authoritative timing **and lifecycle** from the stored
+/// log.
 ///
 /// The plain [`live_state`] fold (over `&[Event]`) cannot see `recorded_at`; the snapshot
 /// and change-stream paths hold the full [`StoredEvent`] log, so they finish the live state
 /// by folding the current heat's race-start / race-end instants in here. A no-op when there
 /// is no current heat. Idempotent and order-independent — just a finishing fold.
+///
+/// The **lifecycle** (marshaling Slice 5) is derived alongside: an `Unofficial` heat is
+/// [`Provisional`](LifecycleState::Provisional) (carrying the logged auto-official deadline, if a
+/// protest window was armed), a `Final` heat is [`Official`](LifecycleState::Official), and any
+/// earlier phase has no lifecycle yet (`None`).
 pub fn with_heat_timing(mut live: LiveRaceState, stored: &[StoredEvent]) -> LiveRaceState {
     if let Some(heat) = live.current_heat.clone() {
         let (started, ended) = heat_timing(stored, &heat);
         live.race_started_at = started;
         live.race_ended_at = ended;
+        live.lifecycle = match live.phase {
+            HeatPhase::Unofficial => {
+                let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
+                Some(LifecycleState::Provisional {
+                    auto_official_at: heat_finalizing_at(&events, &heat),
+                })
+            }
+            HeatPhase::Final => Some(LifecycleState::Official),
+            _ => None,
+        };
     }
     live
 }
@@ -922,6 +1000,137 @@ mod tests {
         let live = with_heat_timing(live_state(&[]), &[]);
         assert_eq!(live.race_started_at, None);
         assert_eq!(live.race_ended_at, None);
+        assert_eq!(live.lifecycle, None);
+    }
+
+    // --- the provisional → official lifecycle (marshaling Slice 5) -------------------
+
+    fn finalizing(id: &str, at: i64) -> Event {
+        Event::HeatFinalizing {
+            heat: HeatId(id.into()),
+            at,
+        }
+    }
+
+    #[test]
+    fn lifecycle_is_none_before_the_heat_is_unofficial() {
+        // A running heat has no result yet — no provisional/official lifecycle to show.
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(live.lifecycle, None);
+    }
+
+    #[test]
+    fn unofficial_without_a_protest_window_is_provisional_manual() {
+        // No `HeatFinalizing` logged ⇒ manual finalize only: Provisional with no auto-official deadline.
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 2_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(
+            live.lifecycle,
+            Some(LifecycleState::Provisional {
+                auto_official_at: None
+            })
+        );
+    }
+
+    #[test]
+    fn unofficial_with_a_protest_window_carries_the_auto_official_deadline() {
+        // The runtime logged a deadline ⇒ Provisional with the auto-official instant for the countdown.
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 2_000_000),
+            stored_at(finalizing("q-1", 122_000_000), 2_000_100),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(
+            live.lifecycle,
+            Some(LifecycleState::Provisional {
+                auto_official_at: Some(122_000_000)
+            })
+        );
+    }
+
+    #[test]
+    fn final_heat_is_official() {
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 2_000_000),
+            stored_at(changed("q-1", HeatTransition::Finalized), 3_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(live.lifecycle, Some(LifecycleState::Official));
+    }
+
+    #[test]
+    fn revert_re_opens_provisional() {
+        // Finalize, then Revert back to Unofficial: the heat is Provisional again (the lifecycle
+        // tracks the FSM, so a reverted result is correctable once more). The runtime re-arms the
+        // auto-official timer by logging a fresh `HeatFinalizing`; here we just assert it re-opened.
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 2_000_000),
+            stored_at(changed("q-1", HeatTransition::Finalized), 3_000_000),
+            stored_at(changed("q-1", HeatTransition::Reverted), 4_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(
+            live.lifecycle,
+            Some(LifecycleState::Provisional {
+                auto_official_at: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_fresh_run_drops_a_stale_auto_official_deadline() {
+        // A heat finished + armed a window, then was restarted and re-run: the new run's window has
+        // not been armed yet, so the stale deadline from the previous run is cleared on the `Running`.
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 2_000_000),
+            stored_at(finalizing("q-1", 122_000_000), 2_000_100),
+            stored_at(changed("q-1", HeatTransition::Restarted), 2_500_000),
+            stored_at(changed("q-1", HeatTransition::Running), 9_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 10_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(
+            live.lifecycle,
+            Some(LifecycleState::Provisional {
+                auto_official_at: None
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_folds_deterministically() {
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Running), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Finished), 2_000_000),
+            stored_at(finalizing("q-1", 122_000_000), 2_000_100),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let a = with_heat_timing(live_state(&events), &log);
+        let b = with_heat_timing(live_state(&events), &log);
+        assert_eq!(a.lifecycle, b.lifecycle);
     }
 
     #[test]

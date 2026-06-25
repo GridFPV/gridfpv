@@ -339,6 +339,63 @@ pub fn consumes_pass(
     }
 }
 
+/// The **protest window** for the provisional → official lifecycle (marshaling Slice 5,
+/// marshaling.html §3.3): an optional, OFF-by-default **auto-official timer**.
+///
+/// A heat sits in [`Unofficial`](HeatState::Unofficial) (provisional, correctable) after the race
+/// closes. When a protest window is configured, the runtime **auto-finalizes** it
+/// (`Unofficial → Final`) once the window elapses from the race-end instant; the RD can always
+/// finalize early (manually) or correct during the window, and [`Revert`](HeatCommand::Revert)
+/// re-opens a finalized result. This is **not** a gate that blocks `Finalize` — it is an additive
+/// auto-finalize. The default ([`Off`](Self::Off)) is today's behaviour: manual `Finalize` only.
+///
+/// Derives serde + `ts_rs::TS` so it can be carried as a per-round config
+/// ([`RoundDef::protest_window`](../../server/events/struct.RoundDef.html)) and read by the
+/// frontend; it mirrors [`GraceWindow`]'s shape (an off variant + a bounded duration).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum ProtestWindow {
+    /// No auto-official timer (the default): the heat stays `Unofficial` until the RD manually
+    /// finalizes it. Today's behaviour, unchanged.
+    #[default]
+    Off,
+    /// Auto-finalize `micros` microseconds after the race-end instant: once the window elapses the
+    /// runtime appends the `Finalize` the RD would have pressed. The RD may still finalize early.
+    After {
+        /// Length of the protest window, in microseconds (server wall clock), counted from the
+        /// `Running → Unofficial` race-end instant.
+        #[ts(type = "number")]
+        micros: i64,
+    },
+}
+
+/// Whether an `Unofficial` heat's auto-official timer is **due** (marshaling Slice 5): the protest
+/// window has elapsed, so the runtime should append the auto `Finalize` (`Unofficial → Final`).
+///
+/// Pure — like [`consumes_pass`], it reads no clock: the elapsed time is an **input**. The runtime
+/// supplies `since_finished_micros` (now − the race-end instant) and emits the `Finalize` itself.
+///
+/// Inputs:
+/// - `state` — the heat's current [`HeatState`]. Only an `Unofficial` heat can auto-finalize.
+/// - `window` — the configured [`ProtestWindow`]. [`Off`](ProtestWindow::Off) never fires.
+/// - `since_finished_micros` — microseconds elapsed since the race-end instant (server clock).
+///   `None` (the race-end instant is unknown / the heat has not finished) is never due.
+///
+/// Returns `true` iff `state` is `Unofficial`, `window` is [`After`](ProtestWindow::After), and the
+/// elapsed time is at least the window (inclusive — exactly at the deadline is due).
+pub fn auto_official_due(
+    state: HeatState,
+    window: ProtestWindow,
+    since_finished_micros: Option<i64>,
+) -> bool {
+    match (state, window) {
+        (HeatState::Unofficial, ProtestWindow::After { micros }) => {
+            since_finished_micros.is_some_and(|elapsed| elapsed >= micros)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,6 +803,60 @@ mod tests {
             assert!(
                 !consumes_pass(state, GraceWindow::UntilScored, None),
                 "{state:?} must not consume passes",
+            );
+        }
+    }
+
+    // --- the auto-official timer (marshaling Slice 5) ---------------------------------
+
+    #[test]
+    fn protest_window_off_never_auto_finalizes() {
+        // OFF = manual Finalize only (today's behaviour): no elapsed value ever makes it due.
+        for elapsed in [None, Some(-1), Some(0), Some(1_000_000), Some(i64::MAX)] {
+            assert!(
+                !auto_official_due(HeatState::Unofficial, ProtestWindow::Off, elapsed),
+                "Off must never be due (elapsed {elapsed:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn protest_window_after_is_due_once_the_window_elapses() {
+        let window = ProtestWindow::After { micros: 2_000_000 };
+        // Before the window — not due.
+        assert!(!auto_official_due(
+            HeatState::Unofficial,
+            window,
+            Some(1_999_999)
+        ));
+        // Exactly at the deadline — due (inclusive).
+        assert!(auto_official_due(
+            HeatState::Unofficial,
+            window,
+            Some(2_000_000)
+        ));
+        // Past the deadline — due.
+        assert!(auto_official_due(
+            HeatState::Unofficial,
+            window,
+            Some(2_500_000)
+        ));
+        // An unknown race-end instant is never due (the runtime can't place the deadline yet).
+        assert!(!auto_official_due(HeatState::Unofficial, window, None));
+    }
+
+    #[test]
+    fn auto_official_is_due_only_from_unofficial() {
+        let window = ProtestWindow::After { micros: 0 };
+        // Even a zero-length window only fires from Unofficial; any other state is never due,
+        // so the timer can never skip the provisional phase or re-fire on a finalized heat.
+        for &state in &ALL_STATES {
+            let due = auto_official_due(state, window, Some(10_000_000));
+            assert_eq!(
+                due,
+                state == HeatState::Unofficial,
+                "{state:?} auto-official due should be {}",
+                state == HeatState::Unofficial,
             );
         }
     }

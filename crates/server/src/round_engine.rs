@@ -1357,6 +1357,7 @@ mod tests {
             staging_timer_secs: default_staging_timer_secs(),
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
             time_limit_secs: None,
         }
     }
@@ -1616,6 +1617,7 @@ mod tests {
             staging_timer_secs: default_staging_timer_secs(),
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
             time_limit_secs: None,
         }
     }
@@ -1760,6 +1762,7 @@ mod tests {
             staging_timer_secs: default_staging_timer_secs(),
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
             time_limit_secs: None,
         };
         let meta = meta_with(
@@ -1824,6 +1827,7 @@ mod tests {
             staging_timer_secs: default_staging_timer_secs(),
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
             time_limit_secs: None,
         };
         let meta = meta_with(
@@ -1898,6 +1902,7 @@ mod tests {
             staging_timer_secs: default_staging_timer_secs(),
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
             time_limit_secs: None,
         }
     }
@@ -2156,6 +2161,7 @@ mod tests {
             staging_timer_secs: default_staging_timer_secs(),
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
             time_limit_secs: None,
         }
     }

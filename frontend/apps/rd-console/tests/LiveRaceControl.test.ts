@@ -27,7 +27,8 @@ const ROUND: RoundDef = {
   channel_mode: 'Static',
   staging_timer_secs: 5, // 0:05 so the test can run it over-time quickly
   start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-  grace_window: { Duration: { micros: 3_000_000 } }
+  grace_window: { Duration: { micros: 3_000_000 } },
+  protest_window: 'Off'
 };
 const EVENT_WITH_ROUND: EventMeta = {
   id: 'e1',
@@ -673,7 +674,8 @@ const OP_ROUND: RoundDef = {
   channel_mode: 'Static',
   staging_timer_secs: 300,
   start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-  grace_window: { Duration: { micros: 3_000_000 } }
+  grace_window: { Duration: { micros: 3_000_000 } },
+  protest_window: 'Off'
 };
 const OP_EVENT: EventMeta = {
   id: 'e1',
@@ -801,7 +803,8 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
     channel_mode: 'Static',
     staging_timer_secs: 300,
     start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-    grace_window: { Duration: { micros: 3_000_000 } }
+    grace_window: { Duration: { micros: 3_000_000 } },
+    protest_window: 'Off'
   };
   const FN_EVENT: EventMeta = {
     id: 'e1',
@@ -960,7 +963,8 @@ describe('LiveRaceControl — roster-seeded callsigns (resolve pre-race, no prog
     channel_mode: 'Static',
     staging_timer_secs: 300,
     start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-    grace_window: { Duration: { micros: 3_000_000 } }
+    grace_window: { Duration: { micros: 3_000_000 } },
+    protest_window: 'Off'
   };
   const RS_EVENT: EventMeta = {
     id: 'e1',
