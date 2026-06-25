@@ -17,6 +17,20 @@
 export const OPEN_PRACTICE = 'open_practice';
 
 /**
+ * The **multi-main** finals format key (#219, decisions D14) — a finals **split by qualifying rank**:
+ * the ranked field is sliced into mains of `main_size` (A-main = top N, B-main = next N, …) racing in
+ * parallel for placement, and the mains' results **stack** into the final standings (A-main →
+ * places 1..N, B-main → N+1..2N, …). Its heats are the mains, so they are named "A-Main", "B-Main",
+ * … off the heat's tier rather than "<Round> Heat <N>" (see the heat-naming helper).
+ */
+export const MULTI_MAIN = 'multi_main';
+
+/** Whether a format key is the multi-main finals format. */
+export function isMultiMainFormat(format: string | undefined | null): boolean {
+  return format === MULTI_MAIN;
+}
+
+/**
  * The **bracket** format keys — the elimination chains whose rounds are bracket *levels* (decisions
  * D13: one round per level). A bracket is authored as a chain of rounds: a level-1 round seeded
  * `FromRanking` (the quali cut), then each next level seeded `FromHeatWinners` of the prior level.

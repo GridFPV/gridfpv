@@ -3,7 +3,9 @@ import type { HeatSummary, RoundDef } from '@gridfpv/types';
 import {
   heatDisplayName,
   heatNameById,
+  isMultiMainRound,
   isOpenPracticeRound,
+  mainTierName,
   OPEN_PRACTICE_HEAT_NAME
 } from '../src/lib/heats.js';
 
@@ -78,5 +80,45 @@ describe('heats — heatNameById (by-id resolution for Live control)', () => {
   it('falls back to the bare id when the heat carries no resolvable round (sim/free-text)', () => {
     const untagged: HeatSummary = { ...heat('q-1'), round: undefined };
     expect(heatNameById('q-1', [untagged], [round()])).toBe('q-1');
+  });
+});
+
+describe('heats — multi-main tier naming (#219)', () => {
+  const mainsRound = (over: Partial<RoundDef> = {}): RoundDef =>
+    round({ format: 'multi_main', label: 'Mains', ...over });
+
+  it('reports a multi-main round as such (and not open-practice)', () => {
+    expect(isMultiMainRound(mainsRound())).toBe(true);
+    expect(isOpenPracticeRound(mainsRound())).toBe(false);
+    expect(isMultiMainRound(round())).toBe(false);
+  });
+
+  it('maps a main index to its tier name (A-Main, B-Main, …)', () => {
+    expect(mainTierName(0)).toBe('A-Main');
+    expect(mainTierName(1)).toBe('B-Main');
+    expect(mainTierName(2)).toBe('C-Main');
+    expect(mainTierName(25)).toBe('Z-Main');
+    // Past the alphabet falls back to a numbered main rather than running off the letters.
+    expect(mainTierName(26)).toBe('Main 27');
+  });
+
+  it('names each multi-main heat by its tier (position in the round)', () => {
+    const r = mainsRound();
+    const list = [heat('main-A'), heat('main-B'), heat('main-C')];
+    expect(heatDisplayName(r, list[0], list)).toBe('A-Main');
+    expect(heatDisplayName(r, list[1], list)).toBe('B-Main');
+    expect(heatDisplayName(r, list[2], list)).toBe('C-Main');
+  });
+
+  it('names a not-yet-listed multi-main heat as the next tier', () => {
+    const r = mainsRound();
+    const list = [heat('main-A')];
+    expect(heatDisplayName(r, heat('main-B'), list)).toBe('B-Main');
+  });
+
+  it('resolves a multi-main heat id to its tier name via heatNameById', () => {
+    const r = mainsRound();
+    const list = [heat('main-A'), heat('main-B')];
+    expect(heatNameById('main-B', list, [r])).toBe('B-Main');
   });
 });
