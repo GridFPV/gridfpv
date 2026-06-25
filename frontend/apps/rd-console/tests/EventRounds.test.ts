@@ -706,9 +706,11 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     await within(roundsCard).findByText('Free Practice');
     expect(within(roundsCard).getByText('1h')).toBeInTheDocument();
 
-    // The Heats area drops the manual "Fill next heat" control for the open-practice round.
+    // The Heats area drops the manual fill control for the open-practice round — neither the
+    // single-step "Add next heat" nor the deterministic "Generate heats" (#216).
     const heatsCard = screen.getByRole('heading', { name: 'Heats' }).closest('section')!;
-    expect(within(heatsCard).queryByRole('button', { name: 'Fill next heat' })).toBeNull();
+    expect(within(heatsCard).queryByRole('button', { name: 'Add next heat' })).toBeNull();
+    expect(within(heatsCard).queryByRole('button', { name: 'Generate heats' })).toBeNull();
   });
 
   it('round-trips an open-practice time limit through edit', async () => {
@@ -919,13 +921,48 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Fill next heat' }));
+    // r1 is a timed_qual round — a deterministic format, so its control is "Generate heats" (#216).
+    await fireEvent.click(await screen.findByRole('button', { name: 'Generate heats' }));
 
-    // A FillRound command tagged with the round was sent.
+    // A FillRound command tagged with the round was sent — in fill-all mode for the deterministic round.
     await waitFor(() => expect(sendSpy).toHaveBeenCalled());
-    expect(sendSpy.mock.calls[0][0]).toEqual({ FillRound: { round: 'r1' } });
+    expect(sendSpy.mock.calls[0][0]).toEqual({ FillRound: { round: 'r1', mode: 'All' } });
     // The newly-scheduled heat shows up after the re-read, named by its round + position.
     await screen.findByText('Qualifying R1 Heat 1');
+  });
+
+  it('generate-all fills MULTIPLE heats from one click for a deterministic round (#216)', async () => {
+    const impls = heatsImpls([]);
+    const filled: HeatSummary[] = [
+      {
+        heat: 'q-1',
+        lineup: ['p1', 'p2'],
+        class: 'c1',
+        round: 'r1',
+        phase: 'Scheduled',
+        is_current: true
+      },
+      {
+        heat: 'q-2',
+        lineup: ['p1', 'p2'],
+        class: 'c1',
+        round: 'r1',
+        phase: 'Scheduled',
+        is_current: false
+      }
+    ];
+    // Empty on mount; after the one generate-all action the whole round's heats are present.
+    impls.listHeatsImpl.mockResolvedValueOnce([]).mockResolvedValue(filled);
+
+    const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    // One "Generate heats" click → one fill-all command → both heats appear.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Generate heats' }));
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
+    expect(sendSpy.mock.calls[0][0]).toEqual({ FillRound: { round: 'r1', mode: 'All' } });
+    await screen.findByText('Qualifying R1 Heat 1');
+    await screen.findByText('Qualifying R1 Heat 2');
   });
 
   it('builds a heat by hand from the round’s eligible members (tagged, no free text)', async () => {
@@ -1052,10 +1089,11 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
       format: 'single_elim',
       seeding: { FromRanking: { source_rounds: ['r1'], top_n: 2 } }
     });
-    // After creating, the bracket's first heat is filled (a FillRound on the new round).
+    // After creating, the bracket's heats are generated (a fill-all FillRound on the new round —
+    // a bracket is deterministic, #216).
     await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
     expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
-      FillRound: { round: 'r2' }
+      FillRound: { round: 'r2', mode: 'All' }
     });
   });
 });

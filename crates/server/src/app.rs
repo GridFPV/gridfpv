@@ -1092,6 +1092,8 @@ async fn add_round(
             &event_id,
             &state,
             round.id.clone(),
+            // Open practice's single channel heat is one draw — single-step (#216).
+            crate::control::FillMode::Next,
         );
         if let Some(err) = ack.error {
             return Err(err);

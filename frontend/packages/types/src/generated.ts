@@ -58,6 +58,7 @@ export type * from '@bindings/Event';
 export type * from '@bindings/EventId';
 export type * from '@bindings/EventMeta';
 export type * from '@bindings/EventOutcome';
+export type * from '@bindings/FillMode';
 export type * from '@bindings/FormatParam';
 export type * from '@bindings/FormatSchema';
 export type * from '@bindings/GateIndex';

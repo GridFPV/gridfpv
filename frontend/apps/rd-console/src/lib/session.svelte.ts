@@ -93,6 +93,7 @@ import type {
   CreatePilotRequest,
   CreateTimerRequest,
   EventMeta,
+  FillMode,
   FormatSchema,
   HeatId,
   HeatResult,
@@ -820,16 +821,22 @@ export class Session {
   // `listHeats` is an open read of the round-tagged heats list the UI groups by round.
 
   /**
-   * Fill a round's **next heat** (`Command::FillRound`) — race redesign Slice 3b. Asks the per-event
-   * round engine to append the next format-generated `HeatScheduled` tagged with this round (and its
-   * class when single-class). A successful ack means *either* a heat was appended *or* the round is
-   * already complete / its outstanding heat must be scored first — the engine treats those as
-   * expected no-ops, so the caller re-reads {@link listHeats} to see whether a new heat appeared.
-   * Sent through the control path (full-trust first → lazy token); returns the raw {@link CommandAck}
-   * like {@link send}.
+   * Fill a round (`Command::FillRound`) — race redesign Slice 3b; fill-all added #216. Asks the
+   * per-event round engine to append format-generated `HeatScheduled`(s) tagged with this round (and
+   * its class when single-class):
+   *
+   *  - `'Next'` (the default) appends the **single** next heat — the interactive single-step used by
+   *    the dynamic Open Practice format and as the building block.
+   *  - `'All'` fills the **whole** round in one round-trip, looping the generator until the round is
+   *    complete — for the deterministic formats (Time Trials, Round Robin, Multi-Main, brackets).
+   *
+   * A successful ack means the engine reached its terminal state for that mode (a heat/heats were
+   * appended, the round is already complete, or its outstanding heat must be scored first — all
+   * expected no-ops), so the caller re-reads {@link listHeats} to see which heats appeared. Sent
+   * through the control path (full-trust first → lazy token); returns the raw {@link CommandAck}.
    */
-  fillRound(round: RoundId): Promise<CommandAck> {
-    return this.send({ FillRound: { round } });
+  fillRound(round: RoundId, mode: FillMode = 'Next'): Promise<CommandAck> {
+    return this.send({ FillRound: { round, mode } });
   }
 
   /**

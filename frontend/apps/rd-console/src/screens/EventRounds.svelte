@@ -51,7 +51,11 @@
     isQualifyingFormat,
     OPEN_PRACTICE
   } from '../lib/formats.js';
-  import { heatDisplayName as sharedHeatDisplayName, isOpenPracticeRound } from '../lib/heats.js';
+  import {
+    heatDisplayName as sharedHeatDisplayName,
+    isDeterministicRound,
+    isOpenPracticeRound
+  } from '../lib/heats.js';
   import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -226,20 +230,31 @@
     return 'running';
   }
 
-  // Fill a round's next heat. The engine acks ok whether it appended a heat OR reported the round
+  // Fill a round's heats (#216). Deterministic formats (Time Trials, Round Robin, Multi-Main,
+  // brackets) **generate all** their heats in one action (`mode: 'All'`); the dynamic Open Practice
+  // single-steps (`'Next'`). The engine acks ok whether it appended heat(s) OR reported the round
   // complete / its outstanding heat unscored, so compare the round's heat count before and after to
-  // tell the RD which happened.
+  // tell the RD what happened, then refetch once after the (possibly batched) fill.
   async function fillRound(round: RoundDef) {
     if (fillingRound) return;
     fillingRound = round.id;
     const before = heatsByRound(round.id).length;
+    const generateAll = isDeterministicRound(round);
     try {
-      const ack = await session.fillRound(round.id);
+      const ack = await session.fillRound(round.id, generateAll ? 'All' : 'Next');
       if (!ack.ok) return; // The error banner / toast surfaces session.lastCommandError.
       await refreshHeats();
       const after = heatsByRound(round.id).length;
-      if (after > before) toast.success(`Heat added to ${round.label}.`);
-      else toast.info(`${round.label}: no new heat — the round is complete or awaiting a score.`);
+      const added = after - before;
+      if (added > 0) {
+        toast.success(
+          generateAll
+            ? `${round.label}: ${added} ${added === 1 ? 'heat' : 'heats'} generated.`
+            : `Heat added to ${round.label}.`
+        );
+      } else {
+        toast.info(`${round.label}: no new heat — the round is complete or awaiting a score.`);
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -301,8 +316,10 @@
     advancing = false;
   }
 
-  // Create the seeded single_elim round, then immediately Fill its first bracket heat so the heats
-  // list shows the ranking-seeded matchups. The bracket is editable thereafter (manual build).
+  // Create the seeded single_elim round, then immediately generate its bracket heats so the heats
+  // list shows the ranking-seeded matchups. A bracket is deterministic, so this generates all the
+  // heats producible now (#216) — the first bracket round's matchups; later rounds fill as results
+  // come in. The bracket is editable thereafter (manual build).
   async function submitAdvance(source: RoundDef) {
     if (advancing) return;
     advancing = true;
@@ -317,8 +334,8 @@
         toast.info('A control token is required to manage rounds.');
         return;
       }
-      // Generate the seeded bracket heats from the ranking.
-      const ack = await session.fillRound(created.id);
+      // Generate all the seeded bracket heats from the ranking (deterministic → fill-all, #216).
+      const ack = await session.fillRound(created.id, 'All');
       if (ack.ok) await refreshHeats();
       toast.success(`Bracket “${created.label}” created, seeded from ${source.label}.`);
       advanceRoundId = undefined;
@@ -1304,6 +1321,9 @@
                   >
                     Advance to bracket
                   </Button>
+                  <!-- Format-aware fill (#216): a deterministic round generates all its heats in
+                       one action; a dynamic round (Open Practice — gated out above, kept for any
+                       future dynamic format) single-steps. -->
                   <Button
                     variant="primary"
                     size="sm"
@@ -1311,7 +1331,7 @@
                     loading={fillingRound === round.id}
                     disabled={fillingRound !== undefined}
                   >
-                    Fill next heat
+                    {isDeterministicRound(round) ? 'Generate heats' : 'Add next heat'}
                   </Button>
                 {/if}
               {/snippet}
@@ -1401,8 +1421,9 @@
                     </p>
                   {:else}
                     <p class="empty small" role="status">
-                      No heats yet — <strong>Fill next heat</strong> to draw the first from this round’s
-                      field.
+                      No heats yet — <strong
+                        >{isDeterministicRound(round) ? 'Generate heats' : 'Add next heat'}</strong
+                      > to draw from this round’s field.
                     </p>
                   {/if}
                 {:else}

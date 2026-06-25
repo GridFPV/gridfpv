@@ -403,8 +403,10 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   const heatRound = page.getByRole('region', { name: `Heats for ${ROUND_LABEL}` });
   await expect(heatRound).toBeVisible({ timeout: 15_000 });
 
-  // ── Fill next heat → a heat appears in the round's list with the members' callsigns ───────────
-  await heatRound.getByRole('button', { name: 'Fill next heat' }).click();
+  // ── Generate heats → a heat appears in the round's list with the members' callsigns ───────────
+  // timed_qual is deterministic, so the control is "Generate heats" (#216); a 2-pilot whole-field
+  // round draws a single heat.
+  await heatRound.getByRole('button', { name: 'Generate heats' }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
   const filledRow = heatRound.locator('.heat-row').first();
   await expect(filledRow).toBeVisible({ timeout: 15_000 });
@@ -434,6 +436,88 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
     ...json,
     data: { pilots: [] }
   });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
+});
+
+/**
+ * **Generate heats** — fill a whole deterministic round in one action (#216).
+ *
+ * Set up a class with **four** members and a `round_robin` round (`heat_size: 2`) over the real
+ * write paths — a deterministic format whose field partitions into **two** heats. Then in the Heats
+ * UI click the single **Generate heats** control and assert **both** heats appear from that one
+ * action (where the old single-step would have drawn only the first). Nothing mocked.
+ */
+test('RD generates a whole round of heats in one action (Generate heats, #216)', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  const SUFFIX = Date.now();
+  const ROUND_LABEL = `E2E-GenAll-${SUFFIX}`;
+  const CALLS = ['A', 'B', 'C', 'D'].map((c) => `E2E-Gen-${c}-${SUFFIX}`);
+
+  // ── Set up over the real write paths: the Open Class, four rostered members, a round_robin round.
+  const classes = (await (await page.request.get(`${base}/classes`)).json()) as Array<{
+    id: string;
+    name: string;
+  }>;
+  const classId = classes.find((c) => c.name === 'Open Class')!.id;
+
+  const mkPilot = async (callsign: string) => {
+    const p = (await (
+      await page.request.post(`${base}/pilots`, { ...json, data: { callsign } })
+    ).json()) as { id: string };
+    return p.id;
+  };
+  const pilotIds: string[] = [];
+  for (const c of CALLS) pilotIds.push(await mkPilot(c));
+
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [classId] } });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: pilotIds } });
+  await page.request.put(`${ev}/classes/${classId}/membership`, {
+    ...json,
+    data: { pilots: pilotIds }
+  });
+  // A round_robin round, heat_size 2 → 4 members partition into 2 heats in one round's worth.
+  const round = (await (
+    await page.request.post(`${ev}/rounds`, {
+      ...json,
+      data: {
+        label: ROUND_LABEL,
+        classes: [classId],
+        format: 'round_robin',
+        params: { rounds: '1', heat_size: '2' },
+        win_condition: 'BestLap',
+        seeding: 'FromRoster',
+        channel_mode: 'PerHeat'
+      }
+    })
+  ).json()) as { id: string };
+  expect(round.id).toBeTruthy();
+
+  // ── Into the Heats UI → one "Generate heats" click fills the whole round ──────────────────────
+  await page.goto('/');
+  await enterPractice(page);
+  await openTab(page, 'Rounds & Heats');
+  const heatRound = page.getByRole('region', { name: `Heats for ${ROUND_LABEL}` });
+  await expect(heatRound).toBeVisible({ timeout: 15_000 });
+
+  await heatRound.getByRole('button', { name: 'Generate heats' }).click();
+  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+
+  // Both heats appear from the single action — "<round> Heat 1" AND "<round> Heat 2".
+  await expect(heatRound.getByText(`${ROUND_LABEL} Heat 1`)).toBeVisible({ timeout: 15_000 });
+  await expect(heatRound.getByText(`${ROUND_LABEL} Heat 2`)).toBeVisible({ timeout: 15_000 });
+  await expect(heatRound.locator('.heat-row')).toHaveCount(2);
+  if (process.env.GRIDFPV_SHOTS)
+    await heatRound.screenshot({ path: `${process.env.GRIDFPV_SHOTS}/generate-all-heats.png` });
+
+  // ── Clean up the shared Director's event back to empty. ───────────────────────────────────────
+  await page.request.delete(`${ev}/rounds/${round.id}`);
+  await page.request.put(`${ev}/classes/${classId}/membership`, { ...json, data: { pilots: [] } });
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
 });
@@ -531,7 +615,7 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
   await openTab(page, 'Rounds & Heats');
   const heatRound = page.getByRole('region', { name: `Heats for ${ROUND_LABEL}` });
   await expect(heatRound).toBeVisible({ timeout: 15_000 });
-  await heatRound.getByRole('button', { name: 'Fill next heat' }).click();
+  await heatRound.getByRole('button', { name: 'Generate heats' }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
   const filledRow = heatRound.locator('.heat-row').first();
   await expect(filledRow).toBeVisible({ timeout: 15_000 });

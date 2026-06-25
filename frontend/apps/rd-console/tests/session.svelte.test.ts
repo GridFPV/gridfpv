@@ -992,14 +992,24 @@ describe('Session', () => {
       return { session, sendCommand };
     }
 
-    it('fillRound sends a FillRound command tagged with the round', async () => {
+    it('fillRound sends a FillRound command tagged with the round (defaults to single-step Next)', async () => {
       const sendCommand = vi.fn(async () => okAck);
       const { session } = heatSession({ sendCommand });
       session.setToken('tok');
       session.selectEvent(PRACTICE);
       const ack = await session.fillRound('r1');
       expect(ack).toEqual(okAck);
-      expect(sendCommand).toHaveBeenCalledWith({ FillRound: { round: 'r1' } });
+      // No explicit mode → 'Next' (the single-step default, wire-compatible). #216.
+      expect(sendCommand).toHaveBeenCalledWith({ FillRound: { round: 'r1', mode: 'Next' } });
+    });
+
+    it('fillRound carries the fill-all mode when asked (generate-all, #216)', async () => {
+      const sendCommand = vi.fn(async () => okAck);
+      const { session } = heatSession({ sendCommand });
+      session.setToken('tok');
+      session.selectEvent(PRACTICE);
+      await session.fillRound('r1', 'All');
+      expect(sendCommand).toHaveBeenCalledWith({ FillRound: { round: 'r1', mode: 'All' } });
     });
 
     it('scheduleHeat sends a tagged ScheduleHeat with the lineup, class, and round', async () => {

@@ -773,8 +773,9 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
     await fireEvent.click(reset);
 
     await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
+    // Open practice single-steps — the New run fills its one channel heat (mode 'Next', #216).
     expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
-      FillRound: { round: 'rp' }
+      FillRound: { round: 'rp', mode: 'Next' }
     });
   });
 

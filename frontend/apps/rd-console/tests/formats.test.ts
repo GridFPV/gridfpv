@@ -3,6 +3,7 @@ import {
   fieldsForFormat,
   FORMAT_LABELS,
   formatLabel,
+  isDeterministicFormat,
   isOpenPracticeFormat,
   OPEN_PRACTICE
 } from '../src/lib/formats.js';
@@ -42,6 +43,18 @@ describe('formats — friendly-name mapping (Rounds form redesign item 1)', () =
     expect(isOpenPracticeFormat('open_practice')).toBe(true);
     expect(isOpenPracticeFormat('timed_qual')).toBe(false);
     expect(isOpenPracticeFormat(undefined)).toBe(false);
+  });
+
+  it('treats every format but open practice as deterministic (#216 generate-all eligibility)', () => {
+    // Deterministic: generate-all in one action.
+    for (const det of ['timed_qual', 'round_robin', 'multi_main', 'single_elim', 'double_elim']) {
+      expect(isDeterministicFormat(det)).toBe(true);
+    }
+    // Open practice is the lone dynamic format — single-step.
+    expect(isDeterministicFormat('open_practice')).toBe(false);
+    // A blank/nullish format is not deterministic.
+    expect(isDeterministicFormat(undefined)).toBe(false);
+    expect(isDeterministicFormat('')).toBe(false);
   });
 });
 

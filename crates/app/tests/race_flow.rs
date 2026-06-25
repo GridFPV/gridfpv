@@ -30,7 +30,7 @@ use gridfpv_engine::heat::GraceWindow;
 use gridfpv_events::{AdapterId, ClassId, Event, HeatId, RoundId};
 use gridfpv_server::app::AppState;
 use gridfpv_server::classes::CreateClassRequest;
-use gridfpv_server::control::{Command, CommandAck};
+use gridfpv_server::control::{Command, CommandAck, FillMode};
 use gridfpv_server::events::{
     ChannelMode, EventRegistry, MemberSlot, NewRoundReq, RoundDef, SeedingRule, StartProcedure,
 };
@@ -204,6 +204,7 @@ async fn run_one_heat(
         token,
         &Command::FillRound {
             round: RoundId(round.into()),
+            mode: FillMode::Next,
         },
     )
     .await;
@@ -386,6 +387,7 @@ async fn round_driven_mock_race_flow_e2e() {
         &token,
         &Command::FillRound {
             round: qual.id.clone(),
+            mode: FillMode::Next,
         },
     )
     .await;
@@ -445,6 +447,7 @@ async fn round_driven_mock_race_flow_e2e() {
         &token,
         &Command::FillRound {
             round: bracket.id.clone(),
+            mode: FillMode::Next,
         },
     )
     .await;
@@ -639,7 +642,13 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
         "POST",
         &format!("/events/{}/control", event.0),
         Some(&token),
-        Some(serde_json::to_value(Command::FillRound { round: round.id }).unwrap()),
+        Some(
+            serde_json::to_value(Command::FillRound {
+                round: round.id,
+                mode: FillMode::Next,
+            })
+            .unwrap(),
+        ),
     )
     .await;
     assert_eq!(http, StatusCode::OK, "control HTTP: {body}");
@@ -773,6 +782,7 @@ async fn static_channel_balanced_qual_flow_e2e() {
             &token,
             &Command::FillRound {
                 round: round.id.clone(),
+                mode: FillMode::Next,
             },
         )
         .await;
@@ -1012,6 +1022,7 @@ async fn heat_auto_advances_running_to_unofficial_under_the_clock() {
         &token,
         &Command::FillRound {
             round: round.clone(),
+            mode: FillMode::Next,
         },
     )
     .await;
@@ -1086,6 +1097,7 @@ async fn the_logged_clock_events_replay_deterministically() {
         &token,
         &Command::FillRound {
             round: round.clone(),
+            mode: FillMode::Next,
         },
     )
     .await;
@@ -1237,6 +1249,7 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         &token,
         &Command::FillRound {
             round: round.id.clone(),
+            mode: FillMode::Next,
         },
     )
     .await;
