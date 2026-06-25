@@ -392,6 +392,35 @@
       first-class finals format.)</dd>
     </dl>
 
+    <h2>D15 · GridFPV native timer-server (post-v1.0.0): reuse RH firmware, strip the RMS</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>GridFPV depends on RotorHazard as both the <strong>timer</strong> and the
+      <strong>race-management system (RMS)</strong>. RH only <em>streams</em> scalar RSSI aggregates
+      on the wire — the dense per-tick signal history needs a post-race pull — and we don't control
+      that wire protocol. So the richest signal, the one marshaling most wants, never arrives live and
+      isn't ours to shape (<a href="timer-adapters.html">Timer Adapters</a> §3,
+      <a href="marshaling.html">Marshaling</a>).</dd>
+      <dt>Decision</dt>
+      <dd>A <strong>two-tier</strong> timer strategy. <strong>Tier 1 (now, non-negotiable):</strong>
+      the <strong>RH adapter stays the primary path</strong> — it works with any existing RH install
+      at zero friction (the adoption path), and we <em>never gate GridFPV on a GridFPV timer</em>.
+      <strong>Tier 2 (post-v1.0.0):</strong> a lightweight, fully <strong>remote-controlled GridFPV
+      timer-server</strong> on the <strong>same Pi&nbsp;+&nbsp;RX5808 hardware</strong> that
+      <strong>reuses the RH node firmware</strong> (the proven RX5808 driver + node-level RSSI
+      crossing detection) and <strong>strips the RH RMS</strong> — replacing only the server/RMS
+      layer. Same hardware, software swap.</dd>
+      <dt>Rationale</dt>
+      <dd>The RX5808 driver is the easy part; RH's real moat is the <em>detection</em> — the
+      hysteresis, calibration, and start-of-race tuning — so we reuse the node firmware rather than
+      re-earn it. Owning the server gives us the <strong>dense signal</strong> natively (it solves the
+      marshaling fidelity gap rather than working around it) and enables <strong>full re-detection
+      marshaling</strong> (the deferred RH-style recalculate). The <strong>mock-timer protocol is a
+      first draft</strong> of this server's wire protocol. <strong>Sequence after the core RMS +
+      marshaling are proven; this is post-v1.0.0, not a near-term dependency</strong> — Tier 1 carries
+      us until then. (Tracking: <strong>#238</strong>.)</dd>
+    </dl>
+
     <footer class="doc-footer">
       <p>
         Internal design documentation · <a href="index.html">&larr; back to docs index</a>
