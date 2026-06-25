@@ -107,6 +107,7 @@ import type {
   RoundDef,
   RoundId,
   Scope,
+  SignalTraceView,
   Timer,
   TimerId,
   UpdateClassRequest,
@@ -251,6 +252,15 @@ export class Session {
    * Pulled alongside {@link lapList} and refreshed on every correction.
    */
   marshalingAudit = $state.raw<AuditEntry[] | undefined>(undefined);
+  /**
+   * The current heat's captured **RSSI signal trace** (`?projection=signal`, marshaling Slice 1) —
+   * one per-competitor trace of streaming-cadence RSSI samples plus the enter/exit thresholds the
+   * timer detected against. Pulled alongside {@link lapList} / {@link marshalingAudit} by
+   * {@link refreshMarshaling}; the Marshaling screen renders it as the signal-as-evidence graph
+   * (Slice 4) when present, and falls back to the lap-only layout when a heat has **no trace**
+   * (a sim heat — `competitors` empty). `$state.raw`: an immutable whole replaced per pull.
+   */
+  signalTrace = $state.raw<SignalTraceView | undefined>(undefined);
   /** Whether this session may issue mutating marshaling commands (an RD, not a read-only pilot). */
   get canControl(): boolean {
     return this.role === 'rd';
@@ -1328,12 +1338,14 @@ export class Session {
   async refreshMarshaling(heat: HeatId): Promise<void> {
     const event = this.currentEvent;
     if (!event) return;
-    const [laps, audit] = await Promise.all([
+    const [laps, audit, signal] = await Promise.all([
       this.#fetchHeatProjection<LapList>(heat, 'laps', 'LapList'),
-      this.#fetchHeatProjection<AuditEntry[]>(heat, 'audit', 'MarshalingAudit')
+      this.#fetchHeatProjection<AuditEntry[]>(heat, 'audit', 'MarshalingAudit'),
+      this.#fetchHeatProjection<SignalTraceView>(heat, 'signal', 'SignalTrace')
     ]);
     if (laps !== undefined) this.lapList = laps;
     if (audit !== undefined) this.marshalingAudit = audit;
+    if (signal !== undefined) this.signalTrace = signal;
   }
 
   /**

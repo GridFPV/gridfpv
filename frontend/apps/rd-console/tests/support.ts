@@ -47,7 +47,8 @@ import type {
   CommandAck,
   EventMeta,
   LapList,
-  LiveRaceState
+  LiveRaceState,
+  SignalTraceView
 } from '@gridfpv/types';
 import { Session, type SessionRole } from '../src/lib/session.svelte.js';
 
@@ -133,6 +134,8 @@ export function makeTestSession(
     laps?: LapList;
     /** Seed the marshaling audit trail (#55) — the screen reads `session.marshalingAudit`. */
     audit?: AuditEntry[];
+    /** Seed the captured RSSI signal trace (Slice 4) — the screen reads `session.signalTrace`. */
+    signal?: SignalTraceView;
     /** The session role (#80). Defaults to `'rd'`; pass `'readonly'` to assert gating. */
     role?: SessionRole;
   } & TimerImpls
@@ -220,6 +223,7 @@ export function makeTestSession(
   if (opts?.role) session.setRole(opts.role);
   if (opts?.laps) session.lapList = opts.laps;
   if (opts?.audit) session.marshalingAudit = opts.audit;
+  if (opts?.signal) session.signalTrace = opts.signal;
   vi.stubGlobal(
     'fetch',
     vi.fn(async () => ({ ok: false, json: async () => ({}) }) as unknown as Response)

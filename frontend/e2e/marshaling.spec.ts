@@ -313,3 +313,67 @@ test('a read-only session sees the laps + audit but cannot mutate', async ({ pag
   // The audit panel is still present (read access is unrestricted).
   await expect(page.getByRole('complementary', { name: 'Audit trail' })).toBeVisible();
 });
+
+// ── Slice 4: the signal-as-evidence RSSI graph ──────────────────────────────────────────────
+//
+// The graph mounts only for a heat that captured an RSSI trace (a RotorHazard heat). The shared
+// e2e Director runs the **Mock/sim timer**, which emits no signal facts — so a heat run here has
+// **no trace** and the screen must take the lap-only **sim fallback** (no graph). That fallback is
+// the half this open-Director e2e can prove end-to-end. The *trace-present* half — the graph
+// drawing the line/thresholds/markers and a marker-click selecting the lap — is driven against a
+// seeded `SignalTraceView` in the component tests (`MarshalingScreen.test.ts`, Slice 4) and against
+// real RSSI in the dockerized-RotorHazard harness (`crates/adapters/tests/rh_signal.rs`,
+// `cargo xtask live`), because injecting signal facts needs the RH adapter, not the control API.
+const SIM_HEAT = `marshal-sim-${Date.now()}`;
+
+test('a sim heat (no captured trace) shows no RSSI graph and keeps the lap-only layout', async ({
+  page,
+  director
+}) => {
+  await enterPractice(page);
+
+  const control = (cmd: unknown) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: cmd
+    });
+
+  // Schedule + focus a Mock heat and run it to Unofficial so it has laps to marshal.
+  expect(
+    (await control({ ScheduleHeat: { heat: SIM_HEAT, lineup: UI_PILOTS } })).ok()
+  ).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat: SIM_HEAT } })).ok()).toBeTruthy();
+
+  await page.reload();
+  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.heat-id .value')).toHaveText(SIM_HEAT, { timeout: 15_000 });
+
+  await page.getByRole('button', { name: 'Stage', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Staged');
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
+
+  const heatSheet = page.getByRole('region', { name: 'Heat sheet' });
+  const lapCells = heatSheet.locator('.laps');
+  await expect
+    .poll(
+      async () =>
+        (await lapCells.allTextContents()).reduce(
+          (s, t) => s + (parseInt(t.match(/(\d+)/)?.[1] ?? '0', 10) || 0),
+          0
+        ),
+      { timeout: 30_000, message: 'live laps should bank before marshaling' }
+    )
+    .toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial');
+
+  await page.getByRole('button', { name: /Marshaling/ }).click();
+  const marshaling = page.getByRole('region', { name: 'Marshaling' });
+  await expect(marshaling).toBeVisible();
+
+  // The lap list (the sim fallback) renders…
+  await expect(marshaling.locator('button.lap').first()).toBeVisible({ timeout: 15_000 });
+  // …but the RSSI graph does NOT mount — no trace was captured for a Mock heat.
+  await expect(page.getByLabel('RSSI signal graph')).toHaveCount(0);
+});
