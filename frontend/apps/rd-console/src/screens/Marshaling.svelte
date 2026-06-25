@@ -23,7 +23,8 @@
     HeatId,
     Lap,
     LapList,
-    LogRef
+    LogRef,
+    SignalTraceView
   } from '@gridfpv/types';
   import { formatMicros } from '@gridfpv/components';
   import {
@@ -41,6 +42,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
+  import RssiGraph from '../lib/RssiGraph.svelte';
 
   let { session, adapter = 'rh-1' }: { session: Session; adapter?: string } = $props();
 
@@ -48,6 +50,13 @@
   const laps = $derived<LapList | undefined>(session.lapList);
   const audit = $derived<AuditEntry[] | undefined>(session.marshalingAudit);
   const canControl = $derived(session.canControl);
+
+  // The captured RSSI trace for this heat (`?projection=signal`, Slice 1), pulled alongside the
+  // lap list + audit by `refreshMarshaling`. A heat that captured signal (a RotorHazard heat) has
+  // one or more competitor traces; a **sim heat** has none — `hasTrace` is then false and the
+  // signal-as-evidence graph is skipped, leaving today's lap-only layout (marshaling.html §3.2).
+  const signalTrace = $derived<SignalTraceView | undefined>(session.signalTrace);
+  const hasTrace = $derived((signalTrace?.competitors.length ?? 0) > 0);
 
   // Drive the marshaling reads off the live stream: whenever the current heat (or the stream's
   // cursor — a new appended event, e.g. a correction we or another client made) changes, re-pull
@@ -225,6 +234,14 @@
 
   <div class="layout">
     <div class="main">
+      {#if hasTrace && signalTrace}
+        <!-- Signal-as-evidence (Slice 4): the RSSI graph for heats that captured a trace. A marker
+             click selects that lap in the action surface below; the lap-list selection highlights
+             the same marker (two-way — `selectLap` is the one shared selection). Display only — no
+             re-detection (marshaling.html §3.2/§5). Sim heats (no trace) skip this entirely. -->
+        <RssiGraph trace={signalTrace} {laps} {selected} onselect={selectLap} />
+      {/if}
+
       {#if laps && laps.competitors.length > 0}
         <div class="laps">
           {#each laps.competitors as cl (cl.competitor.competitor)}

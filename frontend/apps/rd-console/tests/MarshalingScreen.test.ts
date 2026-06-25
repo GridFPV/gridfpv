@@ -3,7 +3,13 @@ import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
 import Marshaling from '../src/screens/Marshaling.svelte';
 import { makeTestSession } from './support.js';
-import { liveRunning, lapList, marshalingAudit } from './fixtures.js';
+import {
+  liveRunning,
+  lapList,
+  marshalingAudit,
+  signalTrace,
+  emptySignalTrace
+} from './fixtures.js';
 
 describe('Marshaling (Slice 3)', () => {
   it('renders the per-competitor selectable lap list', () => {
@@ -96,6 +102,80 @@ describe('Marshaling (Slice 3)', () => {
     // Newest first: the DQ (at_ref 20) precedes the void (at_ref 18).
     expect(entries[0]).toHaveTextContent('DQ applied for CARMEN');
     expect(entries[1]).toHaveTextContent('Detection voided (ref 12)');
+  });
+
+  // ── Slice 4: the signal-as-evidence RSSI graph ────────────────────────────────────────
+  describe('signal-as-evidence graph (Slice 4)', () => {
+    it('renders the graph with threshold lines + a lap marker per lap when a trace is present', () => {
+      const { session } = makeTestSession({
+        live: liveRunning,
+        laps: lapList,
+        signal: signalTrace
+      });
+      render(Marshaling, { session });
+
+      // The graph mounts (one figure for ALICE's trace) with its enter/exit threshold lines.
+      const graph = screen.getByLabelText('RSSI signal graph');
+      const svg = within(graph).getByLabelText(/RSSI trace for ALICE/);
+      expect(svg.querySelector('.enter-line')).not.toBeNull();
+      expect(svg.querySelector('.exit-line')).not.toBeNull();
+
+      // One vertical lap marker per ALICE lap (the lap list has two), each clickable.
+      const markers = within(graph).getAllByRole('button', { name: /Lap \d+ at .* — select/ });
+      expect(markers).toHaveLength(2);
+
+      // The streaming-cadence note is surfaced so the coarse line isn't read as RH's dense history.
+      expect(within(graph).getByText(/streaming-cadence/i)).toBeInTheDocument();
+    });
+
+    it('clicking a lap marker selects that lap in the action surface (two-way with the list)', async () => {
+      const { session } = makeTestSession({
+        live: liveRunning,
+        laps: lapList,
+        signal: signalTrace
+      });
+      render(Marshaling, { session });
+
+      const graph = screen.getByLabelText('RSSI signal graph');
+      // Click ALICE's lap-2 marker; the selection legend reflects exactly that lap.
+      await fireEvent.click(within(graph).getByRole('button', { name: /Lap 2 at .* — select/ }));
+      expect(screen.getByText(/Selected: ALICE · Lap 2/)).toBeInTheDocument();
+      // The marker is now pressed (the two-way highlight).
+      expect(within(graph).getByRole('button', { name: /Lap 2 at .* — select/ })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      );
+    });
+
+    it('a selection made on the lap LIST highlights the matching graph marker (two-way)', async () => {
+      const { session } = makeTestSession({
+        live: liveRunning,
+        laps: lapList,
+        signal: signalTrace
+      });
+      render(Marshaling, { session });
+
+      // Select via the lap list, assert the graph marker reflects it.
+      await fireEvent.click(screen.getByRole('button', { name: /Lap 1\s*41\.000/ }));
+      const graph = screen.getByLabelText('RSSI signal graph');
+      expect(within(graph).getByRole('button', { name: /Lap 1 at .* — select/ })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      );
+    });
+
+    it('a heat with NO trace (a sim heat) skips the graph and keeps the lap-only layout', () => {
+      const { session } = makeTestSession({
+        live: liveRunning,
+        laps: lapList,
+        signal: emptySignalTrace
+      });
+      render(Marshaling, { session });
+
+      // No graph; the lap list still renders (the sim fallback path).
+      expect(screen.queryByLabelText('RSSI signal graph')).toBeNull();
+      expect(screen.getByRole('button', { name: /Lap 1\s*41\.000/ })).toBeInTheDocument();
+    });
   });
 
   it('a read-only session hides every mutating control but shows laps + audit', () => {

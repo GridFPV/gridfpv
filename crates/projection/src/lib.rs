@@ -82,6 +82,11 @@ pub struct Lap {
     /// Renders as a plain TS `number` (bounded far below 2^53).
     #[ts(type = "number")]
     pub duration_micros: i64,
+    /// Source-clock timestamp (µs) of the pass that **closes** this lap — the gate-pass instant.
+    /// On the same clock as the signal trace's sample times (`from + i·period_micros`), so the
+    /// Marshaling RSSI graph can place a vertical lap marker at exactly this lap's gate pass
+    /// without re-deriving it from durations (Slice 4 — signal-as-evidence).
+    pub at: SourceTime,
     /// Global append offset of the pass that **opens** this lap (the lap's start gate).
     pub start_ref: LogRef,
     /// Global append offset of the pass that **closes** this lap (the lap's end gate). This is
@@ -528,6 +533,7 @@ fn laps_from_corrected(passes: &[(u64, Pass)]) -> Vec<Lap> {
             Lap {
                 number: (idx + 1) as u32,
                 duration_micros: end_pass.at.micros_since(start_pass.at),
+                at: end_pass.at,
                 start_ref: LogRef(*start_off),
                 end_ref: LogRef(*end_off),
             }

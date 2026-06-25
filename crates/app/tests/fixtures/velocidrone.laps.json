@@ -9,12 +9,14 @@
         {
           "number": 1,
           "duration_micros": 12000000,
+          "at": 14000000,
           "start_ref": 3,
           "end_ref": 6
         },
         {
           "number": 2,
           "duration_micros": 13000000,
+          "at": 27000000,
           "start_ref": 6,
           "end_ref": 8
         }
@@ -29,6 +31,7 @@
         {
           "number": 1,
           "duration_micros": 13000000,
+          "at": 15500000,
           "start_ref": 4,
           "end_ref": 7
         }
