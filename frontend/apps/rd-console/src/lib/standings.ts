@@ -56,3 +56,23 @@ export function advanceRoundReq(source: RoundDef, topN: number, label: string): 
 export function advanceRoundLabel(source: RoundDef): string {
   return `${source.label} — Bracket`;
 }
+
+/**
+ * Assemble the request for the **next bracket level** advancing `level` produces (#217, decisions
+ * D13: one round per level). Unlike {@link advanceRoundReq} (quali → level 1, seeded `FromRanking`),
+ * a level → next-level advance reuses the same bracket format and is seeded
+ * `FromHeatWinners { source_round: <level> }` — the per-level generator pairs the level's heat
+ * winners into the next level's heats. Carries the level's classes + win condition unchanged; the RD
+ * picks the `label` (e.g. "Semifinals").
+ */
+export function advanceLevelReq(level: RoundDef, label: string): NewRoundReq {
+  return {
+    label,
+    classes: [...level.classes],
+    format: level.format,
+    params: { ...(level.params ?? {}) },
+    win_condition: level.win_condition,
+    seeding: { FromHeatWinners: { source_round: level.id } },
+    channel_mode: level.channel_mode
+  };
+}

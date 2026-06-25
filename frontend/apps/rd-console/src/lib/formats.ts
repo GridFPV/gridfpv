@@ -17,6 +17,21 @@
 export const OPEN_PRACTICE = 'open_practice';
 
 /**
+ * The **bracket** format keys — the elimination chains whose rounds are bracket *levels* (decisions
+ * D13: one round per level). A bracket is authored as a chain of rounds: a level-1 round seeded
+ * `FromRanking` (the quali cut), then each next level seeded `FromHeatWinners` of the prior level.
+ * Today only `single_elim` ships its level chain end-to-end; `double_elim`'s cross-bracket seeding
+ * (D13/D14) is the named-next design problem, so it is listed for labelling but its UI advancement
+ * is not yet driven here.
+ */
+export const BRACKET_FORMATS: readonly string[] = ['single_elim', 'double_elim'];
+
+/** Whether a format key is a bracket (elimination) format whose rounds are bracket levels (D13). */
+export function isBracketFormat(format: string | undefined | null): boolean {
+  return !!format && BRACKET_FORMATS.includes(format);
+}
+
+/**
  * The **qualifying** format keys — `timed_qual` and `round_robin`. For these the cross-round
  * ranking metric *is* the win condition (the qualifying metric is derived from the win condition,
  * not a separate stored param — Rounds form redesign), so the win-condition dropdown offers only
