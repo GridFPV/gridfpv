@@ -1887,7 +1887,8 @@ mod tests {
     }
 
     /// `FillRound` assigns channels from the event's selected timer onto the heat — the lineup gets
-    /// first-fit Raceband frequencies in seed order (race redesign Slice 4a).
+    /// the **IMD-best** Raceband subset for its simultaneous size (#209 auto-pick), laid onto the
+    /// seeds in order (race redesign Slice 4a + #209).
     #[test]
     fn fill_round_assigns_frequencies_from_the_selected_timer() {
         use crate::timers::{ChannelCapability, CreateTimerRequest, TimerKind};
@@ -1922,10 +1923,12 @@ mod tests {
                 _ => None,
             })
             .expect("the scheduled heat carries an assigned frequency set");
-        // Top two seeds get Raceband R1, R2 in order.
+        // #209: the two seeds get the IMD-cleanest 2-channel Raceband subset — the widest-spread
+        // pair R1 (5658) and R8 (5917) — in seed order (lowest channel → top seed), not the naive
+        // first-fit R1, R2.
         assert_eq!(freqs.len(), 2);
         assert_eq!(freqs[0].1, 5658);
-        assert_eq!(freqs[1].1, 5695);
+        assert_eq!(freqs[1].1, 5917);
     }
 
     /// `FillRound` rejects an oversized lineup with a typed `BadRequest` (the heat-size cap) and

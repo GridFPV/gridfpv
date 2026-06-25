@@ -10,6 +10,7 @@
 pub mod event;
 pub mod format;
 pub mod heat;
+pub mod imd;
 pub mod schedule;
 pub mod scoring;
 
