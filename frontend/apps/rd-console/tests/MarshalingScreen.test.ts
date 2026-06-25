@@ -1,6 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
+import type {
+  AuditEntry,
+  EventMeta,
+  HeatSummary,
+  LapList,
+  LiveRaceState,
+  RoundDef
+} from '@gridfpv/types';
 import Marshaling from '../src/screens/Marshaling.svelte';
 import { makeTestSession } from './support.js';
 import {
@@ -145,7 +153,8 @@ describe('Marshaling (Slice 3)', () => {
         kind: 'ProtestFiled' as const,
         at: 1_700_000_000_000_000,
         at_ref: 22,
-        summary: 'Protest filed against BOB: contact'
+        competitor: 'BOB',
+        summary: 'Protest filed: contact'
       }
     ];
     const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList, audit });
@@ -164,12 +173,14 @@ describe('Marshaling (Slice 3)', () => {
         kind: 'LapThrownOut' as const,
         at: 1_700_000_000_000_000,
         at_ref: 30,
+        competitor: null,
         summary: 'Lap thrown out (ref 14)'
       },
       {
         kind: 'HeatVoided' as const,
         at: 1_700_000_000_000_000,
         at_ref: 31,
+        competitor: null,
         summary: 'Heat voided'
       }
     ];
@@ -200,8 +211,9 @@ describe('Marshaling (Slice 3)', () => {
     render(Marshaling, { session });
     const panel = within(screen.getByRole('complementary', { name: 'Audit trail' }));
     const entries = panel.getAllByRole('listitem');
-    // Newest first: the DQ (at_ref 20) precedes the void (at_ref 18).
-    expect(entries[0]).toHaveTextContent('DQ applied for CARMEN');
+    // Newest first: the DQ (at_ref 20) precedes the void (at_ref 18). The competitor name is composed
+    // from the STRUCTURED ref (resolved to its callsign — here the bare ref, no directory seeded).
+    expect(entries[0]).toHaveTextContent('CARMEN · DQ applied');
     expect(entries[1]).toHaveTextContent('Detection voided (ref 12)');
   });
 
@@ -279,6 +291,150 @@ describe('Marshaling (Slice 3)', () => {
     });
   });
 
+  // ── Friendly names everywhere (heat name, lap headings, dropdowns, audit) ───────────────────
+  //
+  // The Marshaling raw-id bug: the screen rendered raw refs (pilot ids / "node-2") for the heat name,
+  // the lap-list headings, the ruling/protest dropdowns, and the audit lines. These assert the screen
+  // resolves them all to friendly names through the shared resolver + heat-name helper.
+  describe('friendly names (the raw-id bug fix)', () => {
+    // A roster-seeded heat: the competitor refs ARE the pilot ids (the common FromRoster case), so a
+    // callsign must resolve from the directory with NO progress binding. node-2 is an unbound seat.
+    const ROUND = {
+      id: 'r1',
+      label: 'Qualifying R1',
+      classes: ['c1'],
+      format: 'timed_qual',
+      params: {},
+      win_condition: { Timed: { window_micros: 120_000_000 } },
+      seeding: 'FromRoster',
+      channel_mode: 'Static',
+      protest_window: 'Off'
+    } as unknown as RoundDef;
+    const EVENT: EventMeta = {
+      id: 'e1',
+      name: 'Friday',
+      created_at: 0,
+      persistent: true,
+      timers: ['mock'],
+      roster: [],
+      classes: ['c1'],
+      rounds: [ROUND]
+    };
+    const PILOTS = [
+      { id: 'maverick-4d9rp8', callsign: 'Maverick', vtx_types: [] },
+      { id: 'goose-yla6dp', callsign: 'Goose', vtx_types: [] }
+    ];
+    const FN_LIVE: LiveRaceState = {
+      current_heat: 'q1-heat',
+      phase: 'Unofficial',
+      active_pilots: ['maverick-4d9rp8', 'goose-yla6dp'],
+      progress: [
+        { competitor: 'maverick-4d9rp8', laps_completed: 2, last_lap_micros: 40_000_000 },
+        { competitor: 'goose-yla6dp', laps_completed: 2, last_lap_micros: 41_000_000 }
+      ],
+      running_order: ['maverick-4d9rp8', 'goose-yla6dp']
+    };
+    const FN_HEAT: HeatSummary = {
+      heat: 'q1-heat',
+      lineup: ['maverick-4d9rp8', 'goose-yla6dp'],
+      round: 'r1',
+      class: 'c1',
+      frequencies: [],
+      phase: 'Unofficial',
+      is_current: true
+    };
+    // A lap list keyed by the pilot-id refs (so the headings must resolve to callsigns).
+    const FN_LAPS: LapList = {
+      competitors: [
+        {
+          competitor: { adapter: 'rh-1', competitor: 'maverick-4d9rp8' },
+          laps: [
+            { number: 1, duration_micros: 40_000_000, at: 40_000_000, start_ref: 10, end_ref: 12 }
+          ]
+        },
+        {
+          competitor: { adapter: 'rh-1', competitor: 'goose-yla6dp' },
+          laps: [
+            { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 11, end_ref: 13 }
+          ]
+        }
+      ]
+    };
+    // An audit whose competitor refs are pilot ids — the line must compose the resolved callsign.
+    const FN_AUDIT: AuditEntry[] = [
+      {
+        kind: 'PenaltyApplied',
+        at: 1_700_000_000_000_000,
+        at_ref: 20,
+        competitor: 'goose-yla6dp',
+        summary: 'DQ applied'
+      },
+      {
+        kind: 'ProtestFiled',
+        at: 1_700_000_000_000_000,
+        at_ref: 21,
+        competitor: 'maverick-4d9rp8',
+        summary: 'Protest filed: cut the course'
+      }
+    ];
+
+    function renderFN(audit: AuditEntry[] = FN_AUDIT) {
+      return makeTestSession({
+        event: EVENT,
+        live: FN_LIVE,
+        laps: FN_LAPS,
+        audit,
+        listHeatsImpl: vi.fn(async () => [FN_HEAT]),
+        listPilotsImpl: vi.fn(async () => PILOTS as unknown as never),
+        listChannelsImpl: vi.fn(async () => [])
+      });
+    }
+
+    it('renders the heat header as its friendly "<Round> Heat N" name, not the raw id', async () => {
+      const { session } = renderFN();
+      render(Marshaling, { session });
+      const header = screen.getByRole('region', { name: 'Marshaling' }).querySelector('.heat')!;
+      await waitFor(() => expect(header.textContent).toContain('Qualifying R1 Heat 1'));
+      expect(header.textContent).not.toContain('q1-heat');
+    });
+
+    it('renders the lap-list headings as pilot callsigns, not the raw refs', async () => {
+      const { session } = renderFN();
+      render(Marshaling, { session });
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
+      );
+      expect(screen.getByRole('heading', { name: 'Goose' })).toBeInTheDocument();
+      expect(screen.queryByText('maverick-4d9rp8')).not.toBeInTheDocument();
+      expect(screen.queryByText('goose-yla6dp')).not.toBeInTheDocument();
+    });
+
+    it('labels the ruling + protest dropdowns by callsign (option value stays the ref)', async () => {
+      const { session } = renderFN();
+      render(Marshaling, { session });
+      const ruling = screen.getByLabelText('Ruling competitor') as HTMLSelectElement;
+      await waitFor(() => {
+        const opts = Array.from(ruling.options).map((o) => o.textContent?.trim());
+        expect(opts).toContain('Maverick');
+        expect(opts).toContain('Goose');
+      });
+      // The option VALUE remains the raw ref (the command still targets it).
+      const goose = Array.from(ruling.options).find((o) => o.textContent?.trim() === 'Goose')!;
+      expect(goose.value).toBe('goose-yla6dp');
+    });
+
+    it('composes the audit line with the RESOLVED callsign from the structured ref', async () => {
+      const { session } = renderFN();
+      render(Marshaling, { session });
+      const panel = within(screen.getByRole('complementary', { name: 'Audit trail' }));
+      // The DQ line shows the callsign, never the raw pilot id.
+      await waitFor(() => expect(panel.getByText('Goose · DQ applied')).toBeInTheDocument());
+      expect(panel.getByText('Maverick · Protest filed: cut the course')).toBeInTheDocument();
+      expect(panel.queryByText(/goose-yla6dp/)).not.toBeInTheDocument();
+      expect(panel.queryByText(/maverick-4d9rp8/)).not.toBeInTheDocument();
+    });
+  });
+
   it('a read-only session hides every mutating control but shows laps + audit', () => {
     const { session } = makeTestSession({
       live: liveRunning,
@@ -290,7 +446,7 @@ describe('Marshaling (Slice 3)', () => {
 
     // Laps and audit still render.
     expect(screen.getByRole('button', { name: /Lap 1\s*41\.000/ })).toBeInTheDocument();
-    expect(screen.getByText('DQ applied for CARMEN')).toBeInTheDocument();
+    expect(screen.getByText('CARMEN · DQ applied')).toBeInTheDocument();
     // No mutating controls.
     expect(screen.queryByRole('button', { name: 'Remove (void)' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Split' })).toBeNull();

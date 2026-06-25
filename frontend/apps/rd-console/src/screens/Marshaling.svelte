@@ -19,14 +19,22 @@
   import type {
     AuditEntry,
     AuditKind,
+    ChannelCatalogEntry,
     CompetitorRef,
     HeatId,
+    HeatSummary,
     Lap,
     LapList,
     LogRef,
+    Pilot,
+    PilotId,
+    PilotProgress,
     SignalTraceView
   } from '@gridfpv/types';
   import { formatMicros } from '@gridfpv/components';
+  import { channelLabel } from '../lib/channels.js';
+  import { createCompetitorNameResolver } from '../lib/competitorName.js';
+  import { heatNameById } from '../lib/heats.js';
   import {
     adjustLapCommand,
     applyPenaltyCommand,
@@ -69,6 +77,68 @@
   // signal-as-evidence graph is skipped, leaving today's lap-only layout (marshaling.html §3.2).
   const signalTrace = $derived<SignalTraceView | undefined>(session.signalTrace);
   const hasTrace = $derived((signalTrace?.competitors.length ?? 0) > 0);
+
+  // ── Friendly names everywhere (heat name + pilot callsigns) ───────────────────────────────────
+  // Marshaling — like Live control — knows the heat and its competitors only as raw ids/refs (the
+  // live stream + lap list carry no human labels). It resolves them here, at the call site that has
+  // the directory + round context, and renders display strings: the heat's "<Round> Heat N" name and
+  // every competitor's callsign (lap headings, the selection legend, the ruling/protest dropdowns,
+  // and the audit lines). The competitor resolution is the SHARED resolver Live control uses
+  // (`competitorName.ts`) so the two never drift (the raw-ref bug, #214 follow-up).
+
+  // The app-level directories (callsigns) + scheduled heats + channel catalog — open reads, re-pulled
+  // whenever the stream advances so a freshly-registered pilot / scheduled heat resolves live.
+  let pilots = $state<Pilot[]>([]);
+  let heats = $state<HeatSummary[]>([]);
+  let catalog = $state<ChannelCatalogEntry[]>([]);
+  $effect(() => {
+    void session.protocolState;
+    session
+      .listPilots()
+      .then((p) => (pilots = p))
+      .catch(() => (pilots = []));
+  });
+  $effect(() => {
+    void session.protocolState;
+    session
+      .listHeats()
+      .then((h) => (heats = h))
+      .catch(() => (heats = []));
+  });
+  $effect(() => {
+    session
+      .listChannels()
+      .then((c) => (catalog = c))
+      .catch(() => (catalog = []));
+  });
+
+  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
+  // A competitor ref → its explicitly-bound pilot id, from the live `progress.pilot` (the manual /
+  // open-practice registration path); empty for the common roster-seeded heat — see the resolver.
+  const explicitPilotByRef = $derived(
+    new Map<CompetitorRef, PilotId>(
+      (session.liveState?.progress ?? [])
+        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
+        .map((p) => [p.competitor, p.pilot])
+    )
+  );
+  // The current heat's competitor ref → channel-label map (for the open-practice `node-{i}` seat
+  // fallback), joined off the heat's `frequencies` like Live control's channels panel.
+  const currentChannels = $derived.by(() => {
+    const summary = heats.find((h) => h.heat === heat);
+    const map = new Map<CompetitorRef, string>();
+    for (const [ref, mhz] of summary?.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
+    return map;
+  });
+
+  // The shared competitor → callsign resolver (same rule as Live control).
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
+    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef: currentChannels })
+  );
+  // The current heat's friendly "<Round> Heat N" / "Open Practice Heat" name (the raw id otherwise).
+  const heatName = $derived(
+    heat ? heatNameById(heat, heats, session.currentEvent?.rounds ?? []) : ''
+  );
 
   // Drive the marshaling reads off the live stream: whenever the current heat (or the stream's
   // cursor — a new appended event, e.g. a correction we or another client made) changes, re-pull
@@ -290,12 +360,21 @@
     // `at` is microseconds since the Unix epoch (server recorded_at).
     return new Date(at / 1000).toLocaleTimeString();
   }
+
+  // The displayed audit line: the server-baked `summary` (which no longer carries the raw competitor
+  // ref) with the **resolved callsign** prepended when the entry names a competitor. This is the
+  // client-side composition the AuditEntry restructure enables — a baked raw-id string couldn't be
+  // re-resolved, so the structured `competitor` ref is resolved here and joined to the summary.
+  function auditSummary(entry: AuditEntry): string {
+    if (entry.competitor == null) return entry.summary;
+    return `${competitorName(entry.competitor)} · ${entry.summary}`;
+  }
 </script>
 
 <section class="marshaling" aria-label="Marshaling">
   <header>
     <h2>
-      Marshaling{#if heat}<span class="heat"> — {heat}</span>{/if}
+      Marshaling{#if heat}<span class="heat"> — {heatName}</span>{/if}
       {#if lifecycle}
         {#if lifecycle === 'Official'}
           <span class="lifecycle-badge official" aria-label="Result lifecycle">Official</span>
@@ -335,7 +414,7 @@
         <div class="laps">
           {#each laps.competitors as cl (cl.competitor.competitor)}
             <div class="comp">
-              <h4>{cl.competitor.competitor}</h4>
+              <h4>{competitorName(cl.competitor.competitor)}</h4>
               {#if cl.laps.length === 0}
                 <p class="empty">No laps yet.</p>
               {:else}
@@ -368,7 +447,7 @@
         <fieldset class="selection-actions" disabled={!selected}>
           <legend>
             {#if selected}
-              Selected: {selected.competitor} · Lap {selected.lap.number}
+              Selected: {competitorName(selected.competitor)} · Lap {selected.lap.number}
             {:else}
               Select a lap to correct
             {/if}
@@ -411,7 +490,7 @@
               >Competitor
               <select bind:value={penaltyTarget} aria-label="Ruling competitor">
                 <option value="" disabled>—</option>
-                {#each competitors as c (c)}<option value={c}>{c}</option>{/each}
+                {#each competitors as c (c)}<option value={c}>{competitorName(c)}</option>{/each}
               </select>
             </label>
             <label
@@ -459,7 +538,7 @@
               <select bind:value={reverseTargetRef} aria-label="Reverse ruling">
                 <option value="" disabled>—</option>
                 {#each reversibleRulings as p (p.at_ref)}
-                  <option value={p.at_ref}>{p.summary}</option>
+                  <option value={p.at_ref}>{auditSummary(p)}</option>
                 {/each}
               </select>
             </label>
@@ -480,7 +559,7 @@
               >Against
               <select bind:value={protestTarget} aria-label="Protest competitor">
                 <option value="" disabled>—</option>
-                {#each competitors as c (c)}<option value={c}>{c}</option>{/each}
+                {#each competitors as c (c)}<option value={c}>{competitorName(c)}</option>{/each}
               </select>
             </label>
             <label class="grow"
@@ -504,7 +583,7 @@
               <select bind:value={resolveProtestRef} aria-label="Resolve protest">
                 <option value="" disabled>—</option>
                 {#each filedProtests as p (p.at_ref)}
-                  <option value={p.at_ref}>{p.summary}</option>
+                  <option value={p.at_ref}>{auditSummary(p)}</option>
                 {/each}
               </select>
             </label>
@@ -543,7 +622,7 @@
           {#each audit as entry (entry.at_ref)}
             <li class="audit-entry kind-{entry.kind}">
               <span class="audit-kind">{auditLabel(entry.kind)}</span>
-              <span class="audit-summary">{entry.summary}</span>
+              <span class="audit-summary">{auditSummary(entry)}</span>
               {#if entry.at != null}
                 <span class="audit-at">{auditTime(entry.at)}</span>
               {/if}

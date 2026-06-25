@@ -430,6 +430,117 @@ test('a read-only session sees the laps + audit but cannot mutate', async ({ pag
   await expect(page.getByRole('complementary', { name: 'Audit trail' })).toBeVisible();
 });
 
+// ── Friendly names everywhere: lap headings + audit show callsigns, not raw pilot ids ─────────
+//
+// The Marshaling raw-id bug (#214 follow-up): the screen rendered the raw competitor refs (pilot
+// ids for a roster-seeded heat) in the lap-list headings, the ruling/protest dropdowns, and the
+// audit lines. This drives a real `FromRoster` heat of NAMED pilots (the refs are the pilot ids,
+// distinct from the callsigns) through a DQ, and asserts the screen shows CALLSIGNS — never the
+// pilot ids — in the lap headings, the ruling dropdown, and the composed audit line.
+test('the Marshaling screen shows pilot callsigns (not raw ids) in lap headings + audit', async ({
+  page,
+  director
+}) => {
+  const base = director.baseUrl;
+  const ev = `${base}/events/practice`;
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  const SUFFIX = Date.now();
+  const ACE = `E2E-Marsh-Ace-${SUFFIX}`;
+  const BEE = `E2E-Marsh-Bee-${SUFFIX}`;
+  const ROUND_LABEL = `E2E-MarshRound-${SUFFIX}`;
+
+  // Open Class is pre-seeded; add two pilots, roster + a FromRoster qual round.
+  const classes = (await (await page.request.get(`${base}/classes`)).json()) as Array<{
+    id: string;
+    name: string;
+  }>;
+  const classId = classes.find((c) => c.name === 'Open Class')!.id;
+  const mkPilot = async (callsign: string) => {
+    const p = (await (
+      await page.request.post(`${base}/pilots`, { ...json, data: { callsign } })
+    ).json()) as { id: string };
+    return p.id;
+  };
+  const aceId = await mkPilot(ACE);
+  const beeId = await mkPilot(BEE);
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [classId] } });
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [aceId, beeId] } });
+  const round = (await (
+    await page.request.post(`${ev}/rounds`, {
+      ...json,
+      data: {
+        label: ROUND_LABEL,
+        classes: [classId],
+        format: 'timed_qual',
+        params: {},
+        win_condition: 'BestLap',
+        seeding: 'FromRoster',
+        channel_mode: 'Static'
+      }
+    })
+  ).json()) as { id: string };
+
+  // Fill the round → a single Scheduled heat whose competitor refs ARE the pilot ids.
+  expect(
+    (
+      await page.request.post(`${ev}/control`, {
+        ...json,
+        data: { FillRound: { round: round.id } }
+      })
+    ).ok()
+  ).toBeTruthy();
+  const heats = (await (await page.request.get(`${ev}/heats`)).json()) as Array<{
+    heat: string;
+    round?: string;
+  }>;
+  const heat = heats.find((h) => h.round === round.id)!.heat;
+  expect(
+    (await page.request.post(`${ev}/control`, { ...json, data: { SetCurrentHeat: { heat } } })).ok()
+  ).toBeTruthy();
+
+  await enterPractice(page);
+  await page.reload();
+  // The heat is round-tagged → the header shows its friendly name (not the raw id).
+  await expect(page.locator('.heat-id .value')).toHaveText(`${ROUND_LABEL} Heat 1`, {
+    timeout: 15_000
+  });
+
+  // Run it to Unofficial so it has laps to marshal, then DQ a pilot.
+  await runToUnofficial(page);
+
+  await page.getByRole('button', { name: /Marshaling/ }).click();
+  const marshaling = page.getByRole('region', { name: 'Marshaling' });
+  await expect(marshaling).toBeVisible();
+  await expect(marshaling.locator('button.lap').first()).toBeVisible({ timeout: 15_000 });
+
+  // The Marshaling header shows the friendly heat name (not the raw heat id).
+  await expect(marshaling.locator('.heat')).toContainText(`${ROUND_LABEL} Heat 1`);
+
+  // The lap-list headings show CALLSIGNS — never the raw pilot ids.
+  await expect(marshaling.locator('.comp h4', { hasText: ACE })).toBeVisible();
+  await expect(marshaling.locator('.comp h4', { hasText: BEE })).toBeVisible();
+  await expect(marshaling.getByText(aceId)).toHaveCount(0);
+  await expect(marshaling.getByText(beeId)).toHaveCount(0);
+
+  // The ruling dropdown labels are callsigns (the option value is still the ref the command targets).
+  const ruling = marshaling.getByLabel('Ruling competitor');
+  await expect(ruling.getByRole('option', { name: ACE })).toHaveCount(1);
+
+  // DQ Ace via the ruling panel → the audit line composes the CALLSIGN, not the pilot id.
+  await ruling.selectOption({ label: ACE });
+  await marshaling.getByRole('button', { name: 'Apply' }).click();
+  const audit = page.getByRole('complementary', { name: 'Audit trail' });
+  await expect(audit.getByText(new RegExp(`${ACE}.*DQ applied`))).toBeVisible({ timeout: 10_000 });
+  // The raw pilot id never appears in the audit line.
+  await expect(audit.getByText(aceId)).toHaveCount(0);
+
+  // ── Clean up the shared Director's event back to empty. ───────────────────────────────────────
+  await page.request.post(`${ev}/control`, { ...json, data: { VoidHeat: { heat } } });
+  await page.request.delete(`${ev}/rounds/${round.id}`);
+  await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [] } });
+  await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
+});
+
 // ── Slice 4: the signal-as-evidence RSSI graph ──────────────────────────────────────────────
 //
 // The graph mounts only for a heat that captured an RSSI trace (a RotorHazard heat). The shared
