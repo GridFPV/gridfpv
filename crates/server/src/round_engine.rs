@@ -195,7 +195,8 @@ impl std::fmt::Display for AssignError {
 impl std::error::Error for AssignError {}
 
 /// Assign **video channels** to a heat's lineup from a timer's available channels (race redesign
-/// Slice 4a) — the engine's half of the RE §7.3 split (the engine allocates; the adapter applies).
+/// Slice 4a; IMD-aware selection #209) — the engine's half of the RE §7.3 split (the engine
+/// allocates; the adapter applies).
 ///
 /// Given the event's selected `timer` and the heat's `lineup` (in seed order):
 ///
@@ -204,13 +205,21 @@ impl std::error::Error for AssignError {}
 ///    A timer with **no available channels** (a sim/Mock-without-frequencies, an unconfigured
 ///    timer) assigns **nothing** — an empty allocation — *after* the cap check, so a heat that is
 ///    simply un-channelled is fine but an oversized one is still rejected.
-/// 2. **First-fit allocation.** The available channels (raw MHz, in preference order, capped to the
-///    node count) form a [`FrequencyPool`]; [`allocate`] hands each pilot the first free channel in
-///    seed order (top seed → first channel). Too few channels for the lineup is
-///    [`AssignError::TooFewChannels`].
+/// 2. **IMD-aware channel SELECTION (#209 auto-pick).** Rather than first-fitting the pool's first
+///    `lineup.len()` channels, pick the **cleanest** size-`lineup.len()` *subset* of the timer's
+///    available channels by third-order intermodulation
+///    ([`pick_best_imd_set`](gridfpv_engine::imd::pick_best_imd_set)). IMD only matters for the
+///    channels flying **simultaneously in this heat**, so the channel *set* is chosen for the
+///    heat's lineup size — products landing on/near a used channel cause video breakup, so the
+///    subset that keeps the worst product farthest from every used channel is chosen. Too few
+///    available channels for the lineup is [`AssignError::TooFewChannels`].
+/// 3. **First-fit assignment of the chosen set.** The IMD-best channels (sorted ascending) are
+///    laid onto the lineup in seed order via [`allocate`] — top seed gets the lowest chosen
+///    channel, etc. — so the per-pilot mapping is deterministic.
 ///
 /// Pure and deterministic: the same lineup + timer config always yields the same per-pilot
-/// `(competitor, mhz)` assignment — the determinism `HeatScheduled.frequencies` and the e2e rely on.
+/// `(competitor, mhz)` assignment — no clock, no RNG — the determinism `HeatScheduled.frequencies`
+/// and the e2e rely on (the fill is replay-deterministic).
 pub fn assign_frequencies(
     timer: &Timer,
     lineup: &[CompetitorRef],
@@ -227,17 +236,33 @@ pub fn assign_frequencies(
     if timer.available_channels.is_empty() {
         return Ok(Vec::new());
     }
-    // The pool is the available channels, in preference order, but never more than the timer has
-    // nodes for (a node can't run two channels). `FrequencyPool::new` de-duplicates.
-    let pool = FrequencyPool::new(
-        timer
-            .available_channels
-            .iter()
-            .take(nodes)
-            .copied()
-            .map(Frequency::new),
-    );
-    match allocate(lineup, &pool) {
+    // The candidate pool is the available channels, but never more than the timer has nodes for (a
+    // node can't run two channels). De-duplicate first so the IMD picker chooses among distinct
+    // channels and the TooFewChannels count below is the real distinct supply.
+    let mut pool: Vec<u16> = Vec::new();
+    for &ch in timer.available_channels.iter().take(nodes) {
+        if !pool.contains(&ch) {
+            pool.push(ch);
+        }
+    }
+    if lineup.len() > pool.len() {
+        return Err(AssignError::TooFewChannels {
+            lineup: lineup.len(),
+            available: pool.len(),
+        });
+    }
+
+    // #209 auto-pick: choose the IMD-cleanest size-`lineup.len()` subset of the candidate pool for
+    // this heat's *simultaneous* lineup, then first-fit those channels onto the seed-ordered lineup.
+    // NOTE(#209): this is the **auto-pick** half only. The remaining halves stay on the roadmap —
+    // surfacing the heat's IMD score in the UI and flagging a low-IMD heat for the RD. Channels are
+    // now IMD-optimised at fill; the score display + low-IMD flag are not yet wired.
+    // `pick_best_imd_set` is deterministic (tie-broken by widest spread then lowest channels), so
+    // the assignment is replay-deterministic. A manual per-heat channel override (if any) is applied
+    // by the caller, which wins over this auto-pick.
+    let best = gridfpv_engine::imd::pick_best_imd_set(&pool, lineup.len());
+    let chosen_pool = FrequencyPool::new(best.into_iter().map(Frequency::new));
+    match allocate(lineup, &chosen_pool) {
         Ok(assignment) => Ok(assignment
             .into_iter()
             .map(|(competitor, freq)| (competitor, freq.mhz))
@@ -1289,17 +1314,27 @@ mod tests {
     }
 
     #[test]
-    fn assign_is_first_fit_in_seed_order() {
-        // An 8-node Raceband timer assigns R1, R2, R3 to the top three seeds in order.
+    fn assign_picks_the_imd_best_subset_in_seed_order() {
+        // #209 auto-pick: an 8-node Raceband timer no longer first-fits R1,R2,R3 (which has a
+        // third-order product landing exactly on R3 — IMD score 0). It selects the IMD-cleanest
+        // 3-channel subset — [5658, 5732, 5917] (score 74) — and lays it onto the seeds in order
+        // (lowest channel → top seed).
         let timer = timer_with(8, RACEBAND_MHZ.to_vec());
         let assignment = assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap();
         assert_eq!(
             assignment,
             vec![
                 (CompetitorRef("A".into()), 5658),
-                (CompetitorRef("B".into()), 5695),
-                (CompetitorRef("C".into()), 5732),
+                (CompetitorRef("B".into()), 5732),
+                (CompetitorRef("C".into()), 5917),
             ]
+        );
+        // The chosen set is strictly cleaner than the naive first-fit R1,R2,R3.
+        let chosen: Vec<u16> = assignment.iter().map(|(_, f)| *f).collect();
+        assert!(
+            gridfpv_engine::imd::imd_score(&chosen)
+                > gridfpv_engine::imd::imd_score(&[5658, 5695, 5732]),
+            "IMD-best subset must beat first-fit"
         );
     }
 
@@ -1366,6 +1401,33 @@ mod tests {
                 available: 2
             }
         );
+    }
+
+    #[test]
+    fn assign_imd_pick_is_capped_by_node_count_and_replay_deterministic() {
+        // #209 auto-pick, capped by nodes + deterministic. A 4-node Raceband timer caps the candidate
+        // pool to its first 4 channels (R1..R4); the IMD-best 3-subset of *that* capped pool is
+        // [5658, 5695, 5769] (score 37) — chosen over the first-fit R1,R2,R3 (score 0). The node cap
+        // bounds the candidate set, exactly as the prior first-fit did.
+        let timer = timer_with(4, RACEBAND_MHZ.to_vec());
+        let l = lineup(&["A", "B", "C"]);
+
+        let first = assign_frequencies(&timer, &l).unwrap();
+        let chosen: Vec<u16> = first.iter().map(|(_, f)| *f).collect();
+        assert_eq!(
+            chosen,
+            vec![5658, 5695, 5769],
+            "IMD-best of the node-capped pool"
+        );
+        assert!(
+            gridfpv_engine::imd::imd_score(&chosen)
+                > gridfpv_engine::imd::imd_score(&[5658, 5695, 5732]),
+            "still beats the first-fit even within the node cap"
+        );
+
+        // Fold/fill twice → identical (no clock, no RNG): the assignment replays deterministically.
+        let second = assign_frequencies(&timer, &l).unwrap();
+        assert_eq!(first, second, "IMD assignment is replay-deterministic");
     }
 
     /// A timer registry with **no resolvable primary** for the per-heat tests (the meta selects no
