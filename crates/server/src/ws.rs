@@ -121,7 +121,11 @@ impl Encoding {
     /// thing, so a delta would be no smaller).
     fn of(kind: ProjectionKind) -> Self {
         match kind {
-            ProjectionKind::LiveRaceState | ProjectionKind::LapList => Encoding::DeltaPreferring,
+            // The signal trace appends incrementally as a heat runs (chunk after chunk), so it is
+            // delta-preferring like the lap list and live state (#59 will encode the appended chunks).
+            ProjectionKind::LiveRaceState
+            | ProjectionKind::LapList
+            | ProjectionKind::SignalTrace => Encoding::DeltaPreferring,
             ProjectionKind::HeatResult
             | ProjectionKind::Ranking
             | ProjectionKind::EventOutcome

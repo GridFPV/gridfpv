@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use gridfpv_adapters::rotorhazard::RotorHazardAdapter;
 use gridfpv_adapters::rotorhazard::transport::RotorHazardConnection;
 use gridfpv_events::Event;
-use gridfpv_projection::{LapList, lap_list};
+use gridfpv_projection::{LapList, lap_list, signal_trace};
 use gridfpv_testkit::{NodeCsv, RhContainer, node_csv};
 
 const PORT: u16 = 5031;
@@ -193,5 +193,118 @@ fn emulated_signal_multi_node_race() {
         "emulated-signal race: node-0 {} laps, node-1 {} laps; n0 signalled passes ok",
         node0.lap_count(),
         node1.lap_count()
+    );
+}
+
+/// The **fidelity gate** (marshaling Slice 1): capture the RSSI trace + enter/exit thresholds from a
+/// dockerized RotorHazard driven by an emulated node-output stream (`NodeCsv`), and assert the
+/// captured trace matches the RSSI values that CSV actually reports — no quantization or dropout
+/// within what RotorHazard exposes live.
+///
+/// The CSV drives a known, stable `peak_rssi` (reported every tick as the node peak) and a
+/// `baseline_rssi`. RotorHazard re-emits `node_data` on its heartbeat while racing, so the adapter
+/// captures one trace sample per emit; every captured sample must be one of the values the CSV
+/// reports (the node peak), proving the capture is faithful to the source. Thresholds (RH's
+/// `enter_at`/`exit_at`) are captured from `enter_and_exit_at_levels`.
+///
+/// NB: this is the value RH *streams* live (one aggregate `node_peak_rssi` per emit), which is the
+/// documented fidelity bound — coarser than the detector's internal per-tick history (that lives in
+/// the request-driven `current_marshal_data`, which a live translator does not subscribe to). The
+/// thing for the maintainer to confirm on real hardware is whether this streamed cadence is dense
+/// enough for the evidence layer, or whether the request-driven history must be pulled at heat end.
+#[test]
+#[ignore = "requires Docker (spins up dockerized RotorHazard with emulated signals)"]
+fn captured_trace_matches_emitted_csv_samples() {
+    const PEAK: i32 = 150;
+    const BASELINE: i32 = 70;
+    // One node, fast laps, a known stable peak — `node_csv` reports `peak_rssi` as the node peak on
+    // every tick and `node_peak = peak + 30`.
+    let csvs = vec![(
+        0usize,
+        node_csv(&NodeCsv {
+            ticks_per_lap: 6,
+            peak_rssi: PEAK,
+            baseline_rssi: BASELINE,
+        }),
+    )];
+
+    let rh = RhContainer::start(PORT + 1, TICK, &csvs);
+    let conn = RotorHazardConnection::connect(rh.url(), RotorHazardAdapter::new())
+        .expect("connect to RotorHazard");
+
+    let mut events: Vec<Event> = Vec::new();
+    std::thread::sleep(Duration::from_secs(2));
+    conn.set_min_lap_time(0).ok();
+    conn.stop_race().ok();
+    conn.discard_laps().expect("discard_laps");
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = conn.events();
+
+    conn.stage_race().expect("stage_race");
+    assert!(
+        wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+            evs.iter()
+                .any(|e| matches!(e, Event::SessionStarted { .. }))
+        }),
+        "race never reached RACING"
+    );
+
+    // Let the heartbeat stream a run of node_data ticks so the trace accumulates samples.
+    let captured_enough = wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+        signal_trace(evs)
+            .competitor(&gridfpv_projection::CompetitorKey {
+                adapter: gridfpv_events::AdapterId("rotorhazard".into()),
+                competitor: gridfpv_events::CompetitorRef("node-0".into()),
+            })
+            .map(|t| t.samples.len() >= 5)
+            .unwrap_or(false)
+    });
+
+    conn.stop_race().ok();
+    std::thread::sleep(Duration::from_millis(800));
+    events.extend(conn.events());
+    conn.disconnect();
+
+    assert!(captured_enough, "node-0 never accumulated a trace");
+
+    let view = signal_trace(&events);
+    let trace = view
+        .competitor(&gridfpv_projection::CompetitorKey {
+            adapter: gridfpv_events::AdapterId("rotorhazard".into()),
+            competitor: gridfpv_events::CompetitorRef("node-0".into()),
+        })
+        .expect("node-0 trace present");
+
+    // Fidelity: every captured sample is a value the CSV actually reports for this node — the node
+    // peak (PEAK). RotorHazard's mock node holds `node_peak_rssi` at the CSV's reported peak, so a
+    // faithful capture reproduces it exactly with no quantization within the u16 range.
+    assert!(!trace.samples.is_empty(), "trace has samples");
+    for &s in &trace.samples {
+        assert_eq!(
+            s, PEAK as u16,
+            "captured sample {s} must equal the CSV-reported node peak {PEAK} (no quantization); \
+             full trace: {:?}",
+            trace.samples
+        );
+    }
+    // The capture cadence is the configured period; the time base anchors at 0 for the heat.
+    assert!(trace.period_micros > 0);
+    assert_eq!(trace.from, Some(gridfpv_events::SourceTime::from_micros(0)));
+
+    // Thresholds: RotorHazard's enter/exit levels were captured from `enter_and_exit_at_levels`.
+    // (The mock profile carries the stock defaults; we assert they were captured, not their exact
+    // value, since the profile default can vary by RH build.)
+    assert!(
+        trace.enter.is_some() && trace.exit.is_some(),
+        "enter/exit thresholds must be captured, got enter={:?} exit={:?}",
+        trace.enter,
+        trace.exit
+    );
+
+    println!(
+        "fidelity: node-0 captured {} samples (all == {PEAK}); thresholds enter={:?} exit={:?}",
+        trace.samples.len(),
+        trace.enter,
+        trace.exit
     );
 }

@@ -82,7 +82,9 @@ use axum::routing::{get, post, put};
 use gridfpv_engine::format::{FormatRegistry, FormatSchema};
 use gridfpv_engine::scoring::{WinCondition, score_with_global_offsets};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
-use gridfpv_projection::{LapList, lap_list_marshaled, marshaling_log, registrations};
+use gridfpv_projection::{
+    LapList, lap_list_marshaled, marshaling_log, registrations, signal_trace,
+};
 use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -1356,6 +1358,9 @@ enum HeatProjection {
     Audit,
     /// The heat's scored [`HeatResult`].
     Result,
+    /// The heat's captured RSSI signal trace
+    /// ([`SignalTraceView`](gridfpv_projection::SignalTraceView), marshaling Slice 1).
+    Signal,
 }
 
 /// Query parameters for the heat-scope endpoint.
@@ -1466,7 +1471,9 @@ pub(crate) fn class_window(events: &[Event], class: &ClassId) -> Vec<Event> {
 /// `?projection=live` (default) returns the heat's [`LiveRaceState`]; `?projection=laps`
 /// its [`LapList`]; `?projection=audit` its marshaling audit trail
 /// ([`AuditEntry`](gridfpv_projection::AuditEntry) list, #55); `?projection=result` its scored
-/// [`HeatResult`]. The log is filtered to the heat's window so the body is heat-local.
+/// [`HeatResult`]; `?projection=signal` its captured RSSI signal trace
+/// ([`SignalTraceView`](gridfpv_projection::SignalTraceView), marshaling Slice 1). The log is
+/// filtered to the heat's window so the body is heat-local.
 async fn snapshot_heat(
     State(registry): State<EventRegistry>,
     Path((event_id, heat)): Path<(EventId, HeatId)>,
@@ -1536,6 +1543,11 @@ async fn snapshot_heat(
                 WinCondition::BestLap,
                 race_start,
             ))
+        }
+        HeatProjection::Signal => {
+            // The signal-as-evidence trace (marshaling Slice 1): fold the heat window's
+            // SignalChunk/SignalThresholds facts into a per-competitor trace. Pure and clock-free.
+            ProjectionBody::SignalTrace(signal_trace(&heat_events))
         }
     };
 
@@ -1873,6 +1885,51 @@ mod tests {
                 assert_eq!(trail[1].kind, gridfpv_projection::AuditKind::Voided);
             }
             other => panic!("expected marshaling audit, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn heat_scope_signal_projection_returns_captured_trace() {
+        // Seed a heat with two signal chunks for node A plus thresholds; the signal projection
+        // folds them into a per-competitor trace scoped to the heat window.
+        let mut events = recorded_heat();
+        events.push(Event::SignalThresholds(gridfpv_events::SignalThresholds {
+            adapter: AdapterId("rotorhazard".into()),
+            competitor: CompetitorRef("A".into()),
+            enter: 90,
+            exit: 80,
+        }));
+        events.push(Event::SignalChunk(gridfpv_events::SignalChunk {
+            adapter: AdapterId("rotorhazard".into()),
+            competitor: CompetitorRef("A".into()),
+            from: SourceTime::from_micros(0),
+            period_micros: 100_000,
+            rssi: vec![70, 150],
+        }));
+        events.push(Event::SignalChunk(gridfpv_events::SignalChunk {
+            adapter: AdapterId("rotorhazard".into()),
+            competitor: CompetitorRef("A".into()),
+            from: SourceTime::from_micros(200_000),
+            period_micros: 100_000,
+            rssi: vec![148, 70],
+        }));
+        let (registry, _state, _) = state_with(events);
+        let (status, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/heat/q-1?projection=signal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::SignalTrace(view) => {
+                assert_eq!(view.competitors.len(), 1);
+                let trace = &view.competitors[0];
+                assert_eq!(trace.competitor.competitor, CompetitorRef("A".into()));
+                assert_eq!(trace.samples, vec![70, 150, 148, 70]);
+                assert_eq!(trace.enter, Some(90));
+                assert_eq!(trace.exit, Some(80));
+            }
+            other => panic!("expected signal trace, got {other:?}"),
         }
     }
 

@@ -80,7 +80,8 @@
 //! the single source of truth for passes.
 
 use gridfpv_events::{
-    AdapterId, CompetitorRef, Event, GateIndex, Pass, SessionId, SignalContext, SourceTime,
+    AdapterId, CompetitorRef, Event, GateIndex, Pass, SessionId, SignalChunk, SignalContext,
+    SignalThresholds, SourceTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -128,8 +129,12 @@ pub enum Raw {
     /// events (see module docs).
     PassRecord(RawPassRecord),
     /// A `node_data` message carrying per-node `pass_peak_rssi[]`. Updates the RSSI
-    /// cache used to annotate subsequent passes.
+    /// cache used to annotate subsequent passes, and (for a signal-capable adapter while a
+    /// race is active) emits a [`Event::SignalChunk`] trace sample per node.
     NodeData(RawNodeData),
+    /// An `enter_and_exit_at_levels` message carrying the per-node detection thresholds.
+    /// Emits [`Event::SignalThresholds`] for a signal-capable adapter.
+    EnterExitLevels(RawEnterExitLevels),
 }
 
 /// A RotorHazard `race_status` message (see [`Raw::RaceStatus`]).
@@ -219,12 +224,38 @@ pub struct RawPassRecord {
 }
 
 /// A RotorHazard `node_data` message (see [`Raw::NodeData`]). Per-node RSSI arrays.
+///
+/// RotorHazard's `emit_node_data` (`RHUI.py`) re-sends these scalar arrays on its heartbeat
+/// cadence while a race runs — they are the **latest aggregate** per node, *not* a per-tick
+/// history array (the full `history_values` trace lives in the request-driven
+/// `current_marshal_data`, which a live translator does not subscribe to). So the trace this
+/// adapter captures samples `node_peak_rssi` at the `node_data` emit cadence — see
+/// [`SignalChunk`](gridfpv_events::SignalChunk)'s fidelity bound.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawNodeData {
     /// Per-node peak RSSI of the most recent pass (array index = node index). This is
-    /// the per-pass RSSI source; `0` under mock nodes.
+    /// the per-pass RSSI source for a [`Pass`]'s [`SignalContext`]; `0` under mock nodes.
     #[serde(default)]
     pub pass_peak_rssi: Vec<f32>,
+    /// Per-node **current** peak RSSI (the node's running signal level, reset each crossing;
+    /// array index = node index). This is the per-tick value the captured trace samples — it
+    /// is the closest live proxy to "current RSSI" that `node_data` exposes. Absent on older
+    /// payloads (defaults empty), in which case the trace falls back to `pass_peak_rssi`.
+    #[serde(default)]
+    pub node_peak_rssi: Vec<f32>,
+}
+
+/// A RotorHazard `enter_and_exit_at_levels` message (`RHUI.emit_enter_and_exit_at_levels`):
+/// the per-node detection thresholds the timer is calibrated with. The signal-as-evidence
+/// layer captures these so a marshal sees the levels a call was made against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawEnterExitLevels {
+    /// Per-node enter threshold (RSSI rising above this opens a pass; array index = node index).
+    #[serde(default)]
+    pub enter_at_levels: Vec<f32>,
+    /// Per-node exit threshold (RSSI falling below this closes the pass; array index = node index).
+    #[serde(default)]
+    pub exit_at_levels: Vec<f32>,
 }
 
 /// The competitor handle for a RotorHazard node seat: `"node-{index}"`. Stable across
@@ -261,7 +292,33 @@ pub struct RotorHazardAdapter {
     /// Suppresses passes already emitted (re-sent snapshot / reconnect). Keyed on the
     /// pass `(adapter, competitor, sequence)` by [`Deduplicator`].
     dedup: Deduplicator,
+    /// Whether to capture the RSSI trace (marshaling Slice 1). Gated on the adapter's signal
+    /// capability so only signal-capable sources produce [`SignalChunk`]/[`SignalThresholds`];
+    /// `true` for a real RotorHazard. A non-signal source would set this `false` and emit none.
+    signal_capture: bool,
+    /// The capture cadence: microseconds between consecutive trace samples, used to place each
+    /// `node_data` sample on the source clock. RotorHazard's `node_data` is heartbeat-driven, so
+    /// this mirrors its emit interval ([`DEFAULT_NODE_DATA_PERIOD_MICROS`]).
+    node_data_period_micros: u32,
+    /// Whether a race is currently running (between the `SessionStarted` and `SessionEnded`
+    /// edges). Trace samples are only captured while racing — idle `node_data` is monitoring
+    /// churn, not evidence for a heat.
+    race_active: bool,
+    /// Per-node trace sample counter, reset each race. The `from` of a node's chunk is
+    /// `index * node_data_period_micros`, so concatenated chunks reconstruct a contiguous trace
+    /// deterministically without the adapter reading a clock.
+    sample_index: std::collections::HashMap<usize, u64>,
+    /// Last `(enter, exit)` thresholds emitted per node, so an unchanged
+    /// `enter_and_exit_at_levels` re-send does not re-emit a [`SignalThresholds`] fact.
+    last_thresholds: std::collections::HashMap<usize, (u16, u16)>,
 }
+
+/// Default trace-capture cadence: RotorHazard's `node_data` heartbeat emit interval. The real
+/// server re-sends `node_data` a few times a second; `100_000` µs (10 Hz) is a representative
+/// default. The exact realtime cadence is the fidelity bound to confirm on hardware
+/// (marshaling.html §4) — the capture is faithful to *what RH streams*, which is one aggregate
+/// sample per emit, not the detector's internal per-tick history.
+pub const DEFAULT_NODE_DATA_PERIOD_MICROS: u32 = 100_000;
 
 impl RotorHazardAdapter {
     /// A RotorHazard adapter with the default id (`"rotorhazard"`).
@@ -277,6 +334,12 @@ impl RotorHazardAdapter {
             seen_seats: std::collections::HashSet::new(),
             pass_peak_rssi: std::collections::HashMap::new(),
             dedup: Deduplicator::new(),
+            // RotorHazard is the full-signal case, so trace capture is on by default.
+            signal_capture: true,
+            node_data_period_micros: DEFAULT_NODE_DATA_PERIOD_MICROS,
+            race_active: false,
+            sample_index: std::collections::HashMap::new(),
+            last_thresholds: std::collections::HashMap::new(),
         }
     }
 
@@ -391,26 +454,99 @@ impl RotorHazardAdapter {
                 // spanning) lifetime.
                 self.dedup = Deduplicator::new();
                 self.seen_seats.clear();
+                // Marshaling Slice 1: a fresh race resets the trace's time base so each heat's
+                // captured chunks start at source-time 0 — deterministic and heat-local.
+                self.race_active = true;
+                self.sample_index.clear();
+                self.last_thresholds.clear();
                 out.push(Event::SessionStarted {
                     adapter: self.id.clone(),
                     session: Self::session_id(status.race_heat_id),
                 });
             }
-            race_status::DONE => out.push(Event::SessionEnded {
-                adapter: self.id.clone(),
-                session: Self::session_id(status.race_heat_id),
-            }),
+            race_status::DONE => {
+                // Stop capturing trace samples once the race closes (idle `node_data` is not
+                // heat evidence).
+                self.race_active = false;
+                out.push(Event::SessionEnded {
+                    adapter: self.id.clone(),
+                    session: Self::session_id(status.race_heat_id),
+                })
+            }
             // READY (reset) and STAGING (pre-roll) carry no canonical lifecycle edge.
             race_status::READY | race_status::STAGING => {}
             _ => {}
         }
     }
 
-    /// Update the per-node RSSI cache from a `node_data` message. Emits no events; the
-    /// cache annotates subsequent passes' [`SignalContext`].
-    fn update_node_data(&mut self, data: RawNodeData) {
+    /// Update the per-node RSSI cache from a `node_data` message, and — for a signal-capable
+    /// adapter while a race is active — emit one [`Event::SignalChunk`] trace sample per node.
+    ///
+    /// The cache (`pass_peak_rssi`) annotates subsequent passes' [`SignalContext`] (unchanged).
+    /// The trace samples `node_peak_rssi` (the live signal level), falling back to
+    /// `pass_peak_rssi` on an older payload that omits it. Each sample is placed on the source
+    /// clock at `sample_index[node] * node_data_period_micros`, so concatenating a node's chunks
+    /// reconstructs a contiguous, deterministic trace (`gridfpv_projection::signal_trace`). RSSI
+    /// is clamped into `u16` ADC counts (RH's stock range is ~0–255; negatives clamp to 0).
+    fn update_node_data(&mut self, data: RawNodeData, out: &mut Vec<Event>) {
         for (node_index, &rssi) in data.pass_peak_rssi.iter().enumerate() {
             self.pass_peak_rssi.insert(node_index, rssi);
+        }
+
+        // Trace capture is gated on the signal capability and only runs while a race is active.
+        if !self.signal_capture || !self.race_active {
+            return;
+        }
+        // Sample the live node peak where present; older payloads without it fall back to the
+        // per-pass peak so a trace is still captured at the same cadence.
+        let samples = if data.node_peak_rssi.is_empty() {
+            &data.pass_peak_rssi
+        } else {
+            &data.node_peak_rssi
+        };
+        for (node_index, &rssi) in samples.iter().enumerate() {
+            let sample = rssi.round().clamp(0.0, u16::MAX as f32) as u16;
+            let index = self.sample_index.entry(node_index).or_insert(0);
+            let from = SourceTime::from_micros(*index as i64 * self.node_data_period_micros as i64);
+            *index += 1;
+            out.push(Event::SignalChunk(SignalChunk {
+                adapter: self.id.clone(),
+                competitor: seat_ref(node_index),
+                from,
+                period_micros: self.node_data_period_micros,
+                rssi: vec![sample],
+            }));
+        }
+    }
+
+    /// Emit per-node [`Event::SignalThresholds`] from an `enter_and_exit_at_levels` message —
+    /// for a signal-capable adapter only. A node is emitted once and then only when its
+    /// `(enter, exit)` pair changes, so a steady re-send does not spam the log.
+    fn update_thresholds(&mut self, levels: RawEnterExitLevels, out: &mut Vec<Event>) {
+        if !self.signal_capture {
+            return;
+        }
+        let n = levels
+            .enter_at_levels
+            .len()
+            .min(levels.exit_at_levels.len());
+        for node_index in 0..n {
+            let enter = levels.enter_at_levels[node_index]
+                .round()
+                .clamp(0.0, u16::MAX as f32) as u16;
+            let exit = levels.exit_at_levels[node_index]
+                .round()
+                .clamp(0.0, u16::MAX as f32) as u16;
+            if self.last_thresholds.get(&node_index) == Some(&(enter, exit)) {
+                continue;
+            }
+            self.last_thresholds.insert(node_index, (enter, exit));
+            out.push(Event::SignalThresholds(SignalThresholds {
+                adapter: self.id.clone(),
+                competitor: seat_ref(node_index),
+                enter,
+                exit,
+            }));
         }
     }
 }
@@ -439,7 +575,8 @@ impl Adapter for RotorHazardAdapter {
             Raw::CurrentLaps(snapshot) => self.translate_current_laps(snapshot, &mut out),
             // pass_record is an advisory cross-check; it mints no canonical events.
             Raw::PassRecord(_) => {}
-            Raw::NodeData(data) => self.update_node_data(data),
+            Raw::NodeData(data) => self.update_node_data(data, &mut out),
+            Raw::EnterExitLevels(levels) => self.update_thresholds(levels, &mut out),
         }
         out
     }
@@ -509,7 +646,15 @@ mod tests {
     #[test]
     fn recorded_session_translates_to_canonical_events() {
         let mut adapter = RotorHazardAdapter::with_id(AdapterId("rh".into()));
-        let events = run(&mut adapter, parse(SESSION_FIXTURE));
+        let all = run(&mut adapter, parse(SESSION_FIXTURE));
+        // The fixture's `node_data` ticks now also produce SignalChunk trace samples (Slice 1);
+        // this test asserts the lap/lifecycle backbone, so filter the trace out and assert it in
+        // `recorded_session_captures_signal_trace` separately.
+        let events: Vec<Event> = all
+            .iter()
+            .filter(|e| !matches!(e, Event::SignalChunk(_) | Event::SignalThresholds(_)))
+            .cloned()
+            .collect();
 
         let rh = AdapterId("rh".into());
         let heat = SessionId("heat-0".into());
@@ -607,6 +752,7 @@ mod tests {
         // node_data first, then a lap on node 0 picks up its cached RSSI.
         adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![201.5, 0.0],
+            node_peak_rssi: vec![201.5, 0.0],
         }));
         let events = adapter.translate(snapshot(0, 0, vec![lap(0, 1_000.0)]));
         let pass = events
@@ -622,6 +768,180 @@ mod tests {
                 rssi_peak: Some(201.5)
             })
         );
+    }
+
+    /// Helper: collect the `SignalChunk`s in an event slice.
+    fn chunks(events: &[Event]) -> Vec<&SignalChunk> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::SignalChunk(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn node_data_captures_a_trace_only_while_racing() {
+        let mut adapter = RotorHazardAdapter::new();
+        // Idle `node_data` before RACING is monitoring churn — no trace captured.
+        let idle = adapter.translate(Raw::NodeData(RawNodeData {
+            pass_peak_rssi: vec![70.0, 60.0],
+            node_peak_rssi: vec![70.0, 60.0],
+        }));
+        assert!(chunks(&idle).is_empty(), "no trace before the race starts");
+
+        // RACING opens capture.
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(0),
+        }));
+        let t0 = adapter.translate(Raw::NodeData(RawNodeData {
+            pass_peak_rssi: vec![150.0, 120.0],
+            node_peak_rssi: vec![150.0, 120.0],
+        }));
+        let t1 = adapter.translate(Raw::NodeData(RawNodeData {
+            pass_peak_rssi: vec![151.0, 121.0],
+            node_peak_rssi: vec![151.0, 121.0],
+        }));
+
+        // One chunk per node per tick, sampling node_peak_rssi, anchored on the per-node index.
+        let c0 = chunks(&t0);
+        assert_eq!(c0.len(), 2);
+        assert_eq!(c0[0].competitor, CompetitorRef("node-0".into()));
+        assert_eq!(c0[0].rssi, vec![150]);
+        assert_eq!(c0[0].from, SourceTime::from_micros(0));
+        assert_eq!(c0[0].period_micros, DEFAULT_NODE_DATA_PERIOD_MICROS);
+        assert_eq!(c0[1].competitor, CompetitorRef("node-1".into()));
+        assert_eq!(c0[1].rssi, vec![120]);
+
+        // The second tick advances each node's sample index by one period.
+        let c1 = chunks(&t1);
+        assert_eq!(c1[0].from, SourceTime::from_micros(100_000));
+        assert_eq!(c1[0].rssi, vec![151]);
+
+        // DONE stops capture.
+        let done = adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(0),
+        }));
+        assert!(chunks(&done).is_empty());
+        let after = adapter.translate(Raw::NodeData(RawNodeData {
+            pass_peak_rssi: vec![70.0, 60.0],
+            node_peak_rssi: vec![70.0, 60.0],
+        }));
+        assert!(chunks(&after).is_empty(), "no trace after the race ends");
+    }
+
+    #[test]
+    fn node_data_trace_falls_back_to_pass_peak_when_node_peak_absent() {
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(0),
+        }));
+        // An older payload with no node_peak_rssi: the trace samples pass_peak_rssi instead.
+        let t = adapter.translate(Raw::NodeData(RawNodeData {
+            pass_peak_rssi: vec![88.0],
+            node_peak_rssi: vec![],
+        }));
+        let c = chunks(&t);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].rssi, vec![88]);
+    }
+
+    #[test]
+    fn race_restart_resets_the_trace_time_base() {
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        }));
+        adapter.translate(Raw::NodeData(RawNodeData {
+            pass_peak_rssi: vec![100.0],
+            node_peak_rssi: vec![100.0],
+        }));
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(1),
+        }));
+        // A new heat resets the per-node sample index back to 0.
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(2),
+        }));
+        let t = adapter.translate(Raw::NodeData(RawNodeData {
+            pass_peak_rssi: vec![100.0],
+            node_peak_rssi: vec![100.0],
+        }));
+        assert_eq!(chunks(&t)[0].from, SourceTime::from_micros(0));
+    }
+
+    #[test]
+    fn enter_exit_levels_emit_thresholds_once_until_changed() {
+        let mut adapter = RotorHazardAdapter::new();
+        let first = adapter.translate(Raw::EnterExitLevels(RawEnterExitLevels {
+            enter_at_levels: vec![90.0, 92.0],
+            exit_at_levels: vec![80.0, 82.0],
+        }));
+        let thresholds: Vec<&SignalThresholds> = first
+            .iter()
+            .filter_map(|e| match e {
+                Event::SignalThresholds(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thresholds.len(), 2);
+        assert_eq!((thresholds[0].enter, thresholds[0].exit), (90, 80));
+
+        // An unchanged re-send emits nothing.
+        let resent = adapter.translate(Raw::EnterExitLevels(RawEnterExitLevels {
+            enter_at_levels: vec![90.0, 92.0],
+            exit_at_levels: vec![80.0, 82.0],
+        }));
+        assert!(
+            !resent
+                .iter()
+                .any(|e| matches!(e, Event::SignalThresholds(_))),
+            "steady thresholds are not re-emitted"
+        );
+
+        // A changed value re-emits for that node only.
+        let changed = adapter.translate(Raw::EnterExitLevels(RawEnterExitLevels {
+            enter_at_levels: vec![90.0, 95.0],
+            exit_at_levels: vec![80.0, 82.0],
+        }));
+        let changed_t: Vec<&SignalThresholds> = changed
+            .iter()
+            .filter_map(|e| match e {
+                Event::SignalThresholds(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changed_t.len(), 1);
+        assert_eq!(changed_t[0].competitor, CompetitorRef("node-1".into()));
+        assert_eq!((changed_t[0].enter, changed_t[0].exit), (95, 82));
+    }
+
+    #[test]
+    fn recorded_session_captures_signal_trace() {
+        // The recorded fixture drives RACING then several all-zero `node_data` ticks: the trace
+        // captures one zero sample per node per tick while racing, anchored at source-time 0.
+        let mut adapter = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        let events = run(&mut adapter, parse(SESSION_FIXTURE));
+        let view = gridfpv_projection::signal_trace(&events);
+        // Three nodes appear in node_data; each gets a trace.
+        assert_eq!(view.competitors.len(), 3);
+        let node0 = view
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "node-0")
+            .expect("node-0 trace");
+        // The fixture sends 4 node_data ticks while racing -> 4 samples, all zero (mock nodes).
+        assert_eq!(node0.samples.len(), 4);
+        assert!(node0.samples.iter().all(|&s| s == 0));
+        assert_eq!(node0.from, Some(SourceTime::from_micros(0)));
+        assert_eq!(node0.period_micros, DEFAULT_NODE_DATA_PERIOD_MICROS);
     }
 
     #[test]

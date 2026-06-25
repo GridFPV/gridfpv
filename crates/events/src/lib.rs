@@ -131,6 +131,66 @@ pub struct SignalContext {
     pub rssi_peak: Option<f32>,
 }
 
+/// A contiguous run of per-tick RSSI samples captured from a signal-capable timer
+/// (RotorHazard first — marshaling.html §3.2, the signal-as-evidence layer).
+///
+/// The trace is the **evidence** a marshal later reviews a call against. It is captured
+/// **chunked and append-incrementally** rather than one fat per-heat blob: a hardware timer
+/// streams its node RSSI continuously, so chunks append as the run proceeds and interleave
+/// deterministically with the [`Pass`]es in the same log — a single buffered-until-heat-end
+/// event would be lost on an abort. Each chunk is a window of `rssi` samples beginning at
+/// `from` on the source clock, one every `period_micros`; concatenating a competitor's chunks
+/// in append order reconstructs the whole trace (the projection's job, see
+/// `gridfpv_projection::signal_trace`).
+///
+/// `rssi` is kept as `u16` — RotorHazard's filtered ADC counts are integers, so this is
+/// compact, exact, and free of the float-equality hazards a `f32` trace would carry into the
+/// deterministic fold/tests (matching the events crate's integer-time convention).
+///
+/// # Fidelity bound
+///
+/// RotorHazard's streaming `node_data` socket emit carries only the **latest** per-node
+/// sample (`pass_peak_rssi`/`node_peak_rssi`), not a backfilled per-tick history array (that
+/// lives in the request-driven `current_marshal_data`, which a live translator does not
+/// subscribe to). So a chunk captured from the live stream samples at the emit cadence — one
+/// `rssi` value per `node_data` tick — which is faithful to *what RH exposes live*, but is
+/// coarser than the detector's internal sampling. This is the load-bearing fidelity bound
+/// (marshaling.html §4) to confirm on real hardware.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignalChunk {
+    /// The timing source that produced this trace.
+    pub adapter: AdapterId,
+    /// The source-local competitor (node seat) the trace belongs to.
+    pub competitor: CompetitorRef,
+    /// The source-clock timestamp of the **first** sample in `rssi`.
+    pub from: SourceTime,
+    /// Microseconds between consecutive samples (the capture cadence).
+    #[ts(type = "number")]
+    pub period_micros: u32,
+    /// The RSSI samples (filtered ADC counts), oldest first, one every `period_micros`.
+    pub rssi: Vec<u16>,
+}
+
+/// The enter/exit detection thresholds a signal-capable timer is configured with for a node —
+/// the levels the RSSI crosses to open/close a pass (RotorHazard `enter_at_level` /
+/// `exit_at_level`). Captured **once** alongside the [`SignalChunk`] trace so a marshal can
+/// see *why* the timer called (or missed) a lap against the visible signal (marshaling.html
+/// §3.2). One-shot per `(adapter, competitor)`; a later one supersedes (the projection keeps
+/// the last).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignalThresholds {
+    /// The timing source these thresholds belong to.
+    pub adapter: AdapterId,
+    /// The source-local competitor (node seat) the thresholds apply to.
+    pub competitor: CompetitorRef,
+    /// The **enter** threshold: RSSI rising above this opens a pass.
+    pub enter: u16,
+    /// The **exit** threshold: RSSI falling below this closes the pass.
+    pub exit: u16,
+}
+
 /// A gate crossing — the one observation everything else derives from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
@@ -298,6 +358,18 @@ pub enum Event {
     },
     /// A gate crossing — the atom (see [`Pass`]).
     Pass(Pass),
+
+    /// A chunk of captured per-node RSSI trace (marshaling Slice 1 — the signal-as-evidence
+    /// plumbing, marshaling.html §3.2). An **immutable raw observation** like [`Pass`]: a
+    /// signal-capable adapter appends these incrementally as a heat runs, and the
+    /// `gridfpv_projection::signal_trace` projection folds a competitor's chunks back into a
+    /// contiguous trace. A timer with no signal (sim/Velocidrone) never emits this, so the
+    /// signal layer is simply absent there.
+    SignalChunk(SignalChunk),
+    /// The one-shot enter/exit detection thresholds for a node (see [`SignalThresholds`]).
+    /// Captured alongside the trace so the evidence carries the levels the timer detected
+    /// against; the last one per `(adapter, competitor)` wins.
+    SignalThresholds(SignalThresholds),
 
     // --- race-engine events (#28) ---
     /// A heat is created with its lineup and enters the `Scheduled` state — the
@@ -722,6 +794,64 @@ mod tests {
                 competitor: CompetitorRef("Bee".into()),
                 penalty: Penalty::Disqualify,
             }
+        );
+    }
+
+    #[test]
+    fn signal_trace_events_round_trip() {
+        // The Slice-1 signal-as-evidence facts round-trip through externally-tagged JSON.
+        let events = vec![
+            Event::SignalChunk(SignalChunk {
+                adapter: AdapterId("rotorhazard".into()),
+                competitor: CompetitorRef("node-0".into()),
+                from: SourceTime::from_micros(2_215_296),
+                period_micros: 100_000,
+                rssi: vec![70, 72, 150, 148, 71, 70],
+            }),
+            Event::SignalThresholds(SignalThresholds {
+                adapter: AdapterId("rotorhazard".into()),
+                competitor: CompetitorRef("node-0".into()),
+                enter: 90,
+                exit: 80,
+            }),
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let back: Event = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, back);
+        }
+    }
+
+    #[test]
+    fn legacy_log_without_signal_trace_reads_back_with_defaults() {
+        // A log written before `SignalChunk`/`SignalThresholds` existed carries none of the new
+        // variants. They are a purely additive extension of the externally-tagged `Event` enum, so
+        // every pre-existing serialized event still deserializes unchanged — and a Velocidrone/sim
+        // log (which never emits the signal facts) is byte-identical to a pre-Slice-1 log.
+        let legacy_pass =
+            r#"{"Pass":{"adapter":"velocidrone","competitor":"AcroAce","at":12500000}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(legacy_pass).unwrap(),
+            Event::Pass(Pass {
+                adapter: AdapterId("velocidrone".into()),
+                competitor: CompetitorRef("AcroAce".into()),
+                at: SourceTime::from_micros(12_500_000),
+                sequence: None,
+                gate: GateIndex::LAP,
+                signal: None,
+            })
+        );
+        // And the new facts themselves deserialize from their on-the-wire shape.
+        let chunk = r#"{"SignalChunk":{"adapter":"rotorhazard","competitor":"node-1","from":5000000,"period_micros":100000,"rssi":[60,120,61]}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(chunk).unwrap(),
+            Event::SignalChunk(SignalChunk {
+                adapter: AdapterId("rotorhazard".into()),
+                competitor: CompetitorRef("node-1".into()),
+                from: SourceTime::from_micros(5_000_000),
+                period_micros: 100_000,
+                rssi: vec![60, 120, 61],
+            })
         );
     }
 

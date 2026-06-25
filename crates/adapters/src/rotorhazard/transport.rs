@@ -24,7 +24,10 @@ use rust_socketio::client::Client;
 use rust_socketio::{ClientBuilder, Payload, RawClient};
 use serde_json::json;
 
-use super::{Raw, RawCurrentLaps, RawNodeData, RawPassRecord, RawRaceStatus, RotorHazardAdapter};
+use super::{
+    Raw, RawCurrentLaps, RawEnterExitLevels, RawNodeData, RawPassRecord, RawRaceStatus,
+    RotorHazardAdapter,
+};
 use crate::Adapter;
 use gridfpv_events::Event;
 
@@ -51,6 +54,9 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
         "node_data" => serde_json::from_value::<RawNodeData>(value)
             .ok()
             .map(Raw::NodeData),
+        "enter_and_exit_at_levels" => serde_json::from_value::<RawEnterExitLevels>(value)
+            .ok()
+            .map(Raw::EnterExitLevels),
         _ => None,
     }
 }
@@ -148,12 +154,20 @@ impl RotorHazardConnection {
                 "pass_record",
                 handler("pass_record", adapter.clone(), events.clone()),
             )
+            .on(
+                "enter_and_exit_at_levels",
+                handler("enter_and_exit_at_levels", adapter.clone(), events.clone()),
+            )
             .connect()?;
 
-        // Warm initial state on (re)connect: ask RH to send current per-node RSSI so
-        // the signal-context cache is populated before the first pass. `current_laps`
-        // and `race_status` arrive via the normal snapshot stream.
-        let _ = client.emit("load_data", json!({ "load_types": ["node_data"] }));
+        // Warm initial state on (re)connect: ask RH to send current per-node RSSI and the
+        // enter/exit detection thresholds, so the signal-context cache is populated before the
+        // first pass and the trace's thresholds are captured. `current_laps` and `race_status`
+        // arrive via the normal snapshot stream.
+        let _ = client.emit(
+            "load_data",
+            json!({ "load_types": ["node_data", "enter_and_exit_at_levels"] }),
+        );
 
         Ok(Self {
             client,

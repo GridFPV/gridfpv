@@ -181,10 +181,12 @@ fn node_index(competitor: &CompetitorRef) -> Option<usize> {
 }
 
 /// Remap one canonical RH [`Event`] onto the heat's lineup and the source adapter id, or `None` to
-/// drop it. Only [`Event::Pass`]es feed the lap projection; a pass on node `n` is attributed to
-/// `lineup[n]` and re-stamped with `adapter`. Passes for a node outside the lineup (an idle seat)
-/// are dropped, as are the adapter's lifecycle / `CompetitorSeen` events (the heat lineup is already
-/// established by the control path).
+/// drop it. [`Event::Pass`]es feed the lap projection and the signal facts
+/// ([`Event::SignalChunk`]/[`Event::SignalThresholds`], marshaling Slice 1) feed the signal-trace
+/// projection; each is keyed on a node seat (`node-{n}`), attributed to `lineup[n]` and re-stamped
+/// with `adapter`. Facts for a node outside the lineup (an idle seat) are dropped, as are the
+/// adapter's lifecycle / `CompetitorSeen` events (the heat lineup is already established by the
+/// control path).
 fn remap(event: Event, lineup: &[CompetitorRef], adapter: &AdapterId) -> Option<Event> {
     match event {
         Event::Pass(mut pass) => {
@@ -193,6 +195,18 @@ fn remap(event: Event, lineup: &[CompetitorRef], adapter: &AdapterId) -> Option<
             pass.adapter = adapter.clone();
             pass.competitor = competitor;
             Some(Event::Pass(pass))
+        }
+        Event::SignalChunk(mut chunk) => {
+            let index = node_index(&chunk.competitor)?;
+            chunk.competitor = lineup.get(index)?.clone();
+            chunk.adapter = adapter.clone();
+            Some(Event::SignalChunk(chunk))
+        }
+        Event::SignalThresholds(mut t) => {
+            let index = node_index(&t.competitor)?;
+            t.competitor = lineup.get(index)?.clone();
+            t.adapter = adapter.clone();
+            Some(Event::SignalThresholds(t))
         }
         _ => None,
     }
@@ -399,4 +413,63 @@ fn sleep_unless_cancelled(dur: Duration, cancel: &AtomicBool) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     cancel.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gridfpv_events::{SignalChunk, SignalThresholds, SourceTime};
+
+    fn lineup() -> Vec<CompetitorRef> {
+        vec![CompetitorRef("Ace".into()), CompetitorRef("Bee".into())]
+    }
+
+    #[test]
+    fn remap_attributes_signal_chunk_to_the_lineup_pilot() {
+        // A trace chunk on node-1 is re-attributed to lineup[1] and re-stamped with the adapter id,
+        // exactly like a pass — so the signal-trace projection groups it under the right pilot.
+        let adapter = AdapterId("timer-7".into());
+        let chunk = Event::SignalChunk(SignalChunk {
+            adapter: AdapterId("rotorhazard".into()),
+            competitor: CompetitorRef("node-1".into()),
+            from: SourceTime::from_micros(0),
+            period_micros: 100_000,
+            rssi: vec![70, 150],
+        });
+        match remap(chunk, &lineup(), &adapter) {
+            Some(Event::SignalChunk(c)) => {
+                assert_eq!(c.competitor, CompetitorRef("Bee".into()));
+                assert_eq!(c.adapter, adapter);
+                assert_eq!(c.rssi, vec![70, 150]);
+            }
+            other => panic!("expected a remapped SignalChunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remap_attributes_thresholds_and_drops_off_lineup_nodes() {
+        let adapter = AdapterId("timer-7".into());
+        let t = Event::SignalThresholds(SignalThresholds {
+            adapter: AdapterId("rotorhazard".into()),
+            competitor: CompetitorRef("node-0".into()),
+            enter: 90,
+            exit: 80,
+        });
+        match remap(t, &lineup(), &adapter) {
+            Some(Event::SignalThresholds(t)) => {
+                assert_eq!(t.competitor, CompetitorRef("Ace".into()));
+                assert_eq!(t.adapter, adapter);
+            }
+            other => panic!("expected remapped SignalThresholds, got {other:?}"),
+        }
+        // A node beyond the (2-seat) lineup is dropped, like an idle-seat pass.
+        let off = Event::SignalChunk(SignalChunk {
+            adapter: AdapterId("rotorhazard".into()),
+            competitor: CompetitorRef("node-5".into()),
+            from: SourceTime::from_micros(0),
+            period_micros: 100_000,
+            rssi: vec![0],
+        });
+        assert!(remap(off, &lineup(), &adapter).is_none());
+    }
 }
