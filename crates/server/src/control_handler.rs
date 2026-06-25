@@ -290,6 +290,11 @@ pub fn apply_command_in_event(
         Command::FillRound { round, mode } => {
             apply_fill_round(registry, event_id, state, round, mode)
         }
+        // `Advance` is more than the `Final → Advanced` transition: advancing a finalized heat
+        // **loads the next heat to run** into Live control. That may need a generator draw (a
+        // round mid-fill) and always needs to select the next heat, so it runs through the
+        // event-aware path where the registry/meta are in scope — see [`apply_advance`].
+        Command::Advance { heat } => apply_advance(registry, event_id, state, heat),
         // `ScheduleHeat` also needs the event meta + timer registry (the channel cap + assignment),
         // so it is handled here rather than in the log-only `apply_command`.
         Command::ScheduleHeat {
@@ -540,6 +545,105 @@ pub fn apply_fill_round(
     }
 }
 
+/// Handle [`Command::Advance`] — advancing a finalized heat **loads the next heat to run**.
+///
+/// Before this, `Advance` only recorded the `Final → Advanced` transition (which leaves the heat
+/// `Final` — a terminal off-ramp) and nothing else moved: Live control stayed on the just-finished
+/// heat, so the button looked like a no-op. Now it does the two-step the RD expects:
+///
+/// 1. Append the `Advanced` transition (reusing the engine's legality via [`heat_transition`]); a
+///    heat that is not `Final` (or never scheduled) is rejected verbatim and nothing else happens.
+/// 2. Find the **next heat to run** and select it (so the `current_heat` fold follows it):
+///    - the **on-deck** heat — the next still-`Scheduled` heat — if one already exists; else
+///    - **generate** the next heat for the advanced heat's round (one generator draw, the same
+///      single-step path [`Command::FillRound`] `Next` uses) and select that; else
+///    - **nothing to advance to** (the round is complete / the heat was untagged) — leave the heat
+///      `Advanced` (a clear terminal), ack ok. No crash, no spurious selection.
+///
+/// Each step is its own append; a generated heat plus the selection are two events, which is why
+/// this lives on the event-aware path (it needs the registry/meta to draw, like `FillRound`).
+fn apply_advance(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    heat: HeatId,
+) -> CommandAck {
+    // 1. Record the `Final → Advanced` transition (engine legality + event shape reused). A
+    //    non-`Final` or unknown heat is rejected verbatim here, appending nothing.
+    let advanced = match heat_transition(state, heat.clone(), HeatCommand::Advance) {
+        Ok(event) => event,
+        Err(err) => return CommandAck::failed(err),
+    };
+    if let Err(err) = state.append(advanced, None) {
+        return CommandAck::failed(err);
+    }
+
+    // 2. Pick the next heat to run. The advanced heat is now `Final` (not `Scheduled`), so
+    //    `on_deck` against it is exactly "the next still-`Scheduled` heat" — the heat to load.
+    let next = {
+        let (events, _cursor) = match state.read() {
+            Ok(read) => read,
+            Err(err) => return CommandAck::failed(err),
+        };
+        crate::live_state::on_deck(&events, &heat)
+    };
+
+    if let Some(next) = next {
+        // A next heat is already scheduled — follow Live control to it.
+        return select_next_heat(state, next);
+    }
+
+    // Nothing is on deck: ask the advanced heat's round generator for the next heat (a round
+    // mid-fill), then select whatever it scheduled. An untagged heat has no round to draw from.
+    let round = {
+        let (events, _cursor) = match state.read() {
+            Ok(read) => read,
+            Err(err) => return CommandAck::failed(err),
+        };
+        crate::live_state::round_of_heat(&events, &heat)
+    };
+    if let Some(round) = round {
+        if let Some(meta) = registry.meta_of(event_id) {
+            // One generator draw (the `FillMode::Next` step). It either appends the next heat or
+            // reports the round terminal (nothing to schedule).
+            match fill_round_once(registry, &meta, state, &round) {
+                FillStep::Appended => {
+                    // A heat was just scheduled in this round; on_deck now finds it. Select it.
+                    let next = {
+                        let (events, _cursor) = match state.read() {
+                            Ok(read) => read,
+                            Err(err) => return CommandAck::failed(err),
+                        };
+                        crate::live_state::on_deck(&events, &heat)
+                    };
+                    if let Some(next) = next {
+                        return select_next_heat(state, next);
+                    }
+                }
+                // Round complete / already-scheduled-elsewhere: nothing more to load.
+                FillStep::Terminal => {}
+                // A generator/append error: surface it verbatim (the Advanced transition stands).
+                FillStep::Failed(ack) => return ack,
+            }
+        }
+    }
+
+    // The round is genuinely complete (or the heat was untagged and nothing is on deck): the heat
+    // stays `Advanced`, a clean terminal. Ack ok — Advance succeeded, there was just no next heat.
+    CommandAck::ok()
+}
+
+/// Append a [`Event::CurrentHeatSelected`] to move Live control onto `next`, the same selection the
+/// RD's manual "select heat" records — so the `current_heat` fold follows it. The heat is one we
+/// just derived from the log (on-deck / freshly generated), so it is known-scheduled; no further
+/// validation needed.
+fn select_next_heat(state: &AppState, next: HeatId) -> CommandAck {
+    match state.append(Event::CurrentHeatSelected { heat: next }, None) {
+        Ok(_offset) => CommandAck::ok(),
+        Err(err) => CommandAck::failed(err),
+    }
+}
+
 /// Validate a [`Command`] against the current log and, on success, append the event(s) it
 /// records (protocol.html §5) — the one control write path, shared by both endpoints.
 ///
@@ -570,6 +674,10 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::SkipCountdown { heat } => heat_transition(state, heat, HeatCommand::SkipCountdown),
         Command::ForceEnd { heat } => heat_transition(state, heat, HeatCommand::ForceEnd),
         Command::Finalize { heat } => heat_transition(state, heat, HeatCommand::Finalize),
+        // `Advance` on the real control path is intercepted by `apply_command_in_event`
+        // (it loads the next heat too — see `apply_advance`). On the bare-`apply_command`
+        // path it records just the `Final → Advanced` transition (no next-heat selection),
+        // which is the legality-checked event with no event scope to draw a next heat from.
         Command::Advance { heat } => heat_transition(state, heat, HeatCommand::Advance),
         Command::Revert { heat } => heat_transition(state, heat, HeatCommand::Revert),
         Command::Abort { heat } => heat_transition(state, heat, HeatCommand::Abort),
@@ -2215,6 +2323,330 @@ mod tests {
             heats_in_round(&state, &round.id),
             1,
             "open practice stays at its single heat — single-stepping it never adds more"
+        );
+    }
+
+    // --- Advance loads the next heat (fix: Advance was a no-op on Live control) ---------------
+
+    /// The current heat the live projection is focused on, for the Advance tests to assert against.
+    #[cfg(test)]
+    fn current_heat_of(state: &AppState) -> Option<HeatId> {
+        let (events, _) = state.read().unwrap();
+        crate::live_state::live_state(&events).current_heat
+    }
+
+    /// Drive `heat` from `Scheduled` all the way to `Final` through the control path (the runtime
+    /// override transitions stand in for the auto-clock so a test can finalize without timers).
+    #[cfg(test)]
+    fn drive_heat_to_final(
+        registry: &EventRegistry,
+        event_id: &EventId,
+        state: &AppState,
+        heat: &HeatId,
+    ) {
+        for cmd in [
+            Command::Stage { heat: heat.clone() },
+            Command::Start { heat: heat.clone() },
+            Command::SkipCountdown { heat: heat.clone() },
+            Command::ForceEnd { heat: heat.clone() },
+            Command::Finalize { heat: heat.clone() },
+        ] {
+            let ack = apply_command_in_event(registry, event_id, state, cmd);
+            assert!(ack.ok, "driving {heat:?} to Final: {ack:?}");
+        }
+        assert_eq!(
+            heat_state(state, heat),
+            Some(gridfpv_engine::heat::HeatState::Final),
+            "{heat:?} should be Final before Advance"
+        );
+    }
+
+    /// Fold a single heat's current state through the control path (test helper).
+    #[cfg(test)]
+    fn heat_state(state: &AppState, heat: &HeatId) -> Option<gridfpv_engine::heat::HeatState> {
+        let (events, _) = state.read().unwrap();
+        gridfpv_engine::heat::heat_state(&events, heat)
+    }
+
+    /// The heat ids tagged with `round`, in first-scheduled order (test helper).
+    #[cfg(test)]
+    fn heat_ids_in_round(state: &AppState, round: &gridfpv_events::RoundId) -> Vec<HeatId> {
+        let (events, _) = state.read().unwrap();
+        let mut out = Vec::new();
+        for e in &events {
+            if let Event::HeatScheduled {
+                heat,
+                round: Some(r),
+                ..
+            } = e
+            {
+                if r == round && !out.contains(heat) {
+                    out.push(heat.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The core fix: with the round's heats already scheduled, finalizing heat 1 and then
+    /// `Advance`-ing it **loads heat 2** into Live control (the on-deck case). Before the fix
+    /// Advance only recorded the `Advanced` transition and `current_heat` stayed on heat 1.
+    #[test]
+    fn advance_loads_the_next_already_scheduled_heat() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+
+        // Fill the whole round up front: 4 pilots at heat_size 2 → 2 scheduled heats.
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::All,
+                },
+            )
+            .ok
+        );
+        let heats = heat_ids_in_round(&state, &round);
+        assert_eq!(heats.len(), 2, "the round has two scheduled heats");
+        let (heat1, heat2) = (heats[0].clone(), heats[1].clone());
+
+        // Heat 1 is the current heat (first scheduled); drive it to Final, then Advance.
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::Advance {
+                heat: heat1.clone(),
+            },
+        );
+        assert!(ack.ok, "Advance rejected: {ack:?}");
+
+        // Live control now follows to heat 2 (Scheduled, ready to Stage); heat 1 is Advanced/Final.
+        assert_eq!(
+            current_heat_of(&state),
+            Some(heat2.clone()),
+            "Advance loaded the next heat"
+        );
+        assert_eq!(
+            heat_state(&state, &heat2),
+            Some(gridfpv_engine::heat::HeatState::Scheduled),
+            "the loaded heat is ready to Stage"
+        );
+        assert_eq!(
+            heat_state(&state, &heat1),
+            Some(gridfpv_engine::heat::HeatState::Final),
+            "the advanced heat stays Final (terminal)"
+        );
+    }
+
+    /// The generate-if-needed case: only heat 1 is pre-scheduled. Advancing it draws the round's
+    /// next heat from the generator and selects it — no manual fill in between.
+    #[test]
+    fn advance_generates_and_loads_the_next_heat_when_none_is_on_deck() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+
+        // Single-step fill: only heat 1 exists; heat 2 is *not* yet scheduled.
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::Next,
+                },
+            )
+            .ok
+        );
+        assert_eq!(
+            heat_ids_in_round(&state, &round).len(),
+            1,
+            "only heat 1 yet"
+        );
+        let heat1 = heat_ids_in_round(&state, &round)[0].clone();
+
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::Advance {
+                heat: heat1.clone(),
+            },
+        );
+        assert!(ack.ok, "Advance rejected: {ack:?}");
+
+        // Advance generated heat 2 and loaded it.
+        let heats = heat_ids_in_round(&state, &round);
+        assert_eq!(
+            heats.len(),
+            2,
+            "Advance drew the next heat from the generator"
+        );
+        let heat2 = heats[1].clone();
+        assert_eq!(
+            current_heat_of(&state),
+            Some(heat2.clone()),
+            "Advance loaded the generated heat"
+        );
+        assert_eq!(
+            heat_state(&state, &heat2),
+            Some(gridfpv_engine::heat::HeatState::Scheduled)
+        );
+    }
+
+    /// The round-complete case: advancing the *last* heat of a finished round leaves it Advanced
+    /// (a clean terminal) — no next heat, no crash, and Live control stays on the advanced heat.
+    #[test]
+    fn advance_on_the_last_heat_of_a_complete_round_stays_advanced() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+
+        // Fill the whole round, then drive BOTH heats to Final so the round is genuinely complete.
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::All,
+                },
+            )
+            .ok
+        );
+        let heats = heat_ids_in_round(&state, &round);
+        assert_eq!(heats.len(), 2);
+        let (heat1, heat2) = (heats[0].clone(), heats[1].clone());
+
+        // Advance heat 1 to load heat 2, then finalize heat 2 and Advance it: nothing is left.
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::Advance {
+                    heat: heat1.clone()
+                },
+            )
+            .ok
+        );
+        drive_heat_to_final(&registry, &event_id, &state, &heat2);
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::Advance {
+                heat: heat2.clone(),
+            },
+        );
+        assert!(
+            ack.ok,
+            "Advance on the last heat is still a typed ok: {ack:?}"
+        );
+
+        // No new heat was scheduled; heat 2 stays Final/Advanced and remains the current heat.
+        assert_eq!(
+            heat_ids_in_round(&state, &round).len(),
+            2,
+            "a complete round draws no further heats"
+        );
+        assert_eq!(
+            heat_state(&state, &heat2),
+            Some(gridfpv_engine::heat::HeatState::Final),
+            "the last advanced heat stays Final"
+        );
+        assert_eq!(
+            current_heat_of(&state),
+            Some(heat2),
+            "with nothing to advance to, Live control stays on the advanced heat"
+        );
+    }
+
+    /// `Advance` is replay-deterministic: the log it produces (transition + generated heat +
+    /// selection) re-folds to the same live state every time, so a recorded session replays
+    /// identically. (The fixture ids are random per build, so we assert on the *replayed log*, not
+    /// on two independently-seeded fixtures.)
+    #[test]
+    fn advance_is_deterministic_on_replay() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.clone(),
+                mode: FillMode::Next,
+            },
+        );
+        let heat1 = heat_ids_in_round(&state, &round)[0].clone();
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+        apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::Advance { heat: heat1 },
+        );
+
+        // Re-folding the same recorded log twice yields the same live state (same current heat).
+        let (events, _) = state.read().unwrap();
+        assert_eq!(
+            crate::live_state::live_state(&events),
+            crate::live_state::live_state(&events),
+            "Advance's log re-folds deterministically",
+        );
+        // And the generated next heat is the one loaded.
+        let heat2 = heat_ids_in_round(&state, &round)[1].clone();
+        assert_eq!(
+            crate::live_state::live_state(&events).current_heat,
+            Some(heat2),
+        );
+    }
+
+    /// `Advance` on a heat that is not `Final` (here: never finalized) is rejected verbatim by the
+    /// engine's legality and appends nothing — the next-heat load only runs after a legal Advance.
+    #[test]
+    fn advance_on_a_non_final_heat_is_rejected_and_loads_nothing() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.clone(),
+                mode: FillMode::All,
+            },
+        );
+        let heats = heat_ids_in_round(&state, &round);
+        let heat1 = heats[0].clone();
+        let before = state.read().unwrap().0.len();
+
+        // Heat 1 is still Scheduled — Advance is illegal.
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::Advance { heat: heat1 },
+        );
+        assert!(!ack.ok, "Advance on a non-Final heat must be rejected");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        assert_eq!(
+            state.read().unwrap().0.len(),
+            before,
+            "a rejected Advance appends nothing (no transition, no selection)"
         );
     }
 

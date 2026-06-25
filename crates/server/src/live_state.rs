@@ -409,7 +409,7 @@ fn lineup_of(events: &[Event], heat: &HeatId) -> Vec<CompetitorRef> {
 /// "Still scheduled" means its folded [`HeatState`] is `Scheduled` (it has been created
 /// but not staged). Heats are considered in the order they were first scheduled in the
 /// log, so the on-deck heat is the next one queued behind the current heat.
-fn on_deck(events: &[Event], current: &HeatId) -> Option<HeatId> {
+pub(crate) fn on_deck(events: &[Event], current: &HeatId) -> Option<HeatId> {
     let mut seen: Vec<HeatId> = Vec::new();
     for event in events {
         if let Event::HeatScheduled { heat, .. } = event {
@@ -420,6 +420,13 @@ fn on_deck(events: &[Event], current: &HeatId) -> Option<HeatId> {
     }
     seen.into_iter()
         .find(|heat| heat != current && heat_state(events, heat) == Some(HeatState::Scheduled))
+}
+
+/// The round a heat was scheduled under, from its most recent `HeatScheduled` (`None` for a
+/// free-text / untagged heat). Used by the Advance control path to ask that round's generator
+/// for the next heat when nothing is already on deck.
+pub(crate) fn round_of_heat(events: &[Event], heat: &HeatId) -> Option<RoundId> {
+    latest_schedule(events, heat).2
 }
 
 /// Rank active pilots into the provisional running order: most laps first, ties broken
