@@ -2043,6 +2043,107 @@ mod tests {
         }
     }
 
+    /// A `multi_main` round (#219, D14) seeded `FromRanking` from `source` with the given `main_size`
+    /// and `top_n`, over `class`. Win condition BestLap so a heat's finishing order is its best laps.
+    fn multi_main_round(
+        id: &str,
+        class: &str,
+        source: &str,
+        main_size: &str,
+        top_n: usize,
+    ) -> RoundDef {
+        RoundDef {
+            id: RoundId(id.into()),
+            label: "Mains".into(),
+            classes: vec![ScopeClassId(class.into())],
+            format: "multi_main".into(),
+            params: BTreeMap::from([("main_size".into(), main_size.into())]),
+            win_condition: WinCondition::BestLap,
+            seeding: SeedingRule::FromRanking {
+                source_rounds: vec![RoundId(source.into())],
+                top_n,
+            },
+            channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            time_limit_secs: None,
+        }
+    }
+
+    /// Finalize a heat where `order` is its finishing order (best first): each pilot gets a holeshot
+    /// then one lap, with lap times strictly increasing down the order so BestLap ranks them as
+    /// listed. Appends the full schedule→run→finalize span under `heat_id`.
+    fn finishing_heat(heat_id: &str, round: &str, class: &str, order: &[&str]) -> Vec<Event> {
+        let mut out = vec![scheduled(heat_id, round, class, order)];
+        let mut passes = Vec::new();
+        for (i, c) in order.iter().enumerate() {
+            passes.push(pass(c, i as i64, 0)); // holeshot (uncounted)
+        }
+        for (i, c) in order.iter().enumerate() {
+            // Best lap grows with position so the listed order is the finishing order.
+            passes.push(pass(c, 1_000_000 + (i as i64) * 100_000, 1));
+        }
+        out.extend(run_heat_events(heat_id, passes));
+        out
+    }
+
+    /// Drive every heat of a `multi_main` round to Final: repeatedly FillRound (one main at a time),
+    /// finalize that main with the supplied finishing order, until the round reports Complete.
+    /// `mains` maps each heat id to its finishing order, in the order the generator emits them.
+    #[test]
+    fn multi_main_round_splits_by_rank_into_named_mains_and_stacks_the_standings() {
+        // Quali ranks 6 pilots A>B>C>D>E>F (by best lap). A multi_main round (main_size 2, top 6)
+        // splits them into A-main(A,B), B-main(C,D), C-main(E,F). Each main is one heat; their
+        // results stack: A-main → places 1-2, B-main → 3-4, C-main → 5-6.
+        let qual = qual_round("q1", "open");
+        let mains = multi_main_round("m1", "open", "q1", "2", 6);
+        let meta = meta_with(
+            vec![qual, mains.clone()],
+            vec![member("open", &["A", "B", "C", "D", "E", "F"])],
+        );
+
+        // Quali heat to Final, A fastest … F slowest.
+        let qfill = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
+        let qheat = match qfill {
+            FillOutcome::Scheduled { heat, .. } => heat.0,
+            other => panic!("expected scheduled quali heat, got {other:?}"),
+        };
+        let mut log = finishing_heat(&qheat, "q1", "open", &["A", "B", "C", "D", "E", "F"]);
+
+        // The quali ranking seeds the mains; fill one main at a time, finalizing each before the
+        // next FillRound (the interactive per-heat flow). The generator emits A, B, then C main.
+        let mut scheduled_mains: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            let outcome = fill_round(&meta, &no_timers(), &RoundId("m1".into()), &log).unwrap();
+            let (heat, lineup) = match outcome {
+                FillOutcome::Scheduled { heat, lineup, .. } => (heat.0, lineup),
+                other => panic!("expected a scheduled main, got {other:?}"),
+            };
+            // Finalize this main with its seeded lineup as the finishing order (no upsets).
+            let order: Vec<&str> = lineup.iter().map(|c| c.0.as_str()).collect();
+            log.extend(finishing_heat(&heat, "m1", "open", &order));
+            scheduled_mains.push(heat);
+        }
+
+        // The three mains are the engine's `main-A`, `main-B`, `main-C` ids, split top-down by rank.
+        assert_eq!(scheduled_mains, vec!["main-A", "main-B", "main-C"]);
+
+        // Once all three are scored, the round is complete.
+        let done = fill_round(&meta, &no_timers(), &RoundId("m1".into()), &log).unwrap();
+        assert!(matches!(done, FillOutcome::Complete));
+
+        // The stacked standings: A-main (A,B) → 1,2; B-main (C,D) → 3,4; C-main (E,F) → 5,6. The
+        // worst A-main finisher (B, pos 2) still outranks the best B-main finisher (C, pos 3).
+        let ranking = round_ranking(&meta, &mains, &log).unwrap();
+        let names: Vec<String> = ranking.iter().map(|r| r.competitor.0.clone()).collect();
+        assert_eq!(names, vec!["A", "B", "C", "D", "E", "F"]);
+        for (i, entry) in ranking.iter().enumerate() {
+            assert_eq!(entry.position, i as u32 + 1);
+        }
+    }
+
     #[test]
     fn bracket_round_seeds_best_per_pilot_across_multiple_source_rounds() {
         // Issue #51: a bracket seeded `FromRanking` from TWO qual rounds. Q1 ranks A,B,C,D;
