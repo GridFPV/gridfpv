@@ -5,6 +5,8 @@
 //! never drift. Pure std + cargo, so it works the same on Windows/Linux/macOS.
 #![forbid(unsafe_code)]
 
+mod rh_mock;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
@@ -199,7 +201,8 @@ fn live() -> bool {
 }
 
 fn main() {
-    let task = std::env::args().nth(1).unwrap_or_else(|| "ci".to_string());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let task = args.first().cloned().unwrap_or_else(|| "ci".to_string());
     let ok = match task.as_str() {
         "fmt" => fmt(),
         "lint" | "clippy" => lint(),
@@ -207,9 +210,12 @@ fn main() {
         "gen" => generate(),
         "ci" => fmt() && lint() && test() && gen_check(),
         "live" => live(),
+        // The interactive RotorHazard mock-signal harness (marshaling testing). Needs Docker to
+        // `feed`; `dump`/`list` are plain HTTP/std. See `rh_mock.rs`.
+        "rh-mock" => rh_mock::run(&args[1..]),
         other => {
             eprintln!("unknown task: {other}");
-            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live]");
+            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live|rh-mock]");
             false
         }
     };
