@@ -94,6 +94,17 @@ describe('seam 1: snapshot routes are path-scoped', () => {
     expect(Object.keys((json as { body: object }).body)).toEqual(['HeatResult']);
   });
 
+  it('GET /snapshot/heat/{id}?projection=audit → 200 MarshalingAudit (#55)', async () => {
+    const { status, json } = await getSnapshot(
+      `/events/practice/snapshot/heat/${HEAT}?projection=audit`
+    );
+    expect(status).toBe(200);
+    const body = (json as { body: object }).body;
+    expect(Object.keys(body)).toEqual(['MarshalingAudit']);
+    // The body is an array of audit entries (empty when the heat has no rulings).
+    expect(Array.isArray((body as { MarshalingAudit: unknown }).MarshalingAudit)).toBe(true);
+  });
+
   it('GET /snapshot/class/{event}/{class} → 200 LiveRaceState', async () => {
     const { status, json } = await getSnapshot('/events/practice/snapshot/class/spring-cup/open');
     expect(status).toBe(200);

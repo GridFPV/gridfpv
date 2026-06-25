@@ -132,3 +132,184 @@ test('a marshaling DQ correction re-folds the heat result', async ({ page, direc
     if (!p.disqualified) expect(p.position).toBeLessThan(dqPos);
   }
 });
+
+// ── Slice 3: the Marshaling UI drives corrections through the screen, against a real Director ──
+const UI_PILOTS = ['Pax', 'Quill', 'Rune'];
+const UI_HEAT = `marshal-ui-${Date.now()}`;
+
+/** Enter Practice and confirm the live read stream is up (mirrors the helper above). */
+async function enterPractice(page: import('@playwright/test').Page): Promise<void> {
+  await page.goto('/');
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  await page.getByRole('button', { name: /Events/ }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
+  ).toBeVisible({ timeout: 15_000 });
+  if (
+    await page
+      .getByRole('heading', { name: 'Choose an event' })
+      .isVisible()
+      .catch(() => false)
+  ) {
+    await page
+      .getByRole('button', { name: /Practice/ })
+      .first()
+      .click();
+  }
+  await expect(liveNav).toBeVisible();
+  await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
+}
+
+test('the Marshaling screen corrects laps and the audit + standings update live', async ({
+  page,
+  director
+}) => {
+  await enterPractice(page);
+
+  const control = (cmd: unknown) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: cmd
+    });
+
+  // Schedule + focus a heat, run it to Unofficial so it has laps to marshal.
+  expect((await control({ ScheduleHeat: { heat: UI_HEAT, lineup: UI_PILOTS } })).ok()).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat: UI_HEAT } })).ok()).toBeTruthy();
+
+  await page.reload();
+  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.heat-id .value')).toHaveText(UI_HEAT, { timeout: 15_000 });
+
+  await page.getByRole('button', { name: 'Stage', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Staged');
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
+
+  const heatSheet = page.getByRole('region', { name: 'Heat sheet' });
+  const lapCells = heatSheet.locator('.laps');
+  await expect
+    .poll(
+      async () =>
+        (await lapCells.allTextContents()).reduce(
+          (s, t) => s + (parseInt(t.match(/(\d+)/)?.[1] ?? '0', 10) || 0),
+          0
+        ),
+      { timeout: 30_000, message: 'live laps should bank before marshaling' }
+    )
+    .toBeGreaterThan(1);
+  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await expect(page.locator('.phase').first()).toHaveText('Unofficial');
+
+  // ── Open the Marshaling screen ───────────────────────────────────────────────────────
+  await page.getByRole('button', { name: /Marshaling/ }).click();
+  const marshaling = page.getByRole('region', { name: 'Marshaling' });
+  await expect(marshaling).toBeVisible();
+  const audit = page.getByRole('complementary', { name: 'Audit trail' });
+
+  // A lap shows up in the list once the snapshot loads.
+  await expect(marshaling.locator('button.lap').first()).toBeVisible({ timeout: 15_000 });
+  const correctionTime = marshaling.getByLabel('Correction time');
+
+  // Select the first lap and confirm it took (a re-fold from a prior correction can briefly clear
+  // the selection, so select-then-confirm via aria-pressed is the robust pattern). Re-click if the
+  // first click landed during a re-render.
+  const selectFirstLap = async () => {
+    const lap = marshaling.locator('button.lap').first();
+    await expect(async () => {
+      // Click only when not already selected (the lap button toggles), then confirm it took.
+      if ((await lap.getAttribute('aria-pressed')) !== 'true') await lap.click();
+      await expect(lap).toHaveAttribute('aria-pressed', 'true', { timeout: 2_000 });
+    }).toPass({ timeout: 15_000 });
+  };
+
+  // ── Select a lap and EDIT its time — the audit gains a "Re-timed" entry ───────────────
+  await selectFirstLap();
+  await correctionTime.fill('1.234');
+  await marshaling.getByRole('button', { name: 'Edit time' }).click();
+  await expect(audit.getByText(/Re-timed/i).first()).toBeVisible({ timeout: 10_000 });
+
+  // ── Select a lap and SPLIT it — the audit gains a "Split" entry ───────────────────────
+  await selectFirstLap();
+  await correctionTime.fill('0.500');
+  await marshaling.getByRole('button', { name: 'Split' }).click();
+  await expect(audit.getByText(/Split/i).first()).toBeVisible({ timeout: 10_000 });
+
+  // ── DQ a competitor through the ruling panel ─────────────────────────────────────────
+  await marshaling.getByLabel('Ruling competitor').selectOption(UI_PILOTS[0]);
+  // Kind defaults to Disqualify.
+  await marshaling.getByRole('button', { name: 'Apply' }).click();
+  await expect(audit.getByText(/DQ applied/i).first()).toBeVisible({ timeout: 10_000 });
+
+  // The DQ flows into standings (the result snapshot re-folds).
+  const result = async () => {
+    const res = await page.request.get(
+      `${director.baseUrl}/events/practice/snapshot/heat/${UI_HEAT}?projection=result`
+    );
+    expect(res.ok()).toBeTruthy();
+    return (await res.json()).body.HeatResult as {
+      places: { competitor: { competitor: string }; disqualified?: boolean }[];
+    };
+  };
+  await expect
+    .poll(
+      async () =>
+        (await result()).places.find((p) => p.competitor.competitor === UI_PILOTS[0])
+          ?.disqualified ?? false,
+      { timeout: 10_000, message: 'the UI DQ should re-fold the standings' }
+    )
+    .toBe(true);
+
+  // ── REVERSE the DQ through the audit-backed reverse control — the audit gains "Reversed" ─
+  await marshaling.getByLabel('Reverse ruling').selectOption({ index: 1 });
+  await marshaling.getByRole('button', { name: 'Reverse ruling' }).click();
+  await expect(audit.getByText(/Reversed/i).first()).toBeVisible({ timeout: 10_000 });
+  // And the DQ is undone in the standings.
+  await expect
+    .poll(
+      async () =>
+        (await result()).places.find((p) => p.competitor.competitor === UI_PILOTS[0])
+          ?.disqualified ?? false,
+      { timeout: 10_000, message: 'reversing the DQ should re-fold the standings back' }
+    )
+    .toBe(false);
+});
+
+test('a read-only session sees the laps + audit but cannot mutate', async ({ page, director }) => {
+  // Reuse the heat the UI test created if present, else schedule a fresh one so the screen has laps.
+  const roHeat = `marshal-ro-${Date.now()}`;
+  const control = (cmd: unknown) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: cmd
+    });
+  expect((await control({ ScheduleHeat: { heat: roHeat, lineup: UI_PILOTS } })).ok()).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat: roHeat } })).ok()).toBeTruthy();
+
+  // Enter as a read-only pilot via the role seam.
+  await page.goto('/?role=readonly');
+  const liveNav = page.getByRole('button', { name: /Live control/ });
+  await page.getByRole('button', { name: /Events/ }).click();
+  if (
+    await page
+      .getByRole('heading', { name: 'Choose an event' })
+      .isVisible()
+      .catch(() => false)
+  ) {
+    await page
+      .getByRole('button', { name: /Practice/ })
+      .first()
+      .click();
+  }
+  await expect(liveNav).toBeVisible({ timeout: 15_000 });
+
+  await page.getByRole('button', { name: /Marshaling/ }).click();
+  const marshaling = page.getByRole('region', { name: 'Marshaling' });
+  await expect(marshaling).toBeVisible();
+  // The read-only banner shows, and NO mutating controls are present.
+  await expect(marshaling.getByText(/Read-only/i)).toBeVisible();
+  await expect(marshaling.getByRole('button', { name: 'Remove (void)' })).toHaveCount(0);
+  await expect(marshaling.getByRole('button', { name: 'Apply' })).toHaveCount(0);
+  await expect(marshaling.getByRole('button', { name: 'Void heat' })).toHaveCount(0);
+  // The audit panel is still present (read access is unrestricted).
+  await expect(page.getByRole('complementary', { name: 'Audit trail' })).toBeVisible();
+});

@@ -53,6 +53,17 @@
 
   const session = new Session();
 
+  // Role seam (#55/#80): a `?role=readonly` query selects the read-only-pilot tier, which hides
+  // every mutating control (the Marshaling actions, etc.). The Director is the enforced boundary;
+  // this only reflects it client-side. The full read-only-pilot wiring (deriving the role from the
+  // connection tier) is a later slice — this query param is the first-class hook the UI gates on.
+  if (
+    typeof location !== 'undefined' &&
+    new URLSearchParams(location.search).get('role') === 'readonly'
+  ) {
+    session.setRole('readonly');
+  }
+
   // ── Hash-based URL routing (#118) ──────────────────────────────────────────
   // The view is reflected in `location.hash` so a refresh stays on the same page/tab and
   // back/forward + bookmarks work. The hash is the source of truth: navigating sets it, and the

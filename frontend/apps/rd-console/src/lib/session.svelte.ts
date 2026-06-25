@@ -79,6 +79,7 @@ import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
 import type {
   AdapterId,
+  AuditEntry,
   ChannelCatalogEntry,
   Class,
   ClassId,
@@ -86,6 +87,7 @@ import type {
   Command,
   CommandAck,
   CompetitorRef,
+  LapList,
   CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
@@ -182,6 +184,13 @@ function liveStateOf(body: ProjectionBody | undefined): LiveRaceState | undefine
   return undefined;
 }
 
+/**
+ * The session's auth tier (auth-tls-model): `'rd'` is the loopback / token-holding operator who
+ * may commit; `'readonly'` is the read-only pilot tier that may only observe. Drives UI gating of
+ * mutating controls (the Director is the enforced boundary; this mirrors it client-side).
+ */
+export type SessionRole = 'rd' | 'readonly';
+
 /** The reactive console session — one instance, shared across screens. */
 export class Session {
   /**
@@ -220,6 +229,32 @@ export class Session {
   heatResult = $state.raw<HeatResult | undefined>(undefined);
   /** The last control-path error surfaced to the RD (cleared on the next send). */
   lastCommandError = $state<CommandAck['error']>(undefined);
+  /**
+   * The session's **role** (#80, auth tiers): `'rd'` may commit corrections; `'readonly'` (the
+   * read-only pilot tier) sees the record but cannot change it. The Director is the real boundary
+   * (it gates control via `ControlAuth`); this is the **UI reflection** of that — mutating controls
+   * hide/disable when the role is `'readonly'`, so a pilot view never shows actions it can't take.
+   * Defaults to `'rd'` (the loopback / token-holding operator). The read-only-pilot wiring that
+   * *sets* this from the connection tier is a later slice; the gate is first-class now.
+   */
+  role = $state<SessionRole>('rd');
+  /**
+   * The current heat's marshaling lap list (`?projection=laps`), pulled via
+   * {@link refreshMarshaling}. The live read stream carries only `LiveRaceState`, so the
+   * Marshaling screen reads the heat's laps (with marshaling folded in, each lap carrying its
+   * `start_ref`/`end_ref` command target) here, refreshed whenever the live stream signals a change.
+   */
+  lapList = $state.raw<LapList | undefined>(undefined);
+  /**
+   * The current heat's marshaling **audit trail** (`?projection=audit`, #55) — the
+   * reverse-chronological "what changed, when, what kind" the defensible-results panel renders.
+   * Pulled alongside {@link lapList} and refreshed on every correction.
+   */
+  marshalingAudit = $state.raw<AuditEntry[] | undefined>(undefined);
+  /** Whether this session may issue mutating marshaling commands (an RD, not a read-only pilot). */
+  get canControl(): boolean {
+    return this.role === 'rd';
+  }
   /**
    * The Director's timer registry with **live** status, polled while inside an event (#73,
    * Slice 2b). `GET /timers` returns each timer's *current* status on every request (the
@@ -1135,6 +1170,8 @@ export class Session {
     this.protocolState = undefined;
     this.liveState = undefined;
     this.heatResult = undefined;
+    this.lapList = undefined;
+    this.marshalingAudit = undefined;
     this.lastCommandError = undefined;
     this.timers = [];
   }
@@ -1264,6 +1301,77 @@ export class Session {
       }
     } catch {
       /* leave heatResult unchanged */
+    }
+    return undefined;
+  }
+
+  /**
+   * Set the session role (#80 auth tiers). `'readonly'` hides/disables mutating controls across
+   * the console (e.g. the Marshaling actions); `'rd'` restores them. The Director still enforces
+   * the boundary — this only reflects it in the UI so a read-only viewer never sees actions it
+   * cannot take.
+   */
+  setRole(role: SessionRole): void {
+    this.role = role;
+  }
+
+  /**
+   * Pull the current heat's marshaling projections — the lap list (`?projection=laps`) and the
+   * audit trail (`?projection=audit`, #55) — and store them on {@link lapList} / {@link marshalingAudit}.
+   *
+   * The live read stream carries only `LiveRaceState`, so the Marshaling screen reads these tighter
+   * heat-scope snapshots and re-pulls them whenever the live stream signals a change (a correction
+   * re-folds both). Corrections therefore flow into the lap list, the audit, AND standings (the live
+   * stream) by the same "append → re-fold → re-fetch" path — nothing reconciled locally. Open to
+   * read (no token); a failed fetch leaves the last good value.
+   */
+  async refreshMarshaling(heat: HeatId): Promise<void> {
+    const event = this.currentEvent;
+    if (!event) return;
+    const [laps, audit] = await Promise.all([
+      this.#fetchHeatProjection<LapList>(heat, 'laps', 'LapList'),
+      this.#fetchHeatProjection<AuditEntry[]>(heat, 'audit', 'MarshalingAudit')
+    ]);
+    if (laps !== undefined) this.lapList = laps;
+    if (audit !== undefined) this.marshalingAudit = audit;
+  }
+
+  /**
+   * One-shot read of a heat-scope projection snapshot, narrowing `body[bodyKey]`. Shared by the
+   * result / marshaling reads. Open to read; returns `undefined` on any failure (caller keeps the
+   * last value).
+   */
+  async #fetchHeatProjection<T>(
+    heat: HeatId,
+    projection: string,
+    bodyKey: string
+  ): Promise<T | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const base = this.baseUrl.endsWith('/') ? this.baseUrl.slice(0, -1) : this.baseUrl;
+    const headers: Record<string, string> = {};
+    if (this.#token) headers.Authorization = `Bearer ${this.#token}`;
+    try {
+      const resp = await globalThis.fetch(
+        `${base}/events/${encodeURIComponent(event.id)}/snapshot/heat/${encodeURIComponent(
+          heat
+        )}?projection=${projection}`,
+        { headers }
+      );
+      if (!resp.ok) return undefined;
+      const snap: unknown = await resp.json();
+      if (
+        snap &&
+        typeof snap === 'object' &&
+        'body' in snap &&
+        snap.body &&
+        typeof snap.body === 'object' &&
+        bodyKey in snap.body
+      ) {
+        return (snap.body as Record<string, T>)[bodyKey];
+      }
+    } catch {
+      /* leave the caller's value unchanged */
     }
     return undefined;
   }
