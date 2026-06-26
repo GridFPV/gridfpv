@@ -222,23 +222,35 @@ fn feed(args: &[String]) -> bool {
 
 /// Print exactly what the maintainer does next: point a Director at this RH timer and run a heat.
 fn print_run_instructions(url: &str, node_count: usize) {
+    let last_node = node_count.saturating_sub(1);
     println!("\x1b[1mNext steps (run a heat against this timer):\x1b[0m");
     println!(
-        "  1. Start a Director: \x1b[1mcargo run -p gridfpv-app\x1b[0m (serves on its own port, \
+        "  1. Start a Director \x1b[1mbuilt with the live feature\x1b[0m (the RH connector is \
+         `live`-gated):\n     \
+         \x1b[1mcargo run -p gridfpv-app --features live\x1b[0m (serves on its own port, \
          usually http://localhost:3000)."
     );
     println!(
-        "  2. In the console, add a RotorHazard timer pointing at \x1b[1m{url}\x1b[0m and select \
-         it for your event."
+        "  2. In the console, add a RotorHazard timer pointing at \x1b[1m{url}\x1b[0m, select it \
+         for your event, and \x1b[1mmake that event active\x1b[0m — the Director only connects the \
+         ACTIVE event's selected RH timers (the timer should read `Connected` before any heat)."
     );
     println!(
-        "  3. Build a heat with {node_count} seat(s) (node-0..node-{}), stage it, and start the \
-         race. The emulated CSV drives the crossings — no manual lap injection.",
-        node_count.saturating_sub(1)
+        "  3. Build a heat seating a pilot on \x1b[1mnode-0{}\x1b[0m — the emulated CSV(s) drive \
+         only the node(s) this scenario feeds, so a pilot MUST be on one of those seats or its \
+         crossings attribute to nobody. {} seat(s) fed here (node-0..node-{last_node}).",
+        if node_count > 1 {
+            format!("..node-{last_node}")
+        } else {
+            String::new()
+        },
+        node_count
     );
     println!(
-        "  4. Let it run a few seconds (laps record as the mock signal crosses), then finish the \
-         heat."
+        "  4. \x1b[1mStage → Start\x1b[0m the heat (a normal heat — the Director drives RH into a \
+         RACING state on Start; a heat left only Staged never races, so no laps). The emulated CSV \
+         drives the crossings — no manual lap injection. Let it run a few seconds (laps record as \
+         the mock signal crosses), then finish the heat."
     );
     println!(
         "  5. \x1b[1mSee the captured values\x1b[0m:\n     \
@@ -246,8 +258,10 @@ fn print_run_instructions(url: &str, node_count: usize) {
          e.g. cargo xtask rh-mock dump http://localhost:3000 practice q-1"
     );
     println!(
-        "\n  \x1b[2mTip: RH's default 10s lap minimum can swallow the brisk mock laps. The \
-         Director/adapter set it to 0 for mock runs; if you drive RH directly, set MIN_LAP_TIME=0.\x1b[0m"
+        "\n  \x1b[2mNote: RH's default 10s lap minimum logs `Pass record under lap minimum (10)` \
+         for the brisk sub-second mock laps, but RH's default behavior still RECORDS them, so they \
+         flow through to the Director. (If you drive RH directly and want the warnings gone, emit \
+         set_option MIN_LAP_TIME=0.)\x1b[0m"
     );
 }
 

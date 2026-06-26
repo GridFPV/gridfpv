@@ -15,7 +15,12 @@
 //!    advances to `Connected` *without* a heat being run (#105 — the whole point: a drop-off is
 //!    visible before/between races).
 //! 5. Then drives Practice's heat to `Running`, and asserts **passes flow** into Practice's log over
-//!    that already-live connection (real RH crossings, attributed to the heat's lineup).
+//!    that already-live connection (real RH crossings, attributed to the heat's lineup). This step
+//!    is also the **staging-race-condition guard**: the driver resets RH (`stop_race` +
+//!    `discard_laps`) and then `stage_race`s it; if those emits are sent back-to-back, RotorHazard's
+//!    gevent loop aborts staging ("Stopping race during staging") and the timer never reaches
+//!    RACING, so it replays no passes and the heat records **zero laps** — the no-laps bug. The
+//!    `STAGE_RESET_SETTLE` settle in `source::rotorhazard` fixes it; this assertion fails without it.
 //! 6. Finishes the heat and asserts the connection **stays `Connected`** — the heat is disarmed but
 //!    the persistent connection is NOT torn down (#105), so status keeps reflecting the live link.
 //! 7. **Stops the RH container** out from under the live connection and asserts the Director
