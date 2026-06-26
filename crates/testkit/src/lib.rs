@@ -124,8 +124,12 @@ fn det_noise(node_seed: u64, sample: u64, salt: u64, amp: f64) -> f64 {
 /// - a low **baseline floor** while the craft is away from the gate,
 /// - a smooth **Gaussian bell** centred on `cross_tick` (rise → peak → fall over the approach and
 ///   departure window) — not a square step,
-/// - constant small **deterministic noise** (a few RSSI units) on baseline *and* peak, so the trace
-///   is never perfectly smooth, yet stays reproducible (seeded xorshift, no wall-clock).
+/// - small **deterministic noise** (a few RSSI units) so the trace is never perfectly smooth, yet
+///   stays reproducible (seeded xorshift, no wall-clock). The noise is *shaped* (see the body): full
+///   ± jitter on the off-gate baseline, but rectified **upward** at the crest so the reported peak
+///   never dips below the lap's true peak (`node_peak`/`pass_peak` are running maxima). That keeps
+///   the crossing **reliably detectable** — its captured peak always clears RH's calibrated `enter`
+///   by the lap's full peak-to-baseline margin — while the baseline stays clear of `exit`.
 ///
 /// `noise_amp` is the per-sample jitter amplitude (scenarios raise it for a "noisy" feed). The bell
 /// peaks **at** `cross_tick`, where RH's crossing detection fires (`cross=T`), so the signal maximum
@@ -147,11 +151,23 @@ fn pass_value(
     let bell = (-(dist * dist) / (2.0 * sigma * sigma)).exp();
     let span = (peak - baseline) as f64;
     let smooth = baseline as f64 + span * bell;
-    // Constant small noise on everything (baseline AND peak); a touch more at the peak so the
-    // crest isn't a clean curve either.
-    let noise = det_noise(node_seed, sample as u64, 0xA1, noise_amp)
-        + det_noise(node_seed, sample as u64, 0xB2, noise_amp * 0.4) * bell;
-    (smooth + noise).round().clamp(1.0, 999.0) as i32
+    // Noise model, shaped so the trace stays realistic *and* the crossing stays detectable:
+    //
+    // - **Off-gate (baseline)** carries full bidirectional jitter (`±noise_amp`) so the floor has
+    //   real texture — but its amplitude is bounded (see [`BASE_NOISE`]) to stay clear of RH's exit
+    //   threshold, so the detector cleanly drops below `exit` between passes and re-arms.
+    // - **Near the crest** the jitter is *rectified upward* (`bell`-weighted): `node_peak`/`pass_peak`
+    //   are running **maxima** on a real timer, so sensor noise around a pass crest only ever pushes
+    //   the reported peak *up*, never carves a notch below the true peak. This keeps the crest the
+    //   unambiguous maximum it physically is, guaranteeing the captured peak clears RH's calibrated
+    //   `enter` with the lap's full peak-to-baseline margin (no noise-induced dip below threshold).
+    //
+    // The two blend by `bell`: pure ± noise at the floor, pure additive crest noise at the peak.
+    let floor_noise = det_noise(node_seed, sample as u64, 0xA1, noise_amp) * (1.0 - bell);
+    let crest_noise = det_unit(node_seed, sample as u64, 0xB2) * noise_amp * 0.4 * bell;
+    (smooth + floor_noise + crest_noise)
+        .round()
+        .clamp(1.0, 999.0) as i32
 }
 
 /// Lap-to-lap variation: nudge a lap's peak height a few RSSI units (deterministically, keyed by
@@ -492,9 +508,13 @@ pub mod scenarios {
     pub const STRONG_PEAK: i32 = 200;
     /// A clearly-detected-but-weak peak (above threshold, below [`STRONG_PEAK`]).
     pub const WEAK_PEAK: i32 = 120;
-    /// A *marginal* peak: just above the enter threshold — a pass that barely
-    /// registers (dirty signal, gate at the edge of range).
-    pub const MARGINAL_PEAK: i32 = ENTER_THRESHOLD + 5;
+    /// A *marginal* peak: above the enter threshold but with only a slim margin — a pass that
+    /// registers, but is the weakest the model still reliably detects (dirty signal, gate at the edge
+    /// of range). The margin (`+15`) is sized so the bell crest clears RH's calibrated `enter` even
+    /// after lap-to-lap peak variation (`varied_peak` can shave a few percent off a low peak), so the
+    /// pass *always* records — "marginal" in magnitude, not in reliability. It stays clearly below
+    /// [`WEAK_PEAK`] so the `strong > weak > marginal` ordering the signal-context tests assert holds.
+    pub const MARGINAL_PEAK: i32 = ENTER_THRESHOLD + 15;
 
     /// **Uniform pace** — `laps` crossings, every `gap` ticks, strong signal.
     ///
@@ -1146,6 +1166,69 @@ mod tests {
                 "crossing at {cross} (value {}) must clear the enter threshold {ENTER_THRESHOLD}",
                 vals[cross]
             );
+        }
+    }
+
+    #[test]
+    fn crest_is_rectified_to_the_nominal_peak() {
+        // The detection guarantee: at the crossing tick the reported value never dips BELOW the
+        // lap's (varied) peak — `node_peak`/`pass_peak` are running maxima, so crest noise only adds.
+        // This is what makes the peak-above-enter margin equal to `peak - enter` with no noise dip
+        // that could drop a marginal pass under the calibrated threshold.
+        const PEAK: i32 = 96; // a deliberately low peak so any downward dip would breach the margin
+        const BASE: i32 = 70;
+        let opts = NodeCsv {
+            ticks_per_lap: 48,
+            peak_rssi: PEAK,
+            baseline_rssi: BASE,
+            seed: 7,
+        };
+        let vals = values(&node_csv(&opts));
+        for cross in (48..TOTAL_TICKS).step_by(48) {
+            let nominal = varied_peak(opts.seed, cross / 48, PEAK);
+            assert!(
+                vals[cross] >= nominal,
+                "crest at {cross} ({}) dipped below the lap's nominal peak {nominal} — noise must \
+                 rectify upward at the crest so detection never loses the margin",
+                vals[cross]
+            );
+        }
+    }
+
+    #[test]
+    fn thin_margin_scenarios_clear_enter_with_headroom() {
+        // The marginal/noisy/weak scenarios must clear RH's enter threshold at EVERY crossing with a
+        // real margin (after lap-to-lap variation), so passes record reliably — "marginal" in
+        // magnitude, never in reliability. (The old +5 marginal could dip to the threshold and miss.)
+        const MIN_MARGIN: i32 = 8;
+        for (name, plan) in [
+            ("marginal", marginal(8, 48)),
+            ("noisy", noisy(8, 48)),
+            ("weak", weak(8, 48)),
+        ] {
+            let csv = plan_csv(&plan);
+            let rows = rows(&csv);
+            for (i, r) in rows.iter().enumerate() {
+                if r[7] == "T" {
+                    let v: i32 = r[4].parse().unwrap();
+                    assert!(
+                        v >= ENTER_THRESHOLD + MIN_MARGIN,
+                        "{name} crossing at {i} (value {v}) must clear enter {ENTER_THRESHOLD} by at \
+                         least {MIN_MARGIN} so it reliably detects"
+                    );
+                }
+            }
+            // And the off-gate baseline (sampled midway between crossings, well clear of any bell)
+            // must stay below the exit threshold (80) so RH's two-state detector cleanly drops out
+            // between passes and re-arms for the next crossing. Crossings are every 48 ticks; tick
+            // `n*48 + 24` is the trough between them.
+            for mid in (24..TOTAL_TICKS).step_by(48) {
+                let v: i32 = rows[mid][4].parse().unwrap();
+                assert!(
+                    v < 80,
+                    "{name} off-gate baseline at {mid} ({v}) must stay below the exit threshold 80"
+                );
+            }
         }
     }
 
