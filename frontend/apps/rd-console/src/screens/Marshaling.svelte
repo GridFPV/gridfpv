@@ -126,15 +126,27 @@
   });
 
   const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  // A competitor ref → its explicitly-bound pilot id, from the live `progress.pilot` (the manual /
-  // open-practice registration path); empty for the common roster-seeded heat — see the resolver.
-  const explicitPilotByRef = $derived(
-    new Map<CompetitorRef, PilotId>(
-      (session.liveState?.progress ?? [])
-        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
-        .map((p) => [p.competitor, p.pilot])
-    )
-  );
+  // A competitor ref → its explicitly-bound pilot id, from the heat's **durable** registration
+  // binding (`progress.pilot`). Sourced from the MARSHALED heat's own live-state fold
+  // (`session.heatLiveState`, `?projection=live` over that heat's window — pulled by
+  // `refreshMarshaling`), NOT the global live stream's current heat (`session.liveState`). The
+  // marshaled heat is frequently NOT the current one — a finished / non-current / node-seeded heat
+  // under review — so the global stream carries no progress for it and a `node-0` ref fell through
+  // to the raw "node-0" label. The heat-window fold carries the heat's `CompetitorRegistered` binds,
+  // so a bound `node-0 → pilot` resolves its callsign for ANY heat (the raw-ref bug, #214 follow-up).
+  // The global stream's progress is merged underneath as a fallback so the current heat still
+  // resolves immediately on first mount, before the heat-scope snapshot lands.
+  const explicitPilotByRef = $derived.by(() => {
+    const map = new Map<CompetitorRef, PilotId>();
+    const add = (progress: readonly PilotProgress[] | undefined): void => {
+      for (const p of progress ?? []) if (p.pilot != null) map.set(p.competitor, p.pilot);
+    };
+    add(session.liveState?.progress); // fallback: the global stream (only when it IS this heat)
+    // Authoritative: the marshaled heat's durable binding — but only once the heat-scope fold is for
+    // THIS heat (a stale fold from a just-deselected heat could re-bind a reused `node-0` ref wrong).
+    if (session.heatLiveState?.current_heat === heat) add(session.heatLiveState?.progress);
+    return map;
+  });
   // The current heat's competitor ref → channel-label map (for the open-practice `node-{i}` seat
   // fallback), joined off the heat's `frequencies` like Live control's channels panel.
   const currentChannels = $derived.by(() => {

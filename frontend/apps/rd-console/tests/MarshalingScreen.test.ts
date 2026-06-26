@@ -538,6 +538,100 @@ describe('Marshaling (Slice 3)', () => {
     // (the resolving-window read) and the real data only on the next, and the test then nudges
     // `currentEvent` **without** touching `protocolState`. With the fix (the effects also depend on
     // `currentEvent`) the re-read fires and the names resolve; pre-fix they stay raw ids.
+    // ── The node-seeded / finished-heat durable-binding fix (raw "node-0" bug) ──────────────────
+    //
+    // A node-seeded RH heat binds `node-0 → pilot` durably in the heat's `CompetitorRegistered`
+    // facts (the heat-scope `?projection=live` fold carries it on `progress[].pilot`). But the
+    // GLOBAL live stream (`session.liveState`) only has progress for the *current* heat — a
+    // finished / non-current heat under review has empty global progress, and `node-0` is NOT a
+    // directory pilot id, so the resolver fell through to the raw "node-0" channel/ref. The fix
+    // sources `explicitPilotByRef` from the MARSHALED heat's own fold (`session.heatLiveState`),
+    // so the callsign resolves for ANY heat with a durable binding — even with empty live progress.
+    it('resolves the callsign for a node-seeded heat from the DURABLE binding (empty live progress)', async () => {
+      // A node-seeded heat: the competitor ref is "node-0" (NOT a pilot id) and the heat is finished,
+      // so the global live stream carries NO progress (current_heat is a different / no heat).
+      const NODE_LAPS: LapList = {
+        competitors: [
+          {
+            competitor: { adapter: 'rh-1', competitor: 'node-0' },
+            laps: [
+              { number: 1, duration_micros: 40_000_000, at: 40_000_000, start_ref: 10, end_ref: 12 }
+            ]
+          }
+        ]
+      };
+      const NODE_HEAT: HeatSummary = {
+        heat: 'q1-heat',
+        lineup: ['node-0'],
+        round: 'r1',
+        class: 'c1',
+        frequencies: [],
+        phase: 'Unofficial',
+        is_current: false
+      };
+      const NODE_AUDIT: AuditEntry[] = [
+        {
+          kind: 'PenaltyApplied',
+          at: 1_700_000_000_000_000,
+          at_ref: 20,
+          competitor: 'node-0',
+          summary: 'DQ applied'
+        }
+      ];
+      // The GLOBAL stream is on this heat but carries NO pilot binding in progress (the regression
+      // scenario): node-0 is unbound there. The DURABLE binding lives in the heat-scope fold.
+      const EMPTY_LIVE: LiveRaceState = {
+        current_heat: 'q1-heat',
+        phase: 'Unofficial',
+        active_pilots: ['node-0'],
+        progress: [{ competitor: 'node-0', laps_completed: 1, last_lap_micros: 40_000_000 }],
+        running_order: ['node-0']
+      };
+      // The marshaled heat's OWN fold (`?projection=live`) carries the durable `node-0 → Maverick` bind.
+      const HEAT_LIVE: LiveRaceState = {
+        current_heat: 'q1-heat',
+        phase: 'Unofficial',
+        active_pilots: ['node-0'],
+        progress: [
+          {
+            competitor: 'node-0',
+            pilot: 'maverick-4d9rp8',
+            laps_completed: 1,
+            last_lap_micros: 40_000_000
+          }
+        ],
+        running_order: ['node-0']
+      };
+      const { session } = makeTestSession({
+        event: EVENT,
+        live: EMPTY_LIVE,
+        heatLive: HEAT_LIVE,
+        laps: NODE_LAPS,
+        audit: NODE_AUDIT,
+        listHeatsImpl: vi.fn(async () => [NODE_HEAT]),
+        listPilotsImpl: vi.fn(async () => PILOTS as unknown as never),
+        listChannelsImpl: vi.fn(async () => [])
+      });
+      render(Marshaling, { session });
+
+      // Lap-list heading resolves to the callsign — not the raw "node-0".
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
+      );
+      // The ruling / protest / add-lap dropdowns label by callsign (value stays the ref).
+      const ruling = screen.getByLabelText('Ruling competitor') as HTMLSelectElement;
+      const opts = Array.from(ruling.options).map((o) => o.textContent?.trim());
+      expect(opts).toContain('Maverick');
+      const mav = Array.from(ruling.options).find((o) => o.textContent?.trim() === 'Maverick')!;
+      expect(mav.value).toBe('node-0');
+      // The audit line composes the resolved callsign from the structured ref.
+      const panel = within(screen.getByRole('complementary', { name: 'Audit trail' }));
+      expect(panel.getByText('Maverick · DQ applied')).toBeInTheDocument();
+      // The raw "node-0" must appear NOWHERE the resolver renders a name.
+      expect(screen.queryByRole('heading', { name: 'node-0' })).not.toBeInTheDocument();
+      expect(opts).not.toContain('node-0');
+    });
+
     it('re-reads heats + pilots when currentEvent settles, with no further stream tick', async () => {
       let heatsCalls = 0;
       let pilotsCalls = 0;

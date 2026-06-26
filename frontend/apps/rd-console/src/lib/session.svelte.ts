@@ -262,6 +262,17 @@ export class Session {
    * (a sim heat — `competitors` empty). `$state.raw`: an immutable whole replaced per pull.
    */
   signalTrace = $state.raw<SignalTraceView | undefined>(undefined);
+  /**
+   * The marshaled heat's own `LiveRaceState` (`?projection=live`), folded over **that heat's** log
+   * window — pulled alongside the lap list / audit by {@link refreshMarshaling}. This is distinct
+   * from {@link liveState}, which is the global live stream's *current* heat: the marshaled heat is
+   * frequently NOT the current one (a finished / non-current heat under review), so its live stream
+   * progress is empty or stale. The heat-scope fold carries the heat's durable `progress[].pilot`
+   * registration bindings (the `node-0 → pilot` bind lives in the heat window's `CompetitorRegistered`
+   * facts), which the Marshaling screen feeds to the competitor-name resolver so a node-seeded /
+   * finished heat resolves callsigns — not the raw "node-0" ref. `$state.raw`: replaced per pull.
+   */
+  heatLiveState = $state.raw<LiveRaceState | undefined>(undefined);
   /** Whether this session may issue mutating marshaling commands (an RD, not a read-only pilot). */
   get canControl(): boolean {
     return this.role === 'rd';
@@ -1190,6 +1201,7 @@ export class Session {
     this.heatResult = undefined;
     this.lapList = undefined;
     this.marshalingAudit = undefined;
+    this.heatLiveState = undefined;
     this.lastCommandError = undefined;
     this.timers = [];
   }
@@ -1346,14 +1358,19 @@ export class Session {
   async refreshMarshaling(heat: HeatId): Promise<void> {
     const event = this.currentEvent;
     if (!event) return;
-    const [laps, audit, signal] = await Promise.all([
+    const [laps, audit, signal, live] = await Promise.all([
       this.#fetchHeatProjection<LapList>(heat, 'laps', 'LapList'),
       this.#fetchHeatProjection<AuditEntry[]>(heat, 'audit', 'MarshalingAudit'),
-      this.#fetchHeatProjection<SignalTraceView>(heat, 'signal', 'SignalTrace')
+      this.#fetchHeatProjection<SignalTraceView>(heat, 'signal', 'SignalTrace'),
+      // The marshaled heat's own live-state fold — for its durable `progress[].pilot` registration
+      // bindings, so the name resolver renders callsigns for a node-seeded / finished heat whose
+      // global live stream (`this.liveState`) carries no progress for it (the raw-"node-0" bug).
+      this.#fetchHeatProjection<LiveRaceState>(heat, 'live', 'LiveRaceState')
     ]);
     if (laps !== undefined) this.lapList = laps;
     if (audit !== undefined) this.marshalingAudit = audit;
     if (signal !== undefined) this.signalTrace = signal;
+    if (live !== undefined) this.heatLiveState = live;
   }
 
   /**
