@@ -99,6 +99,20 @@ type TuneSlot = Arc<Mutex<Option<Vec<(u64, u16)>>>>;
 /// async [`RhConnection::prepare`] caller to the blocking driver thread; `true` ⇒ a prepare is due.
 type PrepareSlot = Arc<AtomicBool>;
 
+/// A **pending seat assignment** the driver applies on its next loop: when a heat is **Staged** the
+/// bridge hands the connection the heat's `(node_index, callsign)` bind so the driver seats each
+/// bound pilot onto its RH node (`seat_heat`) before racing — so RH records *and* attributes passes
+/// (the laps-attribute fix). Shared from the async [`RhConnection::seat`] caller to the blocking
+/// driver thread; `None` ⇒ nothing pending.
+type SeatSlot = Arc<Mutex<Option<Vec<(u64, String)>>>>;
+
+/// The RH heat id **seated** for the current arming, if seating succeeded (the laps-attribute fix):
+/// a fresh RH heat built at Stage with the bound pilots assigned + made current, so RH records +
+/// attributes passes. Held by [`drive`] **outside** its reconnect loop (not a `maintain`-local) so it
+/// **survives a mid-race reconnect**, and shared into [`maintain`] so the finish-time dense save reads
+/// it to reuse the seated heat (already current + savable) rather than adding a separate empty heat.
+type SeatedHeatSlot = Arc<Mutex<Option<u64>>>;
+
 /// A heat armed onto a live RH connection: the lineup its node seats remap onto, and a flag the
 /// driver flips once it has staged the RH race for this arming (so a re-drain doesn't re-stage).
 struct ArmedHeat {
@@ -169,6 +183,11 @@ pub struct RhConnection {
     /// staging and resets RH to READY so the eventual `stage_race` (at Grid's go) starts RH recording
     /// instantly, with no RH-side staging hold/tones.
     prepare: PrepareSlot,
+    /// A **pending seat assignment** the driver applies on its next loop (the laps-attribute fix):
+    /// set by [`seat`](Self::seat) when a heat is **Staged**, the driver seats each bound pilot
+    /// (`(node_index, callsign)`) onto its RH node (`seat_heat`) so RH records + attributes passes
+    /// — without it RH races an empty-pilot heat and rejects every crossing ("Pilot not defined").
+    seat: SeatSlot,
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
@@ -186,13 +205,15 @@ impl RhConnection {
         let armed: Arc<Mutex<Option<ArmedHeat>>> = Arc::new(Mutex::new(None));
         let tune: TuneSlot = Arc::new(Mutex::new(None));
         let prepare: PrepareSlot = Arc::new(AtomicBool::new(false));
+        let seat: SeatSlot = Arc::new(Mutex::new(None));
         let driver = {
             let cancel = cancel.clone();
             let armed = armed.clone();
             let tune = tune.clone();
             let prepare = prepare.clone();
+            let seat = seat.clone();
             tokio::task::spawn_blocking(move || {
-                drive(url, timer_id, timers, cancel, armed, tune, prepare);
+                drive(url, timer_id, timers, cancel, armed, tune, prepare, seat);
             })
         };
         Self {
@@ -200,6 +221,7 @@ impl RhConnection {
             armed,
             tune,
             prepare,
+            seat,
             _driver: driver,
         }
     }
@@ -222,6 +244,18 @@ impl RhConnection {
     pub fn tune(&self, assignment: Vec<(u64, u16)>) {
         let mut slot = self.tune.lock().expect("tune lock poisoned");
         *slot = Some(assignment);
+    }
+
+    /// **Seat** this connection's heat: hand the driver the heat's `(node_index, callsign)` bind so
+    /// it seats each bound pilot onto its RH node before racing (the laps-attribute fix). The driver
+    /// builds a fresh RH heat with these pilots assigned and makes it current, so RH records *and*
+    /// attributes passes on the bound nodes (its pass gate dismisses a crossing on a node with no
+    /// seated pilot). The bridge calls this when a heat is **Staged**, alongside `prepare`/`tune`,
+    /// before it arms/runs. `seats` carries one entry per **bound** node; unbound nodes are omitted
+    /// (left unseated — RH won't record there). An empty `seats` is a no-op (nothing to seat).
+    pub fn seat(&self, seats: Vec<(u64, String)>) {
+        let mut slot = self.seat.lock().expect("seat lock poisoned");
+        *slot = Some(seats);
     }
 
     /// Arm a running heat onto this live connection: called at Grid's go (the `Armed → Running`
@@ -358,8 +392,17 @@ fn drive(
     armed: Arc<Mutex<Option<ArmedHeat>>>,
     tune: TuneSlot,
     prepare: PrepareSlot,
+    seat: SeatSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
+    // The RH heat id **seated** for the current arming (the laps-attribute fix), if seating
+    // succeeded: a fresh RH heat built at Stage with the bound pilots assigned + made current. Lives
+    // here in `drive` — **outside** the reconnect loop — so it **survives a mid-race reconnect**: the
+    // finish-time dense save reads it (in `maintain`) to reuse the seated heat (already current +
+    // savable) rather than adding a separate empty heat. A `maintain`-local would reset to `None` on
+    // every reconnect, so the finish would then wrongly add an empty heat and clobber the still-
+    // current seated one. Cleared when a new prepare begins (a fresh arming). `None` ⇒ no seated heat.
+    let seated_heat: SeatedHeatSlot = Arc::new(Mutex::new(None));
     // The adapter is created **once** and reused across every (re)connection (#105). Its dedup +
     // `last_race_status` must be continuous across a reconnect: on a mid-race drop the running heat
     // stays `staged` (it lives in the shared `armed` Mutex, not the adapter), so the staging block
@@ -412,7 +455,7 @@ fn drive(
         backoff = RECONNECT_BACKOFF_MIN;
 
         // Maintain the live link until it drops or we are cancelled.
-        let dropped = maintain(&conn, &cancel, &armed, &tune, &prepare);
+        let dropped = maintain(&conn, &cancel, &armed, &tune, &prepare, &seat, &seated_heat);
 
         // Stop any in-flight race and disconnect on the way out of this connection. `disconnect`
         // returns the adapter so the next reconnect reuses its dedup state (the #105 fix).
@@ -449,6 +492,8 @@ fn maintain(
     armed: &Mutex<Option<ArmedHeat>>,
     tune: &Mutex<Option<Vec<(u64, u16)>>>,
     prepare: &AtomicBool,
+    seat: &Mutex<Option<Vec<(u64, String)>>>,
+    seated_heat: &Mutex<Option<u64>>,
 ) -> bool {
     let mut last_activity = Instant::now();
     let mut probed_since_activity = false;
@@ -497,7 +542,32 @@ fn maintain(
             }
             conn.stop_race().ok();
             conn.discard_laps().ok();
+            // A fresh prepare begins a new arming: drop any prior seated heat so this Stage's seat
+            // (below) — or the finish-time fallback — applies cleanly.
+            *seated_heat.lock().expect("seated-heat lock poisoned") = None;
             // Drop the reset-era event churn so it isn't remapped as race passes when a heat arms.
+            let _ = conn.events();
+        }
+
+        // Apply a pending **seat** (the laps-attribute fix): the bridge handed this connection the
+        // heat's `(node_index, callsign)` bind at Stage. Build a fresh RH heat with those pilots
+        // seated and make it current, so RH **records and attributes** passes on the bound nodes —
+        // without this RH races an empty-pilot heat and its pass gate dismisses every crossing
+        // ("Pilot not defined"), the zero-laps bug. We seat AFTER the prepare reset (the reset's
+        // `stop_race`/`discard_laps` don't touch heat rows, but ordering keeps RH idle while we set
+        // the current heat). The seated heat is remembered so the finish-time dense save reuses it
+        // (it is already current + savable) rather than adding a separate empty heat. Best-effort: a
+        // seating that can't complete (a slow RH) leaves `seated_heat = None` and the flow falls back
+        // to practice mode, which still records via RH's `current_heat is HEAT_ID_NONE` gate branch.
+        let pending_seat = seat.lock().expect("seat lock poisoned").take();
+        if let Some(seats) = pending_seat {
+            match conn.seat_heat(&seats) {
+                Ok(heat_id) => *seated_heat.lock().expect("seated-heat lock poisoned") = heat_id,
+                // A failed emit on a supposedly-live socket signals a drop.
+                Err(_) => return true,
+            }
+            // Drop the seating churn (heat_data/pilot_data/heat re-emits) so none is remapped as a
+            // race pass when the heat arms.
             let _ = conn.events();
         }
 
@@ -510,13 +580,17 @@ fn maintain(
         // pass-to-pass deltas, even RH's fixed `RACE_START_DELAY_EXTRA_SECS` prestage (a constant,
         // not socket-settable) cancels out and lap times stay correct.
         //
-        // Staging deliberately runs in RotorHazard's **practice mode** (no current heat): RH only
-        // records live laps for a node with a *seated pilot* once a heat is current — a selected
-        // *empty* heat would reject every crossing (`server.py`'s pass gate:
-        // `pilot_id != PILOT_ID_NONE or current_heat is HEAT_ID_NONE`). The dense per-tick RSSI
-        // history still accumulates on the node interface during a practice race, so we select a
-        // savable heat only at heat-END (see the `finishing` block) to persist it — keeping live
-        // recording intact while still activating marshaling path-2.
+        // RH's pass gate (`server.py`'s `do_pass_record_callback`) records a crossing only when the
+        // node has a *seated pilot* on the current heat, OR no heat is current (practice mode):
+        // `(pilot_id is not None and pilot_id != PILOT_ID_NONE) or current_heat is HEAT_ID_NONE`.
+        // The Stage-time **seat** above built a fresh heat with the bound pilots seated and made it
+        // current, so each bound node records AND attributes its passes (and RH's "Racing heat …
+        // pilots: …" log names the callsigns) — the laps-attribute fix. If seating could not complete
+        // (`seated_heat` is `None`), the heat stays in practice mode (no current heat), which still
+        // records via the `current_heat is HEAT_ID_NONE` branch (just unattributed on the RH side —
+        // GridFPV remaps node→pilot itself). Either way the dense per-tick RSSI history accumulates on
+        // the node interface during the race; the finish block below persists it (marshaling path-2),
+        // reusing the seated heat when there is one rather than adding a separate empty heat.
         let mut just_staged = false;
         let do_stage = {
             let slot = armed.lock().expect("armed-heat lock poisoned");
@@ -574,13 +648,21 @@ fn maintain(
                 claim_finish(slot.as_mut(), finish_deadline.is_some())
             };
             if start_finish {
-                // Select a savable heat FIRST (while still RACING) so the DONE-triggered `save_laps`
-                // has a current heat to persist into. Request add_heat + the heat list, wait for the
-                // `heat_data` response, then select synchronously on this thread (keeping the
-                // heat-setup emits ordered and off the socket callback — an emit-per-`heat_data`
-                // there floods + drops the link). Bounded so a quirky/older RH that never answers
-                // doesn't stall the finish; the dense pull just no-ops then (the coarse trace stands).
-                if conn.ensure_savable_heat().is_ok() {
+                // The Stage-time seat already made a savable heat current (with the bound pilots
+                // seated), so the DONE-triggered `save_laps` has a current heat to persist into — no
+                // extra heat needed. Only when there is NO seated heat (seating couldn't complete, so
+                // the race ran in practice mode) do we add+select a savable heat now, FIRST (while
+                // still RACING), so the dense history still persists: request add_heat + the heat
+                // list, wait for the `heat_data` response, then select synchronously on this thread
+                // (keeping the heat-setup emits ordered and off the socket callback — an
+                // emit-per-`heat_data` there floods + drops the link). Bounded so a quirky/older RH
+                // that never answers doesn't stall the finish; the dense pull just no-ops then (the
+                // coarse trace stands).
+                let already_seated = seated_heat
+                    .lock()
+                    .expect("seated-heat lock poisoned")
+                    .is_some();
+                if !already_seated && conn.ensure_savable_heat().is_ok() {
                     let select_deadline = Instant::now() + ENSURE_HEAT_TIMEOUT;
                     loop {
                         // Keep draining so the `heat_data` handler runs; route any real passes that

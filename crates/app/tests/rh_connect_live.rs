@@ -17,12 +17,15 @@
 //! 5. Then drives Practice's heat through the real lifecycle to `Running`, and asserts **passes
 //!    flow** into Practice's log over that already-live connection (real RH crossings, attributed to
 //!    the heat's lineup). This also exercises the **Grid-owns-all-timing** flow: at **Staged** the
-//!    bridge prepares the RH connection (zero RH's staging hold/tones + reset to READY), and at
-//!    **Running** (Grid's go) the driver emits a single `stage_race` so RH starts recording
-//!    immediately — no RH-side staging sequence competing with Grid's start procedure. Because the
-//!    reset now happens at Staged (seconds before the start emit, never the same gevent tick), the
-//!    old reset-vs-staging race is gone and the `STAGE_RESET_SETTLE` band-aid is retired; this
-//!    assertion (passes land, the heat is not zero-laps) is the guard.
+//!    bridge prepares the RH connection (zero RH's staging hold/tones + reset to READY) **and seats
+//!    the heat's bound pilots onto their RH nodes** (the laps-attribute fix), and at **Running**
+//!    (Grid's go) the driver emits a single `stage_race` so RH starts recording immediately — no
+//!    RH-side staging sequence competing with Grid's start procedure. Because the reset now happens
+//!    at Staged (seconds before the start emit, never the same gevent tick), the old reset-vs-staging
+//!    race is gone and the `STAGE_RESET_SETTLE` band-aid is retired; this assertion (passes land, the
+//!    heat is not zero-laps) is the guard. The seating is asserted directly: RH's own
+//!    "Racing heat … pilots: Ace" log lists the bound callsign (vs the empty pilots list of the
+//!    unseated bug), and RH dismisses **no** crossing for an unseated node.
 //! 6. Finishes the heat and asserts the connection **stays `Connected`** — the heat is disarmed but
 //!    the persistent connection is NOT torn down (#105), so status keeps reflecting the live link.
 //! 7. **Stops the RH container** out from under the live connection and asserts the Director
@@ -245,6 +248,44 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
     );
     let pass_count = count_passes(&events);
 
+    // === The laps-attribute fix: the heat's bound pilot is SEATED on its RH node at Stage, so RH
+    // records AND attributes passes (its pass gate dismisses a crossing on a node with no seated
+    // pilot — the zero-laps bug). Prove the seat took on the RH side two ways:
+    //
+    //  1. RH's own staging log names the seated callsign — "Racing heat '…' round N, pilots: Ace" —
+    //     rather than the empty "pilots:" that the unseated (buggy) path logged. This is the direct
+    //     before/after: empty pilots list → the bound callsign listed.
+    let pilots_line_lists_the_seated_callsign = {
+        let out = std::process::Command::new("docker")
+            .args(["logs", rh.name()])
+            .output()
+            .expect("docker logs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        text.lines()
+            .filter(|l| l.contains("Racing heat") && l.contains("pilots:"))
+            .any(|l| l.contains("Ace"))
+    };
+    assert!(
+        pilots_line_lists_the_seated_callsign,
+        "RotorHazard's 'Racing heat … pilots:' log must list the heat's bound pilot ('Ace') — the \
+         laps-attribute fix seats it on the RH node at Stage; an empty pilots list is the unseated \
+         bug that records zero laps"
+    );
+    //  2. RH actually RECORDED passes (logged a `Pass record`, not the `Pass record dismissed: …
+    //     Pilot not defined` the unseated gate emits). The `got_passes` assertion above already
+    //     proved the laps flowed into the event log (attributed to node-0 → lineup[0]); this
+    //     re-affirms RH itself recorded them rather than dismissing every crossing.
+    assert_eq!(
+        count_log_lines(&rh, "Pilot not defined"),
+        0,
+        "RotorHazard must not DISMISS passes for an unseated node ('Pilot not defined') — the bound \
+         pilot is seated, so every crossing on its node records"
+    );
+
     // Let the heat run on a little so the COARSE streamed trace accumulates a representative run of
     // samples (one `SignalChunk` per `node_data` heartbeat) — a longer, more realistic baseline for
     // the dense path to beat than a single sample.
@@ -286,8 +327,8 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
     // the driver stop the RH race (-> DONE) and pull RotorHazard's DENSE per-tick history into the
     // finishing heat's log. Assert a `SignalHistory` lands and the folded trace now carries strictly
     // MORE samples than the coarse stream — the full-fidelity upgrade, activated by the normal
-    // staging/finish loop (the bridge selected a savable heat via `ensure_savable_heat`), not a
-    // bespoke marshal-data poke. ===
+    // staging/finish loop. The savable heat is the one **seated at Stage** (already current), which
+    // the finish reuses rather than adding a separate empty heat — not a bespoke marshal-data poke. ===
     let got_dense = wait_for(Duration::from_secs(20), || {
         read_all(&state)
             .iter()

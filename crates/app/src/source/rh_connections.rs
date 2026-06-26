@@ -101,6 +101,22 @@ impl RhConnections {
         }
     }
 
+    /// **Seat** `(event, timer)`'s connection with the heat's `(node_index, callsign)` bind (the
+    /// laps-attribute fix), if a live connection exists: the driver builds a fresh RH heat with those
+    /// pilots seated onto their nodes and makes it current, so RH **records and attributes** passes on
+    /// the bound nodes (RH dismisses a crossing on a node with no seated pilot). The bridge calls this
+    /// when a heat is **Staged**, alongside `prepare`/`tune`. Returns whether a live connection was
+    /// found to seat; a no-op (`false`) for a non-active event or a not-yet-connected timer.
+    pub fn seat(&self, event: &EventId, timer: &TimerId, seats: Vec<(u64, String)>) -> bool {
+        let map = self.inner.lock().expect("rh-connections lock poisoned");
+        if let Some(conn) = map.get(&(event.clone(), timer.clone())) {
+            conn.seat(seats);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Disarm the current heat on `(event, timer)`'s connection (the heat left `Running`): the race
     /// is stopped/cleared but the **connection stays alive**. A no-op if no such connection.
     pub fn disarm(&self, event: &EventId, timer: &TimerId) {

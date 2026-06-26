@@ -158,6 +158,12 @@ pub enum Raw {
     /// dense history — `on_save_laps`/`emit_race_marshal_data` no-op while `current_heat` is None in
     /// the default practice mode). Exposed via [`take_heat_ids`](RotorHazardAdapter::take_heat_ids).
     HeatData(RawHeatData),
+    /// A `pilot_data` response (`RHUI.emit_pilot_data`), the configured pilots with their ids. Emits
+    /// no canonical events; the adapter records the ids so the transport can learn the id of a pilot
+    /// it just created (`add_pilot`) — the newest (highest) id — to then assign it onto a heat seat
+    /// when **seating** a heat's bound pilots before racing (the laps-attribute fix). Exposed via
+    /// [`take_pilot_ids`](RotorHazardAdapter::take_pilot_ids).
+    PilotData(RawPilotData),
 }
 
 /// A RotorHazard `race_status` message (see [`Raw::RaceStatus`]).
@@ -397,13 +403,15 @@ pub struct RawRaceDetails {
 
 /// A RotorHazard `heat_data` response (`RHUI.emit_heat_data`): the configured heats.
 ///
-/// Shape: `{ "heats": [ { "id": <heat_id>, … }, … ] }`. The transport pulls this (via
-/// `load_data { heat_data }`) so it can select a **savable** current heat before staging — RH only
-/// persists a run's dense history for a saved heat (`current_heat != HEAT_ID_NONE`). The adapter
-/// records the ids; the rest of each heat object is ignored here.
+/// Shape: `{ "heats": [ { "id": <heat_id>, "slots": [ { "id", "node_index", … }, … ], … }, … ] }`.
+/// The transport pulls this (via `load_data { heat_data }`) so it can select a **savable** current
+/// heat before staging — RH only persists a run's dense history for a saved heat
+/// (`current_heat != HEAT_ID_NONE`) — and, when **seating** a heat's bound pilots, learn each
+/// node's **slot id** (the `HeatNode` primary key `alter_heat` targets to assign a pilot to a node).
+/// The adapter records each heat's id and its node→slot map; the rest is ignored here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawHeatData {
-    /// The configured heats; only each heat's `id` is read.
+    /// The configured heats; each heat's `id` and per-node `slots` are read.
     #[serde(default)]
     pub heats: Vec<RawHeat>,
 }
@@ -413,6 +421,44 @@ pub struct RawHeatData {
 pub struct RawHeat {
     /// The heat's id, used to select it as the current (savable) heat.
     pub id: i64,
+    /// The heat's seats — one [`RawHeatSlot`] per node — used to assign a pilot to a node
+    /// (`alter_heat { heat, slot_id, pilot }`) when seating the heat's bound pilots before racing.
+    #[serde(default)]
+    pub slots: Vec<RawHeatSlot>,
+}
+
+/// One seat (RotorHazard `HeatNode`) of a heat in a `heat_data` response (see [`RawHeat`]).
+///
+/// `alter_heat` assigns a pilot to a heat by **slot id** (the `HeatNode` primary key), not by node
+/// index — so seating the heat's bound pilots reads each seat's `(node_index, id)` here and emits
+/// `alter_heat { heat, slot_id: id, pilot }` for the seat at the bound node index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawHeatSlot {
+    /// The slot's id (`HeatNode` primary key) — the `slot_id` `alter_heat` targets.
+    pub id: i64,
+    /// The node index this slot seats a pilot on (0-based). `None` for an unprogrammed slot.
+    #[serde(default)]
+    pub node_index: Option<usize>,
+}
+
+/// A RotorHazard `pilot_data` response (`RHUI.emit_pilot_data`): the configured pilots.
+///
+/// Shape: `{ "pilots": [ { "pilot_id": <id>, … }, … ] }`. The transport pulls this after creating a
+/// pilot (`add_pilot`) so it can learn the new pilot's id — the **highest** id, the one just added —
+/// to assign onto a heat seat when seating a heat's bound pilots. The rest of each pilot object is
+/// ignored here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawPilotData {
+    /// The configured pilots; only each pilot's `pilot_id` is read.
+    #[serde(default)]
+    pub pilots: Vec<RawPilotEntry>,
+}
+
+/// One pilot in a `pilot_data` response (see [`RawPilotData`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawPilotEntry {
+    /// The pilot's id (`Pilot` primary key), used to assign the pilot onto a heat seat.
+    pub pilot_id: i64,
 }
 
 /// Deserialize a history array that may arrive either as a JSON array (`[1, 2, 3]`) or as a
@@ -512,6 +558,16 @@ pub struct RotorHazardAdapter {
     /// heat before staging (RH only persists a run's dense history for a saved heat). Empty until a
     /// `heat_data` is folded.
     pending_heat_ids: Vec<i64>,
+    /// The per-node **slot ids** of each configured heat, learned from the most recent `heat_data`,
+    /// drained by the transport via [`take_heat_slots`](Self::take_heat_slots). Seating a heat's
+    /// bound pilots needs each node's slot id (the `HeatNode` PK `alter_heat` targets). Keyed by heat
+    /// id → `(node_index → slot_id)`. Empty until a `heat_data` is folded.
+    pending_heat_slots: std::collections::HashMap<i64, std::collections::HashMap<usize, i64>>,
+    /// Configured RotorHazard pilot ids learned from the most recent `pilot_data`, drained by the
+    /// transport via [`take_pilot_ids`](Self::take_pilot_ids) so it can learn the id of a pilot it
+    /// just created (`add_pilot` — the highest id) to assign onto a heat seat when seating. Empty
+    /// until a `pilot_data` is folded.
+    pending_pilot_ids: Vec<i64>,
 }
 
 /// A pending per-pilotrace marshal pull the transport issues (`get_pilotrace { pilotrace_id }`),
@@ -553,6 +609,8 @@ impl RotorHazardAdapter {
             pending_pilotrace_requests: Vec::new(),
             pilotrace_start_time: std::collections::HashMap::new(),
             pending_heat_ids: Vec::new(),
+            pending_heat_slots: std::collections::HashMap::new(),
+            pending_pilot_ids: Vec::new(),
         }
     }
 
@@ -563,6 +621,24 @@ impl RotorHazardAdapter {
     /// history. Empty when no `heat_data` has been folded since the last drain.
     pub fn take_heat_ids(&mut self) -> Vec<i64> {
         std::mem::take(&mut self.pending_heat_ids)
+    }
+
+    /// Take (and clear) the per-node slot ids of each configured heat learned from the most recent
+    /// `heat_data`. The transport calls this when **seating** a heat's bound pilots: it picks the
+    /// freshest heat (the one it just `add_heat`ed) and reads each node's slot id to assign a pilot
+    /// (`alter_heat { heat, slot_id, pilot }`). Empty when no `heat_data` has been folded.
+    pub fn take_heat_slots(
+        &mut self,
+    ) -> std::collections::HashMap<i64, std::collections::HashMap<usize, i64>> {
+        std::mem::take(&mut self.pending_heat_slots)
+    }
+
+    /// Take (and clear) the configured pilot ids learned from the most recent `pilot_data`. The
+    /// transport calls this after creating a pilot (`add_pilot`) when seating a heat's bound pilots:
+    /// the **highest** id is the pilot just added, to be assigned onto a heat seat. Empty when no
+    /// `pilot_data` has been folded.
+    pub fn take_pilot_ids(&mut self) -> Vec<i64> {
+        std::mem::take(&mut self.pending_pilot_ids)
     }
 
     /// Take (and clear) the per-pilotrace marshal pulls discovered from the most recent `race_list`.
@@ -910,7 +986,29 @@ impl RotorHazardAdapter {
     /// [`pending_heat_ids`](Self::pending_heat_ids); the transport picks one to make current so the
     /// run is savable (the dense-history precondition). A re-sent `heat_data` rebuilds the list.
     fn translate_heat_data(&mut self, data: RawHeatData) {
-        self.pending_heat_ids = data.heats.into_iter().map(|h| h.id).collect();
+        self.pending_heat_ids = data.heats.iter().map(|h| h.id).collect();
+        self.pending_heat_slots = data
+            .heats
+            .into_iter()
+            .map(|h| {
+                let node_to_slot = h
+                    .slots
+                    .into_iter()
+                    .filter_map(|s| s.node_index.map(|n| (n, s.id)))
+                    .collect();
+                (h.id, node_to_slot)
+            })
+            .collect();
+    }
+
+    /// Record the configured pilot ids from a `pilot_data` response for the transport to drain.
+    ///
+    /// Emits no canonical events — `pilot_data` is a transport routing payload. The ids queue in
+    /// [`pending_pilot_ids`](Self::pending_pilot_ids); the transport reads the highest (the pilot it
+    /// just `add_pilot`ed) to assign onto a heat seat when seating. A re-sent `pilot_data` rebuilds
+    /// the list.
+    fn translate_pilot_data(&mut self, data: RawPilotData) {
+        self.pending_pilot_ids = data.pilots.into_iter().map(|p| p.pilot_id).collect();
     }
 
     /// Emit per-node [`Event::SignalThresholds`] from an `enter_and_exit_at_levels` message —
@@ -975,6 +1073,7 @@ impl Adapter for RotorHazardAdapter {
             Raw::RaceList(list) => self.translate_race_list(list),
             Raw::RaceDetails(details) => self.translate_race_details(details, &mut out),
             Raw::HeatData(data) => self.translate_heat_data(data),
+            Raw::PilotData(data) => self.translate_pilot_data(data),
         }
         out
     }
@@ -1417,7 +1516,20 @@ mod tests {
         // (the marshaling path-2 precondition).
         let mut adapter = RotorHazardAdapter::new();
         let events = adapter.translate(Raw::HeatData(RawHeatData {
-            heats: vec![RawHeat { id: 1 }, RawHeat { id: 4 }, RawHeat { id: 2 }],
+            heats: vec![
+                RawHeat {
+                    id: 1,
+                    slots: vec![],
+                },
+                RawHeat {
+                    id: 4,
+                    slots: vec![],
+                },
+                RawHeat {
+                    id: 2,
+                    slots: vec![],
+                },
+            ],
         }));
         assert!(events.is_empty(), "heat_data emits no canonical events");
         // The ids are exposed for the transport to drain, then cleared (one-shot per send).
@@ -1425,6 +1537,65 @@ mod tests {
         assert!(
             adapter.take_heat_ids().is_empty(),
             "draining clears the heat ids"
+        );
+    }
+
+    #[test]
+    fn heat_data_records_per_node_slot_ids_for_seating() {
+        // Seating a heat's bound pilots needs each node's slot id (the `HeatNode` PK `alter_heat`
+        // targets). The adapter records heat id → (node_index → slot_id) from `heat_data` for the
+        // transport to drain when it seats.
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::HeatData(RawHeatData {
+            heats: vec![RawHeat {
+                id: 7,
+                slots: vec![
+                    RawHeatSlot {
+                        id: 21,
+                        node_index: Some(0),
+                    },
+                    RawHeatSlot {
+                        id: 22,
+                        node_index: Some(1),
+                    },
+                    // An unprogrammed slot (no node) is ignored.
+                    RawHeatSlot {
+                        id: 23,
+                        node_index: None,
+                    },
+                ],
+            }],
+        }));
+        let slots = adapter.take_heat_slots();
+        let heat = slots.get(&7).expect("heat 7 slots recorded");
+        assert_eq!(heat.get(&0), Some(&21), "node-0 maps to slot 21");
+        assert_eq!(heat.get(&1), Some(&22), "node-1 maps to slot 22");
+        assert_eq!(heat.len(), 2, "the unprogrammed (no-node) slot is dropped");
+        assert!(
+            adapter.take_heat_slots().is_empty(),
+            "draining clears the heat slots"
+        );
+    }
+
+    #[test]
+    fn pilot_data_records_ids_for_seating_and_emits_no_events() {
+        // `pilot_data` is a transport routing payload: it mints no canonical events but records the
+        // configured pilot ids so the transport can learn the id of a pilot it just `add_pilot`ed
+        // (the highest) to assign onto a heat seat when seating.
+        let mut adapter = RotorHazardAdapter::new();
+        let events = adapter.translate(Raw::PilotData(RawPilotData {
+            pilots: vec![
+                RawPilotEntry { pilot_id: 1 },
+                RawPilotEntry { pilot_id: 5 },
+                RawPilotEntry { pilot_id: 3 },
+            ],
+        }));
+        assert!(events.is_empty(), "pilot_data emits no canonical events");
+        // The transport reads the highest (the just-added pilot).
+        assert_eq!(adapter.take_pilot_ids().into_iter().max(), Some(5));
+        assert!(
+            adapter.take_pilot_ids().is_empty(),
+            "draining clears the pilot ids"
         );
     }
 
