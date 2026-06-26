@@ -242,21 +242,26 @@ flowchart LR
     </ul>
     <p><strong>Done when:</strong> roster import + results push work against a chapter, and the open-data API + widgets serve.</p>
 
-    <h3>Post-1.0 — GridFPV native timer-server (future)</h3>
-    <p><strong>Goal:</strong> own the server half of the timing stack. (<a href="timer-adapters.html">Timer Adapters</a>, <a href="decisions.html">D15</a>)</p>
+    <h3>RH integration — a required GridFPV RotorHazard plugin</h3>
+    <p><strong>Goal:</strong> make the RotorHazard integration plugin-based, for native control and live dense signal. (<a href="timer-adapters.html">Timer Adapters</a>, <a href="decisions.html">D16</a>)</p>
     <ul>
-      <li>A <strong>Tier-2</strong> remote-controlled <strong>GridFPV timer-server</strong> on the
-      same Pi&nbsp;+&nbsp;RX5808 hardware that <strong>reuses the RH node firmware</strong>
-      (RX5808 driver + node-level detection) and <strong>strips the RH RMS</strong> — a software swap,
-      not new hardware. Gives the <strong>dense signal</strong> natively (solves the marshaling
-      fidelity gap) and enables full re-detection marshaling; the mock-timer protocol is its
-      wire-protocol first draft.</li>
+      <li>A <strong>required GridFPV RotorHazard plugin</strong> running <em>inside</em> the RH server
+      with <strong>RHAPI access</strong> (node manager / race events / config). It supersedes the
+      socket-API workarounds: <strong>live dense RSSI</strong> (no save-then-pull), <strong>clean
+      start/stop</strong> bypassing the RMS staging, <strong>per-node passes</strong> without the
+      seating dance, and <strong>threshold/calibration access</strong> — which <strong>unblocks the
+      draggable-threshold "recalculate" re-detection marshaling feature</strong> (#3). It
+      <strong>reuses RH's entire proven stack</strong> (node firmware + RMS + the detection moat):
+      no RMS replacement, no firmware re-hosting.</li>
     </ul>
     <p>
-      <strong>Tier 1 stays primary throughout:</strong> the RH adapter remains the non-negotiable
-      default — GridFPV is never gated on a GridFPV timer. Sequenced <strong>after the core RMS +
-      marshaling are proven</strong>; <strong>post-v1.0.0, not a near-term dependency</strong>
-      (<a href="decisions.html">D15</a>, #238).
+      This <strong>replaces the dropped "own-the-stack" native timer-server</strong> (D15,
+      superseded): the plugin delivers the same payoff far more cheaply, so the RH integration is no
+      longer a post-1.0 firmware project — it is the <strong>integration path</strong>.
+      <strong>"Required" is a guided one-step install</strong> (Grid detects a missing plugin and
+      offers to install it), not a hard-fail, keeping the "try it fast" feel. The plugin becomes the
+      <strong>primary RH integration</strong>; the full plugin design doc + sliced build plan are
+      forthcoming (<a href="decisions.html">D16</a>).
     </p>
 
     <h2>3. Cross-cutting workstreams</h2>

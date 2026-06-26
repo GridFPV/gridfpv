@@ -392,7 +392,19 @@
       first-class finals format.)</dd>
     </dl>
 
-    <h2>D15 · GridFPV native timer-server (post-v1.0.0): reuse RH firmware, strip the RMS</h2>
+    <h2 id="d15">D15 · GridFPV native timer-server (post-v1.0.0): reuse RH firmware, strip the RMS <span class="tag optional">superseded</span></h2>
+    <div class="callout">
+      <p>
+        <strong>Superseded by <a href="#d16">D16</a> (2026-06-26).</strong> The own-the-stack
+        timer-server is <strong>dropped</strong> in favor of a <strong>required GridFPV RotorHazard
+        plugin</strong>. The plugin delivers what owning the server was <em>for</em> — live dense
+        RSSI, clean start/stop, per-node passes, and threshold/calibration access (which unblocks
+        re-detection marshaling) — far more cheaply, by running <em>inside</em> the RH server with
+        RHAPI access and reusing RH's entire proven stack (no RMS replacement, no firmware
+        re-hosting). The text below is retained as history. (Note: D16 also revises D15's premise
+        that GridFPV must <em>never</em> gate on a GridFPV timer — see D16's rationale.)
+      </p>
+    </div>
     <dl class="entities">
       <dt>Context</dt>
       <dd>GridFPV depends on RotorHazard as both the <strong>timer</strong> and the
@@ -419,6 +431,51 @@
       first draft</strong> of this server's wire protocol. <strong>Sequence after the core RMS +
       marshaling are proven; this is post-v1.0.0, not a near-term dependency</strong> — Tier 1 carries
       us until then. (Tracking: <strong>#238</strong>.)</dd>
+    </dl>
+
+    <h2 id="d16">D16 · Require a GridFPV RotorHazard plugin; drop own-the-stack (supersedes D15)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>D15 committed to owning the server half of the stack — a post-v1.0.0 native timer-server
+      reusing the RH node firmware and stripping the RH RMS — to get the <strong>dense per-tick
+      signal</strong> natively and unblock full re-detection marshaling. That is real engineering:
+      a firmware re-host, an RMS replacement, and the standing risk of having to prove our detection
+      is as good as RH's. Meanwhile the live integration kept accreting <strong>socket-API scar
+      tissue</strong>: the save-then-pull dense-signal path, the <code>alter_race_format</code>
+      staging-zero hack, the <code>add_pilot</code>/<code>alter_heat</code> seating dance, and an
+      un-zeroable ~0.9&nbsp;s prestage — all symptoms of the RH <em>socket</em> protocol being too
+      limiting, not of RH itself.</dd>
+      <dt>Decision</dt>
+      <dd><strong>Require a GridFPV RotorHazard plugin; drop the own-the-stack timer-server.</strong>
+      The plugin runs <em>inside</em> the RH server with <strong>RHAPI access</strong> to the node
+      manager, race events, and config, and becomes the <strong>primary RH integration</strong>. It
+      delivers exactly what owning the server was <em>for</em> — <strong>live dense RSSI</strong> (no
+      save-then-pull), <strong>clean start/stop</strong> bypassing the RMS staging,
+      <strong>per-node passes</strong> without the seating dance, and
+      <strong>threshold/calibration access</strong> (which unblocks the draggable-threshold
+      "recalculate" re-detection marshaling feature, #3) — while <strong>reusing RH's entire proven
+      stack</strong> (node firmware + RMS + the detection moat): no RMS replacement, no firmware
+      re-hosting, no "is our firmware as good as theirs" risk. <strong>"Required" means a guided
+      install</strong> — Grid detects a missing plugin and offers a one-step install — <em>not</em> a
+      cryptic hard-fail, so the "try it fast" feel is preserved. The plugin makes the socket
+      workarounds native, so that workaround code (the dense-signal save-then-pull, the
+      <code>alter_race_format</code> hack, the seating dance, the prestage fight) can be
+      <strong>retired</strong>. This <strong>revises D15's premise</strong> that GridFPV must never
+      gate on a GridFPV timer (see rationale). The full plugin <em>design doc</em> + sliced build plan
+      are forthcoming separate work; this entry records the <em>direction</em>, not the full design.</dd>
+      <dt>Rationale</dt>
+      <dd><strong>Friction is a non-issue.</strong> Every other serious RMS — FPVTrackside, LiveTime —
+      already requires its own timing plugin/install, so requiring ours is the <em>normal shape</em>
+      of a serious RMS, not a barrier. That fact revises the prior "zero-friction stock RH / never
+      gate on a GridFPV timer" principle (D15): a guided one-step install is not friction worth
+      designing the whole stack around. <strong>The plugin is far cheaper than owning the stack</strong>
+      and gets the same payoff: it inherits RH's detection moat instead of re-earning it, and its
+      RHAPI access yields the dense signal and the clean control surface the socket API can't.
+      <strong>The socket API is the actual problem</strong> — proven by the scar tissue above — and the
+      plugin makes those paths native rather than worked-around. Net: we keep RH's proven hardware and
+      detection, gain the fidelity and control we wanted, retire the workaround code, and unblock
+      re-detection marshaling — without a firmware project. The mock-timer protocol remains a useful
+      reference, but the RH integration path is now <strong>the plugin</strong>.</dd>
     </dl>
 
     <footer class="doc-footer">
