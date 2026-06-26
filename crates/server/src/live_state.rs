@@ -218,9 +218,24 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
     let active_pilots = lineup_of(events, &current_heat);
 
     // The lap projection is keyed on (adapter, competitor); the lineup carries only the
-    // competitor handle. Fold the whole log once (marshaling-aware) and index laps by
-    // competitor ref, summing across adapters for a competitor seen on more than one.
-    let laps = lap_list_marshaled(events.iter().enumerate().map(|(i, e)| (i as u64, e)));
+    // competitor handle. Fold the marshaling-aware lap projection and index laps by competitor
+    // ref, summing across adapters for a competitor seen on more than one.
+    //
+    // **Scope to the current run.** Abort/Restart send the heat back to `Scheduled` but leave the
+    // aborted run's `Pass`es in the log; counting the whole log would keep showing (and a re-run
+    // would double-count) those stale laps. So we window the fold to events at/after the heat's
+    // latest reset boundary — the live count is *only* this run's passes (zero right after a reset,
+    // counted from zero on the re-run). The global offset each event is fed under is preserved so a
+    // marshaling adjudication still addresses the right pass. A heat that never reset has no
+    // boundary, so everything counts (a normally-finalized heat is unaffected).
+    let run_start = current_run_start(events, &current_heat);
+    let laps = lap_list_marshaled(
+        events
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= run_start)
+            .map(|(i, e)| (i as u64, e)),
+    );
     let mut by_ref: BTreeMap<&CompetitorRef, (u32, Option<i64>)> = BTreeMap::new();
     for cl in &laps.competitors {
         let CompetitorKey { competitor, .. } = &cl.competitor;
@@ -447,6 +462,36 @@ fn current_heat(events: &[Event]) -> Option<HeatId> {
         }
     }
     active.or(first_scheduled)
+}
+
+/// The log index where the current heat's **current run** begins: one past the heat's latest
+/// **reset boundary** (its most recent `Aborted` or `Restarted` `HeatStateChanged`), or `0` if the
+/// heat was never reset.
+///
+/// A reset (`Aborted`/`Restarted`) sends the heat back to `Scheduled` but leaves the abandoned
+/// run's `Pass`es in the log. The *current run* is everything logged after that boundary, so the
+/// live lap count / standings / heat sheet must fold only passes at indices `>= current_run_start`:
+/// right after a reset (no new run yet) that window holds no passes ⇒ zero laps; a fresh re-run's
+/// passes are counted from zero (the abandoned run's passes are excluded). A heat that finalizes
+/// normally was never reset, so the boundary is `0` and the whole log counts — leaving finalized
+/// results unaffected.
+///
+/// Pure and order-preserving like the rest of the projection: it is the *latest* such transition
+/// for `heat`, so a heat aborted twice scopes to the most recent abort.
+fn current_run_start(events: &[Event], heat: &HeatId) -> usize {
+    let mut start = 0;
+    for (i, event) in events.iter().enumerate() {
+        if let Event::HeatStateChanged {
+            heat: h,
+            transition: HeatTransition::Aborted | HeatTransition::Restarted,
+        } = event
+        {
+            if h == heat {
+                start = i + 1;
+            }
+        }
+    }
+    start
 }
 
 /// The lineup of a heat: the competitors from its most recent `HeatScheduled`.
@@ -984,6 +1029,196 @@ mod tests {
             changed("q-1", HeatTransition::Running),
             pass("A", 1_000_000, 1),
             pass("A", 4_000_000, 2),
+        ];
+        assert_eq!(live_state(&events), live_state(&events));
+    }
+
+    #[test]
+    fn abort_resets_live_lap_count_to_zero() {
+        // A heat runs and banks laps, then is aborted (→ Scheduled, no new run yet). The aborted
+        // run's passes stay in the log, but the live count must be 0 for every pilot — `progress`
+        // (Leaderboard / heat sheet) and `running_order` reset together.
+        let mut events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 1_000_000, 1),
+            pass("A", 4_000_000, 2), // A: 1 lap before the abort
+            pass("B", 1_500_000, 1),
+        ];
+        // Before the abort, A has a lap.
+        let pre = live_state(&events);
+        assert_eq!(
+            pre.progress
+                .iter()
+                .find(|p| p.competitor == CompetitorRef("A".into()))
+                .unwrap()
+                .laps_completed,
+            1
+        );
+
+        // Abort: heat back to Scheduled, the prior run's passes linger in the log.
+        events.push(changed("q-1", HeatTransition::Aborted));
+        let s = live_state(&events);
+        assert_eq!(s.phase, HeatPhase::Scheduled);
+        assert!(
+            s.progress.iter().all(|p| p.laps_completed == 0),
+            "every pilot's live lap count resets to 0 after Abort"
+        );
+        assert!(
+            s.progress.iter().all(|p| p.last_lap_micros.is_none()),
+            "the stale last-lap also clears after Abort"
+        );
+    }
+
+    #[test]
+    fn rerun_after_abort_counts_from_zero_not_old_plus_new() {
+        // After an abort, a fresh re-run (re-Stage → Start → new passes) counts ONLY the new run's
+        // laps — the aborted run's passes are excluded, so it is N-from-zero, never old+new.
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            // The aborted run: A banks 2 laps (3 passes), B banks 1 lap.
+            pass("A", 1_000_000, 1),
+            pass("A", 4_000_000, 2),
+            pass("A", 7_000_000, 3),
+            pass("B", 1_500_000, 1),
+            pass("B", 4_500_000, 2),
+            changed("q-1", HeatTransition::Aborted),
+            // The fresh re-run: A banks 1 lap (2 passes), B none.
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 20_000_000, 4),
+            pass("A", 22_500_000, 5), // new lap = 2.5s
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.phase, HeatPhase::Running);
+        let a = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .unwrap();
+        // 1 (this run), NOT 2 (aborted run) + 1 = 3.
+        assert_eq!(a.laps_completed, 1);
+        assert_eq!(a.last_lap_micros, Some(2_500_000));
+        let b = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("B".into()))
+            .unwrap();
+        assert_eq!(b.laps_completed, 0, "B's aborted-run lap is excluded");
+        // Running order ranks by the current run: A (1 lap) leads B (0).
+        assert_eq!(
+            s.running_order,
+            vec![CompetitorRef("A".into()), CompetitorRef("B".into())]
+        );
+    }
+
+    #[test]
+    fn restart_resets_live_lap_count_to_zero_and_reruns_from_zero() {
+        // Same as Abort but via Restart (a committed heat restarted → Scheduled). After Restart the
+        // count is 0; the re-run counts from zero.
+        let mut events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 1_000_000, 1),
+            pass("A", 4_000_000, 2), // A: 1 lap
+            changed("q-1", HeatTransition::Restarted),
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.phase, HeatPhase::Scheduled);
+        assert!(
+            s.progress.iter().all(|p| p.laps_completed == 0),
+            "every pilot's live lap count resets to 0 after Restart"
+        );
+
+        // Re-run: A banks 2 laps from zero.
+        events.extend([
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 30_000_000, 3),
+            pass("A", 33_000_000, 4),
+            pass("A", 36_000_000, 5),
+        ]);
+        let s = live_state(&events);
+        let a = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .unwrap();
+        assert_eq!(a.laps_completed, 2, "counted from zero, not 1 + 2");
+    }
+
+    #[test]
+    fn normal_finalize_without_a_reset_counts_the_whole_heat() {
+        // A heat that finalizes normally was never reset → the boundary is the start of the log, so
+        // every lap counts (finalized results are unaffected by the run-scoping).
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 1_000_000, 1),
+            pass("A", 4_000_000, 2),
+            pass("A", 7_000_000, 3), // A: 2 laps
+            changed("q-1", HeatTransition::Finished),
+            changed("q-1", HeatTransition::Finalized),
+        ];
+        assert_eq!(current_run_start(&events, &heat()), 0);
+        let s = live_state(&events);
+        assert_eq!(s.phase, HeatPhase::Final);
+        let a = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .unwrap();
+        assert_eq!(
+            a.laps_completed, 2,
+            "a normally-finalized heat counts every lap"
+        );
+    }
+
+    #[test]
+    fn current_run_start_finds_the_latest_reset_boundary() {
+        // Two aborts: the boundary is one past the *latest* one. A reset on a *different* heat does
+        // not move this heat's boundary.
+        let events = vec![
+            scheduled("q-1", &["A"]),                  // 0
+            changed("q-1", HeatTransition::Running),   // 1
+            pass("A", 1_000_000, 1),                   // 2
+            changed("q-1", HeatTransition::Aborted),   // 3
+            scheduled("q-2", &["B"]),                  // 4
+            changed("q-2", HeatTransition::Aborted),   // 5 — a DIFFERENT heat's reset
+            changed("q-1", HeatTransition::Running),   // 6
+            pass("A", 2_000_000, 2),                   // 7
+            changed("q-1", HeatTransition::Restarted), // 8 — q-1's latest reset
+            changed("q-1", HeatTransition::Running),   // 9
+        ];
+        assert_eq!(current_run_start(&events, &HeatId("q-1".into())), 9);
+        // A never-reset heat has boundary 0.
+        assert_eq!(
+            current_run_start(&[scheduled("q-9", &["Z"])], &HeatId("q-9".into())),
+            0
+        );
+    }
+
+    #[test]
+    fn run_scoped_lap_count_is_deterministic_on_replay() {
+        let events = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 1_000_000, 1),
+            pass("A", 4_000_000, 2),
+            changed("q-1", HeatTransition::Aborted),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 9_000_000, 3),
         ];
         assert_eq!(live_state(&events), live_state(&events));
     }
