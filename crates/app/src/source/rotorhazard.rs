@@ -55,6 +55,20 @@ const DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 /// on the wait (the drain loop still runs regardless — this only bounds the staging settle).
 const STAGE_SETTLE: Duration = Duration::from_secs(15);
 
+/// How long the driver keeps routing drained events into a **finishing** heat's sink after it
+/// stopped the RH race (marshaling path-2). Stopping the race drives RH to `DONE`, which
+/// auto-triggers the dense `current_marshal_data` / `save_laps` → `race_list` → `get_pilotrace`
+/// marshal pull; those round-trips take a moment on RH's gevent loop, so we keep the heat's sink
+/// armed this long to capture the resulting [`Event::SignalHistory`] into the right heat's log
+/// before clearing the slot. Generous enough for the per-pilotrace pull chain, still brief.
+const FINISH_DRAIN_SETTLE: Duration = Duration::from_secs(3);
+
+/// How long the driver waits, at heat-end, for RotorHazard's `heat_data` response (after
+/// `ensure_savable_heat`'s `add_heat`/`load_data`) before giving up on selecting a savable heat and
+/// stopping the race anyway. Bounds the case where an older/quirky RH never answers `heat_data` —
+/// the finish proceeds and the dense pull simply no-ops (the coarse trace still stands).
+const ENSURE_HEAT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// How long to let RotorHazard settle back to **READY** after the reset (`stop_race` +
 /// `discard_laps`) before emitting `stage_race`. RotorHazard runs its socket handlers + the staging
 /// countdown on one gevent loop, and emitting the reset and the stage in the same tick makes RH's
@@ -89,6 +103,13 @@ struct ArmedHeat {
     sink: PassSink,
     /// Set by the driver once it has staged the RH race for this arming.
     staged: bool,
+    /// Set by [`disarm`](RhConnection::disarm) when the heat left `Running`: the driver finishes the
+    /// heat by **stopping the RH race** (driving it to `DONE`, which auto-triggers the dense
+    /// `current_marshal_data`/`get_pilotrace` marshal pull — marshaling path-2), keeps routing the
+    /// resulting [`Event::SignalHistory`] into this heat's sink for a short settle, then clears the
+    /// slot. Without the stop, RH stays `RACING` between heats and the dense history is never pulled
+    /// into the finishing heat's log — only the coarse streamed samples survive.
+    finishing: bool,
 }
 
 /// Render an error together with its full `source()` chain as `"top: cause: root-cause"`.
@@ -179,14 +200,21 @@ impl RhConnection {
             lineup,
             sink,
             staged: false,
+            finishing: false,
         });
     }
 
-    /// Disarm the current heat (it left `Running`): the driver stops/clears the RH race but the
-    /// **connection stays alive** (and keeps reporting status). A no-op if nothing is armed.
+    /// Disarm the current heat (it left `Running`): the driver **stops the RH race** so it reaches
+    /// `DONE` — which auto-triggers RotorHazard's dense marshal-data pull (marshaling path-2) — keeps
+    /// routing the resulting [`Event::SignalHistory`] into the finishing heat's log for a short
+    /// settle, then clears the slot. The **connection stays alive** (and keeps reporting status)
+    /// throughout. A no-op if nothing is armed. Marking `finishing` (rather than nulling the slot
+    /// outright) is what lets the dense history land in the right heat's log before the slot clears.
     pub fn disarm(&self) {
         let mut slot = self.armed.lock().expect("armed-heat lock poisoned");
-        *slot = None;
+        if let Some(heat) = slot.as_mut() {
+            heat.finishing = true;
+        }
     }
 
     /// Tear the connection down: stop any race, disconnect, leave the timer `Disconnected`. Called
@@ -282,7 +310,7 @@ fn drive(
         // Reuse the carried adapter (preserving dedup/last_race_status across reconnects); only on
         // the first attempt is it `Some` from above — every later iteration re-seeds it from the
         // adapter recovered out of the previous connection's `disconnect`.
-        let adapter = carry_adapter.take().unwrap_or_else(RotorHazardAdapter::new);
+        let adapter = carry_adapter.take().unwrap_or_default();
         let conn = match RotorHazardConnection::connect(&url, adapter) {
             Ok(conn) => conn,
             Err(e) => {
@@ -354,6 +382,10 @@ fn maintain(
     let mut last_activity = Instant::now();
     let mut probed_since_activity = false;
     let mut stage_deadline: Option<Instant> = None;
+    // The settle window for a **finishing** heat (disarmed): the deadline by which the heat's sink
+    // stays armed after the RH race is stopped, so the DONE-triggered dense marshal pull lands in
+    // the right heat's log before the slot clears. `None` ⇒ no heat is finishing.
+    let mut finish_deadline: Option<Instant> = None;
 
     while !cancel.load(Ordering::Relaxed) {
         // The source of truth for a drop (#105): `rust_socketio` runs with `.reconnect(false)`, so a
@@ -397,6 +429,14 @@ fn maintain(
         if do_stage {
             // Reset RH to a clean READY state. (`stop_race` first in case a prior heat is still
             // STAGING/RACING; `discard_laps` clears any stale laps and forces READY.)
+            //
+            // Staging deliberately runs in RotorHazard's **practice mode** (no current heat): RH only
+            // records live laps for a node with a *seated pilot* once a heat is current — a selected
+            // *empty* heat would reject every crossing (`server.py`'s pass gate:
+            // `pilot_id != PILOT_ID_NONE or current_heat is HEAT_ID_NONE`). The dense per-tick RSSI
+            // history still accumulates on the node interface during a practice race, so we select a
+            // savable heat only at heat-END (see the `finishing` block) to persist it — keeping live
+            // recording intact while still activating marshaling path-2.
             conn.stop_race().ok();
             conn.discard_laps().ok();
             // Let RotorHazard settle back to READY before staging — see the hazard note above. The
@@ -419,6 +459,9 @@ fn maintain(
             }
             just_staged = true;
             stage_deadline = Some(Instant::now() + STAGE_SETTLE);
+            // A fresh heat staged over a still-finishing previous one (back-to-back heats): cancel
+            // any pending finish settle so the new heat's slot is not cleared out from under it.
+            finish_deadline = None;
         } else if armed.lock().expect("armed-heat lock poisoned").is_none() {
             // Nothing armed: clear any stale stage wait.
             stage_deadline = None;
@@ -426,6 +469,65 @@ fn maintain(
         if just_staged {
             last_activity = Instant::now();
             probed_since_activity = false;
+        }
+
+        // Finish a disarmed heat (marshaling path-2): the bridge marked the armed heat `finishing`
+        // when it left `Running`. The race ran in practice mode (so live laps recorded), and the
+        // node interface accumulated the dense per-tick RSSI history throughout. Now, at heat-END,
+        // make a savable heat current and stop the race: stopping drives RH to DONE, and the
+        // transport's DONE handler auto-emits `save_laps` -> `race_list` -> `get_pilotrace` (and the
+        // aggregate `current_race_marshal` on newer RH) — which, with a current heat, persists and
+        // returns that accumulated history. We keep the heat's sink armed through a settle window so
+        // the resulting `SignalHistory` lands in THIS heat's log (the full-fidelity trace superseding
+        // the coarse stream), then clear the slot (the connection stays alive).
+        {
+            let start_finish = {
+                let slot = armed.lock().expect("armed-heat lock poisoned");
+                matches!(slot.as_ref(), Some(h) if h.finishing) && finish_deadline.is_none()
+            };
+            if start_finish {
+                // Select a savable heat FIRST (while still RACING) so the DONE-triggered `save_laps`
+                // has a current heat to persist into. Request add_heat + the heat list, wait for the
+                // `heat_data` response, then select synchronously on this thread (keeping the
+                // heat-setup emits ordered and off the socket callback — an emit-per-`heat_data`
+                // there floods + drops the link). Bounded so a quirky/older RH that never answers
+                // doesn't stall the finish; the dense pull just no-ops then (the coarse trace stands).
+                if conn.ensure_savable_heat().is_ok() {
+                    let select_deadline = Instant::now() + ENSURE_HEAT_TIMEOUT;
+                    loop {
+                        // Keep draining so the `heat_data` handler runs; route any real passes that
+                        // are still trickling in into the (still-armed) heat's log rather than drop
+                        // them. (Use the same routing as the main drain below by deferring it — here
+                        // we only need the handler to fire, so a discard of non-pass churn is fine;
+                        // passes for the finishing heat are rare this late and the main drain catches
+                        // any that remain on the next loop.)
+                        let _ = conn.events();
+                        if let Some(heat) = conn.take_savable_heat() {
+                            conn.set_current_heat(heat).ok();
+                            break;
+                        }
+                        if Instant::now() >= select_deadline {
+                            break;
+                        }
+                        if sleep_unless_cancelled(Duration::from_millis(100), cancel) {
+                            return false;
+                        }
+                    }
+                }
+                // Drive RH to DONE; the transport's DONE handler issues the dense marshal pull, now
+                // with a current heat so `save_laps` persists the accumulated history.
+                conn.stop_race().ok();
+                finish_deadline = Some(Instant::now() + FINISH_DRAIN_SETTLE);
+            }
+            if let Some(deadline) = finish_deadline {
+                if Instant::now() >= deadline {
+                    // Settle elapsed: the dense history has been drained into the heat's log. Clear
+                    // the slot (heat fully disarmed) — the connection stays alive and idle-monitors.
+                    *armed.lock().expect("armed-heat lock poisoned") = None;
+                    finish_deadline = None;
+                    stage_deadline = None;
+                }
+            }
         }
 
         // Drain whatever the transport has translated since the last tick.

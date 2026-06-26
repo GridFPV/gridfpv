@@ -152,6 +152,12 @@ pub enum Raw {
     /// `history_values`/`history_times` + `enter_at`/`exit_at`; emits a [`Event::SignalHistory`]
     /// (and refreshes [`SignalThresholds`]) for that seat — see [`RawRaceDetails`].
     RaceDetails(RawRaceDetails),
+    /// A `heat_data` response (`RHUI.emit_heat_data`), the list of configured heats with their ids.
+    /// Emits no canonical events; the adapter records the heat ids so the transport can **select a
+    /// savable heat** before staging (a heat must be current for RotorHazard to persist the run's
+    /// dense history — `on_save_laps`/`emit_race_marshal_data` no-op while `current_heat` is None in
+    /// the default practice mode). Exposed via [`take_heat_ids`](RotorHazardAdapter::take_heat_ids).
+    HeatData(RawHeatData),
 }
 
 /// A RotorHazard `race_status` message (see [`Raw::RaceStatus`]).
@@ -389,6 +395,26 @@ pub struct RawRaceDetails {
     pub exit_at: Option<f64>,
 }
 
+/// A RotorHazard `heat_data` response (`RHUI.emit_heat_data`): the configured heats.
+///
+/// Shape: `{ "heats": [ { "id": <heat_id>, … }, … ] }`. The transport pulls this (via
+/// `load_data { heat_data }`) so it can select a **savable** current heat before staging — RH only
+/// persists a run's dense history for a saved heat (`current_heat != HEAT_ID_NONE`). The adapter
+/// records the ids; the rest of each heat object is ignored here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawHeatData {
+    /// The configured heats; only each heat's `id` is read.
+    #[serde(default)]
+    pub heats: Vec<RawHeat>,
+}
+
+/// One heat in a `heat_data` response (see [`RawHeatData`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawHeat {
+    /// The heat's id, used to select it as the current (savable) heat.
+    pub id: i64,
+}
+
 /// Deserialize a history array that may arrive either as a JSON array (`[1, 2, 3]`) or as a
 /// JSON-**encoded string** (`"[1, 2, 3]"`). RotorHazard's `get_pilotrace` `json.dumps`es the history
 /// while `current_marshal_data` sends a bare array — accept both so one [`Raw`] shape covers both RH
@@ -481,6 +507,11 @@ pub struct RotorHazardAdapter {
     /// `race_list`, so a `race_details` response (which carries no start time) can be made
     /// race-relative. Cleared each new race.
     pilotrace_start_time: std::collections::HashMap<usize, f64>,
+    /// Configured RotorHazard heat ids learned from the most recent `heat_data`, drained by the
+    /// transport via [`take_heat_ids`](Self::take_heat_ids) so it can select a **savable** current
+    /// heat before staging (RH only persists a run's dense history for a saved heat). Empty until a
+    /// `heat_data` is folded.
+    pending_heat_ids: Vec<i64>,
 }
 
 /// A pending per-pilotrace marshal pull the transport issues (`get_pilotrace { pilotrace_id }`),
@@ -521,7 +552,17 @@ impl RotorHazardAdapter {
             pending_marshal_request: false,
             pending_pilotrace_requests: Vec::new(),
             pilotrace_start_time: std::collections::HashMap::new(),
+            pending_heat_ids: Vec::new(),
         }
+    }
+
+    /// Take (and clear) the configured heat ids learned from the most recent `heat_data`.
+    ///
+    /// The transport calls this after feeding a `heat_data` payload: it selects one of the returned
+    /// ids as the current (savable) heat (`set_current_heat`) so RotorHazard persists the run's dense
+    /// history. Empty when no `heat_data` has been folded since the last drain.
+    pub fn take_heat_ids(&mut self) -> Vec<i64> {
+        std::mem::take(&mut self.pending_heat_ids)
     }
 
     /// Take (and clear) the per-pilotrace marshal pulls discovered from the most recent `race_list`.
@@ -863,6 +904,15 @@ impl RotorHazardAdapter {
         }));
     }
 
+    /// Record the configured heat ids from a `heat_data` response for the transport to drain.
+    ///
+    /// Emits no canonical events — `heat_data` is a transport routing payload. The ids queue in
+    /// [`pending_heat_ids`](Self::pending_heat_ids); the transport picks one to make current so the
+    /// run is savable (the dense-history precondition). A re-sent `heat_data` rebuilds the list.
+    fn translate_heat_data(&mut self, data: RawHeatData) {
+        self.pending_heat_ids = data.heats.into_iter().map(|h| h.id).collect();
+    }
+
     /// Emit per-node [`Event::SignalThresholds`] from an `enter_and_exit_at_levels` message —
     /// for a signal-capable adapter only. A node is emitted once and then only when its
     /// `(enter, exit)` pair changes, so a steady re-send does not spam the log.
@@ -924,6 +974,7 @@ impl Adapter for RotorHazardAdapter {
             Raw::MarshalData(data) => self.translate_marshal_data(data, &mut out),
             Raw::RaceList(list) => self.translate_race_list(list),
             Raw::RaceDetails(details) => self.translate_race_details(details, &mut out),
+            Raw::HeatData(data) => self.translate_heat_data(data),
         }
         out
     }
@@ -1357,6 +1408,24 @@ mod tests {
             })
             .unwrap();
         assert_eq!(pass.competitor, CompetitorRef("node-0".into()));
+    }
+
+    #[test]
+    fn heat_data_records_ids_for_the_transport_and_emits_no_events() {
+        // `heat_data` is a transport routing payload: it mints no canonical events but records the
+        // configured heat ids so the transport can select a savable current heat before staging
+        // (the marshaling path-2 precondition).
+        let mut adapter = RotorHazardAdapter::new();
+        let events = adapter.translate(Raw::HeatData(RawHeatData {
+            heats: vec![RawHeat { id: 1 }, RawHeat { id: 4 }, RawHeat { id: 2 }],
+        }));
+        assert!(events.is_empty(), "heat_data emits no canonical events");
+        // The ids are exposed for the transport to drain, then cleared (one-shot per send).
+        assert_eq!(adapter.take_heat_ids(), vec![1, 4, 2]);
+        assert!(
+            adapter.take_heat_ids().is_empty(),
+            "draining clears the heat ids"
+        );
     }
 
     #[test]
