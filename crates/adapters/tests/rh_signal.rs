@@ -249,6 +249,11 @@ fn captured_trace_matches_emitted_csv_samples() {
         "race never reached RACING"
     );
 
+    // Re-request thresholds AFTER racing starts: the RACING transition clears the adapter's
+    // threshold dedup, and the connect-time capture was discarded by the drain above, so re-ask now
+    // so the (unchanged-value) `SignalThresholds` are re-emitted and captured into `events`.
+    conn.request_thresholds().ok();
+
     // Let the heartbeat stream a run of node_data ticks so the trace accumulates samples.
     let captured_enough = wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
         signal_trace(evs)
@@ -275,15 +280,16 @@ fn captured_trace_matches_emitted_csv_samples() {
         })
         .expect("node-0 trace present");
 
-    // Fidelity: every captured sample is a value the CSV actually reports for this node — the node
-    // peak (PEAK). RotorHazard's mock node holds `node_peak_rssi` at the CSV's reported peak, so a
-    // faithful capture reproduces it exactly with no quantization within the u16 range.
+    // Fidelity: every captured sample is a value the CSV actually reports for this node. The coarse
+    // trace samples `node_peak_rssi`, which `node_csv` holds at `peak + 30` on every tick, so a
+    // faithful capture reproduces THAT value exactly with no quantization within the u16 range.
+    const NODE_PEAK: i32 = PEAK + 30;
     assert!(!trace.samples.is_empty(), "trace has samples");
     for &s in &trace.samples {
         assert_eq!(
-            s, PEAK as u16,
-            "captured sample {s} must equal the CSV-reported node peak {PEAK} (no quantization); \
-             full trace: {:?}",
+            s, NODE_PEAK as u16,
+            "captured sample {s} must equal the CSV-reported node peak {NODE_PEAK} (no \
+             quantization); full trace: {:?}",
             trace.samples
         );
     }
@@ -302,9 +308,118 @@ fn captured_trace_matches_emitted_csv_samples() {
     );
 
     println!(
-        "fidelity: node-0 captured {} samples (all == {PEAK}); thresholds enter={:?} exit={:?}",
+        "fidelity: node-0 captured {} samples (all == {NODE_PEAK}); thresholds enter={:?} exit={:?}",
         trace.samples.len(),
         trace.enter,
         trace.exit
+    );
+}
+
+/// The **dense-history** gate (RH path 2 — `current_marshal_data`): after a heat ends, the adapter
+/// pulls RotorHazard's request-driven dense marshal data and the `signal_trace` projection prefers
+/// it over the coarse streamed samples. This asserts the dense trace carries **strictly more**
+/// samples than the coarse streaming count captured live — the full-fidelity upgrade.
+///
+/// Flow: drive an emulated node stream into a real dockerized RH, count the **coarse** streamed
+/// samples accumulated while racing, finish the heat (which auto-triggers `current_race_marshal`),
+/// then re-fold and assert the now-dense trace has many more samples (RH's per-tick history vs. one
+/// sample per `node_data` heartbeat). The auto-request fires on the DONE transition; we also call
+/// `request_marshal_data()` explicitly as a belt-and-braces re-request in case the heat ended before
+/// the live socket drained the DONE.
+#[test]
+#[ignore = "requires Docker (spins up dockerized RotorHazard with emulated signals)"]
+fn dense_marshal_history_supersedes_coarse_stream() {
+    const PEAK: i32 = 150;
+    const BASELINE: i32 = 70;
+    let csvs = vec![(
+        0usize,
+        node_csv(&NodeCsv {
+            ticks_per_lap: 6,
+            peak_rssi: PEAK,
+            baseline_rssi: BASELINE,
+        }),
+    )];
+
+    let rh = RhContainer::start(PORT + 2, TICK, &csvs);
+    let conn = RotorHazardConnection::connect(rh.url(), RotorHazardAdapter::new())
+        .expect("connect to RotorHazard");
+
+    let key = gridfpv_projection::CompetitorKey {
+        adapter: gridfpv_events::AdapterId("rotorhazard".into()),
+        competitor: gridfpv_events::CompetitorRef("node-0".into()),
+    };
+
+    let mut events: Vec<Event> = Vec::new();
+    std::thread::sleep(Duration::from_secs(2));
+    conn.set_min_lap_time(0).ok();
+    conn.stop_race().ok();
+    conn.discard_laps().expect("discard_laps");
+    // RotorHazard only persists (and thus exposes) a race's dense history for a SAVED heat — its
+    // `current_heat` is None in default practice mode, where `save_laps` is a no-op. Create and
+    // select a heat so the post-race dense history is pullable (the production staging path selects
+    // an RH heat for the same reason).
+    conn.add_heat().ok();
+    std::thread::sleep(Duration::from_millis(500));
+    conn.set_current_heat(1).ok();
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = conn.events();
+
+    conn.stage_race().expect("stage_race");
+    assert!(
+        wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+            evs.iter()
+                .any(|e| matches!(e, Event::SessionStarted { .. }))
+        }),
+        "race never reached RACING"
+    );
+
+    // Let a run of coarse streamed samples accumulate.
+    let captured_enough = wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+        signal_trace(evs)
+            .competitor(&key)
+            .map(|t| t.samples.len() >= 5)
+            .unwrap_or(false)
+    });
+    assert!(captured_enough, "node-0 never accumulated a coarse trace");
+
+    // The coarse streamed sample count, before any dense history is pulled.
+    let coarse_samples = signal_trace(&events)
+        .competitor(&key)
+        .map(|t| t.samples.len())
+        .unwrap_or(0);
+
+    // Finish the heat: the DONE transition auto-triggers the heat-end marshal pull (the transport
+    // emits `current_race_marshal`, then `save_laps` + a `race_list` request whose ids drive
+    // `get_pilotrace` — whichever the server implements answers).
+    conn.stop_race().ok();
+
+    // Wait for the dense `SignalHistory` to arrive and supersede the coarse stream. The transport
+    // drives the pull automatically off the DONE edge; keep draining while it completes.
+    let got_dense = wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+        evs.iter().any(|e| matches!(e, Event::SignalHistory(_)))
+    });
+
+    events.extend(conn.events());
+    conn.disconnect();
+
+    assert!(
+        got_dense,
+        "no SignalHistory pulled after heat end (coarse samples were {coarse_samples})"
+    );
+
+    let dense_samples = signal_trace(&events)
+        .competitor(&key)
+        .map(|t| t.samples.len())
+        .expect("node-0 dense trace");
+
+    assert!(
+        dense_samples > coarse_samples,
+        "dense history must carry MORE samples than the coarse stream: dense={dense_samples} \
+         coarse={coarse_samples}"
+    );
+
+    println!(
+        "dense marshal history: coarse stream = {coarse_samples} samples, dense history = \
+         {dense_samples} samples (full-fidelity upgrade)"
     );
 }

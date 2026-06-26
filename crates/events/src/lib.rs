@@ -191,6 +191,42 @@ pub struct SignalThresholds {
     pub exit: u16,
 }
 
+/// The **dense, full-fidelity** per-node RSSI history for a heat — the detector's own internal
+/// sampling, pulled from RotorHazard's request-driven `current_marshal_data` at heat end
+/// (marshaling.html §3.2, the "RSSI fidelity" risk in §4).
+///
+/// Unlike the live-streamed [`SignalChunk`] (one aggregate sample per `node_data` heartbeat emit,
+/// the *coarse* trace), this is the trace RotorHazard's own marshal page reviews against: every
+/// per-tick sample the node recorded, with its **own** sample time. A signal-capable adapter pulls
+/// it once when a heat reaches `DONE` and appends one `SignalHistory` per node. The `signal_trace`
+/// projection **prefers** this dense history over the coarse [`SignalChunk`] samples for a
+/// competitor when both are present (the dense trace supersedes the streaming approximation).
+///
+/// # Why explicit per-sample times (not a uniform cadence)
+///
+/// [`SignalChunk`] assumes a fixed `period_micros` because the live stream emits on a regular
+/// heartbeat. The detector's internal history is **not** guaranteed uniform — RotorHazard reports a
+/// parallel `history_times`/`history_values` pair — so this carries the per-sample times directly
+/// (`times[i]` is the source-clock instant of `rssi[i]`), preserving native fidelity with **no
+/// resampling** (the load-bearing fidelity caution, marshaling.html §4). Times are race-relative
+/// microseconds on the same clock as [`Pass::at`] and the chunk time base, so lap markers and the
+/// dense trace align.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignalHistory {
+    /// The timing source that produced this history.
+    pub adapter: AdapterId,
+    /// The source-local competitor (node seat) the history belongs to.
+    pub competitor: CompetitorRef,
+    /// The source-clock timestamp (race-relative µs) of each sample, parallel to `rssi`. Same
+    /// length as `rssi`; `times[i]` is when `rssi[i]` was recorded. Renders as TS `number[]`
+    /// (bounded far below 2^53).
+    #[ts(type = "number[]")]
+    pub times: Vec<i64>,
+    /// The dense per-tick RSSI samples (filtered ADC counts), parallel to `times`.
+    pub rssi: Vec<u16>,
+}
+
 /// A gate crossing — the one observation everything else derives from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
@@ -554,6 +590,10 @@ pub enum Event {
     /// Captured alongside the trace so the evidence carries the levels the timer detected
     /// against; the last one per `(adapter, competitor)` wins.
     SignalThresholds(SignalThresholds),
+    /// The **dense, full-fidelity** per-node RSSI history for a heat, pulled from RotorHazard's
+    /// request-driven `current_marshal_data` at heat end (see [`SignalHistory`]). Supersedes the
+    /// coarse streaming [`SignalChunk`] samples for its competitor in the `signal_trace` projection.
+    SignalHistory(SignalHistory),
 
     // --- race-engine events (#28) ---
     /// A heat is created with its lineup and enters the `Scheduled` state — the
@@ -1203,6 +1243,12 @@ mod tests {
                 competitor: CompetitorRef("node-0".into()),
                 enter: 90,
                 exit: 80,
+            }),
+            Event::SignalHistory(SignalHistory {
+                adapter: AdapterId("rotorhazard".into()),
+                competitor: CompetitorRef("node-0".into()),
+                times: vec![0, 50_000, 100_000, 150_000],
+                rssi: vec![70, 88, 150, 71],
             }),
         ];
         for event in events {

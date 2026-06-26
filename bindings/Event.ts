@@ -12,6 +12,7 @@ import type { ProtestOutcome } from "./ProtestOutcome";
 import type { RoundId } from "./RoundId";
 import type { SessionId } from "./SessionId";
 import type { SignalChunk } from "./SignalChunk";
+import type { SignalHistory } from "./SignalHistory";
 import type { SignalThresholds } from "./SignalThresholds";
 import type { SourceTime } from "./SourceTime";
 
@@ -27,7 +28,7 @@ import type { SourceTime } from "./SourceTime";
  * `{ "VariantName": { ..fields } }`, which maps cleanly to a discriminated union in
  * the generated TypeScript (#4).
  */
-export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "AdapterDisconnected": { adapter: AdapterId, } } | { "SessionStarted": { adapter: AdapterId, session: SessionId, } } | { "SessionEnded": { adapter: AdapterId, session: SessionId, } } | { "CompetitorSeen": { adapter: AdapterId, competitor: CompetitorRef, } } | { "CompetitorRegistered": { adapter: AdapterId, competitor: CompetitorRef, pilot: PilotId, } } | { "Pass": Pass } | { "SignalChunk": SignalChunk } | { "SignalThresholds": SignalThresholds } | { "HeatScheduled": { heat: HeatId, lineup: Array<CompetitorRef>, 
+export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "AdapterDisconnected": { adapter: AdapterId, } } | { "SessionStarted": { adapter: AdapterId, session: SessionId, } } | { "SessionEnded": { adapter: AdapterId, session: SessionId, } } | { "CompetitorSeen": { adapter: AdapterId, competitor: CompetitorRef, } } | { "CompetitorRegistered": { adapter: AdapterId, competitor: CompetitorRef, pilot: PilotId, } } | { "Pass": Pass } | { "SignalChunk": SignalChunk } | { "SignalThresholds": SignalThresholds } | { "SignalHistory": SignalHistory } | { "HeatScheduled": { heat: HeatId, lineup: Array<CompetitorRef>, 
 /**
  * The class this heat runs in, where the scheduler tagged it.
  */

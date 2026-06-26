@@ -25,8 +25,8 @@ use rust_socketio::{ClientBuilder, Payload, RawClient};
 use serde_json::json;
 
 use super::{
-    Raw, RawCurrentLaps, RawEnterExitLevels, RawNodeData, RawPassRecord, RawRaceStatus,
-    RotorHazardAdapter,
+    Raw, RawCurrentLaps, RawEnterExitLevels, RawMarshalData, RawNodeData, RawPassRecord,
+    RawRaceDetails, RawRaceList, RawRaceStatus, RotorHazardAdapter,
 };
 use crate::Adapter;
 use gridfpv_events::Event;
@@ -57,6 +57,15 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
         "enter_and_exit_at_levels" => serde_json::from_value::<RawEnterExitLevels>(value)
             .ok()
             .map(Raw::EnterExitLevels),
+        "current_marshal_data" => serde_json::from_value::<RawMarshalData>(value)
+            .ok()
+            .map(Raw::MarshalData),
+        "race_list" => serde_json::from_value::<RawRaceList>(value)
+            .ok()
+            .map(Raw::RaceList),
+        "race_details" => serde_json::from_value::<RawRaceDetails>(value)
+            .ok()
+            .map(Raw::RaceDetails),
         _ => None,
     }
 }
@@ -96,15 +105,47 @@ impl RotorHazardConnection {
             }
         };
 
-        // One handler per translated event: decode -> translate -> accumulate.
+        // One handler per translated event: decode -> translate -> accumulate. After translating, if
+        // the adapter flagged a heat-end marshal-data request (set on the DONE transition, drained
+        // here so it fires once), emit RotorHazard's `current_race_marshal` on the socket the callback
+        // was handed. RotorHazard replies with `current_marshal_data` — the dense `history_values`/
+        // `history_times` trace — which the `current_marshal_data` handler below feeds back through the
+        // same adapter as `SignalHistory`. Driving the request from the `race_status` callback keeps
+        // all wire IO in the transport while the trigger stays in the pure translator.
         let handler = |name: &'static str,
                        adapter: Arc<Mutex<RotorHazardAdapter>>,
                        sink: Arc<Mutex<Vec<Event>>>| {
-            move |payload: Payload, _client: RawClient| {
+            move |payload: Payload, client: RawClient| {
                 if let Some(raw) = raw_from_socket(name, &payload) {
-                    let translated = adapter.lock().unwrap().translate(raw);
+                    let (translated, request_marshal, pilotrace_requests) = {
+                        let mut a = adapter.lock().unwrap();
+                        let translated = a.translate(raw);
+                        // Drain both heat-end intents: the one-shot marshal request (set on the DONE
+                        // edge) and any per-pilotrace pulls discovered from a `race_list`.
+                        let request_marshal = a.take_marshal_request();
+                        let pilotrace_requests = a.take_pilotrace_requests();
+                        (translated, request_marshal, pilotrace_requests)
+                    };
                     if !translated.is_empty() {
                         sink.lock().unwrap().extend(translated);
+                    }
+                    if request_marshal {
+                        // Heat just ended: pull the dense history. Two RotorHazard builds expose it
+                        // differently, so drive both — whichever the server implements answers:
+                        //  • newer RH: the aggregate `current_race_marshal` -> `current_marshal_data`;
+                        //  • older RH: per-pilotrace — `save_laps` (persist the run), then request the
+                        //    saved-race tree (`race_list`) whose ids drive `get_pilotrace` below.
+                        // All best-effort: a failed emit on a dropped link just leaves the coarse
+                        // streamed trace, which the driver's reconnect path tolerates.
+                        let _ = client.emit("current_race_marshal", Payload::Text(vec![]));
+                        let _ = client.emit("save_laps", Payload::Text(vec![]));
+                        let _ = client.emit("load_data", json!({ "load_types": ["race_list"] }));
+                    }
+                    // A `race_list` yields the per-pilotrace ids to pull; issue each `get_pilotrace`
+                    // so its `race_details` (the dense history) folds back through this same adapter.
+                    for req in pilotrace_requests {
+                        let _ = client
+                            .emit("get_pilotrace", json!({ "pilotrace_id": req.pilotrace_id }));
                     }
                 }
             }
@@ -157,6 +198,18 @@ impl RotorHazardConnection {
             .on(
                 "enter_and_exit_at_levels",
                 handler("enter_and_exit_at_levels", adapter.clone(), events.clone()),
+            )
+            .on(
+                "current_marshal_data",
+                handler("current_marshal_data", adapter.clone(), events.clone()),
+            )
+            .on(
+                "race_list",
+                handler("race_list", adapter.clone(), events.clone()),
+            )
+            .on(
+                "race_details",
+                handler("race_details", adapter.clone(), events.clone()),
             )
             .connect()?;
 
@@ -234,6 +287,51 @@ impl RotorHazardConnection {
     /// Stop the current race — driving helper for tests.
     pub fn stop_race(&self) -> Result<(), rust_socketio::Error> {
         self.client.emit("stop_race", Payload::Text(vec![]))
+    }
+
+    /// Re-request the per-node enter/exit detection thresholds (`load_data` /
+    /// `enter_and_exit_at_levels`) — a driving helper so a test can re-capture thresholds after
+    /// draining the connect-time burst.
+    pub fn request_thresholds(&self) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "load_data",
+            json!({ "load_types": ["enter_and_exit_at_levels"] }),
+        )
+    }
+
+    /// Add a heat (`add_heat`, 0-arg) — a driving helper for the dense-marshal-data test so a saved
+    /// heat exists to select (RotorHazard's per-pilotrace marshal path needs a saved race).
+    pub fn add_heat(&self) -> Result<(), rust_socketio::Error> {
+        self.client.emit("add_heat", Payload::Text(vec![]))
+    }
+
+    /// Persist the just-finished race (`save_laps`, 0-arg) so its per-pilotrace history is written to
+    /// the DB and becomes pullable via `get_pilotrace` — a driving helper for the dense-history test.
+    pub fn save_laps(&self) -> Result<(), rust_socketio::Error> {
+        self.client.emit("save_laps", Payload::Text(vec![]))
+    }
+
+    /// Select RotorHazard's **current heat** (`set_current_heat`, `{ heat: <id> }`) — a driving
+    /// helper for the dense-marshal-data test.
+    ///
+    /// RotorHazard's `emit_race_marshal_data` only answers when a **saved heat** is current
+    /// (`current_heat != HEAT_ID_NONE`); the default practice mode has no heat, so the test selects
+    /// one before the race so the post-race dense history can be pulled. Best-effort.
+    pub fn set_current_heat(&self, heat: u64) -> Result<(), rust_socketio::Error> {
+        self.client
+            .emit("set_current_heat", json!({ "heat": heat }))
+    }
+
+    /// Request RotorHazard's dense **post-race marshal data** (`current_race_marshal`) — the
+    /// request-driven `current_marshal_data` with each node's `history_values`/`history_times`.
+    ///
+    /// In normal operation the adapter auto-requests this on the heat-end (`DONE`) transition (see
+    /// the `race_status` handler); this explicit helper lets a test pull it on demand after staging a
+    /// race down, so the dense-history capture can be asserted deterministically. RotorHazard only
+    /// answers while the race is `DONE` (`emit_race_marshal_data` returns early otherwise).
+    pub fn request_marshal_data(&self) -> Result<(), rust_socketio::Error> {
+        self.client
+            .emit("current_race_marshal", Payload::Text(vec![]))
     }
 
     /// Discard the current race's laps, returning RotorHazard to a READY state —

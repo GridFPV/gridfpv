@@ -81,7 +81,7 @@
 
 use gridfpv_events::{
     AdapterId, CompetitorRef, Event, GateIndex, Pass, SessionId, SignalChunk, SignalContext,
-    SignalThresholds, SourceTime,
+    SignalHistory, SignalThresholds, SourceTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -135,6 +135,23 @@ pub enum Raw {
     /// An `enter_and_exit_at_levels` message carrying the per-node detection thresholds.
     /// Emits [`Event::SignalThresholds`] for a signal-capable adapter.
     EnterExitLevels(RawEnterExitLevels),
+    /// A `current_marshal_data` response (`RHUI.emit_race_marshal_data`), requested at heat end on
+    /// **newer** RotorHazard. Carries the **dense** per-node `history_values`/`history_times` trace
+    /// for every seat at once; emits one [`Event::SignalHistory`] per node for a signal-capable
+    /// adapter (the full-fidelity trace that supersedes the coarse streamed [`SignalChunk`]s — see
+    /// [`RawMarshalData`]).
+    MarshalData(RawMarshalData),
+    /// A `race_list` response (`RHUI.emit_race_list`), listing the **saved** races and their
+    /// per-pilot `pilotrace_id`s. On the RotorHazard build whose marshal API is per-pilotrace
+    /// ([`Raw::RaceDetails`]), the transport reads these ids to pull each seat's dense history.
+    /// Emits no canonical events itself (it is a transport routing payload); the adapter exposes the
+    /// ids via [`take_pilotrace_requests`](RotorHazardAdapter::take_pilotrace_requests).
+    RaceList(RawRaceList),
+    /// A `race_details` response (`get_pilotrace`), the **per-pilotrace** dense marshal payload on
+    /// the RotorHazard build that has no aggregate `current_marshal_data`. Carries one seat's
+    /// `history_values`/`history_times` + `enter_at`/`exit_at`; emits a [`Event::SignalHistory`]
+    /// (and refreshes [`SignalThresholds`]) for that seat — see [`RawRaceDetails`].
+    RaceDetails(RawRaceDetails),
 }
 
 /// A RotorHazard `race_status` message (see [`Raw::RaceStatus`]).
@@ -258,6 +275,141 @@ pub struct RawEnterExitLevels {
     pub exit_at_levels: Vec<f32>,
 }
 
+/// A RotorHazard `current_marshal_data` response (`RHUI.emit_race_marshal_data`), the
+/// **request-driven** dense marshal payload its own marshal page pulls *after* a race.
+///
+/// Shape (validated against `src/server/RHUI.py::emit_race_marshal_data`):
+/// `{ "race": { "start_time": <monotonic-seconds>, … }, "seats": { "<index>": { history_values,
+/// history_times, enter_at, exit_at, laps, … }, … } }`. The `seats` map is keyed by **stringified
+/// node index** (JSON object keys are strings). Each seat carries the detector's own per-tick
+/// `history_values` (RSSI integers) paired with `history_times` (monotonic-clock **seconds**,
+/// floats), the dense trace RotorHazard's marshal graph renders. `race.start_time` is the
+/// monotonic-second origin of the race; subtracting it makes each `history_times` value
+/// race-relative — the same origin as `lap_time_stamp` / [`SourceTime`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawMarshalData {
+    /// The race-level header. Carries `start_time` (the monotonic-second origin) used to make the
+    /// per-seat `history_times` race-relative. Optional: absent on a payload built before a race.
+    #[serde(default)]
+    pub race: Option<RawMarshalRace>,
+    /// Per-seat dense data, keyed by **stringified node index** (`"0"`, `"1"`, …).
+    #[serde(default)]
+    pub seats: std::collections::BTreeMap<String, RawMarshalSeat>,
+}
+
+/// The `race` header of a `current_marshal_data` payload (see [`RawMarshalData`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawMarshalRace {
+    /// The race's monotonic-clock start time in **seconds** (`race.start_time_monotonic`). The
+    /// origin the per-seat `history_times` are measured from; subtracting it yields race-relative
+    /// time. Absent on some payloads (defaults to `0.0`, i.e. times already race-relative).
+    #[serde(default)]
+    pub start_time: f64,
+}
+
+/// One seat's dense marshal data within a `current_marshal_data` payload (see [`RawMarshalData`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawMarshalSeat {
+    /// The detector's per-tick RSSI history (filtered ADC counts), parallel to `history_times`.
+    /// Accepts either a JSON array or a JSON-encoded string (different RH builds wire it either way).
+    #[serde(default, deserialize_with = "de_f64_history")]
+    pub history_values: Vec<f64>,
+    /// The monotonic-clock **seconds** timestamp of each `history_values` sample, parallel to it.
+    #[serde(default, deserialize_with = "de_f64_history")]
+    pub history_times: Vec<f64>,
+}
+
+/// A `race_list` response (`RHUI.emit_race_list`): the saved-race tree whose leaves carry the
+/// `pilotrace_id`s the per-pilotrace marshal request ([`Raw::RaceDetails`]) needs.
+///
+/// Shape: `{ "heats": { "<heat_id>": { "rounds": { "<round_id>": { "start_time": <monotonic-sec>,
+/// "pilotraces": [ { "pilotrace_id", "node_index" }, … ] }, … } }, … } }`. The adapter walks it for
+/// the `(pilotrace_id, node_index)` pairs the transport then pulls one at a time, carrying the
+/// round's `start_time` so the per-pilotrace history can be made race-relative.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawRaceList {
+    /// Saved heats by stringified heat id.
+    #[serde(default)]
+    pub heats: std::collections::BTreeMap<String, RawRaceListHeat>,
+}
+
+/// One heat in a `race_list` (see [`RawRaceList`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawRaceListHeat {
+    /// Saved rounds by stringified round id.
+    #[serde(default)]
+    pub rounds: std::collections::BTreeMap<String, RawRaceListRound>,
+}
+
+/// One saved round in a `race_list` (see [`RawRaceList`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawRaceListRound {
+    /// The round's monotonic-clock start time in **seconds** — the origin the per-pilotrace
+    /// `history_times` are measured from (used to make the dense history race-relative).
+    #[serde(default)]
+    pub start_time: f64,
+    /// The per-pilot saved-race entries, each with the `pilotrace_id` the marshal request targets.
+    #[serde(default)]
+    pub pilotraces: Vec<RawRaceListPilotRace>,
+}
+
+/// One per-pilot saved-race entry in a `race_list` round (see [`RawRaceListRound`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawRaceListPilotRace {
+    /// The id `get_pilotrace` targets to fetch this seat's dense history.
+    pub pilotrace_id: i64,
+    /// The node seat this saved pilotrace belongs to (maps to `node-{index}`).
+    #[serde(default)]
+    pub node_index: Option<usize>,
+}
+
+/// A `race_details` response (`get_pilotrace`): one saved pilotrace's dense history + thresholds.
+///
+/// Shape: `{ "node_index", "history_values", "history_times", "enter_at", "exit_at", … }`. The
+/// history arrays wire as **JSON-encoded strings** on this RH build (`json.dumps(...)`), so they are
+/// parsed leniently. `history_times` are monotonic **seconds**; the adapter subtracts the round's
+/// `start_time` (carried from the `race_list`) — or the first sample when no start is known — to make
+/// the dense trace race-relative.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawRaceDetails {
+    /// The node seat this pilotrace belongs to (maps to `node-{index}`).
+    #[serde(default)]
+    pub node_index: Option<usize>,
+    /// The detector's per-tick RSSI history (filtered ADC counts), parallel to `history_times`.
+    #[serde(default, deserialize_with = "de_f64_history")]
+    pub history_values: Vec<f64>,
+    /// The monotonic-clock **seconds** timestamp of each `history_values` sample, parallel to it.
+    #[serde(default, deserialize_with = "de_f64_history")]
+    pub history_times: Vec<f64>,
+    /// The node's enter threshold the call was made against, if reported.
+    #[serde(default)]
+    pub enter_at: Option<f64>,
+    /// The node's exit threshold the call was made against, if reported.
+    #[serde(default)]
+    pub exit_at: Option<f64>,
+}
+
+/// Deserialize a history array that may arrive either as a JSON array (`[1, 2, 3]`) or as a
+/// JSON-**encoded string** (`"[1, 2, 3]"`). RotorHazard's `get_pilotrace` `json.dumps`es the history
+/// while `current_marshal_data` sends a bare array — accept both so one [`Raw`] shape covers both RH
+/// builds. A malformed string yields an empty history (no panic).
+fn de_f64_history<'de, D>(deserializer: D) -> Result<Vec<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ArrayOrString {
+        Array(Vec<f64>),
+        Str(String),
+    }
+    Ok(match ArrayOrString::deserialize(deserializer)? {
+        ArrayOrString::Array(v) => v,
+        ArrayOrString::Str(s) => serde_json::from_str(&s).unwrap_or_default(),
+    })
+}
+
 /// The competitor handle for a RotorHazard node seat: `"node-{index}"`. Stable across
 /// pilot reassignment (the binding to a GridFPV pilot is a registration action, not
 /// an adapter event — see `gridfpv_events::CompetitorRef`).
@@ -311,6 +463,32 @@ pub struct RotorHazardAdapter {
     /// Last `(enter, exit)` thresholds emitted per node, so an unchanged
     /// `enter_and_exit_at_levels` re-send does not re-emit a [`SignalThresholds`] fact.
     last_thresholds: std::collections::HashMap<usize, (u16, u16)>,
+    /// Set when a race reaches `DONE` (a signal-capable adapter only): a flag the **transport** drains
+    /// via [`take_marshal_request`](Self::take_marshal_request) to know it should send RotorHazard's
+    /// `current_race_marshal` request and pull the dense `current_marshal_data` history at heat end.
+    /// The pure translator cannot speak the socket, so it records the *intent* here and the transport
+    /// acts on it — keeping all wire knowledge in the transport while the trigger stays in the
+    /// translator (driven by the same `race_status` stream it already folds).
+    pending_marshal_request: bool,
+    /// Pending per-pilotrace marshal pulls discovered from a `race_list`, drained by the transport
+    /// via [`take_pilotrace_requests`](Self::take_pilotrace_requests). On the RotorHazard build whose
+    /// marshal API is per-pilotrace (`get_pilotrace` -> `race_details`), the heat-end flow is:
+    /// save laps -> request `race_list` -> pull each `(pilotrace_id)` here -> fold `race_details` into
+    /// dense history. Each entry carries the round `start_time` so the history can be made
+    /// race-relative when the `race_details` response (which omits it) comes back.
+    pending_pilotrace_requests: Vec<PilotRaceRequest>,
+    /// The round `start_time` (monotonic seconds) per `node_index`, learned from the most recent
+    /// `race_list`, so a `race_details` response (which carries no start time) can be made
+    /// race-relative. Cleared each new race.
+    pilotrace_start_time: std::collections::HashMap<usize, f64>,
+}
+
+/// A pending per-pilotrace marshal pull the transport issues (`get_pilotrace { pilotrace_id }`),
+/// discovered from a `race_list`. See [`RotorHazardAdapter::take_pilotrace_requests`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PilotRaceRequest {
+    /// The id to fetch (`get_pilotrace`'s `pilotrace_id`).
+    pub pilotrace_id: i64,
 }
 
 /// Default trace-capture cadence: RotorHazard's `node_data` heartbeat emit interval. The real
@@ -340,7 +518,30 @@ impl RotorHazardAdapter {
             race_active: false,
             sample_index: std::collections::HashMap::new(),
             last_thresholds: std::collections::HashMap::new(),
+            pending_marshal_request: false,
+            pending_pilotrace_requests: Vec::new(),
+            pilotrace_start_time: std::collections::HashMap::new(),
         }
+    }
+
+    /// Take (and clear) the per-pilotrace marshal pulls discovered from the most recent `race_list`.
+    ///
+    /// The transport calls this after feeding a `race_list` payload: each returned
+    /// [`PilotRaceRequest`] should be issued as a `get_pilotrace` so its `race_details` response folds
+    /// into dense history. Draining clears the queue so the same `race_list` is not pulled twice.
+    pub fn take_pilotrace_requests(&mut self) -> Vec<PilotRaceRequest> {
+        std::mem::take(&mut self.pending_pilotrace_requests)
+    }
+
+    /// Take (and clear) the "request the dense marshal data" flag, set when a race reached `DONE`.
+    ///
+    /// The transport calls this after feeding a `race_status` payload through the adapter: a `true`
+    /// return means a heat just ended on a signal-capable adapter, so the transport should emit
+    /// RotorHazard's `current_race_marshal` request and let the `current_marshal_data` response feed
+    /// back through [`translate`](Adapter::translate) as [`Event::SignalHistory`]. It is one-shot per
+    /// heat end — draining clears it so a re-sent `DONE` (a reconnect replay) does not re-request.
+    pub fn take_marshal_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_marshal_request)
     }
 
     /// The capability profile for RotorHazard — the full-signal case (see module docs).
@@ -459,6 +660,10 @@ impl RotorHazardAdapter {
                 self.race_active = true;
                 self.sample_index.clear();
                 self.last_thresholds.clear();
+                // A fresh race invalidates any stale marshal-pull state from the previous heat.
+                self.pending_marshal_request = false;
+                self.pending_pilotrace_requests.clear();
+                self.pilotrace_start_time.clear();
                 out.push(Event::SessionStarted {
                     adapter: self.id.clone(),
                     session: Self::session_id(status.race_heat_id),
@@ -468,6 +673,14 @@ impl RotorHazardAdapter {
                 // Stop capturing trace samples once the race closes (idle `node_data` is not
                 // heat evidence).
                 self.race_active = false;
+                // The heat just ended: a signal-capable adapter should now pull RotorHazard's dense
+                // `current_marshal_data` history (the full-fidelity trace its marshal page reviews).
+                // Record the intent for the transport to act on — the pure translator can't emit the
+                // socket request itself. Only on a genuine RACING/STAGING -> DONE edge (this arm runs
+                // once per transition), so a re-sent DONE on a reconnect does not re-request.
+                if self.signal_capture {
+                    self.pending_marshal_request = true;
+                }
                 out.push(Event::SessionEnded {
                     adapter: self.id.clone(),
                     session: Self::session_id(status.race_heat_id),
@@ -517,6 +730,137 @@ impl RotorHazardAdapter {
                 rssi: vec![sample],
             }));
         }
+    }
+
+    /// Translate a `current_marshal_data` response (newer RotorHazard) into one
+    /// [`Event::SignalHistory`] per seat that carries a dense trace — the **full-fidelity** per-tick
+    /// RSSI history RotorHazard records, which supersedes the coarse streamed [`SignalChunk`] samples
+    /// in the `signal_trace` projection. Each seat's `start_time` is the race origin from the payload
+    /// header. Gated on the signal capability.
+    fn translate_marshal_data(&mut self, data: RawMarshalData, out: &mut Vec<Event>) {
+        if !self.signal_capture {
+            return;
+        }
+        let start_time = data.race.as_ref().map(|r| r.start_time).unwrap_or(0.0);
+        for (key, seat) in data.seats {
+            // Seats are keyed by stringified node index; a non-numeric key is not a node seat.
+            let Ok(node_index) = key.parse::<usize>() else {
+                continue;
+            };
+            self.emit_dense_history(
+                node_index,
+                start_time,
+                &seat.history_times,
+                &seat.history_values,
+                out,
+            );
+        }
+    }
+
+    /// Translate a `race_list` (saved-race tree) into the per-pilotrace pulls the transport issues.
+    ///
+    /// Walks every heat/round, recording each `(pilotrace_id)` to pull and the round `start_time` per
+    /// `node_index` (so the later `race_details` history can be made race-relative). The pulls queue
+    /// in [`pending_pilotrace_requests`](Self::pending_pilotrace_requests) for the transport to drain;
+    /// this emits no canonical events. Idempotent within a heat: a re-sent `race_list` rebuilds the
+    /// same queue (the transport drains it once per send).
+    fn translate_race_list(&mut self, list: RawRaceList) {
+        if !self.signal_capture {
+            return;
+        }
+        let mut requests = Vec::new();
+        for heat in list.heats.into_values() {
+            for round in heat.rounds.into_values() {
+                for pr in round.pilotraces {
+                    if let Some(node_index) = pr.node_index {
+                        self.pilotrace_start_time
+                            .insert(node_index, round.start_time);
+                    }
+                    requests.push(PilotRaceRequest {
+                        pilotrace_id: pr.pilotrace_id,
+                    });
+                }
+            }
+        }
+        self.pending_pilotrace_requests = requests;
+    }
+
+    /// Translate a `race_details` (one saved pilotrace) into that seat's dense [`Event::SignalHistory`]
+    /// — the per-pilotrace marshal path on the RotorHazard build with no aggregate
+    /// `current_marshal_data`. Refreshes the seat's [`SignalThresholds`] from `enter_at`/`exit_at`
+    /// when present. Uses the round `start_time` learned from the `race_list` as the race origin (or
+    /// the first sample when none is known). Gated on the signal capability.
+    fn translate_race_details(&mut self, details: RawRaceDetails, out: &mut Vec<Event>) {
+        if !self.signal_capture {
+            return;
+        }
+        let Some(node_index) = details.node_index else {
+            return;
+        };
+        // Prefer the race start learned from the race_list; else anchor on the first sample so the
+        // trace is trace-relative (starts at 0) — matching the coarse trace's per-heat origin.
+        let start_time = self
+            .pilotrace_start_time
+            .get(&node_index)
+            .copied()
+            .or_else(|| details.history_times.first().copied())
+            .unwrap_or(0.0);
+        self.emit_dense_history(
+            node_index,
+            start_time,
+            &details.history_times,
+            &details.history_values,
+            out,
+        );
+        // Refresh thresholds the call was made against, if reported (last-writer-wins downstream).
+        if let (Some(enter), Some(exit)) = (details.enter_at, details.exit_at) {
+            let enter = enter.round().clamp(0.0, u16::MAX as f32 as f64) as u16;
+            let exit = exit.round().clamp(0.0, u16::MAX as f32 as f64) as u16;
+            out.push(Event::SignalThresholds(SignalThresholds {
+                adapter: self.id.clone(),
+                competitor: seat_ref(node_index),
+                enter,
+                exit,
+            }));
+        }
+    }
+
+    /// Emit one dense [`Event::SignalHistory`] for a seat from its parallel `times`/`values` arrays.
+    ///
+    /// `start_time` is the race origin in **seconds**; each `times[i]` (also seconds) is made
+    /// race-relative by subtracting it, then converted to integer microseconds (the [`SourceTime`]
+    /// unit). RSSI clamps into `u16` ADC counts, native units, **no resampling** (the Slice 1
+    /// fidelity caution). Mismatched-length arrays use the common prefix; an empty history emits
+    /// nothing. Shared by the `current_marshal_data` and `race_details` paths so the two RH builds
+    /// fold identically.
+    fn emit_dense_history(
+        &self,
+        node_index: usize,
+        start_time: f64,
+        history_times: &[f64],
+        history_values: &[f64],
+        out: &mut Vec<Event>,
+    ) {
+        let n = history_values.len().min(history_times.len());
+        if n == 0 {
+            return;
+        }
+        let mut times = Vec::with_capacity(n);
+        let mut rssi = Vec::with_capacity(n);
+        for i in 0..n {
+            // Race-relative seconds -> integer microseconds (round half away from zero); clamp to
+            // non-negative so a sample fractionally before the recorded start can't go negative.
+            let rel_secs = history_times[i] - start_time;
+            let micros = (rel_secs * 1_000_000.0).round().max(0.0) as i64;
+            times.push(micros);
+            rssi.push(history_values[i].round().clamp(0.0, u16::MAX as f32 as f64) as u16);
+        }
+        out.push(Event::SignalHistory(SignalHistory {
+            adapter: self.id.clone(),
+            competitor: seat_ref(node_index),
+            times,
+            rssi,
+        }));
     }
 
     /// Emit per-node [`Event::SignalThresholds`] from an `enter_and_exit_at_levels` message —
@@ -577,6 +921,9 @@ impl Adapter for RotorHazardAdapter {
             Raw::PassRecord(_) => {}
             Raw::NodeData(data) => self.update_node_data(data, &mut out),
             Raw::EnterExitLevels(levels) => self.update_thresholds(levels, &mut out),
+            Raw::MarshalData(data) => self.translate_marshal_data(data, &mut out),
+            Raw::RaceList(list) => self.translate_race_list(list),
+            Raw::RaceDetails(details) => self.translate_race_details(details, &mut out),
         }
         out
     }
@@ -1211,6 +1558,206 @@ mod tests {
             4,
             "a fresh adapter (old reconnect behavior) double-emits the in-progress laps"
         );
+    }
+
+    /// Collect the `SignalHistory` events in a slice.
+    fn histories(events: &[Event]) -> Vec<&SignalHistory> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::SignalHistory(h) => Some(h),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Build a `current_marshal_data` payload with a race `start_time` and one seat.
+    fn marshal_data(start_time: f64, seat: usize, times: &[f64], values: &[f64]) -> Raw {
+        let mut seats = std::collections::BTreeMap::new();
+        seats.insert(
+            seat.to_string(),
+            RawMarshalSeat {
+                history_values: values.to_vec(),
+                history_times: times.to_vec(),
+            },
+        );
+        Raw::MarshalData(RawMarshalData {
+            race: Some(RawMarshalRace { start_time }),
+            seats,
+        })
+    }
+
+    #[test]
+    fn done_transition_flags_a_marshal_request() {
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        }));
+        // No request before the heat ends.
+        assert!(!adapter.take_marshal_request());
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(1),
+        }));
+        // The DONE edge flags exactly one request; draining clears it (a re-sent DONE won't re-flag).
+        assert!(
+            adapter.take_marshal_request(),
+            "DONE flags a marshal request"
+        );
+        assert!(!adapter.take_marshal_request(), "the flag is one-shot");
+        // A re-sent DONE (no transition) does not re-flag.
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(1),
+        }));
+        assert!(
+            !adapter.take_marshal_request(),
+            "re-sent DONE is not a transition"
+        );
+    }
+
+    #[test]
+    fn marshal_data_emits_dense_history_race_relative_micros() {
+        let mut adapter = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        // start_time 10.0s; samples at 10.1/10.2/10.3s -> 100k/200k/300k µs race-relative.
+        let events = adapter.translate(marshal_data(
+            10.0,
+            2,
+            &[10.1, 10.2, 10.3],
+            &[70.0, 150.0, 71.0],
+        ));
+        let hs = histories(&events);
+        assert_eq!(hs.len(), 1);
+        let h = hs[0];
+        assert_eq!(h.competitor, CompetitorRef("node-2".into()));
+        assert_eq!(h.adapter, AdapterId("rh".into()));
+        assert_eq!(h.times, vec![100_000, 200_000, 300_000]);
+        assert_eq!(h.rssi, vec![70, 150, 71]);
+    }
+
+    #[test]
+    fn marshal_data_skips_empty_or_mismatched_seats() {
+        let mut adapter = RotorHazardAdapter::new();
+        // Empty history: no event. Mismatched lengths: take the common prefix.
+        let empty = adapter.translate(marshal_data(0.0, 0, &[], &[]));
+        assert!(histories(&empty).is_empty(), "an empty seat emits nothing");
+
+        let mut seats = std::collections::BTreeMap::new();
+        seats.insert(
+            "0".to_string(),
+            RawMarshalSeat {
+                history_values: vec![70.0, 150.0, 71.0],
+                // One fewer time than values: the common prefix (2) is used.
+                history_times: vec![0.1, 0.2],
+            },
+        );
+        let mismatched = adapter.translate(Raw::MarshalData(RawMarshalData {
+            race: Some(RawMarshalRace { start_time: 0.0 }),
+            seats,
+        }));
+        let h = histories(&mismatched);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].times.len(), 2);
+        assert_eq!(h[0].rssi, vec![70, 150]);
+    }
+
+    #[test]
+    fn marshal_data_clamps_negative_times_and_rssi_range() {
+        let mut adapter = RotorHazardAdapter::new();
+        // A sample fractionally before start_time clamps to 0; RSSI clamps into u16.
+        let events = adapter.translate(marshal_data(5.0, 0, &[4.999_999, 5.5], &[-3.0, 70000.0]));
+        let h = histories(&events);
+        assert_eq!(h[0].times[0], 0, "a pre-start sample clamps to 0");
+        assert_eq!(h[0].rssi, vec![0, u16::MAX]);
+    }
+
+    #[test]
+    fn marshal_data_is_silent_without_signal_capability() {
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.signal_capture = false;
+        let events = adapter.translate(marshal_data(0.0, 0, &[0.1, 0.2], &[70.0, 150.0]));
+        assert!(
+            histories(&events).is_empty(),
+            "a non-signal source emits no dense history"
+        );
+    }
+
+    #[test]
+    fn race_list_queues_pilotrace_requests() {
+        let mut adapter = RotorHazardAdapter::new();
+        let raw = r#"{"event":"race_list","heats":{"1":{"rounds":{"1":{"start_time":987741.3,
+            "pilotraces":[{"pilotrace_id":1,"node_index":0},{"pilotrace_id":2,"node_index":1}]}}}}}"#;
+        let parsed: Raw = serde_json::from_str(raw).expect("race_list parses");
+        let events = adapter.translate(parsed);
+        // race_list emits no canonical events; it queues the per-pilotrace pulls.
+        assert!(events.is_empty());
+        let reqs = adapter.take_pilotrace_requests();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[0].pilotrace_id, 1);
+        assert_eq!(reqs[1].pilotrace_id, 2);
+        // Draining clears the queue.
+        assert!(adapter.take_pilotrace_requests().is_empty());
+    }
+
+    #[test]
+    fn race_details_emits_dense_history_relative_to_race_list_start() {
+        let mut adapter = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        // First the race_list teaches node-0's race start (987741.0s); then the per-pilotrace history.
+        let list = r#"{"event":"race_list","heats":{"1":{"rounds":{"1":{"start_time":987741.0,
+            "pilotraces":[{"pilotrace_id":1,"node_index":0}]}}}}}"#;
+        adapter.translate(serde_json::from_str::<Raw>(list).unwrap());
+        // history_times/values arrive as JSON-ENCODED STRINGS (this RH build's `json.dumps`).
+        let details = r#"{"event":"race_details","node_index":0,
+            "history_values":"[70, 150, 71]",
+            "history_times":"[987741.1, 987741.2, 987741.3]",
+            "enter_at":90,"exit_at":80}"#;
+        let events = adapter.translate(serde_json::from_str::<Raw>(details).unwrap());
+        let h = histories(&events);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].competitor, CompetitorRef("node-0".into()));
+        // Times are race-relative (minus the race_list start 987741.0): 0.1/0.2/0.3s -> µs.
+        assert_eq!(h[0].times, vec![100_000, 200_000, 300_000]);
+        assert_eq!(h[0].rssi, vec![70, 150, 71]);
+        // Thresholds are refreshed from enter_at/exit_at.
+        let t = events
+            .iter()
+            .find_map(|e| match e {
+                Event::SignalThresholds(t) => Some(t),
+                _ => None,
+            })
+            .expect("thresholds emitted");
+        assert_eq!((t.enter, t.exit), (90, 80));
+    }
+
+    #[test]
+    fn race_details_without_race_list_anchors_on_first_sample() {
+        // No prior race_list (so no known start): the trace anchors on its first sample (-> 0).
+        let mut adapter = RotorHazardAdapter::new();
+        let details = r#"{"event":"race_details","node_index":2,
+            "history_values":[120, 121, 122],
+            "history_times":[5.5, 5.6, 5.7]}"#;
+        let events = adapter.translate(serde_json::from_str::<Raw>(details).unwrap());
+        let h = histories(&events);
+        assert_eq!(h[0].competitor, CompetitorRef("node-2".into()));
+        assert_eq!(h[0].times, vec![0, 100_000, 200_000]);
+        assert_eq!(h[0].rssi, vec![120, 121, 122]);
+    }
+
+    #[test]
+    fn race_restart_clears_pending_marshal_state() {
+        // A new race must not carry stale pilotrace pulls / start times from the previous heat.
+        let mut adapter = RotorHazardAdapter::new();
+        let list = r#"{"event":"race_list","heats":{"1":{"rounds":{"1":{"start_time":1.0,
+            "pilotraces":[{"pilotrace_id":9,"node_index":0}]}}}}}"#;
+        adapter.translate(serde_json::from_str::<Raw>(list).unwrap());
+        // A fresh RACING transition clears the queue.
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(2),
+        }));
+        assert!(adapter.take_pilotrace_requests().is_empty());
+        assert!(!adapter.take_marshal_request());
     }
 
     #[test]
