@@ -50,6 +50,21 @@ use gridfpv_server::scope::EventId;
 use gridfpv_server::timers::{CreateTimerRequest, MOCK_TIMER_ID, TimerId, TimerKind, TimerStatus};
 use gridfpv_testkit::{NodeCsv, RhContainer, node_csv};
 
+/// Count how many lines of `rh`'s container log contain `needle` — used to assert the heat-end dense
+/// save fires **exactly once** (no #250 loop: `Heat added` / `Current laps saved` must not repeat).
+fn count_log_lines(rh: &RhContainer, needle: &str) -> usize {
+    let out = std::process::Command::new("docker")
+        .args(["logs", rh.name()])
+        .output()
+        .expect("docker logs");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    text.lines().filter(|l| l.contains(needle)).count()
+}
+
 /// DISTINCT RH host port for the app's RH-connect e2e (server full-event 5041, engine 5040).
 const RH_PORT: u16 = 5042;
 /// CSV tick interval (seconds) — a brisk pace so passes land within the live window.
@@ -284,6 +299,50 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
         "app marshaling path-2 (production flow): coarse stream = {coarse_samples} samples, dense \
          history = {dense_samples} samples (full-fidelity upgrade activated by the normal heat loop)"
     );
+
+    // === #250 regression guard: the heat-end dense save must fire EXACTLY ONCE. ===
+    //
+    // The #250 dense activation re-fired the heat-end `add_heat → set_current_heat → stop_race`
+    // dance on every `maintain` re-entry: the burst of emits could drop the socket, and the driver
+    // reconnected into a fresh `maintain` whose local guard was reset while the *shared* armed slot
+    // was still `finishing` — so it re-ran the dance, looping heat after heat, re-flooding+resetting
+    // the link and stopping the live race so NO laps landed. The fix moves the once-only guard into
+    // the shared slot (`done`, set before any emit), so a reconnect/re-sent DONE/maintain re-entry
+    // never re-runs it. We prove that here three ways:
+    //
+    //  1. The RH container log shows the heat-save dance ran ONCE, not in a loop. RotorHazard logs
+    //     `Current laps saved: ...` per `save_laps`; a loop logs it many times. We allow up to a
+    //     small constant for the legitimate single save (and the per-pilotrace pull on older RH),
+    //     but a loop would show double-digits. `Heat added` likewise must not repeat per finish.
+    let laps_saved = count_log_lines(&rh, "Current laps saved");
+    let heats_added = count_log_lines(&rh, "Heat added");
+    eprintln!(
+        "app #250 guard: RH log shows {laps_saved}x 'Current laps saved', {heats_added}x 'Heat added' \
+         (a loop would show these climbing without bound)"
+    );
+    assert!(
+        laps_saved <= 3,
+        "the heat-end dense save must fire ONCE, not loop: RH logged 'Current laps saved' \
+         {laps_saved} times (the #250 regression flooded the socket with a save-per-reconnect loop)"
+    );
+    // One finish should add at most one savable heat (plus the heats present from staging). A loop
+    // creates a fresh heat every reconnect — climbing without bound.
+    assert!(
+        heats_added <= 4,
+        "the heat-end dense save must add a savable heat ONCE, not loop: RH logged 'Heat added' \
+         {heats_added} times (the #250 regression created heat after heat)"
+    );
+
+    //  2. Laps actually landed — the live race was NOT interrupted by the finish. The earlier passes
+    //     assertion proves laps flowed; re-affirm the run still holds them after the finish (the loop
+    //     repeatedly stop_race'd the live heat, so under the regression the count would collapse).
+    assert!(
+        count_passes(&read_all(&state)) >= 1,
+        "laps must still be present after the heat-end save (the #250 loop repeatedly stopped the \
+         live race, leaving zero laps)"
+    );
+
+    //  3. The connection never flapped during the finish (asserted below: it stays Connected).
     // Give the bridge several poll cycles to observe the Finished transition and disarm the heat,
     // then assert the connection is *still* Connected — not torn down. We can't prove a negative by
     // waiting forever, so we wait a generous window and assert it never left Connected.

@@ -110,6 +110,16 @@ struct ArmedHeat {
     /// slot. Without the stop, RH stays `RACING` between heats and the dense history is never pulled
     /// into the finishing heat's log — only the coarse streamed samples survive.
     finishing: bool,
+    /// Set by the driver the instant it has **fired the heat-end dense save** (the
+    /// `ensure_savable_heat → set_current_heat → stop_race` dance) for this arming, so it runs
+    /// **exactly once**. This guard lives in the *shared* slot (not a `maintain`-local) deliberately:
+    /// the dense pull's burst of socket emits can itself drop the link, and on reconnect the driver
+    /// re-enters [`maintain`] with the same still-`finishing` slot — without this flag it would
+    /// re-run the whole add_heat/set_current_heat/stop_race dance every reconnect, looping heat after
+    /// heat, re-flooding+resetting the socket and killing the live race (the #250 regression). Once
+    /// `done` is set, the finish is never re-triggered by a re-sent `DONE`, a reconnect, or a
+    /// maintain re-entry; only the (local) settle drain remains, after which the slot is cleared.
+    done: bool,
 }
 
 /// Render an error together with its full `source()` chain as `"top: cause: root-cause"`.
@@ -201,6 +211,7 @@ impl RhConnection {
             sink,
             staged: false,
             finishing: false,
+            done: false,
         });
     }
 
@@ -275,6 +286,38 @@ fn remap(event: Event, lineup: &[CompetitorRef], adapter: &AdapterId) -> Option<
             Some(Event::SignalHistory(h))
         }
         _ => None,
+    }
+}
+
+/// Decide whether to fire the heat-end dense save **right now**, and atomically claim it so it can
+/// fire **exactly once per arming**. Returns `true` (and flips the heat's shared `done` flag) only
+/// when: a heat is armed, it is `finishing`, it has not already fired (`!done`), and no settle is in
+/// flight (`!settle_pending`). On every other call it returns `false`.
+///
+/// The once-only guarantee lives in the *shared* `done` flag (on [`ArmedHeat`], persisted across
+/// reconnects) rather than a `maintain`-local: the dense pull's burst of emits can drop the link, so
+/// the driver re-enters [`maintain`] (fresh local `finish_deadline = None`) with the same still-
+/// `finishing` slot. Were the guard local, that re-entry would re-run the whole add_heat /
+/// set_current_heat / stop_race dance — looping heat after heat, re-flooding+resetting the socket and
+/// stopping the live race so no laps land (the #250 regression). Claiming on the shared flag makes a
+/// re-sent `DONE`, a reconnect, and a maintain re-entry all no-ops. `settle_pending` blocks a second
+/// claim within the *same* invocation while the post-save drain settle is still running.
+fn claim_finish(heat: Option<&mut ArmedHeat>, settle_pending: bool) -> bool {
+    match heat {
+        Some(h) => claim_finish_flags(h.finishing, &mut h.done, settle_pending),
+        None => false,
+    }
+}
+
+/// The pure once-only decision behind [`claim_finish`], over the raw flags so it is unit-testable
+/// without a live `ArmedHeat` (which needs a `PassSink`/log). Flips `done` and returns `true` iff
+/// the save should fire now: `finishing && !done && !settle_pending`.
+fn claim_finish_flags(finishing: bool, done: &mut bool, settle_pending: bool) -> bool {
+    if finishing && !*done && !settle_pending {
+        *done = true;
+        true
+    } else {
+        false
     }
 }
 
@@ -481,9 +524,18 @@ fn maintain(
         // the resulting `SignalHistory` lands in THIS heat's log (the full-fidelity trace superseding
         // the coarse stream), then clear the slot (the connection stays alive).
         {
+            // Fire the heat-end dense save **exactly once per arming**. The trigger is gated on three
+            // independent conditions, all of which survive a reconnect: the heat is `finishing`, it
+            // has not already fired (`!done`, the *shared* guard), and no settle is in flight locally.
+            // We flip the shared `done` flag the instant we decide to fire — BEFORE any emit — so that
+            // if the dense pull's emit burst drops the socket and the driver reconnects into a fresh
+            // `maintain` with the same still-`finishing` slot, `done` is already set and the dance is
+            // NOT re-run (the #250 looping/flapping regression). This makes the save idempotent: a
+            // re-sent `DONE`, a reconnect, or a maintain re-entry can never re-create heats/rounds,
+            // re-flood the socket, or re-stop the live race.
             let start_finish = {
-                let slot = armed.lock().expect("armed-heat lock poisoned");
-                matches!(slot.as_ref(), Some(h) if h.finishing) && finish_deadline.is_none()
+                let mut slot = armed.lock().expect("armed-heat lock poisoned");
+                claim_finish(slot.as_mut(), finish_deadline.is_some())
             };
             if start_finish {
                 // Select a savable heat FIRST (while still RACING) so the DONE-triggered `save_laps`
@@ -517,6 +569,19 @@ fn maintain(
                 // Drive RH to DONE; the transport's DONE handler issues the dense marshal pull, now
                 // with a current heat so `save_laps` persists the accumulated history.
                 conn.stop_race().ok();
+                finish_deadline = Some(Instant::now() + FINISH_DRAIN_SETTLE);
+            } else if finish_deadline.is_none()
+                && armed
+                    .lock()
+                    .expect("armed-heat lock poisoned")
+                    .as_ref()
+                    .is_some_and(|h| h.done)
+            {
+                // The save already fired (`done`) but this `maintain` invocation has no local settle —
+                // i.e. the link dropped/reconnected mid-settle and we re-entered fresh. Do NOT re-fire
+                // the dance (the guard above already prevents that); just restart the drain settle so
+                // any dense `SignalHistory` re-pushed on the new socket still lands in this heat's log,
+                // and the slot is eventually cleared rather than stranded `done`-but-armed forever.
                 finish_deadline = Some(Instant::now() + FINISH_DRAIN_SETTLE);
             }
             if let Some(deadline) = finish_deadline {
@@ -642,6 +707,52 @@ mod tests {
             rssi: vec![0],
         });
         assert!(remap(off, &lineup(), &adapter).is_none());
+    }
+
+    /// The heat-end dense save fires **exactly once per arming**, even across a reconnect (#250
+    /// regression). The shared `done` flag — not a `maintain`-local — is what guarantees it: a
+    /// finishing heat claims the save once; a second poll in the same invocation is gated by the
+    /// settle; and crucially, after a simulated reconnect (the local settle resets to "not pending")
+    /// the still-`finishing` heat must NOT re-fire because `done` persists in the shared slot. Pre-fix
+    /// the local-only guard re-ran the add_heat/set_current_heat/stop_race dance on every reconnect,
+    /// looping heats, flapping the socket, and stopping the live race so no laps landed.
+    #[test]
+    fn finish_fires_exactly_once_even_across_a_reconnect() {
+        // Not finishing yet (heat still Running): never fires.
+        let mut done = false;
+        assert!(!claim_finish_flags(false, &mut done, false));
+        assert!(!done);
+
+        // Disarm → finishing. The first poll (no settle pending) claims the save and marks it done.
+        assert!(
+            claim_finish_flags(true, &mut done, false),
+            "the first finish poll must fire the save"
+        );
+        assert!(done, "claiming the save must flip the shared `done` flag");
+
+        // A second poll in the SAME maintain invocation, while the post-save settle is pending, does
+        // not re-fire (settle_pending = true).
+        assert!(
+            !claim_finish_flags(true, &mut done, true),
+            "the save must not re-fire while the post-save settle is still in flight"
+        );
+
+        // Simulate a RECONNECT: the dense pull dropped the link, the driver re-enters `maintain` with
+        // a fresh local `finish_deadline = None` (settle_pending = false) but the SAME still-
+        // `finishing` shared slot (`done` already true). It must NOT re-run the dance — this is the
+        // exact #250 loop the fix closes.
+        assert!(
+            !claim_finish_flags(true, &mut done, false),
+            "a reconnect must NOT re-fire the heat-end save once it has already fired (the #250 loop)"
+        );
+
+        // A FRESH arming (a new heat) resets `done` to false in `arm_heat`, so the next real finish
+        // fires again — the once-only guard is per-arming, not per-connection.
+        let mut next = false;
+        assert!(
+            claim_finish_flags(true, &mut next, false),
+            "a brand-new arming's finish must fire (the guard is per-arming)"
+        );
     }
 
     /// A failed connect to a dead port must produce an *actionable* log: the bare top-level
