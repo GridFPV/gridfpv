@@ -82,6 +82,26 @@ struct ArmedHeat {
     staged: bool,
 }
 
+/// Render an error together with its full `source()` chain as `"top: cause: root-cause"`.
+///
+/// `rust_socketio::Error`'s Display is lossy for the connect path: its
+/// `IncompleteResponseFromEngineIo(rust_engineio::Error)` variant carries no `{0}`, so it prints the
+/// bare string "EngineIO Error" and drops the wrapped engine.io/reqwest cause — a refused TCP
+/// connect, a handshake reject, a TLS failure, and a timeout all collapse to that one opaque line.
+/// Walking `std::error::Error::source()` recovers the real reason so a connect-failure log is
+/// actionable (e.g. distinguishes "RH not running on :5000 (connection refused)" from a genuine
+/// handshake regression).
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
 /// One persistent live RotorHazard connection for a *(active event, RH timer)* pair (#105).
 ///
 /// Owns a dedicated `spawn_blocking` driver thread that connects on construction, maintains and
@@ -261,9 +281,17 @@ fn drive(
                 // The adapter was consumed by the failed `connect`; start the next attempt fresh.
                 // (A connect failure means no socket and no replayed snapshot, so there is nothing
                 // to dedup against — a fresh adapter is correct and #156 re-seeds on the next race.)
+                //
+                // Log the full error *chain*, not just `rust_socketio`'s top-level Display: its
+                // `IncompleteResponseFromEngineIo` variant renders as the bare, useless string
+                // "EngineIO Error" (no `{0}`), which hides the actual cause — a refused TCP connect
+                // (RH not running / wrong port), an engine.io handshake reject, a TLS fault, or a
+                // timeout all collapse to the same opaque line. `error_chain` walks `source()` so the
+                // log tells a dead `:5000` apart from a genuine handshake failure at a glance.
                 eprintln!(
-                    "gridfpv: RotorHazard connect failed for {:?}: {e}",
-                    timer_id.0
+                    "gridfpv: RotorHazard connect failed for {:?}: {}",
+                    timer_id.0,
+                    error_chain(&e)
                 );
                 timers.set_status(&timer_id, TimerStatus::Error);
                 if sleep_unless_cancelled(backoff, &cancel) {
@@ -480,5 +508,33 @@ mod tests {
             rssi: vec![0],
         });
         assert!(remap(off, &lineup(), &adapter).is_none());
+    }
+
+    /// A failed connect to a dead port must produce an *actionable* log: the bare top-level
+    /// `rust_socketio` Display is "EngineIO Error" (hides the cause), but `error_chain` walks the
+    /// `source()` chain down to the real reason (here: the refused TCP connect). This is the
+    /// regression-diagnosis fix — a dead `:5000` no longer looks identical to a handshake failure.
+    #[test]
+    fn error_chain_surfaces_the_real_connect_cause() {
+        // Port 1 is reserved/unused on the loopback, so the connect is refused immediately.
+        // (`RotorHazardConnection` isn't `Debug`, so match rather than `expect_err`.)
+        let err =
+            match RotorHazardConnection::connect("http://127.0.0.1:1", RotorHazardAdapter::new()) {
+                Ok(_) => panic!("connecting to a dead port must fail"),
+                Err(e) => e,
+            };
+        let chained = error_chain(&err);
+        // The top-level Display alone is the useless opaque string...
+        assert_eq!(err.to_string(), "EngineIO Error");
+        // ...but the chain recovers the underlying cause (refused / no connection).
+        assert!(
+            chained.len() > "EngineIO Error".len(),
+            "error_chain must add the underlying cause, got {chained:?}"
+        );
+        let lower = chained.to_lowercase();
+        assert!(
+            lower.contains("refused") || lower.contains("connect"),
+            "error_chain should name the refused connect, got {chained:?}"
+        );
     }
 }
