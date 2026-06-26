@@ -75,6 +75,7 @@ fn scenario() -> Vec<(usize, String)> {
                 ticks_per_lap: 2,
                 peak_rssi: 180,
                 baseline_rssi: 70,
+                seed: 0,
             }),
         ),
         (1usize, plan_csv(&scenarios::dnf(2, 6))),

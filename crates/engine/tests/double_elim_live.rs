@@ -49,6 +49,7 @@ fn busy_stream() -> String {
         ticks_per_lap: 2,
         peak_rssi: 180,
         baseline_rssi: 70,
+        seed: 0,
     })
 }
 
