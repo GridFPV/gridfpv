@@ -129,9 +129,9 @@ pub enum Command {
 
     // --- Scheduling ---
     /// Create a heat with its lineup (`Event::HeatScheduled`). Additively carries the
-    /// class/round the heat runs in and the per-pilot frequency assignment; all three
-    /// are optional and default-absent, so the free-text NewHeat path (which assigns
-    /// none of them) is unchanged on the wire.
+    /// class/round the heat runs in, the per-pilot frequency assignment, and an optional
+    /// human `label`; all are optional and default-absent, so the free-text NewHeat path
+    /// (which assigns none of them) is unchanged on the wire.
     ScheduleHeat {
         /// The id the new heat will carry.
         heat: HeatId,
@@ -149,6 +149,13 @@ pub enum Command {
         /// assigned (a sim race, or the free-text path).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         frequencies: Vec<(CompetitorRef, u16)>,
+        /// An **optional human label** for a manually-built heat. When set it becomes the
+        /// heat's display name everywhere (overriding the derived "‹Round› Heat N" / tier
+        /// convention); `None` (the default / the generator path) keeps the auto-name.
+        /// Threaded straight into the emitted [`Event::HeatScheduled`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        label: Option<String>,
     },
 
     /// **Fill a round** (race redesign Slice 3a) — the round-driven engine's one command.
@@ -409,6 +416,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             Command::ScheduleHeat {
                 heat: HeatId("main-a".into()),
@@ -422,6 +430,7 @@ mod tests {
                     (CompetitorRef("node-0".into()), 5658),
                     (CompetitorRef("node-1".into()), 5695),
                 ],
+                label: Some("Featured Heat".into()),
             },
             Command::FillRound {
                 round: RoundId("qualifying-r1-abc".into()),

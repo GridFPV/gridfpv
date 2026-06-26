@@ -477,6 +477,9 @@
   let buildOpen = $state(false);
   let buildRound = $state<RoundId | ''>('');
   let buildHeatId = $state('');
+  // An optional human name for the heat. When set it becomes the heat's display name everywhere
+  // (overriding the derived "‹Round› Heat N" / tier convention); empty = auto-name (label None).
+  let buildHeatLabel = $state('');
   let buildSelected = $state<Set<PilotId>>(new Set());
   let building = $state(false);
 
@@ -510,6 +513,7 @@
     buildOpen = true;
     buildRound = rounds[0]?.id ?? '';
     buildHeatId = '';
+    buildHeatLabel = '';
     buildSelected = new Set();
   }
   function cancelBuild() {
@@ -528,10 +532,13 @@
     building = true;
     // Lineup in eligible-member order; a pilot id is its own CompetitorRef.
     const lineup: CompetitorRef[] = eligibleMembers.filter((pid) => buildSelected.has(pid));
+    // A blank name = no custom label (the heat keeps its derived auto-name).
+    const label = buildHeatLabel.trim() || undefined;
     try {
       const ack = await session.scheduleHeat(buildHeatId.trim(), lineup, {
         round: buildRound,
-        class: roundClass(buildRound)
+        class: roundClass(buildRound),
+        label
       });
       if (!ack.ok) return; // The toast/banner surfaces session.lastCommandError (e.g. a dup id).
       await refreshHeats();
@@ -539,6 +546,7 @@
       buildOpen = false;
       buildSelected = new Set();
       buildHeatId = '';
+      buildHeatLabel = '';
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1653,6 +1661,16 @@
           </Field>
           <Field label="Heat id" required>
             <Input bind:value={buildHeatId} placeholder="e.g. q-1" aria-label="Build heat id" />
+          </Field>
+          <Field
+            label="Heat name (optional)"
+            hint="Overrides the auto-name. Leave blank to keep it."
+          >
+            <Input
+              bind:value={buildHeatLabel}
+              placeholder="e.g. Featured Heat"
+              aria-label="Build heat name"
+            />
           </Field>
         </div>
 

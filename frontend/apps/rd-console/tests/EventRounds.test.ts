@@ -982,8 +982,42 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
 
     await waitFor(() => expect(sendSpy).toHaveBeenCalled());
     // A ScheduleHeat tagged with the round + its single class, lineup of the chosen pilot refs.
+    // The optional name was left blank, so no custom label is sent (the heat keeps its auto-name).
     expect(sendSpy.mock.calls[0][0]).toEqual({
-      ScheduleHeat: { heat: 'q-1', lineup: ['p1', 'p2'], class: 'c1', round: 'r1' }
+      ScheduleHeat: {
+        heat: 'q-1',
+        lineup: ['p1', 'p2'],
+        class: 'c1',
+        round: 'r1',
+        label: undefined
+      }
+    });
+  });
+
+  it('sends the optional heat name as the ScheduleHeat label (custom build-heat name)', async () => {
+    const impls = heatsImpls([]);
+    const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.input(await screen.findByLabelText('Build heat id'), {
+      target: { value: 'q-1' }
+    });
+    await fireEvent.input(await screen.findByLabelText('Build heat name'), {
+      target: { value: 'Featured Heat' }
+    });
+    await fireEvent.click(screen.getByLabelText('Select AceOne'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({
+      ScheduleHeat: {
+        heat: 'q-1',
+        lineup: ['p1'],
+        class: 'c1',
+        round: 'r1',
+        label: 'Featured Heat'
+      }
     });
   });
 });

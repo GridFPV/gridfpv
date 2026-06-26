@@ -2058,6 +2058,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -2175,6 +2176,7 @@ mod tests {
                         class: None,
                         round: None,
                         frequencies: vec![],
+                        label: None,
                     },
                     None,
                 )
@@ -2236,6 +2238,7 @@ mod tests {
                         class: None,
                         round: None,
                         frequencies: vec![],
+                        label: None,
                     },
                     None,
                 )

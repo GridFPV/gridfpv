@@ -1724,6 +1724,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             Event::HeatStateChanged {
                 heat: HeatId("q-1".into()),
@@ -2042,6 +2043,7 @@ mod tests {
                 class: Some(ClassId("open".into())),
                 round: Some(RoundId("q1".into())),
                 frequencies: vec![],
+                label: None,
             },
             Event::HeatStateChanged {
                 heat: HeatId("o-1".into()),
@@ -2055,6 +2057,7 @@ mod tests {
                 class: Some(ClassId("sport".into())),
                 round: Some(RoundId("q2".into())),
                 frequencies: vec![],
+                label: None,
             },
             Event::HeatStateChanged {
                 heat: HeatId("s-1".into()),
@@ -2121,6 +2124,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             Event::HeatStateChanged {
                 heat: HeatId("q-1".into()),
@@ -2134,6 +2138,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             Event::HeatStateChanged {
                 heat: HeatId("q-2".into()),

@@ -1,10 +1,11 @@
 /**
  * Shared heat-naming helpers for the RD console.
  *
- * Heats carry no human label on the wire ({@link HeatSummary} is the engine's view), so the
- * console derives a display name from the round + the heat's position within that round. This
- * one place owns that rule so the Rounds & Heats stage ({@link EventRounds}) and the Live-control
- * heat picker render the **same** name for a given heat.
+ * A heat may carry an **optional human label** ({@link HeatSummary.label}, set by the manual
+ * build-heat flow); when present it *is* the display name. Otherwise the console **derives** one
+ * from the round + the heat's position within that round. This one place owns that rule so the
+ * Rounds & Heats stage ({@link EventRounds}) and the Live-control heat picker render the **same**
+ * name for a given heat.
  *
  *  - an **open-practice** round auto-creates a single channel heat → "Open Practice Heat";
  *  - a **multi-main** finals round (#219, D14) names its heats by *tier* → "A-Main", "B-Main", …
@@ -68,6 +69,10 @@ export function heatDisplayName(
   heat: HeatSummary,
   heatsInRound: HeatSummary[]
 ): string {
+  // A manually-built heat may carry an RD-typed custom label — it wins over every derived
+  // convention below (the whole point of the build-heat name field). A generator heat has none.
+  const custom = heat.label?.trim();
+  if (custom) return custom;
   if (isOpenPracticeRound(round)) return OPEN_PRACTICE_HEAT_NAME;
   const index = heatsInRound.findIndex((x) => x.heat === heat.heat);
   if (isMultiMainRound(round)) {
@@ -94,6 +99,10 @@ export function heatDisplayName(
 export function heatNameById(heatId: HeatId, heats: HeatSummary[], rounds: RoundDef[]): string {
   const summary = heats.find((h) => h.heat === heatId);
   if (!summary) return heatId;
+  // A custom label wins even for a heat with no resolvable round (it has no derived name to fall
+  // back to but should still show the RD's name rather than the bare id).
+  const custom = summary.label?.trim();
+  if (custom) return custom;
   const round = summary.round ? rounds.find((r) => r.id === summary.round) : undefined;
   if (!round) return heatId;
   const inRound = heats.filter((h) => h.round === round.id);

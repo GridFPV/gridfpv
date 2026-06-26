@@ -81,6 +81,38 @@ describe('heats — heatNameById (by-id resolution for Live control)', () => {
     const untagged: HeatSummary = { ...heat('q-1'), round: undefined };
     expect(heatNameById('q-1', [untagged], [round()])).toBe('q-1');
   });
+
+  it('prefers a custom label even when the heat has no resolvable round', () => {
+    const labelled: HeatSummary = { ...heat('q-1'), round: undefined, label: 'Featured Heat' };
+    expect(heatNameById('q-1', [labelled], [round()])).toBe('Featured Heat');
+  });
+});
+
+describe('heats — a custom label overrides the derived auto-name (build-heat)', () => {
+  it('heatDisplayName returns the custom label over the "<Round> Heat N" convention', () => {
+    const r = round();
+    const labelled: HeatSummary = { ...heat('h-a'), label: 'Featured Heat' };
+    expect(heatDisplayName(r, labelled, [labelled])).toBe('Featured Heat');
+  });
+
+  it('heatDisplayName returns the custom label over the multi-main tier name', () => {
+    const r = round({ format: 'multi_main' });
+    const labelled: HeatSummary = { ...heat('main-A'), label: 'Grand Final' };
+    expect(heatDisplayName(r, labelled, [labelled])).toBe('Grand Final');
+  });
+
+  it('falls back to the derived name when the label is absent or blank', () => {
+    const r = round();
+    const list = [heat('h-a')];
+    expect(heatDisplayName(r, { ...list[0], label: undefined }, list)).toBe('Qualifying R1 Heat 1');
+    expect(heatDisplayName(r, { ...list[0], label: '   ' }, list)).toBe('Qualifying R1 Heat 1');
+  });
+
+  it('heatNameById resolves a labelled heat to its custom label', () => {
+    const r = round();
+    const labelled: HeatSummary = { ...heat('h-a'), label: 'Featured Heat' };
+    expect(heatNameById('h-a', [labelled], [r])).toBe('Featured Heat');
+  });
 });
 
 describe('heats — multi-main tier naming (#219)', () => {

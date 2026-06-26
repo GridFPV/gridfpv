@@ -601,11 +601,12 @@ pub enum Event {
     /// competitors in the heat and, additively, the class/round it belongs to and the
     /// per-pilot frequency assignment.
     ///
-    /// The `class`, `round`, and `frequencies` fields are **additive** and
+    /// The `class`, `round`, `frequencies`, and `label` fields are **additive** and
     /// default-absent: a heat scheduled without them (the free-text NewHeat path, a
     /// sim race, a pre-existing log entry) reads back as `None`/empty, so older logs
     /// round-trip unchanged. `frequencies` pairs each competitor with a raw-MHz channel
-    /// (e.g. `5800`); empty means none assigned (sim/none).
+    /// (e.g. `5800`); empty means none assigned (sim/none). `label` is the optional
+    /// human name a manual build-heat carries (see the field doc).
     HeatScheduled {
         heat: HeatId,
         lineup: Vec<CompetitorRef>,
@@ -621,6 +622,14 @@ pub enum Event {
         /// assigned (a simulator, or the free-text path that does not assign channels).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         frequencies: Vec<(CompetitorRef, u16)>,
+        /// An **optional human label** the RD typed when building this heat by hand. When
+        /// present it is the heat's display name everywhere (overriding the derived
+        /// "‹Round› Heat N" / tier convention); `None` for a generator-filled heat, which
+        /// keeps the auto-name. Additive and default-absent, so a pre-existing log (or a
+        /// generator heat) reads back as `None` and round-trips unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        label: Option<String>,
     },
     /// A heat-loop state transition appended by the engine (race-engine.html §2).
     HeatStateChanged {
@@ -891,6 +900,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             Event::HeatScheduled {
                 heat: HeatId("main-a".into()),
@@ -904,6 +914,7 @@ mod tests {
                     (CompetitorRef("node-0".into()), 5658),
                     (CompetitorRef("node-1".into()), 5695),
                 ],
+                label: None,
             },
             Event::HeatStarting {
                 heat: HeatId("q-1".into()),
@@ -1013,8 +1024,8 @@ mod tests {
 
     #[test]
     fn heat_scheduled_omits_class_round_and_frequencies_when_default() {
-        // A heat with no class/round/frequencies (the free-text NewHeat path, a sim
-        // race) serialises *exactly* like the pre-tag shape: the new fields are
+        // A heat with no class/round/frequencies/label (the free-text NewHeat path, a
+        // sim race) serialises *exactly* like the pre-tag shape: the new fields are
         // skipped entirely, so the wire stays byte-compatible with old logs.
         let event = Event::HeatScheduled {
             heat: HeatId("q-1".into()),
@@ -1022,6 +1033,7 @@ mod tests {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("class"), "absent class omitted: {json}");
@@ -1030,6 +1042,7 @@ mod tests {
             !json.contains("frequencies"),
             "empty frequencies omitted: {json}"
         );
+        assert!(!json.contains("label"), "absent label omitted: {json}");
         let back: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
     }
@@ -1048,9 +1061,11 @@ mod tests {
                 (CompetitorRef("node-0".into()), 5658),
                 (CompetitorRef("node-1".into()), 5695),
             ],
+            label: Some("Featured Heat".into()),
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("class") && json.contains("round") && json.contains("frequencies"));
+        assert!(json.contains("label") && json.contains("Featured Heat"));
         let back: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
     }
@@ -1293,8 +1308,8 @@ mod tests {
 
     #[test]
     fn legacy_heat_scheduled_reads_back_with_defaults() {
-        // A pre-existing serialized `HeatScheduled` (before the class/round/frequencies
-        // tags existed) must still deserialize, with the new fields defaulting to
+        // A pre-existing serialized `HeatScheduled` (before the class/round/frequencies/
+        // label tags existed) must still deserialize, with the new fields defaulting to
         // None/empty. This is the exact JSON shape an old log on disk holds.
         let legacy = r#"{"HeatScheduled":{"heat":"q-1","lineup":["node-0","node-1"]}}"#;
         let back: Event = serde_json::from_str(legacy).unwrap();
@@ -1309,6 +1324,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             }
         );
     }

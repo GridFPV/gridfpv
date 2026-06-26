@@ -303,6 +303,7 @@ pub fn apply_command_in_event(
             class,
             round,
             frequencies,
+            label,
         } => apply_schedule_heat(
             registry,
             event_id,
@@ -312,6 +313,7 @@ pub fn apply_command_in_event(
             class,
             round,
             frequencies,
+            label,
         ),
         other => apply_command(state, other),
     }
@@ -335,6 +337,7 @@ fn apply_schedule_heat(
     class: Option<gridfpv_events::ClassId>,
     round: Option<gridfpv_events::RoundId>,
     frequencies: Vec<(gridfpv_events::CompetitorRef, u16)>,
+    label: Option<String>,
 ) -> CommandAck {
     use crate::round_engine;
 
@@ -380,6 +383,7 @@ fn apply_schedule_heat(
         class,
         round,
         frequencies,
+        label,
     };
     match state.append(event, None) {
         Ok(_offset) => CommandAck::ok(),
@@ -469,6 +473,8 @@ fn fill_round_once(
                 class,
                 round: Some(round.clone()),
                 frequencies,
+                // A generator-filled heat keeps the derived auto-name (no custom label).
+                label: None,
             };
             match state.append(event, None) {
                 Ok(_offset) => FillStep::Appended,
@@ -702,12 +708,14 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             class,
             round,
             frequencies,
+            label,
         } => Ok(Event::HeatScheduled {
             heat,
             lineup,
             class,
             round,
             frequencies,
+            label,
         }),
 
         // --- FillRound is intercepted by `apply_command_in_event` (it needs the event
@@ -1007,6 +1015,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             None,
         )
@@ -1114,13 +1123,14 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
         );
         assert!(ack.ok);
         let (events, _) = state.read().unwrap();
         assert!(events.iter().any(|e| matches!(
             e,
-            Event::HeatScheduled { heat: h, lineup: l, class: None, round: None, frequencies }
+            Event::HeatScheduled { heat: h, lineup: l, class: None, round: None, frequencies, label: None }
                 if *h == heat() && *l == lineup && frequencies.is_empty()
         )));
     }
@@ -1144,6 +1154,7 @@ mod tests {
                 class: Some(ClassId("open".into())),
                 round: Some(RoundId("r1".into())),
                 frequencies: freqs.clone(),
+                label: None,
             },
         );
         assert!(ack.ok, "got {ack:?}");
@@ -1155,6 +1166,32 @@ mod tests {
                     && *c == ClassId("open".into())
                     && *r == RoundId("r1".into())
                     && *frequencies == freqs
+        )));
+    }
+
+    /// A `ScheduleHeat` carrying a custom `label` persists it on the emitted `HeatScheduled`
+    /// (the build-heat custom-name path); a generator/free-text heat leaves it `None`.
+    #[test]
+    fn schedule_heat_carries_the_custom_label() {
+        let state = AppState::new(InMemoryLog::default());
+        let lineup = vec![CompetitorRef("A".into())];
+        let ack = apply_command(
+            &state,
+            Command::ScheduleHeat {
+                heat: heat(),
+                lineup: lineup.clone(),
+                class: None,
+                round: None,
+                frequencies: vec![],
+                label: Some("Featured Heat".into()),
+            },
+        );
+        assert!(ack.ok, "got {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::HeatScheduled { heat: h, label: Some(l), .. }
+                if *h == heat() && l == "Featured Heat"
         )));
     }
 
@@ -1175,6 +1212,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -1233,6 +1271,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -1440,6 +1479,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             None,
         )
@@ -1488,6 +1528,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             None,
         )
@@ -1603,6 +1644,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             None,
         )
@@ -1724,6 +1766,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             None,
         )

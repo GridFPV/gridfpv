@@ -103,7 +103,14 @@ round?: RoundId,
  * Per-pilot frequency assignment in raw MHz (e.g. `5800`); empty when none is
  * assigned (a sim race, or the free-text path).
  */
-frequencies?: Array<[CompetitorRef, number]>, } } | { "FillRound": { 
+frequencies?: Array<[CompetitorRef, number]>, 
+/**
+ * An **optional human label** for a manually-built heat. When set it becomes the
+ * heat's display name everywhere (overriding the derived "‹Round› Heat N" / tier
+ * convention); `None` (the default / the generator path) keeps the auto-name.
+ * Threaded straight into the emitted [`Event::HeatScheduled`].
+ */
+label?: string, } } | { "FillRound": { 
 /**
  * The round to fill — one of the event's [`rounds`](crate::events::EventMeta::rounds).
  */

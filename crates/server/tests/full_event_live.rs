@@ -325,6 +325,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         },
         &rd,
     )

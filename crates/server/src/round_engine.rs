@@ -1607,6 +1607,7 @@ mod tests {
             class: Some(ClassId(class.into())),
             round: Some(RoundId(round.into())),
             frequencies: vec![],
+            label: None,
         }
     }
 
@@ -2597,6 +2598,7 @@ mod tests {
                         class: Some(ClassId("open".into())),
                         round: Some(RoundId("q1".into())),
                         frequencies: freqs,
+                        label: None,
                     });
                     let mut passes = Vec::new();
                     for (i, n) in names.iter().enumerate() {
@@ -3049,6 +3051,7 @@ mod tests {
                         class: Some(ClassId("open".into())),
                         round: Some(RoundId("q1".into())),
                         frequencies: vec![],
+                        label: None,
                     });
                     // Score the heat with deterministic passes (A < B < C on best lap).
                     log.extend(run_heat_events(

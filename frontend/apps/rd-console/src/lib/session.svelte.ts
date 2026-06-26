@@ -854,16 +854,17 @@ export class Session {
    * Schedule a heat by hand (`Command::ScheduleHeat`) — race redesign Slice 3b, the manual build that
    * replaces the retired free-text NewHeat form. The lineup is real {@link CompetitorRef}s drawn from
    * a round's eligible class members (no typed names), and the heat is **tagged** with the round and
-   * its class so it lands in that round's heats list. Sent through the control path; returns the raw
-   * {@link CommandAck}.
+   * its class so it lands in that round's heats list. An optional `label` overrides the derived
+   * display name (the RD's custom heat name); omitted (undefined/empty) keeps the auto-name. Sent
+   * through the control path; returns the raw {@link CommandAck}.
    */
   scheduleHeat(
     heat: HeatId,
     lineup: CompetitorRef[],
-    tag: { class?: ClassId; round?: RoundId } = {}
+    tag: { class?: ClassId; round?: RoundId; label?: string } = {}
   ): Promise<CommandAck> {
     return this.send({
-      ScheduleHeat: { heat, lineup, class: tag.class, round: tag.round }
+      ScheduleHeat: { heat, lineup, class: tag.class, round: tag.round, label: tag.label }
     });
   }
 

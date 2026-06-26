@@ -93,6 +93,7 @@ fn heat_scheduled(id: &str, lineup: &[&str]) -> Event {
         class: None,
         round: None,
         frequencies: vec![],
+        label: None,
     }
 }
 
