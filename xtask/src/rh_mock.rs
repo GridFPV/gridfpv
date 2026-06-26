@@ -30,8 +30,13 @@ use gridfpv_testkit::{NodeCsv, NodePlan, RhContainer, node_csv, scenarios};
 /// Default host port for the harness-spun RotorHazard (distinct from the persistent dev rigs:
 /// `gridfpv-rh` :5000, `gridfpv-demo-rh` :5099, and the `*_live` test ports 5031/5040-5042).
 const DEFAULT_PORT: u16 = 5055;
-/// Default CSV tick interval (seconds). A brisk pace so passes land quickly while a heat runs.
-const DEFAULT_TICK: &str = "0.1";
+/// Default CSV tick interval (seconds) — RotorHazard's `RH_UPDATE_INTERVAL`, i.e. the wall-clock
+/// time per emulated sample. `0.015` is ~67 Hz, in the realistic 50–100 Hz band so the gate-pass
+/// bell is sampled densely (a real lap spans dozens of samples). Raise the rate with a smaller
+/// value (`--tick 0.01` = 100 Hz) or slow it down for longer heats (`--tick 0.1` = 10 Hz). The
+/// per-lap tick *count* (how many samples make up one lap in the CSV) is the testkit's
+/// `DEFAULT_TICKS_PER_LAP`; `--tick` only sets how fast RH walks those samples.
+const DEFAULT_TICK: &str = "0.015";
 
 /// The dispatch entry point. `args` is everything after `rh-mock` on the command line.
 pub fn run(args: &[String]) -> bool {
@@ -77,6 +82,9 @@ struct Scenario {
 /// The scenario menu. Each entry reuses the [`gridfpv_testkit`] generators so the harness drives
 /// exactly the same emulated streams the e2e suite asserts on.
 fn menu() -> Vec<Scenario> {
+    // Gaps are in CSV ticks (samples). At the ~67 Hz default tick a ~48-tick lap is a brisk,
+    // realistic gate-to-gate cadence; the gap also sets the bell width, so these gaps keep each
+    // pass a smooth rise→peak→fall rather than a spike.
     vec![
         Scenario {
             name: "clean",
@@ -86,37 +94,52 @@ fn menu() -> Vec<Scenario> {
         Scenario {
             name: "missed-lap",
             blurb: "one node that SKIPS a crossing (gate miss) — 3 laps, a long dead gap, 3 more",
-            build: || vec![(0, plan(scenarios::missed_crossing(3, 3, 8, 4)))],
+            build: || vec![(0, plan(scenarios::missed_crossing(3, 3, 48, 3)))],
         },
         Scenario {
             name: "false-pass",
-            blurb: "one node with a fast double-crossing (a false/extra pass) among normal laps",
+            blurb: "one node with a small spurious secondary bump (a false/extra pass) among laps",
             build: || {
-                // Two crossings only ~2 ticks apart simulate a bounce/double-trigger: RH may record
-                // a too-fast extra lap the marshal must void. Normal pace is 12 ticks.
-                let plan = scenarios::varied_pace(&[12, 12, 2, 12, 12]);
+                // A short, LOW-peak crossing ~10 ticks after a normal one: a spurious secondary
+                // bump (a bounce/reflection) the marshal must void. Its bell is a small lump beside
+                // the real peak, not a second full pass — exactly the false-positive case.
+                let plan = gridfpv_testkit::NodePlan {
+                    laps: vec![
+                        gridfpv_testkit::LapSpec::paced(48),
+                        gridfpv_testkit::LapSpec::paced(48),
+                        // The spurious bump: only 10 ticks later, at a much lower peak.
+                        gridfpv_testkit::LapSpec::with_peak(
+                            10,
+                            gridfpv_testkit::ENTER_THRESHOLD + 8,
+                        ),
+                        gridfpv_testkit::LapSpec::paced(48),
+                        gridfpv_testkit::LapSpec::paced(48),
+                    ],
+                    peak_rssi: scenarios::STRONG_PEAK,
+                    ..Default::default()
+                };
                 vec![(0, gridfpv_testkit::plan_csv(&plan))]
             },
         },
         Scenario {
             name: "noisy",
-            blurb: "one node at a MARGINAL peak (just over the enter threshold) — dirty RSSI",
-            build: || vec![(0, plan(scenarios::marginal(6, 10)))],
+            blurb: "one node, MARGINAL peak + a loud noise floor (dirty RF) — grainy RSSI trace",
+            build: || vec![(0, plan(scenarios::noisy(6, 48)))],
         },
         Scenario {
             name: "strong-vs-weak",
             blurb: "two nodes, one strong + one weak signal — compare cached RSSI context",
-            build: || gridfpv_testkit::race(&[scenarios::strong(6, 8), scenarios::weak(6, 12)]),
+            build: || gridfpv_testkit::race(&[scenarios::strong(6, 48), scenarios::weak(6, 64)]),
         },
         Scenario {
             name: "dnf",
             blurb: "two nodes — node 0 flies on, node 1 DNFs after 2 laps (per-node independence)",
-            build: || gridfpv_testkit::race(&[scenarios::uniform(8, 8), scenarios::dnf(2, 8)]),
+            build: || gridfpv_testkit::race(&[scenarios::uniform(8, 48), scenarios::dnf(2, 48)]),
         },
         Scenario {
             name: "pack",
             blurb: "three nodes crossing the gate SIMULTANEOUSLY — the dedup/ordering stress case",
-            build: || gridfpv_testkit::simultaneous(3, 6, 12),
+            build: || gridfpv_testkit::simultaneous(3, 6, 48),
         },
     ]
 }

@@ -302,6 +302,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
             ticks_per_lap: 2,
             peak_rssi: 180,
             baseline_rssi: 70,
+            seed: 0,
         }),
     )];
     let heat = HeatId(HEAT.into());

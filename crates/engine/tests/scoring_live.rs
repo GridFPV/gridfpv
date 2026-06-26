@@ -96,6 +96,7 @@ fn busier_node_places_ahead_under_timed_and_first_to_n() {
                 ticks_per_lap: 2,
                 peak_rssi: 180,
                 baseline_rssi: 70,
+                seed: 0,
             }),
         ),
         (1usize, plan_csv(&scenarios::dnf(2, 6))),

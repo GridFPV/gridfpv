@@ -104,6 +104,7 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
             ticks_per_lap: 2,
             peak_rssi: 180,
             baseline_rssi: 70,
+            seed: 0,
         }),
     )];
     // RAII: the container is removed when `rh` drops at the end of the test.
@@ -354,6 +355,7 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
             ticks_per_lap: 2,
             peak_rssi: 180,
             baseline_rssi: 70,
+            seed: 0,
         }),
     )];
     let rh = RhContainer::start(RH_FAILOVER_PORT, TICK, &scenario);

@@ -54,6 +54,7 @@ fn lapper(ticks_per_lap: usize) -> String {
         ticks_per_lap,
         peak_rssi: 180,
         baseline_rssi: 70,
+        seed: 0,
     })
 }
 

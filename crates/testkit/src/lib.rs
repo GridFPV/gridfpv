@@ -49,25 +49,119 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// How to synthesise one node's emulated output stream.
+///
+/// The stream is **not** a square peak/nadir envelope: each lap is modelled as a low
+/// [`NodeCsv::baseline_rssi`] floor plus a smooth Gaussian-ish bell centred on the gate crossing
+/// (rise → peak → fall over the approach/depart window), with a few RSSI units of deterministic
+/// per-sample noise on baseline *and* peak, and slight lap-to-lap variation in peak height. See
+/// [`pass_profile`] for the model.
 pub struct NodeCsv {
     /// Ticks (CSV lines) between lap increments — roughly `lap_duration /
-    /// RH_UPDATE_INTERVAL`. Smaller = faster laps.
+    /// RH_UPDATE_INTERVAL`. At a realistic ~50–100 Hz sample rate (10–20 ms/tick) a lap is many
+    /// dozens of ticks, so the default is far denser than the old square-wave `6`. Smaller =
+    /// faster laps. See [`DEFAULT_TICKS_PER_LAP`].
     pub ticks_per_lap: usize,
-    /// The node's peak RSSI, reported every tick so the node's `pass_peak_rssi`
-    /// (and thus the adapter's `SignalContext`) is a stable, assertable value.
+    /// The lap's **peak** RSSI: the height of the bell at the gate crossing (kept valid: 1..=999).
+    /// Lap-to-lap variation nudges this a few units per lap; the noise floor jitters it per sample.
     pub peak_rssi: i32,
-    /// Baseline RSSI between crossings (kept valid: 1..=999).
+    /// Baseline RSSI between crossings, while the craft is away from the gate (kept valid: 1..=999).
     pub baseline_rssi: i32,
+    /// Deterministic-RNG seed for this node's noise and lap-to-lap variation, so two nodes in the
+    /// same race get distinct (but reproducible) traces. [`race`] sets this to the node index;
+    /// single-node callers can leave it at the default `0`.
+    pub seed: u64,
 }
 
 impl Default for NodeCsv {
     fn default() -> Self {
         Self {
-            ticks_per_lap: 6,
+            ticks_per_lap: DEFAULT_TICKS_PER_LAP,
             peak_rssi: 150,
             baseline_rssi: 70,
+            seed: 0,
         }
     }
+}
+
+/// Realistic default sample density. At a ~50–100 Hz mock tick (10–20 ms/sample) a real lap spans
+/// many dozens of samples, so the bell profile is resolved smoothly rather than as a 6-point square.
+/// The `cargo xtask rh-mock feed --tick T` knob sets the *wall-clock* seconds per tick (RH's
+/// `RH_UPDATE_INTERVAL`); this constant sets how many ticks make up one lap in the generated CSV.
+pub const DEFAULT_TICKS_PER_LAP: usize = 48;
+
+/// Half-width of the gate-pass bell, as a fraction of the lap window. The Gaussian peak occupies
+/// roughly the final ~30% of the approach and the first ~30% of the depart around the crossing; the
+/// rest of the lap sits at the noisy baseline floor while the craft is away from the gate.
+const BELL_SIGMA_FRAC: f64 = 0.16;
+
+/// A tiny deterministic xorshift64* PRNG, seeded per `(node, sample)` so the noise is reproducible
+/// across runs (the repo bans `Math.random`/wall-clock in generators). Returns a value in `0.0..1.0`.
+fn det_unit(node_seed: u64, sample: u64, salt: u64) -> f64 {
+    // SplitMix-style avalanche of the keyed input, then one xorshift* step.
+    let mut x = node_seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(sample.wrapping_mul(0xD1B5_4A32_D192_ED03))
+        .wrapping_add(salt.wrapping_mul(0xCA5A_8267_6F49_5C2D))
+        .wrapping_add(0x2545_F491_4F6C_DD1D);
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    let r = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+    // Top 53 bits -> [0,1).
+    (r >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Deterministic symmetric noise in `±amp` RSSI units for one sample, keyed by node+sample.
+fn det_noise(node_seed: u64, sample: u64, salt: u64, amp: f64) -> f64 {
+    (det_unit(node_seed, sample, salt) - 0.5) * 2.0 * amp
+}
+
+/// The realistic per-tick RSSI **value** for one node at sample `i`, given the **crossing tick** it
+/// is nearest to (`cross_tick`), the lap window (`tpl` ticks), the lap's peak, the node baseline,
+/// and the node seed.
+///
+/// Model (what real per-gate-pass RSSI looks like):
+/// - a low **baseline floor** while the craft is away from the gate,
+/// - a smooth **Gaussian bell** centred on `cross_tick` (rise → peak → fall over the approach and
+///   departure window) — not a square step,
+/// - constant small **deterministic noise** (a few RSSI units) on baseline *and* peak, so the trace
+///   is never perfectly smooth, yet stays reproducible (seeded xorshift, no wall-clock).
+///
+/// `noise_amp` is the per-sample jitter amplitude (scenarios raise it for a "noisy" feed). The bell
+/// peaks **at** `cross_tick`, where RH's crossing detection fires (`cross=T`), so the signal maximum
+/// and the recorded crossing align. Returned value is clamped valid (`1..=999`).
+fn pass_value(
+    node_seed: u64,
+    sample: usize,
+    cross_tick: usize,
+    tpl: usize,
+    peak: i32,
+    baseline: i32,
+    noise_amp: f64,
+) -> i32 {
+    let window = tpl.max(1) as f64;
+    // Signed distance (in lap-fractions) from this sample to the nearest crossing.
+    let dist = (cross_tick as f64 - sample as f64) / window;
+    // Gaussian bell: 1.0 at the crossing, decaying to ~baseline as the craft moves off-gate.
+    let sigma = BELL_SIGMA_FRAC.max(1e-3);
+    let bell = (-(dist * dist) / (2.0 * sigma * sigma)).exp();
+    let span = (peak - baseline) as f64;
+    let smooth = baseline as f64 + span * bell;
+    // Constant small noise on everything (baseline AND peak); a touch more at the peak so the
+    // crest isn't a clean curve either.
+    let noise = det_noise(node_seed, sample as u64, 0xA1, noise_amp)
+        + det_noise(node_seed, sample as u64, 0xB2, noise_amp * 0.4) * bell;
+    (smooth + noise).round().clamp(1.0, 999.0) as i32
+}
+
+/// Lap-to-lap variation: nudge a lap's peak height a few RSSI units (deterministically, keyed by
+/// node+lap) so no two passes are identical. Returns the varied peak, clamped valid.
+fn varied_peak(node_seed: u64, lap_index: usize, peak: i32) -> i32 {
+    // ±~4% of the peak, at least ±2 units, so even low peaks vary visibly.
+    let amp = (peak as f64 * 0.04).max(2.0);
+    (peak as f64 + det_noise(node_seed, lap_index as u64, 0xC3, amp))
+        .round()
+        .clamp(1.0, 999.0) as i32
 }
 
 /// Render one CSV row (one mock tick) in RotorHazard `MockInterface` column order.
@@ -75,18 +169,17 @@ impl Default for NodeCsv {
 /// Columns: `idx, lap_id, ms, rssi, node_peak, pass_peak, loop_time, cross(T/F),
 /// pass_nadir, node_nadir, peakRssi, pkFirst, pkLast, nadirRssi, ndFirst, ndLast`.
 ///
-/// Two distinct signal fidelities ride in one row, and tests assert on both:
+/// Two signal fidelities ride in one row, and both now carry the realistic gate-pass shape:
 /// - **Coarse** — `node_peak` (col 4) is what `node_data` streams and the adapter's coarse
-///   [`SignalChunk`] trace samples once per heartbeat. It is held **stable** at `node_peak` so the
-///   coarse-fidelity test can assert an exact value.
+///   [`SignalChunk`] trace samples once per heartbeat. It carries the per-tick **bell + noise**
+///   value so the *live* trace already looks like real RSSI (rise → peak → fall, not a square step).
 /// - **Dense** — the `peakRssi`/`nadirRssi` history columns (10/13) with their first/last times
 ///   (11/12, 14/15) feed RotorHazard's per-tick `history_values`/`history_times` accumulator
 ///   (`BaseHardwareInterface.PeakNadirHistory.addTo`), the dense trace its marshal page reviews and
-///   our path-2 (`current_marshal_data`/`get_pilotrace`) pulls at heat end. Passing `pk_hi/pk_lo`
-///   distinct **first/last** times (`pkFirst > pkLast`) makes RH log *two* history entries per tick,
-///   and varying `peak_rssi_hist`/`nadir_rssi_hist` per tick (rather than a flat square wave) gives
-///   the captured trace real texture at a much higher sample density than the coarse stream — the
-///   resolution the marshaling graph is judged on.
+///   our path-2 (`current_marshal_data`/`get_pilotrace`) pulls at heat end. Distinct **first/last**
+///   times (`pkFirst > pkLast`) make RH log *two* history entries per tick, raising density; the
+///   per-tick `peak_rssi_hist`/`nadir_rssi_hist` carry the same bell-shaped, noisy envelope so the
+///   captured dense trace has real texture at full per-tick resolution — what the graph is judged on.
 #[allow(clippy::too_many_arguments)]
 fn csv_row(
     lap_id: usize,
@@ -107,30 +200,6 @@ fn csv_row(
     )
 }
 
-/// A per-tick dense **peak/nadir** RSSI envelope for the history columns, given the lap's peak and
-/// the node's baseline and where this tick sits within the lap (`0.0` just after the previous
-/// crossing → `1.0` at the next). The envelope ramps the peak up toward the crossing and the nadir
-/// down between crossings, so the captured dense trace has a realistic, textured shape (not a flat
-/// square wave) at full per-tick density — what the marshaling graph is judged on. Returns
-/// `(peak_rssi_hist, nadir_rssi_hist)`, both kept valid (`1..=999`).
-fn dense_envelope(peak: i32, baseline: i32, phase: f64) -> (i32, i32) {
-    // Peak rises from baseline toward `peak` as the craft approaches the gate (phase -> 1.0).
-    let span = (peak - baseline).max(1) as f64;
-    let rise = baseline as f64 + span * phase;
-    // A small per-tick wobble so consecutive ticks differ (defeats RH's run-length dedup, keeping
-    // the trace dense) without crossing the enter threshold off-gate.
-    let wobble = if phase < 0.95 {
-        ((phase * 12.0).sin() * 4.0).round()
-    } else {
-        0.0
-    };
-    let peak_rssi = (rise + wobble).round().clamp(1.0, 999.0) as i32;
-    // Nadir sits a little below the running baseline, dipping deepest mid-lap (phase ~0.5).
-    let dip = (baseline as f64 * 0.4) * (1.0 - (phase - 0.5).abs() * 2.0).max(0.0);
-    let nadir_rssi = ((baseline as f64) - dip).round().clamp(1.0, 999.0) as i32;
-    (peak_rssi, nadir_rssi)
-}
-
 /// Render one node's `mock_data_{N}.csv` content.
 ///
 /// Columns (RotorHazard `MockInterface`): `idx, lap_id, ms, rssi, node_peak,
@@ -145,41 +214,53 @@ fn dense_envelope(peak: i32, baseline: i32, phase: f64) -> (i32, i32) {
 /// before the race even begins. At EOF the file loops, which simply keeps laps
 /// coming (each increment still differs from the last seen id).
 ///
-/// The coarse `node_peak` (col 4) stays stable at `peak + 30` (the value the coarse [`SignalChunk`]
-/// trace samples and the fidelity test asserts), while the dense history columns carry a textured
-/// per-tick peak/nadir envelope (see [`csv_row`]/[`dense_envelope`]) so the path-2 trace pulled at
-/// heat end is high-resolution.
+/// Both the coarse `node_peak` (col 4) and the dense history columns (10/13) now carry the
+/// realistic gate-pass value — a baseline floor plus a Gaussian bell centred on each crossing, with
+/// deterministic per-sample noise (see [`pass_value`]) and slight lap-to-lap peak variation (see
+/// [`varied_peak`]). The peak lands exactly on the crossing tick, so RH's crossing detection still
+/// fires there and laps still record.
 pub fn node_csv(opts: &NodeCsv) -> String {
-    let node_peak = opts.peak_rssi + 30;
+    let tpl = opts.ticks_per_lap.max(1);
     let mut lines = Vec::with_capacity(TOTAL_TICKS);
     for i in 0..TOTAL_TICKS {
-        let lap_id = i / opts.ticks_per_lap;
-        let on_lap = i > 0 && i % opts.ticks_per_lap == 0;
-        let rssi = if on_lap {
-            opts.peak_rssi
-        } else {
-            opts.baseline_rssi
-        };
+        let lap_id = i / tpl;
+        let on_lap = i > 0 && i % tpl == 0;
+        // The crossing tick this sample is nearest to frames the bell (crossings are at multiples
+        // of `tpl`); the peak lands on it so detection and signal maximum align.
+        let cross_idx = (i + tpl / 2) / tpl;
+        let cross_tick = cross_idx * tpl;
+        // That crossing's lap-varied peak (so each pass differs slightly).
+        let peak = varied_peak(opts.seed, cross_idx.max(1), opts.peak_rssi);
+        let value = pass_value(
+            opts.seed,
+            i,
+            cross_tick,
+            tpl,
+            peak,
+            opts.baseline_rssi,
+            BASE_NOISE,
+        );
         let cross = if on_lap { 'T' } else { 'F' };
-        // Phase within the current lap window (0 just after the last crossing -> ~1 at the next).
-        let phase = (i % opts.ticks_per_lap) as f64 / opts.ticks_per_lap.max(1) as f64;
-        let (peak_hist, nadir_hist) = dense_envelope(opts.peak_rssi, opts.baseline_rssi, phase);
-        // pass_peak is reported on EVERY tick so the node's signal level is a stable
-        // value the adapter can cache and assert (not just on lap ticks).
+        // pass_peak reports the lap's (varied) peak on EVERY tick so the node's signal level is a
+        // stable, cacheable context value the adapter asserts (not the noisy per-tick value).
         lines.push(csv_row(
             lap_id,
-            rssi,
-            node_peak,
-            opts.peak_rssi,
+            value,
+            value,
+            peak,
             cross,
-            peak_hist,
-            nadir_hist,
+            value,
+            opts.baseline_rssi,
         ));
     }
     let mut out = lines.join("\n");
     out.push('\n');
     out
 }
+
+/// Default per-sample baseline/peak noise amplitude (RSSI units, ±). A few units of jitter on
+/// everything so the trace is never perfectly smooth. Scenarios raise this for a "noisy" feed.
+pub const BASE_NOISE: f64 = 3.0;
 
 // ---------------------------------------------------------------------------
 // Scenario library: per-node lap schedules (`NodePlan` / `LapSpec` / `plan_csv`)
@@ -247,6 +328,12 @@ pub struct NodePlan {
     pub peak_rssi: i32,
     /// Baseline RSSI reported between crossings (kept valid: 1..=999).
     pub baseline_rssi: i32,
+    /// Per-sample noise amplitude (RSSI units, ±) for this node's trace. Defaults to [`BASE_NOISE`];
+    /// the `noisy` scenario raises it for a dirtier baseline.
+    pub noise_amp: f64,
+    /// Deterministic-RNG seed for this node's noise and lap-to-lap variation (see [`NodeCsv::seed`]).
+    /// [`race`] sets it to the node index so co-racing nodes get distinct, reproducible traces.
+    pub seed: u64,
 }
 
 impl Default for NodePlan {
@@ -255,6 +342,8 @@ impl Default for NodePlan {
             laps: Vec::new(),
             peak_rssi: 150,
             baseline_rssi: 70,
+            noise_amp: BASE_NOISE,
+            seed: 0,
         }
     }
 }
@@ -287,52 +376,105 @@ impl NodePlan {
 /// *every* row so the node's signal level stays a stable, assertable value (it
 /// reflects the most recent crossing, like the real node's `pass_peak_rssi`).
 ///
-/// As in [`node_csv`], the coarse `node_peak` (col 4) stays stable at `last_peak + 30` while the
-/// dense history columns carry a textured per-tick peak/nadir envelope (see
-/// [`csv_row`]/[`dense_envelope`]), so the path-2 trace pulled at heat end is high-resolution.
+/// As in [`node_csv`], both the coarse `node_peak` (col 4) and the dense history columns (10/13)
+/// carry the realistic gate-pass value: a baseline floor plus a Gaussian bell centred on each
+/// scheduled crossing (the bell peaks *on* the `cross=T` tick so detection still fires), with
+/// deterministic per-sample noise (see [`pass_value`]) and slight lap-to-lap peak variation (see
+/// [`varied_peak`]). `pass_peak` (col 5) holds the most-recent crossing's nominal peak as the stable
+/// signal-context value the adapter caches.
 pub fn plan_csv(plan: &NodePlan) -> String {
     let crossings = plan.crossing_ticks();
-    // Map tick -> peak for fast lookup, and precompute the running lap_id.
-    let mut next = 0usize; // index into crossings
+    // Resolve each crossing's nominal peak (plan default unless the lap overrides it), then apply
+    // lap-to-lap variation so no two passes are identical.
+    let peaks: Vec<i32> = crossings
+        .iter()
+        .enumerate()
+        .map(|(li, _)| {
+            let nominal = match plan.laps.get(li) {
+                Some(s) if s.peak_rssi != 0 => s.peak_rssi,
+                _ => plan.peak_rssi,
+            };
+            varied_peak(plan.seed, li + 1, nominal)
+        })
+        .collect();
+
     let mut lap_id = 0usize;
-    // Most recent crossing peak, for the per-row pass_peak (signal context).
-    let mut last_peak = plan.peak_rssi;
-    // The tick window of the current lap, for the dense envelope's phase: the previous crossing
-    // (or 0) and the next scheduled crossing (or the window end).
-    let mut prev_cross = 0usize;
+    // Most recent crossing's NOMINAL peak (unvaried), for the per-row pass_peak signal context —
+    // kept stable so signal-magnitude assertions read a clean value.
+    let mut last_nominal = plan.peak_rssi;
+    let mut next = 0usize; // index into crossings
     let mut lines = Vec::with_capacity(TOTAL_TICKS);
     for i in 0..TOTAL_TICKS {
         let on_lap = next < crossings.len() && crossings[next] == i;
         if on_lap {
             lap_id += 1;
-            let spec = &plan.laps[lap_id - 1];
-            last_peak = if spec.peak_rssi != 0 {
-                spec.peak_rssi
-            } else {
-                plan.peak_rssi
+            last_nominal = match plan.laps.get(lap_id - 1) {
+                Some(s) if s.peak_rssi != 0 => s.peak_rssi,
+                _ => plan.peak_rssi,
             };
-            prev_cross = i;
             next += 1;
         }
-        let node_peak = last_peak + 30;
-        let rssi = if on_lap {
-            last_peak
-        } else {
-            plan.baseline_rssi
-        };
         let cross = if on_lap { 'T' } else { 'F' };
-        // Phase within the current lap window: rises from the previous crossing toward the next.
-        let next_cross = crossings.get(next).copied().unwrap_or(TOTAL_TICKS);
-        let window = next_cross.saturating_sub(prev_cross).max(1);
-        let phase = (i.saturating_sub(prev_cross)) as f64 / window as f64;
-        let (peak_hist, nadir_hist) = dense_envelope(last_peak, plan.baseline_rssi, phase);
+
+        // The realistic per-tick value: the nearest scheduled crossing's bell over the baseline.
+        let value = if let Some(ci) = nearest_crossing(&crossings, i) {
+            let cross_tick = crossings[ci];
+            // Local window = distance to the nearer neighbouring crossing (sets the bell width to
+            // this lap's pace). Falls back to a sane default with only one crossing.
+            let win = local_window(&crossings, ci);
+            pass_value(
+                plan.seed,
+                i,
+                cross_tick,
+                win,
+                peaks[ci],
+                plan.baseline_rssi,
+                plan.noise_amp,
+            )
+        } else {
+            // No crossings (empty plan): a flat, noisy baseline floor.
+            (plan.baseline_rssi as f64 + det_noise(plan.seed, i as u64, 0xA1, plan.noise_amp))
+                .round()
+                .clamp(1.0, 999.0) as i32
+        };
+
         lines.push(csv_row(
-            lap_id, rssi, node_peak, last_peak, cross, peak_hist, nadir_hist,
+            lap_id,
+            value,
+            value,
+            last_nominal,
+            cross,
+            value,
+            plan.baseline_rssi,
         ));
     }
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Index into `crossings` of the crossing nearest to sample `i`, or `None` if there are none.
+fn nearest_crossing(crossings: &[usize], i: usize) -> Option<usize> {
+    crossings
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, &t)| t.abs_diff(i))
+        .map(|(ci, _)| ci)
+}
+
+/// The bell-width window for crossing `ci`: the gap to its nearer neighbour (so a fast lap gets a
+/// narrow bell and a slow one a wide bell). With a single crossing, defaults to [`DEFAULT_TICKS_PER_LAP`].
+fn local_window(crossings: &[usize], ci: usize) -> usize {
+    let here = crossings[ci];
+    let prev = ci.checked_sub(1).map(|p| here - crossings[p]);
+    let next = crossings.get(ci + 1).map(|&n| n - here);
+    match (prev, next) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => DEFAULT_TICKS_PER_LAP,
+    }
+    .max(1)
 }
 
 /// The ready-made scenario menu: high-level constructors that each describe a
@@ -475,6 +617,26 @@ pub mod scenarios {
             ..NodePlan::default()
         }
     }
+
+    /// **Noisy / dirty channel** — `laps` marginal-peak laps with a much louder per-sample noise
+    /// floor (`noise_amp` ~3× the [`super::BASE_NOISE`] default).
+    ///
+    /// Simulates: a dirty RF environment — a jittery baseline and a marginal peak that only just
+    /// clears the enter threshold. Distinct from [`marginal`] (clean baseline) in the *texture* of
+    /// the trace: the marshaling graph should look genuinely grainy.
+    ///
+    /// Assert: laps still record (the peak clears threshold despite the noise); the captured trace
+    /// has a visibly higher baseline variance than a clean node.
+    pub fn noisy(laps: usize, gap: usize) -> NodePlan {
+        NodePlan {
+            laps: (0..laps)
+                .map(|_| LapSpec::with_peak(gap, MARGINAL_PEAK + 10))
+                .collect(),
+            peak_rssi: MARGINAL_PEAK + 10,
+            noise_amp: super::BASE_NOISE * 3.0,
+            ..NodePlan::default()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +655,15 @@ pub fn race(plans: &[NodePlan]) -> Vec<(usize, String)> {
     plans
         .iter()
         .enumerate()
-        .map(|(i, plan)| (i, plan_csv(plan)))
+        .map(|(i, plan)| {
+            // Key each node's deterministic noise/variation to its index so co-racing nodes get
+            // distinct (but reproducible) traces, even from identical plans (e.g. a `pack`).
+            let seeded = NodePlan {
+                seed: i as u64,
+                ..plan.clone()
+            };
+            (i, plan_csv(&seeded))
+        })
         .collect()
 }
 
@@ -817,5 +987,194 @@ mod tests {
         assert_eq!(ticks.len(), (TOTAL_TICKS - 1) / 20); // 29
         let csv = plan_csv(&plan);
         assert_eq!(crossings(&csv), ticks.len());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Realistic-signal model: the per-tick RSSI VALUE (col 4 node_peak / col 10
+    // dense peak history) is a baseline floor + a Gaussian bell on each crossing,
+    // with deterministic noise and lap-to-lap variation — not a square wave.
+    // ---------------------------------------------------------------------------
+
+    /// The per-tick streamed value (col 4 `node_peak`) for every row — what the coarse trace
+    /// samples and the live sparkline draws.
+    fn values(csv: &str) -> Vec<i32> {
+        rows(csv)
+            .iter()
+            .map(|r| r[4].parse::<i32>().expect("node_peak is a number"))
+            .collect()
+    }
+
+    /// A compact sparkline (used by the visual sanity test so a human can eyeball the shape).
+    fn sparkline(vals: &[i32]) -> String {
+        const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let min = *vals.iter().min().unwrap();
+        let max = *vals.iter().max().unwrap();
+        let span = (max - min).max(1);
+        vals.iter()
+            .map(|&v| BARS[((v - min) as i64 * 7 / span as i64) as usize])
+            .collect()
+    }
+
+    #[test]
+    fn value_is_bell_not_square() {
+        // A single node, default density: the value should PEAK at each crossing and sit near the
+        // baseline midway between crossings — a smooth rise/fall, not a two-level square wave.
+        let opts = NodeCsv {
+            ticks_per_lap: 48,
+            peak_rssi: 200,
+            baseline_rssi: 60,
+            seed: 0,
+        };
+        let vals = values(&node_csv(&opts));
+        // At a crossing tick (i = 48) the value is near the peak; halfway between (i = 72) it has
+        // fallen close to the baseline.
+        let at_cross = vals[48];
+        let mid = vals[72];
+        assert!(
+            at_cross > 180,
+            "value at the crossing should be near the peak (~200), got {at_cross}"
+        );
+        assert!(
+            mid < 90,
+            "value midway between crossings should fall near the baseline (~60), got {mid}"
+        );
+        // It is genuinely many-valued (a curve), not just two levels (peak/baseline).
+        let mut distinct: Vec<i32> = vals[24..72].to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(
+            distinct.len() > 10,
+            "the rise→peak→fall should take many distinct values, got {}",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn baseline_carries_noise() {
+        // Between crossings the value jitters by a few units (constant small noise) rather than
+        // being a perfectly flat baseline.
+        let opts = NodeCsv {
+            ticks_per_lap: 48,
+            peak_rssi: 200,
+            baseline_rssi: 60,
+            seed: 0,
+        };
+        let vals = values(&node_csv(&opts));
+        // Sample the off-gate stretch around mid-lap (i ~ 70..78), away from the bell.
+        let win = &vals[68..78];
+        let min = *win.iter().min().unwrap();
+        let max = *win.iter().max().unwrap();
+        assert!(
+            max > min,
+            "off-gate baseline must jitter (noise), got a flat run: {win:?}"
+        );
+        assert!(
+            (max - min) <= 12,
+            "baseline noise should be small (a few units), got spread {} in {win:?}",
+            max - min
+        );
+    }
+
+    #[test]
+    fn generation_is_deterministic() {
+        // Same input -> byte-identical output (seeded RNG, no wall-clock).
+        let opts = NodeCsv::default();
+        assert_eq!(node_csv(&opts), node_csv(&opts));
+        let plan = varied_pace(&[40, 60, 50]);
+        assert_eq!(plan_csv(&plan), plan_csv(&plan));
+    }
+
+    #[test]
+    fn lap_to_lap_peaks_vary() {
+        // No two passes are identical: the peak height drifts a little lap to lap.
+        let plan = uniform(6, 60);
+        let vals = values(&plan_csv(&plan));
+        let ticks = plan.crossing_ticks();
+        let peaks: Vec<i32> = ticks.iter().map(|&t| vals[t]).collect();
+        let mut uniq = peaks.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert!(
+            uniq.len() > 1,
+            "lap peaks should vary lap-to-lap, all equal: {peaks:?}"
+        );
+        // But the variation is modest — every pass is still clearly a strong peak.
+        let min = *peaks.iter().min().unwrap();
+        let max = *peaks.iter().max().unwrap();
+        assert!(
+            (max - min) < STRONG_PEAK / 5,
+            "lap variation should be modest, got {min}..{max}"
+        );
+    }
+
+    #[test]
+    fn seeded_nodes_differ_in_a_race() {
+        // Two identical pack plans get distinct traces once `race` keys them by node index.
+        let out = simultaneous(2, 6, 60);
+        assert_ne!(
+            values(&out[0].1),
+            values(&out[1].1),
+            "co-racing nodes must have distinct (seeded) noise"
+        );
+    }
+
+    #[test]
+    fn fidelity_within_model_peak_clears_threshold() {
+        // The model's fidelity invariant (mirrors the adapter e2e gate): the streamed value (what
+        // the coarse trace captures) reaches the peak band at each crossing, so RH's enter
+        // threshold is cleared and laps still record — and every value is a plausible RSSI in
+        // [baseline-noise, peak+noise].
+        const PEAK: i32 = 150;
+        const BASE: i32 = 70;
+        let opts = NodeCsv {
+            ticks_per_lap: 48,
+            peak_rssi: PEAK,
+            baseline_rssi: BASE,
+            seed: 0,
+        };
+        let vals = values(&node_csv(&opts));
+        for (i, &v) in vals.iter().enumerate() {
+            assert!(
+                (1..=PEAK + 10).contains(&v),
+                "sample {i}={v} outside the model band [1, peak+noise]"
+            );
+        }
+        // Each crossing tick clears the enter threshold (so detection fires on a real peak).
+        for cross in (48..TOTAL_TICKS).step_by(48) {
+            assert!(
+                vals[cross] > ENTER_THRESHOLD,
+                "crossing at {cross} (value {}) must clear the enter threshold {ENTER_THRESHOLD}",
+                vals[cross]
+            );
+        }
+    }
+
+    #[test]
+    fn visual_sparkline() {
+        // Not an assertion gate — run with `--nocapture` to eyeball the shape:
+        //   cargo test -p gridfpv-testkit visual_sparkline -- --nocapture
+        let clean = node_csv(&NodeCsv {
+            ticks_per_lap: 48,
+            peak_rssi: 200,
+            baseline_rssi: 60,
+            seed: 0,
+        });
+        println!(
+            "\nclean (first 144 ticks):\n{}",
+            &sparkline(&values(&clean)[..144])
+        );
+        let noisy = plan_csv(&NodePlan {
+            laps: (0..3)
+                .map(|_| LapSpec::with_peak(48, MARGINAL_PEAK))
+                .collect(),
+            peak_rssi: MARGINAL_PEAK,
+            baseline_rssi: 60,
+            noise_amp: BASE_NOISE * 3.0,
+            seed: 1,
+        });
+        println!(
+            "noisy/marginal (first 144 ticks):\n{}",
+            &sparkline(&values(&noisy)[..144])
+        );
     }
 }

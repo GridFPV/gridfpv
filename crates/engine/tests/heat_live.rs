@@ -35,6 +35,7 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
                 ticks_per_lap: 6,
                 peak_rssi: 150,
                 baseline_rssi: 70,
+                seed: 0,
             }),
         ),
         (
@@ -43,6 +44,7 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
                 ticks_per_lap: 10,
                 peak_rssi: 120,
                 baseline_rssi: 60,
+                seed: 0,
             }),
         ),
     ];
