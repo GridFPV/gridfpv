@@ -605,6 +605,65 @@ test('a sim heat (no captured trace) shows no RSSI graph and keeps the lap-only 
   await expect(page.getByLabel('RSSI signal graph')).toHaveCount(0);
 });
 
+// ── Add a brand-new lap via the explicit "Add lap" control ────────────────────────────────────
+//
+// The marshaling UI can now ADD a lap (not just edit existing ones) through the per-competitor
+// "Add lap" control: pick a competitor + a typed source-clock time → an `InsertLap` correction that
+// appends + re-folds. This drives that control through the screen against a real Director and
+// asserts the new lap appears in the competitor's lap list (the re-fold). It runs over a sim (Mock)
+// heat — no trace/graph — which is exactly the no-graph path the explicit control exists for.
+const ADD_PILOTS = ['Vega', 'Wren', 'Xan'];
+const ADD_HEAT = `marshal-addlap-${Date.now()}`;
+
+test('the Add-lap control inserts a new lap and it appears in the lap list', async ({
+  page,
+  director
+}) => {
+  await enterPractice(page);
+  const control = (cmd: unknown) =>
+    page.request.post(`${director.baseUrl}/events/practice/control`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: cmd
+    });
+
+  expect(
+    (await control({ ScheduleHeat: { heat: ADD_HEAT, lineup: ADD_PILOTS } })).ok()
+  ).toBeTruthy();
+  expect((await control({ SetCurrentHeat: { heat: ADD_HEAT } })).ok()).toBeTruthy();
+
+  await page.reload();
+  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.heat-id .value')).toHaveText(ADD_HEAT, { timeout: 15_000 });
+  await runToUnofficial(page);
+
+  await page.getByRole('button', { name: /Marshaling/ }).click();
+  const marshaling = page.getByRole('region', { name: 'Marshaling' });
+  await expect(marshaling).toBeVisible();
+  await expect(marshaling.locator('button.lap').first()).toBeVisible({ timeout: 15_000 });
+
+  // Count the first competitor's existing laps, then add one at a typed time well inside the window.
+  const firstCard = marshaling.locator('.comp').first();
+  const before = await firstCard.locator('button.lap').count();
+  const target = (await firstCard.locator('h4').textContent())!.trim();
+
+  await marshaling.getByLabel('Add-lap competitor').selectOption({ label: target });
+  await marshaling.getByLabel('Add-lap time').fill('3.5');
+  await marshaling.getByRole('button', { name: 'Add lap' }).click();
+
+  // The append→re-fold adds a lap to that competitor's list, and the audit logs an "Inserted" entry.
+  const audit = page.getByRole('complementary', { name: 'Audit trail' });
+  await expect(audit.getByText(/Inserted/i).first()).toBeVisible({ timeout: 10_000 });
+  await expect
+    .poll(
+      async () => marshaling.locator('.comp', { hasText: target }).locator('button.lap').count(),
+      {
+        timeout: 10_000,
+        message: 'the inserted lap should appear in the lap list'
+      }
+    )
+    .toBe(before + 1);
+});
+
 // ── Slice 5: the provisional → official lifecycle + auto-official timer ───────────────────────
 //
 // The protest window is a per-round, OFF-by-default **auto-official timer**: when set, the runtime

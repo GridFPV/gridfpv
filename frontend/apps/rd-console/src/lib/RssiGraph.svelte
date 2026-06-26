@@ -31,6 +31,8 @@
     laps,
     selected,
     onselect,
+    onaddlap,
+    canControl = false,
     nameFor = (r) => r
   }: {
     /** The captured trace for the heat — one entry per competitor that produced signal facts. */
@@ -41,6 +43,18 @@
     selected: { competitor: CompetitorRef; lap: Lap } | null;
     /** Emit the lap a marker click selects (two-way with the lap-list selection). */
     onselect: (competitor: CompetitorRef, lap: Lap) => void;
+    /**
+     * Add a brand-new lap for a competitor at a source-clock time (the cursor's race-relative
+     * instant). Wired to a click on the trace / the "Add lap here" affordance at the crosshair.
+     * Optional: when absent (or when `canControl` is false) the graph is review-only.
+     */
+    onaddlap?: (competitor: CompetitorRef, at: number) => void;
+    /**
+     * Whether the session may mutate (the role gate — read-only pilots can't add laps). When false
+     * the add-lap affordance is hidden and a trace click does nothing, mirroring the parent's
+     * `canControl` boundary on every other correction.
+     */
+    canControl?: boolean;
     /**
      * Resolve a competitor ref to its human-facing display name (the callsign), so the trace label
      * and aria-labels read as the pilot, not the raw ref. Defaults to identity so callers/tests that
@@ -136,6 +150,68 @@
   function isSelected(ref: CompetitorRef, lap: Lap): boolean {
     return selected != null && selected.competitor === ref && selected.lap.end_ref === lap.end_ref;
   }
+
+  // ── Hover crosshair + time/RSSI readout ───────────────────────────────────────────────────────
+  // As the marshal moves over a trace we show a vertical guide at the cursor and read out the exact
+  // race-relative time + the RSSI sample there — the "where exactly is this?" the lap-add needs. The
+  // cursor is tracked per-competitor (`ref`) so each trace owns its own crosshair.
+  let hover = $state<{ ref: CompetitorRef; x: number; time: number; rssi: number } | null>(null);
+
+  /** Invert {@link xOf}: a plot X (user units) back to a source-clock time, clamped to the span. */
+  function timeAt(x: number, span: { from: number; to: number }): number {
+    const w = span.to - span.from || 1;
+    const frac = Math.min(1, Math.max(0, (x - PAD_L) / plotW));
+    return span.from + frac * w;
+  }
+
+  /** The RSSI sample nearest a source-clock time, using the trace's `from`/`period` sample grid. */
+  function rssiAt(t: CompetitorTrace, time: number): number {
+    const n = t.samples.length;
+    if (n === 0) return 0;
+    const from = t.from ?? 0;
+    const i = Math.min(n - 1, Math.max(0, Math.round((time - from) / (t.period_micros || 1))));
+    return t.samples[i];
+  }
+
+  /**
+   * Format a source-clock microsecond instant as race-relative seconds (`S.mmm`) — the same axis the
+   * samples + lap markers live on. Reuses {@link formatMicros} (≥60s rolls to `M:SS.mmm`).
+   */
+  function formatTime(micros: number): string {
+    return formatMicros(Math.round(micros));
+  }
+
+  /** Map a mouse event to the plot's user-unit X (the SVG is stretched to its rendered box). */
+  function pointerX(e: MouseEvent, svg: SVGSVGElement): number {
+    const rect = svg.getBoundingClientRect();
+    if (rect.width === 0) return PAD_L;
+    return ((e.clientX - rect.left) / rect.width) * W;
+  }
+
+  function onHover(e: MouseEvent, ct: CompetitorTrace, span: { from: number; to: number }): void {
+    const svg = e.currentTarget as SVGSVGElement;
+    const px = pointerX(e, svg);
+    const x = Math.min(PAD_L + plotW, Math.max(PAD_L, px));
+    const time = timeAt(x, span);
+    hover = { ref: ct.competitor.competitor, x, time, rssi: rssiAt(ct, time) };
+  }
+
+  function clearHover(): void {
+    hover = null;
+  }
+
+  /** Click on the trace → add a lap at the cursor's race-relative time (role-gated). */
+  function onTraceClick(
+    e: MouseEvent,
+    ct: CompetitorTrace,
+    span: { from: number; to: number }
+  ): void {
+    if (!canControl || !onaddlap) return;
+    const svg = e.currentTarget as SVGSVGElement;
+    const px = pointerX(e, svg);
+    const x = Math.min(PAD_L + plotW, Math.max(PAD_L, px));
+    onaddlap(ct.competitor.competitor, Math.round(timeAt(x, span)));
+  }
 </script>
 
 <div class="rssi-graph" aria-label="RSSI signal graph">
@@ -167,12 +243,22 @@
       {#if ct.samples.length === 0}
         <p class="empty">No samples captured for this node.</p>
       {:else}
+        {@const isHover = hover != null && hover.ref === ref}
+        <!-- The pointer handlers drive the hover crosshair + the click-to-add-lap convenience; the
+             accessible, keyboard-operable add path is the labelled "Add lap here" DOM button below
+             the plot, so the SVG itself stays a non-interactive `role="img"` figure. -->
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
         <svg
           class="plot"
+          class:addable={canControl && onaddlap != null}
           viewBox={`0 0 ${W} ${H}`}
           preserveAspectRatio="none"
           role="img"
           aria-label={`RSSI trace for ${who} with ${compLaps.length} lap markers`}
+          onmousemove={(e: MouseEvent) => onHover(e, ct, span)}
+          onmouseleave={clearHover}
+          onclick={(e: MouseEvent) => onTraceClick(e, ct, span)}
         >
           <!-- Plot frame -->
           <rect class="frame" x={PAD_L} y={PAD_T} width={plotW} height={plotH} fill="none" />
@@ -200,7 +286,11 @@
               tabindex="0"
               aria-pressed={isSelected(ref, lap)}
               aria-label={`Lap ${lap.number} at ${formatMicros(lap.duration_micros)} — select`}
-              onclick={() => onselect(ref, lap)}
+              onclick={(e: MouseEvent) => {
+                // A marker click selects the lap; don't let it bubble to the SVG's add-lap handler.
+                e.stopPropagation();
+                onselect(ref, lap);
+              }}
               onkeydown={(e: KeyboardEvent) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
@@ -214,7 +304,44 @@
               <text class="label" x={x + 3} y={PAD_T + 10}>{lap.number}</text>
             </g>
           {/each}
+
+          <!-- Hover crosshair + time/RSSI readout: a vertical guide at the cursor, with a small
+               dark, high-contrast chip reading the exact race-relative time + RSSI there. -->
+          {#if isHover && hover}
+            {@const hx = hover.x}
+            {@const flip = hx > PAD_L + plotW * 0.62}
+            <line class="crosshair" x1={hx} y1={PAD_T} x2={hx} y2={PAD_T + plotH} />
+            <g
+              class="readout"
+              data-testid="rssi-readout"
+              transform={`translate(${flip ? hx - 122 : hx + 6}, ${PAD_T + 4})`}
+            >
+              <rect class="readout-bg" x="0" y="0" width="116" height="34" rx="4" />
+              <text class="readout-time" x="6" y="14">t {formatTime(hover.time)}s</text>
+              <text class="readout-rssi" x="6" y="28">rssi {Math.round(hover.rssi)}</text>
+            </g>
+            {#if canControl && onaddlap}
+              <!-- The "Add lap here" affordance lives in the DOM readout below so it's a real,
+                   labelled, click-target button; this hint just cues that a click adds a lap. -->
+              <text class="add-hint" x={flip ? hx - 6 : hx + 6} y={PAD_T + plotH - 6}
+                >click: add lap</text
+              >
+            {/if}
+          {/if}
         </svg>
+        {#if canControl && onaddlap && isHover && hover}
+          <p class="cursor-readout" aria-live="polite">
+            Cursor: <strong>{formatTime(hover.time)}s</strong> · RSSI
+            <strong>{Math.round(hover.rssi)}</strong>
+            <button
+              type="button"
+              class="add-here"
+              onclick={() => onaddlap?.(ref, Math.round(hover!.time))}
+              aria-label={`Add lap for ${who} at ${formatTime(hover.time)} seconds`}
+              >Add lap here</button
+            >
+          </p>
+        {/if}
       {/if}
     </figure>
   {/each}
@@ -360,5 +487,73 @@
   .marker:focus-visible .rule {
     stroke: var(--gf-accent);
     stroke-width: 2;
+  }
+
+  /* Hover crosshair + readout (the "where exactly is this?" guide). */
+  .plot.addable {
+    cursor: crosshair;
+  }
+  .crosshair {
+    stroke: #ffd24a;
+    stroke-width: 1;
+    stroke-dasharray: 2 2;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
+  .readout {
+    pointer-events: none;
+  }
+  .readout-bg {
+    fill: rgba(6, 10, 16, 0.92);
+    stroke: rgba(255, 255, 255, 0.25);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+  .readout-time,
+  .readout-rssi {
+    font-family: var(--gf-font-mono);
+    font-size: 12px;
+    fill: #fff;
+  }
+  .readout-rssi {
+    fill: var(--gf-accent);
+  }
+  .add-hint {
+    fill: #ffd24a;
+    font-family: var(--gf-font-mono);
+    font-size: 11px;
+    pointer-events: none;
+  }
+  /* The explicit, accessible "Add lap here" control under the plot (real DOM button). */
+  .cursor-readout {
+    margin: var(--gf-space-2) 0 0;
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+  }
+  .cursor-readout strong {
+    color: var(--gf-text);
+  }
+  .add-here {
+    font-family: var(--gf-font-family);
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    padding: 0.15rem var(--gf-space-3);
+    border-radius: var(--gf-radius-sm);
+    border: 1px solid var(--gf-accent);
+    background: var(--gf-accent-soft);
+    color: var(--gf-text);
+    cursor: pointer;
+  }
+  .add-here:hover {
+    background: var(--gf-accent);
+    color: #061018;
+  }
+  .add-here:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
   }
 </style>
