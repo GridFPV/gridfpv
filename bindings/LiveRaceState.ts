@@ -66,6 +66,19 @@ race_started_at?: number,
  */
 race_ended_at?: number, 
 /**
+ * The **server-authoritative start-tone instant** of the current heat while it is `Armed`:
+ * the absolute wall-clock instant (microseconds since the Unix epoch) the start tone fires
+ * and the heat auto-advances `Armed → Running`. Derived from the `recorded_at` of the heat's
+ * [`HeatStarting`](gridfpv_events::Event::HeatStarting) event plus its logged `delay_ms` (the
+ * chosen randomized hold). `None` once the heat is `Running`/past (or before it has armed).
+ *
+ * **RD-console-only:** the start delay is *intentionally random to pilots*, so this is the
+ * anchor the RD's control view counts down to ("tone in 0:03") — the read-only / pilot view
+ * never renders it. It is `None` once `race_started_at` is set, so a late join after race-go
+ * sees no stale countdown. Renders as a plain TS `number` (microseconds).
+ */
+tone_at?: number, 
+/**
  * The **provisional → official lifecycle** of the current heat (marshaling Slice 5,
  * marshaling.html §3.3), surfaced for the Marshaling/Live UI. `None` until the heat reaches the
  * `Unofficial` phase (before that there is no result to be provisional about). Once provisional

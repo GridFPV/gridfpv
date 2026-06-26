@@ -47,6 +47,7 @@
   import { useRaceClock } from '../lib/raceClock.svelte.js';
   import { useStagingClock, formatStaging } from '../lib/stagingClock.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
+  import { useArmingClock, formatArming } from '../lib/armingClock.svelte.js';
   import { StartTonePlayer } from '../lib/startTone.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
@@ -359,6 +360,15 @@
   // (no countdown) when the window is Off — the result then stays provisional until manual Finalize.
   const protest = useProtestClock(() => live?.lifecycle);
 
+  // ── Start-tone countdown (RD-console-only) ───────────────────────────────────────────────────
+  // While the heat is Armed, count the wall clock down to the start tone (the server-authoritative
+  // `tone_at`: when the heat auto-advances Armed → Running). The start delay is **intentionally
+  // random to pilots**, so this countdown is RD-control-only: it is fed `tone_at` ONLY for a
+  // controlling session, so a read-only / pilot session never arms it (and the banner below shows
+  // them the generic "stand by" instead). `tone_at` is cleared by the backend once Running, so a
+  // late join after race-go sees no stale countdown.
+  const arming = useArmingClock(() => (canControl ? live?.tone_at : undefined));
+
   // ── Start tone synced to race-go (heat-lifecycle Slice 3; robustness + late-join fix) ──────────
   // A short Web-Audio beep the moment a heat goes live (race-go). The runtime logs
   // `HeatStarting { delay_ms }` then auto-appends the Running transition after the (hidden) random
@@ -550,14 +560,27 @@
 
   {#if heat && phase === 'Armed'}
     <!-- Arming state (Slice 3): the runtime ran the start procedure and will auto-advance to
-         Running after a HIDDEN random hold. We deliberately show a generic "stand by" — not a
-         precise countdown — so the randomness that the delay is meant to provide isn't defeated. -->
+         Running after a random hold. The hold is **intentionally random to pilots**, so the
+         precise tone countdown is RD-control-only: a controlling session sees "Tone in S.s"
+         (`arming.active`, fed `tone_at` only for `canControl`); the read-only / pilot view keeps
+         the generic "stand by" so the randomness the delay provides isn't defeated. -->
     <div class="arming" role="status" aria-label="Arming">
       <span class="arming-pulse" aria-hidden="true"></span>
-      <div class="arming-copy">
-        <span class="arming-title">Arming… stand by</span>
-        <span class="arming-sub">The race starts on its own — listen for the tone.</span>
-      </div>
+      {#if arming.active}
+        <div class="arming-copy">
+          <span class="arming-title"
+            >Tone in <span class="arming-countdown" data-testid="arming-countdown"
+              >{formatArming(arming.remainingMs)}</span
+            ></span
+          >
+          <span class="arming-sub">The race starts on its own — listen for the tone.</span>
+        </div>
+      {:else}
+        <div class="arming-copy">
+          <span class="arming-title">Arming… stand by</span>
+          <span class="arming-sub">The race starts on its own — listen for the tone.</span>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -1018,6 +1041,9 @@
   .arming-sub {
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
+  }
+  .arming-countdown {
+    font-variant-numeric: tabular-nums;
   }
 
   /* ── Result lifecycle (provisional → official, marshaling Slice 5) ─────────── */
