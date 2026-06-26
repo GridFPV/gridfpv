@@ -208,6 +208,15 @@ fn remap(event: Event, lineup: &[CompetitorRef], adapter: &AdapterId) -> Option<
             t.adapter = adapter.clone();
             Some(Event::SignalThresholds(t))
         }
+        Event::SignalHistory(mut h) => {
+            // The dense post-race history (RH `current_marshal_data`) is keyed on a node seat exactly
+            // like a chunk; remap it onto the heat's lineup pilot so the signal-trace projection's
+            // prefer-dense rule supersedes the coarse streamed chunks for the right competitor.
+            let index = node_index(&h.competitor)?;
+            h.competitor = lineup.get(index)?.clone();
+            h.adapter = adapter.clone();
+            Some(Event::SignalHistory(h))
+        }
         _ => None,
     }
 }

@@ -32,7 +32,9 @@
 
 use std::collections::BTreeMap;
 
-use gridfpv_events::{AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SourceTime};
+use gridfpv_events::{
+    AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SignalHistory, SourceTime,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -793,18 +795,34 @@ impl SignalTraceView {
     }
 }
 
-/// Fold a sequence of events into the per-heat [`SignalTraceView`] (marshaling Slice 1).
+/// Fold a sequence of events into the per-heat [`SignalTraceView`] (marshaling Slice 1; dense
+/// upgrade — RH `current_marshal_data`).
 ///
-/// Folds only [`Event::SignalChunk`] and [`Event::SignalThresholds`] — chunks **append** to their
-/// competitor's running sample buffer in log order (so the trace reconstructs exactly the captured
-/// stream), and thresholds are **last-writer-wins** per competitor. Every other event (passes,
-/// lifecycle, marshaling) is ignored: this projection is purely the captured evidence.
+/// Folds [`Event::SignalChunk`], [`Event::SignalThresholds`], and [`Event::SignalHistory`].
+/// Thresholds are **last-writer-wins** per competitor. The two trace sources are handled with a
+/// **prefer-dense** rule:
+///
+/// - [`Event::SignalChunk`] — the *coarse* live-streamed samples (one per `node_data` heartbeat).
+///   They **append** to the competitor's running buffer in log order, reconstructing the stream
+///   exactly.
+/// - [`Event::SignalHistory`] — the *dense, full-fidelity* per-tick history RotorHazard records,
+///   pulled from the request-driven `current_marshal_data` at heat end. When a competitor has **any**
+///   dense history, it **supersedes** the coarse chunk samples entirely: the view carries the dense
+///   trace, not the streaming approximation. Multiple histories for one competitor are last-writer-
+///   wins (a re-pull replaces the earlier one). With no dense history the coarse chunks stand, so a
+///   heat that ended before the pull (or a non-RH source) is unchanged.
+///
+/// Because the dense history carries an **explicit per-sample time** (not a uniform cadence), the
+/// view's uniform `from`/`period_micros` grid is derived from those times: `from` is the first
+/// sample's instant and `period_micros` is the **first inter-sample delta** (RotorHazard samples at
+/// a near-fixed rate). The samples themselves are stored verbatim — native integer ADC counts, no
+/// resampling (the Slice 1 fidelity caution) — so the rendered grid is faithful to the real sample
+/// count even where the cadence drifts slightly. A single-sample history keeps a `period_micros` of
+/// `0` (degenerate, but the grid still places it at `from`).
 ///
 /// Pure and deterministic — no clock, no hidden state — so folding the same events twice yields the
-/// identical view (the determinism-on-replay guarantee Slice 1 is built around). The `from`/
-/// `period_micros` of the **first** chunk seen for a competitor anchor the trace's time base;
-/// because a signal-capable adapter captures chunks back-to-back at a fixed cadence, the running
-/// sample index off that base places every later sample without storing a per-chunk timestamp.
+/// identical view (the determinism-on-replay guarantee Slice 1 is built around): the dense/coarse
+/// choice is a pure function of which facts are present, independent of fold order.
 ///
 /// `events` is the heat's window (the server scopes it before folding, exactly as the lap/audit
 /// projections do); the fold itself is window-agnostic, so it is equally correct over the full log.
@@ -819,6 +837,21 @@ where
         samples: Vec<u16>,
         enter: Option<u16>,
         exit: Option<u16>,
+        /// The dense history that supersedes the coarse `samples`/`from`/`period_micros`, if any has
+        /// been seen (last writer wins). When present it is resolved into the trace at emit time.
+        dense: Option<SignalHistory>,
+    }
+    impl Acc {
+        fn empty() -> Self {
+            Acc {
+                from: None,
+                period_micros: 0,
+                samples: Vec::new(),
+                enter: None,
+                exit: None,
+                dense: None,
+            }
+        }
     }
     let mut by_competitor: BTreeMap<CompetitorKey, Acc> = BTreeMap::new();
 
@@ -829,13 +862,7 @@ where
                     adapter: chunk.adapter.clone(),
                     competitor: chunk.competitor.clone(),
                 };
-                let acc = by_competitor.entry(key).or_insert_with(|| Acc {
-                    from: None,
-                    period_micros: chunk.period_micros,
-                    samples: Vec::new(),
-                    enter: None,
-                    exit: None,
-                });
+                let acc = by_competitor.entry(key).or_insert_with(Acc::empty);
                 // The first chunk anchors the time base; later chunks append onto it.
                 if acc.from.is_none() {
                     acc.from = Some(chunk.from);
@@ -843,18 +870,25 @@ where
                 }
                 acc.samples.extend_from_slice(&chunk.rssi);
             }
+            Event::SignalHistory(history) => {
+                let key = CompetitorKey {
+                    adapter: history.adapter.clone(),
+                    competitor: history.competitor.clone(),
+                };
+                let acc = by_competitor.entry(key).or_insert_with(Acc::empty);
+                // Prefer-dense: the dense history supersedes the coarse chunks. Last writer wins, so
+                // a re-pull replaces the earlier history. An empty history is ignored (it carries no
+                // evidence, so it must not blank out the coarse trace).
+                if !history.rssi.is_empty() {
+                    acc.dense = Some(history.clone());
+                }
+            }
             Event::SignalThresholds(t) => {
                 let key = CompetitorKey {
                     adapter: t.adapter.clone(),
                     competitor: t.competitor.clone(),
                 };
-                let acc = by_competitor.entry(key).or_insert_with(|| Acc {
-                    from: None,
-                    period_micros: 0,
-                    samples: Vec::new(),
-                    enter: None,
-                    exit: None,
-                });
+                let acc = by_competitor.entry(key).or_insert_with(Acc::empty);
                 // Last writer wins.
                 acc.enter = Some(t.enter);
                 acc.exit = Some(t.exit);
@@ -866,16 +900,40 @@ where
     SignalTraceView {
         competitors: by_competitor
             .into_iter()
-            .map(|(competitor, acc)| CompetitorTrace {
-                competitor,
-                from: acc.from,
-                period_micros: acc.period_micros,
-                samples: acc.samples,
-                enter: acc.enter,
-                exit: acc.exit,
+            .map(|(competitor, acc)| {
+                // Prefer-dense: when a dense history is present it replaces the coarse stream; the
+                // uniform `from`/`period_micros` grid is derived from the history's explicit times.
+                let (from, period_micros, samples) = match acc.dense {
+                    Some(history) => dense_trace_grid(&history),
+                    None => (acc.from, acc.period_micros, acc.samples),
+                };
+                CompetitorTrace {
+                    competitor,
+                    from,
+                    period_micros,
+                    samples,
+                    enter: acc.enter,
+                    exit: acc.exit,
+                }
             })
             .collect(),
     }
+}
+
+/// Resolve a dense [`SignalHistory`] into the `(from, period_micros, samples)` the uniform-grid
+/// [`CompetitorTrace`] carries, preserving the native samples verbatim (no resampling).
+///
+/// `from` is the first sample's instant; `period_micros` is the first inter-sample delta (RH samples
+/// at a near-fixed rate, so this anchors the grid the renderer draws on). The `samples` are the
+/// dense RSSI vector unchanged. A single-sample history yields `period_micros = 0`. Times that are
+/// non-monotonic or out of range are clamped to a non-negative `u32` delta so the grid stays valid.
+fn dense_trace_grid(history: &SignalHistory) -> (Option<SourceTime>, u32, Vec<u16>) {
+    let from = history.times.first().copied().map(SourceTime::from_micros);
+    let period_micros = match history.times.get(..2) {
+        Some([a, b]) => (b - a).clamp(0, u32::MAX as i64) as u32,
+        _ => 0,
+    };
+    (from, period_micros, history.rssi.clone())
 }
 
 #[cfg(test)]
@@ -1989,5 +2047,102 @@ mod marshaling_tests {
             chunk("rh", "node-0", 1_300_000, 100_000, &[70]),
         ];
         assert_eq!(signal_trace(&log), signal_trace(&log));
+    }
+
+    fn history(adapter: &str, competitor: &str, times: &[i64], rssi: &[u16]) -> Event {
+        Event::SignalHistory(SignalHistory {
+            adapter: AdapterId(adapter.into()),
+            competitor: CompetitorRef(competitor.into()),
+            times: times.to_vec(),
+            rssi: rssi.to_vec(),
+        })
+    }
+
+    #[test]
+    fn dense_history_supersedes_coarse_chunks() {
+        // A competitor with both coarse chunks AND a dense history: the view carries the DENSE trace
+        // (far more samples), not the streamed approximation — the prefer-dense rule.
+        let log = vec![
+            thresholds("rh", "node-0", 90, 80),
+            // Coarse: two streamed samples.
+            chunk("rh", "node-0", 1_000_000, 100_000, &[70, 150]),
+            // Dense: the full per-tick history pulled at heat end (6 samples, finer grid).
+            history(
+                "rh",
+                "node-0",
+                &[0, 50_000, 100_000, 150_000, 200_000, 250_000],
+                &[70, 88, 150, 149, 90, 71],
+            ),
+        ];
+        let view = signal_trace(&log);
+        let key = CompetitorKey {
+            adapter: AdapterId("rh".into()),
+            competitor: CompetitorRef("node-0".into()),
+        };
+        let trace = view.competitor(&key).expect("node-0 trace");
+        // The DENSE samples win, not the 2 coarse ones.
+        assert_eq!(trace.samples, vec![70, 88, 150, 149, 90, 71]);
+        // Grid derived from the dense times: from = first time, period = first inter-sample delta.
+        assert_eq!(trace.from, Some(SourceTime::from_micros(0)));
+        assert_eq!(trace.period_micros, 50_000);
+        // Thresholds still fold in alongside (independent of the trace source).
+        assert_eq!((trace.enter, trace.exit), (Some(90), Some(80)));
+    }
+
+    #[test]
+    fn coarse_chunks_stand_without_a_dense_history() {
+        // No SignalHistory: the coarse chunks are the trace (a heat that ended before the pull).
+        let log = vec![chunk("rh", "node-0", 1_000_000, 100_000, &[70, 150, 71])];
+        let view = signal_trace(&log);
+        let trace = &view.competitors[0];
+        assert_eq!(trace.samples, vec![70, 150, 71]);
+        assert_eq!(trace.period_micros, 100_000);
+    }
+
+    #[test]
+    fn empty_dense_history_does_not_blank_the_coarse_trace() {
+        // A pull that returned an empty history must NOT erase the coarse evidence already captured.
+        let log = vec![
+            chunk("rh", "node-0", 0, 100_000, &[70, 150, 71]),
+            history("rh", "node-0", &[], &[]),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 150, 71]);
+    }
+
+    #[test]
+    fn dense_history_last_writer_wins() {
+        // Two pulls for one competitor: the later dense history replaces the earlier one.
+        let log = vec![
+            history("rh", "node-0", &[0, 100_000], &[70, 150]),
+            history("rh", "node-0", &[0, 50_000, 100_000], &[70, 88, 150]),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 88, 150]);
+        assert_eq!(trace.period_micros, 50_000);
+    }
+
+    #[test]
+    fn dense_history_fold_is_order_independent() {
+        // Determinism: the dense/coarse choice is a pure function of which facts are present, not of
+        // fold order — the history before or after the chunk yields the same (dense) view.
+        let chunk_first = vec![
+            chunk("rh", "node-0", 0, 100_000, &[70, 150]),
+            history("rh", "node-0", &[0, 50_000, 100_000], &[70, 88, 150]),
+        ];
+        let history_first = vec![
+            history("rh", "node-0", &[0, 50_000, 100_000], &[70, 88, 150]),
+            chunk("rh", "node-0", 0, 100_000, &[70, 150]),
+        ];
+        assert_eq!(signal_trace(&chunk_first), signal_trace(&history_first));
+    }
+
+    #[test]
+    fn single_sample_dense_history_has_zero_period() {
+        let log = vec![history("rh", "node-0", &[42_000], &[150])];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![150]);
+        assert_eq!(trace.from, Some(SourceTime::from_micros(42_000)));
+        assert_eq!(trace.period_micros, 0);
     }
 }
