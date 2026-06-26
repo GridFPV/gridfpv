@@ -107,6 +107,19 @@ pub struct LiveRaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub race_ended_at: Option<i64>,
+    /// The **server-authoritative start-tone instant** of the current heat while it is `Armed`:
+    /// the absolute wall-clock instant (microseconds since the Unix epoch) the start tone fires
+    /// and the heat auto-advances `Armed → Running`. Derived from the `recorded_at` of the heat's
+    /// [`HeatStarting`](gridfpv_events::Event::HeatStarting) event plus its logged `delay_ms` (the
+    /// chosen randomized hold). `None` once the heat is `Running`/past (or before it has armed).
+    ///
+    /// **RD-console-only:** the start delay is *intentionally random to pilots*, so this is the
+    /// anchor the RD's control view counts down to ("tone in 0:03") — the read-only / pilot view
+    /// never renders it. It is `None` once `race_started_at` is set, so a late join after race-go
+    /// sees no stale countdown. Renders as a plain TS `number` (microseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub tone_at: Option<i64>,
     /// The **provisional → official lifecycle** of the current heat (marshaling Slice 5,
     /// marshaling.html §3.3), surfaced for the Marshaling/Live UI. `None` until the heat reaches the
     /// `Unofficial` phase (before that there is no result to be provisional about). Once provisional
@@ -155,6 +168,7 @@ impl Default for LiveRaceState {
             on_deck: None,
             race_started_at: None,
             race_ended_at: None,
+            tone_at: None,
             lifecycle: None,
         }
     }
@@ -254,6 +268,9 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
         // `&[Event]` — the open-practice synthetic path and the unit tests — leaves it `None`.
         race_started_at: None,
         race_ended_at: None,
+        // Likewise set by [`with_heat_timing`]: the start-tone instant needs the `HeatStarting`
+        // event's `recorded_at`, which the bare-event fold cannot see.
+        tone_at: None,
         // The lifecycle is likewise finished by [`with_heat_timing`] from the *stored* log (it needs
         // the `HeatFinalizing` deadline's `recorded_at` context); the bare-event fold leaves it `None`.
         lifecycle: None,
@@ -320,6 +337,42 @@ fn heat_finalizing_at(events: &[Event], heat: &HeatId) -> Option<i64> {
     at
 }
 
+/// The current heat's **start-tone instant** while it is `Armed` (heat-lifecycle Slice 2/3): the
+/// absolute server wall-clock instant (microseconds) the start tone fires and the heat
+/// auto-advances `Armed → Running`.
+///
+/// Derived from the heat's most-recent [`HeatStarting`](Event::HeatStarting): the `recorded_at` of
+/// that event (the instant the heat armed) plus its logged `delay_ms` (the chosen randomized hold,
+/// in **milliseconds** → microseconds). The runtime writes the delay once, at emission time
+/// (mirroring `HeatFinalizing`'s deadline), so a replay folds the *same* instant and every
+/// controlling client counts down identically.
+///
+/// Cleared by any later `Running` for the heat (the tone has fired — `race_started_at` takes over)
+/// or a re-arm sequence: a fresh `HeatStarting` restamps it, a `Running` drops it. Pure and
+/// log-derivable like [`heat_timing`]. `None` when the heat has not armed (no `HeatStarting`), the
+/// `HeatStarting` carried no `recorded_at` (an older/untimed entry), or the heat has since run.
+fn heat_tone_at(stored: &[StoredEvent], heat: &HeatId) -> Option<i64> {
+    let mut at = None;
+    for entry in stored {
+        match &entry.event {
+            // The start procedure armed: the tone fires at this instant + the chosen hold.
+            Event::HeatStarting { heat: h, delay_ms } if h == heat => {
+                at = entry
+                    .recorded_at
+                    .map(|armed| armed + i64::from(*delay_ms) * 1_000);
+            }
+            // The tone has fired (the heat is now Running) — `race_started_at` is the anchor from
+            // here, so drop the pending tone instant. A re-arm logs a fresh `HeatStarting` above.
+            Event::HeatStateChanged {
+                heat: h,
+                transition: HeatTransition::Running,
+            } if h == heat => at = None,
+            _ => {}
+        }
+    }
+    at
+}
+
 /// Set a folded [`LiveRaceState`]'s server-authoritative timing **and lifecycle** from the stored
 /// log.
 ///
@@ -337,6 +390,14 @@ pub fn with_heat_timing(mut live: LiveRaceState, stored: &[StoredEvent]) -> Live
         let (started, ended) = heat_timing(stored, &heat);
         live.race_started_at = started;
         live.race_ended_at = ended;
+        // The start-tone countdown anchor — present only while the heat is `Armed` (the tone has
+        // not fired yet). `heat_tone_at` already clears it on `Running`; gating on the phase keeps
+        // it absent in every non-Armed phase even if the fold order ever changed. RD-console-only:
+        // the field surfaces it, the client gates rendering to a controlling session.
+        live.tone_at = match live.phase {
+            HeatPhase::Armed => heat_tone_at(stored, &heat),
+            _ => None,
+        };
         live.lifecycle = match live.phase {
             HeatPhase::Unofficial => {
                 let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
@@ -1075,6 +1136,106 @@ mod tests {
         assert_eq!(live.race_started_at, None);
         assert_eq!(live.race_ended_at, None);
         assert_eq!(live.lifecycle, None);
+    }
+
+    // --- the start-tone countdown anchor (RD-only tone countdown while Armed) -----------
+
+    fn starting(id: &str, delay_ms: u32) -> Event {
+        Event::HeatStarting {
+            heat: HeatId(id.into()),
+            delay_ms,
+        }
+    }
+
+    #[test]
+    fn tone_at_is_armed_recorded_instant_plus_delay() {
+        // The heat armed at t=1_000_000µs with a 3000ms (3s) hold ⇒ the tone fires at 4_000_000µs.
+        let log = vec![
+            stored(scheduled("q-1", &["A", "B"])),
+            stored_at(changed("q-1", HeatTransition::Staged), 500_000),
+            stored_at(changed("q-1", HeatTransition::Armed), 1_000_000),
+            stored_at(starting("q-1", 3000), 1_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(live.phase, HeatPhase::Armed);
+        assert_eq!(live.tone_at, Some(4_000_000));
+    }
+
+    #[test]
+    fn tone_at_is_cleared_once_the_heat_is_running() {
+        // Once the heat advances to Running the tone has fired; `race_started_at` is the anchor now,
+        // so `tone_at` is `None` (no stale countdown for a late join after race-go).
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(starting("q-1", 3000), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Running), 4_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(live.phase, HeatPhase::Running);
+        assert_eq!(live.tone_at, None);
+        assert_eq!(live.race_started_at, Some(4_000_000));
+    }
+
+    #[test]
+    fn tone_at_is_none_before_the_heat_arms() {
+        // A merely-staged heat (no HeatStarting yet) has no tone instant.
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Staged), 500_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(live.phase, HeatPhase::Staged);
+        assert_eq!(live.tone_at, None);
+    }
+
+    #[test]
+    fn tone_at_uses_the_latest_starting_on_a_re_arm() {
+        // The heat armed, was aborted back, and re-armed: the latest `HeatStarting` wins (a fresh
+        // random hold). The `Running` between them (the abort path never reaches Running here) does
+        // not apply; the second arming's instant + delay is the live tone.
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(starting("q-1", 2000), 1_000_000),
+            stored_at(changed("q-1", HeatTransition::Aborted), 1_500_000),
+            stored_at(changed("q-1", HeatTransition::Staged), 2_000_000),
+            stored_at(changed("q-1", HeatTransition::Armed), 2_500_000),
+            stored_at(starting("q-1", 5000), 2_500_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(live.phase, HeatPhase::Armed);
+        // 2_500_000µs armed + 5000ms hold = 7_500_000µs.
+        assert_eq!(live.tone_at, Some(7_500_000));
+    }
+
+    #[test]
+    fn tone_at_is_none_for_an_untimed_starting_entry() {
+        // An older / untimed `HeatStarting` (no `recorded_at`) yields no absolute instant.
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Armed), 1_000_000),
+            stored(starting("q-1", 3000)),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let live = with_heat_timing(live_state(&events), &log);
+        assert_eq!(live.phase, HeatPhase::Armed);
+        assert_eq!(live.tone_at, None);
+    }
+
+    #[test]
+    fn tone_at_folds_deterministically() {
+        let log = vec![
+            stored(scheduled("q-1", &["A"])),
+            stored_at(changed("q-1", HeatTransition::Armed), 1_000_000),
+            stored_at(starting("q-1", 3000), 1_000_000),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.event.clone()).collect();
+        let a = with_heat_timing(live_state(&events), &log);
+        let b = with_heat_timing(live_state(&events), &log);
+        assert_eq!(a.tone_at, b.tone_at);
     }
 
     // --- the provisional → official lifecycle (marshaling Slice 5) -------------------

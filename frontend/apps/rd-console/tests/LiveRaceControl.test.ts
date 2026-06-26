@@ -299,14 +299,58 @@ describe('LiveRaceControl', () => {
   });
 
   describe('start-procedure UX + tone (Slice 3)', () => {
-    it('shows the generic "arming… stand by" state in Armed (no precise countdown)', async () => {
+    it('shows the generic "arming… stand by" state in Armed when no tone_at is known', async () => {
+      // No `tone_at` on the live state (e.g. an untimed/older log): fall back to the generic copy
+      // with no precise countdown.
       const { session } = makeTestSession({ live: liveAt('Armed') });
       render(LiveRaceControl, { session });
       await tick();
       const arming = await screen.findByRole('status', { name: 'Arming' });
       expect(arming).toHaveTextContent(/Arming… stand by/);
-      // The randomness is hidden: no precise ms/seconds countdown is rendered.
-      expect(arming).not.toHaveTextContent(/\d+\s*ms/);
+      expect(screen.queryByTestId('arming-countdown')).toBeNull();
+    });
+
+    it('shows the RD-only "Tone in S.s" countdown while Armed when tone_at is known', async () => {
+      // RD-console-only: the start delay is intentionally random to PILOTS, so a controlling (RD)
+      // session sees a live countdown to the start tone. tone_at is server-time µs; with the system
+      // clock at 0 a tone_at of 3.2s out reads "3.2s" and ticks down.
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const { session } = makeTestSession({
+        live: { ...liveAt('Armed'), tone_at: 3_200_000 } as LiveRaceState
+      });
+      render(LiveRaceControl, { session });
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+
+      const arming = await screen.findByRole('status', { name: 'Arming' });
+      const countdown = () => screen.getByTestId('arming-countdown').textContent?.trim();
+      expect(arming).toHaveTextContent(/Tone in/);
+      await waitFor(() => expect(countdown()).toBe('3.2s'));
+
+      // It counts down: ~2s later it reads ~1.2s.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(countdown()).toBe('1.2s');
+
+      // It clamps at zero (the runtime fires the tone + flips to Running and clears tone_at).
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(countdown()).toBe('0.0s');
+      vi.useRealTimers();
+    });
+
+    it('hides the tone countdown from a read-only / pilot session (random to pilots)', async () => {
+      // The whole point: pilots must NOT see the countdown. Even with tone_at present, a read-only
+      // session falls back to the generic "stand by" — no precise countdown is fed or rendered.
+      const { session } = makeTestSession({
+        live: { ...liveAt('Armed'), tone_at: 3_200_000 } as LiveRaceState,
+        role: 'readonly'
+      });
+      render(LiveRaceControl, { session });
+      await tick();
+      const arming = await screen.findByRole('status', { name: 'Arming' });
+      expect(arming).toHaveTextContent(/Arming… stand by/);
+      expect(screen.queryByTestId('arming-countdown')).toBeNull();
+      expect(arming).not.toHaveTextContent(/Tone in/);
     });
 
     // A stub platform AudioContext the screen's StartTonePlayer picks up, recording oscillator
