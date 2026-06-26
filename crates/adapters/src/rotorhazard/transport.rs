@@ -25,8 +25,8 @@ use rust_socketio::{ClientBuilder, Payload, RawClient};
 use serde_json::json;
 
 use super::{
-    Raw, RawCurrentLaps, RawEnterExitLevels, RawMarshalData, RawNodeData, RawPassRecord,
-    RawRaceDetails, RawRaceList, RawRaceStatus, RotorHazardAdapter,
+    Raw, RawCurrentLaps, RawEnterExitLevels, RawHeatData, RawMarshalData, RawNodeData,
+    RawPassRecord, RawRaceDetails, RawRaceList, RawRaceStatus, RotorHazardAdapter,
 };
 use crate::Adapter;
 use gridfpv_events::Event;
@@ -66,6 +66,9 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
         "race_details" => serde_json::from_value::<RawRaceDetails>(value)
             .ok()
             .map(Raw::RaceDetails),
+        "heat_data" => serde_json::from_value::<RawHeatData>(value)
+            .ok()
+            .map(Raw::HeatData),
         _ => None,
     }
 }
@@ -85,6 +88,12 @@ pub struct RotorHazardConnection {
     /// a real, final close — `rust_socketio` no longer silently buffers emits and auto-reconnects —
     /// so the driver can read [`is_alive`](Self::is_alive) as the source of truth for a drop (#105).
     alive: Arc<AtomicBool>,
+    /// The newest configured heat id learned from the most recent `heat_data` response (the highest
+    /// id, i.e. the freshest — the one `ensure_savable_heat` just added). The `heat_data` socket
+    /// handler stashes it here; the **driver thread** drains it via [`take_savable_heat`] and selects
+    /// it synchronously (`set_current_heat`) before staging, so the run is savable (the dense-history
+    /// precondition) without any emit-per-`heat_data` feedback loop on the socket callback.
+    savable_heat: Arc<Mutex<Option<u64>>>,
 }
 
 impl RotorHazardConnection {
@@ -95,6 +104,9 @@ impl RotorHazardConnection {
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         // Starts alive; flipped to `false` by the `close`/`error` reserved-event handlers below.
         let alive = Arc::new(AtomicBool::new(true));
+        // The newest savable heat id, stashed by the `heat_data` handler and drained by the driver
+        // (see the struct field). Starts empty (no heat learned yet).
+        let savable_heat: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 
         // `rust_socketio`'s reserved events: on a dropped socket the poll loop fires `error`
         // (the engine.io read failed) and, on a clean disconnect packet, `close`. Either way the
@@ -114,20 +126,36 @@ impl RotorHazardConnection {
         // all wire IO in the transport while the trigger stays in the pure translator.
         let handler = |name: &'static str,
                        adapter: Arc<Mutex<RotorHazardAdapter>>,
-                       sink: Arc<Mutex<Vec<Event>>>| {
+                       sink: Arc<Mutex<Vec<Event>>>,
+                       savable_heat: Arc<Mutex<Option<u64>>>| {
             move |payload: Payload, client: RawClient| {
                 if let Some(raw) = raw_from_socket(name, &payload) {
-                    let (translated, request_marshal, pilotrace_requests) = {
+                    let (translated, request_marshal, pilotrace_requests, heat_ids) = {
                         let mut a = adapter.lock().unwrap();
                         let translated = a.translate(raw);
-                        // Drain both heat-end intents: the one-shot marshal request (set on the DONE
-                        // edge) and any per-pilotrace pulls discovered from a `race_list`.
+                        // Drain the heat-end intents: the one-shot marshal request (set on the DONE
+                        // edge), any per-pilotrace pulls discovered from a `race_list`, and the
+                        // configured heat ids learned from a `heat_data` (so a savable heat can be
+                        // selected before staging — the dense-history precondition).
                         let request_marshal = a.take_marshal_request();
                         let pilotrace_requests = a.take_pilotrace_requests();
-                        (translated, request_marshal, pilotrace_requests)
+                        let heat_ids = a.take_heat_ids();
+                        (translated, request_marshal, pilotrace_requests, heat_ids)
                     };
                     if !translated.is_empty() {
                         sink.lock().unwrap().extend(translated);
+                    }
+                    // A `heat_data` response lists the configured heats: stash the highest (newest) id
+                    // so the **driver thread** can select it as the current (savable) heat
+                    // synchronously, before staging (see `RotorHazardConnection::take_savable_heat`).
+                    // We do NOT emit `set_current_heat` from this socket callback: `heat_data` is
+                    // broadcast on every heat mutation, and an emit-per-`heat_data` would feed back
+                    // (set_current_heat -> heat/current-heat re-emits) and flood the link. The driver
+                    // selects once, deterministically, on its own thread instead.
+                    if let Some(&heat) = heat_ids.iter().max() {
+                        if heat >= 0 {
+                            savable_heat.lock().unwrap().replace(heat as u64);
+                        }
                     }
                     if request_marshal {
                         // Heat just ended: pull the dense history. Two RotorHazard builds expose it
@@ -181,35 +209,84 @@ impl RotorHazardConnection {
             .on("close", drop_handler(alive.clone()))
             .on(
                 "race_status",
-                handler("race_status", adapter.clone(), events.clone()),
+                handler(
+                    "race_status",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
             )
             .on(
                 "current_laps",
-                handler("current_laps", adapter.clone(), events.clone()),
+                handler(
+                    "current_laps",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
             )
             .on(
                 "node_data",
-                handler("node_data", adapter.clone(), events.clone()),
+                handler(
+                    "node_data",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
             )
             .on(
                 "pass_record",
-                handler("pass_record", adapter.clone(), events.clone()),
+                handler(
+                    "pass_record",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
             )
             .on(
                 "enter_and_exit_at_levels",
-                handler("enter_and_exit_at_levels", adapter.clone(), events.clone()),
+                handler(
+                    "enter_and_exit_at_levels",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
             )
             .on(
                 "current_marshal_data",
-                handler("current_marshal_data", adapter.clone(), events.clone()),
+                handler(
+                    "current_marshal_data",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
             )
             .on(
                 "race_list",
-                handler("race_list", adapter.clone(), events.clone()),
+                handler(
+                    "race_list",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
             )
             .on(
                 "race_details",
-                handler("race_details", adapter.clone(), events.clone()),
+                handler(
+                    "race_details",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
+            )
+            .on(
+                "heat_data",
+                handler(
+                    "heat_data",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                ),
             )
             .connect()?;
 
@@ -227,7 +304,18 @@ impl RotorHazardConnection {
             events,
             adapter,
             alive,
+            savable_heat,
         })
+    }
+
+    /// Take (and clear) the newest savable heat id learned from a `heat_data` response, if any.
+    ///
+    /// The driver calls this after [`ensure_savable_heat`](Self::ensure_savable_heat) requested the
+    /// heat list: a `Some(id)` means the heat list arrived and `id` is the freshest heat to make
+    /// current (`set_current_heat`) before staging, so the run persists its dense history. `None`
+    /// until the `heat_data` response has been folded.
+    pub fn take_savable_heat(&self) -> Option<u64> {
+        self.savable_heat.lock().expect("savable-heat lock").take()
     }
 
     /// Whether the socket is still live (#105). The reserved `close`/`error` handlers flip this to
@@ -309,6 +397,30 @@ impl RotorHazardConnection {
     /// the DB and becomes pullable via `get_pilotrace` — a driving helper for the dense-history test.
     pub fn save_laps(&self) -> Result<(), rust_socketio::Error> {
         self.client.emit("save_laps", Payload::Text(vec![]))
+    }
+
+    /// Ensure a **savable current heat** exists on RotorHazard so the next run persists its dense
+    /// per-tick RSSI history (the marshaling Slice 1 / path-2 precondition).
+    ///
+    /// RotorHazard only writes a run's `history_values`/`history_times` (the dense trace its marshal
+    /// page reviews, pulled via `current_marshal_data` / `get_pilotrace`) when a heat is current —
+    /// `on_save_laps` and `emit_race_marshal_data` both no-op while `current_heat == HEAT_ID_NONE`,
+    /// the default in practice mode. The production staging path drives RH through
+    /// `stop_race`/`discard_laps`/`stage_race` but never selects a heat, so without this the dense
+    /// pull always comes back empty and only the coarse streamed [`SignalChunk`]s survive.
+    ///
+    /// This adds a fresh heat (`add_heat`) and **requests** `heat_data`; the `heat_data` handler
+    /// stashes the newest heat id, which the **driver** then reads via [`take_savable_heat`] and
+    /// selects synchronously (`set_current_heat`) before staging. Selection is deliberately NOT done
+    /// in the socket callback: `heat_data` is broadcast on every heat mutation, so an emit-per-event
+    /// would feed back and flood the link (the regression that dropped a staging connection).
+    /// Best-effort: a failed emit on a dropped link just leaves the coarse trace, which the reconnect
+    /// path tolerates. Adding a heat each call is acceptable for the dockerized test rig; a future
+    /// refinement could reuse an existing empty heat instead of always adding one.
+    pub fn ensure_savable_heat(&self) -> Result<(), rust_socketio::Error> {
+        self.client.emit("add_heat", Payload::Text(vec![]))?;
+        self.client
+            .emit("load_data", json!({ "load_types": ["heat_data"] }))
     }
 
     /// Select RotorHazard's **current heat** (`set_current_heat`, `{ heat: <id> }`) — a driving

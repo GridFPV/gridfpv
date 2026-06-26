@@ -70,6 +70,67 @@ impl Default for NodeCsv {
     }
 }
 
+/// Render one CSV row (one mock tick) in RotorHazard `MockInterface` column order.
+///
+/// Columns: `idx, lap_id, ms, rssi, node_peak, pass_peak, loop_time, cross(T/F),
+/// pass_nadir, node_nadir, peakRssi, pkFirst, pkLast, nadirRssi, ndFirst, ndLast`.
+///
+/// Two distinct signal fidelities ride in one row, and tests assert on both:
+/// - **Coarse** — `node_peak` (col 4) is what `node_data` streams and the adapter's coarse
+///   [`SignalChunk`] trace samples once per heartbeat. It is held **stable** at `node_peak` so the
+///   coarse-fidelity test can assert an exact value.
+/// - **Dense** — the `peakRssi`/`nadirRssi` history columns (10/13) with their first/last times
+///   (11/12, 14/15) feed RotorHazard's per-tick `history_values`/`history_times` accumulator
+///   (`BaseHardwareInterface.PeakNadirHistory.addTo`), the dense trace its marshal page reviews and
+///   our path-2 (`current_marshal_data`/`get_pilotrace`) pulls at heat end. Passing `pk_hi/pk_lo`
+///   distinct **first/last** times (`pkFirst > pkLast`) makes RH log *two* history entries per tick,
+///   and varying `peak_rssi_hist`/`nadir_rssi_hist` per tick (rather than a flat square wave) gives
+///   the captured trace real texture at a much higher sample density than the coarse stream — the
+///   resolution the marshaling graph is judged on.
+#[allow(clippy::too_many_arguments)]
+fn csv_row(
+    lap_id: usize,
+    rssi: i32,
+    node_peak: i32,
+    pass_peak: i32,
+    cross: char,
+    peak_rssi_hist: i32,
+    nadir_rssi_hist: i32,
+) -> String {
+    // Distinct first/last times so RH's `addTo` records two entries per peak and per nadir each
+    // tick (`pkFirst > pkLast` / `ndFirst > ndLast`), raising the dense-history density. Small,
+    // fixed, positive values keep them well clear of the "corrupted history times" guard.
+    format!(
+        "0,{lap_id},0,{rssi},{node_peak},{pass_peak},10,{cross},20,30,{peak},2,1,{nadir},2,1",
+        peak = peak_rssi_hist,
+        nadir = nadir_rssi_hist,
+    )
+}
+
+/// A per-tick dense **peak/nadir** RSSI envelope for the history columns, given the lap's peak and
+/// the node's baseline and where this tick sits within the lap (`0.0` just after the previous
+/// crossing → `1.0` at the next). The envelope ramps the peak up toward the crossing and the nadir
+/// down between crossings, so the captured dense trace has a realistic, textured shape (not a flat
+/// square wave) at full per-tick density — what the marshaling graph is judged on. Returns
+/// `(peak_rssi_hist, nadir_rssi_hist)`, both kept valid (`1..=999`).
+fn dense_envelope(peak: i32, baseline: i32, phase: f64) -> (i32, i32) {
+    // Peak rises from baseline toward `peak` as the craft approaches the gate (phase -> 1.0).
+    let span = (peak - baseline).max(1) as f64;
+    let rise = baseline as f64 + span * phase;
+    // A small per-tick wobble so consecutive ticks differ (defeats RH's run-length dedup, keeping
+    // the trace dense) without crossing the enter threshold off-gate.
+    let wobble = if phase < 0.95 {
+        ((phase * 12.0).sin() * 4.0).round()
+    } else {
+        0.0
+    };
+    let peak_rssi = (rise + wobble).round().clamp(1.0, 999.0) as i32;
+    // Nadir sits a little below the running baseline, dipping deepest mid-lap (phase ~0.5).
+    let dip = (baseline as f64 * 0.4) * (1.0 - (phase - 0.5).abs() * 2.0).max(0.0);
+    let nadir_rssi = ((baseline as f64) - dip).round().clamp(1.0, 999.0) as i32;
+    (peak_rssi, nadir_rssi)
+}
+
 /// Render one node's `mock_data_{N}.csv` content.
 ///
 /// Columns (RotorHazard `MockInterface`): `idx, lap_id, ms, rssi, node_peak,
@@ -83,8 +144,12 @@ impl Default for NodeCsv {
 /// rather than being baked in up front — capping `lap_id` would stop producing laps
 /// before the race even begins. At EOF the file loops, which simply keeps laps
 /// coming (each increment still differs from the last seen id).
+///
+/// The coarse `node_peak` (col 4) stays stable at `peak + 30` (the value the coarse [`SignalChunk`]
+/// trace samples and the fidelity test asserts), while the dense history columns carry a textured
+/// per-tick peak/nadir envelope (see [`csv_row`]/[`dense_envelope`]) so the path-2 trace pulled at
+/// heat end is high-resolution.
 pub fn node_csv(opts: &NodeCsv) -> String {
-    const TOTAL_TICKS: usize = 600;
     let node_peak = opts.peak_rssi + 30;
     let mut lines = Vec::with_capacity(TOTAL_TICKS);
     for i in 0..TOTAL_TICKS {
@@ -96,11 +161,19 @@ pub fn node_csv(opts: &NodeCsv) -> String {
             opts.baseline_rssi
         };
         let cross = if on_lap { 'T' } else { 'F' };
+        // Phase within the current lap window (0 just after the last crossing -> ~1 at the next).
+        let phase = (i % opts.ticks_per_lap) as f64 / opts.ticks_per_lap.max(1) as f64;
+        let (peak_hist, nadir_hist) = dense_envelope(opts.peak_rssi, opts.baseline_rssi, phase);
         // pass_peak is reported on EVERY tick so the node's signal level is a stable
         // value the adapter can cache and assert (not just on lap ticks).
-        lines.push(format!(
-            "0,{lap_id},0,{rssi},{node_peak},{peak},10,{cross},20,30,{peak},0,0,20,0,0",
-            peak = opts.peak_rssi,
+        lines.push(csv_row(
+            lap_id,
+            rssi,
+            node_peak,
+            opts.peak_rssi,
+            cross,
+            peak_hist,
+            nadir_hist,
         ));
     }
     let mut out = lines.join("\n");
@@ -213,6 +286,10 @@ impl NodePlan {
 /// reports `baseline_rssi` and `cross = F`. `pass_peak` carries the lap's peak on
 /// *every* row so the node's signal level stays a stable, assertable value (it
 /// reflects the most recent crossing, like the real node's `pass_peak_rssi`).
+///
+/// As in [`node_csv`], the coarse `node_peak` (col 4) stays stable at `last_peak + 30` while the
+/// dense history columns carry a textured per-tick peak/nadir envelope (see
+/// [`csv_row`]/[`dense_envelope`]), so the path-2 trace pulled at heat end is high-resolution.
 pub fn plan_csv(plan: &NodePlan) -> String {
     let crossings = plan.crossing_ticks();
     // Map tick -> peak for fast lookup, and precompute the running lap_id.
@@ -220,6 +297,9 @@ pub fn plan_csv(plan: &NodePlan) -> String {
     let mut lap_id = 0usize;
     // Most recent crossing peak, for the per-row pass_peak (signal context).
     let mut last_peak = plan.peak_rssi;
+    // The tick window of the current lap, for the dense envelope's phase: the previous crossing
+    // (or 0) and the next scheduled crossing (or the window end).
+    let mut prev_cross = 0usize;
     let mut lines = Vec::with_capacity(TOTAL_TICKS);
     for i in 0..TOTAL_TICKS {
         let on_lap = next < crossings.len() && crossings[next] == i;
@@ -231,6 +311,7 @@ pub fn plan_csv(plan: &NodePlan) -> String {
             } else {
                 plan.peak_rssi
             };
+            prev_cross = i;
             next += 1;
         }
         let node_peak = last_peak + 30;
@@ -240,9 +321,13 @@ pub fn plan_csv(plan: &NodePlan) -> String {
             plan.baseline_rssi
         };
         let cross = if on_lap { 'T' } else { 'F' };
-        lines.push(format!(
-            "0,{lap_id},0,{rssi},{node_peak},{peak},10,{cross},20,30,{peak},0,0,20,0,0",
-            peak = last_peak,
+        // Phase within the current lap window: rises from the previous crossing toward the next.
+        let next_cross = crossings.get(next).copied().unwrap_or(TOTAL_TICKS);
+        let window = next_cross.saturating_sub(prev_cross).max(1);
+        let phase = (i.saturating_sub(prev_cross)) as f64 / window as f64;
+        let (peak_hist, nadir_hist) = dense_envelope(last_peak, plan.baseline_rssi, phase);
+        lines.push(csv_row(
+            lap_id, rssi, node_peak, last_peak, cross, peak_hist, nadir_hist,
         ));
     }
     let mut out = lines.join("\n");

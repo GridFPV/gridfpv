@@ -320,12 +320,16 @@ fn captured_trace_matches_emitted_csv_samples() {
 /// it over the coarse streamed samples. This asserts the dense trace carries **strictly more**
 /// samples than the coarse streaming count captured live — the full-fidelity upgrade.
 ///
+/// Crucially this drives the dense path through the **production save precondition**
+/// `conn.ensure_savable_heat()` (add a heat + select it as current) — exactly what the live
+/// Director's staging loop now does before a heat — rather than poking `add_heat`/`set_current_heat`
+/// by hand. RotorHazard only persists a run's dense history for a saved current heat, so this proves
+/// the normal flow (not a bespoke test setup) activates path-2.
+///
 /// Flow: drive an emulated node stream into a real dockerized RH, count the **coarse** streamed
-/// samples accumulated while racing, finish the heat (which auto-triggers `current_race_marshal`),
-/// then re-fold and assert the now-dense trace has many more samples (RH's per-tick history vs. one
-/// sample per `node_data` heartbeat). The auto-request fires on the DONE transition; we also call
-/// `request_marshal_data()` explicitly as a belt-and-braces re-request in case the heat ended before
-/// the live socket drained the DONE.
+/// samples accumulated while racing, finish the heat (which auto-triggers `current_race_marshal` /
+/// `save_laps` -> `race_list` -> `get_pilotrace`), then re-fold and assert the now-dense trace has
+/// many more samples (RH's per-tick history vs. one sample per `node_data` heartbeat).
 #[test]
 #[ignore = "requires Docker (spins up dockerized RotorHazard with emulated signals)"]
 fn dense_marshal_history_supersedes_coarse_stream() {
@@ -355,12 +359,27 @@ fn dense_marshal_history_supersedes_coarse_stream() {
     conn.stop_race().ok();
     conn.discard_laps().expect("discard_laps");
     // RotorHazard only persists (and thus exposes) a race's dense history for a SAVED heat — its
-    // `current_heat` is None in default practice mode, where `save_laps` is a no-op. Create and
-    // select a heat so the post-race dense history is pullable (the production staging path selects
-    // an RH heat for the same reason).
-    conn.add_heat().ok();
-    std::thread::sleep(Duration::from_millis(500));
-    conn.set_current_heat(1).ok();
+    // `current_heat` is None in default practice mode, where `save_laps` is a no-op. Drive the same
+    // production precondition the live Director's staging loop now runs: `ensure_savable_heat` adds a
+    // heat and requests the heat list; the `heat_data` handler stashes the newest id, which we then
+    // select synchronously (exactly as the driver thread does). After this the post-race dense
+    // history is pullable through the normal flow.
+    conn.ensure_savable_heat().expect("ensure_savable_heat");
+    let heat = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = conn.events();
+            if let Some(h) = conn.take_savable_heat() {
+                break Some(h);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    .expect("RotorHazard returned a savable heat id");
+    conn.set_current_heat(heat).expect("set_current_heat");
     std::thread::sleep(Duration::from_secs(2));
     let _ = conn.events();
 

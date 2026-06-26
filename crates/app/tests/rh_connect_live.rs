@@ -214,6 +214,32 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
     );
     let pass_count = count_passes(&events);
 
+    // Let the heat run on a little so the COARSE streamed trace accumulates a representative run of
+    // samples (one `SignalChunk` per `node_data` heartbeat) — a longer, more realistic baseline for
+    // the dense path to beat than a single sample.
+    let pilot_key = gridfpv_projection::CompetitorKey {
+        adapter: AdapterId(SIM_ADAPTER.to_string()),
+        competitor: pilot.clone(),
+    };
+    let _ = wait_for(Duration::from_secs(12), || {
+        gridfpv_projection::signal_trace(&read_all(&state))
+            .competitor(&pilot_key)
+            .map(|t| t.samples.len())
+            .unwrap_or(0)
+            >= 30
+    })
+    .await;
+    let events = read_all(&state);
+    // The COARSE streamed sample count for the lineup pilot, captured live before the heat finishes.
+    let coarse_samples = gridfpv_projection::signal_trace(&events)
+        .competitor(&pilot_key)
+        .map(|t| t.samples.len())
+        .unwrap_or(0);
+    assert!(
+        coarse_samples >= 1,
+        "the live heat should have streamed at least one coarse signal sample"
+    );
+
     // === Finish the heat: the heat is disarmed but the persistent connection STAYS UP (#105). ===
     state
         .append(
@@ -224,6 +250,38 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
             None,
         )
         .unwrap();
+
+    // === Marshaling path-2 through the PRODUCTION flow: finishing the heat disarms it, which makes
+    // the driver stop the RH race (-> DONE) and pull RotorHazard's DENSE per-tick history into the
+    // finishing heat's log. Assert a `SignalHistory` lands and the folded trace now carries strictly
+    // MORE samples than the coarse stream — the full-fidelity upgrade, activated by the normal
+    // staging/finish loop (the bridge selected a savable heat via `ensure_savable_heat`), not a
+    // bespoke marshal-data poke. ===
+    let got_dense = wait_for(Duration::from_secs(20), || {
+        read_all(&state)
+            .iter()
+            .any(|e| matches!(e, Event::SignalHistory(_)))
+    })
+    .await;
+    assert!(
+        got_dense,
+        "the production heat-finish flow must pull RotorHazard's dense SignalHistory into the log \
+         (coarse stream was {coarse_samples} samples)"
+    );
+    let dense_events = read_all(&state);
+    let dense_samples = gridfpv_projection::signal_trace(&dense_events)
+        .competitor(&pilot_key)
+        .map(|t| t.samples.len())
+        .expect("dense trace for the lineup pilot");
+    assert!(
+        dense_samples > coarse_samples,
+        "the dense history must supersede the coarse stream with MORE samples: dense={dense_samples} \
+         coarse={coarse_samples}"
+    );
+    eprintln!(
+        "app marshaling path-2 (production flow): coarse stream = {coarse_samples} samples, dense \
+         history = {dense_samples} samples (full-fidelity upgrade activated by the normal heat loop)"
+    );
     // Give the bridge several poll cycles to observe the Finished transition and disarm the heat,
     // then assert the connection is *still* Connected — not torn down. We can't prove a negative by
     // waiting forever, so we wait a generous window and assert it never left Connected.
