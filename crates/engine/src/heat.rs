@@ -16,6 +16,7 @@
 //! Running    --> Scheduled  : restart
 //! Armed      --> Scheduled  : restart
 //! Unofficial --> Scheduled  : restart
+//! Unofficial --> Scheduled  : discard & re-run
 //! Final      --> Scheduled  : discard & re-run
 //! ```
 //!
@@ -125,7 +126,8 @@ pub enum HeatCommand {
     /// Restart a committed heat — always resets it to `Scheduled`, from any committed
     /// state (Armed/Running/Unofficial), so the RD re-Stages it.
     Restart,
-    /// Discard a finalized heat for a re-run (Final → Scheduled).
+    /// Discard a raced heat for a re-run — throw the result away (Unofficial or Final →
+    /// Scheduled).
     Discard,
 }
 
@@ -183,8 +185,9 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
         (S::Armed | S::Running | S::Unofficial, C::Restart) => HeatTransition::Restarted,
         // Revert re-opens a finalized result for correction (Final → Unofficial).
         (S::Final, C::Revert) => HeatTransition::Reverted,
-        // Discard-and-re-run applies only to a finalized heat.
-        (S::Final, C::Discard) => HeatTransition::Discarded,
+        // Discard-and-re-run applies to a raced heat (Unofficial or Final) — throw the
+        // result away and reset to Scheduled (see `next_state`) for a clean re-run.
+        (S::Unofficial | S::Final, C::Discard) => HeatTransition::Discarded,
 
         // Everything else is illegal in this state.
         _ => return Err(IllegalTransition { state, command }),
@@ -200,7 +203,7 @@ pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, I
 ///   RD re-Stages it).
 /// - `Restarted` → `Scheduled` (a committed heat fully reset, so the RD re-Stages it).
 /// - `Reverted` → `Unofficial` (a finalized heat re-opened for correction).
-/// - `Discarded` → `Scheduled` (a finalized heat queued for re-run).
+/// - `Discarded` → `Scheduled` (a raced heat — Unofficial or Final — queued for re-run).
 /// - `Advanced` is terminal for the heat; it stays `Final`.
 ///
 /// `from` is no longer consulted for any transition (every target is now state-
@@ -447,6 +450,7 @@ mod tests {
             (S::Running, C::Restart, T::Restarted),
             (S::Unofficial, C::Restart, T::Restarted),
             (S::Final, C::Revert, T::Reverted),
+            (S::Unofficial, C::Discard, T::Discarded),
             (S::Final, C::Discard, T::Discarded),
         ]
     }
@@ -486,8 +490,8 @@ mod tests {
 
     #[test]
     fn legal_table_is_exhaustive_over_the_diagram() {
-        // 4 manual forward edges + 2 overrides + 3 aborts + 3 restarts + revert + discard = 14.
-        assert_eq!(legal_table().len(), 14);
+        // 4 manual forward edges + 2 overrides + 3 aborts + 3 restarts + revert + 2 discards = 15.
+        assert_eq!(legal_table().len(), 15);
     }
 
     #[test]
@@ -575,6 +579,23 @@ mod tests {
         assert_eq!(next_state(S::Staged, T::Aborted), S::Scheduled);
         assert_eq!(next_state(S::Armed, T::Aborted), S::Scheduled);
         assert_eq!(next_state(S::Running, T::Aborted), S::Scheduled);
+    }
+
+    #[test]
+    fn discard_is_legal_from_unofficial_and_final_landing_scheduled() {
+        use HeatCommand as C;
+        use HeatState as S;
+        use HeatTransition as T;
+        // A raced heat (Unofficial or Final) can be thrown away; Discarded resets it to
+        // Scheduled for a clean re-run (the UI offers Discard in both states).
+        for &state in &[S::Unofficial, S::Final] {
+            assert_eq!(apply(state, C::Discard), Ok(T::Discarded), "{state:?}");
+            assert_eq!(next_state(state, T::Discarded), S::Scheduled, "{state:?}");
+        }
+        // Illegal before the heat has any result to throw away.
+        for &state in &[S::Scheduled, S::Staged, S::Armed, S::Running] {
+            assert!(apply(state, C::Discard).is_err(), "{state:?} + Discard");
+        }
     }
 
     #[test]
