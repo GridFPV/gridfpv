@@ -965,33 +965,59 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     await screen.findByText('Qualifying R1 Heat 2');
   });
 
-  it('builds a heat by hand from the round’s eligible members (tagged, no free text)', async () => {
+  it('builds a heat by hand without typing an id (auto-generated, round-scoped)', async () => {
     const impls = heatsImpls([]);
     const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
 
-    // The round defaults to the first; type a heat id and pick both eligible members.
-    await fireEvent.input(await screen.findByLabelText('Build heat id'), {
-      target: { value: 'q-1' }
-    });
+    // There is no heat-id field to fill — the RD only picks a round (defaults to the first) and a
+    // lineup. Submit is enabled by round + lineup alone.
+    expect(screen.queryByLabelText('Build heat id')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Schedule heat' })).toBeDisabled();
+
     await fireEvent.click(screen.getByLabelText('Select AceOne'));
     await fireEvent.click(screen.getByLabelText('Select Bolt'));
+    expect(screen.getByRole('button', { name: 'Schedule heat' })).toBeEnabled();
     await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
 
     await waitFor(() => expect(sendSpy).toHaveBeenCalled());
     // A ScheduleHeat tagged with the round + its single class, lineup of the chosen pilot refs.
     // The optional name was left blank, so no custom label is sent (the heat keeps its auto-name).
-    expect(sendSpy.mock.calls[0][0]).toEqual({
-      ScheduleHeat: {
-        heat: 'q-1',
-        lineup: ['p1', 'p2'],
-        class: 'c1',
-        round: 'r1',
-        label: undefined
-      }
+    const sent = sendSpy.mock.calls[0][0] as { ScheduleHeat: { heat: string } };
+    expect(sent.ScheduleHeat).toMatchObject({
+      lineup: ['p1', 'p2'],
+      class: 'c1',
+      round: 'r1',
+      label: undefined
     });
+    // The id is auto-generated: non-empty and round-scoped (the readable `<round>-h-…` style).
+    expect(sent.ScheduleHeat.heat).toBeTruthy();
+    expect(sent.ScheduleHeat.heat).toMatch(/^r1-h-/);
+  });
+
+  it('generates a unique id across two quick builds (no collision)', async () => {
+    const impls = heatsImpls([]);
+    const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    const buildOne = async () => {
+      await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+      await fireEvent.click(screen.getByLabelText('Select AceOne'));
+      await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
+    };
+
+    await buildOne();
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
+    await buildOne();
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(2));
+
+    const first = (sendSpy.mock.calls[0][0] as { ScheduleHeat: { heat: string } }).ScheduleHeat
+      .heat;
+    const second = (sendSpy.mock.calls[1][0] as { ScheduleHeat: { heat: string } }).ScheduleHeat
+      .heat;
+    expect(first).not.toEqual(second);
   });
 
   it('sends the optional heat name as the ScheduleHeat label (custom build-heat name)', async () => {
@@ -1000,9 +1026,6 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
-    await fireEvent.input(await screen.findByLabelText('Build heat id'), {
-      target: { value: 'q-1' }
-    });
     await fireEvent.input(await screen.findByLabelText('Build heat name'), {
       target: { value: 'Featured Heat' }
     });
@@ -1010,15 +1033,14 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
 
     await waitFor(() => expect(sendSpy).toHaveBeenCalled());
-    expect(sendSpy.mock.calls[0][0]).toEqual({
-      ScheduleHeat: {
-        heat: 'q-1',
-        lineup: ['p1'],
-        class: 'c1',
-        round: 'r1',
-        label: 'Featured Heat'
-      }
+    const sent = sendSpy.mock.calls[0][0] as { ScheduleHeat: { heat: string } };
+    expect(sent.ScheduleHeat).toMatchObject({
+      lineup: ['p1'],
+      class: 'c1',
+      round: 'r1',
+      label: 'Featured Heat'
     });
+    expect(sent.ScheduleHeat.heat).toMatch(/^r1-h-/);
   });
 });
 

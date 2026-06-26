@@ -472,11 +472,11 @@
   // --- Manual heat build (replaces the retired NewHeat free-text form) ---------------------------
   // Pick a round, then select from that round's **eligible class members** (real roster pilots, no
   // typed names) → schedule a heat tagged with the round + its single class. The heat id is
-  // RD-entered (so a duplicate is caught by the ack); the lineup is the chosen pilots' refs.
+  // **auto-generated** (round-scoped + collision-safe, in the readable `<round>-h-…` generator
+  // style) so the RD never hand-types the internal handle; the lineup is the chosen pilots' refs.
 
   let buildOpen = $state(false);
   let buildRound = $state<RoundId | ''>('');
-  let buildHeatId = $state('');
   // An optional human name for the heat. When set it becomes the heat's display name everywhere
   // (overriding the derived "‹Round› Heat N" / tier convention); empty = auto-name (label None).
   let buildHeatLabel = $state('');
@@ -505,14 +505,25 @@
     return round && round.classes.length === 1 ? round.classes[0] : undefined;
   }
 
-  const canBuild = $derived(
-    buildRound !== '' && buildHeatId.trim().length > 0 && buildSelected.size > 0
-  );
+  // A heat only needs a round + a non-empty lineup; the id is generated, the name is optional.
+  const canBuild = $derived(buildRound !== '' && buildSelected.size > 0);
+
+  // Mint a unique, round-scoped heat id in the readable generator style (`<round>-h-<suffix>`). The
+  // suffix is a short random base36 token, and we re-roll on the (vanishingly rare) chance it
+  // collides with an already-scheduled heat for the round — `scheduleHeat`'s ack also dup-checks the
+  // id, so this only avoids a needless round-trip rejection. The RD never types this handle.
+  function nextHeatId(roundId: RoundId): string {
+    const taken = new Set(heatsByRound(roundId).map((h) => h.heat));
+    for (;;) {
+      const suffix = Math.random().toString(36).slice(2, 8);
+      const id = `${roundId}-h-${suffix}`;
+      if (!taken.has(id)) return id;
+    }
+  }
 
   function openBuild() {
     buildOpen = true;
     buildRound = rounds[0]?.id ?? '';
-    buildHeatId = '';
     buildHeatLabel = '';
     buildSelected = new Set();
   }
@@ -534,8 +545,10 @@
     const lineup: CompetitorRef[] = eligibleMembers.filter((pid) => buildSelected.has(pid));
     // A blank name = no custom label (the heat keeps its derived auto-name).
     const label = buildHeatLabel.trim() || undefined;
+    // The internal handle is auto-generated (round-scoped + collision-safe), not RD-entered.
+    const heatId = nextHeatId(buildRound);
     try {
-      const ack = await session.scheduleHeat(buildHeatId.trim(), lineup, {
+      const ack = await session.scheduleHeat(heatId, lineup, {
         round: buildRound,
         class: roundClass(buildRound),
         label
@@ -545,7 +558,6 @@
       toast.success('Heat scheduled.');
       buildOpen = false;
       buildSelected = new Set();
-      buildHeatId = '';
       buildHeatLabel = '';
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -1658,9 +1670,6 @@
                 <option value={r.id}>{r.label}</option>
               {/each}
             </Select>
-          </Field>
-          <Field label="Heat id" required>
-            <Input bind:value={buildHeatId} placeholder="e.g. q-1" aria-label="Build heat id" />
           </Field>
           <Field
             label="Heat name (optional)"
