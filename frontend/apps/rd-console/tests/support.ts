@@ -136,6 +136,13 @@ export function makeTestSession(
     audit?: AuditEntry[];
     /** Seed the captured RSSI signal trace (Slice 4) — the screen reads `session.signalTrace`. */
     signal?: SignalTraceView;
+    /**
+     * Seed the MARSHALED heat's own live-state fold (`session.heatLiveState`, `?projection=live`
+     * over that heat's window). Distinct from `live` (the global live stream): the marshaled heat
+     * carries its durable `progress[].pilot` registration bindings here, which the resolver reads to
+     * render callsigns for a finished / node-seeded heat. Backs the durable-binding tests.
+     */
+    heatLive?: LiveRaceState;
     /** The session role (#80). Defaults to `'rd'`; pass `'readonly'` to assert gating. */
     role?: SessionRole;
   } & TimerImpls
@@ -224,6 +231,7 @@ export function makeTestSession(
   if (opts?.laps) session.lapList = opts.laps;
   if (opts?.audit) session.marshalingAudit = opts.audit;
   if (opts?.signal) session.signalTrace = opts.signal;
+  if (opts?.heatLive) session.heatLiveState = opts.heatLive;
   vi.stubGlobal(
     'fetch',
     vi.fn(async () => ({ ok: false, json: async () => ({}) }) as unknown as Response)
