@@ -290,6 +290,28 @@ flowchart LR
         keeps the connection alive.
       </p>
     </div>
+    <div class="callout">
+      <p>
+        <strong>Direction (2026-06-26) — the RH integration becomes a required GridFPV plugin
+        (<a href="decisions.html">D16</a>).</strong> The <strong>socket-only</strong> path described
+        here works against stock RH but is limiting: the dense per-tick signal needs a
+        <strong>save-then-pull</strong>, staging is zeroed with an <code>alter_race_format</code>
+        hack, seating needs an <code>add_pilot</code>/<code>alter_heat</code> dance, and the ~0.9&nbsp;s
+        prestage can't be zeroed. The decided direction is a <strong>required GridFPV RotorHazard
+        plugin</strong> running <em>inside</em> the RH server with <strong>RHAPI access</strong>
+        (node manager / race events / config). The plugin makes those workarounds native — <strong>live
+        dense RSSI</strong> (no save-then-pull), <strong>clean start/stop</strong> bypassing the RMS
+        staging, <strong>per-node passes</strong> without the seating dance, and
+        <strong>threshold/calibration access</strong> (unblocking the re-detection "recalculate"
+        marshaling feature). It reuses RH's proven stack (node firmware + RMS + detection); GridFPV
+        owns start/stop timing while RH owns start/stop/get-data. "Required" is a <strong>guided
+        one-step install</strong>, not a hard-fail. The plugin <strong>supersedes the socket
+        workarounds</strong> and becomes the <strong>primary RH integration</strong>; its full design
+        + build plan are forthcoming separate work (this records the direction). It also
+        <strong>replaces the dropped own-the-stack timer-server</strong> (<a href="decisions.html">D15</a>,
+        superseded).
+      </p>
+    </div>
     <dl class="entities">
       <dt>RotorHazard</dt>
       <dd>Socket.IO / RHAPI; the full-signal case, with calibration and signal-based recovery.
