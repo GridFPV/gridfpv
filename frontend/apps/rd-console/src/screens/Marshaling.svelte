@@ -242,6 +242,31 @@
     if (ack.ok) await afterCorrection();
   }
 
+  // ── Add a brand-new lap (not an edit of an existing one) ──
+  // The `InsertLap` path adds a missed/never-detected crossing for a competitor at a source-clock
+  // time — so it works even when the competitor has ZERO laps. Two entry points feed it the time:
+  //   • the graph: a click on a competitor's trace passes the cursor's race-relative source-time;
+  //   • the per-competitor control: an "Add lap" button at a typed time (seconds), for sim heats
+  //     with no trace/graph.
+  // Role-gated by `canControl` like every other correction (the parent only renders these when the
+  // session may control; the Director re-checks).
+
+  /** Add a lap for a competitor at an exact source-clock time (µs) — the graph-click path. */
+  async function insertLap(competitor: CompetitorRef, at: number): Promise<void> {
+    if (!canControl) return;
+    const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at)));
+    if (ack.ok) await afterCorrection();
+  }
+
+  // The explicit per-competitor "Add lap" control: a typed time in seconds (source clock), so an RD
+  // running a sim heat (no graph) can still add a lap, including to a competitor with no laps yet.
+  let addLapTarget = $state<CompetitorRef | ''>('');
+  let addLapSeconds = $state(0);
+  async function doAddLapAtTime(): Promise<void> {
+    if (!canControl || !addLapTarget) return;
+    await insertLap(addLapTarget, secondsToSourceTime(addLapSeconds));
+  }
+
   // Throw out the selected lap from the SCORED count — distinct from "Remove (void)": the lap stays
   // a real lap, it just no longer counts (marshaling.html §3.3). Targets the lap's end pass.
   async function doThrowOutSelected(): Promise<void> {
@@ -425,6 +450,8 @@
           {laps}
           {selected}
           onselect={selectLap}
+          onaddlap={insertLap}
+          {canControl}
           nameFor={competitorName}
         />
       {/if}
@@ -498,6 +525,41 @@
               title="Exclude this valid lap from the scored count (the lap stays real)"
               >Throw out lap</button
             >
+          </div>
+        </fieldset>
+
+        <!-- Add a brand-new lap (works with zero existing laps). On the graph, click a competitor's
+             trace to add at the cursor's time; here, pick a competitor + a typed time so it also
+             works for sim heats with no graph. -->
+        <fieldset>
+          <legend>Add a lap</legend>
+          <p class="muted hint">
+            {#if hasTrace}
+              Click a competitor's trace on the graph to add a lap at that time, or add one at a
+              typed time here.
+            {:else}
+              Add a missed lap at a typed time (source clock) — works even with no laps yet.
+            {/if}
+          </p>
+          <div class="row">
+            <label
+              >Competitor
+              <select bind:value={addLapTarget} aria-label="Add-lap competitor">
+                <option value="" disabled>—</option>
+                {#each competitors as c (c)}<option value={c}>{competitorName(c)}</option>{/each}
+              </select>
+            </label>
+            <label class="time"
+              >Time (s)
+              <input
+                type="number"
+                step="0.001"
+                min="0"
+                bind:value={addLapSeconds}
+                aria-label="Add-lap time"
+              />
+            </label>
+            <button type="button" onclick={doAddLapAtTime} disabled={!addLapTarget}>Add lap</button>
           </div>
         </fieldset>
 

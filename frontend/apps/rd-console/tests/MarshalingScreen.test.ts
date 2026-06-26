@@ -277,6 +277,39 @@ describe('Marshaling (Slice 3)', () => {
       );
     });
 
+    it('clicking the trace adds a NEW lap at the cursor source-time (InsertLap)', async () => {
+      const { session, sendSpy } = makeTestSession({
+        live: liveRunning,
+        laps: lapList,
+        signal: signalTrace
+      });
+      render(Marshaling, { session });
+
+      const graph = screen.getByLabelText('RSSI signal graph');
+      const svg = within(graph).getByLabelText(/RSSI trace for ALICE/);
+      // Pin the SVG box so clientX maps 1:1 onto the 0..1000 viewBox X (jsdom gives a 0-size rect).
+      vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({
+        left: 0,
+        top: 0,
+        right: 1000,
+        bottom: 220,
+        width: 1000,
+        height: 220,
+        x: 0,
+        y: 0,
+        toJSON: () => ({})
+      } as DOMRect);
+
+      // ALICE's trace spans 0..90s over plotW=984 from PAD_L=8 → click at X=500 ≈ 45.0s.
+      await fireEvent.click(svg, { clientX: 500 });
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      const cmd = sendSpy.mock.calls[0][0] as { InsertLap: { competitor: string; at: number } };
+      expect(cmd.InsertLap.competitor).toBe('ALICE');
+      // X=500 → ((500-8)/984)*90s = 45.0s in source micros.
+      expect(cmd.InsertLap.at).toBeGreaterThan(44_500_000);
+      expect(cmd.InsertLap.at).toBeLessThan(45_500_000);
+    });
+
     it('a heat with NO trace (a sim heat) skips the graph and keeps the lap-only layout', () => {
       const { session } = makeTestSession({
         live: liveRunning,
@@ -288,6 +321,62 @@ describe('Marshaling (Slice 3)', () => {
       // No graph; the lap list still renders (the sim fallback path).
       expect(screen.queryByLabelText('RSSI signal graph')).toBeNull();
       expect(screen.getByRole('button', { name: /Lap 1\s*41\.000/ })).toBeInTheDocument();
+    });
+  });
+
+  // ── Add a brand-new lap (the explicit per-competitor control) ───────────────────────────────
+  describe('add a new lap (explicit control)', () => {
+    it('adds a lap at a typed time via InsertLap', async () => {
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
+      render(Marshaling, { session });
+
+      await fireEvent.change(screen.getByLabelText('Add-lap competitor'), {
+        target: { value: 'ALICE' }
+      });
+      await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '12.5' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Add lap' }));
+      expect(sendSpy).toHaveBeenCalledWith({
+        InsertLap: { adapter: 'rh-1', competitor: 'ALICE', at: 12_500_000 }
+      });
+    });
+
+    it('works for a competitor with ZERO existing laps', async () => {
+      // A lap list where CARMEN has no laps at all — the control still adds one.
+      const zeroLaps: LapList = {
+        competitors: [
+          { competitor: { adapter: 'rh-1', competitor: 'CARMEN' }, laps: [] },
+          {
+            competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+            laps: [
+              { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
+            ]
+          }
+        ]
+      };
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: zeroLaps });
+      render(Marshaling, { session });
+
+      // The empty competitor still renders + is selectable in the add-lap dropdown.
+      expect(screen.getByText('No laps yet.')).toBeInTheDocument();
+      await fireEvent.change(screen.getByLabelText('Add-lap competitor'), {
+        target: { value: 'CARMEN' }
+      });
+      await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '8' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Add lap' }));
+      expect(sendSpy).toHaveBeenCalledWith({
+        InsertLap: { adapter: 'rh-1', competitor: 'CARMEN', at: 8_000_000 }
+      });
+    });
+
+    it('is hidden for a read-only session', () => {
+      const { session } = makeTestSession({
+        live: liveRunning,
+        laps: lapList,
+        role: 'readonly'
+      });
+      render(Marshaling, { session });
+      expect(screen.queryByLabelText('Add-lap competitor')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Add lap' })).toBeNull();
     });
   });
 
