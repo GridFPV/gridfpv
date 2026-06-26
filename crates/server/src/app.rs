@@ -264,12 +264,20 @@ impl AppState {
     pub fn append(&self, event: Event, recorded_at: Option<i64>) -> Result<Offset, ProtocolError> {
         // Server-authoritative race clock (#62 follow-up): a heat's `Armed → Running` and
         // `Running → Unofficial` transitions are the race-start / race-end instants the live
-        // clock anchors to. The runtime/control paths append them with no caller timestamp, so
-        // stamp the server wall clock here (the single append choke point) when one is absent —
-        // making the transition's `recorded_at` the authoritative timing every client reads.
+        // clock anchors to, and a heat's `HeatStarting` is the **arm instant** the start-tone
+        // countdown anchors to (`tone_at` = its `recorded_at` + the logged `delay_ms`, #249). The
+        // runtime/control paths append all of these with no caller timestamp, so stamp the server
+        // wall clock here (the single append choke point) when one is absent — making the event's
+        // `recorded_at` the authoritative timing every client reads. Without this the `HeatStarting`
+        // entry is untimed and `heat_tone_at` yields `None`, so the Armed-phase countdown never shows.
         // A caller-supplied timestamp (a replay, a test pinning an instant) still wins.
-        let recorded_at = recorded_at
-            .or_else(|| matches!(event, Event::HeatStateChanged { .. }).then(now_micros));
+        let recorded_at = recorded_at.or_else(|| {
+            matches!(
+                event,
+                Event::HeatStateChanged { .. } | Event::HeatStarting { .. }
+            )
+            .then(now_micros)
+        });
         let offset = {
             let mut log = self.log.lock().map_err(|_| {
                 ProtocolError::new(ErrorCode::Internal, "the event log lock was poisoned")
@@ -1817,6 +1825,117 @@ mod tests {
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(len));
         assert!(matches!(snap.body, ProjectionBody::LiveRaceState(_)));
+    }
+
+    /// Regression for #249: a `randomized-delay` round arms a heat and the start driver appends
+    /// `HeatStarting { delay_ms }` with **no caller timestamp**. The append choke point must stamp
+    /// its server `recorded_at` (like a heat transition) so `heat_tone_at` can anchor the Armed-phase
+    /// tone countdown to it. Before the fix `HeatStarting` was untimed, `tone_at` was always `None`,
+    /// and the RD's "Tone in S.s" countdown never showed. Here we drive a heat Scheduled → Staged →
+    /// Armed, append an *untimed* `HeatStarting`, and assert the heat-scope live state surfaces a
+    /// `tone_at` in the future (now + the logged delay) while `Armed`.
+    #[tokio::test]
+    async fn armed_heat_surfaces_tone_at_from_an_untimed_heat_starting() {
+        let heat = || HeatId("q-1".into());
+        let changed = |t| Event::HeatStateChanged {
+            heat: heat(),
+            transition: t,
+        };
+        let (registry, state, _) = state_with(vec![
+            Event::HeatScheduled {
+                heat: heat(),
+                lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
+                label: None,
+            },
+            changed(HeatTransition::Staged),
+            changed(HeatTransition::Armed),
+        ]);
+
+        // The start driver's append: an untimed `HeatStarting`. The choke point must stamp it.
+        let before = now_micros();
+        let delay_ms: u32 = 3000;
+        state
+            .append(
+                Event::HeatStarting {
+                    heat: heat(),
+                    delay_ms,
+                },
+                None,
+            )
+            .unwrap();
+        let after = now_micros();
+
+        // The stored entry carries a server `recorded_at` (no longer an untimed entry).
+        let (stored, _) = state.read_stored().unwrap();
+        let starting = stored
+            .iter()
+            .find(|s| matches!(&s.event, Event::HeatStarting { .. }))
+            .expect("the HeatStarting was appended");
+        let armed_at = starting
+            .recorded_at
+            .expect("the append choke point stamped HeatStarting's recorded_at (#249)");
+        assert!(before <= armed_at && armed_at <= after);
+
+        // The heat-scope live state surfaces the tone instant while Armed: armed_at + delay.
+        let (status, snap) = get_snapshot(registry, "/events/practice/snapshot/heat/q-1").await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::LiveRaceState(live) => {
+                assert_eq!(live.phase, HeatPhase::Armed);
+                assert_eq!(live.tone_at, Some(armed_at + i64::from(delay_ms) * 1_000));
+            }
+            other => panic!("expected live race state, got {other:?}"),
+        }
+    }
+
+    /// Once the heat is `Running`, the tone has fired: `tone_at` clears (the countdown ends and
+    /// `race_started_at` takes over). Guards the Armed-only gating end-to-end through the snapshot.
+    #[tokio::test]
+    async fn running_heat_clears_tone_at() {
+        let heat = || HeatId("q-1".into());
+        let changed = |t| Event::HeatStateChanged {
+            heat: heat(),
+            transition: t,
+        };
+        let (registry, state, _) = state_with(vec![
+            Event::HeatScheduled {
+                heat: heat(),
+                lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
+                label: None,
+            },
+            changed(HeatTransition::Staged),
+            changed(HeatTransition::Armed),
+        ]);
+        state
+            .append(
+                Event::HeatStarting {
+                    heat: heat(),
+                    delay_ms: 3000,
+                },
+                None,
+            )
+            .unwrap();
+        // The runtime's auto Armed → Running (the tone fired).
+        state
+            .append(changed(HeatTransition::Running), None)
+            .unwrap();
+
+        let (status, snap) = get_snapshot(registry, "/events/practice/snapshot/heat/q-1").await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::LiveRaceState(live) => {
+                assert_eq!(live.phase, HeatPhase::Running);
+                assert_eq!(live.tone_at, None);
+                assert!(live.race_started_at.is_some());
+            }
+            other => panic!("expected live race state, got {other:?}"),
+        }
     }
 
     #[tokio::test]
