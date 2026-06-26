@@ -94,6 +94,13 @@ pub struct RotorHazardConnection {
     /// it synchronously (`set_current_heat`) before staging, so the run is savable (the dense-history
     /// precondition) without any emit-per-`heat_data` feedback loop on the socket callback.
     savable_heat: Arc<Mutex<Option<u64>>>,
+    /// RotorHazard's **current race-format id**, learned from the `race_status` stream
+    /// (`emit_race_status`'s `race_format_id`, which arrives on connect and on every status change).
+    /// [`prepare_instant_start`](Self::prepare_instant_start) zeroes *this* format's staging delays
+    /// so `stage_race` transitions straight to RACING with no RH-side staging hold/tones — the
+    /// Grid-owns-all-timing model (#…): Grid's start procedure is the only delay; RH just records on
+    /// command. `None` until the first `race_status` carrying a format id is folded.
+    current_format: Arc<Mutex<Option<i64>>>,
 }
 
 impl RotorHazardConnection {
@@ -107,6 +114,9 @@ impl RotorHazardConnection {
         // The newest savable heat id, stashed by the `heat_data` handler and drained by the driver
         // (see the struct field). Starts empty (no heat learned yet).
         let savable_heat: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+        // The current race-format id, learned from the `race_status` stream (see the struct field).
+        // Starts empty (no status folded yet); the first `race_status` on connect populates it.
+        let current_format: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
 
         // `rust_socketio`'s reserved events: on a dropped socket the poll loop fires `error`
         // (the engine.io read failed) and, on a clean disconnect packet, `close`. Either way the
@@ -127,8 +137,25 @@ impl RotorHazardConnection {
         let handler = |name: &'static str,
                        adapter: Arc<Mutex<RotorHazardAdapter>>,
                        sink: Arc<Mutex<Vec<Event>>>,
-                       savable_heat: Arc<Mutex<Option<u64>>>| {
+                       savable_heat: Arc<Mutex<Option<u64>>>,
+                       current_format: Arc<Mutex<Option<i64>>>| {
             move |payload: Payload, client: RawClient| {
+                // Learn the current race-format id from the `race_status` stream (it carries
+                // `race_format_id`). `prepare_instant_start` zeroes that format's staging delays so
+                // `stage_race` reaches RACING with no RH-side staging hold (Grid owns all timing).
+                // Parsed straight off the payload here (independent of the translator's `Raw`) so the
+                // adapter's shape is untouched.
+                if name == "race_status" {
+                    if let Payload::Text(values) = &payload {
+                        if let Some(id) = values
+                            .first()
+                            .and_then(|v| v.get("race_format_id"))
+                            .and_then(|v| v.as_i64())
+                        {
+                            *current_format.lock().unwrap() = Some(id);
+                        }
+                    }
+                }
                 if let Some(raw) = raw_from_socket(name, &payload) {
                     let (translated, request_marshal, pilotrace_requests, heat_ids) = {
                         let mut a = adapter.lock().unwrap();
@@ -214,6 +241,7 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .on(
@@ -223,6 +251,7 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .on(
@@ -232,6 +261,7 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .on(
@@ -241,6 +271,7 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .on(
@@ -250,6 +281,7 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .on(
@@ -259,6 +291,7 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .on(
@@ -268,6 +301,7 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .on(
@@ -277,6 +311,7 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .on(
@@ -286,17 +321,18 @@ impl RotorHazardConnection {
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
+                    current_format.clone(),
                 ),
             )
             .connect()?;
 
-        // Warm initial state on (re)connect: ask RH to send current per-node RSSI and the
-        // enter/exit detection thresholds, so the signal-context cache is populated before the
-        // first pass and the trace's thresholds are captured. `current_laps` and `race_status`
-        // arrive via the normal snapshot stream.
+        // Warm initial state on (re)connect: ask RH to send current per-node RSSI, the enter/exit
+        // detection thresholds, and the current race status (so the **current format id** is learned
+        // early — `prepare_instant_start` needs it to zero that format's staging). `current_laps`
+        // also arrives via the normal snapshot stream.
         let _ = client.emit(
             "load_data",
-            json!({ "load_types": ["node_data", "enter_and_exit_at_levels"] }),
+            json!({ "load_types": ["node_data", "enter_and_exit_at_levels", "race_status"] }),
         );
 
         Ok(Self {
@@ -305,6 +341,7 @@ impl RotorHazardConnection {
             adapter,
             alive,
             savable_heat,
+            current_format,
         })
     }
 
@@ -336,6 +373,59 @@ impl RotorHazardConnection {
     pub fn stage_race(&self) -> Result<(), rust_socketio::Error> {
         // 0-arg server handler: emit with no payload args.
         self.client.emit("stage_race", Payload::Text(vec![]))
+    }
+
+    /// **Prepare RotorHazard for an instant start** — the Grid-owns-all-timing model: GridFPV's own
+    /// start procedure (the randomized Armed hold + the start tone) is the *only* delay; RH must just
+    /// begin recording the instant Grid says go, with **no RH-side staging hold or tones**.
+    ///
+    /// Stock RotorHazard formats ship with a multi-second staging sequence — staging *tones* plus a
+    /// fixed/random *start delay* (`start_delay_min_ms`/`start_delay_max_ms`, typically 1–2 s) — that
+    /// `on_stage_race` runs as its own STAGING→RACING countdown ("Staging new race, format: … →
+    /// tones → Race started"). That ran *on top of* Grid's start procedure (two competing start
+    /// sequences — the root of the staging-race-eats-laps bug the `STAGE_RESET_SETTLE` band-aid
+    /// papered over). This zeroes the **current** format's staging fields so `stage_race`'s
+    /// `staging_total_ms` is 0 and RH transitions straight to RACING:
+    ///   * `staging_fixed_tones = 0`, `staging_delay_tones = 0` — no staging tones;
+    ///   * `start_delay_min_ms = 0`, `start_delay_max_ms = 0` — no fixed/random staging delay;
+    ///   * `unlimited_time = 1` — RH never auto-expires the race; **Grid owns the stop**, not RH's
+    ///     race-format timer.
+    ///
+    /// The only residual is RotorHazard's fixed `RACE_START_DELAY_EXTRA_SECS` prestage (a
+    /// `Config.GENERAL` value, ~0.9 s by default, with no socket setter), which is *constant* and so
+    /// **does not affect lap-time correctness**: RH timestamps every pass relative to its own race
+    /// start, and Grid derives lap times as pass-to-pass deltas on that clock, so a constant prestage
+    /// offset cancels out. (If a deployment needs RH RACING to coincide exactly with Grid's tone, set
+    /// `RACE_START_DELAY_EXTRA_SECS = 0` in the timer's config — outside this socket API.)
+    ///
+    /// Targets the current format learned from the `race_status` stream; re-applies it as current so
+    /// `RaceContext.race.format` reflects the zeroed staging. **Must be emitted while RH is READY** —
+    /// `alter_race_format`/`set_race_format` are rejected during an active race — so the bridge calls
+    /// this at **Stage** (pre-Armed, pre-go), not at the start instant. A no-op (best-effort `Ok`) if
+    /// no current format id has been learned yet. Idempotent: re-zeroing an already-zeroed format is
+    /// harmless.
+    pub fn prepare_instant_start(&self) -> Result<(), rust_socketio::Error> {
+        let Some(format_id) = *self.current_format.lock().expect("current-format lock") else {
+            // No format id known yet (no `race_status` folded): cannot target a format. Best-effort
+            // no-op — staging then keeps whatever the format ships, which the reset/stage flow still
+            // tolerates (the start is just not guaranteed instant on this connection).
+            return Ok(());
+        };
+        self.client.emit(
+            "alter_race_format",
+            json!({
+                "format_id": format_id,
+                "staging_fixed_tones": 0,
+                "staging_delay_tones": 0,
+                "start_delay_min_ms": 0,
+                "start_delay_max_ms": 0,
+                "unlimited_time": 1,
+            }),
+        )?;
+        // Re-select the format as current so `RaceContext.race.format` picks up the zeroed staging
+        // (altering the row alone does not refresh the in-memory current-format object on every RH).
+        self.client
+            .emit("set_race_format", json!({ "race_format": format_id }))
     }
 
     /// Inject a simulated pass on `node` (0-based) — driving helper for tests.
