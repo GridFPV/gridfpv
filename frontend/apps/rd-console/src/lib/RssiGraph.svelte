@@ -30,7 +30,8 @@
     trace,
     laps,
     selected,
-    onselect
+    onselect,
+    nameFor = (r) => r
   }: {
     /** The captured trace for the heat — one entry per competitor that produced signal facts. */
     trace: { competitors: CompetitorTrace[] };
@@ -40,6 +41,12 @@
     selected: { competitor: CompetitorRef; lap: Lap } | null;
     /** Emit the lap a marker click selects (two-way with the lap-list selection). */
     onselect: (competitor: CompetitorRef, lap: Lap) => void;
+    /**
+     * Resolve a competitor ref to its human-facing display name (the callsign), so the trace label
+     * and aria-labels read as the pilot, not the raw ref. Defaults to identity so callers/tests that
+     * don't pass a resolver keep showing the ref unchanged.
+     */
+    nameFor?: (ref: CompetitorRef) => string;
   } = $props();
 
   // Plot geometry. A fixed viewBox keeps the SVG crisp at any rendered size; strokes are in
@@ -147,9 +154,10 @@
     {@const span = spanOf(ct)}
     {@const range = valueRange(ct)}
     {@const compLaps = lapsFor(ref)}
-    <figure class="trace" aria-label={`RSSI for ${ref}`}>
+    {@const who = nameFor(ref)}
+    <figure class="trace" aria-label={`RSSI for ${who}`}>
       <figcaption>
-        <span class="who">{ref}</span>
+        <span class="who">{who}</span>
         <span class="meta">
           {ct.samples.length} samples
           {#if ct.enter != null}· enter {ct.enter}{/if}
@@ -164,7 +172,7 @@
           viewBox={`0 0 ${W} ${H}`}
           preserveAspectRatio="none"
           role="img"
-          aria-label={`RSSI trace for ${ref} with ${compLaps.length} lap markers`}
+          aria-label={`RSSI trace for ${who} with ${compLaps.length} lap markers`}
         >
           <!-- Plot frame -->
           <rect class="frame" x={PAD_L} y={PAD_T} width={plotW} height={plotH} fill="none" />

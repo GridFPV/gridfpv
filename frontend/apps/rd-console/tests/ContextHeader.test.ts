@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import type { LiveRaceState } from '@gridfpv/types';
+import type { EventMeta, HeatSummary, LiveRaceState, RoundDef } from '@gridfpv/types';
 import ContextHeader from '../src/ContextHeader.svelte';
 import { makeTestSession } from './support.js';
 
@@ -75,5 +75,86 @@ describe('ContextHeader heat clock', () => {
     expect(clockEl()).toBeNull();
     // The heat + phase pill still render so the bar shows context.
     expect(screen.getByText('Scheduled')).not.toBeNull();
+  });
+});
+
+/**
+ * The persistent header showed the **raw heat id** in `.ctx-heat-id` on every screen. It must read
+ * the friendly "‹Round› Heat N" name instead, resolved via `heatNameById` off the scheduled-heats
+ * list + the event's rounds — the same name the Live-control title and the Marshaling header use.
+ * The heats read mirrors Marshaling's #242 cold-load fix: it re-runs when `currentEvent` settles
+ * (not only on a stream tick), so a header that mounts while the active event is still resolving
+ * doesn't strand the raw id until the next stream advance.
+ */
+describe('ContextHeader heat name', () => {
+  const ROUND = {
+    id: 'r1',
+    label: 'Qualifying R1',
+    classes: ['c1'],
+    format: 'timed_qual',
+    params: {},
+    win_condition: { Timed: { window_micros: 120_000_000 } },
+    seeding: 'FromRoster',
+    channel_mode: 'Static',
+    protest_window: 'Off'
+  } as unknown as RoundDef;
+  const EVENT: EventMeta = {
+    id: 'e1',
+    name: 'Friday',
+    created_at: 0,
+    persistent: true,
+    timers: ['mock'],
+    roster: [],
+    classes: ['c1'],
+    rounds: [ROUND]
+  };
+  const HEAT: HeatSummary = {
+    heat: 'q1-heat',
+    lineup: [],
+    round: 'r1',
+    class: 'c1',
+    frequencies: [],
+    phase: 'Running',
+    is_current: true
+  };
+  const live = (): LiveRaceState =>
+    ({ current_heat: 'q1-heat', phase: 'Running' }) as LiveRaceState;
+
+  const heatId = () => document.querySelector('.ctx-heat-id');
+
+  it('shows the friendly "‹Round› Heat N" name, not the raw heat id, once heats+rounds resolve', async () => {
+    const { session } = makeTestSession({
+      event: EVENT,
+      live: live(),
+      listHeatsImpl: vi.fn(async () => [HEAT])
+    });
+    render(ContextHeader, { session, ongolive: () => {}, onswitchevent: () => {} });
+
+    await waitFor(() => expect(heatId()?.textContent).toBe('Qualifying R1 Heat 1'));
+    expect(heatId()?.textContent).not.toContain('q1-heat');
+  });
+
+  // The #242 cold-load race: the header mounts while the active event is still resolving, so the
+  // first `listHeats()` lands EMPTY (no event in hand) and the name falls back to the raw id. When
+  // `currentEvent` then settles with NO accompanying stream tick (a quiet heat), the read must
+  // re-fire and the name must resolve — the effect depends on `currentEvent`, not just the stream.
+  it('re-reads heats and resolves the name when currentEvent settles, with no stream tick', async () => {
+    let calls = 0;
+    const { session } = makeTestSession({
+      event: EVENT,
+      live: live(),
+      listHeatsImpl: vi.fn(async () => (calls++ === 0 ? [] : [HEAT]))
+    });
+    render(ContextHeader, { session, ongolive: () => {}, onswitchevent: () => {} });
+
+    // First (empty) read → raw id fallback, the visible symptom of the cold-load race.
+    await waitFor(() => expect(heatId()?.textContent).toBe('q1-heat'));
+
+    // The active event settles — a fresh EventMeta with no stream advance.
+    session.currentEvent = { ...EVENT };
+
+    // The re-read fires on the `currentEvent` change alone and the friendly name resolves.
+    await waitFor(() => expect(heatId()?.textContent).toBe('Qualifying R1 Heat 1'));
+    expect(heatId()?.textContent).not.toContain('q1-heat');
   });
 });

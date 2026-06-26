@@ -420,7 +420,13 @@
              click selects that lap in the action surface below; the lap-list selection highlights
              the same marker (two-way — `selectLap` is the one shared selection). Display only — no
              re-detection (marshaling.html §3.2/§5). Sim heats (no trace) skip this entirely. -->
-        <RssiGraph trace={signalTrace} {laps} {selected} onselect={selectLap} />
+        <RssiGraph
+          trace={signalTrace}
+          {laps}
+          {selected}
+          onselect={selectLap}
+          nameFor={competitorName}
+        />
       {/if}
 
       {#if laps && laps.competitors.length > 0}
