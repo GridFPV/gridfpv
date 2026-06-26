@@ -102,12 +102,17 @@ fn emulated_signal_multi_node_race() {
     // emulated-signal crossing record cleanly.
     conn.set_min_lap_time(0).ok();
 
-    // Clean state, then start a race; the mock CSVs drive the laps (no simulate_lap).
-    conn.stop_race().ok();
-    conn.discard_laps().expect("discard_laps");
+    // Grid owns all timing: prepare RH for an instant start (zero its staging hold/tones + reset to
+    // READY), exactly as the Director does at the heat's **Staged** transition — well before "go".
+    conn.prepare_instant_start().expect("prepare_instant_start");
     std::thread::sleep(Duration::from_secs(2));
     let _ = conn.events();
 
+    // "Go": a single `stage_race` (no reset, no settle) starts RH recording. RH must reach RACING
+    // **without an RH-side staging hold/tone** — only the fixed prestage — so we assert the
+    // transition is prompt (≤ ~1.5s) rather than the multi-second staging countdown a stock format
+    // would run. This is the no-RH-staging guarantee.
+    let go = Instant::now();
     conn.stage_race().expect("stage_race");
     assert!(
         wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
@@ -116,6 +121,13 @@ fn emulated_signal_multi_node_race() {
         }),
         "race never reached RACING"
     );
+    let to_racing = go.elapsed();
+    assert!(
+        to_racing <= Duration::from_millis(1_500),
+        "RH must start racing promptly on command with no staging hold/tone (Grid owns the delay); \
+         took {to_racing:?} — a stock multi-second staging countdown would be far longer"
+    );
+    println!("instant-start: RH reached RACING {to_racing:?} after the go (no RH staging hold)");
 
     // Let the emulated signals produce laps on both nodes.
     let both_have_laps = wait_until(&conn, &mut events, Duration::from_secs(25), |evs| {
@@ -155,6 +167,31 @@ fn emulated_signal_multi_node_race() {
         node0.laps.iter().all(|l| l.duration_micros > 0),
         "lap durations must be positive"
     );
+
+    // --- lap-time correctness on Grid's clock (Grid owns all timing) ---
+    // node-0 flies `ticks_per_lap: 6` at `TICK = 0.1s` ⇒ ~0.6s per lap. Lap durations are pass-to-
+    // pass deltas on RH's race clock, which Grid maps directly — and because they are *differences*,
+    // RH's fixed prestage offset cancels, so the durations must land near the emulated 0.6s/lap
+    // regardless of how long after the go RH actually reached RACING. A generous band absorbs the
+    // mock pipeline's jitter while still proving the mapping is correct (not offset/stretched).
+    const TICK_MS: i64 = 100; // TICK = "0.1" seconds
+    let node0_expected_us = 6 * TICK_MS * 1_000; // 600_000 µs
+    for lap in &node0.laps {
+        let d = lap.duration_micros;
+        assert!(
+            (node0_expected_us / 2..=node0_expected_us * 2).contains(&d),
+            "node-0 lap {} duration {}µs must map near the emulated ~{}µs/lap on Grid's clock \
+             (the prestage offset cancels in pass-to-pass deltas); all: {:?}",
+            lap.number,
+            d,
+            node0_expected_us,
+            node0
+                .laps
+                .iter()
+                .map(|l| l.duration_micros)
+                .collect::<Vec<_>>()
+        );
+    }
 
     // --- dedup: lap numbers strictly increasing (a re-sent snapshot must not dup) ---
     for node in ["node-0", "node-1"] {

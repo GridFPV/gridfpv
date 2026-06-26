@@ -85,6 +85,22 @@ impl RhConnections {
         }
     }
 
+    /// **Prepare** `(event, timer)`'s connection for an instant start (Grid owns all timing), if a
+    /// live connection exists: the driver zeroes RH's current-format staging (no RH-side hold/tones)
+    /// and resets RH to READY, so the eventual arm at Grid's go starts RH recording immediately. The
+    /// bridge calls this when a heat is **Staged** — before the Armed hold + tone — so all the
+    /// reset/format work happens ahead of go. Returns whether a live connection was found to prepare;
+    /// a no-op (`false`) for a non-active event or a not-yet-connected timer.
+    pub fn prepare(&self, event: &EventId, timer: &TimerId) -> bool {
+        let map = self.inner.lock().expect("rh-connections lock poisoned");
+        if let Some(conn) = map.get(&(event.clone(), timer.clone())) {
+            conn.prepare();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Disarm the current heat on `(event, timer)`'s connection (the heat left `Running`): the race
     /// is stopped/cleared but the **connection stays alive**. A no-op if no such connection.
     pub fn disarm(&self, event: &EventId, timer: &TimerId) {

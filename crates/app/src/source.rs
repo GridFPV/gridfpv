@@ -1024,15 +1024,22 @@ fn handle_transition(
         }
         // Staged is pre-Running: the heat isn't emitting yet, but it is the moment to **tune** the
         // device to the heat's assigned channels (race redesign Slice 4a — "the engine allocates,
-        // the adapter applies"). The Mock has no tune (the sim source ignores channels — no-op);
-        // each selected RotorHazard timer's live connection emits `set_frequency` per node. The plan
-        // is read from the heat's `HeatScheduled.frequencies` (empty ⇒ nothing to tune).
+        // the adapter applies") and to **prepare** each RotorHazard timer for an instant start (Grid
+        // owns all timing). The Mock has no tune/prepare (the sim source ignores channels and has no
+        // staging — no-op); each selected RotorHazard timer's live connection emits `set_frequency`
+        // per node and zeroes RH's staging + resets it to READY. The tune plan is read from the
+        // heat's `HeatScheduled.frequencies` (empty ⇒ nothing to tune); the prepare runs regardless
+        // so RH is reset and its staging zeroed even for a heat with no explicit channel plan.
         HeatTransition::Staged => {
             #[cfg(feature = "live")]
             {
                 let plan = tune_plan_of(state, &heat);
-                if !plan.is_empty() {
-                    for timer_id in selected_rh_timers(registry, timers, event_id) {
+                for timer_id in selected_rh_timers(registry, timers, event_id) {
+                    // Ready RH for an instant start at Grid's go: zero its staging hold/tones + reset
+                    // to READY now, well before the Armed hold + tone fire. Retires the old at-go
+                    // reset/stage race (the `STAGE_RESET_SETTLE` band-aid).
+                    connections.prepare(event_id, &timer_id);
+                    if !plan.is_empty() {
                         connections.tune(event_id, &timer_id, plan.clone());
                     }
                 }

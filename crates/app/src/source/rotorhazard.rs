@@ -21,11 +21,19 @@
 //!    running race, disconnects, and leaves the timer [`Disconnected`].
 //!
 //! 2. **Race driving, decoupled from the connection.** A running heat does **not** open a socket
-//!    of its own — it *uses the already-live connection*. When a heat enters `Running` the bridge
-//!    [arms](RhConnection::arm_heat) the heat on each selected RH connection (stage the RH race +
-//!    remap its node seats onto the heat lineup); the driver thread then routes drained passes into
-//!    the event log. When the heat leaves `Running` the bridge [disarms](RhConnection::disarm) it —
-//!    the race is stopped/cleared but the **connection stays alive** (and keeps reporting status).
+//!    of its own — it *uses the already-live connection*. The lifecycle splits across two bridge
+//!    hooks so that **GridFPV owns all start/stop timing and RH is only a start/stop/get-data
+//!    device** (no RH-side staging countdown or tone competing with Grid's start procedure):
+//!    * at **Stage** the bridge [prepares](RhConnection::prepare) each selected RH connection —
+//!      zero RH's current-format staging (no staging hold/tones) and reset RH to READY, well ahead
+//!      of Grid's go;
+//!    * at **Running** (the `Armed → Running` instant, when Grid's tone fires) the bridge
+//!      [arms](RhConnection::arm_heat) the heat — the driver emits a single `stage_race` so RH
+//!      begins recording **immediately** (no reset, no settle, no RH staging) and remaps its node
+//!      seats onto the heat lineup; the driver thread then routes drained passes into the event log.
+//!
+//!    When the heat leaves `Running` the bridge [disarms](RhConnection::disarm) it — the race is
+//!    stopped/cleared but the **connection stays alive** (and keeps reporting status).
 //!
 //! # Why a dedicated driver thread
 //!
@@ -69,15 +77,6 @@ const FINISH_DRAIN_SETTLE: Duration = Duration::from_secs(3);
 /// the finish proceeds and the dense pull simply no-ops (the coarse trace still stands).
 const ENSURE_HEAT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How long to let RotorHazard settle back to **READY** after the reset (`stop_race` +
-/// `discard_laps`) before emitting `stage_race`. RotorHazard runs its socket handlers + the staging
-/// countdown on one gevent loop, and emitting the reset and the stage in the same tick makes RH's
-/// `on_discard_laps`/`on_stop_race` see the just-set `STAGING` status and abort it ("Stopping race
-/// during staging") *before* it reaches RACING — so the timer never replays passes and the heat
-/// records zero laps. Empirically the abort is 100% reproducible at 0ms between emits and gone by
-/// ~50ms; 300ms is a comfortable margin that is still imperceptible at the start line.
-const STAGE_RESET_SETTLE: Duration = Duration::from_millis(300);
-
 /// The minimum backoff between reconnect attempts after a dropped/failed connection.
 const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(500);
 
@@ -93,6 +92,12 @@ const IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// `(node_index, frequency_mhz)` assignment the engine allocated for the staging heat, shared from
 /// the async [`RhConnection::tune`] caller to the blocking driver thread. `None` ⇒ nothing pending.
 type TuneSlot = Arc<Mutex<Option<Vec<(u64, u16)>>>>;
+
+/// A **pending prepare** the driver applies on its next loop: when a heat is **Staged** the bridge
+/// asks the connection to ready RH for an instant start — zero the current format's staging delays
+/// (so `stage_race` has no RH-side hold/tones) and reset RH to a clean READY state. Shared from the
+/// async [`RhConnection::prepare`] caller to the blocking driver thread; `true` ⇒ a prepare is due.
+type PrepareSlot = Arc<AtomicBool>;
 
 /// A heat armed onto a live RH connection: the lineup its node seats remap onto, and a flag the
 /// driver flips once it has staged the RH race for this arming (so a re-drain doesn't re-stage).
@@ -159,6 +164,11 @@ pub struct RhConnection {
     /// [`tune`](Self::tune) (called when a heat is Staged), drained + emitted on the driver thread
     /// (`set_frequency` per node) so the device tunes its nodes to the assigned channels.
     tune: TuneSlot,
+    /// A **pending prepare** the driver applies on its next loop (Grid owns all timing): set by
+    /// [`prepare`](Self::prepare) when a heat is **Staged**, the driver zeroes RH's current-format
+    /// staging and resets RH to READY so the eventual `stage_race` (at Grid's go) starts RH recording
+    /// instantly, with no RH-side staging hold/tones.
+    prepare: PrepareSlot,
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
@@ -175,20 +185,33 @@ impl RhConnection {
         let cancel = Arc::new(AtomicBool::new(false));
         let armed: Arc<Mutex<Option<ArmedHeat>>> = Arc::new(Mutex::new(None));
         let tune: TuneSlot = Arc::new(Mutex::new(None));
+        let prepare: PrepareSlot = Arc::new(AtomicBool::new(false));
         let driver = {
             let cancel = cancel.clone();
             let armed = armed.clone();
             let tune = tune.clone();
+            let prepare = prepare.clone();
             tokio::task::spawn_blocking(move || {
-                drive(url, timer_id, timers, cancel, armed, tune);
+                drive(url, timer_id, timers, cancel, armed, tune, prepare);
             })
         };
         Self {
             cancel,
             armed,
             tune,
+            prepare,
             _driver: driver,
         }
+    }
+
+    /// **Prepare** this connection for an instant start (Grid owns all timing): the driver zeroes
+    /// RH's current-format staging delays (no RH-side staging hold/tones) and resets RH to a clean
+    /// READY state, so the eventual [`arm_heat`](Self::arm_heat) at Grid's go starts RH recording
+    /// immediately. The bridge calls this when a heat is **Staged** — before the Armed hold and the
+    /// start tone — so all the reset/format work happens well ahead of go and never races RH's own
+    /// staging at the start instant (which is what the retired `STAGE_RESET_SETTLE` band-aid fought).
+    pub fn prepare(&self) {
+        self.prepare.store(true, Ordering::Relaxed);
     }
 
     /// **Tune** this connection's nodes to an assigned channel plan (race redesign Slice 4a): the
@@ -201,7 +224,10 @@ impl RhConnection {
         *slot = Some(assignment);
     }
 
-    /// Arm a running heat onto this live connection: the driver stages the RH race and routes its
+    /// Arm a running heat onto this live connection: called at Grid's go (the `Armed → Running`
+    /// instant). The driver emits a single `stage_race` so RH **starts recording immediately** — the
+    /// connection was already reset to READY with zeroed staging by the Stage-time
+    /// [`prepare`](Self::prepare), so there is no reset or staging hold here — then routes its
     /// translated passes (remapped onto `lineup`) into `sink`'s log. Replaces any previously armed
     /// heat (a newer running heat supersedes the prior one).
     pub fn arm_heat(&self, lineup: Vec<CompetitorRef>, sink: PassSink) {
@@ -331,6 +357,7 @@ fn drive(
     cancel: Arc<AtomicBool>,
     armed: Arc<Mutex<Option<ArmedHeat>>>,
     tune: TuneSlot,
+    prepare: PrepareSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
     // The adapter is created **once** and reused across every (re)connection (#105). Its dedup +
@@ -385,7 +412,7 @@ fn drive(
         backoff = RECONNECT_BACKOFF_MIN;
 
         // Maintain the live link until it drops or we are cancelled.
-        let dropped = maintain(&conn, &cancel, &armed, &tune);
+        let dropped = maintain(&conn, &cancel, &armed, &tune, &prepare);
 
         // Stop any in-flight race and disconnect on the way out of this connection. `disconnect`
         // returns the adapter so the next reconnect reuses its dedup state (the #105 fix).
@@ -421,6 +448,7 @@ fn maintain(
     cancel: &AtomicBool,
     armed: &Mutex<Option<ArmedHeat>>,
     tune: &Mutex<Option<Vec<(u64, u16)>>>,
+    prepare: &AtomicBool,
 ) -> bool {
     let mut last_activity = Instant::now();
     let mut probed_since_activity = false;
@@ -451,43 +479,51 @@ fn maintain(
             }
         }
 
-        // Stage a freshly-armed heat once (reset RH to a clean READY state, then stage; RH
-        // auto-starts). Done lazily here so staging happens on the driver thread, not the caller.
+        // Apply a pending **prepare** (Grid owns all timing): the bridge marked this connection at
+        // the heat's **Stage** transition — well before Grid's go — so RH can be readied for an
+        // *instant* start with no RH-side staging hold/tones. Two things, in order:
+        //   1. zero the current format's staging delays (`prepare_instant_start`) so the eventual
+        //      `stage_race` transitions straight to RACING — no staging tones, no fixed/random start
+        //      delay, and `unlimited_time` so RH never auto-stops (Grid owns the stop);
+        //   2. reset RH to a clean READY state (`stop_race` + `discard_laps`) so the start emit lands
+        //      from a known-idle device.
+        // Doing this at Stage (not at go) is what retires the `STAGE_RESET_SETTLE` band-aid: the
+        // reset and the `stage_race` are now separated by the whole Armed hold (seconds), never the
+        // same gevent tick, so there is no reset-vs-staging race to settle against. RH also no longer
+        // runs its own staging sequence on top of Grid's start procedure — Grid's tone is the only go.
+        if prepare.swap(false, Ordering::Relaxed) {
+            if conn.prepare_instant_start().is_err() {
+                return true;
+            }
+            conn.stop_race().ok();
+            conn.discard_laps().ok();
+            // Drop the reset-era event churn so it isn't remapped as race passes when a heat arms.
+            let _ = conn.events();
+        }
+
+        // Stage a freshly-armed heat once — **exactly at Grid's go** (the bridge arms on the
+        // `Armed → Running` instant, when Grid's tone fires). The connection was already reset to
+        // READY with zeroed staging by the Stage-time prepare above, so this is a single `stage_race`
+        // emit with **no reset and no settle**: RH transitions straight to RACING with no RH-side hold
+        // or tones. RH's race-start aligns with Grid's go, so each pass's `lap_time_stamp` (relative
+        // to RH's start) maps onto Grid's race clock — and because Grid derives lap times as
+        // pass-to-pass deltas, even RH's fixed `RACE_START_DELAY_EXTRA_SECS` prestage (a constant,
+        // not socket-settable) cancels out and lap times stay correct.
         //
-        // The reset (`stop_race` + `discard_laps`) and the `stage_race` MUST NOT be emitted
-        // back-to-back: RotorHazard processes socket emits on a gevent loop, and `stage_race`'s
-        // STAGING→RACING transition runs as a non-blocking countdown greenlet. When the reset
-        // emits land in the same gevent tick as `stage_race`, RH's `on_discard_laps`/`on_stop_race`
-        // observes the just-set `STAGING` status and calls `on_stop_race()` — logging "Stopping
-        // race during staging" and dropping RH back to READY *before* it ever reaches RACING. A
-        // timer that never reaches RACING never replays/records any passes, so the heat produces
-        // **zero laps** (the no-laps symptom). Empirically the hazard is 100% reproducible with 0ms
-        // between emits and 0% with a ≥50ms gap; we settle generously between the reset and the
-        // stage so RH has fully returned to READY first.
+        // Staging deliberately runs in RotorHazard's **practice mode** (no current heat): RH only
+        // records live laps for a node with a *seated pilot* once a heat is current — a selected
+        // *empty* heat would reject every crossing (`server.py`'s pass gate:
+        // `pilot_id != PILOT_ID_NONE or current_heat is HEAT_ID_NONE`). The dense per-tick RSSI
+        // history still accumulates on the node interface during a practice race, so we select a
+        // savable heat only at heat-END (see the `finishing` block) to persist it — keeping live
+        // recording intact while still activating marshaling path-2.
         let mut just_staged = false;
         let do_stage = {
             let slot = armed.lock().expect("armed-heat lock poisoned");
             matches!(slot.as_ref(), Some(heat) if !heat.staged)
         };
         if do_stage {
-            // Reset RH to a clean READY state. (`stop_race` first in case a prior heat is still
-            // STAGING/RACING; `discard_laps` clears any stale laps and forces READY.)
-            //
-            // Staging deliberately runs in RotorHazard's **practice mode** (no current heat): RH only
-            // records live laps for a node with a *seated pilot* once a heat is current — a selected
-            // *empty* heat would reject every crossing (`server.py`'s pass gate:
-            // `pilot_id != PILOT_ID_NONE or current_heat is HEAT_ID_NONE`). The dense per-tick RSSI
-            // history still accumulates on the node interface during a practice race, so we select a
-            // savable heat only at heat-END (see the `finishing` block) to persist it — keeping live
-            // recording intact while still activating marshaling path-2.
-            conn.stop_race().ok();
-            conn.discard_laps().ok();
-            // Let RotorHazard settle back to READY before staging — see the hazard note above. The
-            // sleep wakes early on cancel so teardown stays prompt.
-            if sleep_unless_cancelled(STAGE_RESET_SETTLE, cancel) {
-                return false;
-            }
-            // Drop the reset-era event churn so it isn't remapped as race passes.
+            // Drop any churn accumulated since the prepare so it isn't remapped as race passes.
             let _ = conn.events();
             if conn.stage_race().is_err() {
                 // A failed emit on a supposedly-live socket signals a drop.

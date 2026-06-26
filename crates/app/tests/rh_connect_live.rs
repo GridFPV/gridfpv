@@ -14,13 +14,15 @@
 //! 4. Asserts the Director **connects on selection, before any heat**: the timer's [`TimerStatus`]
 //!    advances to `Connected` *without* a heat being run (#105 — the whole point: a drop-off is
 //!    visible before/between races).
-//! 5. Then drives Practice's heat to `Running`, and asserts **passes flow** into Practice's log over
-//!    that already-live connection (real RH crossings, attributed to the heat's lineup). This step
-//!    is also the **staging-race-condition guard**: the driver resets RH (`stop_race` +
-//!    `discard_laps`) and then `stage_race`s it; if those emits are sent back-to-back, RotorHazard's
-//!    gevent loop aborts staging ("Stopping race during staging") and the timer never reaches
-//!    RACING, so it replays no passes and the heat records **zero laps** — the no-laps bug. The
-//!    `STAGE_RESET_SETTLE` settle in `source::rotorhazard` fixes it; this assertion fails without it.
+//! 5. Then drives Practice's heat through the real lifecycle to `Running`, and asserts **passes
+//!    flow** into Practice's log over that already-live connection (real RH crossings, attributed to
+//!    the heat's lineup). This also exercises the **Grid-owns-all-timing** flow: at **Staged** the
+//!    bridge prepares the RH connection (zero RH's staging hold/tones + reset to READY), and at
+//!    **Running** (Grid's go) the driver emits a single `stage_race` so RH starts recording
+//!    immediately — no RH-side staging sequence competing with Grid's start procedure. Because the
+//!    reset now happens at Staged (seconds before the start emit, never the same gevent tick), the
+//!    old reset-vs-staging race is gone and the `STAGE_RESET_SETTLE` band-aid is retired; this
+//!    assertion (passes land, the heat is not zero-laps) is the guard.
 //! 6. Finishes the heat and asserts the connection **stays `Connected`** — the heat is disarmed but
 //!    the persistent connection is NOT torn down (#105), so status keeps reflecting the live link.
 //! 7. **Stops the RH container** out from under the live connection and asserts the Director
@@ -184,8 +186,11 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
         "no passes should exist before a heat — the connection is idle but live"
     );
 
-    // === Now drive Practice's heat to Running (what the control path appends). It uses the
-    // ALREADY-LIVE connection rather than dialing a fresh socket. ===
+    // === Now drive Practice's heat through the real lifecycle to Running (what the control path
+    // appends: Scheduled → Staged → Armed → Running). It uses the ALREADY-LIVE connection rather than
+    // dialing a fresh socket. The **Staged** step is load-bearing for the Grid-owns-timing flow: it
+    // is where the bridge *prepares* the RH connection (zero its staging hold/tones + reset to READY)
+    // so the eventual arm at Running starts RH recording instantly with no RH-side staging. ===
     let heat = HeatId("q-rh-1".into());
     let pilot = CompetitorRef("Ace".into());
     state
@@ -201,15 +206,24 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
             None,
         )
         .unwrap();
-    state
-        .append(
-            Event::HeatStateChanged {
-                heat: heat.clone(),
-                transition: HeatTransition::Running,
-            },
-            None,
-        )
-        .unwrap();
+    for transition in [
+        HeatTransition::Staged,
+        HeatTransition::Armed,
+        HeatTransition::Running,
+    ] {
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition,
+                },
+                None,
+            )
+            .unwrap();
+        // Give the bridge a poll to act on Staged (prepare the RH connection) before arming at
+        // Running — mirrors the real control path's spacing (the Armed hold sits between them).
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
 
     // === Passes flow into Practice's log (real RH crossings, attributed to the lineup). ===
     let got_passes = wait_for(Duration::from_secs(40), || {
@@ -481,7 +495,9 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
         "the RH primary should reach Connected on selection"
     );
 
-    // Run the heat: while the RH primary is healthy, its passes feed (the Mock alternate is gated).
+    // Run the heat through the real lifecycle (Scheduled → Staged → Armed → Running); while the RH
+    // primary is healthy, its passes feed (the Mock alternate is gated). Staged prepares the RH
+    // connection for an instant start (Grid owns all timing).
     let heat = HeatId("q-fo-1".into());
     let pilot = CompetitorRef("Ace".into());
     state
@@ -497,15 +513,22 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
             None,
         )
         .unwrap();
-    state
-        .append(
-            Event::HeatStateChanged {
-                heat: heat.clone(),
-                transition: HeatTransition::Running,
-            },
-            None,
-        )
-        .unwrap();
+    for transition in [
+        HeatTransition::Staged,
+        HeatTransition::Armed,
+        HeatTransition::Running,
+    ] {
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition,
+                },
+                None,
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
 
     assert!(
         wait_for(Duration::from_secs(40), || count_passes(&read_all(&state))
