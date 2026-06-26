@@ -55,6 +55,15 @@ const DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 /// on the wait (the drain loop still runs regardless — this only bounds the staging settle).
 const STAGE_SETTLE: Duration = Duration::from_secs(15);
 
+/// How long to let RotorHazard settle back to **READY** after the reset (`stop_race` +
+/// `discard_laps`) before emitting `stage_race`. RotorHazard runs its socket handlers + the staging
+/// countdown on one gevent loop, and emitting the reset and the stage in the same tick makes RH's
+/// `on_discard_laps`/`on_stop_race` see the just-set `STAGING` status and abort it ("Stopping race
+/// during staging") *before* it reaches RACING — so the timer never replays passes and the heat
+/// records zero laps. Empirically the abort is 100% reproducible at 0ms between emits and gone by
+/// ~50ms; 300ms is a comfortable margin that is still imperceptible at the start line.
+const STAGE_RESET_SETTLE: Duration = Duration::from_millis(300);
+
 /// The minimum backoff between reconnect attempts after a dropped/failed connection.
 const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(500);
 
@@ -369,27 +378,50 @@ fn maintain(
 
         // Stage a freshly-armed heat once (reset RH to a clean READY state, then stage; RH
         // auto-starts). Done lazily here so staging happens on the driver thread, not the caller.
+        //
+        // The reset (`stop_race` + `discard_laps`) and the `stage_race` MUST NOT be emitted
+        // back-to-back: RotorHazard processes socket emits on a gevent loop, and `stage_race`'s
+        // STAGING→RACING transition runs as a non-blocking countdown greenlet. When the reset
+        // emits land in the same gevent tick as `stage_race`, RH's `on_discard_laps`/`on_stop_race`
+        // observes the just-set `STAGING` status and calls `on_stop_race()` — logging "Stopping
+        // race during staging" and dropping RH back to READY *before* it ever reaches RACING. A
+        // timer that never reaches RACING never replays/records any passes, so the heat produces
+        // **zero laps** (the no-laps symptom). Empirically the hazard is 100% reproducible with 0ms
+        // between emits and 0% with a ≥50ms gap; we settle generously between the reset and the
+        // stage so RH has fully returned to READY first.
         let mut just_staged = false;
-        {
+        let do_stage = {
+            let slot = armed.lock().expect("armed-heat lock poisoned");
+            matches!(slot.as_ref(), Some(heat) if !heat.staged)
+        };
+        if do_stage {
+            // Reset RH to a clean READY state. (`stop_race` first in case a prior heat is still
+            // STAGING/RACING; `discard_laps` clears any stale laps and forces READY.)
+            conn.stop_race().ok();
+            conn.discard_laps().ok();
+            // Let RotorHazard settle back to READY before staging — see the hazard note above. The
+            // sleep wakes early on cancel so teardown stays prompt.
+            if sleep_unless_cancelled(STAGE_RESET_SETTLE, cancel) {
+                return false;
+            }
+            // Drop the reset-era event churn so it isn't remapped as race passes.
+            let _ = conn.events();
+            if conn.stage_race().is_err() {
+                // A failed emit on a supposedly-live socket signals a drop.
+                return true;
+            }
+            // Mark the (still-armed) heat staged. A concurrent disarm/re-arm between the check above
+            // and here is benign: a re-arm reset `staged` to false (we re-stage next loop), a disarm
+            // cleared the slot (nothing to mark).
             let mut slot = armed.lock().expect("armed-heat lock poisoned");
             if let Some(heat) = slot.as_mut() {
-                if !heat.staged {
-                    conn.stop_race().ok();
-                    conn.discard_laps().ok();
-                    // Drop the reset-era event churn so it isn't remapped as race passes.
-                    let _ = conn.events();
-                    if conn.stage_race().is_err() {
-                        // A failed emit on a supposedly-live socket signals a drop.
-                        return true;
-                    }
-                    heat.staged = true;
-                    just_staged = true;
-                    stage_deadline = Some(Instant::now() + STAGE_SETTLE);
-                }
-            } else {
-                // Nothing armed: clear any stale stage wait.
-                stage_deadline = None;
+                heat.staged = true;
             }
+            just_staged = true;
+            stage_deadline = Some(Instant::now() + STAGE_SETTLE);
+        } else if armed.lock().expect("armed-heat lock poisoned").is_none() {
+            // Nothing armed: clear any stale stage wait.
+            stage_deadline = None;
         }
         if just_staged {
             last_activity = Instant::now();

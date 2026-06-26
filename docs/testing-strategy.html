@@ -339,13 +339,32 @@ flowchart LR
 # 1. Spin up a real RH fed a "missed lap" signal (parks until Ctrl-C):
 cargo xtask rh-mock feed missed-lap
 
-# 2. In another shell, start a Director and, in its console, add a RotorHazard
-#    timer pointing at the printed URL (e.g. http://localhost:5055), select it,
-#    build + stage a heat with the right seats, and run the race.
-cargo run -p gridfpv-app
+# 2. In another shell, start a Director BUILT WITH THE LIVE FEATURE (the RH
+#    connector is `live`-gated — a default build never connects to RH):
+cargo run -p gridfpv-app --features live
 
-# 3. After the heat, dump the captured signal values for that heat:
+# 3. In its console: add a RotorHazard timer pointing at the printed URL
+#    (e.g. http://localhost:5055), select it, and MAKE THE EVENT ACTIVE — the
+#    Director only connects the ACTIVE event's selected RH timers (the timer
+#    should read `Connected`). Build a heat seating a pilot on node-0 (the seat
+#    the scenario actually feeds — a pilot on an unfed node gets no crossings),
+#    then Stage -> Start it (a normal heat: Start is what drives RH into RACING;
+#    a heat left only Staged never races, so it records no laps).
+
+# 4. After the heat, dump the captured signal values for that heat:
 cargo xtask rh-mock dump http://localhost:3000 practice q-1</pre>
+    <div class="principle">
+      <p><span class="name">Stage <em>and</em> Start — and seat a pilot on a fed node.</span>
+      The two ways a mock-feed heat silently records <strong>no laps</strong>: (a) the heat never
+      reaches RACING — a RotorHazard timer only replays its mock signal into passes while it is in a
+      racing state, so a heat that is only <em>Staged</em> (never Started), or one whose staging is
+      aborted, produces nothing; and (b) the heat's pilot is on a node the scenario does not feed, so
+      crossings arrive for an empty seat and attribute to nobody. The Director drives RH
+      Staged&nbsp;&rarr;&nbsp;RACING on <em>Start</em>; the
+      <code>director_connects_rotorhazard_on_selection_and_keeps_it_connected_through_a_heat</code>
+      live test (<code>crates/app/tests/rh_connect_live.rs</code>) is the regression guard that real
+      passes flow over the staged-then-started connection.</p>
+    </div>
     <p>
       Like the rest of §5, this is a <strong>local class</strong>: <code>feed</code> needs Docker, so
       it never runs in CI; the scenario menu + JSON-pointer extraction are unit-tested in the core
