@@ -552,6 +552,72 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(deleteRoundImpl.mock.calls[0][2]).toBe('r1');
     await waitFor(() => expect(session.currentEvent?.rounds).toEqual([]));
   });
+
+  // ── The add-round form is a modal Dialog (ux(rounds)) ─────────────────────────────────────────
+  // The form lives in a modal Dialog: it is not shown (no open dialog in the a11y tree) until
+  // "+ Add round" opens it; cancel / a successful submit close it. A closed native <dialog> drops
+  // out of the accessibility tree, so `queryByRole('dialog')` is null while it is closed.
+  it('does not show the add-round dialog until "+ Add round" is clicked', async () => {
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+
+    // The trigger is present, but no dialog is shown (a closed native <dialog> drops out of the
+    // a11y tree), so the form is not presented to the user.
+    await screen.findByRole('button', { name: '+ Add round' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add round' }));
+    // Opening reveals the modal: the dialog + its form fields are now present.
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByLabelText('Label')).toBeInTheDocument();
+    expect(screen.getByLabelText('Format')).toBeInTheDocument();
+    expect(screen.getByRole('form', { name: 'Add round' })).toBeInTheDocument();
+  });
+
+  it('cancel closes the add-round dialog without creating a round', async () => {
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), {
+      target: { value: 'Throwaway' }
+    });
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    // Cancel closes the dialog and submits nothing.
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(createRoundImpl).not.toHaveBeenCalled();
+  });
+
+  it('closes the add-round dialog after a successful create', async () => {
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
+      ...QUAL,
+      id: 'r2',
+      label: 'New One'
+    }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'New One' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    // On success the dialog closes (leaves the a11y tree).
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
 });
 
 describe('EventRounds (open practice — no win condition + time limit)', () => {
@@ -1041,6 +1107,45 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       label: 'Featured Heat'
     });
     expect(sent.ScheduleHeat.heat).toMatch(/^r1-h-/);
+  });
+
+  // ── The build-heat form is a modal Dialog (ux(rounds)) ────────────────────────────────────────
+  it('does not show the build-heat dialog until "+ Build heat" is clicked', async () => {
+    const { session } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    // No dialog shown (and so the build form is not presented) until the trigger is clicked.
+    await screen.findByRole('button', { name: '+ Build heat' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name: '+ Build heat' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByRole('form', { name: 'Build heat' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Build round')).toBeInTheDocument();
+  });
+
+  it('cancel closes the build-heat dialog without scheduling a heat', async () => {
+    const { session, sendSpy } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByLabelText('Select AceOne'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('closes the build-heat dialog after a successful schedule', async () => {
+    const { session, sendSpy } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByLabelText('Select AceOne'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 });
 

@@ -70,8 +70,11 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
     timeout: 15_000
   });
 
+  // The add-round form is a modal Dialog (ux(rounds)): the trigger opens it, the fields live inside.
   await page.getByRole('button', { name: '+ Add round' }).click();
-  const form = page.getByRole('form', { name: 'Add round' });
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  const form = dialog.getByRole('form', { name: 'Add round' });
   await expect(form).toBeVisible();
   await form.getByLabel('Label').fill(LABEL);
   await form.getByLabel('Format').selectOption('timed_qual');
@@ -86,6 +89,8 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   await form.getByLabel('Start max delay seconds').fill('3.5');
   await page.getByRole('button', { name: 'Add round', exact: true }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+  // The dialog closes on a successful add.
+  await expect(dialog).toBeHidden();
 
   // The new round lists, with its format and the resolved class name.
   const list = page.getByRole('list').filter({ hasText: LABEL });
@@ -106,7 +111,9 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   // ── Edit the round's label — and confirm the heat-lifecycle config round-tripped on the Director:
   // the edit form is seeded from the persisted round, so the staging mm:ss + start min/max read back.
   await rowAfter.getByRole('button', { name: 'Edit' }).click();
-  const editForm = page.getByRole('form', { name: 'Edit round' });
+  // Edit opens the same modal Dialog, seeded from the persisted round.
+  await expect(page.getByRole('dialog')).toBeVisible();
+  const editForm = page.getByRole('dialog').getByRole('form', { name: 'Edit round' });
   await expect(editForm).toBeVisible();
   await expect(editForm.getByLabel('Staging minutes')).toHaveValue('3');
   await expect(editForm.getByLabel('Staging seconds')).toHaveValue('30');
@@ -416,14 +423,19 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   // ── Build a heat by hand from the round's eligible members ────────────────────────────────────
   // No id is typed — the heat id is auto-generated (round-scoped + collision-safe); the RD only
   // picks a round and a lineup.
+  // The build-heat form is a modal Dialog (ux(rounds)): open it, then fill from inside.
   await page.getByRole('button', { name: '+ Build heat' }).click();
-  const buildForm = page.getByRole('form', { name: 'Build heat' });
+  const buildDialog = page.getByRole('dialog');
+  await expect(buildDialog).toBeVisible();
+  const buildForm = buildDialog.getByRole('form', { name: 'Build heat' });
   await expect(buildForm).toBeVisible();
   await buildForm.getByLabel('Build round').selectOption({ label: ROUND_LABEL });
   await buildForm.getByLabel(`Select ${ACE}`).check();
   await buildForm.getByLabel(`Select ${BEE}`).check();
   await page.getByRole('button', { name: 'Schedule heat' }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
+  // The dialog closes on a successful schedule.
+  await expect(buildDialog).toBeHidden();
 
   // The hand-built heat now lists under the round too — named by its position in the round (the
   // filled heat is "<round> Heat 1", this hand-built one is "<round> Heat 2"), not its raw id.

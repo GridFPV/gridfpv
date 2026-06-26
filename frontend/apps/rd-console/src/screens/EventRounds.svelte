@@ -24,6 +24,7 @@
     Button,
     Card,
     Collapsible,
+    Dialog,
     Field,
     Input,
     Select,
@@ -1082,340 +1083,6 @@
         {/each}
       </ol>
     {/if}
-
-    {#if formOpen}
-      <form
-        class="round-form"
-        aria-label={editing ? 'Edit round' : 'Add round'}
-        onsubmit={(e) => {
-          e.preventDefault();
-          submit();
-        }}
-      >
-        <h3 class="form-title">{editing ? 'Edit round' : 'New round'}</h3>
-
-        <!-- Field order (Rounds form redesign item 2): Label first, then Format, then the remaining
-             fields shown dynamically per the chosen format (`fields` ← `fieldsForFormat`). -->
-        <Field label="Label" required>
-          <Input bind:value={label} placeholder="e.g. Time Trials R1" aria-label="Label" />
-        </Field>
-
-        <Field label="Format" required>
-          <Select bind:value={format} aria-label="Format">
-            {#each formats as f (f)}
-              <!-- Friendly label shown (Rounds form redesign item 1); the value stays the key. -->
-              <option value={f}>{formatLabel(f)}</option>
-            {/each}
-          </Select>
-        </Field>
-
-        <!-- Eligible class — a single-select dropdown (Rounds form redesign item 6): a round targets
-             exactly one class. Stored on the wire as a one-element `classes` list. -->
-        {#if fields.eligibleClass}
-          <Field label="Eligible class" required hint={classHint}>
-            <Select bind:value={selectedClass} aria-label="Eligible class">
-              <option value="" disabled>Choose a class…</option>
-              {#each eventClasses as cls (cls.id)}
-                <option value={cls.id}>{cls.name}</option>
-              {/each}
-            </Select>
-          </Field>
-        {/if}
-
-        <!-- Open practice does no scoring (open-practice refinement): hide the win-condition input and
-             offer the practice **Time limit** instead. A normal round keeps its win condition.
-             For a **qualifying** format the win condition IS the qualifying metric, so only the
-             qualifying-applicable conditions are offered (First-to-N-laps is hidden) and there is no
-             separate "qualifying metric" field — the win condition drives the ranking. -->
-        {#if fields.winCondition}
-          <div class="form-grid">
-            <Field
-              label="Win condition"
-              hint={isQualifying
-                ? 'The qualifying metric — the win condition is how this round’s ranking is decided.'
-                : undefined}
-            >
-              <Select bind:value={winKind} aria-label="Win condition">
-                <option value="Timed">Timed — Most Laps</option>
-                {#if !isQualifying}
-                  <option value="FirstToLaps">First to N laps</option>
-                {/if}
-                <option value="BestLap">Best lap</option>
-                <option value="BestConsecutive">Best N consecutive</option>
-              </Select>
-            </Field>
-
-            {#if winKind === 'Timed'}
-              <Field label="Race time (seconds)">
-                <Input
-                  type="number"
-                  min="1"
-                  bind:value={winSeconds}
-                  aria-label="Race time seconds"
-                />
-              </Field>
-            {:else if winKind === 'FirstToLaps' || winKind === 'BestConsecutive'}
-              <Field label="Laps">
-                <Input type="number" min="1" bind:value={winLaps} aria-label="Laps" />
-              </Field>
-            {/if}
-          </div>
-        {/if}
-
-        {#if fields.timeLimit}
-          <Field
-            label="Time limit (minutes)"
-            hint="Optional — blank = no limit (end the practice manually). When set, the practice auto-ends after this many minutes."
-          >
-            <div class="mmss" role="group" aria-label="Time limit">
-              <Input
-                type="number"
-                min="0"
-                bind:value={timeLimitMinutes}
-                aria-label="Time limit minutes"
-              />
-              <span class="mmss-sep" aria-hidden="true">min</span>
-            </div>
-          </Field>
-        {/if}
-
-        {#if fields.activeChannels}
-          <!-- Open-practice active-channels picker (open-practice Slice 2): the round runs one open
-               heat over the primary timer's active node seats; pick which channels are live. Saved as
-               `seeding: AllChannels { channels: [<node indices>] }` with no classes. -->
-          <Field
-            label="Active channels"
-            required
-            hint={timerNodes.length === 0
-              ? 'Set a primary timer with channels first — open practice runs over its node seats.'
-              : `${selectedNodes.size} of ${timerNodes.length} node${
-                  timerNodes.length === 1 ? '' : 's'
-                } active. Each active channel shows a live practice board.`}
-          >
-            {#if timerNodes.length === 0}
-              <p class="inline-note" role="status">
-                {#if !primaryTimer}
-                  No primary timer for this event. Set a timer in the <strong>Timers</strong> stage —
-                  open practice runs over its channels.
-                {:else}
-                  <strong>{primaryTimer.name}</strong> has no node seats configured. Set its
-                  channels in the <strong>Timers</strong> stage first.
-                {/if}
-              </p>
-            {:else}
-              <div class="channel-picker" role="group" aria-label="Active channels">
-                {#each timerNodes as seat (seat.node)}
-                  <label class="channel-chip" class:unset={seat.mhz === undefined}>
-                    <input
-                      type="checkbox"
-                      checked={selectedNodes.has(seat.node)}
-                      onchange={() => toggleNode(seat.node)}
-                      aria-label={`Channel ${seat.label}`}
-                    />
-                    <span class="channel-seat">
-                      <span class="channel-node" aria-hidden="true">{seat.node + 1}</span>
-                      <span class="channel-name">{seat.label}</span>
-                    </span>
-                  </label>
-                {/each}
-              </div>
-            {/if}
-          </Field>
-        {/if}
-
-        <!-- Seeding (Rounds form redesign item 2): roster-seeded (qual) or ranking-seeded (bracket).
-             The FromRanking source-rounds multi-select + top-N reveals for the bracket / cut case;
-             several source rounds are aggregated best-per-pilot (issue #51). -->
-        {#if fields.seeding}
-          <Field
-            label="Seeding"
-            hint={seedKind === 'FromRanking'
-              ? 'Draw this round from one or more prior rounds’ rankings (the bracket / cut case).'
-              : 'Draw straight from the eligible class’ roster membership.'}
-          >
-            <Select bind:value={seedKind} aria-label="Seeding">
-              <option value="FromRoster">From roster</option>
-              <option value="FromRanking">From ranking</option>
-            </Select>
-          </Field>
-
-          {#if seedKind === 'FromRanking'}
-            <div class="form-grid">
-              <Field
-                label="Source rounds"
-                required
-                hint={sourceCandidates.length === 0
-                  ? undefined
-                  : 'Pick one or more rounds to seed from. Several are aggregated by each pilot’s best result.'}
-              >
-                {#if sourceCandidates.length === 0}
-                  <p class="inline-note">Add another round first to seed from its ranking.</p>
-                {:else}
-                  <div class="source-picker" role="group" aria-label="Source rounds">
-                    {#each sourceCandidates as r (r.id)}
-                      <label class="source-chip">
-                        <input
-                          type="checkbox"
-                          checked={seedSources.has(r.id)}
-                          onchange={() => toggleSeedSource(r.id)}
-                          aria-label={`Seed from ${r.label}`}
-                        />
-                        <span class="source-name">{r.label}</span>
-                      </label>
-                    {/each}
-                  </div>
-                {/if}
-              </Field>
-              <Field label="Top N advance">
-                <Input type="number" min="1" bind:value={seedTopN} aria-label="Top N" />
-              </Field>
-            </div>
-          {/if}
-        {/if}
-
-        {#if fields.channelMode}
-          <Field
-            label="Channel mode"
-            hint={channelMode === 'Static'
-              ? 'Static = each pilot’s fixed channel; heats are channel-balanced (time-trial / qualifying).'
-              : 'Per-heat = channels assigned per heat from the timer’s pool (for brackets).'}
-          >
-            <Select bind:value={channelMode} aria-label="Channel mode">
-              <option value="Static">Static</option>
-              <option value="PerHeat">Per-heat</option>
-            </Select>
-          </Field>
-        {/if}
-
-        <!-- Format params (Rounds form redesign item 4): the chosen format's declared params, each a
-             proper labeled field seeded from its default. The generic "Format Params" add/remove
-             editor is gone — these knobs (rounds, heat_size, metric, bracket_reset, main_size) are
-             meaningful per format, so they show inline. Open practice declares none, so this is empty. -->
-        {#if fields.params && formatParams.length > 0}
-          <fieldset class="config-group">
-            <legend class="config-legend">Format options</legend>
-            <div class="params">
-              {#each formatParams as schema (schema.key)}
-                {@const value = paramValues[schema.key] ?? ''}
-                <Field label={schema.label}>
-                  {#if schema.kind === 'bool'}
-                    <label class="param-toggle">
-                      <input
-                        type="checkbox"
-                        checked={value === 'true' || value === '1'}
-                        aria-label={`${schema.label} value`}
-                        onchange={(e) =>
-                          setParamValue(
-                            schema.key,
-                            (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false'
-                          )}
-                      />
-                      <span>{value === 'true' || value === '1' ? 'On' : 'Off'}</span>
-                    </label>
-                  {:else if schema.kind === 'enum'}
-                    <Select
-                      {value}
-                      aria-label={`${schema.label} value`}
-                      onchange={(e: Event) =>
-                        setParamValue(schema.key, (e.currentTarget as HTMLSelectElement).value)}
-                    >
-                      {#each schema.options ?? [] as opt (opt)}
-                        <option value={opt}>{opt}</option>
-                      {/each}
-                    </Select>
-                  {:else}
-                    <Input
-                      type="number"
-                      {value}
-                      aria-label={`${schema.label} value`}
-                      oninput={(e: Event) =>
-                        setParamValue(schema.key, (e.currentTarget as HTMLInputElement).value)}
-                    />
-                  {/if}
-                </Field>
-              {/each}
-            </div>
-          </fieldset>
-        {/if}
-
-        <fieldset class="config-group">
-          <legend class="config-legend">Start &amp; timing</legend>
-          <div class="form-grid">
-            <Field label="Staging timer" hint="Informational only — no auto-advance.">
-              <div class="mmss" role="group" aria-label="Staging timer">
-                <Input
-                  type="number"
-                  min="0"
-                  bind:value={stagingMinutes}
-                  aria-label="Staging minutes"
-                />
-                <span class="mmss-sep" aria-hidden="true">:</span>
-                <Input
-                  type="number"
-                  min="0"
-                  max="59"
-                  bind:value={stagingSeconds}
-                  aria-label="Staging seconds"
-                />
-              </div>
-            </Field>
-            <Field label="Grace window (seconds)" hint="Late crossings count after the win.">
-              <Input
-                type="number"
-                min="0"
-                bind:value={graceSeconds}
-                aria-label="Grace window seconds"
-              />
-            </Field>
-            <Field
-              label="Protest window (seconds)"
-              hint="0 = off (manual finalize). Otherwise the result auto-finalizes after this long."
-            >
-              <Input
-                type="number"
-                min="0"
-                bind:value={protestSeconds}
-                aria-label="Protest window seconds"
-              />
-            </Field>
-          </div>
-          <!-- Start procedure delays entered in **seconds** (Rounds form redesign item 3); converted
-               to/from the stored `*_delay_ms` on save/load. -->
-          <Field
-            label="Start procedure"
-            hint="Randomized hold before race-go (seconds) — the “arm… and… go”. Max is held ≥ min."
-          >
-            <div class="form-grid">
-              <Field label="Min delay (seconds)">
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  bind:value={startMinSeconds}
-                  aria-label="Start min delay seconds"
-                />
-              </Field>
-              <Field label="Max delay (seconds)">
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  bind:value={startMaxSeconds}
-                  aria-label="Start max delay seconds"
-                />
-              </Field>
-            </div>
-          </Field>
-        </fieldset>
-
-        <div class="form-actions">
-          <Button variant="ghost" type="button" onclick={cancel} disabled={saving}>Cancel</Button>
-          <Button variant="primary" type="submit" loading={saving} disabled={!canSubmit}>
-            {editing ? 'Save round' : 'Add round'}
-          </Button>
-        </div>
-      </form>
-    {/if}
   </Card>
 
   <Card
@@ -1651,73 +1318,399 @@
         {/each}
       </div>
     {/if}
+  </Card>
+  <!-- The add / edit round form is a modal Dialog (backdrop, focus trap, Esc-to-close) — opened by
+         the "+ Add round" / per-round "Edit" buttons, closed on submit/cancel. -->
+  <Dialog bind:open={formOpen} title={editing ? 'Edit round' : 'New round'} onclose={cancel}>
+    <form
+      class="round-form"
+      aria-label={editing ? 'Edit round' : 'Add round'}
+      onsubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <!-- Field order (Rounds form redesign item 2): Label first, then Format, then the remaining
+             fields shown dynamically per the chosen format (`fields` ← `fieldsForFormat`). -->
+      <Field label="Label" required>
+        <Input bind:value={label} placeholder="e.g. Time Trials R1" aria-label="Label" />
+      </Field>
 
-    {#if buildOpen}
-      <form
-        class="build-form"
-        aria-label="Build heat"
-        onsubmit={(e) => {
-          e.preventDefault();
-          submitBuild();
-        }}
-      >
-        <h3 class="form-title">Build a heat by hand</h3>
+      <Field label="Format" required>
+        <Select bind:value={format} aria-label="Format">
+          {#each formats as f (f)}
+            <!-- Friendly label shown (Rounds form redesign item 1); the value stays the key. -->
+            <option value={f}>{formatLabel(f)}</option>
+          {/each}
+        </Select>
+      </Field>
+
+      <!-- Eligible class — a single-select dropdown (Rounds form redesign item 6): a round targets
+             exactly one class. Stored on the wire as a one-element `classes` list. -->
+      {#if fields.eligibleClass}
+        <Field label="Eligible class" required hint={classHint}>
+          <Select bind:value={selectedClass} aria-label="Eligible class">
+            <option value="" disabled>Choose a class…</option>
+            {#each eventClasses as cls (cls.id)}
+              <option value={cls.id}>{cls.name}</option>
+            {/each}
+          </Select>
+        </Field>
+      {/if}
+
+      <!-- Open practice does no scoring (open-practice refinement): hide the win-condition input and
+             offer the practice **Time limit** instead. A normal round keeps its win condition.
+             For a **qualifying** format the win condition IS the qualifying metric, so only the
+             qualifying-applicable conditions are offered (First-to-N-laps is hidden) and there is no
+             separate "qualifying metric" field — the win condition drives the ranking. -->
+      {#if fields.winCondition}
         <div class="form-grid">
-          <Field label="Round" required>
-            <Select bind:value={buildRound} aria-label="Build round">
-              <option value="" disabled>Choose a round…</option>
-              {#each rounds as r (r.id)}
-                <option value={r.id}>{r.label}</option>
-              {/each}
+          <Field
+            label="Win condition"
+            hint={isQualifying
+              ? 'The qualifying metric — the win condition is how this round’s ranking is decided.'
+              : undefined}
+          >
+            <Select bind:value={winKind} aria-label="Win condition">
+              <option value="Timed">Timed — Most Laps</option>
+              {#if !isQualifying}
+                <option value="FirstToLaps">First to N laps</option>
+              {/if}
+              <option value="BestLap">Best lap</option>
+              <option value="BestConsecutive">Best N consecutive</option>
             </Select>
           </Field>
+
+          {#if winKind === 'Timed'}
+            <Field label="Race time (seconds)">
+              <Input type="number" min="1" bind:value={winSeconds} aria-label="Race time seconds" />
+            </Field>
+          {:else if winKind === 'FirstToLaps' || winKind === 'BestConsecutive'}
+            <Field label="Laps">
+              <Input type="number" min="1" bind:value={winLaps} aria-label="Laps" />
+            </Field>
+          {/if}
+        </div>
+      {/if}
+
+      {#if fields.timeLimit}
+        <Field
+          label="Time limit (minutes)"
+          hint="Optional — blank = no limit (end the practice manually). When set, the practice auto-ends after this many minutes."
+        >
+          <div class="mmss" role="group" aria-label="Time limit">
+            <Input
+              type="number"
+              min="0"
+              bind:value={timeLimitMinutes}
+              aria-label="Time limit minutes"
+            />
+            <span class="mmss-sep" aria-hidden="true">min</span>
+          </div>
+        </Field>
+      {/if}
+
+      {#if fields.activeChannels}
+        <!-- Open-practice active-channels picker (open-practice Slice 2): the round runs one open
+               heat over the primary timer's active node seats; pick which channels are live. Saved as
+               `seeding: AllChannels { channels: [<node indices>] }` with no classes. -->
+        <Field
+          label="Active channels"
+          required
+          hint={timerNodes.length === 0
+            ? 'Set a primary timer with channels first — open practice runs over its node seats.'
+            : `${selectedNodes.size} of ${timerNodes.length} node${
+                timerNodes.length === 1 ? '' : 's'
+              } active. Each active channel shows a live practice board.`}
+        >
+          {#if timerNodes.length === 0}
+            <p class="inline-note" role="status">
+              {#if !primaryTimer}
+                No primary timer for this event. Set a timer in the <strong>Timers</strong> stage — open
+                practice runs over its channels.
+              {:else}
+                <strong>{primaryTimer.name}</strong> has no node seats configured. Set its channels
+                in the <strong>Timers</strong> stage first.
+              {/if}
+            </p>
+          {:else}
+            <div class="channel-picker" role="group" aria-label="Active channels">
+              {#each timerNodes as seat (seat.node)}
+                <label class="channel-chip" class:unset={seat.mhz === undefined}>
+                  <input
+                    type="checkbox"
+                    checked={selectedNodes.has(seat.node)}
+                    onchange={() => toggleNode(seat.node)}
+                    aria-label={`Channel ${seat.label}`}
+                  />
+                  <span class="channel-seat">
+                    <span class="channel-node" aria-hidden="true">{seat.node + 1}</span>
+                    <span class="channel-name">{seat.label}</span>
+                  </span>
+                </label>
+              {/each}
+            </div>
+          {/if}
+        </Field>
+      {/if}
+
+      <!-- Seeding (Rounds form redesign item 2): roster-seeded (qual) or ranking-seeded (bracket).
+             The FromRanking source-rounds multi-select + top-N reveals for the bracket / cut case;
+             several source rounds are aggregated best-per-pilot (issue #51). -->
+      {#if fields.seeding}
+        <Field
+          label="Seeding"
+          hint={seedKind === 'FromRanking'
+            ? 'Draw this round from one or more prior rounds’ rankings (the bracket / cut case).'
+            : 'Draw straight from the eligible class’ roster membership.'}
+        >
+          <Select bind:value={seedKind} aria-label="Seeding">
+            <option value="FromRoster">From roster</option>
+            <option value="FromRanking">From ranking</option>
+          </Select>
+        </Field>
+
+        {#if seedKind === 'FromRanking'}
+          <div class="form-grid">
+            <Field
+              label="Source rounds"
+              required
+              hint={sourceCandidates.length === 0
+                ? undefined
+                : 'Pick one or more rounds to seed from. Several are aggregated by each pilot’s best result.'}
+            >
+              {#if sourceCandidates.length === 0}
+                <p class="inline-note">Add another round first to seed from its ranking.</p>
+              {:else}
+                <div class="source-picker" role="group" aria-label="Source rounds">
+                  {#each sourceCandidates as r (r.id)}
+                    <label class="source-chip">
+                      <input
+                        type="checkbox"
+                        checked={seedSources.has(r.id)}
+                        onchange={() => toggleSeedSource(r.id)}
+                        aria-label={`Seed from ${r.label}`}
+                      />
+                      <span class="source-name">{r.label}</span>
+                    </label>
+                  {/each}
+                </div>
+              {/if}
+            </Field>
+            <Field label="Top N advance">
+              <Input type="number" min="1" bind:value={seedTopN} aria-label="Top N" />
+            </Field>
+          </div>
+        {/if}
+      {/if}
+
+      {#if fields.channelMode}
+        <Field
+          label="Channel mode"
+          hint={channelMode === 'Static'
+            ? 'Static = each pilot’s fixed channel; heats are channel-balanced (time-trial / qualifying).'
+            : 'Per-heat = channels assigned per heat from the timer’s pool (for brackets).'}
+        >
+          <Select bind:value={channelMode} aria-label="Channel mode">
+            <option value="Static">Static</option>
+            <option value="PerHeat">Per-heat</option>
+          </Select>
+        </Field>
+      {/if}
+
+      <!-- Format params (Rounds form redesign item 4): the chosen format's declared params, each a
+             proper labeled field seeded from its default. The generic "Format Params" add/remove
+             editor is gone — these knobs (rounds, heat_size, metric, bracket_reset, main_size) are
+             meaningful per format, so they show inline. Open practice declares none, so this is empty. -->
+      {#if fields.params && formatParams.length > 0}
+        <fieldset class="config-group">
+          <legend class="config-legend">Format options</legend>
+          <div class="params">
+            {#each formatParams as schema (schema.key)}
+              {@const value = paramValues[schema.key] ?? ''}
+              <Field label={schema.label}>
+                {#if schema.kind === 'bool'}
+                  <label class="param-toggle">
+                    <input
+                      type="checkbox"
+                      checked={value === 'true' || value === '1'}
+                      aria-label={`${schema.label} value`}
+                      onchange={(e) =>
+                        setParamValue(
+                          schema.key,
+                          (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false'
+                        )}
+                    />
+                    <span>{value === 'true' || value === '1' ? 'On' : 'Off'}</span>
+                  </label>
+                {:else if schema.kind === 'enum'}
+                  <Select
+                    {value}
+                    aria-label={`${schema.label} value`}
+                    onchange={(e: Event) =>
+                      setParamValue(schema.key, (e.currentTarget as HTMLSelectElement).value)}
+                  >
+                    {#each schema.options ?? [] as opt (opt)}
+                      <option value={opt}>{opt}</option>
+                    {/each}
+                  </Select>
+                {:else}
+                  <Input
+                    type="number"
+                    {value}
+                    aria-label={`${schema.label} value`}
+                    oninput={(e: Event) =>
+                      setParamValue(schema.key, (e.currentTarget as HTMLInputElement).value)}
+                  />
+                {/if}
+              </Field>
+            {/each}
+          </div>
+        </fieldset>
+      {/if}
+
+      <fieldset class="config-group">
+        <legend class="config-legend">Start &amp; timing</legend>
+        <div class="form-grid">
+          <Field label="Staging timer" hint="Informational only — no auto-advance.">
+            <div class="mmss" role="group" aria-label="Staging timer">
+              <Input
+                type="number"
+                min="0"
+                bind:value={stagingMinutes}
+                aria-label="Staging minutes"
+              />
+              <span class="mmss-sep" aria-hidden="true">:</span>
+              <Input
+                type="number"
+                min="0"
+                max="59"
+                bind:value={stagingSeconds}
+                aria-label="Staging seconds"
+              />
+            </div>
+          </Field>
+          <Field label="Grace window (seconds)" hint="Late crossings count after the win.">
+            <Input
+              type="number"
+              min="0"
+              bind:value={graceSeconds}
+              aria-label="Grace window seconds"
+            />
+          </Field>
           <Field
-            label="Heat name (optional)"
-            hint="Overrides the auto-name. Leave blank to keep it."
+            label="Protest window (seconds)"
+            hint="0 = off (manual finalize). Otherwise the result auto-finalizes after this long."
           >
             <Input
-              bind:value={buildHeatLabel}
-              placeholder="e.g. Featured Heat"
-              aria-label="Build heat name"
+              type="number"
+              min="0"
+              bind:value={protestSeconds}
+              aria-label="Protest window seconds"
             />
           </Field>
         </div>
-
+        <!-- Start procedure delays entered in **seconds** (Rounds form redesign item 3); converted
+               to/from the stored `*_delay_ms` on save/load. -->
         <Field
-          label="Pilots"
-          required
-          hint={buildRound === ''
-            ? 'Pick a round to see its eligible members.'
-            : eligibleMembers.length === 0
-              ? 'This round’s classes have no members yet — set them in the Roster stage.'
-              : 'Select the round’s eligible class members to fly this heat.'}
+          label="Start procedure"
+          hint="Randomized hold before race-go (seconds) — the “arm… and… go”. Max is held ≥ min."
         >
-          <div class="member-picker" role="group" aria-label="Eligible members">
-            {#each eligibleMembers as pid (pid)}
-              <label class="member-chip">
-                <input
-                  type="checkbox"
-                  checked={buildSelected.has(pid)}
-                  onchange={() => toggleMember(pid)}
-                  aria-label={`Select ${callsign(pid)}`}
-                />
-                <span>{callsign(pid)}</span>
-              </label>
-            {/each}
+          <div class="form-grid">
+            <Field label="Min delay (seconds)">
+              <Input
+                type="number"
+                min="0"
+                step="0.1"
+                bind:value={startMinSeconds}
+                aria-label="Start min delay seconds"
+              />
+            </Field>
+            <Field label="Max delay (seconds)">
+              <Input
+                type="number"
+                min="0"
+                step="0.1"
+                bind:value={startMaxSeconds}
+                aria-label="Start max delay seconds"
+              />
+            </Field>
           </div>
         </Field>
+      </fieldset>
+    </form>
+    <!-- The actions live in the Dialog footer (outside the <form>), so submit is wired via onclick;
+           the form's onsubmit still drives Enter-to-submit. -->
+    {#snippet footer()}
+      <Button variant="ghost" type="button" onclick={cancel} disabled={saving}>Cancel</Button>
+      <Button variant="primary" onclick={submit} loading={saving} disabled={!canSubmit}>
+        {editing ? 'Save round' : 'Add round'}
+      </Button>
+    {/snippet}
+  </Dialog>
 
-        <div class="form-actions">
-          <Button variant="ghost" type="button" onclick={cancelBuild} disabled={building}>
-            Cancel
-          </Button>
-          <Button variant="primary" type="submit" loading={building} disabled={!canBuild}>
-            Schedule heat
-          </Button>
+  <!-- The build-a-heat form is a modal Dialog — opened by the "+ Build heat" button, closed on
+         submit/cancel. -->
+  <Dialog bind:open={buildOpen} title="Build a heat by hand" onclose={cancelBuild}>
+    <form
+      class="build-form"
+      aria-label="Build heat"
+      onsubmit={(e) => {
+        e.preventDefault();
+        submitBuild();
+      }}
+    >
+      <div class="form-grid">
+        <Field label="Round" required>
+          <Select bind:value={buildRound} aria-label="Build round">
+            <option value="" disabled>Choose a round…</option>
+            {#each rounds as r (r.id)}
+              <option value={r.id}>{r.label}</option>
+            {/each}
+          </Select>
+        </Field>
+        <Field label="Heat name (optional)" hint="Overrides the auto-name. Leave blank to keep it.">
+          <Input
+            bind:value={buildHeatLabel}
+            placeholder="e.g. Featured Heat"
+            aria-label="Build heat name"
+          />
+        </Field>
+      </div>
+
+      <Field
+        label="Pilots"
+        required
+        hint={buildRound === ''
+          ? 'Pick a round to see its eligible members.'
+          : eligibleMembers.length === 0
+            ? 'This round’s classes have no members yet — set them in the Roster stage.'
+            : 'Select the round’s eligible class members to fly this heat.'}
+      >
+        <div class="member-picker" role="group" aria-label="Eligible members">
+          {#each eligibleMembers as pid (pid)}
+            <label class="member-chip">
+              <input
+                type="checkbox"
+                checked={buildSelected.has(pid)}
+                onchange={() => toggleMember(pid)}
+                aria-label={`Select ${callsign(pid)}`}
+              />
+              <span>{callsign(pid)}</span>
+            </label>
+          {/each}
         </div>
-      </form>
-    {/if}
-  </Card>
+      </Field>
+    </form>
+    {#snippet footer()}
+      <Button variant="ghost" type="button" onclick={cancelBuild} disabled={building}>
+        Cancel
+      </Button>
+      <Button variant="primary" onclick={submitBuild} loading={building} disabled={!canBuild}>
+        Schedule heat
+      </Button>
+    {/snippet}
+  </Dialog>
 </section>
 
 <style>
@@ -1803,18 +1796,15 @@
     flex-shrink: 0;
   }
 
+  /* The round + build forms now render inside a modal Dialog (the Dialog supplies the title,
+     padding, and surface), so they are just a vertical stack of fields. The round form is long, so
+     it scrolls within the dialog body on short (sunlit-laptop) screens rather than overflowing. */
   .round-form {
-    margin-top: var(--gf-space-4);
-    padding-top: var(--gf-space-4);
-    border-top: 1px solid var(--gf-border-subtle);
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-4);
-  }
-  .form-title {
-    margin: 0;
-    font-size: var(--gf-font-size-md);
-    color: var(--gf-text);
+    max-height: min(70vh, 40rem);
+    overflow-y: auto;
   }
   .form-grid {
     display: grid;
@@ -2170,9 +2160,6 @@
     color: var(--gf-text-muted);
   }
   .build-form {
-    margin-top: var(--gf-space-4);
-    padding-top: var(--gf-space-4);
-    border-top: 1px solid var(--gf-border-subtle);
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-4);
