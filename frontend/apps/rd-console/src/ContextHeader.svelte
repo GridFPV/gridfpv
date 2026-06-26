@@ -22,8 +22,10 @@
    * on the live screen, which now drives its clock from the same source.
    */
   import { StatusPill, RaceClock } from '@gridfpv/components';
+  import type { HeatSummary } from '@gridfpv/types';
   import type { Session } from './lib/session.svelte.js';
   import { useRaceClock } from './lib/raceClock.svelte.js';
+  import { heatNameById } from './lib/heats.js';
 
   let {
     session,
@@ -40,6 +42,33 @@
   const eventName = $derived(session.currentEvent?.name ?? '');
   const live = $derived(session.liveState);
   const heat = $derived(live?.current_heat);
+
+  // The friendly current-heat name ("‹Round› Heat N") — the persistent header sits on every screen,
+  // so the raw heat id leaked "everywhere" until resolved here. We join the live heat id → its
+  // {@link HeatSummary} → that heat's round (off the event) via {@link heatNameById}, the SAME helper
+  // the Live-control title and the Marshaling header use, so the name never drifts. Falls back to the
+  // raw id only when the heat is genuinely unresolvable (a sim / free-text heat, or before the reads
+  // land).
+  //
+  // The scheduled-heats read re-runs on `session.currentEvent` AND `session.protocolState` (the
+  // #242 cold-load fix mirrored from Marshaling): `listHeats()` resolves `[]` until an event is in
+  // hand, and the header mounts on a cold reload while the active event is still resolving. Keyed off
+  // the stream alone, the read would never re-fire when `currentEvent` finally appeared — a quiet
+  // heat emits no further tick — so the header would show the raw id until the next stream advance.
+  // Touching `currentEvent` makes it re-read the instant the event settles. Rounds come straight off
+  // the event, so the `$derived` name re-resolves the moment either heats or the event changes.
+  let heats = $state<HeatSummary[]>([]);
+  $effect(() => {
+    void session.currentEvent;
+    void session.protocolState;
+    session
+      .listHeats()
+      .then((h) => (heats = h))
+      .catch(() => (heats = []));
+  });
+  const heatName = $derived(
+    heat ? heatNameById(heat, heats, session.currentEvent?.rounds ?? []) : ''
+  );
   // The active event's selected timers with their live (polled) connection status (#73, Slice 2b).
   // A compact pill per timer keeps "is the timer still connected?" answerable from any in-event page.
   const timers = $derived(session.selectedTimers);
@@ -82,7 +111,7 @@
       <span class="ctx-sep" aria-hidden="true"></span>
       <div class="ctx-heat">
         <span class="ctx-heat-label">Heat</span>
-        <span class="ctx-heat-id">{heat}</span>
+        <span class="ctx-heat-id">{heatName}</span>
       </div>
       {#if phase}
         <span class="ctx-phase"><StatusPill {phase} size="sm" /></span>
