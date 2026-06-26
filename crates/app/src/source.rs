@@ -1034,6 +1034,7 @@ fn handle_transition(
             #[cfg(feature = "live")]
             {
                 let plan = tune_plan_of(state, &heat);
+                let seats = seats_of(state, registry, &heat);
                 for timer_id in selected_rh_timers(registry, timers, event_id) {
                     // Ready RH for an instant start at Grid's go: zero its staging hold/tones + reset
                     // to READY now, well before the Armed hold + tone fire. Retires the old at-go
@@ -1041,6 +1042,14 @@ fn handle_transition(
                     connections.prepare(event_id, &timer_id);
                     if !plan.is_empty() {
                         connections.tune(event_id, &timer_id, plan.clone());
+                    }
+                    // Seat the heat's bound pilots onto their RH nodes (the laps-attribute fix): RH
+                    // dismisses a crossing on a node with no seated pilot, so without this RH races an
+                    // empty-pilot heat and records zero laps. Empty (an open-practice / unbound heat)
+                    // is a no-op — the connection then runs in practice mode (RH records via the
+                    // no-current-heat gate branch).
+                    if !seats.is_empty() {
+                        connections.seat(event_id, &timer_id, seats.clone());
                     }
                 }
             }
@@ -1210,6 +1219,43 @@ fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
         }
     }
     plan
+}
+
+/// The heat's **node→pilot seating** for RotorHazard (the laps-attribute fix): one
+/// `(node_index, callsign)` per **bound** node of `heat`, read from the heat's lineup (its durable
+/// `HeatScheduled` bind — node `n` runs `lineup[n]`).
+///
+/// `lineup[n]` is the **pilot ref** for node `n` (the round engine builds the field as
+/// `CompetitorRef(pilot_id)`), so each bound node resolves to its pilot's **callsign** via the
+/// directory (CLAUDE.md: resolve a ref to its friendly name from a durable source, never print the
+/// raw id). An open-practice / unchannelled heat seats per **channel** as `node-{i}` refs (no bound
+/// pilot) — those are skipped here, leaving an empty plan (RH then races in practice mode). A pilot
+/// ref that does not resolve falls back to the raw ref string as a last resort so the node is still
+/// seated (RH records there) rather than dropped.
+#[cfg(feature = "live")]
+fn seats_of(state: &AppState, registry: &EventRegistry, heat: &HeatId) -> Vec<(u64, String)> {
+    let Some(lineup) = lineup_of(state, heat) else {
+        return Vec::new();
+    };
+    let pilots = registry.pilots();
+    let mut seats = Vec::new();
+    for (node, competitor) in lineup.into_iter().enumerate() {
+        // An open-practice seat (`node-{i}`) names a channel, not a bound pilot: leave it unseated.
+        if competitor
+            .0
+            .strip_prefix("node-")
+            .is_some_and(|s| s.parse::<usize>().is_ok())
+        {
+            continue;
+        }
+        let pilot_id = gridfpv_server::scope::PilotId(competitor.0.clone());
+        let callsign = pilots
+            .get(&pilot_id)
+            .map(|p| p.callsign)
+            .unwrap_or(competitor.0);
+        seats.push((node as u64, callsign));
+    }
+    seats
 }
 
 // --- the runtime clock (heat-lifecycle redesign, Slice 2) -----------------------------

@@ -19,6 +19,13 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long [`RotorHazardConnection::seat_heat`] waits for each `heat_data` / `pilot_data` response
+/// before giving up on that step. Bounds the case where a quirky/slow RH never answers, so seating
+/// never stalls staging — the caller then falls back to the practice-mode (no-current-heat) flow,
+/// which still records via RH's `current_heat is HEAT_ID_NONE` pass-gate branch.
+const SEAT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 use rust_socketio::client::Client;
 use rust_socketio::{ClientBuilder, Payload, RawClient};
@@ -26,7 +33,7 @@ use serde_json::json;
 
 use super::{
     Raw, RawCurrentLaps, RawEnterExitLevels, RawHeatData, RawMarshalData, RawNodeData,
-    RawPassRecord, RawRaceDetails, RawRaceList, RawRaceStatus, RotorHazardAdapter,
+    RawPassRecord, RawPilotData, RawRaceDetails, RawRaceList, RawRaceStatus, RotorHazardAdapter,
 };
 use crate::Adapter;
 use gridfpv_events::Event;
@@ -69,6 +76,9 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
         "heat_data" => serde_json::from_value::<RawHeatData>(value)
             .ok()
             .map(Raw::HeatData),
+        "pilot_data" => serde_json::from_value::<RawPilotData>(value)
+            .ok()
+            .map(Raw::PilotData),
         _ => None,
     }
 }
@@ -324,6 +334,16 @@ impl RotorHazardConnection {
                     current_format.clone(),
                 ),
             )
+            .on(
+                "pilot_data",
+                handler(
+                    "pilot_data",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                    current_format.clone(),
+                ),
+            )
             .connect()?;
 
         // Warm initial state on (re)connect: ask RH to send current per-node RSSI, the enter/exit
@@ -353,6 +373,151 @@ impl RotorHazardConnection {
     /// until the `heat_data` response has been folded.
     pub fn take_savable_heat(&self) -> Option<u64> {
         self.savable_heat.lock().expect("savable-heat lock").take()
+    }
+
+    /// **Seat a heat's bound pilots on RotorHazard nodes** so RH records *and* attributes passes for
+    /// each bound node — the laps-attribute fix. Without this, GridFPV's node→pilot binding lives only
+    /// in the Director's log; RH races a current heat with **no seated pilots**, and its pass gate
+    /// (`server.py` `do_pass_record_callback`: a pass on a node with `pilot_id == PILOT_ID_NONE` while
+    /// a heat is current is *dismissed* "Pilot not defined") rejects every crossing → zero laps even
+    /// with clear gate crossings.
+    ///
+    /// `seats` is the heat's `(node_index, callsign)` bind, one entry per **bound** node (unbound
+    /// nodes are simply left unseated — RH won't record there, which is correct). For each seat this:
+    ///   1. adds a fresh RH pilot (`add_pilot`) and learns its id (the highest from `pilot_data`),
+    ///   2. names it with the GridFPV callsign (`alter_pilot { callsign }`) so RH's own view + its
+    ///      "Racing heat … pilots: …" log are right,
+    ///   3. assigns it to the heat's slot at that node (`alter_heat { heat, slot_id, pilot }`).
+    /// Then it selects the heat as current (`set_current_heat`) so the seats take effect for the race.
+    ///
+    /// The heat is **freshly added** here (`add_heat`) and this is the heat the finish-time dense save
+    /// then reuses (it is already current + savable), so seating doubles as the savable-heat selection
+    /// — there is no separate empty heat. Returns the seated heat id (so the driver records it and the
+    /// finish path skips re-adding an empty one), or `None` if the seating could not complete (no
+    /// `heat_data`/`pilot_data` response within the bounded waits — the caller falls back to the
+    /// practice-mode flow, which still records via the `current_heat is HEAT_ID_NONE` gate branch).
+    ///
+    /// Runs **synchronously on the driver thread** (like the finish dance) so its emits stay ordered
+    /// and off the socket callback. Best-effort and bounded: a quirky/slow RH that never answers
+    /// `heat_data`/`pilot_data` times out rather than stalling staging. A failed emit on a dropped
+    /// socket surfaces as `Err` so the caller reconnects.
+    pub fn seat_heat(&self, seats: &[(u64, String)]) -> Result<Option<u64>, rust_socketio::Error> {
+        if seats.is_empty() {
+            return Ok(None);
+        }
+        // Add a fresh heat and learn its per-node slot ids (the `HeatNode` PKs `alter_heat` targets).
+        self.adapter.lock().unwrap().take_heat_slots();
+        self.client.emit("add_heat", Payload::Text(vec![]))?;
+        self.client
+            .emit("load_data", json!({ "load_types": ["heat_data"] }))?;
+        let Some((heat_id, node_to_slot)) = self.wait_for_heat_slots() else {
+            return Ok(None);
+        };
+
+        // Learn the current highest pilot id BEFORE creating any, so each `add_pilot` can be
+        // identified as "the new id strictly greater than the floor" rather than the bare max — RH
+        // also broadcasts `pilot_data` on an `alter_pilot` rename, so a stale broadcast carrying an
+        // *existing* (lower-or-equal) id must not be mistaken for the just-added pilot.
+        self.client
+            .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
+        // The current highest pilot id (0 if RH has no pilots yet); the next created pilot exceeds it.
+        let mut pilot_floor = self.wait_for_pilot_above(i64::MIN).unwrap_or(0);
+
+        let mut seated_any = false;
+        for (node_index, callsign) in seats {
+            let Some(&slot_id) = node_to_slot.get(&(*node_index as usize)) else {
+                // The freshly-added heat has no slot for this node index (more bound nodes than RH
+                // nodes) — skip it; RH won't record there, which is the correct degradation.
+                continue;
+            };
+            // Create a pilot and learn its id (the new id strictly above the running floor).
+            self.adapter.lock().unwrap().take_pilot_ids();
+            self.client.emit("add_pilot", Payload::Text(vec![]))?;
+            self.client
+                .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
+            let Some(pilot_id) = self.wait_for_pilot_above(pilot_floor) else {
+                continue;
+            };
+            pilot_floor = pilot_id;
+            // Name it with the GridFPV callsign so RH's own view + its staging log show the callsign.
+            self.client.emit(
+                "alter_pilot",
+                json!({ "pilot_id": pilot_id, "callsign": callsign }),
+            )?;
+            // Seat the pilot on the heat's node slot.
+            self.client.emit(
+                "alter_heat",
+                json!({ "heat": heat_id, "slot_id": slot_id, "pilot": pilot_id }),
+            )?;
+            seated_any = true;
+        }
+
+        // Only make the heat current (and claim it as savable + seated) if at least one bound pilot
+        // was actually assigned. If nothing seated — every node slot missing, or every `add_pilot`
+        // timed out — selecting this empty heat as current would make RH dismiss every crossing
+        // ("Pilot not defined") → zero laps, strictly worse than NOT selecting it. Returning `None`
+        // leaves the connection in practice mode (no current heat), where RH still records via its
+        // `current_heat is HEAT_ID_NONE` gate branch, and the finish path adds its own savable heat.
+        if !seated_any {
+            return Ok(None);
+        }
+        // Make the seated heat current so the seats take effect (and so it is the savable heat the
+        // finish-time dense pull reuses — no separate empty heat).
+        self.client
+            .emit("set_current_heat", json!({ "heat": heat_id }))?;
+        Ok(Some(heat_id as u64))
+    }
+
+    /// Wait (bounded) for a `heat_data` response after [`seat_heat`]'s `add_heat`, returning the
+    /// **freshest** heat (highest id) and its `node_index → slot_id` map — but only once that map is
+    /// **non-empty** (RH may broadcast a `heat_data` for a freshly-added heat before its `HeatNode`
+    /// rows carry a `node_index`; accepting an empty map would seat nobody yet still mark the heat
+    /// savable). `None` on timeout.
+    fn wait_for_heat_slots(&self) -> Option<(i64, std::collections::HashMap<usize, i64>)> {
+        let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
+        loop {
+            {
+                let mut a = self.adapter.lock().unwrap();
+                let slots = a.take_heat_slots();
+                // Pick the freshest heat (highest id) that actually carries node→slot mappings.
+                if let Some((&heat_id, node_to_slot)) = slots
+                    .iter()
+                    .filter(|(_, m)| !m.is_empty())
+                    .max_by_key(|(id, _)| **id)
+                {
+                    return Some((heat_id, node_to_slot.clone()));
+                }
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Wait (bounded) for a `pilot_data` response carrying a pilot id **strictly greater than**
+    /// `floor`, returning that id (the highest such) — used to identify the pilot a preceding
+    /// `add_pilot` just created. Passing `i64::MIN` returns the current highest id (the seating
+    /// floor). `None` on timeout (no id above `floor` arrived).
+    fn wait_for_pilot_above(&self, floor: i64) -> Option<i64> {
+        let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
+        loop {
+            {
+                let mut a = self.adapter.lock().unwrap();
+                let id = a
+                    .take_pilot_ids()
+                    .into_iter()
+                    .filter(|id| *id > floor)
+                    .max();
+                if let Some(id) = id {
+                    return Some(id);
+                }
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Whether the socket is still live (#105). The reserved `close`/`error` handlers flip this to
