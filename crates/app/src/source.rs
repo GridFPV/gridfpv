@@ -1184,6 +1184,7 @@ fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
             heat: h,
             lineup,
             frequencies,
+            label: None,
             ..
         } = s.event
         {
@@ -1752,6 +1753,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -1815,6 +1817,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -1877,6 +1880,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -1906,6 +1910,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -1960,6 +1965,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -2009,6 +2015,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -2223,6 +2230,7 @@ mod tests {
                     class: None,
                     round: Some(round.clone()),
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )
@@ -2430,6 +2438,7 @@ mod tests {
                     class: None,
                     round: None,
                     frequencies: vec![],
+                    label: None,
                 },
                 None,
             )

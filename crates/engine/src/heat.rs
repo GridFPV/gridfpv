@@ -657,6 +657,7 @@ mod tests {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         }
     }
 
@@ -727,6 +728,7 @@ mod tests {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             changed(HeatTransition::Staged),
             Event::HeatStateChanged {

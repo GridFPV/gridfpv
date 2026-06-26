@@ -41,7 +41,15 @@ round?: RoundId,
  * Per-pilot frequency assignment in raw MHz (e.g. `5800`). Empty when none is
  * assigned (a simulator, or the free-text path that does not assign channels).
  */
-frequencies?: Array<[CompetitorRef, number]>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "CurrentHeatSelected": { heat: HeatId, } } | { "HeatStarting": { 
+frequencies?: Array<[CompetitorRef, number]>, 
+/**
+ * An **optional human label** the RD typed when building this heat by hand. When
+ * present it is the heat's display name everywhere (overriding the derived
+ * "‹Round› Heat N" / tier convention); `None` for a generator-filled heat, which
+ * keeps the auto-name. Additive and default-absent, so a pre-existing log (or a
+ * generator heat) reads back as `None` and round-trips unchanged.
+ */
+label?: string, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "CurrentHeatSelected": { heat: HeatId, } } | { "HeatStarting": { 
 /**
  * The heat whose start procedure fired (it is in `Armed`).
  */

@@ -180,6 +180,7 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             None,
         )
@@ -430,6 +431,7 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
                 class: None,
                 round: None,
                 frequencies: vec![],
+                label: None,
             },
             None,
         )

@@ -42,6 +42,13 @@ round?: RoundId,
  */
 frequencies?: Array<[CompetitorRef, number]>, 
 /**
+ * The **optional human label** the RD typed when building this heat by hand, from the most
+ * recent `HeatScheduled`. When present the Heats/Live UI shows it as the heat's display name
+ * (overriding the derived "‹Round› Heat N" / tier convention); `None` for a generator-filled
+ * heat, which keeps the auto-name. Additive — defaults absent so older logs round-trip.
+ */
+label?: string, 
+/**
  * The heat's folded loop phase (its derived status: scheduled / running / final / …).
  */
 phase: HeatPhase, 

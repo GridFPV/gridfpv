@@ -19,6 +19,7 @@ const HEAT = 'q-1';
 const LINEUP = ['A', 'B'];
 const ROUND = 'r1';
 const CLASS = 'open';
+const LABEL = 'Featured Heat';
 
 let director: Director;
 
@@ -32,9 +33,9 @@ afterAll(async () => {
 
 describe('GET /heats serves the round-tagged scheduled heats', () => {
   it('listHeats returns a tagged HeatSummary with lineup and a derived status', async () => {
-    // Schedule a heat tagged with a round + class over the real control path.
+    // Schedule a heat tagged with a round + class + a custom label over the real control path.
     const ack = await rdControl(director.baseUrl, TOKEN, {
-      ScheduleHeat: { heat: HEAT, lineup: LINEUP, class: CLASS, round: ROUND }
+      ScheduleHeat: { heat: HEAT, lineup: LINEUP, class: CLASS, round: ROUND, label: LABEL }
     });
     expect(ack.ok).toBe(true);
 
@@ -45,6 +46,8 @@ describe('GET /heats serves the round-tagged scheduled heats', () => {
     expect(summary!.lineup).toEqual(LINEUP);
     expect(summary!.round).toBe(ROUND);
     expect(summary!.class).toBe(CLASS);
+    // The custom build-heat label round-trips on the wire (overrides the derived name in the UI).
+    expect(summary!.label).toBe(LABEL);
     // Freshly scheduled and on the timer: Scheduled phase, marked current.
     expect(summary!.phase).toBe('Scheduled');
     expect(summary!.is_current).toBe(true);

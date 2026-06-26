@@ -598,6 +598,7 @@ mod tests {
             class: None,
             round: None,
             frequencies: Vec::new(),
+            label: None,
         }
     }
 

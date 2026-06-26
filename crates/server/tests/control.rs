@@ -188,6 +188,7 @@ async fn post_command_drives_heat_loop_and_reaches_stream() {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         },
         &rd,
     )
@@ -229,6 +230,7 @@ async fn control_ws_acks_each_command_and_rejects_illegal() {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         },
     )
     .await;
@@ -295,6 +297,7 @@ async fn control_ws_survives_a_malformed_frame() {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         },
     )
     .await;
@@ -314,6 +317,7 @@ async fn control_post_requires_a_valid_rd_token() {
         class: None,
         round: None,
         frequencies: vec![],
+        label: None,
     };
 
     // No token → 401.
@@ -373,6 +377,7 @@ async fn control_ws_upgrade_requires_a_valid_rd_token() {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         },
     )
     .await;
@@ -396,6 +401,7 @@ async fn reads_are_open_and_a_join_token_authenticates_reads() {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         },
         &rd,
     )
@@ -440,6 +446,7 @@ async fn out_of_band_contract_version_is_told_to_refresh() {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         },
         &rd,
     )

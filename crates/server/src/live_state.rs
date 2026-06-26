@@ -558,6 +558,13 @@ pub struct HeatSummary {
     /// "—". Additive — defaults empty so older logs round-trip.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frequencies: Vec<(CompetitorRef, u16)>,
+    /// The **optional human label** the RD typed when building this heat by hand, from the most
+    /// recent `HeatScheduled`. When present the Heats/Live UI shows it as the heat's display name
+    /// (overriding the derived "‹Round› Heat N" / tier convention); `None` for a generator-filled
+    /// heat, which keeps the auto-name. Additive — defaults absent so older logs round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub label: Option<String>,
     /// The heat's folded loop phase (its derived status: scheduled / running / final / …).
     pub phase: HeatPhase,
     /// Whether this heat is the one currently on the timer (the live `current_heat`).
@@ -588,7 +595,7 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
     order
         .into_iter()
         .map(|heat| {
-            let (lineup, class, round, frequencies) = latest_schedule(events, &heat);
+            let (lineup, class, round, frequencies, label) = latest_schedule(events, &heat);
             let phase = heat_state(events, &heat)
                 .map(phase_of)
                 .unwrap_or(HeatPhase::Scheduled);
@@ -599,6 +606,7 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
                 class,
                 round,
                 frequencies,
+                label,
                 phase,
                 is_current,
             }
@@ -617,8 +625,9 @@ fn latest_schedule(
     Option<ClassId>,
     Option<RoundId>,
     Vec<(CompetitorRef, u16)>,
+    Option<String>,
 ) {
-    let mut out = (Vec::new(), None, None, Vec::new());
+    let mut out = (Vec::new(), None, None, Vec::new(), None);
     for event in events {
         if let Event::HeatScheduled {
             heat: h,
@@ -626,6 +635,7 @@ fn latest_schedule(
             class,
             round,
             frequencies,
+            label,
         } = event
         {
             if h == heat {
@@ -634,6 +644,7 @@ fn latest_schedule(
                     class.clone(),
                     round.clone(),
                     frequencies.clone(),
+                    label.clone(),
                 );
             }
         }
@@ -657,6 +668,7 @@ mod tests {
             class: None,
             round: None,
             frequencies: vec![],
+            label: None,
         }
     }
 
@@ -995,6 +1007,7 @@ mod tests {
             class: Some(ClassId(class.into())),
             round: Some(RoundId(round.into())),
             frequencies: vec![],
+            label: None,
         }
     }
 
@@ -1381,6 +1394,7 @@ mod tests {
                 (CompetitorRef("A".into()), 5658),
                 (CompetitorRef("B".into()), 5800),
             ],
+            label: None,
         };
         let summaries = heat_summaries(&[assigned, scheduled("q-2", &["C"])]);
         assert_eq!(

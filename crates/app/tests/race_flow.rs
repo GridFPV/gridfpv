@@ -866,6 +866,7 @@ async fn static_channel_balanced_qual_flow_e2e() {
         .filter_map(|e| match e {
             Event::HeatScheduled {
                 frequencies,
+                label: None,
                 round: Some(r),
                 ..
             } if *r == round.id => Some(frequencies.iter().map(|(_, ch)| *ch)),

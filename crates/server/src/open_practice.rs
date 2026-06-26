@@ -73,6 +73,7 @@ impl ActivePractice {
             class: None,
             round: None,
             frequencies: Vec::new(),
+            label: None,
         });
         // A `Running` base so the lap fold treats the passes as in-heat laps. This is *only* for lap
         // derivation; the phase served to clients is always the real log's.
@@ -262,6 +263,7 @@ mod tests {
             class: None,
             round: None,
             frequencies: Vec::new(),
+            label: None,
         }];
         for t in transitions {
             events.push(Event::HeatStateChanged {
