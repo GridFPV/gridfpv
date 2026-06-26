@@ -414,12 +414,12 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   await expect(filledRow.getByText(BEE)).toBeVisible();
 
   // ── Build a heat by hand from the round's eligible members ────────────────────────────────────
-  const HAND_HEAT = `e2e-hand-${SUFFIX}`;
+  // No id is typed — the heat id is auto-generated (round-scoped + collision-safe); the RD only
+  // picks a round and a lineup.
   await page.getByRole('button', { name: '+ Build heat' }).click();
   const buildForm = page.getByRole('form', { name: 'Build heat' });
   await expect(buildForm).toBeVisible();
   await buildForm.getByLabel('Build round').selectOption({ label: ROUND_LABEL });
-  await buildForm.getByLabel('Build heat id').fill(HAND_HEAT);
   await buildForm.getByLabel(`Select ${ACE}`).check();
   await buildForm.getByLabel(`Select ${BEE}`).check();
   await page.getByRole('button', { name: 'Schedule heat' }).click();
@@ -428,7 +428,6 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   // The hand-built heat now lists under the round too — named by its position in the round (the
   // filled heat is "<round> Heat 1", this hand-built one is "<round> Heat 2"), not its raw id.
   await expect(heatRound.getByText(`${ROUND_LABEL} Heat 2`)).toBeVisible({ timeout: 15_000 });
-  await expect(heatRound.getByText(HAND_HEAT)).toHaveCount(0);
 
   // ── Clean up the shared Director's event back to empty. ───────────────────────────────────────
   await page.request.delete(`${ev}/rounds/${round.id}`);
