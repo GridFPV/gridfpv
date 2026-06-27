@@ -192,7 +192,7 @@ flowchart LR
         <tr><td><strong>save-then-pull</strong> dense RSSI (<code>save_laps</code>&rarr;<code>load_data</code>&rarr;<code>get_pilotrace</code>)</td><td><code>interface.seats[i].history_values</code> read live</td><td>S2</td></tr>
         <tr><td><strong><code>alter_race_format</code> staging-zero</strong> hack</td><td>plugin owns the format + calls <code>race.stage()</code></td><td>S3</td></tr>
         <tr><td><strong><code>add_pilot</code>/<code>alter_heat</code> seating dance</strong></td><td><code>rhapi.db</code> + <code>race.slots</code> in-process</td><td>S3</td></tr>
-        <tr><td><strong>un-zeroable ~0.9&nbsp;s prestage</strong></td><td>plugin controls start via <code>stage()</code>/<code>schedule()</code></td><td>S3</td></tr>
+        <tr><td><strong>un-zeroable ~0.9&nbsp;s prestage</strong> (<code>RACE_START_DELAY_EXTRA_SECS</code>)</td><td>plugin <strong>zeroes it via <code>rhapi.config</code></strong> at load — shipped independently of the control rewrite, so <code>stage_race</code> reaches RACING immediately</td><td>done</td></tr>
         <tr><td>per-pass RSSI only via <code>node_data</code></td><td>full <code>current_rssi</code>/<code>pass_peak_rssi</code>/levels every heartbeat</td><td>S2</td></tr>
         <tr><td><strong>no signal write-back</strong> (blocks #3 recalc)</td><td>re-detection over the stored dense trace + <code>frequencyset_alter</code> calibrate</td><td>S4</td></tr>
       </tbody>
