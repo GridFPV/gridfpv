@@ -37,11 +37,28 @@
     onclose?.();
   }
 
+  /**
+   * Backdrop click-to-close, with a **buffer** so a near-miss while reaching for the form doesn't
+   * dismiss it. A click whose target is the dialog element itself (not its inner panel) is the
+   * backdrop region — but we only close when it lands *well outside* the panel: clicks within
+   * {@link BACKDROP_BUFFER_PX} of the panel edge are treated as intended-for-the-dialog and ignored.
+   */
+  const BACKDROP_BUFFER_PX = 32;
   function onBackdrop(e: MouseEvent) {
     if (!dismissable) return;
-    // A click whose target is the dialog element itself (not its inner panel) is
-    // the backdrop region.
-    if (e.target === dialog) close();
+    if (e.target !== dialog) return; // clicked inside the panel / its content
+    const panel = dialog?.querySelector('.gf-dialog-panel');
+    if (panel) {
+      const r = panel.getBoundingClientRect();
+      const b = BACKDROP_BUFFER_PX;
+      const nearPanel =
+        e.clientX >= r.left - b &&
+        e.clientX <= r.right + b &&
+        e.clientY >= r.top - b &&
+        e.clientY <= r.bottom + b;
+      if (nearPanel) return; // within the buffer — a near-miss, don't close
+    }
+    close();
   }
 </script>
 
