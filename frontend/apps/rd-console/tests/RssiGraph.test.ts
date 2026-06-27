@@ -81,10 +81,11 @@ describe('RssiGraph trace labels', () => {
  * falls outside the captured sample window (the dense trace can be shorter than the race).
  */
 describe('RssiGraph thresholds + lap coverage', () => {
-  it('shades the enter/exit hysteresis band when both levels are present', () => {
+  it('shades a detection window per crossing (enter→exit) the engine saw', () => {
     render(RssiGraph, { trace: signalTrace, laps: lapList, selected: null, onselect: () => {} });
     const svg = screen.getByLabelText(/RSSI trace for ALICE/);
-    expect(svg.querySelector('.hysteresis')).not.toBeNull();
+    // The fixture has two peaks crossing enter=110 then dropping below exit=95 → two windows.
+    expect(svg.querySelectorAll('.crossing')).toHaveLength(2);
   });
 
   it('renders a marker for every lap, including one past the captured sample window', () => {
