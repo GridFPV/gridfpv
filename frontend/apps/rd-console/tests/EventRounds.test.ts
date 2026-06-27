@@ -1331,7 +1331,7 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
   const SEMIS: RoundDef = {
     ...QUAL,
     id: 'semis',
-    label: 'Semifinals',
+    label: 'Pro — Semifinals',
     format: 'single_elim',
     seeding: { FromRanking: { source_rounds: ['q'], top_n: 4 } }
   };
@@ -1361,7 +1361,7 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
     render(EventRounds, { session });
 
     // The bracket container groups the chain (header + tree + the nested level cards).
-    const panel = (await screen.findByLabelText(/Bracket — Semifinals/i)) as HTMLElement;
+    const panel = (await screen.findByLabelText(/Bracket — Pro/i)) as HTMLElement;
     // The Semifinals level shows (both as the tree column and the nested level card — at least once).
     expect(within(panel).getAllByText('Semifinals').length).toBeGreaterThan(0);
   });
@@ -1372,7 +1372,7 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
 
     // The bracket container renders, but a bracket level never offers "Advance to bracket" — that is a
     // qualifying-round action, and bracket levels are built as a full chain up front by the builder.
-    await screen.findByLabelText(/Bracket — Semifinals/i);
+    await screen.findByLabelText(/Bracket — Pro/i);
     expect(screen.queryByRole('button', { name: 'Advance to bracket' })).toBeNull();
   });
 });

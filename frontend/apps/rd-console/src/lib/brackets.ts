@@ -129,10 +129,28 @@ export function buildBracketView(
       }))
     }));
 
-    return { name: level.round.label, matches };
+    // The tree column shows just the level name (e.g. "Quarterfinals"), stripping the bracket-name
+    // prefix that the level's round label carries ("‹Bracket› — ‹Level›") — the container header
+    // already shows the bracket name.
+    return { name: splitBracketLabel(level.round.label).level, matches };
   });
 
   return { rounds: bracketRounds };
+}
+
+/**
+ * Split a bracket level's round label into its **bracket name** + **level name**. The builder labels
+ * each level `"‹Bracket name› — ‹Level›"` (e.g. `"Pro — Quarterfinals"`) so multiple brackets in one
+ * event are distinguishable; this recovers the parts for display (the container header shows `name`,
+ * the tree column shows `level`). A label with no ` — ` separator has no prefix — the whole label is
+ * the level name. Splits on the **last** separator, so a bracket name that itself contains ` — `
+ * survives.
+ */
+export function splitBracketLabel(label: string): { name: string; level: string } {
+  const sep = ' — ';
+  const i = label.lastIndexOf(sep);
+  if (i < 0) return { name: '', level: label };
+  return { name: label.slice(0, i), level: label.slice(i + sep.length) };
 }
 
 /**
