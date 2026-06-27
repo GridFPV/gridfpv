@@ -75,7 +75,8 @@
     isBracketLevel,
     isBracketRoot,
     isLevelComplete,
-    nextLevelLabel
+    nextLevelLabel,
+    splitBracketLabel
   } from '../lib/brackets.js';
   import { advanceLevelReq, advanceRoundReq, bracketSizeOptions } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
@@ -337,6 +338,7 @@
   // level fills as its source finalizes); when the source is already done, level 1 fills immediately.
   let advanceOpen = $state(false);
   let advanceModalRound = $state<RoundDef | undefined>(undefined);
+  let advanceName = $state('');
   let advanceSize = $state(8);
   let advanceFinalKind = $state<'single' | 'chase'>('single');
   let advanceFinalWins = $state(2);
@@ -351,6 +353,9 @@
 
   function openAdvance(round: RoundDef) {
     advanceModalRound = round;
+    // Default the bracket name to the round's class (the common per-class bracket); the RD can rename
+    // it — multiple brackets per event are distinguished by this name.
+    advanceName = round.classes.length > 0 ? className(round.classes[0]) : 'Bracket';
     const options = bracketSizeOptions(roundFieldSize(round));
     advanceSize = options.length > 0 ? options[options.length - 1] : 0; // largest that fits
     advanceFinalKind = 'single';
@@ -378,12 +383,15 @@
     try {
       const levels = Math.round(Math.log2(size)); // size is a power of two
       const useChase = advanceFinalKind === 'chase';
+      // Each level is named "‹Bracket name› — ‹Level›" so multiple brackets in one event stay
+      // distinct (the container header shows the name, the tree shows the level).
+      const name = advanceName.trim() || 'Bracket';
       let firstLevelId: RoundId | undefined;
       let prev: RoundDef = source;
       for (let i = 1; i <= levels; i++) {
         const heatCount = size / 2 ** i; // heats this level holds (the final = 1)
         const isFinal = i === levels;
-        const label = nextLevelLabel(source.label, heatCount, i - 1);
+        const label = `${name} — ${nextLevelLabel(source.label, heatCount, i - 1)}`;
         const final =
           isFinal && useChase
             ? { format: 'chase_the_ace', winsToWin: advanceFinalWins }
@@ -410,7 +418,7 @@
       }
       await refreshHeats();
       toast.success(
-        `Bracket built from ${source.label} — ${size} seeds, ${levels} ${levels === 1 ? 'level' : 'levels'}.`
+        `“${name}” bracket built from ${source.label} — ${size} seeds, ${levels} ${levels === 1 ? 'level' : 'levels'}.`
       );
       advanceOpen = false;
       advanceModalRound = undefined;
@@ -1331,10 +1339,11 @@
           {#if group.kind === 'bracket'}
             {@const view = bracketViewFor(group.root)}
             {@const champ = championByRoot[group.root.id]}
-            <section class="bracket-container" aria-label={`Bracket — ${group.root.label}`}>
+            {@const bracketName = splitBracketLabel(group.root.label).name || 'Bracket'}
+            <section class="bracket-container" aria-label={`Bracket — ${bracketName}`}>
               <header class="bracket-header">
                 <div class="bracket-headline">
-                  <h3 class="bracket-title">Bracket</h3>
+                  <h3 class="bracket-title">{bracketName}</h3>
                   {#if champ}
                     <span class="bracket-champion">Champion · {callsign(champ)}</span>
                   {/if}
@@ -1786,6 +1795,13 @@
           bracket.
         </p>
       {:else}
+        <Field
+          label="Bracket name"
+          required
+          hint="Names every level (“‹name› — Quarterfinals”, …) so multiple brackets in one event stay distinct."
+        >
+          <Input bind:value={advanceName} aria-label="Bracket name" placeholder="e.g. Pro" />
+        </Field>
         <div class="form-grid">
           <Field
             label="Bracket size"
@@ -1828,7 +1844,7 @@
         variant="primary"
         onclick={submitAdvance}
         loading={advancing}
-        disabled={advanceSizeOptions.length === 0}
+        disabled={advanceSizeOptions.length === 0 || advanceName.trim().length === 0}
       >
         Build bracket
       </Button>

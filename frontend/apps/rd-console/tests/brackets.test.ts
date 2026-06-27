@@ -7,7 +7,8 @@ import {
   heatWinnersSource,
   isBracketRoot,
   isLevelComplete,
-  nextLevelLabel
+  nextLevelLabel,
+  splitBracketLabel
 } from '../src/lib/brackets.js';
 
 /** A minimal RoundDef builder — only the fields the bracket-chain logic reads matter. */
@@ -152,6 +153,19 @@ describe('groupRoundsForDisplay — folds a bracket chain into one group', () =>
       'q',
       'final'
     ]);
+  });
+});
+
+describe('splitBracketLabel — bracket name + level name', () => {
+  it('splits "‹name› — ‹level›" on the last separator', () => {
+    expect(splitBracketLabel('Pro — Quarterfinals')).toEqual({
+      name: 'Pro',
+      level: 'Quarterfinals'
+    });
+    // A bracket name that itself contains the separator survives (split on the LAST one).
+    expect(splitBracketLabel('A — B — Final')).toEqual({ name: 'A — B', level: 'Final' });
+    // No separator → no prefix; the whole label is the level.
+    expect(splitBracketLabel('Final')).toEqual({ name: '', level: 'Final' });
   });
 });
 
