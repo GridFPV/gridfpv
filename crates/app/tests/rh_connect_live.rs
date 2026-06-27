@@ -368,11 +368,23 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
         .competitor(&pilot_key)
         .map(|t| t.samples.len())
         .expect("dense trace for the lineup pilot");
-    assert!(
-        dense_samples > coarse_samples,
-        "the dense history must supersede the coarse stream with MORE samples: dense={dense_samples} \
-         coarse={coarse_samples}"
-    );
+    // S2 split: with the GridFPV plugin (the path `cargo xtask live` mounts) the dense history is
+    // pushed LIVE over `gridfpv_signal` and supersedes the coarse stream *during* the race — the
+    // post-race pull is suppressed, so the mid-race "coarse" baseline is already the dense trace and
+    // `dense == coarse` is expected. Without the plugin (stock RH fallback, deleted in S3) the
+    // DONE-edge save-then-pull yields strictly more samples than the coarse stream.
+    if std::env::var_os("GRIDFPV_RH_PLUGIN").is_some() {
+        assert!(
+            dense_samples >= 1,
+            "the live plugin must deliver a dense SignalHistory trace; got {dense_samples}"
+        );
+    } else {
+        assert!(
+            dense_samples > coarse_samples,
+            "the dense history must supersede the coarse stream with MORE samples: \
+             dense={dense_samples} coarse={coarse_samples}"
+        );
+    }
     eprintln!(
         "app marshaling path-2 (production flow): coarse stream = {coarse_samples} samples, dense \
          history = {dense_samples} samples (full-fidelity upgrade activated by the normal heat loop)"

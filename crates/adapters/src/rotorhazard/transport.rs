@@ -38,8 +38,9 @@ use rust_socketio::{ClientBuilder, Payload, RawClient};
 use serde_json::json;
 
 use super::{
-    Raw, RawCurrentLaps, RawEnterExitLevels, RawHeatData, RawMarshalData, RawNodeData,
-    RawPassRecord, RawPilotData, RawRaceDetails, RawRaceList, RawRaceStatus, RotorHazardAdapter,
+    Raw, RawCurrentLaps, RawEnterExitLevels, RawGridSignal, RawHeatData, RawMarshalData,
+    RawNodeData, RawPassRecord, RawPilotData, RawRaceDetails, RawRaceList, RawRaceStatus,
+    RotorHazardAdapter,
 };
 use crate::Adapter;
 use gridfpv_events::Event;
@@ -85,6 +86,10 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
         "pilot_data" => serde_json::from_value::<RawPilotData>(value)
             .ok()
             .map(Raw::PilotData),
+        // The GridFPV plugin's live signal push (D16, Slice 2). Absent on a stock RH.
+        "gridfpv_signal" => serde_json::from_value::<RawGridSignal>(value)
+            .ok()
+            .map(Raw::GridSignal),
         _ => None,
     }
 }
@@ -387,6 +392,18 @@ impl RotorHazardConnection {
                 "pilot_data",
                 handler(
                     "pilot_data",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                    current_format.clone(),
+                ),
+            )
+            // The GridFPV plugin's live signal push (D16, S2): folds straight through the same
+            // translator as the RH-native signal events (→ SignalThresholds/SignalHistory).
+            .on(
+                "gridfpv_signal",
+                handler(
+                    "gridfpv_signal",
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),
