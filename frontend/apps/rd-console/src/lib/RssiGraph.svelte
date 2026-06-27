@@ -84,11 +84,21 @@
     return laps?.competitors.find((c) => c.competitor.competitor === ref)?.laps ?? [];
   }
 
-  /** A trace's source-clock span `[from, from + (n-1)·period]`; falls back to a unit span. */
-  function spanOf(t: CompetitorTrace): { from: number; to: number } {
-    const from = t.from ?? 0;
+  /**
+   * A trace's plotted source-clock span. Starts at the sample window `[from, from + (n-1)·period]`
+   * but is **widened to include every lap's pass time**, so a lap recorded before the first captured
+   * sample or after the last (the dense trace can be shorter than the race) still lands inside the
+   * plot and gets a marker — "show all the current laps". Falls back to a unit span.
+   */
+  function spanOf(t: CompetitorTrace, laps: Lap[] = []): { from: number; to: number } {
+    const sampleFrom = t.from ?? 0;
     const n = t.samples.length;
-    const to = n > 1 ? from + (n - 1) * t.period_micros : from + 1;
+    let from = sampleFrom;
+    let to = n > 1 ? sampleFrom + (n - 1) * t.period_micros : sampleFrom + 1;
+    for (const lap of laps) {
+      if (lap.at < from) from = lap.at;
+      if (lap.at > to) to = lap.at;
+    }
     return { from, to };
   }
 
@@ -219,6 +229,7 @@
     <span class="swatch sample"></span> Signal (streaming cadence)
     <span class="swatch enter"></span> Enter
     <span class="swatch exit"></span> Exit
+    <span class="swatch band"></span> Enter/exit band
     <span class="swatch marker"></span> Lap pass
     <span class="cadence-note"
       >Streaming-cadence trace — one sample per timer emit, not RotorHazard's dense marshal history.</span
@@ -227,9 +238,9 @@
 
   {#each trace.competitors as ct (ct.competitor.adapter + '/' + ct.competitor.competitor)}
     {@const ref = ct.competitor.competitor}
-    {@const span = spanOf(ct)}
-    {@const range = valueRange(ct)}
     {@const compLaps = lapsFor(ref)}
+    {@const span = spanOf(ct, compLaps)}
+    {@const range = valueRange(ct)}
     {@const who = nameFor(ref)}
     <figure class="trace" aria-label={`RSSI for ${who}`}>
       <figcaption>
@@ -262,6 +273,21 @@
         >
           <!-- Plot frame -->
           <rect class="frame" x={PAD_L} y={PAD_T} width={plotW} height={plotH} fill="none" />
+
+          <!-- Enter/exit hysteresis band: the shaded zone between the two detection levels the timer
+               crosses to register a pass. Drawn behind the signal so the trace reads on top; only when
+               we actually have both levels (so a missing band visibly means "no thresholds captured"). -->
+          {#if ct.enter != null && ct.exit != null}
+            {@const ye = yOf(ct.enter, range)}
+            {@const yx = yOf(ct.exit, range)}
+            <rect
+              class="hysteresis"
+              x={PAD_L}
+              y={Math.min(ye, yx)}
+              width={plotW}
+              height={Math.abs(yx - ye)}
+            />
+          {/if}
 
           <!-- Threshold lines (horizontal) -->
           {#if ct.enter != null}
@@ -380,6 +406,12 @@
   .swatch.exit {
     background: var(--gf-danger);
   }
+  .swatch.band {
+    /* A taller swatch so the translucent fill reads as an area, not a line. */
+    height: 0.7rem;
+    background: rgba(120, 170, 255, 0.18);
+    border: 1px solid rgba(120, 170, 255, 0.4);
+  }
   .swatch.marker {
     background: var(--gf-text-secondary);
   }
@@ -429,6 +461,11 @@
   .frame {
     stroke: rgba(255, 255, 255, 0.12);
     stroke-width: 1;
+  }
+  .hysteresis {
+    /* The enter↔exit band — a light wash so it highlights the detection zone without
+       competing with the signal trace or the threshold lines drawn over it. */
+    fill: rgba(120, 170, 255, 0.12);
   }
   .signal {
     fill: none;
