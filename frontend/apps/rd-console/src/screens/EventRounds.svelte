@@ -71,6 +71,7 @@
   import {
     bracketChainRounds,
     buildBracketView,
+    groupRoundsForDisplay,
     isBracketRoot,
     isLevelComplete,
     nextLevelLabel
@@ -475,6 +476,22 @@
   // their heats, winners inferred from the next level's lineups (the final's from the champion).
   function bracketViewFor(root: RoundDef): Bracket {
     return buildBracketView(root, rounds, heats, callsign, championByRoot[root.id]);
+  }
+
+  // The bracket container's sub-line: where it was seeded from + the cut size + how many levels.
+  // Resolves the source round to its friendly label (never the raw id) via the rounds list.
+  function bracketSubtitle(root: RoundDef): string {
+    const seed = root.seeding;
+    const parts: string[] = [];
+    if (typeof seed === 'object' && 'FromRanking' in seed) {
+      const srcId = seed.FromRanking.source_rounds[0];
+      const src = rounds.find((r) => r.id === srcId);
+      parts.push(src ? `from ${src.label}` : 'seeded from a ranking');
+      parts.push(`top ${seed.FromRanking.top_n}`);
+    }
+    const levels = bracketChainRounds(root, rounds).length;
+    parts.push(`${levels} ${levels === 1 ? 'level' : 'levels'}`);
+    return parts.join(' · ');
   }
 
   // --- Manual heat build (replaces the retired NewHeat free-text form) ---------------------------
@@ -1121,7 +1138,7 @@
       </p>
     {:else}
       <div class="heat-rounds">
-        {#each rounds as round (round.id)}
+        {#snippet roundCard(round: RoundDef)}
           {@const heatCount = heatsByRound(round.id).length}
           {@const rc = collapse(`round:${round.id}`, !roundFinished(round.id))}
           <section class="heat-round" aria-label={`Heats for ${round.label}`}>
@@ -1194,21 +1211,6 @@
               {/snippet}
 
               <div class="heat-round-body">
-                <!-- Bracket chain view (#217, decisions D13): a single-elim bracket is a chain of
-                     level-rounds. Render the whole chain as one BracketTree on its FIRST level (the
-                     root), columns left-to-right (e.g. Quarterfinals → Semifinals → Final), each
-                     heat's competitors + the advancing seat. Later levels show only their own heat
-                     rows below — their bracket context lives here. -->
-                {#if isBracketChainRoot(round)}
-                  {@const view = bracketViewFor(round)}
-                  {#if view.rounds.length > 0}
-                    <div class="bracket-view" aria-label={`Bracket — ${round.label}`}>
-                      <h4 class="standings-title">Bracket</h4>
-                      <BracketTree bracket={view} />
-                    </div>
-                  {/if}
-                {/if}
-
                 {#if standingsRound === round.id}
                   {@const rHeats = heatsByRound(round.id)}
                   {@const finalizedCount = rHeats.filter((h) => h.phase === 'Final').length}
@@ -1362,6 +1364,38 @@
               </div>
             </Collapsible>
           </section>
+        {/snippet}
+
+        <!-- Group the rounds for display: a single-elim bracket's level-rounds fold into ONE Bracket
+             container (header + the whole-chain BracketTree + the level rounds nested as their own
+             cards); every other round renders standalone. Each level stays a first-class round
+             (run / advance / edit) inside the container. -->
+        {#each groupRoundsForDisplay(rounds) as group (group.kind === 'bracket' ? group.root.id : group.round.id)}
+          {#if group.kind === 'bracket'}
+            {@const view = bracketViewFor(group.root)}
+            {@const champ = championByRoot[group.root.id]}
+            <section class="bracket-container" aria-label={`Bracket — ${group.root.label}`}>
+              <header class="bracket-header">
+                <div class="bracket-headline">
+                  <h3 class="bracket-title">Bracket</h3>
+                  {#if champ}
+                    <span class="bracket-champion">🏆 Champion · {callsign(champ)}</span>
+                  {/if}
+                </div>
+                <p class="bracket-sub">{bracketSubtitle(group.root)}</p>
+              </header>
+              {#if view.rounds.length > 0}
+                <div class="bracket-view"><BracketTree bracket={view} /></div>
+              {/if}
+              <div class="bracket-levels">
+                {#each group.levels as level (level.id)}
+                  {@render roundCard(level)}
+                {/each}
+              </div>
+            </section>
+          {:else}
+            {@render roundCard(group.round)}
+          {/if}
         {/each}
       </div>
     {/if}
@@ -2014,6 +2048,52 @@
   .heat-round {
     display: flex;
     flex-direction: column;
+  }
+  /* Bracket container (#31): groups a single-elim chain's level-rounds into one unit — header +
+     the whole-chain BracketTree + the nested level cards down a rail, so the bracket reads as one
+     thing on the Rounds stage instead of three loose rounds. */
+  .bracket-container {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface);
+  }
+  .bracket-header {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-1);
+  }
+  .bracket-headline {
+    display: flex;
+    align-items: baseline;
+    gap: var(--gf-space-3);
+    flex-wrap: wrap;
+  }
+  .bracket-title {
+    margin: 0;
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .bracket-champion {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-accent);
+  }
+  .bracket-sub {
+    margin: 0;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  /* The level cards sit under the tree on a left rail, so they read as "inside" the bracket. */
+  .bracket-levels {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+    padding-left: var(--gf-space-3);
+    border-left: 2px solid var(--gf-border-subtle);
   }
   .heat-count-chip {
     font-size: var(--gf-font-size-sm);

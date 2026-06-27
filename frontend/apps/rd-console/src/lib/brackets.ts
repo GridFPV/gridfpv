@@ -162,3 +162,46 @@ export function nextLevelLabel(
         : `${rootLabel} — Round ${levelIndex + 1}`;
   }
 }
+
+/** One entry in the Rounds-stage display list: a whole bracket chain, or a standalone round. */
+export type RoundGroup =
+  | { kind: 'bracket'; root: RoundDef; levels: RoundDef[] }
+  | { kind: 'round'; round: RoundDef };
+
+/**
+ * Group the event's `rounds` for display: a single-elim bracket's level rounds collapse into ONE
+ * `bracket` group (so the Rounds stage shows the chain as a container, not three loose rounds),
+ * every other round stays a standalone `round`. Order is preserved by each chain's **root** position
+ * — the bracket group appears where its first level sits in `rounds`, and the chain's later levels
+ * are folded into it (never emitted on their own).
+ *
+ * A bracket level that names a `FromHeatWinners` source which isn't actually a root chain in this
+ * event (an orphan — its root was deleted) falls back to a standalone `round` so it never vanishes.
+ * Keeps the level rounds first-class (each is still its own `RoundDef`); this is a pure view grouping.
+ */
+export function groupRoundsForDisplay(rounds: RoundDef[]): RoundGroup[] {
+  // Every round reachable from some root's chain — these are folded into their bracket group and are
+  // never emitted standalone (the root carries them).
+  const chained = new Set<RoundId>();
+  for (const r of rounds) {
+    if (isBracketRoot(r)) for (const c of bracketChainRounds(r, rounds)) chained.add(c.id);
+  }
+
+  const consumed = new Set<RoundId>();
+  const groups: RoundGroup[] = [];
+  for (const round of rounds) {
+    if (consumed.has(round.id)) continue;
+    if (isBracketRoot(round)) {
+      const levels = bracketChainRounds(round, rounds);
+      levels.forEach((l) => consumed.add(l.id));
+      groups.push({ kind: 'bracket', root: round, levels });
+    } else if (chained.has(round.id)) {
+      // A non-root level its root chain already folds in — skip; the root group emits it.
+      continue;
+    } else {
+      consumed.add(round.id);
+      groups.push({ kind: 'round', round });
+    }
+  }
+  return groups;
+}

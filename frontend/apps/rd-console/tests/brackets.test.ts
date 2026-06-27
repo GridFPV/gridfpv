@@ -3,6 +3,7 @@ import type { HeatSummary, RoundDef } from '@gridfpv/types';
 import {
   bracketChainRounds,
   buildBracketView,
+  groupRoundsForDisplay,
   heatWinnersSource,
   isBracketRoot,
   isLevelComplete,
@@ -120,6 +121,37 @@ describe('buildBracketView — stitches the level chain, infers winners', () => 
     const view = buildBracketView(SEMIS, [QUAL, FINAL, SEMIS], heats, (r) => r);
     const final = view.rounds[1].matches[0];
     expect(final.slots.every((s) => !s.winner)).toBe(true);
+  });
+});
+
+describe('groupRoundsForDisplay — folds a bracket chain into one group', () => {
+  it('emits standalone rounds and one bracket group (root + folded levels) in order', () => {
+    const groups = groupRoundsForDisplay([QUAL, SEMIS, FINAL]);
+    expect(groups.map((g) => (g.kind === 'bracket' ? `bracket:${g.root.id}` : g.round.id))).toEqual(
+      ['q', 'bracket:semis']
+    );
+    const bracket = groups.find((g) => g.kind === 'bracket');
+    expect(bracket?.kind === 'bracket' && bracket.levels.map((r) => r.id)).toEqual([
+      'semis',
+      'final'
+    ]);
+  });
+
+  it('never emits a chained level on its own (the root carries it)', () => {
+    const ids = groupRoundsForDisplay([QUAL, SEMIS, FINAL]).flatMap((g) =>
+      g.kind === 'round' ? [g.round.id] : []
+    );
+    expect(ids).not.toContain('final');
+    expect(ids).not.toContain('semis');
+  });
+
+  it('keeps a non-bracket round standalone, and falls an orphan level back to standalone', () => {
+    // FINAL names source_round 'semis', but no root chain in this list reaches it → standalone.
+    const groups = groupRoundsForDisplay([QUAL, FINAL]);
+    expect(groups.map((g) => (g.kind === 'bracket' ? 'bracket' : g.round.id))).toEqual([
+      'q',
+      'final'
+    ]);
   });
 });
 
