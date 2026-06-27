@@ -259,11 +259,18 @@
   // single-steps (`'Next'`). The engine acks ok whether it appended heat(s) OR reported the round
   // complete / its outstanding heat unscored, so compare the round's heat count before and after to
   // tell the RD what happened, then refetch once after the (possibly batched) fill.
+  // Open-ended round: "Heats per pilot" set to 0 (Time Trials / Round Robin). Instead of a fixed
+  // set, the round generates the next heat on demand forever — so it single-steps ('Next') like
+  // Open Practice rather than generating all at once (which would never terminate).
+  function isOpenEndedRound(round: RoundDef): boolean {
+    return (round.params?.rounds ?? '') === '0';
+  }
+
   async function fillRound(round: RoundDef) {
     if (fillingRound) return;
     fillingRound = round.id;
     const before = heatsByRound(round.id).length;
-    const generateAll = isDeterministicRound(round);
+    const generateAll = isDeterministicRound(round) && !isOpenEndedRound(round);
     try {
       const ack = await session.fillRound(round.id, generateAll ? 'All' : 'Next');
       if (!ack.ok) return; // The error banner / toast surfaces session.lastCommandError.
@@ -1164,7 +1171,11 @@
                     loading={fillingRound === round.id}
                     disabled={fillingRound !== undefined}
                   >
-                    {isDeterministicRound(round) ? 'Generate heats' : 'Add next heat'}
+                    {isOpenEndedRound(round)
+                      ? 'Generate next heat'
+                      : isDeterministicRound(round)
+                        ? 'Generate heats'
+                        : 'Add next heat'}
                   </Button>
                 {/if}
               {/snippet}
@@ -1270,7 +1281,11 @@
                   {:else}
                     <p class="empty small" role="status">
                       No heats yet — <strong
-                        >{isDeterministicRound(round) ? 'Generate heats' : 'Add next heat'}</strong
+                        >{isOpenEndedRound(round)
+                          ? 'Generate next heat'
+                          : isDeterministicRound(round)
+                            ? 'Generate heats'
+                            : 'Add next heat'}</strong
                       > to draw from this round’s field.
                     </p>
                   {/if}
@@ -1528,7 +1543,12 @@
           <div class="params">
             {#each formatParams as schema (schema.key)}
               {@const value = paramValues[schema.key] ?? ''}
-              <Field label={schema.label}>
+              <Field
+                label={schema.label}
+                hint={schema.key === 'rounds'
+                  ? '0 = open-ended: generate the next heat on demand until you stop.'
+                  : undefined}
+              >
                 {#if schema.kind === 'bool'}
                   <label class="param-toggle">
                     <input
@@ -1557,6 +1577,7 @@
                 {:else}
                   <Input
                     type="number"
+                    min={schema.key === 'rounds' ? '0' : undefined}
                     {value}
                     aria-label={`${schema.label} value`}
                     oninput={(e: Event) =>

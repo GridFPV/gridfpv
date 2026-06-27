@@ -1134,13 +1134,27 @@ fn fill_round_static(
 
     // How many times the whole field flies — the format's round count (e.g. `timed_qual` runs
     // `rounds` rounds). Channel-balanced heats are built per format-round so every member flies
-    // each round, across the configured round count.
+    // each round, across the configured round count. `0` = open-ended (generate the next heat on
+    // demand forever; see `static_round_count`).
     let format_rounds = static_round_count(round);
+    let already: Vec<HeatId> = scheduled_round_heats(events, &round.id);
 
-    let plans = channel_balanced_plan(round, &members, node_cap, format_rounds);
+    // For the open-ended case, plan just enough of the (infinite) channel-balanced rotation to yield
+    // one not-yet-scheduled heat: one extra format-round beyond what's already been generated. The
+    // rotation + ids are deterministic, so this always surfaces the next heat and never completes —
+    // the RD ends the round by simply not asking for more.
+    let rounds_to_plan = if format_rounds == 0 {
+        let per_round = channel_balanced_plan(round, &members, node_cap, 1)
+            .len()
+            .max(1);
+        already.len() / per_round + 1
+    } else {
+        format_rounds
+    };
+
+    let plans = channel_balanced_plan(round, &members, node_cap, rounds_to_plan);
 
     // One heat per FillRound: emit the first plan not already scheduled (dedup like per-heat).
-    let already: Vec<HeatId> = scheduled_round_heats(events, &round.id);
     let next = plans.into_iter().find(|(heat, _)| !already.contains(heat));
     match next {
         Some((heat, assignment)) => {
@@ -1151,7 +1165,8 @@ fn fill_round_static(
                 frequencies: Some(assignment),
             })
         }
-        // Every planned channel-balanced heat is already scheduled → the static round is complete.
+        // Fixed-count: every planned channel-balanced heat is already scheduled → the round is
+        // complete. (Open-ended always finds a fresh heat above, so it never lands here.)
         None => Ok(FillOutcome::Complete),
     }
 }
@@ -1248,6 +1263,11 @@ fn channel_balanced_plan(
 /// The number of times a static round's field flies (its format round count, race redesign Slice
 /// 7a): the `rounds` param, defaulting to the qualifying formats' defaults (`timed_qual` 3,
 /// `round_robin` 3), else 1. Read off the round's params verbatim.
+///
+/// **`0` means open-ended** (the RD set "Heats per pilot" to 0): instead of a fixed number of
+/// rounds, the round generates the next heat on demand each fill, indefinitely, until the RD stops
+/// — see [`fill_round_static`]. An absent param falls back to the format default (never 0), so
+/// open-ended is only ever an explicit choice.
 fn static_round_count(round: &RoundDef) -> usize {
     let default = match round.format.as_str() {
         "timed_qual" | "round_robin" => 3,
@@ -1258,7 +1278,6 @@ fn static_round_count(round: &RoundDef) -> usize {
         .get("rounds")
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
-        .max(1)
 }
 
 /// Slugify a round id into a heat-id-safe stem (lowercase alnum, other runs → single `-`).
@@ -1673,6 +1692,47 @@ mod tests {
             fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]),
             Err(FillError::EmptyField(_))
         ));
+    }
+
+    #[test]
+    fn open_ended_static_round_keeps_generating_the_next_heat() {
+        // "Heats per pilot = 0" on a static (time-trial) round: each fill yields the next heat in
+        // the continuing channel-balanced rotation, and it never completes.
+        let mut round = qual_round("tt", "open");
+        round.channel_mode = ChannelMode::Static;
+        round.params.insert("rounds".into(), "0".into());
+        // 3 pilots on distinct channels, a 2-node timer -> 2 heats per format-round (A&B, then C).
+        let (meta, timers) = meta_with_timer(
+            vec![round],
+            vec![member_chan(
+                "open",
+                &[("A", 5658), ("B", 5695), ("C", 5760)],
+            )],
+            2,
+        );
+        let rid = RoundId("tt".into());
+
+        let mut events: Vec<Event> = Vec::new();
+        let mut ids: Vec<String> = Vec::new();
+        for _ in 0..5 {
+            match fill_round(&meta, &timers, &rid, &events).unwrap() {
+                FillOutcome::Scheduled { heat, lineup, .. } => {
+                    let names: Vec<&str> = lineup.iter().map(|c| c.0.as_str()).collect();
+                    events.push(scheduled(&heat.0, "tt", "open", &names));
+                    ids.push(heat.0);
+                }
+                other => {
+                    panic!("open-ended round must always schedule another heat, got {other:?}")
+                }
+            }
+        }
+        let unique: std::collections::HashSet<_> = ids.iter().cloned().collect();
+        assert_eq!(unique.len(), 5, "every generated heat is distinct: {ids:?}");
+        assert!(ids[0].ends_with("-r1-h1"), "first heat is r1-h1: {ids:?}");
+        assert!(
+            ids.iter().any(|i| i.ends_with("-r2-h1")),
+            "the rotation continues into round 2: {ids:?}"
+        );
     }
 
     // --- Qualifying metric is derived from the win condition (Rounds form redesign) --------------

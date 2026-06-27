@@ -118,7 +118,9 @@ pub struct TimedQualifying {
     /// The field flying each round, in seed/draw order (recorded outcome already
     /// applied). The lineup of every round and the final ranking tie-break.
     field: Vec<CompetitorRef>,
-    /// How many rounds the field flies before the format completes.
+    /// How many rounds the field flies before the format completes. **`0` is open-ended**: the
+    /// generator keeps emitting the next round on demand forever (the RD ends it by not requesting
+    /// more) — "Heats per pilot = 0".
     rounds: usize,
     /// Which round metric the cross-round aggregation ranks by.
     metric: QualMetric,
@@ -167,9 +169,10 @@ impl Generator for TimedQualifying {
     fn next(&mut self, completed: &[CompletedHeat]) -> GeneratorStep {
         // One heat per round: the number of completed heats *is* the rounds run. Emit the
         // next round while any remain, otherwise the format is complete. Pure function of
-        // (completed.len(), rounds) — no clock, no RNG.
+        // (completed.len(), rounds) — no clock, no RNG. `rounds == 0` is **open-ended**: always
+        // emit the next round (the RD ends the format by not requesting more).
         let rounds_run = completed.len();
-        if rounds_run < self.rounds {
+        if self.rounds == 0 || rounds_run < self.rounds {
             let next_round = rounds_run + 1;
             GeneratorStep::Run(vec![HeatPlan::new(
                 Self::round_id(next_round),
@@ -320,6 +323,27 @@ mod tests {
             CompletedHeat::new("round-2", best_lap_round(&[("A", Some(1_900_000))])),
         ];
         assert_eq!(g.next(&completed), GeneratorStep::Complete);
+    }
+
+    #[test]
+    fn zero_rounds_is_open_ended_and_never_completes() {
+        // "Heats per pilot = 0": the generator keeps emitting the next round forever.
+        let mut g = TimedQualifying::new(field(&["A", "B"]), 0, QualMetric::BestLap);
+        let mut completed: Vec<CompletedHeat> = Vec::new();
+        for r in 1..=20 {
+            assert_eq!(
+                g.next(&completed),
+                GeneratorStep::Run(vec![HeatPlan::new(
+                    format!("round-{r}"),
+                    field(&["A", "B"])
+                )]),
+                "open-ended (rounds=0) must keep emitting round {r}, never Complete"
+            );
+            completed.push(CompletedHeat::new(
+                format!("round-{r}"),
+                best_lap_round(&[("A", Some(2_000_000))]),
+            ));
+        }
     }
 
     #[test]
