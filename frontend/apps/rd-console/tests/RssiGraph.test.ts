@@ -76,6 +76,41 @@ describe('RssiGraph trace labels', () => {
 });
 
 /**
+ * Threshold band + complete lap coverage (the pre-recalc legibility pass): the enter/exit levels are
+ * shaded as an area (not just lines), and EVERY current lap gets a marker — even one whose pass time
+ * falls outside the captured sample window (the dense trace can be shorter than the race).
+ */
+describe('RssiGraph thresholds + lap coverage', () => {
+  it('shades the enter/exit hysteresis band when both levels are present', () => {
+    render(RssiGraph, { trace: signalTrace, laps: lapList, selected: null, onselect: () => {} });
+    const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+    expect(svg.querySelector('.hysteresis')).not.toBeNull();
+  });
+
+  it('renders a marker for every lap, including one past the captured sample window', () => {
+    // ALICE's samples span 0…90s; add a lap at 200s. The plot must widen to include it so its
+    // marker still shows rather than rendering off-frame.
+    const farLaps = {
+      ...lapList,
+      competitors: [
+        {
+          ...lapList.competitors[0],
+          laps: [
+            ...lapList.competitors[0].laps,
+            { number: 9, duration_micros: 1_000_000, at: 200_000_000, start_ref: 99, end_ref: 100 }
+          ]
+        },
+        ...lapList.competitors.slice(1)
+      ]
+    };
+    render(RssiGraph, { trace: signalTrace, laps: farLaps, selected: null, onselect: () => {} });
+    const graph = screen.getByLabelText('RSSI signal graph');
+    expect(within(graph).getByRole('button', { name: /Lap 1 at/ })).toBeInTheDocument();
+    expect(within(graph).getByRole('button', { name: /Lap 9 at/ })).toBeInTheDocument();
+  });
+});
+
+/**
  * Hover crosshair + time/RSSI readout (gap 1): moving over a trace must report the EXACT
  * race-relative time + RSSI at the cursor, using the same px→source-time mapping the lap markers
  * use. The fixture's ALICE trace samples `i` are at `from + i·period` (1s cadence), so the RSSI at
