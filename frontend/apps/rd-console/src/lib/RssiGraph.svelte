@@ -85,16 +85,26 @@
   }
 
   /**
-   * A trace's plotted source-clock span. Starts at the sample window `[from, from + (n-1)·period]`
-   * but is **widened to include every lap's pass time**, so a lap recorded before the first captured
-   * sample or after the last (the dense trace can be shorter than the race) still lands inside the
-   * plot and gets a marker — "show all the current laps". Falls back to a unit span.
+   * A sample's source-clock time (µs). Dense traces carry the **actual** per-sample `times` (RH's
+   * marshal history is bursty — clustered around each crossing — so the uniform `from + i·period`
+   * grid badly compresses it); the coarse streaming path has no `times`, so its exact uniform grid
+   * is used instead.
+   */
+  function sampleTimeOf(t: CompetitorTrace, i: number): number {
+    const explicit = t.times?.[i];
+    return explicit ?? (t.from ?? 0) + i * t.period_micros;
+  }
+
+  /**
+   * A trace's plotted source-clock span — the first to the last sample's real instant — **widened to
+   * include every lap's pass time** so every lap still lands inside the plot and gets a marker. Using
+   * the real sample times (not the uniform grid) keeps the signal spanning its true duration, so it
+   * lines up with the lap markers instead of compressing into the left. Falls back to a unit span.
    */
   function spanOf(t: CompetitorTrace, laps: Lap[] = []): { from: number; to: number } {
-    const sampleFrom = t.from ?? 0;
     const n = t.samples.length;
-    let from = sampleFrom;
-    let to = n > 1 ? sampleFrom + (n - 1) * t.period_micros : sampleFrom + 1;
+    let from = n > 0 ? sampleTimeOf(t, 0) : (t.from ?? 0);
+    let to = n > 1 ? sampleTimeOf(t, n - 1) : from + 1;
     for (const lap of laps) {
       if (lap.at < from) from = lap.at;
       if (lap.at > to) to = lap.at;
@@ -148,12 +158,14 @@
     const stride = n > MAX_POINTS ? Math.ceil(n / MAX_POINTS) : 1;
     const pts: string[] = [];
     for (let i = 0; i < n; i += stride) {
-      const time = (t.from ?? 0) + i * t.period_micros;
-      pts.push(`${xOf(time, span).toFixed(1)},${yOf(t.samples[i], range).toFixed(1)}`);
+      pts.push(
+        `${xOf(sampleTimeOf(t, i), span).toFixed(1)},${yOf(t.samples[i], range).toFixed(1)}`
+      );
     }
     // Always include the last sample so the line reaches the end of the span.
-    const lastTime = (t.from ?? 0) + (n - 1) * t.period_micros;
-    pts.push(`${xOf(lastTime, span).toFixed(1)},${yOf(t.samples[n - 1], range).toFixed(1)}`);
+    pts.push(
+      `${xOf(sampleTimeOf(t, n - 1), span).toFixed(1)},${yOf(t.samples[n - 1], range).toFixed(1)}`
+    );
     return pts.join(' ');
   }
 
@@ -167,14 +179,13 @@
    */
   function crossingWindows(t: CompetitorTrace): { from: number; to: number }[] {
     if (t.enter == null || t.exit == null) return [];
-    const from0 = t.from ?? 0;
     const n = t.samples.length;
     const out: { from: number; to: number }[] = [];
     let inCrossing = false;
     let start = 0;
     for (let i = 0; i < n; i++) {
       const v = t.samples[i];
-      const time = from0 + i * t.period_micros;
+      const time = sampleTimeOf(t, i);
       if (!inCrossing) {
         if (v >= t.enter) {
           inCrossing = true;
@@ -185,7 +196,7 @@
         inCrossing = false;
       }
     }
-    if (inCrossing && n > 0) out.push({ from: start, to: from0 + (n - 1) * t.period_micros });
+    if (inCrossing && n > 0) out.push({ from: start, to: sampleTimeOf(t, n - 1) });
     return out;
   }
 
@@ -206,10 +217,23 @@
     return span.from + frac * w;
   }
 
-  /** The RSSI sample nearest a source-clock time, using the trace's `from`/`period` sample grid. */
+  /** The RSSI sample nearest a source-clock time. For a dense trace (explicit, non-uniform `times`)
+   *  it scans for the closest instant; for the coarse uniform grid it indexes by `from`/`period`. */
   function rssiAt(t: CompetitorTrace, time: number): number {
     const n = t.samples.length;
     if (n === 0) return 0;
+    if (t.times) {
+      let best = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < n; i++) {
+        const d = Math.abs(t.times[i] - time);
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      }
+      return t.samples[best];
+    }
     const from = t.from ?? 0;
     const i = Math.min(n - 1, Math.max(0, Math.round((time - from) / (t.period_micros || 1))));
     return t.samples[i];

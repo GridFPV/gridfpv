@@ -773,6 +773,14 @@ pub struct CompetitorTrace {
     pub period_micros: u32,
     /// The concatenated per-tick RSSI samples (filtered ADC counts), oldest first.
     pub samples: Vec<u16>,
+    /// The **actual** source-clock timestamp (µs) of each sample, when the trace came from a dense
+    /// history. RH's marshal history is non-uniformly spaced (bursts of peak/nadir entries around
+    /// each crossing), so a uniform `from + i·period_micros` grid badly misplaces samples and
+    /// understates the span; a renderer that has these should plot each sample at its real time.
+    /// `None` for the coarse streaming path, where `from`/`period_micros` is exact.
+    #[serde(default)]
+    #[ts(optional, type = "Array<number>")]
+    pub times: Option<Vec<i64>>,
     /// The enter detection threshold, where captured.
     #[ts(optional)]
     pub enter: Option<u16>,
@@ -903,17 +911,23 @@ where
         competitors: by_competitor
             .into_iter()
             .map(|(competitor, acc)| {
-                // Prefer-dense: when a dense history is present it replaces the coarse stream; the
-                // uniform `from`/`period_micros` grid is derived from the history's explicit times.
-                let (from, period_micros, samples) = match acc.dense {
-                    Some(history) => dense_trace_grid(&history),
-                    None => (acc.from, acc.period_micros, acc.samples),
+                // Prefer-dense: when a dense history is present it replaces the coarse stream. The
+                // uniform `from`/`period_micros` grid is kept (compat), but the explicit per-sample
+                // `times` are carried too so a renderer can plot each sample at its real instant — RH's
+                // history is bursty, so the uniform grid alone badly compresses the trace.
+                let (from, period_micros, samples, times) = match acc.dense {
+                    Some(history) => {
+                        let (from, period_micros, samples) = dense_trace_grid(&history);
+                        (from, period_micros, samples, Some(history.times))
+                    }
+                    None => (acc.from, acc.period_micros, acc.samples, None),
                 };
                 CompetitorTrace {
                     competitor,
                     from,
                     period_micros,
                     samples,
+                    times,
                     enter: acc.enter,
                     exit: acc.exit,
                 }
