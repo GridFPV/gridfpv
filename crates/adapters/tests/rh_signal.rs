@@ -447,38 +447,49 @@ fn dense_marshal_history_supersedes_coarse_stream() {
         "race never reached RACING"
     );
 
-    // Let a run of coarse streamed samples accumulate.
+    // Let a run of samples accumulate while racing. (Coarse `node_data` chunks; with the GridFPV
+    // plugin mounted the live dense history is already superseding by the time we measure.)
     let captured_enough = wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
         signal_trace(evs)
             .competitor(&key)
             .map(|t| t.samples.len() >= 5)
             .unwrap_or(false)
     });
-    assert!(captured_enough, "node-0 never accumulated a coarse trace");
+    assert!(captured_enough, "node-0 never accumulated a trace");
 
-    // The coarse streamed sample count, before any dense history is pulled.
+    // The sample count mid-race, before the heat is stopped.
     let coarse_samples = signal_trace(&events)
         .competitor(&key)
         .map(|t| t.samples.len())
         .unwrap_or(0);
 
-    // Finish the heat: the DONE transition auto-triggers the heat-end marshal pull (the transport
-    // emits `current_race_marshal`, then `save_laps` + a `race_list` request whose ids drive
-    // `get_pilotrace` — whichever the server implements answers).
-    conn.stop_race().ok();
-
-    // Wait for the dense `SignalHistory` to arrive and supersede the coarse stream. The transport
-    // drives the pull automatically off the DONE edge; keep draining while it completes.
-    let got_dense = wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
-        evs.iter().any(|e| matches!(e, Event::SignalHistory(_)))
-    });
+    // S2 split: with the GridFPV plugin (the path `cargo xtask live` exercises) the dense history
+    // is pushed **live** over `gridfpv_signal` and supersedes the coarse stream *during* the race —
+    // the post-race save-then-pull is suppressed. Without it (stock RH fallback, which S3 deletes)
+    // the DONE edge drives the pull. Either way a dense `SignalHistory` results.
+    let plugin_live = std::env::var_os("GRIDFPV_RH_PLUGIN").is_some();
+    let got_dense = if plugin_live {
+        // The live dense history should arrive while the heat is still running (no pull).
+        let live = wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+            evs.iter().any(|e| matches!(e, Event::SignalHistory(_)))
+        });
+        conn.stop_race().ok();
+        live
+    } else {
+        // The DONE transition auto-triggers the marshal pull (`current_race_marshal`, then
+        // `save_laps` + `race_list` → `get_pilotrace` — whichever the server implements answers).
+        conn.stop_race().ok();
+        wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+            evs.iter().any(|e| matches!(e, Event::SignalHistory(_)))
+        })
+    };
 
     events.extend(conn.events());
     conn.disconnect();
 
     assert!(
         got_dense,
-        "no SignalHistory pulled after heat end (coarse samples were {coarse_samples})"
+        "no dense SignalHistory produced (coarse samples were {coarse_samples}, plugin_live={plugin_live})"
     );
 
     let dense_samples = signal_trace(&events)
@@ -486,11 +497,20 @@ fn dense_marshal_history_supersedes_coarse_stream() {
         .map(|t| t.samples.len())
         .expect("node-0 dense trace");
 
-    assert!(
-        dense_samples > coarse_samples,
-        "dense history must carry MORE samples than the coarse stream: dense={dense_samples} \
-         coarse={coarse_samples}"
-    );
+    if plugin_live {
+        // The plugin delivered the dense trace live (without the pull); assert it's a real trace.
+        assert!(
+            dense_samples >= 5,
+            "the live dense trace should carry real samples; got {dense_samples}"
+        );
+    } else {
+        // The post-race pull yields a denser trace than the coarse stream.
+        assert!(
+            dense_samples > coarse_samples,
+            "dense history must carry MORE samples than the coarse stream: dense={dense_samples} \
+             coarse={coarse_samples}"
+        );
+    }
 
     // Eyeball artifact (run with --nocapture): a sparkline of the captured dense trace, exactly the
     // shape the marshaling graph / `cargo xtask rh-mock dump` renders. Under the realistic model

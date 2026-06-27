@@ -166,6 +166,13 @@ pub enum Raw {
     /// when **seating** a heat's bound pilots before racing (the laps-attribute fix). Exposed via
     /// [`take_pilot_ids`](RotorHazardAdapter::take_pilot_ids).
     PilotData(RawPilotData),
+    /// A `gridfpv_signal` broadcast from the **GridFPV RH plugin** (D16, Slice 2): live per-node
+    /// signal pushed in-process — `current_rssi`, the enter/exit detection levels, and the dense
+    /// `history_values`/`history_times` window — plus the race-start clock origin. The adapter folds
+    /// it into the same canonical [`SignalThresholds`]/[`SignalHistory`] facts the post-race
+    /// save-then-pull produced, but **live**, and (once seen) suppresses that pull entirely. Absent on
+    /// a stock RH (no plugin), so the socket fallback still pulls. See [`RawGridSignal`].
+    GridSignal(RawGridSignal),
 }
 
 /// A RotorHazard `race_status` message (see [`Raw::RaceStatus`]).
@@ -495,6 +502,44 @@ where
     })
 }
 
+/// A `gridfpv_signal` broadcast from the GridFPV RH plugin (see [`Raw::GridSignal`]).
+///
+/// Live per-node signal pushed in-process while a race runs. `race_start` is RotorHazard's
+/// monotonic race origin in **seconds** (the same clock as each node's `history_times`), used to make
+/// the dense history race-relative — exactly as the marshal-data path does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawGridSignal {
+    /// The race-start origin in seconds (RotorHazard monotonic). `None` if no race is running.
+    #[serde(default)]
+    pub race_start: Option<f64>,
+    /// Per-node signal snapshots.
+    #[serde(default)]
+    pub nodes: Vec<RawGridSignalNode>,
+}
+
+/// One node's entry in a [`RawGridSignal`] broadcast.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawGridSignalNode {
+    /// Zero-based node/seat index.
+    pub index: usize,
+    /// The node's current live RSSI (advisory; the live coarse trace still comes from `node_data`).
+    #[serde(default)]
+    pub current_rssi: Option<f64>,
+    /// The node's enter detection level (rising past this opens a pass).
+    #[serde(default)]
+    pub enter_at: Option<f64>,
+    /// The node's exit detection level (falling below this closes a pass).
+    #[serde(default)]
+    pub exit_at: Option<f64>,
+    /// The dense per-sample RSSI history window (parallel to `history_times`).
+    #[serde(default, deserialize_with = "de_f64_history")]
+    pub history_values: Vec<f64>,
+    /// The dense per-sample timestamps in seconds (RotorHazard monotonic; parallel to
+    /// `history_values`).
+    #[serde(default, deserialize_with = "de_f64_history")]
+    pub history_times: Vec<f64>,
+}
+
 /// The competitor handle for a RotorHazard node seat: `"node-{index}"`. Stable across
 /// pilot reassignment (the binding to a GridFPV pilot is a registration action, not
 /// an adapter event — see `gridfpv_events::CompetitorRef`).
@@ -555,6 +600,17 @@ pub struct RotorHazardAdapter {
     /// acts on it — keeping all wire knowledge in the transport while the trigger stays in the
     /// translator (driven by the same `race_status` stream it already folds).
     pending_marshal_request: bool,
+    /// Whether the GridFPV RH plugin is pushing **live signal** (`gridfpv_signal`, Slice 2). Set on
+    /// the first such broadcast and kept for the adapter's life (it persists across reconnects, like
+    /// the dedup). While set, the dense trace arrives live, so the adapter **suppresses the post-race
+    /// save-then-pull** ([`pending_marshal_request`](Self::pending_marshal_request) is not raised on
+    /// the DONE edge). A stock RH never sends `gridfpv_signal`, so this stays `false` and the pull
+    /// remains the fallback.
+    live_signal_active: bool,
+    /// Per-node length of the dense history last emitted as a [`SignalHistory`], reset each race. The
+    /// plugin re-broadcasts the full window every tick; emitting only when a node's history has
+    /// **grown** keeps the log to roughly one dense fact per crossing instead of one per broadcast.
+    last_history_len: std::collections::HashMap<usize, usize>,
     /// Pending per-pilotrace marshal pulls discovered from a `race_list`, drained by the transport
     /// via [`take_pilotrace_requests`](Self::take_pilotrace_requests). On the RotorHazard build whose
     /// marshal API is per-pilotrace (`get_pilotrace` -> `race_details`), the heat-end flow is:
@@ -619,6 +675,8 @@ impl RotorHazardAdapter {
             sample_index: std::collections::HashMap::new(),
             last_thresholds: std::collections::HashMap::new(),
             pending_marshal_request: false,
+            live_signal_active: false,
+            last_history_len: std::collections::HashMap::new(),
             pending_pilotrace_requests: Vec::new(),
             pilotrace_start_time: std::collections::HashMap::new(),
             pending_heat_ids: Vec::new(),
@@ -797,6 +855,10 @@ impl RotorHazardAdapter {
                 self.last_thresholds.clear();
                 // A fresh race invalidates any stale marshal-pull state from the previous heat.
                 self.pending_marshal_request = false;
+                // The dense trace is per-heat: forget the previous heat's emitted lengths so the new
+                // heat's growing history emits fresh `SignalHistory` facts. (`live_signal_active`
+                // persists — once the plugin is streaming, it streams every heat.)
+                self.last_history_len.clear();
                 self.pending_pilotrace_requests.clear();
                 self.pilotrace_start_time.clear();
                 out.push(Event::SessionStarted {
@@ -813,7 +875,9 @@ impl RotorHazardAdapter {
                 // Record the intent for the transport to act on — the pure translator can't emit the
                 // socket request itself. Only on a genuine RACING/STAGING -> DONE edge (this arm runs
                 // once per transition), so a re-sent DONE on a reconnect does not re-request.
-                if self.signal_capture {
+                // ...unless the GridFPV plugin is already pushing the dense trace live (Slice 2):
+                // then the full-fidelity history has arrived in-band and the pull is redundant.
+                if self.signal_capture && !self.live_signal_active {
                     self.pending_marshal_request = true;
                 }
                 out.push(Event::SessionEnded {
@@ -1041,22 +1105,70 @@ impl RotorHazardAdapter {
             .len()
             .min(levels.exit_at_levels.len());
         for node_index in 0..n {
-            let enter = levels.enter_at_levels[node_index]
-                .round()
-                .clamp(0.0, u16::MAX as f32) as u16;
-            let exit = levels.exit_at_levels[node_index]
-                .round()
-                .clamp(0.0, u16::MAX as f32) as u16;
-            if self.last_thresholds.get(&node_index) == Some(&(enter, exit)) {
-                continue;
+            self.emit_threshold(
+                node_index,
+                levels.enter_at_levels[node_index] as f64,
+                levels.exit_at_levels[node_index] as f64,
+                out,
+            );
+        }
+    }
+
+    /// Emit a [`SignalThresholds`] for one seat, deduped against the last `(enter, exit)` seen so a
+    /// re-sent (unchanged) level does not re-emit. Shared by the `enter_and_exit_at_levels` path and
+    /// the plugin's `gridfpv_signal` path.
+    fn emit_threshold(&mut self, node_index: usize, enter: f64, exit: f64, out: &mut Vec<Event>) {
+        let enter = enter.round().clamp(0.0, u16::MAX as f64) as u16;
+        let exit = exit.round().clamp(0.0, u16::MAX as f64) as u16;
+        if self.last_thresholds.get(&node_index) == Some(&(enter, exit)) {
+            return;
+        }
+        self.last_thresholds.insert(node_index, (enter, exit));
+        out.push(Event::SignalThresholds(SignalThresholds {
+            adapter: self.id.clone(),
+            competitor: seat_ref(node_index),
+            enter,
+            exit,
+        }));
+    }
+
+    /// Fold a `gridfpv_signal` broadcast from the GridFPV RH plugin (D16, Slice 2) into canonical
+    /// signal facts — the **live** equivalent of the post-race save-then-pull. Per node it refreshes
+    /// the detection [`SignalThresholds`] and, when the dense history has **grown**, emits an updated
+    /// dense [`SignalHistory`] (the same full-fidelity trace the marshal-data path produces, made
+    /// race-relative via `race_start`). Seeing any broadcast marks [`live_signal_active`], which
+    /// suppresses the redundant post-race pull on the DONE edge.
+    ///
+    /// The plugin re-sends the full window each tick; the per-node grown-length check
+    /// ([`last_history_len`](Self::last_history_len)) keeps the log to ~one dense fact per crossing
+    /// rather than one per broadcast. The live coarse trace still comes from `node_data` until the
+    /// first dense history supersedes it in the projection.
+    fn translate_grid_signal(&mut self, sig: RawGridSignal, out: &mut Vec<Event>) {
+        if !self.signal_capture {
+            return;
+        }
+        self.live_signal_active = true;
+        for node in sig.nodes {
+            let node_index = node.index;
+            if let (Some(enter), Some(exit)) = (node.enter_at, node.exit_at) {
+                self.emit_threshold(node_index, enter, exit, out);
             }
-            self.last_thresholds.insert(node_index, (enter, exit));
-            out.push(Event::SignalThresholds(SignalThresholds {
-                adapter: self.id.clone(),
-                competitor: seat_ref(node_index),
-                enter,
-                exit,
-            }));
+            // Dense history: emit only when this node's window has grown since the last emit, and
+            // only with a known race origin to anchor the race-relative times.
+            let len = node.history_values.len().min(node.history_times.len());
+            let grown = len > self.last_history_len.get(&node_index).copied().unwrap_or(0);
+            if let Some(start) = sig.race_start {
+                if len > 0 && grown {
+                    self.last_history_len.insert(node_index, len);
+                    self.emit_dense_history(
+                        node_index,
+                        start,
+                        &node.history_times,
+                        &node.history_values,
+                        out,
+                    );
+                }
+            }
         }
     }
 }
@@ -1092,6 +1204,7 @@ impl Adapter for RotorHazardAdapter {
             Raw::RaceDetails(details) => self.translate_race_details(details, &mut out),
             Raw::HeatData(data) => self.translate_heat_data(data),
             Raw::PilotData(data) => self.translate_pilot_data(data),
+            Raw::GridSignal(sig) => self.translate_grid_signal(sig, &mut out),
         }
         out
     }
@@ -1873,6 +1986,119 @@ mod tests {
         assert!(
             !adapter.take_marshal_request(),
             "re-sent DONE is not a transition"
+        );
+    }
+
+    /// Build a `gridfpv_signal` broadcast (D16, S2) with one node's dense window + thresholds.
+    fn grid_signal(
+        race_start: f64,
+        node: usize,
+        enter: f64,
+        exit: f64,
+        times: &[f64],
+        values: &[f64],
+    ) -> Raw {
+        Raw::GridSignal(RawGridSignal {
+            race_start: Some(race_start),
+            nodes: vec![RawGridSignalNode {
+                index: node,
+                current_rssi: values.last().copied(),
+                enter_at: Some(enter),
+                exit_at: Some(exit),
+                history_values: values.to_vec(),
+                history_times: times.to_vec(),
+            }],
+        })
+    }
+
+    fn thresholds(events: &[Event]) -> Vec<&SignalThresholds> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::SignalThresholds(t) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grid_signal_emits_dense_history_and_thresholds() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        // start 10.0s; samples 10.1/10.2/10.3s -> 100k/200k/300k µs race-relative (like marshal data).
+        let events = a.translate(grid_signal(
+            10.0,
+            2,
+            90.0,
+            80.0,
+            &[10.1, 10.2, 10.3],
+            &[70.0, 150.0, 71.0],
+        ));
+        let hs = histories(&events);
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0].competitor, CompetitorRef("node-2".into()));
+        assert_eq!(hs[0].times, vec![100_000, 200_000, 300_000]);
+        assert_eq!(hs[0].rssi, vec![70, 150, 71]);
+        let th = thresholds(&events);
+        assert_eq!(th.len(), 1);
+        assert_eq!((th[0].enter, th[0].exit), (90, 80));
+        assert_eq!(th[0].competitor, CompetitorRef("node-2".into()));
+    }
+
+    #[test]
+    fn grid_signal_dense_emitted_only_on_growth() {
+        let mut a = RotorHazardAdapter::new();
+        // The plugin re-sends the full window each tick; we emit a dense history only when it grows.
+        let first = a.translate(grid_signal(0.0, 0, 90.0, 80.0, &[0.1, 0.2], &[70.0, 150.0]));
+        assert_eq!(
+            histories(&first).len(),
+            1,
+            "first window emits a dense history"
+        );
+        assert_eq!(thresholds(&first).len(), 1, "first window emits thresholds");
+
+        let again = a.translate(grid_signal(0.0, 0, 90.0, 80.0, &[0.1, 0.2], &[70.0, 150.0]));
+        assert!(
+            histories(&again).is_empty(),
+            "an unchanged window emits no new dense history"
+        );
+        assert!(
+            thresholds(&again).is_empty(),
+            "unchanged thresholds are not re-emitted"
+        );
+
+        let grown = a.translate(grid_signal(
+            0.0,
+            0,
+            90.0,
+            80.0,
+            &[0.1, 0.2, 0.3],
+            &[70.0, 150.0, 71.0],
+        ));
+        assert_eq!(
+            histories(&grown).len(),
+            1,
+            "a grown window emits an updated dense history"
+        );
+        assert_eq!(histories(&grown)[0].rssi, vec![70, 150, 71]);
+    }
+
+    #[test]
+    fn live_signal_suppresses_the_marshal_pull_on_done() {
+        let mut a = RotorHazardAdapter::new();
+        a.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        }));
+        // The plugin pushes live signal during the race...
+        a.translate(grid_signal(0.0, 0, 90.0, 80.0, &[0.1], &[150.0]));
+        a.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(1),
+        }));
+        // ...so the dense trace is already in hand: the DONE edge must NOT request the post-race pull.
+        assert!(
+            !a.take_marshal_request(),
+            "live plugin signal makes the post-race save-then-pull redundant"
         );
     }
 

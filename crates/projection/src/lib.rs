@@ -923,16 +923,21 @@ where
 /// Resolve a dense [`SignalHistory`] into the `(from, period_micros, samples)` the uniform-grid
 /// [`CompetitorTrace`] carries, preserving the native samples verbatim (no resampling).
 ///
-/// `from` is the first sample's instant; `period_micros` is the first inter-sample delta (RH samples
-/// at a near-fixed rate, so this anchors the grid the renderer draws on). The `samples` are the
-/// dense RSSI vector unchanged. A single-sample history yields `period_micros = 0`. Times that are
-/// non-monotonic or out of range are clamped to a non-negative `u32` delta so the grid stays valid.
+/// `from` is the first sample's instant; `period_micros` is the first **positive** inter-sample
+/// delta (RH samples at a near-fixed rate, so this anchors the grid the renderer draws on). The
+/// `samples` are the dense RSSI vector unchanged. A dense history can legitimately repeat a timestamp
+/// — e.g. a peak reported at the same first/last time, so `history_times` reads `[t, t, …]` — so the
+/// grid skips zero/negative deltas to avoid a degenerate period of `0`; it falls back to `0` only
+/// when every delta is non-positive (a single distinct time, including a single-sample history).
 fn dense_trace_grid(history: &SignalHistory) -> (Option<SourceTime>, u32, Vec<u16>) {
     let from = history.times.first().copied().map(SourceTime::from_micros);
-    let period_micros = match history.times.get(..2) {
-        Some([a, b]) => (b - a).clamp(0, u32::MAX as i64) as u32,
-        _ => 0,
-    };
+    let period_micros = history
+        .times
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .find(|&d| d > 0)
+        .unwrap_or(0)
+        .clamp(0, u32::MAX as i64) as u32;
     (from, period_micros, history.rssi.clone())
 }
 
@@ -2144,5 +2149,25 @@ mod marshaling_tests {
         assert_eq!(trace.samples, vec![150]);
         assert_eq!(trace.from, Some(SourceTime::from_micros(42_000)));
         assert_eq!(trace.period_micros, 0);
+    }
+
+    #[test]
+    fn dense_history_with_repeated_timestamp_derives_a_positive_period() {
+        // A live dense history (RH `history_values`) can repeat a timestamp — a peak reported at the
+        // same first/last time gives `[t, t, …]`. The grid period must skip the zero delta and use
+        // the first POSITIVE one, not collapse to a degenerate 0.
+        let log = vec![history(
+            "rh",
+            "node-0",
+            &[1_000, 1_000, 1_100, 1_100],
+            &[70, 150, 150, 71],
+        )];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.from, Some(SourceTime::from_micros(1_000)));
+        assert_eq!(
+            trace.period_micros, 100,
+            "first positive delta (1_100 - 1_000), skipping the leading 0"
+        );
+        assert_eq!(trace.samples, vec![70, 150, 150, 71]);
     }
 }
