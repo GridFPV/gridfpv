@@ -41,15 +41,17 @@ PROTOCOL_VERSION = 1
 # manifest.json's "version".
 PLUGIN_VERSION = "0.1.0"
 
-# Capabilities this build implements — the Director keys transport decisions off these
-# (e.g. it prefers the plugin's live-signal path, and skips the post-race pull, once it
-# sees "live_signal"). Later slices append "clean_control", "recalc".
-CAPABILITIES = ["hello", "live_signal"]
+# Capabilities this build implements — the Director keys transport decisions off these.
+# "live_pass": the plugin emits per-node passes natively from RACE_LAP_RECORDED (S3), so the
+# Director gets the pass atom directly rather than diffing the current_laps snapshot. Native
+# start/stop control ("clean_control") lands in a later step.
+CAPABILITIES = ["hello", "live_signal", "live_pass"]
 
 # Socket.io event names of the gridfpv_* namespace.
 EVT_HELLO = "gridfpv_hello"
 EVT_HELLO_ACK = "gridfpv_hello_ack"
 EVT_SIGNAL = "gridfpv_signal"
+EVT_PASS = "gridfpv_pass"
 
 # Live-signal broadcast cadence (seconds) — decimated so the stream stays cheap on a Pi
 # (design risk #5). 0.5 s = 2 Hz. Each tick sends only the NEW dense samples since the last
@@ -181,12 +183,37 @@ def initialize(rhapi):
         except Exception:  # noqa: BLE001
             logger.exception("GridFPV final signal flush error")
 
+    # ---- S3: per-node passes -----------------------------------------------------------
+    def on_lap_recorded(args=None):
+        """Broadcast the pass atom natively as RH records each lap (RACE_LAP_RECORDED), attributed by
+        node seat — so the Director gets passes directly instead of diffing the current_laps snapshot.
+        `lap` is RH's Crossing object; `lap_time_stamp` is cumulative ms since race start (the same
+        unit current_laps carries), so the Director folds it identically (and dedups on lap_number)."""
+        args = args or {}
+        try:
+            lap = args.get("lap")
+            node_index = args.get("node_index")
+            if lap is None or node_index is None:
+                return
+            rhapi.ui.socket_broadcast(
+                EVT_PASS,
+                {
+                    "node_index": node_index,
+                    "lap_number": getattr(lap, "lap_number", 0),
+                    "lap_time_stamp": getattr(lap, "lap_time_stamp", 0.0),
+                    "peak_rssi": args.get("peak_rssi"),
+                },
+            )
+        except Exception:  # noqa: BLE001 - never let a pass broadcast take down RH
+            logger.exception("GridFPV pass broadcast error")
+
     if Evt is not None:
         rhapi.events.on(Evt.RACE_START, start_signal, name="gridfpv_signal_start")
         rhapi.events.on(Evt.RACE_STOP, stop_signal, name="gridfpv_signal_stop")
         rhapi.events.on(Evt.RACE_FINISH, stop_signal, name="gridfpv_signal_finish")
+        rhapi.events.on(Evt.RACE_LAP_RECORDED, on_lap_recorded, name="gridfpv_pass")
     else:  # pragma: no cover
-        logger.warning("GridFPV: eventmanager.Evt unavailable; live signal disabled")
+        logger.warning("GridFPV: eventmanager.Evt unavailable; live signal/passes disabled")
 
     logger.info(
         "GridFPV plugin loaded (v%s, protocol v%s) — handshake + live signal registered",
