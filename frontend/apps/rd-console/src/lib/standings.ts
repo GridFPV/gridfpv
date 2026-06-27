@@ -44,6 +44,10 @@ export function advanceRoundReq(source: RoundDef, topN: number, label: string): 
     format: 'single_elim',
     params: {},
     win_condition,
+    // Carry the source's race time too: a bracket inherits the qual's win condition, and a
+    // ranking-only condition (Best Lap / Best N Consecutive) needs a time limit to end its heats —
+    // without it the server rejects the round (a scored round must be able to end).
+    time_limit_secs: source.time_limit_secs,
     seeding: {
       // Advancing one round seeds the bracket from that single round (issue #51: `source_rounds` is
       // a list — a one-element list here; the Rounds form lets the RD add more sources after).
@@ -72,6 +76,9 @@ export function advanceLevelReq(level: RoundDef, label: string): NewRoundReq {
     format: level.format,
     params: { ...(level.params ?? {}) },
     win_condition: level.win_condition,
+    // Carry the level's race time forward too, so a ranking-only win condition still ends its
+    // heats (a scored round must be able to end — server validation).
+    time_limit_secs: level.time_limit_secs,
     seeding: { FromHeatWinners: { source_round: level.id } },
     channel_mode: level.channel_mode
   };
