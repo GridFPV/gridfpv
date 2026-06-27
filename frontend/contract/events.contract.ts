@@ -1403,6 +1403,7 @@ describe('race Slice 2a: rounds', () => {
     // persisted `zippyq` rounds validate, see the `POST /rounds` accepts-registered-format guard) but
     // omitted from this offered set so a new round can't select it.
     expect(schemas.map((s) => s.name)).toEqual([
+      'chase_the_ace',
       'double_elim',
       'multi_main',
       'open_practice',
@@ -1411,6 +1412,10 @@ describe('race Slice 2a: rounds', () => {
       'timed_qual'
     ]);
     expect(schemas.map((s) => s.name)).not.toContain('zippyq');
+    // Chase the Ace (a final-format) declares `wins_to_win` (number, default 2). The Rounds UI shows
+    // it only as a final-level format — the general round picker filters it out client-side.
+    const cta = schemas.find((s) => s.name === 'chase_the_ace')!;
+    expect(cta.params.find((p) => p.key === 'wins_to_win')?.default).toBe('2');
     // open_practice declares no params (its active channels are the field, via AllChannels seeding).
     expect(schemas.find((s) => s.name === 'open_practice')!.params).toEqual([]);
     // timed_qual declares `rounds` (number, default 3) relabeled "Heats per pilot". It declares NO

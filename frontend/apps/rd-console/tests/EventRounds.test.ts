@@ -1329,7 +1329,7 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
     expect(within(panel).getAllByText('Semifinals').length).toBeGreaterThan(0);
   });
 
-  it('shows "Advance bracket" only when the level is complete, and creates the next level seeded FromHeatWinners', async () => {
+  it('advancing into the final opens the format picker and creates a single-race final by default', async () => {
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
       ...SEMIS,
       id: 'final',
@@ -1343,26 +1343,59 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
     });
     render(EventRounds, { session });
 
-    // With both semis heats Final and >1 heat, the Advance-bracket action is offered.
-    await fireEvent.click(await screen.findByRole('button', { name: 'Advance bracket' }));
+    // The next level holds 1 heat → the final, so the action is "Advance to final" and opens the
+    // final-format picker rather than creating immediately.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to final' }));
+    // Default is Single race → create the final.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Create final' }));
 
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     const [, , req] = createRoundImpl.mock.calls[0];
-    // It reuses the bracket format, seeded FromHeatWinners of the source level, labelled "Final"
-    // (the next level holds 1 heat → the final).
+    // Single race = the bracket format (single_elim), seeded FromHeatWinners, labelled "Final".
     expect(req).toMatchObject({
       format: 'single_elim',
       label: 'Final',
       seeding: { FromHeatWinners: { source_round: 'semis' } }
     });
-    // The next level's winners-paired heats are then generated (fill-all FillRound, #216).
+    // The final's heats are then generated (fill-all FillRound, #216).
     await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
     expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
       FillRound: { round: 'final', mode: 'All' }
     });
   });
 
-  it('hides "Advance bracket" while a level still has an unscored heat', async () => {
+  it('creates a Chase-the-Ace final (chase_the_ace + wins_to_win) when chosen', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
+      ...SEMIS,
+      id: 'final',
+      label: 'Final',
+      format: 'chase_the_ace',
+      seeding: { FromHeatWinners: { source_round: 'semis' } }
+    }));
+    const { session } = makeTestSession({
+      ...bracketImpls(SEMI_HEATS),
+      createRoundImpl,
+      event: BRACKET_EVENT
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to final' }));
+    // Pick Chase the Ace, then create.
+    await fireEvent.change(await screen.findByLabelText('Final format'), {
+      target: { value: 'chase' }
+    });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Create final' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    expect(req).toMatchObject({
+      format: 'chase_the_ace',
+      seeding: { FromHeatWinners: { source_round: 'semis' } },
+      params: { wins_to_win: '2' }
+    });
+  });
+
+  it('hides the advance action while a level still has an unscored heat', async () => {
     const incomplete: HeatSummary[] = [SEMI_HEATS[0], { ...SEMI_HEATS[1], phase: 'Running' }];
     const { session } = makeTestSession({
       ...bracketImpls(incomplete),
@@ -1372,6 +1405,7 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
 
     // The bracket panel renders, but no advance action until every heat is Final.
     await screen.findByLabelText(/Bracket — Semifinals/i);
+    expect(screen.queryByRole('button', { name: 'Advance to final' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Advance bracket' })).toBeNull();
   });
 });

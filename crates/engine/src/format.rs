@@ -527,6 +527,14 @@ impl FormatRegistry {
     ///   [`standard`](Self::standard) so persisted rounds load, but omitted from this offered set.
     pub fn standard_schemas() -> Vec<FormatSchema> {
         vec![
+            // Chase the Ace (final-format): offered so the round form + edit form can render its
+            // `wins_to_win` param and the final-format selector can pick it. The Rounds UI surfaces
+            // it **only as a final-level format** (filtered out of the general round picker) — a
+            // multi-race final, not a regular round.
+            FormatSchema {
+                name: "chase_the_ace".into(),
+                params: vec![FormatParam::number("wins_to_win", "Wins to win", "2")],
+            },
             FormatSchema {
                 name: "double_elim".into(),
                 params: vec![FormatParam::boolean("bracket_reset", "Bracket reset", "1")],
@@ -1279,6 +1287,7 @@ mod tests {
         assert_eq!(
             offered,
             vec![
+                "chase_the_ace",
                 "double_elim",
                 "multi_main",
                 "open_practice",
@@ -1287,15 +1296,19 @@ mod tests {
                 "timed_qual",
             ]
         );
+        // Chase the Ace carries its `wins_to_win` param (default 2) for the params editor.
+        let cta = schemas.iter().find(|s| s.name == "chase_the_ace").unwrap();
+        assert_eq!(cta.params.len(), 1);
+        assert_eq!(cta.params[0].key, "wins_to_win");
         assert!(
             !offered.contains(&"zippyq"),
             "ZippyQ is shelved (#218) — must not be offered"
         );
         // …yet it remains registered, so it's the offered set that shrank, not the registry.
         assert!(FormatRegistry::standard().contains("zippyq"));
-        // Chase the Ace is likewise registered (a final-format) but NOT in the general offered set —
-        // it is surfaced contextually as a final-level format, never as a regular round.
-        assert!(!offered.contains(&"chase_the_ace"));
+        // Chase the Ace IS offered (it carries a param schema for the editor) but the Rounds UI
+        // shows it only as a final-level format — the general round picker filters it out client-side.
+        assert!(offered.contains(&"chase_the_ace"));
         assert!(FormatRegistry::standard().contains("chase_the_ace"));
     }
 
