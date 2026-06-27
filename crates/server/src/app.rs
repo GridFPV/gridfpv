@@ -365,6 +365,14 @@ pub fn router(registry: EventRegistry) -> Router {
     // event id to its own `AppState`/log through the registry.
     let read = Router::new()
         .route("/health", get(|| async { "ok" }))
+        // The Director's wall clock, in epoch microseconds (open, no auth). The console measures its
+        // offset from this (round-trip-corrected) so the start countdown + race clock read off
+        // *server* time, not the RD device's clock — which can differ by ~1s on a separate laptop and
+        // otherwise makes the Armed countdown bottom out early. See `serverNowMs` in session.svelte.ts.
+        .route(
+            "/time",
+            get(|| async { Json(serde_json::json!({ "now_micros": now_micros() })) }),
+        )
         // Events lifecycle (issue #72): list (Practice first) and RD-gated create.
         .route("/events", get(list_events).post(create_event))
         // RD-gated **permanent** delete of an event + ALL its data (the papercut fix): the

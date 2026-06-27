@@ -233,7 +233,8 @@
   const clock = useRaceClock(
     () => phase,
     () => live?.race_started_at,
-    () => live?.race_ended_at
+    () => live?.race_ended_at,
+    () => session.serverNowMs()
   );
   const elapsedMs = $derived(clock.elapsedMs);
 
@@ -367,7 +368,10 @@
   // controlling session, so a read-only / pilot session never arms it (and the banner below shows
   // them the generic "stand by" instead). `tone_at` is cleared by the backend once Running, so a
   // late join after race-go sees no stale countdown.
-  const arming = useArmingClock(() => (canControl ? live?.tone_at : undefined));
+  const arming = useArmingClock(
+    () => (canControl ? live?.tone_at : undefined),
+    () => session.serverNowMs()
+  );
 
   // ── Start tone synced to race-go (heat-lifecycle Slice 3; robustness + late-join fix) ──────────
   // A short Web-Audio beep the moment a heat goes live (race-go). The runtime logs

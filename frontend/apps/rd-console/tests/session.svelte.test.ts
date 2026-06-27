@@ -91,6 +91,30 @@ describe('Session', () => {
     expect(session.liveState?.current_heat).toBe('heat-1');
   });
 
+  it('syncServerClock anchors serverNowMs to the Director clock (offset-corrected)', async () => {
+    const { connect } = mockConnect(connecting);
+    const control = { baseUrl: 'http://d.local', sendCommand: vi.fn(async () => okAck) };
+    const session = new Session({
+      connectImpl: connect,
+      controlFactory: () => control,
+      autoRestore: false
+    });
+    // The Director's wall clock is 1000ms AHEAD of this client device.
+    const serverAheadMs = 1000;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ now_micros: (Date.now() + serverAheadMs) * 1000 })
+    } as unknown as Response);
+
+    expect(session.serverNowMs() - Date.now()).toBe(0); // no offset before the first sync
+    await session.syncServerClock();
+    // serverNowMs() now reads ~1s ahead of raw Date.now() — the countdown + race clock use server time.
+    const delta = session.serverNowMs() - Date.now();
+    expect(delta).toBeGreaterThan(900);
+    expect(delta).toBeLessThan(1100);
+    fetchSpy.mockRestore();
+  });
+
   it('switching events re-homes both seams to the new event', () => {
     const { connect } = mockConnect(connecting);
     const controlFactory = vi.fn(() => ({
