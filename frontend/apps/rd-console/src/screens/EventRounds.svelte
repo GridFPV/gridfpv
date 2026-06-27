@@ -1210,6 +1210,11 @@
                 {/if}
 
                 {#if standingsRound === round.id}
+                  {@const rHeats = heatsByRound(round.id)}
+                  {@const finalizedCount = rHeats.filter((h) => h.phase === 'Final').length}
+                  {@const allTied =
+                    standingsRows.length > 0 &&
+                    standingsRows.every((r) => r.position === standingsRows[0].position)}
                   <div class="round-standings" aria-label={`Standings for ${round.label}`}>
                     <h4 class="standings-title">Standings — seeds the bracket</h4>
                     {#if standingsLoading}
@@ -1220,7 +1225,21 @@
                       </p>
                     {:else if standingsRows.length === 0}
                       <p class="empty small" role="status">No ranked competitors yet.</p>
+                    {:else if allTied}
+                      <!-- The round ranking only counts FINALIZED heats; with none finalized every
+                           pilot is tied (position 1), which reads as a broken ranking. Show the
+                           finalize-progress instead and let the order fill in as heats finalize. -->
+                      <p class="empty small" role="status">
+                        Ranking appears as you finalize heats — {finalizedCount} of {rHeats.length}
+                        finalized.
+                      </p>
                     {:else}
+                      {#if finalizedCount > 0 && finalizedCount < rHeats.length}
+                        <p class="standings-progress" role="status">
+                          {finalizedCount} of {rHeats.length} heats finalized — updates as you finalize
+                          more.
+                        </p>
+                      {/if}
                       <ol class="standings-list">
                         {#each standingsRows as entry (entry.competitor)}
                           <li class="standings-row">
@@ -2035,6 +2054,11 @@
     color: var(--gf-text-muted);
     text-transform: uppercase;
     letter-spacing: var(--gf-tracking-caps);
+  }
+  .standings-progress {
+    margin: var(--gf-space-1) 0 var(--gf-space-2);
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-faint);
   }
   .standings-list {
     list-style: none;
