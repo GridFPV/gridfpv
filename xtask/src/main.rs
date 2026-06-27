@@ -138,6 +138,15 @@ fn gen_check() -> bool {
 /// up and tears down its own disposable RotorHazard, so no external state is needed —
 /// just Docker. `--include-ignored` runs the `#[ignore]`d container tests too.
 fn live() -> bool {
+    // Boot every live RotorHazard against the GridFPV plugin (S0+): the testkit's
+    // RhContainer mounts the dir named by `GRIDFPV_RH_PLUGIN` into the container's
+    // user `plugins/gridfpv`. The plugin is additive — at S0 it's a load-only
+    // placeholder, so the socket-path live tests behave identically — and this lets
+    // later slices iterate on the plugin in-container under the live suite. Set on the
+    // child `cargo test` process (env, not a process-global set_var, which is unsafe
+    // under this crate's `#![forbid(unsafe_code)]`).
+    let plugin_dir = workspace_root().join("plugins/gridfpv");
+
     // Run each target sequentially so at most one RotorHazard container exists at a
     // time (cargo runs separate test binaries in parallel otherwise).
     let target = |package: &str, name: &str, ignored: bool| {
@@ -155,7 +164,11 @@ fn live() -> bool {
         if ignored {
             args.push("--ignored");
         }
-        run("cargo", &args)
+        run_env(
+            "cargo",
+            &args,
+            &[(gridfpv_testkit::PLUGIN_ENV, &plugin_dir)],
+        )
     };
     // No container needed (in-process mock WS server).
     let ws = target("gridfpv-adapters", "velocidrone_ws", false);
