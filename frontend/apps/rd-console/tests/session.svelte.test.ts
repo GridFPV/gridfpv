@@ -106,7 +106,9 @@ describe('Session', () => {
       json: async () => ({ now_micros: (Date.now() + serverAheadMs) * 1000 })
     } as unknown as Response);
 
-    expect(session.serverNowMs() - Date.now()).toBe(0); // no offset before the first sync
+    // No offset before the first sync — serverNowMs() is just Date.now(). Allow a 1-tick slop: the
+    // two clock reads straddle a possible millisecond rollover (was a flaky `-1 !== 0` in loaded CI).
+    expect(Math.abs(session.serverNowMs() - Date.now())).toBeLessThanOrEqual(2);
     await session.syncServerClock();
     // serverNowMs() now reads ~1s ahead of raw Date.now() — the countdown + race clock use server time.
     const delta = session.serverNowMs() - Date.now();
