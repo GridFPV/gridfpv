@@ -60,9 +60,10 @@ fn usage() {
     eprintln!(
         "\nusage: cargo xtask rh-mock <feed|dump|plugin-check|list>\n\
          \n\
-         feed [scenario] [--port P] [--tick T] [--plugin]\n\
+         feed [scenario] [--port P] [--tick T] [--plugin] [--mock-plugin]\n\
          \x20                                        spin up a real RotorHazard fed a mock signal\n\
-         \x20                                        (--plugin mounts the GridFPV plugin too)\n\
+         \x20                                        (--plugin = GridFPV plugin; --mock-plugin =\n\
+         \x20                                         test-only gridfpv_mock_* node-control plugin)\n\
          dump <director-url> <event> <heat>       print the captured ?projection=signal values\n\
          plugin-check [--port P]                  boot RH with the GridFPV plugin and confirm it loads\n\
          list                                     show the scenario menu\n\
@@ -74,10 +75,21 @@ fn usage() {
 /// The in-repo GridFPV plugin directory (`<root>/plugins/gridfpv`) the harness mounts
 /// into RH's user `plugins/`. `CARGO_MANIFEST_DIR` is `<root>/xtask`.
 fn plugin_dir() -> std::path::PathBuf {
+    workspace_root().join("plugins/gridfpv")
+}
+
+/// The in-repo **test-only** mock-control plugin (`<root>/plugins/gridfpv_mock`): network control
+/// of the mock nodes (set RSSI/frequency, inject laps) over the `gridfpv_mock_*` socket namespace.
+fn mock_plugin_dir() -> std::path::PathBuf {
+    workspace_root().join("plugins/gridfpv_mock")
+}
+
+/// The workspace root (parent of this crate's `xtask` dir).
+fn workspace_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask manifest dir has a parent (workspace root)")
-        .join("plugins/gridfpv")
+        .to_path_buf()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -182,6 +194,7 @@ fn feed(args: &[String]) -> bool {
     let mut port = DEFAULT_PORT;
     let mut tick = DEFAULT_TICK.to_string();
     let mut with_plugin = false;
+    let mut with_mock = false;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -201,6 +214,9 @@ fn feed(args: &[String]) -> bool {
                 }
             },
             "--plugin" => with_plugin = true,
+            // The test-only mock-control plugin (gridfpv_mock_* socket namespace). Implies the
+            // gridfpv plugin folder need not be present; mount it alongside whatever else is asked.
+            "--mock-plugin" => with_mock = true,
             other if other.starts_with("--") => {
                 eprintln!("unknown flag: {other}");
                 return false;
@@ -226,20 +242,34 @@ fn feed(args: &[String]) -> bool {
 
     let csvs = (scenario.build)();
     let node_count = csvs.len();
-    let plugin = with_plugin.then(plugin_dir);
+    // Build the plugin mount list from the flags (own the PathBufs; pass borrows to the testkit).
+    let main_dir = with_plugin.then(plugin_dir);
+    let mock_dir = with_mock.then(mock_plugin_dir);
+    let mut plugins: Vec<(&str, &std::path::Path)> = Vec::new();
+    if let Some(d) = &main_dir {
+        plugins.push(("gridfpv", d.as_path()));
+    }
+    if let Some(d) = &mock_dir {
+        plugins.push(("gridfpv_mock", d.as_path()));
+    }
+    let plugin_note = match (with_plugin, with_mock) {
+        (true, true) => ", +GridFPV plugin +mock-control",
+        (true, false) => ", +GridFPV plugin",
+        (false, true) => ", +mock-control plugin",
+        (false, false) => "",
+    };
     println!(
         "\n\x1b[1mStarting RotorHazard\x1b[0m with scenario \x1b[1m{}\x1b[0m on port {port} \
-         ({node_count} emulated node(s), tick={tick}s{})...",
-        scenario.name,
-        if with_plugin { ", +GridFPV plugin" } else { "" }
+         ({node_count} emulated node(s), tick={tick}s{plugin_note})...",
+        scenario.name
     );
     println!("  {}", scenario.blurb);
-    if let Some(dir) = &plugin {
-        println!("  mounting GridFPV plugin from {}", dir.display());
+    for (folder, dir) in &plugins {
+        println!("  mounting plugin `{folder}` from {}", dir.display());
     }
 
     // RAII: removed on drop (Ctrl-C below drops it). Blocks until the HTTP port is up.
-    let rh = RhContainer::start_with_plugin(port, &tick, &csvs, plugin);
+    let rh = RhContainer::start_with_plugins(port, &tick, &csvs, &plugins);
     let url = rh.url().to_string();
 
     println!(

@@ -86,6 +86,7 @@ export type * from '@bindings/Pilot';
 export type * from '@bindings/PilotId';
 export type * from '@bindings/PilotProgress';
 export type * from '@bindings/Placement';
+export type * from '@bindings/PluginPresence';
 export type * from '@bindings/ProjectionBody';
 export type * from '@bindings/ProjectionKind';
 export type * from '@bindings/ProtestOutcome';

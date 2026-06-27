@@ -49,9 +49,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gridfpv_adapters::rotorhazard::RotorHazardAdapter;
-use gridfpv_adapters::rotorhazard::transport::RotorHazardConnection;
+use gridfpv_adapters::rotorhazard::transport::{
+    DIRECTOR_PROTOCOL_VERSION, PluginHello, RotorHazardConnection,
+};
 use gridfpv_events::{AdapterId, CompetitorRef, Event};
-use gridfpv_server::timers::{TimerId, TimerRegistry, TimerStatus};
+use gridfpv_server::timers::{PluginPresence, TimerId, TimerRegistry, TimerStatus};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
@@ -87,6 +89,13 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// RH pushes asynchronously, so a healthy idle link is silent; the probe distinguishes "idle" from
 /// "dropped" without depending on transport-level disconnect callbacks.
 const IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long to wait, after connecting, for the GridFPV plugin's `gridfpv_hello_ack` (D16, S1). A
+/// plugin-equipped RH replies near-instantly (`wait_for_plugin` returns as soon as it lands); a
+/// stock RH never answers, so this bounds how long we wait before declaring the plugin *missing*
+/// and entering the maintain loop. Kept short — the only cost is a one-time per-connect delay
+/// against a stock RH, which then gets the guided-install prompt anyway.
+const PLUGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
 /// `(node_index, frequency_mhz)` assignment the engine allocated for the staging heat, shared from
@@ -454,6 +463,12 @@ fn drive(
         timers.set_status(&timer_id, TimerStatus::Connected);
         backoff = RECONNECT_BACKOFF_MIN;
 
+        // Probe for the GridFPV plugin (D16, S1): `connect` already emitted `gridfpv_hello`, so
+        // wait briefly for the `gridfpv_hello_ack`. Present-&-compatible / incompatible / missing
+        // drives the Director's required-with-guided-install UX. Re-probed on every (re)connect.
+        let plugin = classify_plugin(conn.wait_for_plugin(PLUGIN_PROBE_TIMEOUT));
+        timers.set_plugin(&timer_id, plugin);
+
         // Maintain the live link until it drops or we are cancelled.
         let dropped = maintain(&conn, &cancel, &armed, &tune, &prepare, &seat, &seated_heat);
 
@@ -480,6 +495,30 @@ fn drive(
     }
     // Cancelled: leave the timer Disconnected (deselected / event changed / shutdown).
     timers.set_status(&timer_id, TimerStatus::Disconnected);
+}
+
+/// Classify the GridFPV-plugin handshake result (D16, S1) into the [`PluginPresence`] the timer
+/// surfaces: no answer → `Missing` (a stock RH — the guided install applies); an answer whose
+/// `gridfpv_*` protocol matches the Director → `Present`; otherwise → `Incompatible` (the guided
+/// install offers the matching build). Compatibility is the protocol version only — the plugin and
+/// Director build versions can differ freely as long as the wire protocol agrees.
+fn classify_plugin(hello: Option<PluginHello>) -> PluginPresence {
+    match hello {
+        None => PluginPresence::Missing,
+        Some(h) if h.protocol_version == DIRECTOR_PROTOCOL_VERSION => PluginPresence::Present {
+            plugin_version: h.plugin_version,
+            rhapi_version: h.rhapi_version,
+            capabilities: h.capabilities,
+        },
+        Some(h) => PluginPresence::Incompatible {
+            reason: format!(
+                "the timer's GridFPV plugin speaks protocol v{}, but this Director supports v{}",
+                h.protocol_version, DIRECTOR_PROTOCOL_VERSION
+            ),
+            plugin_version: h.plugin_version,
+            protocol_version: h.protocol_version,
+        },
+    }
 }
 
 /// Maintain one established connection: drain translated events each tick (routing passes into the

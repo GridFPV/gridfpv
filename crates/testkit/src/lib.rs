@@ -44,7 +44,7 @@
 
 use std::fs;
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -745,19 +745,35 @@ impl RhContainer {
         Self::start_with_plugin(port, update_interval, csvs, None)
     }
 
-    /// Like [`RhContainer::start`], but with an explicit `plugin_dir` to mount into the
-    /// container's user `plugins/gridfpv` (read-only). `Some(dir)` takes precedence; with
-    /// `None` the [`PLUGIN_ENV`] env var is consulted as a fallback. Used by
-    /// `cargo xtask rh-mock` (which can't set process env under `#![forbid(unsafe_code)]`).
+    /// Like [`RhContainer::start`], but with an explicit GridFPV `plugin_dir` to mount into the
+    /// container's user `plugins/gridfpv` (read-only). `Some(dir)` takes precedence; with `None`
+    /// the [`PLUGIN_ENV`] env var is consulted as a fallback (the path `cargo xtask live` uses).
+    /// For mounting additional plugins (e.g. the test-only `gridfpv_mock`) use
+    /// [`start_with_plugins`](Self::start_with_plugins).
     pub fn start_with_plugin(
         port: u16,
         update_interval: &str,
         csvs: &[(usize, String)],
         plugin_dir: Option<PathBuf>,
     ) -> Self {
-        ensure_image();
-
         let plugin_dir = plugin_dir.or_else(|| std::env::var_os(PLUGIN_ENV).map(PathBuf::from));
+        let plugins: Vec<(&str, PathBuf)> =
+            plugin_dir.into_iter().map(|dir| ("gridfpv", dir)).collect();
+        let refs: Vec<(&str, &Path)> = plugins.iter().map(|(n, d)| (*n, d.as_path())).collect();
+        Self::start_with_plugins(port, update_interval, csvs, &refs)
+    }
+
+    /// Start RotorHazard with **any number of plugins** mounted (read-only) into the container's
+    /// user `plugins/<folder>` dirs — each `(folder, host_dir)`. Used by `cargo xtask rh-mock` to
+    /// boot the real `gridfpv` plugin and/or the test-only `gridfpv_mock` control plugin together
+    /// (xtask can't set process env under `#![forbid(unsafe_code)]`, so it passes dirs explicitly).
+    pub fn start_with_plugins(
+        port: u16,
+        update_interval: &str,
+        csvs: &[(usize, String)],
+        plugins: &[(&str, &Path)],
+    ) -> Self {
+        ensure_image();
 
         let name = format!("gridfpv-rh-sig-{port}");
         // Clean any leftover from a previous aborted run.
@@ -787,20 +803,19 @@ impl RhContainer {
                 node_index + 1
             ));
         }
-        // Optionally boot against the GridFPV plugin (S0+): mount the host plugin dir
-        // into the container's user `plugins/gridfpv` (read-only). The plugin is
-        // additive — a placeholder loads cleanly and stock-RH behavior is unchanged.
-        if let Some(plugin_dir) = plugin_dir {
-            if plugin_dir.is_dir() {
+        // Mount each requested plugin into the container's user `plugins/<folder>` (read-only).
+        // Plugins are additive — a placeholder loads cleanly and stock-RH behavior is unchanged.
+        for (folder, dir) in plugins {
+            if dir.is_dir() {
                 args.push("-v".into());
                 args.push(format!(
-                    "{}:{RH_SERVER_DIR}/plugins/gridfpv:ro",
-                    plugin_dir.display()
+                    "{}:{RH_SERVER_DIR}/plugins/{folder}:ro",
+                    dir.display()
                 ));
             } else {
                 eprintln!(
-                    "{PLUGIN_ENV}={} is not a directory; booting stock RH without the plugin",
-                    plugin_dir.display()
+                    "plugin dir {} for `{folder}` is not a directory; skipping that mount",
+                    dir.display()
                 );
             }
         }
