@@ -52,6 +52,7 @@
     voidHeatCommand
   } from '../lib/marshaling.js';
   import type { ProtestOutcome } from '@gridfpv/types';
+  import { commandForAction } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
@@ -71,11 +72,24 @@
   const audit = $derived<AuditEntry[] | undefined>(session.marshalingAudit);
   const canControl = $derived(session.canControl);
 
+  // The MARSHALED heat's own live state — it may NOT be Race Control's current heat (the heat
+  // picker, #4). Prefer the heat-scoped fold (`refreshMarshaling` pulls ?projection=live over the
+  // marshaled heat); fall back to the global stream only when the marshaled heat IS the current one.
+  // So the lifecycle badge + the result transitions read the heat *under review*, not Race Control's.
+  const marshalLive = $derived(
+    session.heatLiveState?.current_heat === heat
+      ? session.heatLiveState
+      : session.liveState?.current_heat === heat
+        ? session.liveState
+        : undefined
+  );
+  // The marshaled heat's loop phase — drives which result transition (Finalize / Revert) is offered.
+  const marshalPhase = $derived(marshalLive?.phase);
   // The result lifecycle (marshaling Slice 5): Provisional (Unofficial) vs Official (Final), with the
-  // auto-official countdown when the round armed a protest window. Read-only display — it surfaces the
-  // governance state; the Finalize/Revert *transitions* live on Live control and enforce the role.
-  const lifecycle = $derived(session.liveState?.lifecycle);
-  const protest = useProtestClock(() => session.liveState?.lifecycle);
+  // auto-official countdown when the round armed a protest window. The Finalize/Revert transitions
+  // below now act on it from here too (B) — targeting the marshaled heat, never Race Control's.
+  const lifecycle = $derived(marshalLive?.lifecycle);
+  const protest = useProtestClock(() => marshalLive?.lifecycle);
 
   // The captured RSSI trace for this heat (`?projection=signal`, Slice 1), pulled alongside the
   // lap list + audit by `refreshMarshaling`. A heat that captured signal (a RotorHazard heat) has
@@ -371,6 +385,21 @@
   async function doVoidHeat(): Promise<void> {
     if (!heat) return;
     const ack = await session.send(voidHeatCommand(heat));
+    if (ack.ok) await afterCorrection();
+  }
+
+  // Result-lifecycle transitions on the MARSHALED heat (B). These act on `heat` (the picker's heat),
+  // never Race Control's current heat — marshaling issues no SetCurrentHeat. Same append→re-fold path
+  // as every correction, so the badge + buttons update via afterCorrection.
+  async function doFinalize(): Promise<void> {
+    if (!heat) return;
+    const ack = await session.send(commandForAction('Finalize', heat));
+    if (ack.ok) await afterCorrection();
+  }
+
+  async function doRevert(): Promise<void> {
+    if (!heat) return;
+    const ack = await session.send(commandForAction('Revert', heat));
     if (ack.ok) await afterCorrection();
   }
 
@@ -772,6 +801,24 @@
           </div>
         </fieldset>
 
+        <fieldset class="result-actions">
+          <legend>Heat result</legend>
+          {#if marshalPhase === 'Unofficial'}
+            <p class="muted">Provisional — finalize to lock the result as official.</p>
+            <button type="button" class="finalize" onclick={doFinalize} disabled={!heat}
+              >Finalize → Official</button
+            >
+          {:else if marshalPhase === 'Final'}
+            <p class="muted">Official — revert to re-open the result for correction.</p>
+            <ConfirmButton onconfirm={doRevert} disabled={!heat}>Revert → Unofficial</ConfirmButton>
+          {:else}
+            <p class="muted">
+              No result to finalize yet — this heat hasn’t finished (it’s {marshalPhase ??
+                'not running'}).
+            </p>
+          {/if}
+        </fieldset>
+
         <fieldset class="danger-zone">
           <legend>Void the heat</legend>
           <p class="muted">Throws out the whole heat — it will not count.</p>
@@ -1020,6 +1067,22 @@
   .danger-zone {
     border-color: color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
     background: var(--gf-danger-soft);
+  }
+  .result-actions {
+    border-color: color-mix(in srgb, var(--gf-accent) 35%, var(--gf-border));
+  }
+  .finalize {
+    border: 1px solid var(--gf-accent);
+    background: var(--gf-accent-soft);
+    color: var(--gf-text);
+    font-weight: var(--gf-font-weight-semibold);
+    padding: 0.3rem var(--gf-space-3);
+    border-radius: var(--gf-radius-sm);
+    cursor: pointer;
+  }
+  .finalize:hover:not(:disabled) {
+    background: var(--gf-accent);
+    color: #061018;
   }
   .audit {
     padding: var(--gf-space-4);

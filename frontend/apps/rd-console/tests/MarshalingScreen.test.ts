@@ -242,6 +242,32 @@ describe('Marshaling (Slice 3)', () => {
     expect(sendSpy).toHaveBeenCalledWith({ VoidHeat: { heat: 'heat-1' } });
   });
 
+  it('finalizes the marshaled heat (Unofficial→Final), never moving the current heat', async () => {
+    const live: LiveRaceState = {
+      ...liveRunning,
+      phase: 'Unofficial',
+      lifecycle: { Provisional: {} }
+    };
+    const { session, sendSpy } = makeTestSession({ live, laps: lapList });
+    render(Marshaling, { session });
+    await fireEvent.click(screen.getByRole('button', { name: /Finalize/ }));
+    expect(sendSpy).toHaveBeenCalledWith({ Finalize: { heat: 'heat-1' } });
+    // Marshaling must not move Race Control's current heat.
+    expect(
+      sendSpy.mock.calls.find(([c]) => typeof c === 'object' && c !== null && 'SetCurrentHeat' in c)
+    ).toBeUndefined();
+  });
+
+  it('reverts a finalized marshaled heat (Final→Unofficial) after confirm', async () => {
+    const live: LiveRaceState = { ...liveRunning, phase: 'Final', lifecycle: 'Official' };
+    const { session, sendSpy } = makeTestSession({ live, laps: lapList });
+    render(Marshaling, { session });
+    await fireEvent.click(screen.getByRole('button', { name: /Revert/ }));
+    expect(sendSpy).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(sendSpy).toHaveBeenCalledWith({ Revert: { heat: 'heat-1' } });
+  });
+
   it('renders the audit trail newest-first', () => {
     const { session } = makeTestSession({
       live: liveRunning,
