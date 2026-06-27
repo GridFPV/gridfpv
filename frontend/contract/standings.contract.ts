@@ -68,6 +68,8 @@ describe('GET round ranking + class standings serve the season-join projections'
         format: 'timed_qual',
         params: { rounds: '1' },
         win_condition: 'BestLap',
+        // Best Lap only ranks, so a scored round needs a race time to end (server validation).
+        time_limit_secs: 60,
         seeding: 'FromRoster'
       },
       TOKEN
