@@ -60,7 +60,6 @@
     fieldsForFormat,
     formatLabel,
     isBracketFormat,
-    isChaseTheAceFormat,
     isQualifyingFormat,
     OPEN_PRACTICE
   } from '../lib/formats.js';
@@ -604,14 +603,15 @@
   let formOpen = $state(false);
   let saving = $state(false);
 
-  // Chase the Ace is a final-only format: offer it in the Format picker ONLY when editing an
-  // existing bracket round (to set or keep a final as Chase the Ace), never for a brand-new general
-  // round. Every other offered format is always available. (Creation also offers it at the
-  // advance-to-final step.)
+  // Bracket formats (single/double elim, Chase the Ace) are built via "Advance to bracket" (the
+  // full-chain builder), never added as a standalone round — a bracket level added by hand would be
+  // an orphan (roster-seeded, no chain). So hide them from the Add-round picker. They stay selectable
+  // ONLY when editing an existing bracket round (to adjust a level / switch its final format).
+  // multi_main is NOT a bracket chain (a one-round tiered final), so it stays a normal Add-round format.
   const formatOptions = $derived.by(() => {
     const editingRound = editing !== undefined ? rounds.find((r) => r.id === editing) : undefined;
-    const allowChaseTheAce = editingRound !== undefined && isBracketFormat(editingRound.format);
-    return formats.filter((f) => !isChaseTheAceFormat(f) || allowChaseTheAce);
+    const allowBracket = editingRound !== undefined && isBracketFormat(editingRound.format);
+    return formats.filter((f) => !isBracketFormat(f) || allowBracket);
   });
 
   let label = $state('');
