@@ -72,6 +72,30 @@ def initialize(rhapi):
     # {index: {"t": [secs], "v": [rssi], "sent": int}} — the source of the incremental slices.
     state = {"greenlet": None, "acc": {}}
 
+    # ---- Grid owns start timing --------------------------------------------------------
+    # RotorHazard adds a fixed pre-stage pad (GENERAL/RACE_START_DELAY_EXTRA_SECS, default 0.9s)
+    # AFTER `stage_race` before it reaches RACING — separate from the race format's staging the
+    # Director already zeroes. So the race actually starts ~0.9s after the Director's start
+    # countdown hits zero. The Director owns race timing, so zero the pad here: RACING is then
+    # reached immediately on stage and the start lines up with the countdown. (Lap times are
+    # measured from RACING either way, so this only removes the offset.) Prior value reported in
+    # the hello ack for transparency.
+    def zero_prestage_pad():
+        try:
+            was = rhapi.config.get("GENERAL", "RACE_START_DELAY_EXTRA_SECS")
+            if was is not None and float(was) != 0.0:
+                rhapi.config.set("GENERAL", "RACE_START_DELAY_EXTRA_SECS", 0)
+                logger.info(
+                    "GridFPV: zeroed RACE_START_DELAY_EXTRA_SECS (was %s) — Grid owns start timing",
+                    was,
+                )
+            return was
+        except Exception:  # noqa: BLE001 - never fail load on an optional timing tweak
+            logger.exception("GridFPV: could not read/zero RACE_START_DELAY_EXTRA_SECS")
+            return None
+
+    prestage_secs_was = zero_prestage_pad()
+
     # ---- S1: handshake -----------------------------------------------------------------
     def on_hello(_data=None):
         ack = {
@@ -83,6 +107,8 @@ def initialize(rhapi):
             ),
             "capabilities": CAPABILITIES,
             "node_count": _node_count(rhapi),
+            # The RACE_START_DELAY_EXTRA_SECS we found before zeroing it (None if unreadable).
+            "prestage_secs_was": prestage_secs_was,
         }
         logger.info("GridFPV hello -> ack %s", ack)
         rhapi.ui.socket_send(EVT_HELLO_ACK, ack)
