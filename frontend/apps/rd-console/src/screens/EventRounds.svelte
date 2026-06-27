@@ -60,6 +60,7 @@
     fieldsForFormat,
     formatLabel,
     isBracketFormat,
+    isChaseTheAceFormat,
     isQualifyingFormat,
     OPEN_PRACTICE
   } from '../lib/formats.js';
@@ -399,6 +400,9 @@
   // Advance-bracket action opens on (a complete final has no next level to advance to).
   function canAdvanceLevel(round: RoundDef): boolean {
     if (!isBracketFormat(round.format)) return false;
+    // Chase the Ace is always the terminal final — it never advances to a further level (and its
+    // multiple race heats would otherwise read as a multi-heat, still-advancing level).
+    if (isChaseTheAceFormat(round.format)) return false;
     if (!isLevelComplete(round.id, heats)) return false;
     // The level is the chain's last when nothing yet chains off it AND it has a single heat (a
     // one-heat level is the final — there is no winners-pairing left to do).
@@ -417,7 +421,24 @@
   // Create the next bracket level seeded FromHeatWinners of `level`, then generate its winners-paired
   // heats (deterministic → fill-all, #216). The default label reads by the next level's size (a
   // 1-heat next level is "Final", 2-heat "Semifinals", …); the round is editable thereafter.
-  async function advanceLevel(level: RoundDef) {
+  // The number of heats the level advancing off `level` will hold (winners pair up, at least one).
+  function nextHeatCountOf(level: RoundDef): number {
+    return Math.max(1, Math.floor(heatsByRound(level.id).length / 2));
+  }
+  // Whether advancing `level` produces the **final** (a single-heat next level) — the point at which
+  // the RD chooses the final's format (single race vs Chase the Ace).
+  function nextLevelIsFinal(level: RoundDef): boolean {
+    return nextHeatCountOf(level) === 1;
+  }
+
+  // Create the next bracket level seeded FromHeatWinners of `level`, then generate its winners-paired
+  // heats (deterministic → fill-all, #216). `finalFormat` (the final-format selector) overrides the
+  // next level's format for the final — omit for a single decisive race, pass chase_the_ace for a
+  // multi-race final. The default label reads by the next level's size. The round is editable after.
+  async function advanceLevel(
+    level: RoundDef,
+    finalFormat?: { format: string; winsToWin?: number }
+  ) {
     if (advancingLevel) return;
     advancingLevel = level.id;
     try {
@@ -429,11 +450,9 @@
         rounds
       );
       const levelIndex = chain.findIndex((r) => r.id === level.id);
-      // The next level holds half this level's heats (winners pair up), at least one.
-      const nextHeatCount = Math.max(1, Math.floor(heatsByRound(level.id).length / 2));
       const rootLabel = chain[0]?.label ?? level.label;
-      const label = nextLevelLabel(rootLabel, nextHeatCount, levelIndex);
-      const created = await session.createRound(advanceLevelReq(level, label));
+      const label = nextLevelLabel(rootLabel, nextHeatCountOf(level), levelIndex);
+      const created = await session.createRound(advanceLevelReq(level, label, finalFormat));
       if (!created) {
         toast.info('A control token is required to manage rounds.');
         return;
@@ -446,6 +465,31 @@
     } finally {
       advancingLevel = undefined;
     }
+  }
+
+  // The advance-to-final picker (the final-format selector): which level's final is being set up,
+  // whether it is a Chase-the-Ace final, and the wins target. Single race is the default.
+  let finalConfigLevel = $state<RoundId | undefined>(undefined);
+  let finalFormatKind = $state<'single' | 'chase'>('single');
+  let finalWins = $state(2);
+
+  function openFinalConfig(level: RoundDef) {
+    finalConfigLevel = level.id;
+    finalFormatKind = 'single';
+    finalWins = 2;
+  }
+  function cancelFinalConfig() {
+    finalConfigLevel = undefined;
+  }
+  async function submitFinalConfig(level: RoundDef) {
+    const useChase = finalFormatKind === 'chase';
+    finalConfigLevel = undefined;
+    await advanceLevel(
+      level,
+      useChase
+        ? { format: 'chase_the_ace', winsToWin: Math.max(1, Math.round(finalWins)) }
+        : undefined
+    );
   }
 
   // The champion (overall winner) of a bracket chain whose final is scored, used to mark the final
@@ -605,6 +649,16 @@
   let editing = $state<RoundId | undefined>(undefined);
   let formOpen = $state(false);
   let saving = $state(false);
+
+  // Chase the Ace is a final-only format: offer it in the Format picker ONLY when editing an
+  // existing bracket round (to set or keep a final as Chase the Ace), never for a brand-new general
+  // round. Every other offered format is always available. (Creation also offers it at the
+  // advance-to-final step.)
+  const formatOptions = $derived.by(() => {
+    const editingRound = editing !== undefined ? rounds.find((r) => r.id === editing) : undefined;
+    const allowChaseTheAce = editingRound !== undefined && isBracketFormat(editingRound.format);
+    return formats.filter((f) => !isChaseTheAceFormat(f) || allowChaseTheAce);
+  });
 
   let label = $state('');
   // The round's single eligible class (Rounds form redesign item 6): a round targets exactly one
@@ -1190,11 +1244,12 @@
                     <Button
                       variant="secondary"
                       size="sm"
-                      onclick={() => advanceLevel(round)}
+                      onclick={() =>
+                        nextLevelIsFinal(round) ? openFinalConfig(round) : advanceLevel(round)}
                       loading={advancingLevel === round.id}
-                      disabled={advancingLevel !== undefined}
+                      disabled={advancingLevel !== undefined || finalConfigLevel !== undefined}
                     >
-                      Advance bracket
+                      {nextLevelIsFinal(round) ? 'Advance to final' : 'Advance bracket'}
                     </Button>
                   {/if}
                   <!-- Format-aware fill (#216): a deterministic round generates all its heats in
@@ -1307,6 +1362,66 @@
                         disabled={advanceLabel.trim().length === 0}
                       >
                         Create &amp; fill bracket
+                      </Button>
+                    </div>
+                  </form>
+                {/if}
+
+                <!-- The final-format selector (Slice B): advancing into the last level lets the RD
+                     pick how the final is decided — a single decisive race, or a Chase-the-Ace
+                     multi-race final (first to N race-wins). Chosen BEFORE the final is created so
+                     its heats generate in the right format. -->
+                {#if finalConfigLevel === round.id}
+                  <form
+                    class="advance-form"
+                    aria-label={`Configure the final advancing from ${round.label}`}
+                    onsubmit={(e) => {
+                      e.preventDefault();
+                      submitFinalConfig(round);
+                    }}
+                  >
+                    <h4 class="standings-title">Advance to final</h4>
+                    <p class="advance-note">
+                      Choose how the final is decided. <strong>Single race</strong> is one decisive
+                      heat; <strong>Chase the Ace</strong> races the finalists repeatedly until a pilot
+                      has won the set number of times.
+                    </p>
+                    <div class="form-grid">
+                      <Field label="Final format">
+                        <Select bind:value={finalFormatKind} aria-label="Final format">
+                          <option value="single">Single race</option>
+                          <option value="chase">Chase the Ace</option>
+                        </Select>
+                      </Field>
+                      {#if finalFormatKind === 'chase'}
+                        <Field
+                          label="Wins to win"
+                          hint="First to this many race-wins takes the final (default 2)."
+                        >
+                          <Input
+                            type="number"
+                            min="1"
+                            bind:value={finalWins}
+                            aria-label="Wins to win"
+                          />
+                        </Field>
+                      {/if}
+                    </div>
+                    <div class="form-actions">
+                      <Button
+                        variant="ghost"
+                        type="button"
+                        onclick={cancelFinalConfig}
+                        disabled={advancingLevel !== undefined}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="primary"
+                        type="submit"
+                        loading={advancingLevel !== undefined}
+                      >
+                        Create final
                       </Button>
                     </div>
                   </form>
@@ -1425,7 +1540,7 @@
 
       <Field label="Format" required>
         <Select bind:value={format} aria-label="Format">
-          {#each formats as f (f)}
+          {#each formatOptions as f (f)}
             <!-- Friendly label shown (Rounds form redesign item 1); the value stays the key. -->
             <option value={f}>{formatLabel(f)}</option>
           {/each}

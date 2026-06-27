@@ -25,6 +25,19 @@ export const OPEN_PRACTICE = 'open_practice';
  */
 export const MULTI_MAIN = 'multi_main';
 
+/**
+ * The **Chase the Ace** final-format key — a multi-race final: the seeded final field races
+ * repeatedly until the first pilot to `wins_to_win` race-wins (default 2) is champion. It is a
+ * bracket **final level** (so it folds into the bracket container) and is **dynamic** — each race
+ * only appears once the prior is scored (it single-steps, like open practice), never a batch.
+ */
+export const CHASE_THE_ACE = 'chase_the_ace';
+
+/** Whether a format key is the Chase-the-Ace final format. */
+export function isChaseTheAceFormat(format: string | undefined | null): boolean {
+  return format === CHASE_THE_ACE;
+}
+
 /** Whether a format key is the multi-main finals format. */
 export function isMultiMainFormat(format: string | undefined | null): boolean {
   return format === MULTI_MAIN;
@@ -38,7 +51,7 @@ export function isMultiMainFormat(format: string | undefined | null): boolean {
  * (D13/D14) is the named-next design problem, so it is listed for labelling but its UI advancement
  * is not yet driven here.
  */
-export const BRACKET_FORMATS: readonly string[] = ['single_elim', 'double_elim'];
+export const BRACKET_FORMATS: readonly string[] = ['single_elim', 'double_elim', CHASE_THE_ACE];
 
 /** Whether a format key is a bracket (elimination) format whose rounds are bracket levels (D13). */
 export function isBracketFormat(format: string | undefined | null): boolean {
@@ -79,7 +92,8 @@ export const FORMAT_LABELS: Readonly<Record<string, string>> = {
   zippyq: 'ZippyQ',
   single_elim: 'Single Elimination',
   double_elim: 'Double Elimination',
-  multi_main: 'Multi-Main'
+  multi_main: 'Multi-Main',
+  chase_the_ace: 'Chase the Ace'
 };
 
 /**
@@ -149,7 +163,9 @@ export function isOpenPracticeFormat(format: string | undefined | null): boolean
  * default rather than silently excluded.
  */
 export function isDeterministicFormat(format: string | undefined | null): boolean {
-  return !!format && !isOpenPracticeFormat(format);
+  // Open Practice and Chase the Ace are the dynamic formats: their next heat appears on demand /
+  // only once the prior is scored (a CTA race needs the previous race's result), so they single-step.
+  return !!format && !isOpenPracticeFormat(format) && !isChaseTheAceFormat(format);
 }
 
 /**

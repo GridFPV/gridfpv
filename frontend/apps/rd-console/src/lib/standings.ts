@@ -68,13 +68,27 @@ export function advanceRoundLabel(source: RoundDef): string {
  * `FromHeatWinners { source_round: <level> }` — the per-level generator pairs the level's heat
  * winners into the next level's heats. Carries the level's classes + win condition unchanged; the RD
  * picks the `label` (e.g. "Semifinals").
+ *
+ * `finalFormat` overrides the next level's format for the **final** (the final-format selector): omit
+ * (the default) to reuse the level's bracket format — a single decisive race; pass
+ * `{ format: 'chase_the_ace', winsToWin }` for a multi-race Chase-the-Ace final. A Chase-the-Ace
+ * level carries only its `wins_to_win` param (its field is the seeded finalists, not heat-sized).
  */
-export function advanceLevelReq(level: RoundDef, label: string): NewRoundReq {
+export function advanceLevelReq(
+  level: RoundDef,
+  label: string,
+  finalFormat?: { format: string; winsToWin?: number }
+): NewRoundReq {
+  const format = finalFormat?.format ?? level.format;
+  const params =
+    finalFormat?.format === 'chase_the_ace'
+      ? { wins_to_win: String(Math.max(1, Math.round(finalFormat.winsToWin ?? 2))) }
+      : { ...(level.params ?? {}) };
   return {
     label,
     classes: [...level.classes],
-    format: level.format,
-    params: { ...(level.params ?? {}) },
+    format,
+    params,
     win_condition: level.win_condition,
     // Carry the level's race time forward too, so a ranking-only win condition still ends its
     // heats (a scored round must be able to end — server validation).
