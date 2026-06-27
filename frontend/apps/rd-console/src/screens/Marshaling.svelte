@@ -31,7 +31,7 @@
     PilotProgress,
     SignalTraceView
   } from '@gridfpv/types';
-  import { formatMicros } from '@gridfpv/components';
+  import { formatMicros, Select } from '@gridfpv/components';
   import { channelLabel } from '../lib/channels.js';
   import { createCompetitorNameResolver } from '../lib/competitorName.js';
   import { heatNameById } from '../lib/heats.js';
@@ -375,6 +375,32 @@
       : (session.liveState?.active_pilots ?? [])
   );
 
+  // Marshal one pilot at a time (declutter): a dropdown picks the pilot, and the graph + lap list
+  // below scope to just them. `shownPilot` is the chosen pilot if still in the field, else the first
+  // competitor — so it self-heals when the heat changes without an extra effect.
+  let selectedPilot = $state<CompetitorRef | undefined>(undefined);
+  const shownPilot = $derived<CompetitorRef | undefined>(
+    selectedPilot !== undefined && competitors.includes(selectedPilot)
+      ? selectedPilot
+      : competitors[0]
+  );
+  const shownTrace = $derived<SignalTraceView | undefined>(
+    signalTrace
+      ? {
+          competitors: signalTrace.competitors.filter((c) => c.competitor.competitor === shownPilot)
+        }
+      : undefined
+  );
+  const hasShownTrace = $derived((shownTrace?.competitors.length ?? 0) > 0);
+  const shownLaps = $derived<LapList | undefined>(
+    laps
+      ? {
+          ...laps,
+          competitors: laps.competitors.filter((c) => c.competitor.competitor === shownPilot)
+        }
+      : undefined
+  );
+
   // ── Audit rendering helpers ──
   function auditLabel(kind: AuditKind): string {
     switch (kind) {
@@ -452,14 +478,31 @@
 
   <div class="layout">
     <div class="main">
-      {#if hasTrace && signalTrace}
-        <!-- Signal-as-evidence (Slice 4): the RSSI graph for heats that captured a trace. A marker
-             click selects that lap in the action surface below; the lap-list selection highlights
-             the same marker (two-way — `selectLap` is the one shared selection). Display only — no
-             re-detection (marshaling.html §3.2/§5). Sim heats (no trace) skip this entirely. -->
+      {#if competitors.length > 0}
+        <!-- Marshal one pilot at a time: pick whose signal + laps to review (declutter). -->
+        <div class="pilot-picker">
+          <label for="marshal-pilot">Marshal pilot</label>
+          <Select
+            id="marshal-pilot"
+            value={shownPilot ?? ''}
+            aria-label="Pilot to marshal"
+            onchange={(e: Event) => (selectedPilot = (e.currentTarget as HTMLSelectElement).value)}
+          >
+            {#each competitors as ref (ref)}
+              <option value={ref}>{competitorName(ref)}</option>
+            {/each}
+          </Select>
+        </div>
+      {/if}
+
+      {#if hasShownTrace && shownTrace}
+        <!-- Signal-as-evidence (Slice 4): the RSSI graph for the selected pilot's captured trace. A
+             marker click selects that lap in the action surface below; the lap-list selection
+             highlights the same marker (two-way — `selectLap` is the one shared selection). Display
+             only — no re-detection (marshaling.html §3.2/§5). Sim heats (no trace) skip this. -->
         <RssiGraph
-          trace={signalTrace}
-          {laps}
+          trace={shownTrace}
+          laps={shownLaps}
           {selected}
           onselect={selectLap}
           onaddlap={insertLap}
@@ -468,9 +511,9 @@
         />
       {/if}
 
-      {#if laps && laps.competitors.length > 0}
+      {#if shownLaps && shownLaps.competitors.length > 0}
         <div class="laps">
-          {#each laps.competitors as cl (cl.competitor.competitor)}
+          {#each shownLaps.competitors as cl (cl.competitor.competitor)}
             <div class="comp">
               <h4>{competitorName(cl.competitor.competitor)}</h4>
               {#if cl.laps.length === 0}
@@ -781,6 +824,18 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-4);
+  }
+  .pilot-picker {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    max-width: 22rem;
+  }
+  .pilot-picker label {
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text-secondary);
+    white-space: nowrap;
   }
   .laps {
     display: flex;
