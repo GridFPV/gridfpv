@@ -140,6 +140,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.change(screen.getByLabelText('Win condition'), {
       target: { value: 'BestLap' }
     });
+    // Best-lap is always timed: a Race time field appears and is sent as the round's time limit so
+    // the heat auto-ends (the win condition only ranks). Set 90s.
+    await fireEvent.input(screen.getByLabelText('Race time seconds'), { target: { value: '90' } });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
 
@@ -154,6 +157,8 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       win_condition: 'BestLap',
       seeding: 'FromRoster'
     });
+    // Best-lap qualifying carries its race time as the round time limit (so it can't run forever).
+    expect(req.time_limit_secs).toBe(90);
     // The new round appears in the Rounds list (its label also seeds the Heats section).
     const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
     await within(roundsCard).findByText('RR Heats');
