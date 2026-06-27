@@ -30,6 +30,8 @@
 //! so a log with no rulings projects identically through either entry point.
 #![forbid(unsafe_code)]
 
+pub mod recalc;
+
 use std::collections::BTreeMap;
 
 use gridfpv_events::{
