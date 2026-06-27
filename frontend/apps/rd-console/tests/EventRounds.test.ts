@@ -6,6 +6,7 @@ import type {
   Class,
   EventMeta,
   HeatSummary,
+  NewRoundReq,
   Pilot,
   RoundDef,
   Timer
@@ -1240,20 +1241,22 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
   // level's FromHeatWinners source can be asserted against the previous level's id.
   function chainCreateImpl() {
     let n = 0;
-    return vi.fn(async (_b, _e, req: { label: string; format: string; seeding: unknown }) => ({
-      id: `lvl${++n}`,
-      label: req.label,
-      classes: ['c1'],
-      format: req.format,
-      params: {},
-      win_condition: QUAL.win_condition,
-      seeding: req.seeding,
-      channel_mode: 'PerHeat',
-      staging_timer_secs: 300,
-      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-      grace_window: { Duration: { micros: 3000000 } },
-      protest_window: 'Off'
-    }));
+    return vi.fn(
+      async (_b: string, _e: string, req: NewRoundReq): Promise<RoundDef> => ({
+        id: `lvl${++n}`,
+        label: req.label,
+        classes: ['c1'],
+        format: req.format,
+        params: {},
+        win_condition: QUAL.win_condition,
+        seeding: req.seeding,
+        channel_mode: 'PerHeat',
+        staging_timer_secs: 300,
+        start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+        grace_window: { Duration: { micros: 3000000 } },
+        protest_window: 'Off'
+      })
+    );
   }
 
   it('builds the whole single-elim chain from the advance-to-bracket modal', async () => {
