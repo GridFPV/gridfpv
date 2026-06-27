@@ -380,6 +380,10 @@ pub fn router(registry: EventRegistry) -> Router {
         // delete are RD-gated. `DELETE` rejects the built-in Mock.
         .route("/timers", get(list_timers).post(create_timer))
         .route("/timers/{timer_id}", put(update_timer).delete(delete_timer))
+        // The downloadable GridFPV RotorHazard plugin bundle (D16, S1) the guided-install UX
+        // offers when a timer's plugin is missing/incompatible. Open read: it's static, embedded
+        // at build, and carries no event data — just the plugin folder to drop into RH's plugins/.
+        .route("/plugin/gridfpv.zip", get(download_plugin_bundle))
         // Application-level pilots (issue #74): the persisted directory the RD maintains once and
         // each event rosters from. `GET /pilots` is an open read; create/edit/delete are RD-gated.
         .route("/pilots", get(list_pilots).post(create_pilot))
@@ -587,6 +591,27 @@ async fn set_active_event(
 /// credential, mirroring `GET /events`.
 async fn list_timers(State(registry): State<EventRegistry>) -> Json<Vec<Timer>> {
     Json(registry.timers().list())
+}
+
+/// `GET /plugin/gridfpv.zip` — the downloadable GridFPV RotorHazard plugin bundle (D16, S1).
+///
+/// An **open read**: the guided-install UX offers it when a timer's plugin is missing/incompatible.
+/// The bytes are a STORE-only ZIP built from the plugin source embedded at compile time
+/// ([`plugin_bundle`](crate::plugin_bundle)), so the download always matches this Director's
+/// protocol version. Served as an attachment so the browser saves it.
+async fn download_plugin_bundle() -> Response {
+    let zip = crate::plugin_bundle::plugin_zip();
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/zip"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                concat!("attachment; filename=\"", "gridfpv-plugin.zip", "\""),
+            ),
+        ],
+        zip,
+    )
+        .into_response()
 }
 
 /// `POST /timers` — create a timer from a [`CreateTimerRequest`], RD-gated (issue #73).

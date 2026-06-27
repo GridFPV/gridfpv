@@ -27,6 +27,12 @@ use std::time::{Duration, Instant};
 /// which still records via RH's `current_heat is HEAT_ID_NONE` pass-gate branch.
 const SEAT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// The `gridfpv_*` wire-protocol version the Director speaks (D16, S1). Sent in the
+/// `gridfpv_hello` probe so a plugin can negotiate; the Director treats a plugin whose
+/// `protocol_version` differs as *incompatible* (the guided-install path then offers the matching
+/// build). Bump only on a breaking change to the handshake/message shapes.
+pub const DIRECTOR_PROTOCOL_VERSION: u32 = 1;
+
 use rust_socketio::client::Client;
 use rust_socketio::{ClientBuilder, Payload, RawClient};
 use serde_json::json;
@@ -83,6 +89,40 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
     }
 }
 
+/// The GridFPV plugin's `gridfpv_hello_ack` payload — the in-process RH plugin's reply to
+/// the Director's `gridfpv_hello` probe (RH plugin design D16, Slice 1). Present only when a
+/// plugin-equipped RH answered the handshake; a stock RH never registers the handler, so the
+/// probe simply times out (the Director then surfaces the guided install). Pure wire data —
+/// the app layer maps it to its `PluginPresence` status.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginHello {
+    /// The `gridfpv_*` wire-protocol version (negotiated against the Director's supported range).
+    pub protocol_version: u32,
+    /// The plugin build's own version string (e.g. `"0.1.0"`).
+    #[serde(default)]
+    pub plugin_version: String,
+    /// The RHAPI version the plugin reports (e.g. `"1.4"`).
+    #[serde(default)]
+    pub rhapi_version: String,
+    /// Capabilities the plugin declares it implements (e.g. `["hello"]`; later `"live_signal"`,
+    /// `"clean_control"`, `"recalc"`). The Director keys transport decisions off these.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// The plugin's node/seat count.
+    #[serde(default)]
+    pub node_count: u32,
+}
+
+/// Parse a `gridfpv_hello_ack` socket payload (a one-element array, like every RH emit) into a
+/// [`PluginHello`]. `None` for a malformed/unexpected shape (treated as no answer).
+fn parse_hello(payload: &Payload) -> Option<PluginHello> {
+    let value = match payload {
+        Payload::Text(values) => values.first()?.clone(),
+        _ => return None,
+    };
+    serde_json::from_value(value).ok()
+}
+
 /// A live connection to a RotorHazard server, translating its socket stream into
 /// canonical [`Event`]s.
 pub struct RotorHazardConnection {
@@ -111,6 +151,12 @@ pub struct RotorHazardConnection {
     /// Grid-owns-all-timing model (#…): Grid's start procedure is the only delay; RH just records on
     /// command. `None` until the first `race_status` carrying a format id is folded.
     current_format: Arc<Mutex<Option<i64>>>,
+    /// The GridFPV plugin's handshake reply (`gridfpv_hello_ack`), once it arrives. The Director
+    /// emits `gridfpv_hello` on (re)connect; a plugin-equipped RH answers and the `gridfpv_hello_ack`
+    /// handler stashes the [`PluginHello`] here, which the driver reads via
+    /// [`wait_for_plugin`](Self::wait_for_plugin). Stays `None` against a stock RH (no handler
+    /// registered) — that absence is what drives the Director's guided-install prompt (D16, S1).
+    hello: Arc<Mutex<Option<PluginHello>>>,
 }
 
 impl RotorHazardConnection {
@@ -127,6 +173,9 @@ impl RotorHazardConnection {
         // The current race-format id, learned from the `race_status` stream (see the struct field).
         // Starts empty (no status folded yet); the first `race_status` on connect populates it.
         let current_format: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+        // The GridFPV plugin handshake reply, stashed by the `gridfpv_hello_ack` handler below and
+        // read by the driver (see the struct field). Empty until/unless a plugin-equipped RH answers.
+        let hello: Arc<Mutex<Option<PluginHello>>> = Arc::new(Mutex::new(None));
 
         // `rust_socketio`'s reserved events: on a dropped socket the poll loop fires `error`
         // (the engine.io read failed) and, on a clean disconnect packet, `close`. Either way the
@@ -344,6 +393,16 @@ impl RotorHazardConnection {
                     current_format.clone(),
                 ),
             )
+            // The GridFPV plugin's handshake reply (D16, S1): a plugin-equipped RH answers our
+            // `gridfpv_hello` (emitted below) with `gridfpv_hello_ack`. Stash it for the driver.
+            .on("gridfpv_hello_ack", {
+                let hello = hello.clone();
+                move |payload: Payload, _client: RawClient| {
+                    if let Some(parsed) = parse_hello(&payload) {
+                        *hello.lock().expect("plugin-hello lock") = Some(parsed);
+                    }
+                }
+            })
             .connect()?;
 
         // Warm initial state on (re)connect: ask RH to send current per-node RSSI, the enter/exit
@@ -355,6 +414,15 @@ impl RotorHazardConnection {
             json!({ "load_types": ["node_data", "enter_and_exit_at_levels", "race_status"] }),
         );
 
+        // Probe for the GridFPV plugin (D16, S1): emit `gridfpv_hello` over the connection we just
+        // opened. A plugin-equipped RH replies with `gridfpv_hello_ack` (handled above); a stock RH
+        // has no handler, so nothing comes back and the driver's `wait_for_plugin` times out. We
+        // announce the Director's supported protocol version so the plugin can negotiate later.
+        let _ = client.emit(
+            "gridfpv_hello",
+            json!({ "protocol_version": DIRECTOR_PROTOCOL_VERSION }),
+        );
+
         Ok(Self {
             client,
             events,
@@ -362,6 +430,7 @@ impl RotorHazardConnection {
             alive,
             savable_heat,
             current_format,
+            hello,
         })
     }
 
@@ -373,6 +442,25 @@ impl RotorHazardConnection {
     /// until the `heat_data` response has been folded.
     pub fn take_savable_heat(&self) -> Option<u64> {
         self.savable_heat.lock().expect("savable-heat lock").take()
+    }
+
+    /// Wait up to `timeout` for the GridFPV plugin's `gridfpv_hello_ack` (D16, S1), returning the
+    /// [`PluginHello`] if a plugin-equipped RH answered, or `None` if none did (a stock RH — the
+    /// guided-install case). Blocking poll (small sleeps): the driver calls this on its own thread
+    /// right after [`connect`](Self::connect), so it never stalls the async runtime. The
+    /// `gridfpv_hello` probe is emitted by `connect`, so by the time this is called the reply may
+    /// already be in; we poll rather than block on a channel to keep the transport lock-free.
+    pub fn wait_for_plugin(&self, timeout: Duration) -> Option<PluginHello> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(hello) = self.hello.lock().expect("plugin-hello lock").clone() {
+                return Some(hello);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// **Seat a heat's bound pilots on RotorHazard nodes** so RH records *and* attributes passes for

@@ -52,7 +52,9 @@ use gridfpv_events::{AdapterId, CompetitorRef, Event, HeatId, HeatTransition};
 use gridfpv_server::app::AppState;
 use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{CreateTimerRequest, MOCK_TIMER_ID, TimerId, TimerKind, TimerStatus};
+use gridfpv_server::timers::{
+    CreateTimerRequest, MOCK_TIMER_ID, PluginPresence, TimerId, TimerKind, TimerStatus,
+};
 use gridfpv_testkit::{NodeCsv, RhContainer, node_csv};
 
 /// Count how many lines of `rh`'s container log contain `needle` — used to assert the heat-end dense
@@ -182,6 +184,27 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
         "the Director should report the RH timer Connected on selection, before any heat; status = {:?}",
         timers.get(&rh_timer.id).map(|t| t.status)
     );
+    // The GridFPV-plugin handshake probe runs right after connect (D16, S1): the timer's plugin
+    // presence becomes *known* (Some). Under `cargo xtask live` the plugin folder is mounted
+    // (GRIDFPV_RH_PLUGIN), so it resolves to `Present`; a plain `cargo test` (no plugin mounted)
+    // resolves to `Missing`. Assert it was probed, and — when mounted — that it's recognized.
+    let probed = wait_for(Duration::from_secs(10), || {
+        timers.get(&id).map(|t| t.plugin.is_some()).unwrap_or(false)
+    })
+    .await;
+    assert!(
+        probed,
+        "the Director should probe the RH timer for the GridFPV plugin after connect; plugin = {:?}",
+        timers.get(&id).map(|t| t.plugin.clone())
+    );
+    if std::env::var_os("GRIDFPV_RH_PLUGIN").is_some() {
+        let plugin = timers.get(&id).and_then(|t| t.plugin.clone());
+        assert!(
+            matches!(plugin, Some(PluginPresence::Present { .. })),
+            "with the GridFPV plugin mounted, the handshake should report it Present; got {plugin:?}"
+        );
+    }
+
     // No heat has run yet, yet the timer is live — there are no passes in the log at this point.
     assert_eq!(
         count_passes(&read_all(&state)),

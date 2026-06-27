@@ -67,6 +67,7 @@ pub mod events;
 pub mod live_state;
 pub mod open_practice;
 pub mod pilots;
+pub mod plugin_bundle;
 pub mod round_engine;
 pub mod scope;
 pub mod snapshot;

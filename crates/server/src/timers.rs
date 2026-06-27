@@ -170,6 +170,42 @@ pub enum TimerStatus {
     Error,
 }
 
+/// Whether a connected RotorHazard timer carries the **GridFPV plugin** (RH plugin design D16,
+/// Slice 1) — the in-process integration the Director probes for over the existing socket.io
+/// connection (`gridfpv_hello` → `gridfpv_hello_ack`). Carried as an `Option` on [`Timer`]:
+/// `None` is "not probed" (a Mock timer, or an RH not yet connected). Like [`TimerStatus`] it is a
+/// **live, in-memory** value, not persisted (reset to `None` on load and on reconfigure) and
+/// **additive on the wire** (`#[ts(optional)]` — an older console still parses a `Timer`). The
+/// Director uses it to drive the required-with-guided-install UX (§5): `Missing` and `Incompatible`
+/// surface the one-step install; `Present` surfaces a healthy timer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum PluginPresence {
+    /// Probed, but no GridFPV plugin answered the handshake (a stock RH, or one whose plugin
+    /// failed to load) — the guided-install prompt applies. An RH older than v4.3.0 also lands
+    /// here (it can't run the plugin), and the install guidance says to update RH first.
+    Missing,
+    /// The plugin answered and its `gridfpv_*` protocol is compatible with this Director.
+    Present {
+        /// The plugin build version (e.g. `"0.1.0"`).
+        plugin_version: String,
+        /// The RHAPI version the plugin reported (e.g. `"1.4"`).
+        rhapi_version: String,
+        /// The capabilities the plugin declared (e.g. `["hello"]`).
+        capabilities: Vec<String>,
+    },
+    /// The plugin answered but its protocol version is outside the Director's supported range —
+    /// the guided install offers the matching plugin build.
+    Incompatible {
+        /// The plugin build version, so the UI can name the mismatch.
+        plugin_version: String,
+        /// The plugin's `gridfpv_*` protocol version (the field that didn't match).
+        protocol_version: u32,
+        /// A short plain-language reason for the mismatch.
+        reason: String,
+    },
+}
+
 /// One configured timer in the application-level registry (issue #73).
 ///
 /// The wire shape `GET /timers` returns and the on-disk shape `timers.json` persists: a stable
@@ -204,6 +240,13 @@ pub struct Timer {
     /// empty for a pre-channel-model timer.
     #[serde(default)]
     pub available_channels: Vec<u16>,
+    /// Whether this (RotorHazard) timer carries the **GridFPV plugin** (D16, S1). `None` until
+    /// probed (Mock timers, or an RH not yet connected). Live, in-memory, not persisted — reset to
+    /// `None` on load/reconfigure and driven by the connect-time handshake probe. Additive on the
+    /// wire (`#[ts(optional)]`): an older console (or a test fixture) omits it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub plugin: Option<PluginPresence>,
 }
 
 /// The `serde(default)` provider for [`Timer::node_count`] (a function because serde defaults must
@@ -359,6 +402,7 @@ impl TimerRegistry {
             channel_capability: ChannelCapability::Flexible,
             node_count: DEFAULT_NODE_COUNT,
             available_channels: crate::channels::RACEBAND_MHZ.to_vec(),
+            plugin: None,
         };
         timers.insert(sim.id.clone(), sim);
 
@@ -370,8 +414,10 @@ impl TimerRegistry {
             // Director still boots with at least the Mock).
             if let Some(restored) = read_persisted_timers(dir) {
                 for mut timer in restored {
-                    // Keep the derived status authoritative (never trust a persisted status).
+                    // Keep the derived status authoritative (never trust a persisted status), and
+                    // reset the live plugin-presence — it is re-probed on connect, never restored.
                     timer.status = Timer::status_for(&timer.kind);
+                    timer.plugin = None;
                     timers.insert(timer.id.clone(), timer);
                 }
             }
@@ -429,6 +475,7 @@ impl TimerRegistry {
             channel_capability: request.channel_capability.clone().unwrap_or_default(),
             node_count: request.node_count.unwrap_or(DEFAULT_NODE_COUNT),
             available_channels: request.available_channels.clone().unwrap_or_default(),
+            plugin: None,
         };
         reg.timers.insert(id, timer.clone());
         reg.persist()?;
@@ -455,6 +502,8 @@ impl TimerRegistry {
         if let Some(kind) = &request.kind {
             timer.kind = kind.clone();
             timer.status = Timer::status_for(kind);
+            // A reconfigured timer (new URL/kind) must be re-probed: drop any stale plugin state.
+            timer.plugin = None;
         }
         if let Some(capability) = &request.channel_capability {
             timer.channel_capability = capability.clone();
@@ -479,6 +528,17 @@ impl TimerRegistry {
         let mut reg = self.write();
         if let Some(timer) = reg.timers.get_mut(id) {
             timer.status = status;
+        }
+    }
+
+    /// Set a timer's **live GridFPV-plugin presence** (D16, S1) — the Director drives this from the
+    /// connect-time `gridfpv_hello` handshake (present/compatible, missing, or incompatible). A
+    /// no-op for an unknown id. **In-memory only**, like [`set_status`](Self::set_status): it is
+    /// re-probed on every (re)connect and never persisted.
+    pub fn set_plugin(&self, id: &TimerId, plugin: PluginPresence) {
+        let mut reg = self.write();
+        if let Some(timer) = reg.timers.get_mut(id) {
+            timer.plugin = Some(plugin);
         }
     }
 

@@ -1382,6 +1382,7 @@ mod tests {
             channel_capability: ChannelCapability::Flexible,
             node_count,
             available_channels: available,
+            plugin: None,
         }
     }
 

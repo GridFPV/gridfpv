@@ -56,6 +56,7 @@
     isPlausibleMhz,
     type CapabilityTag
   } from '../lib/channels.js';
+  import PluginCallout from './PluginCallout.svelte';
 
   let {
     session,
@@ -135,10 +136,12 @@
    */
   const displayTimers = $derived.by(() => {
     if (loadState.kind !== 'ready') return [];
-    const liveStatus = new Map(session.timers.map((t) => [t.id, t.status]));
+    // Overlay the poll-fresh, in-memory fields (connection `status` AND `plugin` presence) from the
+    // live-polled list; both are driven by the live connection and only refreshed there.
+    const live = new Map(session.timers.map((t) => [t.id, t]));
     return loadState.timers.map((t) => {
-      const status = liveStatus.get(t.id);
-      return status && status !== t.status ? { ...t, status } : t;
+      const l = live.get(t.id);
+      return l ? { ...t, status: l.status, plugin: l.plugin } : t;
     });
   });
 
@@ -437,6 +440,7 @@
             </div>
           </div>
           <StatusPill status={timer.status} label={timer.status} size="sm" />
+          <PluginCallout {timer} baseUrl={session.baseUrl} />
           <div class="timer-actions">
             <Button variant="ghost" size="sm" onclick={() => openEdit(timer)}>Edit</Button>
             {#if !isBuiltInMock(timer)}
