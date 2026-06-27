@@ -51,7 +51,8 @@ export interface RaceClockState {
 export function useRaceClock(
   getPhase: () => string | undefined,
   getStartedAt: () => number | null | undefined,
-  getEndedAt: () => number | null | undefined
+  getEndedAt: () => number | null | undefined,
+  nowMs: () => number = () => Date.now()
 ): RaceClockState {
   let elapsedMs = $state(0);
 
@@ -71,7 +72,9 @@ export function useRaceClock(
       // All instances count from the SAME server anchor → header and HUD agree, accurate from
       // the real race-go regardless of when this clock mounted.
       const advance = () => {
-        elapsedMs = Math.max(0, Date.now() - startedAtMs);
+        // `nowMs()` is the SERVER clock (offset-corrected) so a skewed RD device counts from the real
+        // race-go, not ~1s off (`startedAtMs` is a server instant).
+        elapsedMs = Math.max(0, nowMs() - startedAtMs);
       };
       advance();
       const id = setInterval(advance, 50);

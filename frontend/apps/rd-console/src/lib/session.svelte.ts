@@ -210,6 +210,14 @@ export class Session {
   resolvingActiveEvent = $state(true);
   /** The base URL both seams target — the Director's origin. */
   baseUrl = $state(defaultBaseUrl());
+  /**
+   * Measured **server − client** wall-clock offset in ms (see {@link syncServerClock}). The start
+   * countdown + race clock read {@link serverNowMs} (Date.now + this) instead of raw `Date.now()`,
+   * so an RD device whose clock differs from the Director's by ~1s still shows the countdown hitting
+   * zero at the real race-go (the "Armed timer stops at ~1s" bug on a separate laptop). `0` until the
+   * first sync (loopback ⇒ ~0 anyway).
+   */
+  serverClockOffsetMs = $state(0);
   /** Whether an RD token is currently held (drives the settings/gear state). */
   hasToken = $state(false);
   /** The live read-client's lifecycle status (connecting → live → …); `idle` at the picker. */
@@ -1108,9 +1116,48 @@ export class Session {
       } catch {
         /* keep the last good list; the next tick retries */
       }
+      // Re-measure the server clock offset on the same cadence — cheap, and keeps the countdown /
+      // race clock honest as the RD device's clock drifts.
+      void this.syncServerClock();
     };
     void poll();
     this.#timerPoll = setInterval(poll, TIMER_POLL_MS);
+  }
+
+  /**
+   * The Director's wall clock in **ms**, via the measured {@link serverClockOffsetMs}. The start
+   * countdown ({@link useArmingClock}) and race clock ({@link useRaceClock}) read this instead of
+   * raw `Date.now()`, so a client device whose clock differs from the Director's still reads true.
+   */
+  serverNowMs(): number {
+    return Date.now() + this.serverClockOffsetMs;
+  }
+
+  /**
+   * Measure the server↔client wall-clock offset from `GET /time` (epoch µs), NTP-style: assume
+   * symmetric latency, so the server's clock at the request *midpoint* is the returned instant, and
+   * `offset = server − clientMidpoint`. On a millisecond LAN this is exact to within the round-trip;
+   * the skew it corrects is ~1s. Keeps the last offset on any failure. Open read, no token.
+   */
+  async syncServerClock(): Promise<void> {
+    const base = this.baseUrl.endsWith('/') ? this.baseUrl.slice(0, -1) : this.baseUrl;
+    try {
+      const t0 = Date.now();
+      const resp = await globalThis.fetch(base + '/time');
+      const t1 = Date.now();
+      if (!resp.ok) return;
+      const body: unknown = await resp.json();
+      const nowMicros =
+        body &&
+        typeof body === 'object' &&
+        typeof (body as { now_micros?: unknown }).now_micros === 'number'
+          ? (body as { now_micros: number }).now_micros
+          : undefined;
+      if (nowMicros === undefined) return;
+      this.serverClockOffsetMs = nowMicros / 1000 - (t0 + t1) / 2;
+    } catch {
+      /* keep the last good offset */
+    }
   }
 
   /** Stop the timer-status poll and clear the handle (idempotent). */

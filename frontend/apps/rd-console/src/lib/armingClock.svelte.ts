@@ -55,7 +55,10 @@ function toneMs(toneAt: number | undefined | null): number | undefined {
  * RD-only gating: pass `undefined` for a read-only / pilot session so the countdown never arms.
  * Must be called during component setup so its internal `$effect` is owned (torn down on unmount).
  */
-export function useArmingClock(getToneAt: () => number | undefined | null): ArmingClockState {
+export function useArmingClock(
+  getToneAt: () => number | undefined | null,
+  nowMs: () => number = () => Date.now()
+): ArmingClockState {
   let remainingMs = $state(0);
   let active = $state(false);
 
@@ -69,8 +72,10 @@ export function useArmingClock(getToneAt: () => number | undefined | null): Armi
     active = true;
     const advance = () => {
       // Count DOWN to the absolute tone instant, clamped at zero: the Running flip lands from the
-      // runtime and clears `tone_at`, so the countdown never shows negative.
-      remainingMs = Math.max(0, at - Date.now());
+      // runtime and clears `tone_at`, so the countdown never shows negative. `nowMs()` is the
+      // SERVER clock (offset-corrected) — a skewed RD device would otherwise stop the countdown ~1s
+      // early (the `tone_at` is a server instant).
+      remainingMs = Math.max(0, at - nowMs());
     };
     advance();
     const id = setInterval(advance, TICK_MS);

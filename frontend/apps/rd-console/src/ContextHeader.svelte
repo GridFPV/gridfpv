@@ -87,7 +87,8 @@
   const clock = useRaceClock(
     () => phase,
     () => live?.race_started_at,
-    () => live?.race_ended_at
+    () => live?.race_ended_at,
+    () => session.serverNowMs()
   );
   // Show the heat clock while it's meaningful: ticking during the race (Running) and frozen at
   // the race-end value once the race has closed (Unofficial) and through finalize (Final). Before
