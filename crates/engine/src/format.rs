@@ -490,6 +490,9 @@ impl FormatRegistry {
         crate::double_elim::DoubleElim::register(&mut registry);
         crate::round_robin::RoundRobin::register(&mut registry);
         crate::multi_main::MultiMain::register(&mut registry);
+        // Chase the Ace (final-format): registered so its rounds build/replay; offered to the UI
+        // contextually as a final-level format (not in `standard_schemas` as a general round).
+        crate::chase_the_ace::ChaseTheAce::register(&mut registry);
         OpenPractice::register(&mut registry);
         registry
     }
@@ -1245,6 +1248,7 @@ mod tests {
         assert_eq!(
             registry.names(),
             vec![
+                "chase_the_ace",
                 "double_elim",
                 "multi_main",
                 "open_practice",
@@ -1289,6 +1293,10 @@ mod tests {
         );
         // …yet it remains registered, so it's the offered set that shrank, not the registry.
         assert!(FormatRegistry::standard().contains("zippyq"));
+        // Chase the Ace is likewise registered (a final-format) but NOT in the general offered set —
+        // it is surfaced contextually as a final-level format, never as a regular round.
+        assert!(!offered.contains(&"chase_the_ace"));
+        assert!(FormatRegistry::standard().contains("chase_the_ace"));
     }
 
     #[test]
