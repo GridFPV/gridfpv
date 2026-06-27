@@ -157,6 +157,38 @@
     return pts.join(' ');
   }
 
+  /**
+   * The time windows the lap-detection engine "sees" a crossing, replaying the timer's own
+   * enter→exit hysteresis over the captured samples: a window OPENS at the first sample that rises
+   * to/above `enter` and CLOSES at the first subsequent sample that falls to/below `exit` (one window
+   * per detected pass). A window still open at the trace end extends to the last sample. Empty unless
+   * both levels are present. Display-only — this visualises what the detector saw, it does not
+   * re-detect or change any lap.
+   */
+  function crossingWindows(t: CompetitorTrace): { from: number; to: number }[] {
+    if (t.enter == null || t.exit == null) return [];
+    const from0 = t.from ?? 0;
+    const n = t.samples.length;
+    const out: { from: number; to: number }[] = [];
+    let inCrossing = false;
+    let start = 0;
+    for (let i = 0; i < n; i++) {
+      const v = t.samples[i];
+      const time = from0 + i * t.period_micros;
+      if (!inCrossing) {
+        if (v >= t.enter) {
+          inCrossing = true;
+          start = time;
+        }
+      } else if (v <= t.exit) {
+        out.push({ from: start, to: time });
+        inCrossing = false;
+      }
+    }
+    if (inCrossing && n > 0) out.push({ from: start, to: from0 + (n - 1) * t.period_micros });
+    return out;
+  }
+
   function isSelected(ref: CompetitorRef, lap: Lap): boolean {
     return selected != null && selected.competitor === ref && selected.lap.end_ref === lap.end_ref;
   }
@@ -229,7 +261,7 @@
     <span class="swatch sample"></span> Signal (streaming cadence)
     <span class="swatch enter"></span> Enter
     <span class="swatch exit"></span> Exit
-    <span class="swatch band"></span> Enter/exit band
+    <span class="swatch band"></span> Detection window
     <span class="swatch marker"></span> Lap pass
     <span class="cadence-note"
       >Streaming-cadence trace — one sample per timer emit, not RotorHazard's dense marshal history.</span
@@ -274,20 +306,15 @@
           <!-- Plot frame -->
           <rect class="frame" x={PAD_L} y={PAD_T} width={plotW} height={plotH} fill="none" />
 
-          <!-- Enter/exit hysteresis band: the shaded zone between the two detection levels the timer
-               crosses to register a pass. Drawn behind the signal so the trace reads on top; only when
-               we actually have both levels (so a missing band visibly means "no thresholds captured"). -->
-          {#if ct.enter != null && ct.exit != null}
-            {@const ye = yOf(ct.enter, range)}
-            {@const yx = yOf(ct.exit, range)}
-            <rect
-              class="hysteresis"
-              x={PAD_L}
-              y={Math.min(ye, yx)}
-              width={plotW}
-              height={Math.abs(yx - ye)}
-            />
-          {/if}
+          <!-- Detection windows: one shaded vertical region per crossing the engine sees — from the
+               sample that rises above `enter` to the one that falls below `exit` (the timer's
+               hysteresis). Drawn behind the signal so the trace reads on top; lets the marshal see
+               exactly what the lap-detection engine registered as a pass. -->
+          {#each crossingWindows(ct) as cw (cw.from)}
+            {@const x1 = xOf(cw.from, span)}
+            {@const x2 = xOf(cw.to, span)}
+            <rect class="crossing" x={x1} y={PAD_T} width={Math.max(1, x2 - x1)} height={plotH} />
+          {/each}
 
           <!-- Threshold lines (horizontal) -->
           {#if ct.enter != null}
@@ -462,9 +489,9 @@
     stroke: rgba(255, 255, 255, 0.12);
     stroke-width: 1;
   }
-  .hysteresis {
-    /* The enter↔exit band — a light wash so it highlights the detection zone without
-       competing with the signal trace or the threshold lines drawn over it. */
+  .crossing {
+    /* A detection window (enter→exit) — a light wash so it highlights the span the engine saw a
+       crossing without competing with the signal trace or threshold lines drawn over it. */
     fill: rgba(120, 170, 255, 0.12);
   }
   .signal {
