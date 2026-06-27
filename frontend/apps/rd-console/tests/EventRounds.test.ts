@@ -1323,10 +1323,10 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
     });
     render(EventRounds, { session });
 
-    // The bracket panel renders under the root level (the Semifinals round).
+    // The bracket container groups the chain (header + tree + the nested level cards).
     const panel = (await screen.findByLabelText(/Bracket — Semifinals/i)) as HTMLElement;
-    // Its one column is the Semifinals level (no Final level round exists yet).
-    expect(within(panel).getByText('Semifinals')).toBeInTheDocument();
+    // The Semifinals level shows (both as the tree column and the nested level card — at least once).
+    expect(within(panel).getAllByText('Semifinals').length).toBeGreaterThan(0);
   });
 
   it('shows "Advance bracket" only when the level is complete, and creates the next level seeded FromHeatWinners', async () => {
