@@ -345,9 +345,16 @@ fn captured_trace_matches_emitted_csv_samples() {
     }
     let max = trace.samples.iter().copied().max().unwrap();
     let min = trace.samples.iter().copied().min().unwrap();
-    // The capture cadence is the configured period; the time base anchors at 0 for the heat.
+    // The capture cadence is positive and the trace is time-anchored near the race start. Under the
+    // live plugin path the first dense sample carries its *actual* race-relative time (a small
+    // positive offset — the first peak/nadir entry after the start), not the marshal-pull path's
+    // zeroed origin, so assert "anchored within the opening second" rather than exactly 0.
     assert!(trace.period_micros > 0);
-    assert_eq!(trace.from, Some(gridfpv_events::SourceTime::from_micros(0)));
+    let from = trace.from.expect("trace is time-anchored").micros;
+    assert!(
+        (0..1_000_000).contains(&from),
+        "the trace anchors near the race start (got {from} µs)"
+    );
 
     // Thresholds: RotorHazard's enter/exit levels were captured from `enter_and_exit_at_levels`.
     // (The mock profile carries the stock defaults; we assert they were captured, not their exact
