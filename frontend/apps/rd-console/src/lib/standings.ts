@@ -30,19 +30,66 @@ export function bracketTopNDefault(fieldSize: number): number {
 }
 
 /**
+ * The selectable **bracket sizes** for a field of `fieldSize` — the powers of two from 2 up to the
+ * largest that **fits** (`2, 4, 8, …` with `2^k ≤ fieldSize`). This is what the Advance-to-bracket
+ * modal offers, so the RD can never advance **more pilots than the round holds** (the size cap), and
+ * every size is a clean power-of-two bracket (no byes). A field under 2 yields no options (you need
+ * at least two to bracket).
+ */
+export function bracketSizeOptions(fieldSize: number): number[] {
+  const n = Math.floor(fieldSize);
+  const out: number[] = [];
+  for (let size = 2; size <= n; size *= 2) out.push(size);
+  return out;
+}
+
+/**
+ * The overall **final** of a bracket: how the last level is decided. Omit (single race = the bracket
+ * format) or `{ format: 'chase_the_ace', winsToWin }` for a multi-race Chase-the-Ace final. Shared by
+ * {@link advanceRoundReq} (a 2-up bracket whose only level *is* the final) and {@link advanceLevelReq}.
+ */
+export interface BracketFinal {
+  format: string;
+  winsToWin?: number;
+}
+
+/** Apply a {@link BracketFinal} to a level request's `format` + `params` (chase carries wins_to_win). */
+function withFinal(
+  base: { format: string; params: Record<string, string> },
+  final: BracketFinal | undefined
+): { format: string; params: Record<string, string> } {
+  if (!final) return base;
+  if (final.format === 'chase_the_ace') {
+    return {
+      format: 'chase_the_ace',
+      params: { wins_to_win: String(Math.max(1, Math.round(final.winsToWin ?? 2))) }
+    };
+  }
+  return { format: final.format, params: base.params };
+}
+
+/**
  * Assemble the request for the **bracket round** that advancing `source` produces: a `single_elim`
  * round over the source round's same eligible classes, carrying the source round's win condition,
  * seeded `FromRanking` from the source round's ranking, top-`topN`. The RD picks the `label` and may
  * override `topN` in the confirm. The created round's heats are then filled (`fillRound`) into the
  * seeded bracket matchups — editable thereafter like any manually-built round.
  */
-export function advanceRoundReq(source: RoundDef, topN: number, label: string): NewRoundReq {
+export function advanceRoundReq(
+  source: RoundDef,
+  topN: number,
+  label: string,
+  final?: BracketFinal
+): NewRoundReq {
   const win_condition: WinCondition = source.win_condition;
+  // `final` applies only when this round IS the final (a 2-up bracket's single level); otherwise it
+  // is a normal single_elim level.
+  const { format, params } = withFinal({ format: 'single_elim', params: {} }, final);
   return {
     label,
     classes: [...source.classes],
-    format: 'single_elim',
-    params: {},
+    format,
+    params,
     win_condition,
     // Carry the source's race time too: a bracket inherits the qual's win condition, and a
     // ranking-only condition (Best Lap / Best N Consecutive) needs a time limit to end its heats —
@@ -74,16 +121,11 @@ export function advanceRoundLabel(source: RoundDef): string {
  * `{ format: 'chase_the_ace', winsToWin }` for a multi-race Chase-the-Ace final. A Chase-the-Ace
  * level carries only its `wins_to_win` param (its field is the seeded finalists, not heat-sized).
  */
-export function advanceLevelReq(
-  level: RoundDef,
-  label: string,
-  finalFormat?: { format: string; winsToWin?: number }
-): NewRoundReq {
-  const format = finalFormat?.format ?? level.format;
-  const params =
-    finalFormat?.format === 'chase_the_ace'
-      ? { wins_to_win: String(Math.max(1, Math.round(finalFormat.winsToWin ?? 2))) }
-      : { ...(level.params ?? {}) };
+export function advanceLevelReq(level: RoundDef, label: string, final?: BracketFinal): NewRoundReq {
+  const { format, params } = withFinal(
+    { format: level.format, params: { ...(level.params ?? {}) } },
+    final
+  );
   return {
     label,
     classes: [...level.classes],
