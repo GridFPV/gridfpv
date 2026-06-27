@@ -35,7 +35,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use gridfpv_engine::format::FormatRegistry;
+use gridfpv_engine::format::{FormatRegistry, OpenPractice};
 use gridfpv_engine::heat::{GraceWindow, ProtestWindow};
 use gridfpv_engine::scoring::WinCondition;
 use gridfpv_events::RoundId;
@@ -642,19 +642,50 @@ impl<'de> Deserialize<'de> for SeedingRule {
             top_n: usize,
         }
 
-        // An untagged shadow of the externally-tagged enum. `FromRanking` carries the lenient body;
-        // the other variants reuse the same field shapes as `SeedingRule` so they round-trip 1:1.
+        // `FromHeatWinners` is single-source (`source_round`), but for consistency with
+        // `FromRanking` (which takes both) we also accept a one-element `source_rounds` array — so a
+        // caller who pluralises by habit isn't rejected. Exactly one source must resolve.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FromHeatWinnersBody {
+            #[serde(default)]
+            source_round: Option<RoundId>,
+            #[serde(default)]
+            source_rounds: Option<Vec<RoundId>>,
+        }
+
+        // An untagged shadow of the externally-tagged enum. `FromRanking` / `FromHeatWinners` carry
+        // the lenient bodies; the other variants reuse the same field shapes as `SeedingRule` so they
+        // round-trip 1:1.
         #[derive(Deserialize)]
         enum Shadow {
             FromRoster,
             FromRanking(FromRankingBody),
-            FromHeatWinners { source_round: RoundId },
+            FromHeatWinners(FromHeatWinnersBody),
             AllChannels { channels: Vec<usize> },
         }
 
         match Shadow::deserialize(deserializer)? {
             Shadow::FromRoster => Ok(SeedingRule::FromRoster),
-            Shadow::FromHeatWinners { source_round } => {
+            Shadow::FromHeatWinners(body) => {
+                let source_round = match (body.source_round, body.source_rounds) {
+                    // Canonical singular form wins.
+                    (Some(single), _) => single,
+                    // A one-element `source_rounds` is lifted to the single source.
+                    (None, Some(rounds)) if rounds.len() == 1 => {
+                        rounds.into_iter().next().expect("len == 1")
+                    }
+                    (None, Some(_)) => {
+                        return Err(D::Error::custom(
+                            "FromHeatWinners seeding takes a single `source_round` (a one-element `source_rounds` is also accepted)",
+                        ));
+                    }
+                    (None, None) => {
+                        return Err(D::Error::custom(
+                            "FromHeatWinners seeding requires `source_round` (or a one-element `source_rounds`)",
+                        ));
+                    }
+                };
                 Ok(SeedingRule::FromHeatWinners { source_round })
             }
             Shadow::AllChannels { channels } => Ok(SeedingRule::AllChannels { channels }),
@@ -1281,12 +1312,17 @@ impl EventRegistry {
             .get_mut(id)
             .ok_or_else(|| RoundError::EventNotFound(id.0.clone()))?;
 
+        // The effective win condition (an omitted one stores the inert default) — used both to
+        // validate the round can end and to build the `RoundDef` below.
+        let win_condition = req.win_condition.unwrap_or_else(default_win_condition);
         validate_round_fields(
             &event.meta,
             &directory,
             &req.classes,
             &req.format,
             &req.seeding,
+            &win_condition,
+            req.time_limit_secs,
             None,
         )?;
 
@@ -1311,8 +1347,8 @@ impl EventRegistry {
             classes: req.classes,
             format: req.format,
             params: req.params,
-            // An omitted win condition stores the inert default (open practice does no scoring).
-            win_condition: req.win_condition.unwrap_or_else(default_win_condition),
+            // The effective win condition computed + validated above (omitted ⇒ inert default).
+            win_condition,
             seeding: req.seeding,
             channel_mode,
             // Heat-lifecycle Slice 2 configs: omitted request fields take their documented defaults.
@@ -1358,12 +1394,15 @@ impl EventRegistry {
         if !event.meta.rounds.iter().any(|r| &r.id == round_id) {
             return Err(RoundError::RoundNotFound(round_id.0.clone()));
         }
+        let win_condition = req.win_condition.unwrap_or_else(default_win_condition);
         validate_round_fields(
             &event.meta,
             &directory,
             &req.classes,
             &req.format,
             &req.seeding,
+            &win_condition,
+            req.time_limit_secs,
             Some(round_id),
         )?;
 
@@ -1378,8 +1417,8 @@ impl EventRegistry {
             classes: req.classes,
             format: req.format,
             params: req.params,
-            // An omitted win condition stores the inert default (open practice does no scoring).
-            win_condition: req.win_condition.unwrap_or_else(default_win_condition),
+            // The effective win condition computed + validated above (omitted ⇒ inert default).
+            win_condition,
             seeding: req.seeding,
             channel_mode,
             // Heat-lifecycle Slice 2 configs: replaced wholesale, defaulting an omitted field.
@@ -1847,14 +1886,36 @@ impl From<RegistryError> for RoundError {
 /// [`FormatRegistry::standard`] name; or a [`SeedingRule::FromRanking`]'s `source_rounds` is empty
 /// or names a round that does not exist in this event (excluding `editing` — a round may not seed
 /// from itself).
+#[allow(clippy::too_many_arguments)]
 fn validate_round_fields(
     meta: &EventMeta,
     directory: &ClassDirectory,
     classes: &[ClassId],
     format: &str,
     seeding: &SeedingRule,
+    win_condition: &WinCondition,
+    time_limit_secs: Option<u32>,
     editing: Option<&RoundId>,
 ) -> Result<(), RoundError> {
+    // A **scored** round's heats must be able to END. `Timed` / `FirstToLaps` self-terminate; `BestLap`
+    // / `BestConsecutive` only *rank* (they never end a heat), so they need a race time
+    // (`time_limit_secs`) — without one the heat would run forever. Open practice is exempt: it
+    // intentionally has no end condition and runs until the RD's `ForceEnd` (so no win condition + no
+    // time limit is valid there). The rounds form always supplies one; this guards the raw API.
+    if format != OpenPractice::NAME {
+        let self_terminates = matches!(
+            win_condition,
+            WinCondition::Timed { .. } | WinCondition::FirstToLaps { .. }
+        );
+        if !self_terminates && time_limit_secs.is_none() {
+            return Err(RoundError::Invalid(
+                "this win condition only ranks — it does not end a heat; set a race time \
+                 (time_limit_secs), or use a Timed / First-to-N win condition"
+                    .to_string(),
+            ));
+        }
+    }
+
     for class in classes {
         if !directory.exists(class) {
             return Err(RoundError::Invalid(format!(
@@ -2600,7 +2661,8 @@ mod tests {
             params: BTreeMap::new(),
             win_condition: Some(WinCondition::BestLap),
             seeding: SeedingRule::FromRoster,
-            time_limit_secs: None,
+            // Best-lap only ranks, so a scored round needs a race time to end (validation).
+            time_limit_secs: Some(60),
             channel_mode: None,
             staging_timer_secs: None,
             start_procedure: None,
@@ -2915,6 +2977,75 @@ mod tests {
             },
         );
         assert!(matches!(self_winners, Err(RoundError::Invalid(_))));
+    }
+
+    #[test]
+    fn scored_round_requires_an_end_condition() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Ends Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+
+        // Best-lap only ranks; a scored round with no race time would never end → rejected.
+        let mut no_end = round_req("R", vec![open.clone()]);
+        no_end.win_condition = Some(WinCondition::BestLap);
+        no_end.time_limit_secs = None;
+        assert!(matches!(
+            reg.add_round(&event.id, no_end),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // Omitting the win condition (defaults to Best Lap) with no race time is also rejected.
+        let mut omitted = round_req("R", vec![open.clone()]);
+        omitted.win_condition = None;
+        omitted.time_limit_secs = None;
+        assert!(matches!(
+            reg.add_round(&event.id, omitted),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // Best-lap WITH a race time is accepted.
+        let mut with_time = round_req("R", vec![open.clone()]);
+        with_time.time_limit_secs = Some(120);
+        assert!(reg.add_round(&event.id, with_time).is_ok());
+
+        // A self-terminating win condition (First-to-N) needs no time limit.
+        let mut first_to = round_req("R", vec![open.clone()]);
+        first_to.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
+        first_to.time_limit_secs = None;
+        assert!(reg.add_round(&event.id, first_to).is_ok());
+
+        // Open practice is EXEMPT — no win condition + no time limit is valid (runs until ForceEnd).
+        let mut practice = round_req("Practice", vec![]);
+        practice.format = "open_practice".to_string();
+        practice.win_condition = None;
+        practice.time_limit_secs = None;
+        practice.seeding = SeedingRule::AllChannels {
+            channels: vec![0, 1],
+        };
+        assert!(reg.add_round(&event.id, practice).is_ok());
+    }
+
+    #[test]
+    fn from_heat_winners_seeding_accepts_either_source_key() {
+        use serde_json::from_str;
+        let canonical = SeedingRule::FromHeatWinners {
+            source_round: RoundId("qf".into()),
+        };
+        // Singular `source_round` (canonical) and a one-element `source_rounds` both deserialize.
+        assert_eq!(
+            from_str::<SeedingRule>(r#"{"FromHeatWinners":{"source_round":"qf"}}"#).unwrap(),
+            canonical
+        );
+        assert_eq!(
+            from_str::<SeedingRule>(r#"{"FromHeatWinners":{"source_rounds":["qf"]}}"#).unwrap(),
+            canonical
+        );
+        // A multi-element `source_rounds` is rejected (FromHeatWinners is single-source), as is none.
+        assert!(
+            from_str::<SeedingRule>(r#"{"FromHeatWinners":{"source_rounds":["a","b"]}}"#).is_err()
+        );
+        assert!(from_str::<SeedingRule>(r#"{"FromHeatWinners":{}}"#).is_err());
     }
 
     #[test]

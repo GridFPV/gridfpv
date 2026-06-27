@@ -1205,7 +1205,8 @@ describe('race Slice 2a: rounds', () => {
         classes: ['mgp-open'],
         format: 'timed_qual',
         params: {},
-        win_condition: 'BestLap'
+        win_condition: 'BestLap',
+        time_limit_secs: 60
       },
       TOKEN
     );
@@ -1226,7 +1227,8 @@ describe('race Slice 2a: rounds', () => {
           label: 'Bracket',
           classes: ['mgp-open'],
           format: 'single_elim',
-          win_condition: 'BestLap'
+          win_condition: 'BestLap',
+          time_limit_secs: 60
         },
         TOKEN
       )
@@ -1240,7 +1242,8 @@ describe('race Slice 2a: rounds', () => {
           classes: ['mgp-open'],
           format: 'timed_qual',
           channel_mode: 'PerHeat',
-          win_condition: 'BestLap'
+          win_condition: 'BestLap',
+          time_limit_secs: 60
         },
         TOKEN
       )
@@ -1503,6 +1506,8 @@ describe('race Slice 3a: FillRound (round-driven engine)', () => {
         format: 'timed_qual',
         params: { rounds: '1' },
         win_condition: 'BestLap',
+        // Best Lap only ranks, so a scored round needs a race time to end (server validation).
+        time_limit_secs: 60,
         // timed_qual defaults to Static (Slice 7a); these FillRound seams assert the per-heat
         // whole-field path, so force PerHeat (the static path is covered by the app-level e2e).
         channel_mode: 'PerHeat'

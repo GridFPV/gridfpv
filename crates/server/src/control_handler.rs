@@ -1882,7 +1882,8 @@ mod tests {
                     params: BTreeMap::from([("rounds".into(), "1".into())]),
                     win_condition: Some(WinCondition::BestLap),
                     seeding: SeedingRule::FromRoster,
-                    time_limit_secs: None,
+                    // Best-lap only ranks, so a scored round needs a race time to end (validation).
+                    time_limit_secs: Some(60),
                     // Per-heat: this test asserts the whole-field single heat (the bracket path).
                     channel_mode: Some(ChannelMode::PerHeat),
                     staging_timer_secs: None,
@@ -2024,7 +2025,8 @@ mod tests {
                     params: BTreeMap::from([("rounds".into(), "1".into())]),
                     win_condition: Some(WinCondition::BestLap),
                     seeding: SeedingRule::FromRoster,
-                    time_limit_secs: None,
+                    // Best-lap only ranks, so a scored round needs a race time to end (validation).
+                    time_limit_secs: Some(60),
                     // Per-heat: this test asserts first-fit channel assignment from the timer pool.
                     channel_mode: Some(ChannelMode::PerHeat),
                     staging_timer_secs: None,
@@ -2198,7 +2200,8 @@ mod tests {
                     ]),
                     win_condition: Some(WinCondition::BestLap),
                     seeding: SeedingRule::FromRoster,
-                    time_limit_secs: None,
+                    // Best-lap only ranks, so a scored round needs a race time to end (validation).
+                    time_limit_secs: Some(60),
                     channel_mode: Some(ChannelMode::PerHeat),
                     staging_timer_secs: None,
                     start_procedure: None,
