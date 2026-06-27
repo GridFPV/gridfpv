@@ -102,7 +102,7 @@
       type="button"
       class="ctx-event"
       onclick={ongolive}
-      title={`${eventName} — go to live control`}
+      title={`${eventName} — go to race control`}
     >
       <span class="ctx-event-name">{eventName}</span>
     </button>

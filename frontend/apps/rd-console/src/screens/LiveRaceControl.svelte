@@ -460,7 +460,7 @@
   }
 </script>
 
-<section class="live-control" aria-label="Live race control">
+<section class="live-control" aria-label="Race control">
   <header class="hud" data-phase={phase}>
     <div class="hud-heat">
       <span class="label">Current heat</span>

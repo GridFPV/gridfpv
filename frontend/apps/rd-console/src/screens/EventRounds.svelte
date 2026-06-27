@@ -1094,7 +1094,7 @@
 
   <Card
     title="Heats"
-    subtitle="Fill each round’s heats from its field, or build one by hand. Run them from Live control."
+    subtitle="Fill each round’s heats from its field, or build one by hand. Run them from Race control."
   >
     {#snippet actions()}
       <Button variant="secondary" size="sm" onclick={openBuild} disabled={rounds.length === 0}>
@@ -1292,7 +1292,7 @@
                 {:else}
                   {#if isOpenPracticeRound(round)}
                     <p class="inline-note small" role="status">
-                      This practice heat is ready — open <strong>Live control</strong> to
+                      This practice heat is ready — open <strong>Race control</strong> to
                       <strong>Stage</strong> then <strong>Start</strong> it.
                     </p>
                   {/if}
