@@ -30,6 +30,14 @@ period_micros: number,
  */
 samples: Array<number>, 
 /**
+ * The **actual** source-clock timestamp (µs) of each sample, when the trace came from a dense
+ * history. RH's marshal history is non-uniformly spaced (bursts of peak/nadir entries around
+ * each crossing), so a uniform `from + i·period_micros` grid badly misplaces samples and
+ * understates the span; a renderer that has these should plot each sample at its real time.
+ * `None` for the coarse streaming path, where `from`/`period_micros` is exact.
+ */
+times?: Array<number>, 
+/**
  * The enter detection threshold, where captured.
  */
 enter?: number, 

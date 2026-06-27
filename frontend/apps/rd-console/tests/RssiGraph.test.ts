@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
-import type { CompetitorRef } from '@gridfpv/types';
+import type { CompetitorRef, LapList, SignalTraceView } from '@gridfpv/types';
 import RssiGraph from '../src/lib/RssiGraph.svelte';
 import { signalTrace, lapList } from './fixtures.js';
 
@@ -86,6 +86,42 @@ describe('RssiGraph thresholds + lap coverage', () => {
     const svg = screen.getByLabelText(/RSSI trace for ALICE/);
     // The fixture has two peaks crossing enter=110 then dropping below exit=95 → two windows.
     expect(svg.querySelectorAll('.crossing')).toHaveLength(2);
+  });
+
+  it('plots dense samples at their actual (non-uniform) times, not a compressed uniform grid', () => {
+    // The bug: RH's dense history is bursty, so `period_micros` (first delta, 15ms here) hugely
+    // understates the span. With explicit `times` the trace must span its REAL duration (0..20s) so
+    // the signal lines up with the laps instead of compressing into the left edge.
+    const trace: SignalTraceView = {
+      competitors: [
+        {
+          competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+          from: 0,
+          period_micros: 15000,
+          samples: [70, 120, 80, 120, 80],
+          times: [0, 100_000, 5_000_000, 10_000_000, 20_000_000],
+          enter: 110,
+          exit: 95
+        }
+      ]
+    };
+    const laps: LapList = {
+      competitors: [
+        {
+          competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+          laps: [
+            { number: 1, duration_micros: 20_000_000, at: 20_000_000, start_ref: 1, end_ref: 2 }
+          ]
+        }
+      ]
+    };
+    render(RssiGraph, { trace, laps, selected: null, onselect: () => {} });
+    const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+    const poly = svg.querySelector('polyline.signal')!;
+    const pts = poly.getAttribute('points')!.trim().split(' ');
+    const lastX = parseFloat(pts[pts.length - 1].split(',')[0]);
+    // The last sample (t=20s) reaches the right edge (~PAD_L+plotW≈992), not crammed to the left.
+    expect(lastX).toBeGreaterThan(900);
   });
 
   it('renders a marker for every lap, including one past the captured sample window', () => {
