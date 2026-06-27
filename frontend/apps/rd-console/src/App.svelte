@@ -147,7 +147,7 @@
       key: '2',
       icon: 'M4 5h16M4 12h16M4 19h16M9 5v14'
     },
-    { id: 'live', label: 'Live control', key: '3', icon: 'M5 3l14 9-14 9V3z' },
+    { id: 'live', label: 'Race control', key: '3', icon: 'M5 3l14 9-14 9V3z' },
     { id: 'marshaling', label: 'Marshaling', key: '4', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
     { id: 'results', label: 'Results', key: '5', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
     {

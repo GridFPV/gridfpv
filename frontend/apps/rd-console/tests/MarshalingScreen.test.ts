@@ -50,6 +50,45 @@ describe('Marshaling (Slice 3)', () => {
     expect(sendSpy).toHaveBeenCalledWith({ SplitLap: { target: 13, at: 21_000_000 } });
   });
 
+  it('marshals a different heat WITHOUT moving Race Control’s current heat', async () => {
+    const heats: HeatSummary[] = [
+      {
+        heat: 'heat-1',
+        lineup: ['ALICE'],
+        round: 'r1',
+        class: 'c1',
+        frequencies: [],
+        phase: 'Final',
+        is_current: true
+      },
+      {
+        heat: 'heat-2',
+        lineup: ['BOB'],
+        round: 'r1',
+        class: 'c1',
+        frequencies: [],
+        phase: 'Unofficial',
+        is_current: false
+      }
+    ];
+    const { session, sendSpy } = makeTestSession({
+      live: liveRunning,
+      laps: lapList,
+      listHeatsImpl: vi.fn(async () => heats)
+    });
+    render(Marshaling, { session });
+    // Pin a non-current heat to marshal it…
+    await waitFor(() => expect(screen.getByLabelText('Heat to marshal')).toBeInTheDocument());
+    await fireEvent.change(screen.getByLabelText('Heat to marshal'), {
+      target: { value: 'heat-2' }
+    });
+    // …which must NOT issue a SetCurrentHeat — Race Control's current heat is untouched.
+    const movedCurrent = sendSpy.mock.calls.find(
+      ([c]) => typeof c === 'object' && c !== null && 'SetCurrentHeat' in c
+    );
+    expect(movedCurrent).toBeUndefined();
+  });
+
   it('edits the selected lap time (AdjustLap on end_ref)', async () => {
     const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
     render(Marshaling, { session });

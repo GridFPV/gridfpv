@@ -60,7 +60,13 @@
 
   let { session, adapter = 'rh-1' }: { session: Session; adapter?: string } = $props();
 
-  const heat = $derived<HeatId | undefined>(session.liveState?.current_heat);
+  // Which heat to marshal. Defaults to — and tracks — Race Control's current heat, but the RD can
+  // pin ANY heat to marshal it. Marshaling issues no `SetCurrentHeat`, so switching the marshaled
+  // heat here does NOT change what Race Control shows/controls (the explicit requirement). An empty
+  // pin (`undefined`) means "follow the live current heat".
+  let marshalHeatPin = $state<HeatId | undefined>(undefined);
+  const currentHeat = $derived<HeatId | undefined>(session.liveState?.current_heat);
+  const heat = $derived<HeatId | undefined>(marshalHeatPin ?? currentHeat);
   const laps = $derived<LapList | undefined>(session.lapList);
   const audit = $derived<AuditEntry[] | undefined>(session.marshalingAudit);
   const canControl = $derived(session.canControl);
@@ -478,6 +484,32 @@
 
   <div class="layout">
     <div class="main">
+      {#if heats.length > 0}
+        <!-- Marshal any heat: defaults to / follows Race Control's current heat, but the RD can pin
+             another to marshal it without moving the current heat. -->
+        <div class="heat-picker">
+          <label for="marshal-heat">Marshal heat</label>
+          <Select
+            id="marshal-heat"
+            value={marshalHeatPin ?? ''}
+            aria-label="Heat to marshal"
+            onchange={(e: Event) =>
+              (marshalHeatPin = (e.currentTarget as HTMLSelectElement).value || undefined)}
+          >
+            <option value=""
+              >Current heat (live){currentHeat
+                ? ` — ${heatNameById(currentHeat, heats, session.currentEvent?.rounds ?? [])}`
+                : ''}</option
+            >
+            {#each heats as h (h.heat)}
+              <option value={h.heat}
+                >{heatNameById(h.heat, heats, session.currentEvent?.rounds ?? [])}</option
+              >
+            {/each}
+          </Select>
+        </div>
+      {/if}
+
       {#if competitors.length > 0}
         <!-- Marshal one pilot at a time: pick whose signal + laps to review (declutter). -->
         <div class="pilot-picker">
@@ -825,12 +857,14 @@
     flex-direction: column;
     gap: var(--gf-space-4);
   }
+  .heat-picker,
   .pilot-picker {
     display: flex;
     align-items: center;
     gap: var(--gf-space-2);
     max-width: 22rem;
   }
+  .heat-picker label,
   .pilot-picker label {
     font-size: var(--gf-font-size-sm);
     font-weight: var(--gf-font-weight-semibold);
