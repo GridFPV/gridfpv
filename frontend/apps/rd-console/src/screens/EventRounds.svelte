@@ -766,6 +766,11 @@
       winKind = 'BestConsecutive';
       winLaps = wc.BestConsecutive.n;
     }
+    // Best-lap / best-consecutive store their race time as the round's time limit (see submit) —
+    // load it back into the Race time field so editing shows it.
+    if ((winKind === 'BestLap' || winKind === 'BestConsecutive') && round.time_limit_secs != null) {
+      winSeconds = Math.round(round.time_limit_secs);
+    }
 
     const seed = round.seeding;
     if (typeof seed === 'string') {
@@ -949,7 +954,15 @@
       // stores its inert default — and the optional time limit instead. A normal round sends its
       // chosen win condition and no time limit.
       win_condition: isOpenPractice ? undefined : buildWinCondition(),
-      time_limit_secs: isOpenPractice ? buildTimeLimitSecs() : undefined,
+      // Best-lap / best-consecutive qualifying is **always timed** — the win condition only ranks, it
+      // doesn't end the heat — so a race time is required or the heat would run forever. Send it as the
+      // round's time limit (the engine auto-ends on it, independent of the win condition). Timed ends
+      // via its own window; first-to-laps ends on the lap target; open practice uses its minutes field.
+      time_limit_secs: isOpenPractice
+        ? buildTimeLimitSecs()
+        : winKind === 'BestLap' || winKind === 'BestConsecutive'
+          ? Math.max(1, Math.round(winSeconds))
+          : undefined,
       seeding: isOpenPractice
         ? { AllChannels: { channels: [...selectedNodes].sort((a, b) => a - b) } }
         : buildSeeding(),
@@ -1396,11 +1409,17 @@
             </Select>
           </Field>
 
-          {#if winKind === 'Timed'}
-            <Field label="Race time (seconds)">
+          {#if winKind === 'Timed' || winKind === 'BestLap' || winKind === 'BestConsecutive'}
+            <Field
+              label="Race time (seconds)"
+              hint={winKind === 'Timed'
+                ? undefined
+                : 'Always timed — the heat ends after this; your best result during the window counts.'}
+            >
               <Input type="number" min="1" bind:value={winSeconds} aria-label="Race time seconds" />
             </Field>
-          {:else if winKind === 'FirstToLaps' || winKind === 'BestConsecutive'}
+          {/if}
+          {#if winKind === 'FirstToLaps' || winKind === 'BestConsecutive'}
             <Field label="Laps">
               <Input type="number" min="1" bind:value={winLaps} aria-label="Laps" />
             </Field>
