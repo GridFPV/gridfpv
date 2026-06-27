@@ -137,6 +137,20 @@
       <code>2^53</code>, so they render to TypeScript as a plain <code>number</code> (matching the
       wire), per <a href="protocol.html">Protocol</a> §6.
     </p>
+    <div class="principle">
+      <p><span class="name">The client reads server time, not its own clock.</span> The anchors
+      (<code>race_started_at</code>, and the Armed start countdown's <code>tone_at</code>) are
+      <em>server</em> instants, but the RD console routinely runs on a <strong>separate device</strong>
+      (a field laptop pointed at the Director) whose wall clock can differ by a second or more. So the
+      <code>now</code> in <code>now − race_started_at</code> must be the server's now, not the
+      browser's <code>Date.now()</code> — otherwise a skewed device stops the Armed countdown ~1&nbsp;s
+      early and offsets the elapsed clock. The session measures the offset against <code>GET /time</code>
+      (the Director's epoch-µs clock), round-trip-corrected NTP-style on the timer-poll cadence, and
+      exposes <code>serverNowMs() = Date.now() + offset</code>. The race clock
+      (<code>useRaceClock</code>) and the start countdown (<code>useArmingClock</code>) both read
+      <code>serverNowMs()</code>. The frozen duration is server&nbsp;−&nbsp;server, so it is unaffected
+      by any skew.</p>
+    </div>
     <div class="callout">
       <p>
         <strong>Why <code>recorded_at</code> and not <code>Pass.at</code>?</strong> A

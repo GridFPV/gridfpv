@@ -165,6 +165,17 @@ flowchart TB
       is timer-agnostic: it works for RotorHazard, LapRF, Velocidrone, or manual entry, because it
       operates on canonical passes, not hardware specifics.</p>
     </div>
+    <div class="principle">
+      <p><span class="name">The marshaling surface is scoped to the heat under review, independent of
+      Race Control.</span> A <strong>heat picker</strong> selects which heat to marshal — it defaults
+      to and follows Race Control's current heat but can pin <em>any</em> heat, and switching it issues
+      <strong>no <code>SetCurrentHeat</code></strong>, so the marshal can review a finished heat while
+      the next one stages. A <strong>pilot picker</strong> narrows the signal graph + lap list to one
+      pilot. The lifecycle badge and the result transitions read the <em>marshaled</em> heat's own
+      heat-scoped live fold, not the global current heat. The result-lifecycle transitions
+      (<strong>Finalize</strong> Unofficial→Final, <strong>Revert</strong> Final→Unofficial, and
+      <strong>Void</strong>) live here too, so the RD can call a result without leaving marshaling.</p>
+    </div>
 
     <h3>3.2 Evidence — signal-as-evidence where the timer provides a trace</h3>
     <p>
