@@ -5,6 +5,7 @@
 //! never drift. Pure std + cargo, so it works the same on Windows/Linux/macOS.
 #![forbid(unsafe_code)]
 
+mod race_day;
 mod rh_mock;
 
 use std::path::{Path, PathBuf};
@@ -226,9 +227,12 @@ fn main() {
         // The interactive RotorHazard mock-signal harness (marshaling testing). Needs Docker to
         // `feed`; `dump`/`list` are plain HTTP/std. See `rh_mock.rs`.
         "rh-mock" => rh_mock::run(&args[1..]),
+        // The mock race-day autopilot: emulate races via the gridfpv_mock plugin while you drive
+        // the Director. See `race_day.rs`.
+        "race-day" => race_day::run(&args[1..]),
         other => {
             eprintln!("unknown task: {other}");
-            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live|rh-mock]");
+            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live|rh-mock|race-day]");
             false
         }
     };

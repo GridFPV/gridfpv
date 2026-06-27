@@ -17,10 +17,18 @@ Handlers (each replies ``gridfpv_mock_ack`` to the asking client):
 - ``gridfpv_mock_set_rssi`` ``{node, rssi}`` — force a node's ``current_rssi`` (for inspection).
 - ``gridfpv_mock_lap`` ``{node}`` — inject a real lap via RH's own ``intf_simulate_lap`` (the same
   proven path RH's built-in ``simulate_lap`` uses), so the pass flows through the genuine pipeline.
+- ``gridfpv_mock_pass`` ``{node, peak, baseline, width, sample_ms}`` — emulate one gate pass: append
+  a smooth RSSI **bell** (baseline→peak→baseline) to the node's dense history (so the live-signal
+  trace shows the pass) AND record the lap via ``intf_simulate_lap``. This is what the "mock race
+  day" autopilot uses to emulate a realistic race over the wire.
+- ``gridfpv_mock_reset`` ``{node?}`` — clear a node's (or all nodes') dense history + RSSI, between
+  races.
 - ``gridfpv_mock_state`` — reply with per-node ``{index, frequency, current_rssi}``.
 """
 
 import logging
+import math
+from time import monotonic
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +83,47 @@ def initialize(rhapi):
         except Exception as ex:  # noqa: BLE001
             nack("lap", ex)
 
+    def on_pass(data=None):
+        data = data or {}
+        try:
+            node = int(data["node"])
+            peak = int(data.get("peak", 150))
+            baseline = int(data.get("baseline", 70))
+            width = max(2, int(data.get("width", 12)))
+            sample_ms = float(data.get("sample_ms", 15.0))
+            n = interface().nodes[node]
+            # Append a smooth raised-cosine bell (baseline -> peak -> baseline) to the node's dense
+            # history, so the GridFPV plugin's live-signal stream shows the gate pass as a real
+            # rise/peak/fall. Timestamps are monotonic seconds (the same clock RH's history uses).
+            t0 = monotonic()
+            for i in range(width):
+                frac = i / (width - 1)
+                env = 0.5 - 0.5 * math.cos(2.0 * math.pi * frac)  # 0..1..0 over the window
+                val = int(round(baseline + (peak - baseline) * env))
+                n.history_values.append(val)
+                n.history_times.append(t0 + i * (sample_ms / 1000.0))
+            n.current_rssi = peak
+            n.pass_peak_rssi = peak
+            # Record the lap through RH's genuine pass pipeline (needs the race RACING).
+            interface().intf_simulate_lap(node, 0)
+            ack("pass", node=node, peak=peak)
+        except Exception as ex:  # noqa: BLE001
+            nack("pass", ex)
+
+    def on_reset(data=None):
+        data = data or {}
+        try:
+            nodes = interface().nodes
+            targets = [int(data["node"])] if "node" in data else list(range(len(nodes)))
+            for idx in targets:
+                nd = nodes[idx]
+                nd.history_values[:] = []
+                nd.history_times[:] = []
+                nd.current_rssi = 0
+            ack("reset", nodes=targets)
+        except Exception as ex:  # noqa: BLE001
+            nack("reset", ex)
+
     def on_state(_data=None):
         try:
             nodes = [
@@ -92,5 +141,7 @@ def initialize(rhapi):
     rhapi.ui.socket_listen("gridfpv_mock_tune", on_tune)
     rhapi.ui.socket_listen("gridfpv_mock_set_rssi", on_set_rssi)
     rhapi.ui.socket_listen("gridfpv_mock_lap", on_lap)
+    rhapi.ui.socket_listen("gridfpv_mock_pass", on_pass)
+    rhapi.ui.socket_listen("gridfpv_mock_reset", on_reset)
     rhapi.ui.socket_listen("gridfpv_mock_state", on_state)
     logger.info("GridFPV mock-control plugin loaded (TEST ONLY) — gridfpv_mock_* handlers registered")
