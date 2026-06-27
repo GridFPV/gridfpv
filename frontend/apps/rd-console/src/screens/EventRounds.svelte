@@ -78,12 +78,7 @@
     isLevelComplete,
     nextLevelLabel
   } from '../lib/brackets.js';
-  import {
-    advanceLevelReq,
-    advanceRoundLabel,
-    advanceRoundReq,
-    bracketTopNDefault
-  } from '../lib/standings.js';
+  import { advanceLevelReq, advanceRoundReq, bracketSizeOptions } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -334,45 +329,92 @@
     return buildEligibleMembers(round.id).length;
   }
 
-  // The advance-to-bracket confirm: which round, its proposed label + top_n (editable), in-flight.
-  let advanceRoundId = $state<RoundId | undefined>(undefined);
-  let advanceLabel = $state('');
-  let advanceTopN = $state(8);
+  // --- Advance to bracket: the full-chain builder (modal) ----------------------------------------
+  // "Advance to bracket" opens a modal that builds the WHOLE single-elim chain at once (level-per-
+  // round, decisions D13): level 1 seeded FromRanking(top-N) → each next level FromHeatWinners of the
+  // prior, down to the final. Size is a power-of-two that **fits the field** (so you can never advance
+  // more pilots than the round holds), and the final's format (Single race / Chase the Ace) is chosen
+  // here too. Build-ahead friendly: if the source isn't finished yet the chain is just created (each
+  // level fills as its source finalizes); when the source is already done, level 1 fills immediately.
+  let advanceOpen = $state(false);
+  let advanceModalRound = $state<RoundDef | undefined>(undefined);
+  let advanceSize = $state(8);
+  let advanceFinalKind = $state<'single' | 'chase'>('single');
+  let advanceFinalWins = $state(2);
   let advancing = $state(false);
 
+  // The selectable bracket sizes for the modal's source round — powers of two that fit its field.
+  const advanceSizeOptions = $derived(
+    advanceModalRound ? bracketSizeOptions(roundFieldSize(advanceModalRound)) : []
+  );
+  // How many levels `advanceSize` produces (a power-of-two size → log2), for the modal's summary.
+  const advanceLevels = $derived(advanceSize >= 2 ? Math.round(Math.log2(advanceSize)) : 0);
+
   function openAdvance(round: RoundDef) {
-    advanceRoundId = round.id;
-    advanceLabel = advanceRoundLabel(round);
-    advanceTopN = bracketTopNDefault(roundFieldSize(round));
+    advanceModalRound = round;
+    const options = bracketSizeOptions(roundFieldSize(round));
+    advanceSize = options.length > 0 ? options[options.length - 1] : 0; // largest that fits
+    advanceFinalKind = 'single';
+    advanceFinalWins = 2;
+    advanceOpen = true;
   }
   function cancelAdvance() {
-    advanceRoundId = undefined;
-    advancing = false;
+    if (advancing) return;
+    advanceOpen = false;
+    advanceModalRound = undefined;
   }
 
-  // Create the seeded single_elim round, then immediately generate its bracket heats so the heats
-  // list shows the ranking-seeded matchups. A bracket is deterministic, so this generates all the
-  // heats producible now (#216) — the first bracket round's matchups; later rounds fill as results
-  // come in. The bracket is editable thereafter (manual build).
-  async function submitAdvance(source: RoundDef) {
-    if (advancing) return;
+  // Build the whole bracket chain from the modal's source round. Levels are created in order (each
+  // FromHeatWinners level references the previously-created level's id, which the server validates),
+  // then level 1 fills if the source is already finished — otherwise the chain is built ahead.
+  async function submitAdvance() {
+    const source = advanceModalRound;
+    if (!source || advancing) return;
+    const size = advanceSize;
+    if (size < 2) {
+      toast.error('Need at least two pilots in the field to build a bracket.');
+      return;
+    }
     advancing = true;
     try {
-      const req: NewRoundReq = advanceRoundReq(
-        source,
-        advanceTopN,
-        advanceLabel.trim() || advanceRoundLabel(source)
-      );
-      const created = await session.createRound(req);
-      if (!created) {
-        toast.info('A control token is required to manage rounds.');
-        return;
+      const levels = Math.round(Math.log2(size)); // size is a power of two
+      const useChase = advanceFinalKind === 'chase';
+      let firstLevelId: RoundId | undefined;
+      let prev: RoundDef = source;
+      for (let i = 1; i <= levels; i++) {
+        const heatCount = size / 2 ** i; // heats this level holds (the final = 1)
+        const isFinal = i === levels;
+        const label = nextLevelLabel(source.label, heatCount, i - 1);
+        const final =
+          isFinal && useChase
+            ? { format: 'chase_the_ace', winsToWin: advanceFinalWins }
+            : undefined;
+        const req =
+          i === 1
+            ? advanceRoundReq(source, size, label, final)
+            : advanceLevelReq(prev, label, final);
+        const created = await session.createRound(req);
+        if (!created) {
+          toast.info('A control token is required to manage rounds.');
+          return;
+        }
+        if (i === 1) firstLevelId = created.id;
+        prev = created;
       }
-      // Generate all the seeded bracket heats from the ranking (deterministic → fill-all, #216).
-      const ack = await session.fillRound(created.id, 'All');
-      if (ack.ok) await refreshHeats();
-      toast.success(`Bracket “${created.label}” created, seeded from ${source.label}.`);
-      advanceRoundId = undefined;
+      // Fill level 1 now if the source is already finished (its ranking exists); otherwise the bracket
+      // is built ahead and each level fills when its source finalizes.
+      if (firstLevelId && roundFinished(source.id)) {
+        const ack = await session.fillRound(firstLevelId, 'All');
+        if (!ack.ok) {
+          toast.info(ack.error?.message ?? 'The first level fills when the source is ready.');
+        }
+      }
+      await refreshHeats();
+      toast.success(
+        `Bracket built from ${source.label} — ${size} seeds, ${levels} ${levels === 1 ? 'level' : 'levels'}.`
+      );
+      advanceOpen = false;
+      advanceModalRound = undefined;
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -380,116 +422,28 @@
     }
   }
 
-  // --- Bracket level advancement + visualization (#217, decisions D13) ---------------------------
-  // A single-elim bracket is a **chain of rounds**, one per level: level 1 (created by Advance to
-  // bracket, seeded FromRanking) → each next level seeded FromHeatWinners of the prior. This block
-  // (a) surfaces an **Advance bracket** action on a bracket level once all its heats are Final,
-  // creating the next level seeded FromHeatWinners + generating its winners-paired heats, and
-  // (b) stitches the chain into a BracketTree view a sunlit-readable column-per-level.
+  // --- Bracket chain visualization (#217, decisions D13) -----------------------------------------
+  // A single-elim bracket is a chain of rounds, one per level (level 1 FromRanking → each next
+  // FromHeatWinners of the prior). The whole chain is built up front by "Advance to bracket" (the
+  // full-chain builder above); this block stitches it into the container's BracketTree.
 
-  // The id of the bracket level whose "Advance bracket" is in flight (creating the next level).
-  let advancingLevel = $state<RoundId | undefined>(undefined);
-
-  // Whether this round is the **first level** of a bracket chain — the anchor the chain view renders
-  // off. Each chain renders once, on its root; later levels show only their own heat rows (their
-  // bracket context lives in the root's BracketTree).
+  // Whether this round is the first level of a bracket chain — the anchor the container/tree renders
+  // off. Each chain renders once, on its root.
   function isBracketChainRoot(round: RoundDef): boolean {
     return isBracketRoot(round);
   }
-  // Whether a bracket level is a **non-final** level whose heats are all scored — the gate the
-  // Advance-bracket action opens on (a complete final has no next level to advance to).
-  function canAdvanceLevel(round: RoundDef): boolean {
-    if (!isBracketFormat(round.format)) return false;
-    // Chase the Ace is always the terminal final — it never advances to a further level (and its
-    // multiple race heats would otherwise read as a multi-heat, still-advancing level).
-    if (isChaseTheAceFormat(round.format)) return false;
-    if (!isLevelComplete(round.id, heats)) return false;
-    // The level is the chain's last when nothing yet chains off it AND it has a single heat (a
-    // one-heat level is the final — there is no winners-pairing left to do).
-    const inLevel = heatsByRound(round.id);
-    const alreadyHasNext = rounds.some((r) => {
-      const seed = r.seeding;
-      return (
-        typeof seed === 'object' &&
-        'FromHeatWinners' in seed &&
-        seed.FromHeatWinners.source_round === round.id
-      );
-    });
-    return !alreadyHasNext && inLevel.length > 1;
-  }
-
-  // Create the next bracket level seeded FromHeatWinners of `level`, then generate its winners-paired
-  // heats (deterministic → fill-all, #216). The default label reads by the next level's size (a
-  // 1-heat next level is "Final", 2-heat "Semifinals", …); the round is editable thereafter.
-  // The number of heats the level advancing off `level` will hold (winners pair up, at least one).
-  function nextHeatCountOf(level: RoundDef): number {
-    return Math.max(1, Math.floor(heatsByRound(level.id).length / 2));
-  }
-  // Whether advancing `level` produces the **final** (a single-heat next level) — the point at which
-  // the RD chooses the final's format (single race vs Chase the Ace).
-  function nextLevelIsFinal(level: RoundDef): boolean {
-    return nextHeatCountOf(level) === 1;
-  }
-
-  // Create the next bracket level seeded FromHeatWinners of `level`, then generate its winners-paired
-  // heats (deterministic → fill-all, #216). `finalFormat` (the final-format selector) overrides the
-  // next level's format for the final — omit for a single decisive race, pass chase_the_ace for a
-  // multi-race final. The default label reads by the next level's size. The round is editable after.
-  async function advanceLevel(
-    level: RoundDef,
-    finalFormat?: { format: string; winsToWin?: number }
-  ) {
-    if (advancingLevel) return;
-    advancingLevel = level.id;
-    try {
-      const chain = bracketChainRounds(
-        rounds.find(
-          (r) =>
-            isBracketChainRoot(r) && bracketChainRounds(r, rounds).some((c) => c.id === level.id)
-        ) ?? level,
-        rounds
-      );
-      const levelIndex = chain.findIndex((r) => r.id === level.id);
-      const rootLabel = chain[0]?.label ?? level.label;
-      const label = nextLevelLabel(rootLabel, nextHeatCountOf(level), levelIndex);
-      const created = await session.createRound(advanceLevelReq(level, label, finalFormat));
-      if (!created) {
-        toast.info('A control token is required to manage rounds.');
-        return;
-      }
-      const ack = await session.fillRound(created.id, 'All');
-      if (ack.ok) await refreshHeats();
-      toast.success(`“${created.label}” created from ${level.label}’s winners.`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      advancingLevel = undefined;
+  // Whether a bracket level's seed source is ready so its heats can be generated: a FromRanking level
+  // needs its source round(s) finished; a FromHeatWinners level needs its source level's heats all
+  // Final. Gates "Generate heats" on a built-ahead level whose source hasn't landed yet.
+  function levelSourceReady(round: RoundDef): boolean {
+    const seed = round.seeding;
+    if (typeof seed === 'object' && 'FromRanking' in seed) {
+      return seed.FromRanking.source_rounds.every((id) => roundFinished(id));
     }
-  }
-
-  // The advance-to-final picker (the final-format selector): which level's final is being set up,
-  // whether it is a Chase-the-Ace final, and the wins target. Single race is the default.
-  let finalConfigLevel = $state<RoundId | undefined>(undefined);
-  let finalFormatKind = $state<'single' | 'chase'>('single');
-  let finalWins = $state(2);
-
-  function openFinalConfig(level: RoundDef) {
-    finalConfigLevel = level.id;
-    finalFormatKind = 'single';
-    finalWins = 2;
-  }
-  function cancelFinalConfig() {
-    finalConfigLevel = undefined;
-  }
-  async function submitFinalConfig(level: RoundDef) {
-    const useChase = finalFormatKind === 'chase';
-    finalConfigLevel = undefined;
-    await advanceLevel(
-      level,
-      useChase
-        ? { format: 'chase_the_ace', winsToWin: Math.max(1, Math.round(finalWins)) }
-        : undefined
-    );
+    if (typeof seed === 'object' && 'FromHeatWinners' in seed) {
+      return isLevelComplete(seed.FromHeatWinners.source_round, heats);
+    }
+    return true;
   }
 
   // The champion (overall winner) of a bracket chain whose final is scored, used to mark the final
@@ -1223,44 +1177,31 @@
                   >
                     {standingsRound === round.id ? 'Hide standings' : 'Standings'}
                   </Button>
-                  <!-- "Advance to bracket" seeds a NEW single-elim from this round's ranking — a
-                       qualifying-round action. It is meaningless on a bracket level (which advances
-                       via "Advance bracket" below), so hide it there. -->
+                  <!-- "Advance to bracket" opens the full-chain builder modal — it seeds a whole
+                       single-elim bracket from this round's ranking. It is a qualifying-round action
+                       (meaningless on a bracket level, which is already part of a chain), so hide it
+                       on bracket levels. -->
                   {#if !isBracketLevel(round)}
                     <Button
                       variant="secondary"
                       size="sm"
                       onclick={() => openAdvance(round)}
-                      disabled={advanceRoundId !== undefined}
+                      disabled={advanceModalRound !== undefined}
                     >
                       Advance to bracket
                     </Button>
                   {/if}
-                  <!-- Advance the bracket to its next level (#217, decisions D13): once a bracket
-                       level's heats are all Final, create the next level seeded FromHeatWinners +
-                       generate its winners-paired heats. Hidden until the level is complete and only
-                       on a non-final bracket level (a complete final has nowhere left to advance). -->
-                  {#if canAdvanceLevel(round)}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onclick={() =>
-                        nextLevelIsFinal(round) ? openFinalConfig(round) : advanceLevel(round)}
-                      loading={advancingLevel === round.id}
-                      disabled={advancingLevel !== undefined || finalConfigLevel !== undefined}
-                    >
-                      {nextLevelIsFinal(round) ? 'Advance to final' : 'Advance bracket'}
-                    </Button>
-                  {/if}
-                  <!-- Format-aware fill (#216): a deterministic round generates all its heats in
-                       one action; a dynamic round (Open Practice — gated out above, kept for any
-                       future dynamic format) single-steps. -->
+                  <!-- Format-aware fill (#216): a deterministic round generates all its heats in one
+                       action; a dynamic round (Open Practice / Chase the Ace) single-steps. A bracket
+                       level built ahead can't fill until its seed source is ready, so it is disabled
+                       until then. -->
                   <Button
                     variant="primary"
                     size="sm"
                     onclick={() => fillRound(round)}
                     loading={fillingRound === round.id}
-                    disabled={fillingRound !== undefined}
+                    disabled={fillingRound !== undefined ||
+                      (isBracketLevel(round) && !levelSourceReady(round))}
                   >
                     {isOpenEndedRound(round)
                       ? 'Generate next heat'
@@ -1315,123 +1256,18 @@
                   </div>
                 {/if}
 
-                {#if advanceRoundId === round.id}
-                  <form
-                    class="advance-form"
-                    aria-label={`Advance ${round.label} to bracket`}
-                    onsubmit={(e) => {
-                      e.preventDefault();
-                      submitAdvance(round);
-                    }}
-                  >
-                    <h4 class="standings-title">Advance to bracket</h4>
-                    <p class="advance-note">
-                      Creates a <strong>single_elim</strong> round seeded from
-                      <strong>{round.label}</strong>'s ranking, then fills the seeded bracket heats.
-                      The bracket is editable afterward.
-                    </p>
-                    <div class="form-grid">
-                      <Field label="Bracket label" required>
-                        <Input bind:value={advanceLabel} aria-label="Bracket label" />
-                      </Field>
-                      <Field
-                        label="Top N advance"
-                        hint="Defaults to the largest power-of-two that fits the field."
-                      >
-                        <Input
-                          type="number"
-                          min="1"
-                          bind:value={advanceTopN}
-                          aria-label="Top N advance"
-                        />
-                      </Field>
-                    </div>
-                    <div class="form-actions">
-                      <Button
-                        variant="ghost"
-                        type="button"
-                        onclick={cancelAdvance}
-                        disabled={advancing}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        variant="primary"
-                        type="submit"
-                        loading={advancing}
-                        disabled={advanceLabel.trim().length === 0}
-                      >
-                        Create &amp; fill bracket
-                      </Button>
-                    </div>
-                  </form>
-                {/if}
-
-                <!-- The final-format selector (Slice B): advancing into the last level lets the RD
-                     pick how the final is decided — a single decisive race, or a Chase-the-Ace
-                     multi-race final (first to N race-wins). Chosen BEFORE the final is created so
-                     its heats generate in the right format. -->
-                {#if finalConfigLevel === round.id}
-                  <form
-                    class="advance-form"
-                    aria-label={`Configure the final advancing from ${round.label}`}
-                    onsubmit={(e) => {
-                      e.preventDefault();
-                      submitFinalConfig(round);
-                    }}
-                  >
-                    <h4 class="standings-title">Advance to final</h4>
-                    <p class="advance-note">
-                      Choose how the final is decided. <strong>Single race</strong> is one decisive
-                      heat; <strong>Chase the Ace</strong> races the finalists repeatedly until a pilot
-                      has won the set number of times.
-                    </p>
-                    <div class="form-grid">
-                      <Field label="Final format">
-                        <Select bind:value={finalFormatKind} aria-label="Final format">
-                          <option value="single">Single race</option>
-                          <option value="chase">Chase the Ace</option>
-                        </Select>
-                      </Field>
-                      {#if finalFormatKind === 'chase'}
-                        <Field
-                          label="Wins to win"
-                          hint="First to this many race-wins takes the final (default 2)."
-                        >
-                          <Input
-                            type="number"
-                            min="1"
-                            bind:value={finalWins}
-                            aria-label="Wins to win"
-                          />
-                        </Field>
-                      {/if}
-                    </div>
-                    <div class="form-actions">
-                      <Button
-                        variant="ghost"
-                        type="button"
-                        onclick={cancelFinalConfig}
-                        disabled={advancingLevel !== undefined}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        variant="primary"
-                        type="submit"
-                        loading={advancingLevel !== undefined}
-                      >
-                        Create final
-                      </Button>
-                    </div>
-                  </form>
-                {/if}
-
                 {#if heatsByRound(round.id).length === 0}
                   {#if isOpenPracticeRound(round)}
                     <p class="empty small" role="status">
                       The practice heat is being prepared — it is created automatically for an
                       open-practice round.
+                    </p>
+                  {:else if isBracketLevel(round) && !levelSourceReady(round)}
+                    <!-- A built-ahead bracket level whose seed source hasn't finished yet: it fills
+                         automatically once the prior round/level is done. -->
+                    <p class="empty small" role="status">
+                      Waiting on its seed source — this level fills once the previous round
+                      finishes.
                     </p>
                   {:else}
                     <p class="empty small" role="status">
@@ -1922,6 +1758,79 @@
       </Button>
       <Button variant="primary" onclick={submitBuild} loading={building} disabled={!canBuild}>
         Schedule heat
+      </Button>
+    {/snippet}
+  </Dialog>
+
+  <!-- Advance to bracket — the full-chain builder (modal, like the round/heat forms). Builds the
+       whole single-elim chain from a source round in one go: a power-of-two size that fits the field
+       (so you can't advance more pilots than the round holds) and the final's format. Build-ahead
+       friendly — each level fills as its source finalizes. -->
+  <Dialog bind:open={advanceOpen} title="Advance to bracket" onclose={cancelAdvance}>
+    <form
+      class="build-form"
+      aria-label="Advance to bracket"
+      onsubmit={(e) => {
+        e.preventDefault();
+        submitAdvance();
+      }}
+    >
+      <p class="advance-note">
+        Builds a full single-elimination bracket seeded from
+        <strong>{advanceModalRound?.label ?? 'this round'}</strong>'s ranking. Each level fills with
+        pilots as the previous round finishes, so you can set this up before race day.
+      </p>
+      {#if advanceSizeOptions.length === 0}
+        <p class="empty small" role="status">
+          This round's field has fewer than two pilots — add class members before building a
+          bracket.
+        </p>
+      {:else}
+        <div class="form-grid">
+          <Field
+            label="Bracket size"
+            hint="How many top seeds advance — capped at what the field holds."
+          >
+            <Select bind:value={advanceSize} aria-label="Bracket size">
+              {#each advanceSizeOptions as size (size)}
+                <option value={size}>Top {size}</option>
+              {/each}
+            </Select>
+          </Field>
+          <Field label="Final format">
+            <Select bind:value={advanceFinalKind} aria-label="Final format">
+              <option value="single">Single race</option>
+              <option value="chase">Chase the Ace</option>
+            </Select>
+          </Field>
+          {#if advanceFinalKind === 'chase'}
+            <Field
+              label="Wins to win"
+              hint="First to this many race-wins takes the final (default 2)."
+            >
+              <Input type="number" min="1" bind:value={advanceFinalWins} aria-label="Wins to win" />
+            </Field>
+          {/if}
+        </div>
+        <p class="advance-note small" role="status">
+          {advanceLevels}
+          {advanceLevels === 1 ? 'level' : 'levels'} down to the Final{advanceFinalKind === 'chase'
+            ? ' (Chase the Ace)'
+            : ''}.
+        </p>
+      {/if}
+    </form>
+    {#snippet footer()}
+      <Button variant="ghost" type="button" onclick={cancelAdvance} disabled={advancing}>
+        Cancel
+      </Button>
+      <Button
+        variant="primary"
+        onclick={submitAdvance}
+        loading={advancing}
+        disabled={advanceSizeOptions.length === 0}
+      >
+        Build bracket
       </Button>
     {/snippet}
   </Dialog>

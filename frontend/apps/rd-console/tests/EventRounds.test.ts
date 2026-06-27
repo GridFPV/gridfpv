@@ -1228,8 +1228,80 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
     await waitFor(() => expect(screen.getByText(/No ranking yet/i)).toBeInTheDocument());
   });
 
-  it('advances a round to a single_elim bracket seeded FromRanking with a power-of-two top_n default', async () => {
-    // A 3-member field defaults top_n to 2 (largest power-of-two ≤ 3).
+  // A 4-member field for the bracket builder: sizes [2, 4], default 4 → a 2-level chain.
+  const EVENT_4: EventMeta = {
+    ...EVENT_WITH_MEMBERS,
+    roster: ['p1', 'p2', 'p3', 'p4'],
+    classes_membership: [
+      { class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }, { pilot: 'p3' }, { pilot: 'p4' }] }
+    ]
+  };
+  // A createRound mock that returns each created level with a distinct id (lvl1, lvl2, …) so the next
+  // level's FromHeatWinners source can be asserted against the previous level's id.
+  function chainCreateImpl() {
+    let n = 0;
+    return vi.fn(async (_b, _e, req: { label: string; format: string; seeding: unknown }) => ({
+      id: `lvl${++n}`,
+      label: req.label,
+      classes: ['c1'],
+      format: req.format,
+      params: {},
+      win_condition: QUAL.win_condition,
+      seeding: req.seeding,
+      channel_mode: 'PerHeat',
+      staging_timer_secs: 300,
+      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+      grace_window: { Duration: { micros: 3000000 } },
+      protest_window: 'Off'
+    }));
+  }
+
+  it('builds the whole single-elim chain from the advance-to-bracket modal', async () => {
+    const createRoundImpl = chainCreateImpl();
+    const { session } = makeTestSession({ ...baseHeatsImpls(), createRoundImpl, event: EVENT_4 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to bracket' }));
+    // The size defaults to the largest power-of-two that fits the 4-pilot field → 4.
+    const size = (await screen.findByLabelText('Bracket size')) as HTMLSelectElement;
+    expect(size.value).toBe('4');
+    await fireEvent.click(screen.getByRole('button', { name: 'Build bracket' }));
+
+    // Two levels: level 1 seeded FromRanking(top 4); level 2 (the final) FromHeatWinners of level 1.
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(2));
+    expect(createRoundImpl.mock.calls[0][2]).toMatchObject({
+      format: 'single_elim',
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 4 } }
+    });
+    expect(createRoundImpl.mock.calls[1][2]).toMatchObject({
+      format: 'single_elim',
+      seeding: { FromHeatWinners: { source_round: 'lvl1' } }
+    });
+  });
+
+  it('builds a Chase-the-Ace final from the modal (chase_the_ace + wins_to_win on the last level)', async () => {
+    const createRoundImpl = chainCreateImpl();
+    const { session } = makeTestSession({ ...baseHeatsImpls(), createRoundImpl, event: EVENT_4 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to bracket' }));
+    await fireEvent.change(await screen.findByLabelText('Final format'), {
+      target: { value: 'chase' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Build bracket' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(2));
+    // The first level stays single_elim; the final (level 2) is Chase the Ace with wins_to_win.
+    expect(createRoundImpl.mock.calls[0][2]).toMatchObject({ format: 'single_elim' });
+    expect(createRoundImpl.mock.calls[1][2]).toMatchObject({
+      format: 'chase_the_ace',
+      seeding: { FromHeatWinners: { source_round: 'lvl1' } },
+      params: { wins_to_win: '2' }
+    });
+  });
+
+  it('caps the bracket size to the field — no option advances more than the pilots available', async () => {
+    // A 3-member field → only "Top 2" is offered (largest power-of-two ≤ 3); "Top 4" never appears.
     const EVENT_3: EventMeta = {
       ...EVENT_WITH_MEMBERS,
       roster: ['p1', 'p2', 'p3'],
@@ -1237,52 +1309,14 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
         { class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }, { pilot: 'p3' }] }
       ]
     };
-    const created: RoundDef = {
-      id: 'r2',
-      label: 'Qualifying R1 — Bracket',
-      classes: ['c1'],
-      format: 'single_elim',
-      params: {},
-      win_condition: QUAL.win_condition,
-      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 2 } },
-      channel_mode: 'PerHeat',
-      staging_timer_secs: 300,
-      start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
-      grace_window: { Duration: { micros: 3000000 } },
-      protest_window: 'Off'
-    };
-    const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
-    const { session, sendSpy } = makeTestSession({
-      ...baseHeatsImpls(),
-      createRoundImpl,
-      event: EVENT_3
-    });
+    const { session } = makeTestSession({ ...baseHeatsImpls(), event: EVENT_3 });
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Advance to bracket' }));
-
-    // The top_n field defaults to the power-of-two ≤ 3 → 2.
-    const topN = (await screen.findByLabelText('Top N advance')) as HTMLInputElement;
-    expect(topN.value).toBe('2');
-    // The label defaults to "<round> — Bracket".
-    const label = screen.getByLabelText('Bracket label') as HTMLInputElement;
-    expect(label.value).toBe('Qualifying R1 — Bracket');
-
-    await fireEvent.click(screen.getByRole('button', { name: 'Create & fill bracket' }));
-
-    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
-    const [, , req] = createRoundImpl.mock.calls[0];
-    expect(req).toMatchObject({
-      classes: ['c1'],
-      format: 'single_elim',
-      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 2 } }
-    });
-    // After creating, the bracket's heats are generated (a fill-all FillRound on the new round —
-    // a bracket is deterministic, #216).
-    await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
-    expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
-      FillRound: { round: 'r2', mode: 'All' }
-    });
+    const size = (await screen.findByLabelText('Bracket size')) as HTMLSelectElement;
+    const options = Array.from(size.options).map((o) => o.textContent?.trim());
+    expect(options).toContain('Top 2');
+    expect(options).not.toContain('Top 4');
   });
 });
 
@@ -1329,84 +1363,14 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
     expect(within(panel).getAllByText('Semifinals').length).toBeGreaterThan(0);
   });
 
-  it('advancing into the final opens the format picker and creates a single-race final by default', async () => {
-    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
-      ...SEMIS,
-      id: 'final',
-      label: 'Final',
-      seeding: { FromHeatWinners: { source_round: 'semis' } }
-    }));
-    const { session, sendSpy } = makeTestSession({
-      ...bracketImpls(SEMI_HEATS),
-      createRoundImpl,
-      event: BRACKET_EVENT
-    });
+  it('does not offer "Advance to bracket" on a bracket level (it is already part of a chain)', async () => {
+    const { session } = makeTestSession({ ...bracketImpls(SEMI_HEATS), event: BRACKET_EVENT });
     render(EventRounds, { session });
 
-    // The next level holds 1 heat → the final, so the action is "Advance to final" and opens the
-    // final-format picker rather than creating immediately.
-    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to final' }));
-    // Default is Single race → create the final.
-    await fireEvent.click(await screen.findByRole('button', { name: 'Create final' }));
-
-    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
-    const [, , req] = createRoundImpl.mock.calls[0];
-    // Single race = the bracket format (single_elim), seeded FromHeatWinners, labelled "Final".
-    expect(req).toMatchObject({
-      format: 'single_elim',
-      label: 'Final',
-      seeding: { FromHeatWinners: { source_round: 'semis' } }
-    });
-    // The final's heats are then generated (fill-all FillRound, #216).
-    await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
-    expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
-      FillRound: { round: 'final', mode: 'All' }
-    });
-  });
-
-  it('creates a Chase-the-Ace final (chase_the_ace + wins_to_win) when chosen', async () => {
-    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
-      ...SEMIS,
-      id: 'final',
-      label: 'Final',
-      format: 'chase_the_ace',
-      seeding: { FromHeatWinners: { source_round: 'semis' } }
-    }));
-    const { session } = makeTestSession({
-      ...bracketImpls(SEMI_HEATS),
-      createRoundImpl,
-      event: BRACKET_EVENT
-    });
-    render(EventRounds, { session });
-
-    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to final' }));
-    // Pick Chase the Ace, then create.
-    await fireEvent.change(await screen.findByLabelText('Final format'), {
-      target: { value: 'chase' }
-    });
-    await fireEvent.click(await screen.findByRole('button', { name: 'Create final' }));
-
-    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
-    const [, , req] = createRoundImpl.mock.calls[0];
-    expect(req).toMatchObject({
-      format: 'chase_the_ace',
-      seeding: { FromHeatWinners: { source_round: 'semis' } },
-      params: { wins_to_win: '2' }
-    });
-  });
-
-  it('hides the advance action while a level still has an unscored heat', async () => {
-    const incomplete: HeatSummary[] = [SEMI_HEATS[0], { ...SEMI_HEATS[1], phase: 'Running' }];
-    const { session } = makeTestSession({
-      ...bracketImpls(incomplete),
-      event: BRACKET_EVENT
-    });
-    render(EventRounds, { session });
-
-    // The bracket panel renders, but no advance action until every heat is Final.
+    // The bracket container renders, but a bracket level never offers "Advance to bracket" — that is a
+    // qualifying-round action, and bracket levels are built as a full chain up front by the builder.
     await screen.findByLabelText(/Bracket — Semifinals/i);
-    expect(screen.queryByRole('button', { name: 'Advance to final' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Advance bracket' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Advance to bracket' })).toBeNull();
   });
 });
 
