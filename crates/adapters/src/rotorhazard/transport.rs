@@ -38,9 +38,9 @@ use rust_socketio::{ClientBuilder, Payload, RawClient};
 use serde_json::json;
 
 use super::{
-    Raw, RawCurrentLaps, RawEnterExitLevels, RawGridSignal, RawHeatData, RawMarshalData,
-    RawNodeData, RawPassRecord, RawPilotData, RawRaceDetails, RawRaceList, RawRaceStatus,
-    RotorHazardAdapter,
+    Raw, RawCurrentLaps, RawEnterExitLevels, RawGridPass, RawGridSignal, RawHeatData,
+    RawMarshalData, RawNodeData, RawPassRecord, RawPilotData, RawRaceDetails, RawRaceList,
+    RawRaceStatus, RotorHazardAdapter,
 };
 use crate::Adapter;
 use gridfpv_events::Event;
@@ -90,6 +90,10 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
         "gridfpv_signal" => serde_json::from_value::<RawGridSignal>(value)
             .ok()
             .map(Raw::GridSignal),
+        // The GridFPV plugin's native per-node pass (D16, Slice 3). Absent on a stock RH.
+        "gridfpv_pass" => serde_json::from_value::<RawGridPass>(value)
+            .ok()
+            .map(Raw::GridPass),
         _ => None,
     }
 }
@@ -404,6 +408,18 @@ impl RotorHazardConnection {
                 "gridfpv_signal",
                 handler(
                     "gridfpv_signal",
+                    adapter.clone(),
+                    events.clone(),
+                    savable_heat.clone(),
+                    current_format.clone(),
+                ),
+            )
+            // The GridFPV plugin's native per-node pass (D16, S3): folds to a Pass, deduped with
+            // the current_laps path.
+            .on(
+                "gridfpv_pass",
+                handler(
+                    "gridfpv_pass",
                     adapter.clone(),
                     events.clone(),
                     savable_heat.clone(),

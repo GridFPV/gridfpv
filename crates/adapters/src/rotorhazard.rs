@@ -173,6 +173,10 @@ pub enum Raw {
     /// save-then-pull produced, but **live**, and (once seen) suppresses that pull entirely. Absent on
     /// a stock RH (no plugin), so the socket fallback still pulls. See [`RawGridSignal`].
     GridSignal(RawGridSignal),
+    /// A `gridfpv_pass` broadcast from the GridFPV RH plugin (D16, Slice 3): the per-node pass atom
+    /// emitted natively from `RACE_LAP_RECORDED`. Folds to a [`Pass`], deduped against the
+    /// `current_laps` snapshot path on the per-node `lap_number`. See [`RawGridPass`].
+    GridPass(RawGridPass),
 }
 
 /// A RotorHazard `race_status` message (see [`Raw::RaceStatus`]).
@@ -544,6 +548,23 @@ pub struct RawGridSignalNode {
     /// `history_values`).
     #[serde(default, deserialize_with = "de_f64_history")]
     pub history_times: Vec<f64>,
+}
+
+/// A `gridfpv_pass` broadcast from the GridFPV RH plugin (see [`Raw::GridPass`]) — the per-node pass
+/// atom the plugin emits natively from `RACE_LAP_RECORDED` (D16, Slice 3), attributed by node seat.
+/// Folds to the same canonical [`Pass`] the `current_laps` snapshot does, deduped on the per-node
+/// `lap_number`, so the two coexist (whichever arrives first wins; a stock RH has only `current_laps`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawGridPass {
+    /// Zero-based node/seat index the lap was recorded on.
+    pub node_index: usize,
+    /// Per-node monotonic lap counter (`0` is the holeshot) — the pass `sequence` + dedup key.
+    pub lap_number: u64,
+    /// Crossing time in cumulative milliseconds since race start (same unit as `current_laps`).
+    pub lap_time_stamp: f64,
+    /// The pass's peak RSSI, if RH reported one — becomes the [`Pass`]'s [`SignalContext`].
+    #[serde(default)]
+    pub peak_rssi: Option<f64>,
 }
 
 /// The competitor handle for a RotorHazard node seat: `"node-{index}"`. Stable across
@@ -1200,6 +1221,37 @@ impl RotorHazardAdapter {
             }
         }
     }
+
+    /// Fold a `gridfpv_pass` broadcast (D16, Slice 3) into a canonical [`Pass`], attributed by node
+    /// seat. Mirrors [`translate_current_laps`](Self::translate_current_laps): same
+    /// `(competitor, sequence=lap_number)` dedup (so the plugin's native pass and the `current_laps`
+    /// re-pass never double-count — whichever arrives first wins), and a seat's first surfaced pass
+    /// announces it as [`Event::CompetitorSeen`].
+    fn translate_grid_pass(&mut self, p: RawGridPass, out: &mut Vec<Event>) {
+        let node_index = p.node_index;
+        let competitor = seat_ref(node_index);
+        let signal = p.peak_rssi.map(|rssi| SignalContext {
+            rssi_peak: Some(rssi as f32),
+        });
+        let pass = Pass {
+            adapter: self.id.clone(),
+            competitor: competitor.clone(),
+            at: Self::lap_stamp_to_source_time(p.lap_time_stamp),
+            sequence: Some(p.lap_number),
+            gate: GateIndex::LAP,
+            signal,
+        };
+        if !self.dedup.observe(&pass) {
+            return;
+        }
+        if self.seen_seats.insert(node_index) {
+            out.push(Event::CompetitorSeen {
+                adapter: self.id.clone(),
+                competitor: competitor.clone(),
+            });
+        }
+        out.push(Event::Pass(pass));
+    }
 }
 
 impl Default for RotorHazardAdapter {
@@ -1234,6 +1286,7 @@ impl Adapter for RotorHazardAdapter {
             Raw::HeatData(data) => self.translate_heat_data(data),
             Raw::PilotData(data) => self.translate_pilot_data(data),
             Raw::GridSignal(sig) => self.translate_grid_signal(sig, &mut out),
+            Raw::GridPass(pass) => self.translate_grid_pass(pass, &mut out),
         }
         out
     }
@@ -2160,6 +2213,50 @@ mod tests {
         assert!(
             !a.take_marshal_request(),
             "live plugin signal makes the post-race save-then-pull redundant"
+        );
+    }
+
+    #[test]
+    fn grid_pass_emits_pass_seen_and_dedups_with_current_laps() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        a.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        }));
+        // A native plugin pass for node 0, lap 1.
+        let evs = a.translate(Raw::GridPass(RawGridPass {
+            node_index: 0,
+            lap_number: 1,
+            lap_time_stamp: 1500.0,
+            peak_rssi: Some(180.0),
+        }));
+        let passes: Vec<_> = evs
+            .iter()
+            .filter_map(|e| {
+                if let Event::Pass(p) = e {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].competitor, CompetitorRef("node-0".into()));
+        assert_eq!(passes[0].sequence, Some(1));
+        assert_eq!(passes[0].at, SourceTime::from_micros(1_500_000));
+        assert!(passes[0].signal.as_ref().unwrap().rssi_peak.is_some());
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, Event::CompetitorSeen { .. })),
+            "a seat's first pass announces it"
+        );
+
+        // The current_laps snapshot re-reporting the SAME lap is deduped — no double Pass.
+        let snap = a.translate(snapshot(0, 0, vec![lap(1, 1500.0)]));
+        let dup = snap.iter().filter(|e| matches!(e, Event::Pass(_))).count();
+        assert_eq!(
+            dup, 0,
+            "current_laps re-pass of the same (node, lap) is deduped"
         );
     }
 
