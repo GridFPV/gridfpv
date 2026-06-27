@@ -34,13 +34,15 @@
 //! - **`current_laps`** — [`Raw::CurrentLaps`]. A **full snapshot**, re-sent on every
 //!   update: `{ "current": { "node_index": [ { laps: [ … ], pilot, … }, … ] } }`.
 //!   The **outer array index is the node index**. Each lap carries `lap_index`,
-//!   `lap_number`, `lap_raw` (ms), `lap_time` (a `"M:SS.mmm"` *string*),
-//!   `lap_time_stamp` (cumulative ms since race start, float), `splits` and
-//!   `late_lap`. There is **no** `source`, **no** `deleted`, **no** per-lap
-//!   `peak_rssi`, and **no** per-lap `node_index` — deleted laps are filtered out
-//!   server-side before the snapshot is built. The adapter diffs each snapshot
-//!   against what it has already emitted per node and emits a [`Pass`] only for the
-//!   *new* laps.
+//!   `lap_number`, `lap_time_stamp` (cumulative ms since race start, float), `splits`
+//!   and `late_lap`. **The lap-time / deletion shape changed across RH versions:** on
+//!   RH ≤ 4.0 the duration was `lap_raw` (ms) with `lap_time` a `"M:SS.mmm"` *string*
+//!   and deleted laps pre-filtered server-side; on **RH 4.3+/4.4** `lap_time` is a
+//!   *numeric* ms duration (the pretty string moved to `lap_time_formatted`) and laps
+//!   now carry `source` and `deleted` inline. The adapter only reads `lap_number` and
+//!   `lap_time_stamp` (both stable); it parses `lap_time` permissively (string *or*
+//!   number) and **skips `deleted` laps**. It diffs each snapshot against what it has
+//!   already emitted per node and emits a [`Pass`] only for the *new* laps.
 //! - **`pass_record`** — [`Raw::PassRecord`]. Fires once per crossing:
 //!   `{ node, frequency, timestamp }` where `timestamp` is epoch-milliseconds. This
 //!   is a real-time *cross-check* signal (it confirms a crossing happened on a node);
@@ -226,17 +228,28 @@ pub struct RawLap {
     pub lap_number: u64,
     /// The lap duration in milliseconds (RotorHazard `lap_raw`). Advisory only — the
     /// engine derives laps from the pass stream — so it is carried for reference.
+    /// Present on RH ≤ 4.0; **renamed to a numeric `lap_time`** on RH 4.3+/4.4 (see
+    /// `lap_time` below), so this is `None` against current RotorHazard.
     #[serde(default)]
     pub lap_raw: Option<f64>,
-    /// RotorHazard's pretty `"M:SS.mmm"` lap-time **string**. Advisory.
+    /// RotorHazard's lap-time field. **Wire-shape changed across RH versions:** a pretty
+    /// `"M:SS.mmm"` *string* on RH ≤ 4.0, a *numeric* duration in ms on RH 4.3+/4.4
+    /// (where the pretty string moved to `lap_time_formatted`). Advisory and unused — we
+    /// type it as a permissive [`serde_json::Value`] so either shape (or its absence)
+    /// deserializes cleanly. Lap timing is derived from `lap_time_stamp`, not this.
     #[serde(default)]
-    pub lap_time: Option<String>,
+    pub lap_time: Option<serde_json::Value>,
     /// Crossing time in **cumulative milliseconds since race start** (RotorHazard
     /// `lap_time_stamp`, a float). Converted to microseconds for [`SourceTime`].
     pub lap_time_stamp: f64,
     /// Whether RotorHazard flagged this as a late lap (over the time limit). Advisory.
     #[serde(default)]
     pub late_lap: bool,
+    /// Whether RotorHazard has **deleted** this lap. Absent on RH ≤ 4.0 (deleted laps
+    /// were pre-filtered server-side → `None`); present on RH 4.3+/4.4, which may carry
+    /// deleted laps inline. We skip `Some(true)` laps so a deletion never mints a pass.
+    #[serde(default)]
+    pub deleted: Option<bool>,
 }
 
 /// A RotorHazard `pass_record` (see [`Raw::PassRecord`]). Advisory cross-check only.
@@ -696,6 +709,11 @@ impl RotorHazardAdapter {
             let competitor = seat_ref(node_index);
 
             for lap in node.laps {
+                // RH 4.3+/4.4 may carry deleted laps inline (older RH pre-filtered them);
+                // never mint a pass for one.
+                if lap.deleted == Some(true) {
+                    continue;
+                }
                 let signal = self
                     .pass_peak_rssi
                     .get(&node_index)
@@ -1122,6 +1140,7 @@ mod tests {
             lap_time: None,
             lap_time_stamp,
             late_lap: false,
+            deleted: None,
         }
     }
 

@@ -43,6 +43,7 @@ pub fn run(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("feed") => feed(&args[1..]),
         Some("dump") => dump(&args[1..]),
+        Some("plugin-check") => plugin_check(&args[1..]),
         Some("list") | None => {
             print_menu();
             true
@@ -57,14 +58,26 @@ pub fn run(args: &[String]) -> bool {
 
 fn usage() {
     eprintln!(
-        "\nusage: cargo xtask rh-mock <feed|dump|list>\n\
+        "\nusage: cargo xtask rh-mock <feed|dump|plugin-check|list>\n\
          \n\
-         feed [scenario] [--port P] [--tick T]   spin up a real RotorHazard fed a mock signal\n\
+         feed [scenario] [--port P] [--tick T] [--plugin]\n\
+         \x20                                        spin up a real RotorHazard fed a mock signal\n\
+         \x20                                        (--plugin mounts the GridFPV plugin too)\n\
          dump <director-url> <event> <heat>       print the captured ?projection=signal values\n\
+         plugin-check [--port P]                  boot RH with the GridFPV plugin and confirm it loads\n\
          list                                     show the scenario menu\n\
          \n\
          Run `cargo xtask rh-mock list` for the scenarios."
     );
+}
+
+/// The in-repo GridFPV plugin directory (`<root>/plugins/gridfpv`) the harness mounts
+/// into RH's user `plugins/`. `CARGO_MANIFEST_DIR` is `<root>/xtask`.
+fn plugin_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask manifest dir has a parent (workspace root)")
+        .join("plugins/gridfpv")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -168,6 +181,7 @@ fn feed(args: &[String]) -> bool {
     let mut scenario_name = "clean".to_string();
     let mut port = DEFAULT_PORT;
     let mut tick = DEFAULT_TICK.to_string();
+    let mut with_plugin = false;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -186,6 +200,7 @@ fn feed(args: &[String]) -> bool {
                     return false;
                 }
             },
+            "--plugin" => with_plugin = true,
             other if other.starts_with("--") => {
                 eprintln!("unknown flag: {other}");
                 return false;
@@ -211,15 +226,20 @@ fn feed(args: &[String]) -> bool {
 
     let csvs = (scenario.build)();
     let node_count = csvs.len();
+    let plugin = with_plugin.then(plugin_dir);
     println!(
         "\n\x1b[1mStarting RotorHazard\x1b[0m with scenario \x1b[1m{}\x1b[0m on port {port} \
-         ({node_count} emulated node(s), tick={tick}s)...",
-        scenario.name
+         ({node_count} emulated node(s), tick={tick}s{})...",
+        scenario.name,
+        if with_plugin { ", +GridFPV plugin" } else { "" }
     );
     println!("  {}", scenario.blurb);
+    if let Some(dir) = &plugin {
+        println!("  mounting GridFPV plugin from {}", dir.display());
+    }
 
     // RAII: removed on drop (Ctrl-C below drops it). Blocks until the HTTP port is up.
-    let rh = RhContainer::start(port, &tick, &csvs);
+    let rh = RhContainer::start_with_plugin(port, &tick, &csvs, plugin);
     let url = rh.url().to_string();
 
     println!(
@@ -241,6 +261,91 @@ fn feed(args: &[String]) -> bool {
     loop {
         std::thread::sleep(Duration::from_secs(3600));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// plugin-check: boot RH with the GridFPV plugin mounted and confirm RH's loader accepts it.
+// ---------------------------------------------------------------------------------------------
+
+/// S0 acceptance check: build/boot the RH v4.4.0 harness image with the in-repo GridFPV
+/// plugin mounted into RH's user `plugins/`, then read the RH log and assert the loader
+/// reported the plugin **loaded** with no `load_issue`. Tears the container down on exit
+/// (RAII). This proves the plugin-mount path end-to-end without needing a Director.
+fn plugin_check(args: &[String]) -> bool {
+    let mut port = DEFAULT_PORT;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--port" => match it.next().and_then(|v| v.parse::<u16>().ok()) {
+                Some(p) => port = p,
+                None => {
+                    eprintln!("--port needs a number");
+                    return false;
+                }
+            },
+            other => {
+                eprintln!("unknown arg: {other}");
+                return false;
+            }
+        }
+    }
+
+    if !docker_present() {
+        eprintln!("\x1b[31mdocker not found on PATH.\x1b[0m plugin-check drives a real container.");
+        return false;
+    }
+
+    let dir = plugin_dir();
+    if !dir.join("manifest.json").is_file() || !dir.join("__init__.py").is_file() {
+        eprintln!(
+            "\x1b[31mGridFPV plugin not found at {}\x1b[0m (expected __init__.py + manifest.json)",
+            dir.display()
+        );
+        return false;
+    }
+
+    println!(
+        "\n\x1b[1mplugin-check\x1b[0m: booting RH (port {port}) with the GridFPV plugin from {}…",
+        dir.display()
+    );
+    // One mock node is enough — we only care that the loader accepts the plugin.
+    let csvs = vec![(0usize, node_csv(&NodeCsv::default()))];
+    let rh = RhContainer::start_with_plugin(port, DEFAULT_TICK, &csvs, Some(dir));
+
+    // The plugin loads during RH init (before the HTTP port is fully serving); poll the
+    // log briefly in case init trails the port-open by a moment.
+    const LOADED: &str = "Loaded external plugin 'gridfpv'";
+    const NOT_LOADED: &str = "Plugin 'gridfpv' not loaded";
+    let mut logs = String::new();
+    for _ in 0..20 {
+        logs = rh.logs();
+        if logs.contains(LOADED) || logs.contains(NOT_LOADED) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    let loaded = logs.contains(LOADED);
+    let failed = logs.contains(NOT_LOADED);
+    println!("\n\x1b[1mRH plugin log lines:\x1b[0m");
+    for line in logs
+        .lines()
+        .filter(|l| l.contains("gridfpv") || l.contains("GridFPV"))
+    {
+        println!("  {line}");
+    }
+
+    if loaded && !failed {
+        println!("\n\x1b[32mPASS\x1b[0m — RH loaded the GridFPV plugin with no load issue.");
+        true
+    } else {
+        eprintln!(
+            "\n\x1b[31mFAIL\x1b[0m — RH did not cleanly load the GridFPV plugin \
+             (loaded={loaded}, load_issue={failed}). Full log:\n{logs}"
+        );
+        false
+    }
+    // `rh` drops here → container removed.
 }
 
 /// Print exactly what the maintainer does next: point a Director at this RH timer and run a heat.

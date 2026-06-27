@@ -705,6 +705,25 @@ pub fn simultaneous(nodes: usize, laps: usize, gap: usize) -> Vec<(usize, String
     race(&plans)
 }
 
+/// The locally-built RotorHazard harness image (RH **v4.4.0**, mock nodes,
+/// `MOCK_NODE_SIGNAL=1` so `mock_data_{N}.csv` drives the signal). Built from
+/// `docker/rotorhazard/Dockerfile`; [`RhContainer::start`] builds it on demand if it
+/// is missing, so `cargo xtask live` stays a one-command run.
+///
+/// This **replaces** the old `cruwaller/rotorhazard:latest` pull, which is stale at
+/// 4.0.0-beta.4 — below the GridFPV plugin floor (RHAPI 1.3 / RH v4.3.0+, D16).
+pub const RH_IMAGE: &str = "gridfpv-rotorhazard:4.4.0";
+
+/// The server dir inside the image: `DATA_DIR` (= `PROGRAM_DIR`), so `mock_data_{N}.csv`
+/// and the user `plugins/` dir both resolve here (see `docker/rotorhazard/Dockerfile`).
+const RH_SERVER_DIR: &str = "/opt/RotorHazard/src/server";
+
+/// Env var pointing at a host plugin directory to mount into the container's user
+/// `plugins/` dir as `plugins/gridfpv` (read-only). Set by `cargo xtask live` /
+/// `rh-mock` so live runs boot against the GridFPV plugin; unset = stock RH (the
+/// socket-fallback path). Mounting an empty/placeholder plugin is harmless.
+pub const PLUGIN_ENV: &str = "GRIDFPV_RH_PLUGIN";
+
 /// A disposable dockerized RotorHazard for a single test, with emulated node CSVs
 /// mounted. Removed on drop.
 pub struct RhContainer {
@@ -717,7 +736,29 @@ impl RhContainer {
     /// Start RotorHazard on `port` with `csvs` (one per node, 0-based node index)
     /// mounted as `mock_data_{index+1}.csv`, ticking every `update_interval`
     /// seconds. Blocks until the HTTP port accepts connections.
+    ///
+    /// The GridFPV plugin is mounted when the [`PLUGIN_ENV`] env var points at a plugin
+    /// directory — the path `cargo xtask live` uses to boot every live RH against the
+    /// plugin. In-process callers that want to mount a specific plugin explicitly use
+    /// [`RhContainer::start_with_plugin`].
     pub fn start(port: u16, update_interval: &str, csvs: &[(usize, String)]) -> Self {
+        Self::start_with_plugin(port, update_interval, csvs, None)
+    }
+
+    /// Like [`RhContainer::start`], but with an explicit `plugin_dir` to mount into the
+    /// container's user `plugins/gridfpv` (read-only). `Some(dir)` takes precedence; with
+    /// `None` the [`PLUGIN_ENV`] env var is consulted as a fallback. Used by
+    /// `cargo xtask rh-mock` (which can't set process env under `#![forbid(unsafe_code)]`).
+    pub fn start_with_plugin(
+        port: u16,
+        update_interval: &str,
+        csvs: &[(usize, String)],
+        plugin_dir: Option<PathBuf>,
+    ) -> Self {
+        ensure_image();
+
+        let plugin_dir = plugin_dir.or_else(|| std::env::var_os(PLUGIN_ENV).map(PathBuf::from));
+
         let name = format!("gridfpv-rh-sig-{port}");
         // Clean any leftover from a previous aborted run.
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
@@ -741,12 +782,29 @@ impl RhContainer {
             fs::write(&file, content).expect("write mock_data csv");
             args.push("-v".into());
             args.push(format!(
-                "{}:/root/RotorHazard/src/server/mock_data_{}.csv",
+                "{}:{RH_SERVER_DIR}/mock_data_{}.csv",
                 file.display(),
                 node_index + 1
             ));
         }
-        args.push("cruwaller/rotorhazard:latest".into());
+        // Optionally boot against the GridFPV plugin (S0+): mount the host plugin dir
+        // into the container's user `plugins/gridfpv` (read-only). The plugin is
+        // additive — a placeholder loads cleanly and stock-RH behavior is unchanged.
+        if let Some(plugin_dir) = plugin_dir {
+            if plugin_dir.is_dir() {
+                args.push("-v".into());
+                args.push(format!(
+                    "{}:{RH_SERVER_DIR}/plugins/gridfpv:ro",
+                    plugin_dir.display()
+                ));
+            } else {
+                eprintln!(
+                    "{PLUGIN_ENV}={} is not a directory; booting stock RH without the plugin",
+                    plugin_dir.display()
+                );
+            }
+        }
+        args.push(RH_IMAGE.into());
 
         let out = Command::new("docker")
             .args(&args)
@@ -780,6 +838,20 @@ impl RhContainer {
         &self.name
     }
 
+    /// The container's combined stdout+stderr so far (`docker logs`). Used by
+    /// `cargo xtask rh-mock plugin-check` to assert the GridFPV plugin loaded.
+    pub fn logs(&self) -> String {
+        Command::new("docker")
+            .args(["logs", &self.name])
+            .output()
+            .map(|o| {
+                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                s.push_str(&String::from_utf8_lossy(&o.stderr));
+                s
+            })
+            .unwrap_or_default()
+    }
+
     /// Stop the container (a real RotorHazard drop-off) without removing it — the link the app holds
     /// is severed, so the driver's liveness monitor should observe the drop. `Drop` still removes
     /// the (now-stopped) container at end of test. Used by the drop-detection live test (#105).
@@ -797,6 +869,44 @@ impl Drop for RhContainer {
             .output();
         let _ = fs::remove_dir_all(&self._tmp);
     }
+}
+
+/// Ensure the [`RH_IMAGE`] exists locally, building it from
+/// `docker/rotorhazard/Dockerfile` if not. Keeps `cargo xtask live`/`rh-mock` a single
+/// command now that the harness uses a locally-built image (RH v4.4.0) instead of a
+/// Docker Hub pull. The first build takes a couple of minutes; subsequent runs are a
+/// no-op (cached). Panics if the build fails — a live test cannot proceed without it.
+fn ensure_image() {
+    let present = Command::new("docker")
+        .args(["image", "inspect", RH_IMAGE])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if present {
+        return;
+    }
+
+    // `<crate>/../../docker/rotorhazard` — the build context (Dockerfile + mock CSV +
+    // config.json + entrypoint).
+    let context = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docker/rotorhazard")
+        .canonicalize()
+        .expect("locate docker/rotorhazard build context");
+
+    eprintln!(
+        "\x1b[1mBuilding {RH_IMAGE}\x1b[0m from {} (first run only; ~1–2 min)…",
+        context.display()
+    );
+    let status = Command::new("docker")
+        .args(["build", "-t", RH_IMAGE, "-t", "gridfpv-rotorhazard:latest"])
+        .arg(&context)
+        .status()
+        .expect("run docker build for the RH harness image");
+    assert!(
+        status.success(),
+        "failed to build {RH_IMAGE} from {} — see the docker build output above",
+        context.display()
+    );
 }
 
 /// Block until `port` accepts a TCP connection, or panic after `timeout`.

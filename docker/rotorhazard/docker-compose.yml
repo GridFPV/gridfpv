@@ -1,22 +1,37 @@
-# Dockerized RotorHazard — a self-hosted, disposable instance we fully control,
-# for capturing fixtures and (later) live integration tests (#25).
+# GridFPV RotorHazard dev harness — a self-hosted, disposable RH we fully control,
+# for capturing fixtures, live integration tests (#25), and iterating on the GridFPV
+# RH plugin (D16, docs/rotorhazard-plugin.html).
 #
-# RotorHazard boots with 8 simulated (mock) nodes; `simulate_lap` over Socket.IO
-# generates real pass/lap records. The container is the only "live timer" our
-# tests are allowed to depend on (the banned dependency is shared/production
-# backends like the Velocidrone game servers — see docs/testing-strategy.html).
+# Built from source at RotorHazard v4.4.0 (see Dockerfile) — the floor for the GridFPV
+# plugin (RHAPI 1.3 / RH v4.3.0+). It boots 8 simulated (mock) nodes; MockInterface
+# reads an emulated RSSI stream from mock_data_{N}.csv (MOCK_NODE_SIGNAL=1), so node
+# RSSI/history is non-zero and laps record through RH's genuine detection pipeline.
 #
-#   docker compose -f docker/rotorhazard/docker-compose.yml up -d
-#   python docker/rotorhazard/capture_frames.py   # drives a race, dumps frames
+#   docker compose -f docker/rotorhazard/docker-compose.yml up -d --build
+#   #   server + Socket.IO on http://localhost:5000
 #   docker compose -f docker/rotorhazard/docker-compose.yml down
+#
+# To iterate on the plugin, uncomment the bind mount below (or use the test harness:
+# `cargo xtask rh-mock feed --plugin`, `cargo xtask rh-mock plugin-check`).
 services:
   rotorhazard:
-    image: cruwaller/rotorhazard:latest
+    build:
+      context: .
+    image: gridfpv-rotorhazard:4.4.0
     container_name: gridfpv-rh
     ports:
       - "5000:5000"   # HTTP + Socket.IO
-    # Mock nodes are the default when no hardware is attached; no extra config
-    # needed. The server logs "Server is using simulated (mock) nodes".
+    environment:
+      # Demo mode: after boot, tune the CSV-backed node so a bare `compose up` shows a
+      # live RSSI feed without staging a heat. (The test harness leaves this unset, so
+      # its mock nodes stay quiet until it stages heats — see mock-entrypoint.sh.)
+      GRIDFPV_RH_DEMO: "1"
+    volumes:
+      # The emulated-signal stream for node 1 (not baked into the image — mounted here so
+      # the standalone rig demonstrates non-zero RSSI; the test harness mounts its own).
+      - ./mock_data_1.csv:/opt/RotorHazard/src/server/mock_data_1.csv:ro
+      # Live-edit the GridFPV plugin inside the running server (RH restart picks up changes):
+      # - ../../plugins/gridfpv:/opt/RotorHazard/src/server/plugins/gridfpv:ro
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/',timeout=5).status==200 else 1)"]
       interval: 10s
