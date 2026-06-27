@@ -1191,6 +1191,28 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
     expect(within(panel).getByText('Bolt')).toBeInTheDocument();
   });
 
+  it('shows finalize-progress instead of an all-tied (every pilot position 1) ranking', async () => {
+    // No heats finalized → the ranking ties everyone at position 1. That reads as broken, so the
+    // panel shows the finalize-progress message rather than the all-P1 list.
+    const roundRankingImpl = vi.fn(async (_b, _e, _round) => [
+      { competitor: 'p1', position: 1 },
+      { competitor: 'p2', position: 1 }
+    ]);
+    const { session } = makeTestSession({
+      ...baseHeatsImpls(),
+      roundRankingImpl,
+      event: EVENT_WITH_MEMBERS
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Standings' }));
+    await waitFor(() => expect(roundRankingImpl).toHaveBeenCalled());
+    const panel = (await screen.findByLabelText(/Standings for Qualifying R1/i)) as HTMLElement;
+    expect(within(panel).getByText(/Ranking appears as you finalize/i)).toBeInTheDocument();
+    // The misleading all-tied list is NOT rendered.
+    expect(within(panel).queryByText('AceOne')).toBeNull();
+  });
+
   it('surfaces an inline note when a round has no ranking yet (unscored 400s)', async () => {
     const roundRankingImpl = vi.fn(async () => {
       throw new Error('GET …/ranking failed: HTTP 400');
