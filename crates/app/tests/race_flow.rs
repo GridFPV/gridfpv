@@ -323,7 +323,8 @@ async fn round_driven_mock_race_flow_e2e() {
             format: "timed_qual".into(),
             params: BTreeMap::from([("rounds".into(), "1".into())]),
             win_condition: Some(gridfpv_engine::scoring::WinCondition::BestLap),
-            time_limit_secs: None,
+            // Best-lap only ranks; a scored round needs a race time to end (server validation).
+            time_limit_secs: Some(60),
             seeding: SeedingRule::FromRoster,
             // Per-heat: this flow asserts the whole-field heat + first-fit channel assignment.
             channel_mode: Some(ChannelMode::PerHeat),
@@ -623,7 +624,8 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
             format: "timed_qual".into(),
             params: BTreeMap::from([("rounds".into(), "1".into())]),
             win_condition: Some(gridfpv_engine::scoring::WinCondition::BestLap),
-            time_limit_secs: None,
+            // Best-lap only ranks; a scored round needs a race time to end (server validation).
+            time_limit_secs: Some(60),
             seeding: SeedingRule::FromRoster,
             // Per-heat: this flow asserts the node-cap rejection of an oversized whole-field heat.
             channel_mode: Some(ChannelMode::PerHeat),
@@ -756,7 +758,8 @@ async fn static_channel_balanced_qual_flow_e2e() {
             format: "timed_qual".into(),
             params: BTreeMap::from([("rounds".into(), "1".into())]),
             win_condition: Some(gridfpv_engine::scoring::WinCondition::BestLap),
-            time_limit_secs: None,
+            // Best-lap only ranks; a scored round needs a race time to end (server validation).
+            time_limit_secs: Some(60),
             seeding: SeedingRule::FromRoster,
             channel_mode: Some(ChannelMode::Static),
             staging_timer_secs: None,
