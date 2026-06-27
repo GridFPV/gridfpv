@@ -72,6 +72,7 @@
     bracketChainRounds,
     buildBracketView,
     groupRoundsForDisplay,
+    isBracketLevel,
     isBracketRoot,
     isLevelComplete,
     nextLevelLabel
@@ -1168,14 +1169,19 @@
                   >
                     {standingsRound === round.id ? 'Hide standings' : 'Standings'}
                   </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onclick={() => openAdvance(round)}
-                    disabled={advanceRoundId !== undefined}
-                  >
-                    Advance to bracket
-                  </Button>
+                  <!-- "Advance to bracket" seeds a NEW single-elim from this round's ranking — a
+                       qualifying-round action. It is meaningless on a bracket level (which advances
+                       via "Advance bracket" below), so hide it there. -->
+                  {#if !isBracketLevel(round)}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onclick={() => openAdvance(round)}
+                      disabled={advanceRoundId !== undefined}
+                    >
+                      Advance to bracket
+                    </Button>
+                  {/if}
                   <!-- Advance the bracket to its next level (#217, decisions D13): once a bracket
                        level's heats are all Final, create the next level seeded FromHeatWinners +
                        generate its winners-paired heats. Hidden until the level is complete and only
@@ -1379,7 +1385,7 @@
                 <div class="bracket-headline">
                   <h3 class="bracket-title">Bracket</h3>
                   {#if champ}
-                    <span class="bracket-champion">🏆 Champion · {callsign(champ)}</span>
+                    <span class="bracket-champion">Champion · {callsign(champ)}</span>
                   {/if}
                 </div>
                 <p class="bracket-sub">{bracketSubtitle(group.root)}</p>
