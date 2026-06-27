@@ -42,7 +42,8 @@ describe('Marshaling (Slice 3)', () => {
     const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
     render(Marshaling, { session });
 
-    // Select BOB's only lap (end_ref 13).
+    // Marshal one pilot at a time: show BOB, then select his only lap (end_ref 13).
+    await fireEvent.change(screen.getByLabelText('Pilot to marshal'), { target: { value: 'BOB' } });
     await fireEvent.click(screen.getByRole('button', { name: /Lap 1\s*43\.000/ }));
     await fireEvent.input(screen.getByLabelText('Correction time'), { target: { value: '21' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Split' }));
@@ -490,9 +491,16 @@ describe('Marshaling (Slice 3)', () => {
     it('renders the lap-list headings as pilot callsigns, not the raw refs', async () => {
       const { session } = renderFN();
       render(Marshaling, { session });
+      // One pilot at a time: each selected pilot's lap-list heading is their callsign, never the ref.
+      await fireEvent.change(screen.getByLabelText('Pilot to marshal'), {
+        target: { value: 'maverick-4d9rp8' }
+      });
       await waitFor(() =>
         expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
       );
+      await fireEvent.change(screen.getByLabelText('Pilot to marshal'), {
+        target: { value: 'goose-yla6dp' }
+      });
       expect(screen.getByRole('heading', { name: 'Goose' })).toBeInTheDocument();
       expect(screen.queryByText('maverick-4d9rp8')).not.toBeInTheDocument();
       expect(screen.queryByText('goose-yla6dp')).not.toBeInTheDocument();
@@ -666,10 +674,13 @@ describe('Marshaling (Slice 3)', () => {
       });
       const header = screen.getByRole('region', { name: 'Marshaling' }).querySelector('.heat')!;
       expect(header.textContent).not.toContain('q1-heat');
+      // The shown pilot's lap-list heading resolves to a callsign (one pilot at a time via the picker).
+      await fireEvent.change(screen.getByLabelText('Pilot to marshal'), {
+        target: { value: 'maverick-4d9rp8' }
+      });
       await waitFor(() =>
         expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
       );
-      expect(screen.getByRole('heading', { name: 'Goose' })).toBeInTheDocument();
       expect(screen.queryByText('maverick-4d9rp8')).not.toBeInTheDocument();
     });
   });
