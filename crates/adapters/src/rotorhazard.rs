@@ -522,6 +522,12 @@ pub struct RawGridSignal {
 pub struct RawGridSignalNode {
     /// Zero-based node/seat index.
     pub index: usize,
+    /// The accumulator index this incremental slice starts at (S2.1): `0` means **replace** (a full
+    /// snapshot — the first broadcast of a race, or the final flush); a value `== the current
+    /// accumulated length` means **append** this slice. Anything else is an out-of-sync slice (a
+    /// missed/duplicated tick) the adapter skips until the next replace. Defaults to `0` (replace).
+    #[serde(default)]
+    pub base: usize,
     /// The node's current live RSSI (advisory; the live coarse trace still comes from `node_data`).
     #[serde(default)]
     pub current_rssi: Option<f64>,
@@ -607,10 +613,11 @@ pub struct RotorHazardAdapter {
     /// the DONE edge). A stock RH never sends `gridfpv_signal`, so this stays `false` and the pull
     /// remains the fallback.
     live_signal_active: bool,
-    /// Per-node length of the dense history last emitted as a [`SignalHistory`], reset each race. The
-    /// plugin re-broadcasts the full window every tick; emitting only when a node's history has
-    /// **grown** keeps the log to roughly one dense fact per crossing instead of one per broadcast.
-    last_history_len: std::collections::HashMap<usize, usize>,
+    /// Per-node accumulated dense trace (race-relative µs + RSSI), reset each race (S2.1). The plugin
+    /// streams the dense history **incrementally** (only new samples each tick); the adapter appends
+    /// them here (or replaces on a full snapshot) and emits the accumulated [`SignalHistory`] when it
+    /// changes — so the wire stays small while the projection still gets the full trace.
+    dense_accum: std::collections::HashMap<usize, (Vec<i64>, Vec<u16>)>,
     /// Pending per-pilotrace marshal pulls discovered from a `race_list`, drained by the transport
     /// via [`take_pilotrace_requests`](Self::take_pilotrace_requests). On the RotorHazard build whose
     /// marshal API is per-pilotrace (`get_pilotrace` -> `race_details`), the heat-end flow is:
@@ -676,7 +683,7 @@ impl RotorHazardAdapter {
             last_thresholds: std::collections::HashMap::new(),
             pending_marshal_request: false,
             live_signal_active: false,
-            last_history_len: std::collections::HashMap::new(),
+            dense_accum: std::collections::HashMap::new(),
             pending_pilotrace_requests: Vec::new(),
             pilotrace_start_time: std::collections::HashMap::new(),
             pending_heat_ids: Vec::new(),
@@ -855,10 +862,10 @@ impl RotorHazardAdapter {
                 self.last_thresholds.clear();
                 // A fresh race invalidates any stale marshal-pull state from the previous heat.
                 self.pending_marshal_request = false;
-                // The dense trace is per-heat: forget the previous heat's emitted lengths so the new
-                // heat's growing history emits fresh `SignalHistory` facts. (`live_signal_active`
-                // persists — once the plugin is streaming, it streams every heat.)
-                self.last_history_len.clear();
+                // The dense trace is per-heat: drop the previous heat's accumulator so the new heat
+                // builds a fresh trace. (`live_signal_active` persists — once the plugin is
+                // streaming, it streams every heat.)
+                self.dense_accum.clear();
                 self.pending_pilotrace_requests.clear();
                 self.pilotrace_start_time.clear();
                 out.push(Event::SessionStarted {
@@ -1153,21 +1160,43 @@ impl RotorHazardAdapter {
             if let (Some(enter), Some(exit)) = (node.enter_at, node.exit_at) {
                 self.emit_threshold(node_index, enter, exit, out);
             }
-            // Dense history: emit only when this node's window has grown since the last emit, and
-            // only with a known race origin to anchor the race-relative times.
-            let len = node.history_values.len().min(node.history_times.len());
-            let grown = len > self.last_history_len.get(&node_index).copied().unwrap_or(0);
-            if let Some(start) = sig.race_start {
-                if len > 0 && grown {
-                    self.last_history_len.insert(node_index, len);
-                    self.emit_dense_history(
-                        node_index,
-                        start,
-                        &node.history_times,
-                        &node.history_values,
-                        out,
-                    );
+            // Dense history (S2.1, incremental): convert this slice to race-relative µs and apply it
+            // to the per-node accumulator — REPLACE on a full snapshot (`base == 0`), APPEND when it
+            // continues the accumulator (`base == len`), else skip an out-of-sync slice. Emit the
+            // accumulated trace only when it actually changed, so a redundant final flush is a no-op.
+            let Some(start) = sig.race_start else {
+                continue;
+            };
+            let n = node.history_values.len().min(node.history_times.len());
+            let mut times = Vec::with_capacity(n);
+            let mut rssi = Vec::with_capacity(n);
+            for i in 0..n {
+                let rel_secs = node.history_times[i] - start;
+                times.push((rel_secs * 1_000_000.0).round().max(0.0) as i64);
+                rssi.push(node.history_values[i].round().clamp(0.0, u16::MAX as f64) as u16);
+            }
+            let acc = self.dense_accum.entry(node_index).or_default();
+            let changed = if node.base == 0 {
+                if acc.0 != times || acc.1 != rssi {
+                    *acc = (times, rssi);
+                    !acc.0.is_empty()
+                } else {
+                    false
                 }
+            } else if node.base == acc.0.len() && n > 0 {
+                acc.0.extend(times);
+                acc.1.extend(rssi);
+                true
+            } else {
+                false // out-of-sync slice; wait for the next full snapshot to resync
+            };
+            if changed {
+                out.push(Event::SignalHistory(SignalHistory {
+                    adapter: self.id.clone(),
+                    competitor: seat_ref(node_index),
+                    times: acc.0.clone(),
+                    rssi: acc.1.clone(),
+                }));
             }
         }
     }
@@ -1989,10 +2018,12 @@ mod tests {
         );
     }
 
-    /// Build a `gridfpv_signal` broadcast (D16, S2) with one node's dense window + thresholds.
+    /// Build a `gridfpv_signal` broadcast (D16, S2) with one node's dense slice + thresholds. `base`
+    /// is the accumulator index the slice starts at (0 = full snapshot/replace; `== len` = append).
     fn grid_signal(
         race_start: f64,
         node: usize,
+        base: usize,
         enter: f64,
         exit: f64,
         times: &[f64],
@@ -2002,6 +2033,7 @@ mod tests {
             race_start: Some(race_start),
             nodes: vec![RawGridSignalNode {
                 index: node,
+                base,
                 current_rssi: values.last().copied(),
                 enter_at: Some(enter),
                 exit_at: Some(exit),
@@ -2028,6 +2060,7 @@ mod tests {
         let events = a.translate(grid_signal(
             10.0,
             2,
+            0,
             90.0,
             80.0,
             &[10.1, 10.2, 10.3],
@@ -2045,41 +2078,69 @@ mod tests {
     }
 
     #[test]
-    fn grid_signal_dense_emitted_only_on_growth() {
+    fn grid_signal_accumulates_incremental_slices() {
         let mut a = RotorHazardAdapter::new();
-        // The plugin re-sends the full window each tick; we emit a dense history only when it grows.
-        let first = a.translate(grid_signal(0.0, 0, 90.0, 80.0, &[0.1, 0.2], &[70.0, 150.0]));
+        // First broadcast (base 0 = full snapshot): emits the dense history + thresholds.
+        let first = a.translate(grid_signal(
+            0.0,
+            0,
+            0,
+            90.0,
+            80.0,
+            &[0.1, 0.2],
+            &[70.0, 150.0],
+        ));
         assert_eq!(
             histories(&first).len(),
             1,
-            "first window emits a dense history"
+            "first snapshot emits a dense history"
         );
-        assert_eq!(thresholds(&first).len(), 1, "first window emits thresholds");
+        assert_eq!(histories(&first)[0].rssi, vec![70, 150]);
+        assert_eq!(
+            thresholds(&first).len(),
+            1,
+            "first snapshot emits thresholds"
+        );
 
-        let again = a.translate(grid_signal(0.0, 0, 90.0, 80.0, &[0.1, 0.2], &[70.0, 150.0]));
-        assert!(
-            histories(&again).is_empty(),
-            "an unchanged window emits no new dense history"
+        // An APPEND slice (base == current length 2) extends the accumulator; the emitted history is
+        // the FULL accumulated trace, and unchanged thresholds are not re-emitted.
+        let appended = a.translate(grid_signal(0.0, 0, 2, 90.0, 80.0, &[0.3], &[71.0]));
+        assert_eq!(
+            histories(&appended).len(),
+            1,
+            "an append emits the grown trace"
+        );
+        assert_eq!(histories(&appended)[0].rssi, vec![70, 150, 71]);
+        assert_eq!(
+            histories(&appended)[0].times,
+            vec![100_000, 200_000, 300_000]
         );
         assert!(
-            thresholds(&again).is_empty(),
+            thresholds(&appended).is_empty(),
             "unchanged thresholds are not re-emitted"
         );
 
-        let grown = a.translate(grid_signal(
+        // A redundant full snapshot identical to the accumulator (e.g. the final flush) is a no-op.
+        let resent = a.translate(grid_signal(
             0.0,
+            0,
             0,
             90.0,
             80.0,
             &[0.1, 0.2, 0.3],
             &[70.0, 150.0, 71.0],
         ));
-        assert_eq!(
-            histories(&grown).len(),
-            1,
-            "a grown window emits an updated dense history"
+        assert!(
+            histories(&resent).is_empty(),
+            "an identical full snapshot emits nothing"
         );
-        assert_eq!(histories(&grown)[0].rssi, vec![70, 150, 71]);
+
+        // An out-of-sync append (base != length, no replace) is skipped, not mis-appended.
+        let desync = a.translate(grid_signal(0.0, 0, 99, 90.0, 80.0, &[9.9], &[123.0]));
+        assert!(
+            histories(&desync).is_empty(),
+            "an out-of-sync slice is skipped"
+        );
     }
 
     #[test]
@@ -2090,7 +2151,7 @@ mod tests {
             race_heat_id: Some(1),
         }));
         // The plugin pushes live signal during the race...
-        a.translate(grid_signal(0.0, 0, 90.0, 80.0, &[0.1], &[150.0]));
+        a.translate(grid_signal(0.0, 0, 0, 90.0, 80.0, &[0.1], &[150.0]));
         a.translate(Raw::RaceStatus(RawRaceStatus {
             race_status: race_status::DONE,
             race_heat_id: Some(1),

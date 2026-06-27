@@ -19,6 +19,7 @@ Clean start/stop and threshold recalculate arrive in S3–S4.
 Floor: RHAPI 1.3 / RotorHazard v4.3.0+ (declared in ``manifest.json``).
 """
 
+import bisect
 import logging
 
 import gevent  # RH's runtime; used for the decimated broadcast greenlet.
@@ -51,12 +52,13 @@ EVT_HELLO_ACK = "gridfpv_hello_ack"
 EVT_SIGNAL = "gridfpv_signal"
 
 # Live-signal broadcast cadence (seconds) — decimated so the stream stays cheap on a Pi
-# (design risk #5). 0.5 s = 2 Hz; the Director gets a fresh dense trace twice a second.
+# (design risk #5). 0.5 s = 2 Hz. Each tick sends only the NEW dense samples since the last
+# (incremental), so the per-tick payload is tiny regardless of heat length.
 SIGNAL_INTERVAL = 0.5
-# Cap on the per-node dense window sent each broadcast (most-recent samples). RH already
-# prunes node history to ~60 s; this bounds a pathological burst. A normal heat fits well
-# under this. (A future optimization streams only the incremental slice; see the doc.)
-SIGNAL_WINDOW = 2000
+# Safety cap on the per-race accumulator length (samples) so a pathological run can't grow
+# memory unbounded — a real heat's peak/nadir history is far smaller. When exceeded, the
+# oldest samples are dropped (the Director keeps what it already folded).
+SIGNAL_WINDOW = 20000
 
 
 def initialize(rhapi):
@@ -64,7 +66,9 @@ def initialize(rhapi):
 
     # The running broadcast greenlet (None when idle). A dict so the inner handlers can
     # rebind it without `nonlocal` gymnastics.
-    state = {"greenlet": None}
+    # `greenlet`: the running broadcast loop. `acc`: per-race, per-node append-only dense buffer
+    # {index: {"t": [secs], "v": [rssi], "sent": int}} — the source of the incremental slices.
+    state = {"greenlet": None, "acc": {}}
 
     # ---- S1: handshake -----------------------------------------------------------------
     def on_hello(_data=None):
@@ -83,32 +87,64 @@ def initialize(rhapi):
 
     rhapi.ui.socket_listen(EVT_HELLO, on_hello)
 
-    # ---- S2: live dense RSSI -----------------------------------------------------------
-    def broadcast_signal_once():
-        """Read the live per-node signal off the interface and broadcast one snapshot."""
+    # ---- S2: live dense RSSI (incremental) ---------------------------------------------
+    def reconcile(seat):
+        """Merge a seat's current RH history into our per-race append-only accumulator; return
+        ``(index, acc)``.
+
+        RH prunes its own node history to ~60 s and reports peak/nadir entries (which can repeat a
+        timestamp), so we keep the full per-race trace ourselves and append only samples newer than
+        the last we hold — found by timestamp (monotonic), which is robust to RH front-pruning.
+        """
+        idx = getattr(seat, "index", 0)
+        acc = state["acc"].setdefault(idx, {"t": [], "v": [], "sent": 0})
+        ht = list(getattr(seat, "history_times", None) or [])
+        hv = list(getattr(seat, "history_values", None) or [])
+        n = min(len(ht), len(hv))
+        if n:
+            # First index in RH's (possibly front-pruned) buffer past what we already hold.
+            start = bisect.bisect_right(ht, acc["t"][-1], hi=n) if acc["t"] else 0
+            for i in range(start, n):
+                acc["t"].append(ht[i])
+                acc["v"].append(hv[i])
+            if len(acc["t"]) > SIGNAL_WINDOW:  # safety: drop oldest if pathologically long
+                drop = len(acc["t"]) - SIGNAL_WINDOW
+                del acc["t"][:drop]
+                del acc["v"][:drop]
+                acc["sent"] = max(0, acc["sent"] - drop)
+        return idx, acc
+
+    def broadcast_signal_once(final=False):
+        """Broadcast each seat's NEW dense samples since the last tick (incremental).
+
+        Each node carries ``base`` — the accumulator index this slice starts at — so the Director
+        can append at ``base`` (or REPLACE when ``base == 0``). ``final`` sends the full accumulated
+        trace (base 0) so the Director's end state is complete even if it missed ticks.
+        """
         seats = getattr(rhapi.interface, "seats", []) or []
         nodes = []
-        for n in seats:
-            hv = list(getattr(n, "history_values", None) or [])
-            ht = list(getattr(n, "history_times", None) or [])
-            if len(hv) > SIGNAL_WINDOW:
-                hv = hv[-SIGNAL_WINDOW:]
-                ht = ht[-SIGNAL_WINDOW:]
+        for seat in seats:
+            idx, acc = reconcile(seat)
+            base = 0 if final else acc["sent"]
             nodes.append(
                 {
-                    "index": getattr(n, "index", 0),
-                    "frequency": getattr(n, "frequency", 0),
-                    "current_rssi": getattr(n, "current_rssi", 0),
-                    "enter_at": getattr(n, "enter_at_level", 0),
-                    "exit_at": getattr(n, "exit_at_level", 0),
-                    "history_values": hv,
-                    "history_times": ht,
+                    "index": idx,
+                    "frequency": getattr(seat, "frequency", 0),
+                    "current_rssi": getattr(seat, "current_rssi", 0),
+                    "enter_at": getattr(seat, "enter_at_level", 0),
+                    "exit_at": getattr(seat, "exit_at_level", 0),
+                    "base": base,
+                    "history_values": acc["v"][base:],
+                    "history_times": acc["t"][base:],
                 }
             )
+            if not final:
+                acc["sent"] = len(acc["t"])
         payload = {
-            # The race-start origin (RH's monotonic seconds) so the Director can make the
-            # dense `history_times` race-relative — the same anchor the marshal-data path uses.
+            # The race-start origin (RH's monotonic seconds) so the Director can make the dense
+            # `history_times` race-relative — the same anchor the marshal-data path uses.
             "race_start": getattr(rhapi.race, "start_time_internal", None),
+            "final": final,
             "nodes": nodes,
         }
         rhapi.ui.socket_broadcast(EVT_SIGNAL, payload)
@@ -124,10 +160,11 @@ def initialize(rhapi):
             logger.exception("GridFPV signal loop error")
 
     def start_signal(_args=None):
-        # Cancel any stale loop, then start a fresh one for this race.
+        # Cancel any stale loop, reset the per-race accumulator, then start a fresh loop.
         g = state.get("greenlet")
         if g is not None:
             g.kill(block=False)
+        state["acc"] = {}
         state["greenlet"] = gevent.spawn(signal_loop)
         logger.info("GridFPV live signal: streaming %s every %ss", EVT_SIGNAL, SIGNAL_INTERVAL)
 
@@ -137,10 +174,10 @@ def initialize(rhapi):
             return
         g.kill(block=False)
         state["greenlet"] = None
-        # Final full snapshot so the Director has the complete trace for the heat even if
-        # it missed the last tick — the live equivalent of the old post-race pull.
+        # Final full snapshot (base 0 = replace) so the Director has the complete trace for the heat
+        # even if it missed ticks (e.g. a mid-heat reconnect) — the live equivalent of the old pull.
         try:
-            broadcast_signal_once()
+            broadcast_signal_once(final=True)
         except Exception:  # noqa: BLE001
             logger.exception("GridFPV final signal flush error")
 
