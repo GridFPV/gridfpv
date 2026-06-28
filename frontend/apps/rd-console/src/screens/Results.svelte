@@ -22,7 +22,6 @@
    * lossless JSON download of whichever projections are present.
    */
   import {
-    Leaderboard,
     StandingsTable,
     BracketTree,
     Button,
@@ -63,14 +62,12 @@
     session,
     heatResult = undefined,
     standings = undefined,
-    outcome = undefined,
-    metricLabel = 'Best lap'
+    outcome = undefined
   }: {
     session?: Session;
     heatResult?: HeatResult;
     standings?: RankEntry[];
     outcome?: EventOutcome;
-    metricLabel?: string;
   } = $props();
 
   const bracket = $derived(outcome ? bracketFromOutcome(outcome) : undefined);
@@ -492,12 +489,6 @@
           </table>
         {/if}
       {/if}
-    </Card>
-  {/if}
-
-  {#if heatResult}
-    <Card title="Heat result" pad={false}>
-      <Leaderboard result={heatResult} {metricLabel} nameFor={callsign} />
     </Card>
   {/if}
 
