@@ -294,6 +294,11 @@
       it "active" implied a rolling-queue capability that does not exist. Shelving it (rather than
       deleting) keeps the deferred seam honest: the option is preserved without pretending it ships.
       (Tracking: <strong>#218</strong> — rename Time Trials + remove ZippyQ from the active set.)</dd>
+      <dt>Update</dt>
+      <dd><strong>Reframed by <a href="#d17">D17</a>:</strong> the flat format set collapses to three
+      RD-facing round types (Practice / Time Trial / Head-to-Head); Round Robin, the elim brackets and
+      Multi-Main become <em>tournament structures</em> over Head-to-Head, surfaced through builders
+      rather than the Add-round picker (Multi-Main now shelved there alongside ZippyQ).</dd>
     </dl>
 
     <h2>D11 · "Qualifying" → "Time Trials": name the format, not the purpose</h2>
@@ -476,6 +481,35 @@
       detection, gain the fidelity and control we wanted, retire the workaround code, and unblock
       re-detection marshaling — without a firmware project. The mock-timer protocol remains a useful
       reference, but the RH integration path is now <strong>the plugin</strong>.</dd>
+    </dl>
+
+    <h2 id="d17">D17 · Round types &amp; scoring: Practice / Time Trial / Head-to-Head, structures over rounds (refines D10/D11/D14)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The format set (D10) is a flat zoo — <code>timed_qual</code>, <code>round_robin</code>,
+      <code>single_elim</code>, <code>double_elim</code>, <code>multi_main</code>,
+      <code>chase_the_ace</code>, <code>open_practice</code> — which tangles three different things into
+      one "format" knob: the <em>kind of flying</em>, how a <em>heat</em> is won, and how a
+      <em>round</em> ranks. An RD thinks in fewer, cleaner buckets.</dd>
+      <dt>Decision</dt>
+      <dd>The RD-facing model is <strong>three round types</strong> — <strong>Practice</strong>,
+      <strong>Time Trial</strong>, <strong>Head-to-Head</strong> — with two orthogonal knobs:
+      <strong>win condition</strong> (wins a <em>heat</em> — First-to-N / Most-laps / Best-of-N) and
+      <strong>scoring</strong> (ranks a <em>round</em> — <strong>Points</strong> via a customisable
+      per-position table, or <strong>Placement</strong>). <strong>Round-robin and brackets are not
+      formats</strong> — they are <strong>tournament structures</strong> assembled from Head-to-Head
+      rounds (round-robin = Points + all-play-all; bracket = Placement + elimination chain), buildable
+      by hand and automated by builders. Best-Lap folds into Best-of-N (N=1); Practice is one
+      channel-based format, optionally named after a class. Full spec:
+      <a href="format-model.html">Format Model</a>.</dd>
+      <dt>Rationale</dt>
+      <dd>Separating <em>racing type</em> from <em>structure</em> (and <em>win condition</em> from
+      <em>scoring</em>) matches how RDs reason — "practice / qualify / race", then "how do I bracket
+      them" — and collapses the Add-round menu to three honest choices while the engine keeps its
+      generators as the mechanics underneath. Refines D11 (Time-Trial naming) and reframes D10/D14:
+      Multi-Main and the elim brackets become builder-assembled structures, not menu formats.
+      Rolls out in stages (bracket win-condition picker → Head-to-Head format → taxonomy collapse);
+      until each stage ships the console keeps the legacy names.</dd>
     </dl>
 
     <footer class="doc-footer">
