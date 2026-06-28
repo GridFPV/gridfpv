@@ -2293,7 +2293,8 @@
 
 <style>
   .event-rounds {
-    max-width: 52rem;
+    /* Fill the workspace width (like the standings screen) — the rounds/heats lists and especially
+       the bracket tree want the room; the shell + cards are already responsive. */
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-4);
