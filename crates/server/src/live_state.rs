@@ -464,30 +464,42 @@ fn current_heat(events: &[Event]) -> Option<HeatId> {
     active.or(first_scheduled)
 }
 
-/// The log index where the current heat's **current run** begins: one past the heat's latest
-/// **reset boundary** (its most recent `Aborted` or `Restarted` `HeatStateChanged`), or `0` if the
-/// heat was never reset.
+/// The log index where the current heat's **current run** begins — the boundary the live lap count /
+/// standings / heat sheet fold from (`>= current_run_start`), so they reflect **only this heat's
+/// current run**. It is the latest of, for `heat`:
 ///
-/// A reset (`Aborted`/`Restarted`) sends the heat back to `Scheduled` but leaves the abandoned
-/// run's `Pass`es in the log. The *current run* is everything logged after that boundary, so the
-/// live lap count / standings / heat sheet must fold only passes at indices `>= current_run_start`:
-/// right after a reset (no new run yet) that window holds no passes ⇒ zero laps; a fresh re-run's
-/// passes are counted from zero (the abandoned run's passes are excluded). A heat that finalizes
-/// normally was never reset, so the boundary is `0` and the whole log counts — leaving finalized
-/// results unaffected.
+/// - its most recent `Running` transition (the run started here — passes only arrive while Running),
+///   **or**
+/// - one past its most recent reset (`Aborted` / `Restarted`).
 ///
-/// Pure and order-preserving like the rest of the projection: it is the *latest* such transition
-/// for `heat`, so a heat aborted twice scopes to the most recent abort.
+/// This scopes the window two ways at once. **Across heats:** a heat's `Running` is logged after every
+/// earlier heat finished, so folding from it excludes those earlier heats' passes — a pilot who flew
+/// prior heats (a bracket level, a round-robin, a multi-round qualifier) shows only *this* heat's laps,
+/// not a running total. **Within a heat:** a reset leaves the abandoned run's passes in the log; the
+/// re-run's `Running` (or the reset boundary, before the re-run) sits after them, so the count restarts
+/// from zero. If the heat has neither run nor reset yet (still `Scheduled`) the window is **empty**
+/// (`events.len()`) ⇒ zero live laps — never a prior-heat total.
+///
+/// Pure and order-preserving: it is the *latest* such transition for `heat`.
 fn current_run_start(events: &[Event], heat: &HeatId) -> usize {
-    let mut start = 0;
+    // Default to past-the-end: a heat that has not run yet contributes no live laps (so selecting an
+    // unraced heat as current shows zeros, not its pilots' totals from earlier heats).
+    let mut start = events.len();
     for (i, event) in events.iter().enumerate() {
         if let Event::HeatStateChanged {
             heat: h,
-            transition: HeatTransition::Aborted | HeatTransition::Restarted,
+            transition,
         } = event
         {
             if h == heat {
-                start = i + 1;
+                match transition {
+                    // The run begins at Running — fold this heat's passes (which follow it), excluding
+                    // every earlier heat and any abandoned earlier run of this one.
+                    HeatTransition::Running => start = i,
+                    // A reset with no re-run yet: window past it so the abandoned passes drop out.
+                    HeatTransition::Aborted | HeatTransition::Restarted => start = i + 1,
+                    _ => {}
+                }
             }
         }
     }
@@ -1170,20 +1182,20 @@ mod tests {
 
     #[test]
     fn normal_finalize_without_a_reset_counts_the_whole_heat() {
-        // A heat that finalizes normally was never reset → the boundary is the start of the log, so
-        // every lap counts (finalized results are unaffected by the run-scoping).
+        // A heat that finalizes normally was never reset → the run begins at its Running, so the
+        // whole run's laps count (finalized results are unaffected by the run-scoping).
         let events = vec![
-            scheduled("q-1", &["A", "B"]),
-            changed("q-1", HeatTransition::Staged),
-            changed("q-1", HeatTransition::Armed),
-            changed("q-1", HeatTransition::Running),
+            scheduled("q-1", &["A", "B"]),           // 0
+            changed("q-1", HeatTransition::Staged),  // 1
+            changed("q-1", HeatTransition::Armed),   // 2
+            changed("q-1", HeatTransition::Running), // 3 — the run starts here
             pass("A", 1_000_000, 1),
             pass("A", 4_000_000, 2),
             pass("A", 7_000_000, 3), // A: 2 laps
             changed("q-1", HeatTransition::Finished),
             changed("q-1", HeatTransition::Finalized),
         ];
-        assert_eq!(current_run_start(&events, &heat()), 0);
+        assert_eq!(current_run_start(&events, &heat()), 3);
         let s = live_state(&events);
         assert_eq!(s.phase, HeatPhase::Final);
         let a = s
@@ -1213,11 +1225,43 @@ mod tests {
             changed("q-1", HeatTransition::Restarted), // 8 — q-1's latest reset
             changed("q-1", HeatTransition::Running),   // 9
         ];
+        // q-1's run starts at its latest Running (9) — after the latest restart (8).
         assert_eq!(current_run_start(&events, &HeatId("q-1".into())), 9);
-        // A never-reset heat has boundary 0.
+        // A heat that has not run yet (Scheduled, no Running/reset) windows past the end — no
+        // current-run passes, so the live count is zero (never a prior-heat total).
+        let only_scheduled = [scheduled("q-9", &["Z"])];
         assert_eq!(
-            current_run_start(&[scheduled("q-9", &["Z"])], &HeatId("q-9".into())),
-            0
+            current_run_start(&only_scheduled, &HeatId("q-9".into())),
+            only_scheduled.len()
+        );
+    }
+
+    #[test]
+    fn current_run_start_scopes_to_this_heats_run_not_earlier_heats() {
+        // A flies q-1 (two laps), then flies q-2 (one lap): q-2's run begins at its own Running, so
+        // q-1's crossings are excluded — the live count is this heat's run, not a cross-heat total.
+        let events = vec![
+            scheduled("q-1", &["A"]),                // 0
+            changed("q-1", HeatTransition::Running), // 1
+            pass("A", 1_000_000, 1),                 // 2 — q-1 holeshot
+            pass("A", 2_000_000, 2),                 // 3 — q-1 lap 1
+            pass("A", 3_000_000, 3),                 // 4 — q-1 lap 2
+            scheduled("q-2", &["A"]),                // 5
+            changed("q-2", HeatTransition::Running), // 6
+            pass("A", 10_000_000, 1),                // 7 — q-2 holeshot
+            pass("A", 13_000_000, 2),                // 8 — q-2 lap 1
+        ];
+        // Before the fix this was 0 (the whole log), so q-2's live count summed in q-1's laps.
+        assert_eq!(current_run_start(&events, &HeatId("q-2".into())), 6);
+        // End to end: the current heat (q-2) shows A with one lap — its q-2 run only, not three.
+        let a = live_state(&events)
+            .progress
+            .into_iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .expect("A is in the current heat");
+        assert_eq!(
+            a.laps_completed, 1,
+            "q-2 live count excludes A's earlier q-1 laps"
         );
     }
 
