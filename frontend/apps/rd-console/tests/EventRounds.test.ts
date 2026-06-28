@@ -138,7 +138,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       classes: ['c1', 'c2'],
       format: 'head_to_head',
       params: {},
-      win_condition: 'BestLap',
+      win_condition: { FirstToLaps: { n: 3 } },
       seeding: 'FromRoster',
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
@@ -162,12 +162,11 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
     // The eligible class is a single-select dropdown (Rounds form redesign item 6).
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    // Head-to-Head offers only Timed / First-to-N; pick First-to-N (3 laps, the default).
     await fireEvent.change(screen.getByLabelText('Win condition'), {
-      target: { value: 'BestLap' }
+      target: { value: 'FirstToLaps' }
     });
-    // Best-lap is always timed: a Race time field appears and is sent as the round's time limit so
-    // the heat auto-ends (the win condition only ranks). Set 90s.
-    await fireEvent.input(screen.getByLabelText('Race time seconds'), { target: { value: '90' } });
+    await fireEvent.input(screen.getByLabelText('Laps'), { target: { value: '3' } });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
 
@@ -179,11 +178,11 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
       label: 'H2H Heats',
       classes: ['c1'],
       format: 'head_to_head',
-      win_condition: 'BestLap',
+      win_condition: { FirstToLaps: { n: 3 } },
       seeding: 'FromRoster'
     });
-    // Best-lap carries its race time as the round time limit (so it can't run forever).
-    expect(req.time_limit_secs).toBe(90);
+    // First-to-N self-terminates (the lap target ends the heat), so no round time limit.
+    expect(req.time_limit_secs).toBeUndefined();
     // The new round appears in the Rounds list (its label also seeds the Heats section).
     const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
     await within(roundsCard).findByText('H2H Heats');
@@ -471,10 +470,11 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(screen.queryByLabelText(/qualifying metric/i)).toBeNull();
     expect(screen.queryByLabelText(/ranking metric/i)).toBeNull();
 
-    // The win-condition dropdown offers only the qualifying conditions — First-to-N is hidden.
+    // The win-condition dropdown offers only the qualifying conditions — Timed and the converged
+    // Best-of-N (best of N laps; N=1 = best lap). First-to-N is hidden.
     const win = (await screen.findByLabelText('Win condition')) as HTMLSelectElement;
     const options = Array.from(win.options).map((o) => o.value);
-    expect(options).toEqual(['Timed', 'BestLap', 'BestConsecutive']);
+    expect(options).toEqual(['Timed', 'BestOfN']);
     expect(options).not.toContain('FirstToLaps');
   });
 
@@ -521,13 +521,18 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'H2H' } });
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    // Group size is a dropdown (capped at the timer's nodes); pick 4 pilots per heat.
+    await fireEvent.change(screen.getByLabelText('Group size value'), { target: { value: '4' } });
 
     // Placement scoring (the default) shows no points editor…
     expect(screen.queryByLabelText('Points for 1st place')).toBeNull();
-    // …switching to Points reveals the per-position editor seeded with the MultiGP-style default.
+    // …switching to Points reveals one row per finishing position (= group size), seeded with the
+    // steep MultiGP-style default; there is no 5th-place row for a group of 4.
     await fireEvent.change(screen.getByLabelText('Scoring value'), { target: { value: 'points' } });
     const first = (await screen.findByLabelText('Points for 1st place')) as HTMLInputElement;
     expect(first.value).toBe('10');
+    expect(screen.getByLabelText('Points for 4th place')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Points for 5th place')).toBeNull();
     // Edit the win value to a steeper 25.
     await fireEvent.input(first, { target: { value: '25' } });
 
@@ -535,8 +540,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     const req = createRoundImpl.mock.calls[0][2];
     expect(req.format).toBe('head_to_head');
+    expect(req.params.group_size).toBe('4');
     expect(req.params.scoring).toBe('points');
-    expect(req.params.points).toBe('25, 6, 4, 3, 2, 1');
+    expect(req.params.points).toBe('25, 6, 4, 3');
   });
 
   it('shows the rounds param as "Heats per pilot" for a qualifying format', async () => {
@@ -1145,6 +1151,43 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     // The id is auto-generated: non-empty and round-scoped (the readable `<round>-h-…` style).
     expect(sent.ScheduleHeat.heat).toBeTruthy();
     expect(sent.ScheduleHeat.heat).toMatch(/^r1-h-/);
+  });
+
+  it('caps the hand-built heat lineup at the primary timer node count, with a note when full', async () => {
+    const CARLA: Pilot = { id: 'p3', callsign: 'Carla', vtx_types: [] };
+    const event3: EventMeta = {
+      ...EVENT,
+      roster: ['p1', 'p2', 'p3'],
+      classes_membership: [
+        { class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }, { pilot: 'p3' }] }
+      ]
+    };
+    const timer2: Timer = {
+      id: 'mock',
+      name: 'Mock',
+      kind: { Mock: { laps: 3, lap_ms: 1000 } },
+      status: 'Ready',
+      channel_capability: 'Flexible',
+      node_count: 2,
+      available_channels: [5658, 5800]
+    };
+    const impls = {
+      ...heatsImpls([]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT, CARLA]),
+      listTimersImpl: vi.fn(async () => [timer2])
+    };
+    const { session } = makeTestSession({ ...impls, event: event3 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    // The 2-node timer caps the lineup at 2: after two picks the third is disabled + a note shows.
+    await fireEvent.click(await screen.findByLabelText('Select AceOne'));
+    await fireEvent.click(screen.getByLabelText('Select Bolt'));
+    expect(screen.getByLabelText('Select Carla')).toBeDisabled();
+    expect(screen.getByText(/All 2 nodes on the primary timer/)).toBeInTheDocument();
+    // Unselecting one frees a node — the third is selectable again.
+    await fireEvent.click(screen.getByLabelText('Select Bolt'));
+    expect(screen.getByLabelText('Select Carla')).toBeEnabled();
   });
 
   it('generates a unique id across two quick builds (no collision)', async () => {
