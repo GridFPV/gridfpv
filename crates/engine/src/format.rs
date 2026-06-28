@@ -493,6 +493,9 @@ impl FormatRegistry {
         // Chase the Ace (final-format): registered so its rounds build/replay; offered to the UI
         // contextually as a final-level format (not in `standard_schemas` as a general round).
         crate::chase_the_ace::ChaseTheAce::register(&mut registry);
+        // Head-to-Head (D17): the atomic racing building block the structures compose. Registered so
+        // its rounds build/replay; UI offering + the points-table editor land with the rollout.
+        crate::head_to_head::HeadToHead::register(&mut registry);
         OpenPractice::register(&mut registry);
         registry
     }
@@ -1258,6 +1261,7 @@ mod tests {
             vec![
                 "chase_the_ace",
                 "double_elim",
+                "head_to_head",
                 "multi_main",
                 "open_practice",
                 "round_robin",
