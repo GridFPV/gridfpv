@@ -135,6 +135,64 @@ async function setupQual(
 }
 
 describe('tournament structures: multi-wave generators end to end', () => {
+  it('single-elim seeded straight from a class roster (no qualifying) crowns a champion', async () => {
+    // The "Build tournament" no-qual path: a class roster → single_elim FromRoster, chained by
+    // FromHeatWinners. No qualifying round at all.
+    const klass = await createClass(director.baseUrl, { name: 'roster-cup' }, TOKEN);
+    const ids: string[] = [];
+    for (let i = 1; i <= 4; i++) {
+      const p = await createPilot(director.baseUrl, { callsign: `rost${i}` }, TOKEN);
+      ids.push(p.id);
+    }
+    await setEventClasses(director.baseUrl, PRACTICE_EVENT_ID, [klass.id], TOKEN);
+    await setEventRoster(director.baseUrl, PRACTICE_EVENT_ID, ids, TOKEN);
+    await setClassMembership(director.baseUrl, PRACTICE_EVENT_ID, klass.id, ids, TOKEN);
+
+    // Level 1: single_elim seeded from the roster (4 pilots → two head-to-head semis).
+    const semis = await createRound(
+      director.baseUrl,
+      PRACTICE_EVENT_ID,
+      {
+        label: 'Roster Cup — Semifinals',
+        classes: [klass.id],
+        format: 'single_elim',
+        params: {},
+        win_condition: { FirstToLaps: { n: 1 } },
+        seeding: 'FromRoster',
+        channel_mode: 'PerHeat'
+      },
+      TOKEN
+    );
+    await fillAll(semis.id);
+    const semiHeats = await heatsOfRound(semis.id);
+    expect(semiHeats.length).toBe(2);
+    for (const h of semiHeats) await runAndFinalize(h.id, h.lineup.length);
+
+    // Level 2: the final, seeded from the semis' heat winners.
+    const final = await createRound(
+      director.baseUrl,
+      PRACTICE_EVENT_ID,
+      {
+        label: 'Roster Cup — Final',
+        classes: [klass.id],
+        format: 'single_elim',
+        params: {},
+        win_condition: { FirstToLaps: { n: 1 } },
+        seeding: { FromHeatWinners: { source_round: semis.id } },
+        channel_mode: 'PerHeat'
+      },
+      TOKEN
+    );
+    await fillAll(final.id);
+    const finalHeats = await heatsOfRound(final.id);
+    expect(finalHeats.length).toBe(1);
+    await runAndFinalize(finalHeats[0].id, finalHeats[0].lineup.length);
+
+    const ranking = await roundRanking(director.baseUrl, PRACTICE_EVENT_ID, final.id);
+    expect(ranking.length).toBeGreaterThanOrEqual(1);
+    expect(String(ranking[0].competitor)).toBeTruthy();
+  });
+
   it('multi-main bump-up: lower mains feed the next main up, bottom-up, to one standing', async () => {
     // 6 seeds, main_size 2, bump_n 1 → A[s1,s2] B[s3,s4] C[s5,s6]; the lowest main runs first and
     // its winner bumps up, repeating to the A main.

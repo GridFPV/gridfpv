@@ -80,7 +80,12 @@
     nextLevelLabel,
     splitBracketLabel
   } from '../lib/brackets.js';
-  import { advanceLevelReq, advanceRoundReq, bracketSizeOptions } from '../lib/standings.js';
+  import {
+    advanceLevelReq,
+    advanceRoundReq,
+    bracketSizeOptions,
+    rosterRoundReq
+  } from '../lib/standings.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -331,15 +336,25 @@
     return buildEligibleMembers(round.id).length;
   }
 
-  // --- Advance to bracket: the full-chain builder (modal) ----------------------------------------
-  // "Advance to bracket" opens a modal that builds the WHOLE single-elim chain at once (level-per-
-  // round, decisions D13): level 1 seeded FromRanking(top-N) → each next level FromHeatWinners of the
-  // prior, down to the final. Size is a power-of-two that **fits the field** (so you can never advance
-  // more pilots than the round holds), and the final's format (Single race / Chase the Ace) is chosen
-  // here too. Build-ahead friendly: if the source isn't finished yet the chain is just created (each
-  // level fills as its source finalizes); when the source is already done, level 1 fills immediately.
+  // --- Build tournament: the full-chain bracket builder (modal) -----------------------------------
+  // "Build tournament" opens a modal that builds the WHOLE single-elim chain at once (level-per-
+  // round, decisions D13): level 1 seeded from EITHER a finished round's ranking (FromRanking, top-N)
+  // OR a class roster (FromRoster) → each next level FromHeatWinners of the prior, down to the final.
+  // For the round seed the size is a power-of-two that **fits the field** (so you can never advance
+  // more pilots than the round holds); the class seed brackets the whole roster (top seeds bye on a
+  // non-power-of-two). The structure (only Single Elimination today), win condition, and the final's
+  // format (Single race / Chase the Ace) are chosen here too. Build-ahead friendly: a not-yet-finished
+  // round just creates the chain (each level fills as its source finalizes); a finished round or a
+  // class roster is "ready now", so level 1 fills immediately.
   let advanceOpen = $state(false);
+  // Seed from a finished round's ranking, or straight off a class roster (no qualifying needed).
+  let advanceSeedKind = $state<'round' | 'class'>('round');
+  // The tournament structure. Only single-elim today; the picker is here so double-elim / round-robin
+  // / multi-main are a one-line addition later.
+  let advanceStructure = $state('single_elim');
   let advanceModalRound = $state<RoundDef | undefined>(undefined);
+  // The class to bracket when seeding from a roster.
+  let advanceSourceClass = $state<ClassId | ''>('');
   let advanceName = $state('');
   let advanceSize = $state(8);
   let advanceFinalKind = $state<'single' | 'chase'>('single');
@@ -362,62 +377,142 @@
   const advanceSizeOptions = $derived(
     advanceModalRound ? bracketSizeOptions(roundFieldSize(advanceModalRound)) : []
   );
-  // How many levels `advanceSize` produces (a power-of-two size → log2), for the modal's summary.
-  const advanceLevels = $derived(advanceSize >= 2 ? Math.round(Math.log2(advanceSize)) : 0);
+  // The roster size of a class — its membership count off the event (mirrors buildEligibleMembers'
+  // membership lookup). Drives the class-seed field size + which classes are bracketable.
+  function classRosterSize(classId: ClassId): number {
+    const membership = session.currentEvent?.classes_membership ?? [];
+    return membership.find((m) => m.class === classId)?.pilots.length ?? 0;
+  }
+  // The classes offerable as a roster seed source: the event's classes with at least two members.
+  const bracketableClasses = $derived(eventClasses.filter((c) => classRosterSize(c.id) >= 2));
+  // The rounds offerable as a ranking seed source: those whose field holds at least two pilots.
+  const bracketableRounds = $derived(rounds.filter((r) => roundFieldSize(r) >= 2));
+  // The bracket's field size (the seed count) for the chosen seed kind: the chosen bracket size for a
+  // round seed, the whole roster for a class seed.
+  const advanceFieldSize = $derived(
+    advanceSeedKind === 'class'
+      ? advanceSourceClass
+        ? classRosterSize(advanceSourceClass)
+        : 0
+      : advanceSize
+  );
+  // How many levels the field produces (ceil(log2) — a non-power-of-two roster byes up), for the
+  // modal's summary.
+  const advanceLevels = $derived(
+    advanceFieldSize >= 2 ? Math.ceil(Math.log2(advanceFieldSize)) : 0
+  );
 
-  function openAdvance(round: RoundDef) {
-    advanceModalRound = round;
-    // Default the bracket name to the round's class (the common per-class bracket); the RD can rename
-    // it — multiple brackets per event are distinguished by this name.
-    advanceName = round.classes.length > 0 ? className(round.classes[0]) : 'Bracket';
-    const options = bracketSizeOptions(roundFieldSize(round));
-    advanceSize = options.length > 0 ? options[options.length - 1] : 0; // largest that fits
+  // Reset the modal's shared fields (structure / name / win / final defaults) — the entry points then
+  // set the seed kind + source.
+  function resetAdvance() {
+    advanceStructure = 'single_elim';
     advanceFinalKind = 'single';
     advanceFinalWins = 2;
     advanceWinKind = 'FirstToLaps';
     advanceWinLaps = 3;
     advanceWinMinutes = 2;
+  }
+
+  function openAdvance(round: RoundDef) {
+    resetAdvance();
+    advanceSeedKind = 'round';
+    advanceModalRound = round;
+    advanceSourceClass = '';
+    // Default the bracket name to the round's class (the common per-class bracket); the RD can rename
+    // it — multiple brackets per event are distinguished by this name.
+    advanceName = round.classes.length > 0 ? className(round.classes[0]) : 'Bracket';
+    const options = bracketSizeOptions(roundFieldSize(round));
+    advanceSize = options.length > 0 ? options[options.length - 1] : 0; // largest that fits
+    advanceOpen = true;
+  }
+  // The standalone entry (Rounds header) — build a bracket from any finished round OR a class roster.
+  function openBuildTournament() {
+    resetAdvance();
+    // Prefer a round seed when there's a bracketable round; otherwise start on the class seed.
+    advanceSeedKind = bracketableRounds.length > 0 ? 'round' : 'class';
+    const firstRound = bracketableRounds[0];
+    advanceModalRound = firstRound;
+    advanceSourceClass = bracketableClasses[0]?.id ?? '';
+    advanceName = 'Bracket';
+    const options = firstRound ? bracketSizeOptions(roundFieldSize(firstRound)) : [];
+    advanceSize = options.length > 0 ? options[options.length - 1] : 0; // largest that fits
     advanceOpen = true;
   }
   function cancelAdvance() {
     if (advancing) return;
     advanceOpen = false;
     advanceModalRound = undefined;
+    advanceSourceClass = '';
   }
 
-  // Build the whole bracket chain from the modal's source round. Levels are created in order (each
-  // FromHeatWinners level references the previously-created level's id, which the server validates),
-  // then level 1 fills if the source is already finished — otherwise the chain is built ahead.
+  // Build the whole bracket chain from the modal's seed (a finished round's ranking OR a class
+  // roster). Levels are created in order (each FromHeatWinners level references the previously-created
+  // level's id, which the server validates), then level 1 fills if the seed is already ready (a
+  // finished round / a class roster) — otherwise the chain is built ahead.
   async function submitAdvance() {
-    const source = advanceModalRound;
-    if (!source || advancing) return;
-    const size = advanceSize;
-    if (size < 2) {
-      toast.error('Need at least two pilots in the field to build a bracket.');
-      return;
+    if (advancing) return;
+    // Compute the field size, the level-1 request, the naming label, and whether the seed is ready to
+    // fill now — by seed kind. A class roster is always ready (fill level 1 immediately); a round is
+    // ready once finished.
+    const winCondition = bracketWinCondition(); // one win condition for every bracket heat
+    const name = advanceName.trim() || 'Bracket';
+    const useChase = advanceFinalKind === 'chase';
+    const final0 = useChase ? { format: 'chase_the_ace', winsToWin: advanceFinalWins } : undefined;
+
+    let fieldSize: number;
+    let sourceLabel: string;
+    let readyNow: boolean;
+    let level1Req: NewRoundReq;
+    let sourceDesc: string;
+    if (advanceSeedKind === 'class') {
+      const classId = advanceSourceClass;
+      fieldSize = classId ? classRosterSize(classId) : 0;
+      if (!classId || fieldSize < 2) {
+        toast.error('Pick a class with at least two pilots to build a bracket.');
+        return;
+      }
+      const levels = Math.max(1, Math.ceil(Math.log2(fieldSize)));
+      sourceLabel = className(classId);
+      sourceDesc = sourceLabel;
+      readyNow = true; // the roster is filled now
+      // Level 1 may also be the final (a 2-pilot roster, levels === 1).
+      const final = levels === 1 ? final0 : undefined;
+      const label = `${name} — ${nextLevelLabel(sourceLabel, Math.ceil(fieldSize / 2), 0)}`;
+      level1Req = rosterRoundReq(classId, label, winCondition, final);
+    } else {
+      const source = advanceModalRound;
+      fieldSize = advanceSize;
+      if (!source || fieldSize < 2) {
+        toast.error('Need at least two pilots in the field to build a bracket.');
+        return;
+      }
+      const levels = Math.max(1, Math.ceil(Math.log2(fieldSize)));
+      sourceLabel = source.label;
+      sourceDesc = source.label;
+      readyNow = roundFinished(source.id);
+      const final = levels === 1 ? final0 : undefined;
+      const label = `${name} — ${nextLevelLabel(sourceLabel, Math.ceil(fieldSize / 2), 0)}`;
+      level1Req = advanceRoundReq(source, fieldSize, label, winCondition, final);
     }
+
     advancing = true;
     try {
-      const levels = Math.round(Math.log2(size)); // size is a power of two
-      const useChase = advanceFinalKind === 'chase';
-      const winCondition = bracketWinCondition(); // one win condition for every bracket heat
+      const levels = Math.max(1, Math.ceil(Math.log2(fieldSize)));
       // Each level is named "‹Bracket name› — ‹Level›" so multiple brackets in one event stay
       // distinct (the container header shows the name, the tree shows the level).
-      const name = advanceName.trim() || 'Bracket';
       let firstLevelId: RoundId | undefined;
-      let prev: RoundDef = source;
+      let prev: RoundDef | undefined;
       for (let i = 1; i <= levels; i++) {
-        const heatCount = size / 2 ** i; // heats this level holds (the final = 1)
+        const heatCount = Math.ceil(fieldSize / 2 ** i); // heats this level holds (the final = 1)
         const isFinal = i === levels;
-        const label = `${name} — ${nextLevelLabel(source.label, heatCount, i - 1)}`;
-        const final =
-          isFinal && useChase
-            ? { format: 'chase_the_ace', winsToWin: advanceFinalWins }
-            : undefined;
-        const req =
-          i === 1
-            ? advanceRoundReq(source, size, label, winCondition, final)
-            : advanceLevelReq(prev, label, winCondition, final);
+        const final = isFinal && useChase ? final0 : undefined;
+        let req: NewRoundReq;
+        if (i === 1) {
+          req = level1Req;
+        } else {
+          const label = `${name} — ${nextLevelLabel(sourceLabel, heatCount, i - 1)}`;
+          req = advanceLevelReq(prev!, label, winCondition, final);
+        }
         const created = await session.createRound(req);
         if (!created) {
           toast.info('A control token is required to manage rounds.');
@@ -426,9 +521,9 @@
         if (i === 1) firstLevelId = created.id;
         prev = created;
       }
-      // Fill level 1 now if the source is already finished (its ranking exists); otherwise the bracket
-      // is built ahead and each level fills when its source finalizes.
-      if (firstLevelId && roundFinished(source.id)) {
+      // Fill level 1 now if the seed is already ready (a finished round / a class roster); otherwise
+      // the bracket is built ahead and each level fills when its source finalizes.
+      if (firstLevelId && readyNow) {
         const ack = await session.fillRound(firstLevelId, 'All');
         if (!ack.ok) {
           toast.info(ack.error?.message ?? 'The first level fills when the source is ready.');
@@ -436,10 +531,11 @@
       }
       await refreshHeats();
       toast.success(
-        `“${name}” bracket built from ${source.label} — ${size} seeds, ${levels} ${levels === 1 ? 'level' : 'levels'}.`
+        `“${name}” bracket built from ${sourceDesc} — ${fieldSize} seeds, ${levels} ${levels === 1 ? 'level' : 'levels'}.`
       );
       advanceOpen = false;
       advanceModalRound = undefined;
+      advanceSourceClass = '';
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1191,6 +1287,16 @@
     subtitle="Define this event's rounds — eligible classes, format, win condition, and seeding. Rounds are added as you go."
   >
     {#snippet actions()}
+      <!-- Build a single-elim tournament from a finished round's ranking or straight off a class
+           roster (no qualifying needed). Offered once there's a bracketable source. -->
+      <Button
+        variant="secondary"
+        size="sm"
+        onclick={openBuildTournament}
+        disabled={bracketableRounds.length === 0 && bracketableClasses.length === 0}
+      >
+        Build tournament
+      </Button>
       <Button
         variant="secondary"
         size="sm"
@@ -1914,7 +2020,7 @@
         </div>
       </Field>
       {#if buildAtNodeCap && Number.isFinite(heatNodeCap)}
-        <p class="inline-note" role="status">
+        <p class="node-cap-note" role="status">
           All {heatNodeCap} nodes on the primary timer are taken — a heat can't run more pilots than the
           timer has nodes.
         </p>
@@ -1930,30 +2036,97 @@
     {/snippet}
   </Dialog>
 
-  <!-- Advance to bracket — the full-chain builder (modal, like the round/heat forms). Builds the
-       whole single-elim chain from a source round in one go: a power-of-two size that fits the field
-       (so you can't advance more pilots than the round holds) and the final's format. Build-ahead
-       friendly — each level fills as its source finalizes. -->
-  <Dialog bind:open={advanceOpen} title="Advance to bracket" onclose={cancelAdvance}>
+  <!-- Build tournament — the full-chain bracket builder (modal, like the round/heat forms). Builds the
+       whole single-elim chain in one go, seeded from EITHER a finished round's ranking OR a class
+       roster. A round seed cuts to a power-of-two size that fits its field; a class seed brackets the
+       whole roster (top seeds bye on a non-power-of-two). Build-ahead friendly — each level fills as
+       its source finalizes (a class roster / finished round fills level 1 immediately). -->
+  <Dialog bind:open={advanceOpen} title="Build tournament" onclose={cancelAdvance}>
     <form
       class="build-form"
-      aria-label="Advance to bracket"
+      aria-label="Build tournament"
       onsubmit={(e) => {
         e.preventDefault();
         submitAdvance();
       }}
     >
       <p class="advance-note">
-        Builds a full single-elimination bracket seeded from
-        <strong>{advanceModalRound?.label ?? 'this round'}</strong>'s ranking. Each level fills with
-        pilots as the previous round finishes, so you can set this up before race day.
+        Builds a full bracket in one go. Seed it from a finished round's ranking or straight off a
+        class roster — each level fills with pilots as the previous round finishes, so you can set
+        this up before race day.
       </p>
-      {#if advanceSizeOptions.length === 0}
+      <div class="form-grid">
+        <Field label="Structure" hint="More tournament structures land here later.">
+          <Select bind:value={advanceStructure} aria-label="Structure">
+            <option value="single_elim">Single Elimination</option>
+          </Select>
+        </Field>
+        <Field label="Seed from" hint="A finished round's ranking, or a class roster.">
+          <Select bind:value={advanceSeedKind} aria-label="Seed from">
+            <option value="round">A finished round</option>
+            <option value="class">A class roster</option>
+          </Select>
+        </Field>
+      </div>
+      {#if advanceSeedKind === 'round'}
+        {#if bracketableRounds.length === 0}
+          <p class="empty small" role="status">
+            No round has a field of two or more pilots yet — add class members, or seed from a class
+            roster instead.
+          </p>
+        {:else}
+          <div class="form-grid">
+            <Field label="Source round" hint="The finished round whose ranking seeds the bracket.">
+              <Select
+                value={advanceModalRound?.id ?? ''}
+                aria-label="Source round"
+                onchange={(e: Event) => {
+                  const id = (e.currentTarget as HTMLSelectElement).value;
+                  advanceModalRound = rounds.find((r) => r.id === id);
+                  const options = advanceModalRound
+                    ? bracketSizeOptions(roundFieldSize(advanceModalRound))
+                    : [];
+                  advanceSize = options.length > 0 ? options[options.length - 1] : 0;
+                }}
+              >
+                {#each bracketableRounds as r (r.id)}
+                  <option value={r.id}>{r.label}</option>
+                {/each}
+              </Select>
+            </Field>
+            <Field
+              label="Bracket size"
+              hint="How many top seeds advance — capped at what the field holds."
+            >
+              <Select bind:value={advanceSize} aria-label="Bracket size">
+                {#each advanceSizeOptions as size (size)}
+                  <option value={size}>Top {size}</option>
+                {/each}
+              </Select>
+            </Field>
+          </div>
+        {/if}
+      {:else if bracketableClasses.length === 0}
         <p class="empty small" role="status">
-          This round's field has fewer than two pilots — add class members before building a
-          bracket.
+          No class has two or more members yet — add class members before building a bracket.
         </p>
       {:else}
+        <Field label="Class" hint="Brackets this class's whole roster.">
+          <Select bind:value={advanceSourceClass} aria-label="Class">
+            {#each bracketableClasses as c (c.id)}
+              <option value={c.id}>{c.name}</option>
+            {/each}
+          </Select>
+        </Field>
+        {#if advanceSourceClass}
+          <p class="advance-note small" role="status">
+            Brackets all {classRosterSize(advanceSourceClass)}
+            {classRosterSize(advanceSourceClass) === 1 ? 'pilot' : 'pilots'} in
+            {className(advanceSourceClass)} (top seeds bye if it isn't a power of two).
+          </p>
+        {/if}
+      {/if}
+      {#if advanceFieldSize >= 2}
         <Field
           label="Bracket name"
           required
@@ -1962,16 +2135,6 @@
           <Input bind:value={advanceName} aria-label="Bracket name" placeholder="e.g. Pro" />
         </Field>
         <div class="form-grid">
-          <Field
-            label="Bracket size"
-            hint="How many top seeds advance — capped at what the field holds."
-          >
-            <Select bind:value={advanceSize} aria-label="Bracket size">
-              {#each advanceSizeOptions as size (size)}
-                <option value={size}>Top {size}</option>
-              {/each}
-            </Select>
-          </Field>
           <Field label="Win condition" hint="How every bracket heat is decided.">
             <Select bind:value={advanceWinKind} aria-label="Bracket win condition">
               <option value="FirstToLaps">First to N laps</option>
@@ -2023,7 +2186,7 @@
         variant="primary"
         onclick={submitAdvance}
         loading={advancing}
-        disabled={advanceSizeOptions.length === 0 || advanceName.trim().length === 0}
+        disabled={advanceFieldSize < 2 || advanceName.trim().length === 0}
       >
         Build bracket
       </Button>
@@ -2272,6 +2435,13 @@
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
   }
+  /* The hand-built-heat node-cap warning — larger + danger-red so it reads as a hard limit. */
+  .node-cap-note {
+    margin: var(--gf-space-2) 0 0;
+    font-size: var(--gf-font-size-md);
+    font-weight: 600;
+    color: var(--gf-danger);
+  }
   .form-actions {
     display: flex;
     justify-content: flex-end;
@@ -2423,9 +2593,6 @@
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-secondary);
     line-height: 1.5;
-  }
-  .advance-note strong {
-    color: var(--gf-text);
   }
   .empty.small {
     font-size: var(--gf-font-size-sm);
