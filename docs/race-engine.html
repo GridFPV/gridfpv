@@ -140,6 +140,12 @@ stateDiagram-v2
     </div>
 
     <h2>3. The format / generator interface</h2>
+    <p class="note">
+      This section is the <strong>engine mechanics</strong> — the generators. The
+      <strong>RD-facing</strong> model (round types, win condition vs scoring, and how round-robin /
+      brackets are structures over Head-to-Head) lives in <a href="format-model.html">Format Model</a>
+      (decision <a href="decisions.html#d17">D17</a>); generators are the machinery underneath it.
+    </p>
     <p>
       Formats are a pluggable registry — the same idea as adapters, for competition
       structure. There is <strong>one unified generator interface</strong>, and qualifying

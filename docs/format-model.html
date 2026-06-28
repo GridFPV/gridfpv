@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Format Model</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Format Model</h1>
+      <p class="doc-kind">Internal design doc · the round-type / scoring taxonomy and how tournaments are structured</p>
+    </header>
+
+    <p class="lead">
+      How an RD describes <em>what kind of flying a round is</em> — collapsed from a zoo of
+      per-format generators into <strong>three round types</strong> (Practice, Time Trial,
+      Head-to-Head) plus two orthogonal knobs (<strong>win condition</strong>, which wins a
+      <em>heat</em>, and <strong>scoring</strong>, which ranks a <em>round</em>). Round-robin and
+      brackets stop being "formats" — they are <strong>tournament structures</strong> assembled from
+      Head-to-Head rounds, by hand or with a builder.
+    </p>
+
+    <div class="callout">
+      <p>
+        This is the <strong>target model</strong> (decision <a href="decisions.html">D15</a>). It
+        supersedes the per-format framing in the earlier heat-gen/formats decisions (D10/D11/D14): the
+        engine still has generators per mechanic, but the <em>RD-facing</em> vocabulary is the three
+        round types + scoring + structures. It rolls out in stages (see <a href="#rollout">Rollout</a>);
+        until a stage ships, the console still exposes the legacy format names.
+      </p>
+    </div>
+
+    <h2>1 · Three round types</h2>
+    <p>The Add-round picker offers exactly these. Everything an RD flies is one of them:</p>
+    <table>
+      <thead>
+        <tr><th>Round type</th><th>What it is</th><th>Scoring</th><th>Knobs</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Practice</strong></td>
+          <td>Fly, no competition. Pick channels; pilots hop on and coordinate.</td>
+          <td>none</td>
+          <td>channels; optional time limit; named <em>"Open Practice"</em> or <em>"‹Class› Practice"</em> (a label only — no mechanical difference)</td>
+        </tr>
+        <tr>
+          <td><strong>Time Trial</strong></td>
+          <td>Qualify against the clock on fixed channels; your best result ranks you.</td>
+          <td>best result ranks the field</td>
+          <td><strong>Best of N laps</strong> (N configurable; <em>N = 1 is "best lap"</em>) + a race time</td>
+        </tr>
+        <tr>
+          <td><strong>Head-to-Head</strong></td>
+          <td>Race other pilots directly, in heats.</td>
+          <td>Points or Placement (§3)</td>
+          <td><strong>group size</strong> (2+); a per-heat <strong>win condition</strong>; a <strong>scoring system</strong></td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      Best-Lap folds into Best-of-N (N&nbsp;=&nbsp;1), so Time Trial has a single ranking metric rather
+      than two. Practice is one format; the "class" variant is purely the round/heat name.
+    </p>
+
+    <h2>2 · Two orthogonal knobs: win condition vs scoring</h2>
+    <p>The thing that used to be tangled inside "format" splits cleanly in two:</p>
+    <ul>
+      <li>
+        <strong>Win condition</strong> — how a <em>single heat</em> is decided. For racing that is
+        <strong>First to N laps</strong> or <strong>Most laps in N minutes</strong> (Timed). For a
+        Time Trial it is the qualifying metric (Best of N). First-to-N self-terminates (no race time);
+        Most-laps and Best-of-N need a race time.
+      </li>
+      <li>
+        <strong>Scoring</strong> — how a <em>round's heats</em> become a ranking (only Head-to-Head
+        has a choice; see §3).
+      </li>
+    </ul>
+    <p>
+      So a Head-to-Head round carries <em>both</em>: the win condition resolves each heat's finish
+      order, and the scoring system turns those finishes into the round's ranking.
+    </p>
+
+    <h2 id="scoring">3 · Scoring systems (Head-to-Head)</h2>
+    <ul>
+      <li>
+        <strong>Points</strong> — finish position earns points from a <strong>customisable
+        per-position table</strong> (1st always the most, strictly descending; steep / exponential
+        drop-offs are allowed). All of the round's heats are <strong>scheduled up front</strong>;
+        points accumulate across a pilot's heats; at the end, <strong>most points wins</strong>. This
+        is what makes a round-robin rank correctly.
+      </li>
+      <li>
+        <strong>Placement</strong> — ranked by where you finished / how far you advanced (winners
+        move on). This is what a bracket uses.
+      </li>
+    </ul>
+    <p>
+      The scoring selector lives <em>on the Head-to-Head round</em>, so an RD can hand-build a points
+      group-stage or a placement round without any builder.
+    </p>
+
+    <h2>4 · Tournament structures</h2>
+    <p>
+      Round-robin and brackets are not formats — they are <strong>structures assembled from
+      Head-to-Head rounds</strong>. An RD can build them by hand; the builders are
+      automation/helpers for the common shapes:
+    </p>
+    <ul>
+      <li><strong>Round Robin</strong> = Head-to-Head + <em>Points</em> + all-play-all, a single round (all heats up front, most points wins).</li>
+      <li><strong>Bracket (Single Elimination)</strong> = Head-to-Head + <em>Placement</em> + an elimination chain (one round per level, winners seeded forward). The bracket builder names the levels "‹Bracket› — ‹Level›" and picks one win condition for all the bracket's heats.</li>
+      <li><strong>Double Elimination, Multi-Main, Chase-the-Ace final</strong> = further structures over Head-to-Head — deferred (single-elim first).</li>
+    </ul>
+
+    <h2>5 · Mapping to the engine we have</h2>
+    <p>
+      The engine keeps its generators as the <em>mechanics</em>; this is mostly a re-framing of the
+      RD-facing vocabulary over them:
+    </p>
+    <ul>
+      <li><strong>Time Trial</strong> ≈ <code>timed_qual</code> (relabel; Best-Lap → Best-of-N).</li>
+      <li><strong>Head-to-Head + Points</strong> ≈ <code>round_robin</code> + a configurable points table.</li>
+      <li><strong>Head-to-Head + Placement</strong> ≈ <code>single_elim</code> (the bracket builder already chains these).</li>
+      <li><strong>Practice</strong> ≈ <code>open_practice</code> (+ an optional class name).</li>
+      <li><code>multi_main</code> / <code>double_elim</code> / <code>chase_the_ace</code> stay registered as structures/finals, surfaced only through builders — not in the Add-round picker.</li>
+    </ul>
+
+    <h2 id="rollout">6 · Rollout</h2>
+    <ol>
+      <li><strong>Bracket win-condition picker</strong> — the "Advance to bracket" modal picks one win condition for all the bracket's heats (default First-to-N; option Most-laps). Small, independent.</li>
+      <li><strong>Head-to-Head round format</strong> — a directly-addable racing round: group size, per-heat win condition, scoring (Points with a custom table, or Placement). This is what round-robin and brackets sit on.</li>
+      <li><strong>Taxonomy collapse</strong> — Add-round becomes Practice / Time Trial / Head-to-Head; Time Trial → Best-of-N; round-robin/single-elim move under Head-to-Head + structures; Practice gains the class name.</li>
+    </ol>
+    <p>
+      User-facing docs (the guide's <em>Formats</em> page) track <em>shipped</em> behaviour, so they are
+      updated per stage as each lands — not ahead of the build.
+    </p>
+
+    <footer class="doc-footer">
+      <p>See also: <a href="race-engine.html">Race Engine</a> · <a href="decisions.html">Decisions</a> (D15) · <a href="heat-lifecycle.html">Heat Lifecycle</a></p>
+    </footer>
+  </main>
+</body>
+</html>
