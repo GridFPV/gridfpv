@@ -41,6 +41,7 @@
     FormatSchema,
     GraceWindow,
     HeatPhase,
+    HeatResult,
     HeatSummary,
     NewRoundReq,
     Pilot,
@@ -59,6 +60,7 @@
   import {
     fieldsForFormat,
     formatLabel,
+    isChaseTheAceFormat,
     isHeadToHeadFormat,
     isQualifyingFormat,
     isRoundTypeFormat,
@@ -73,12 +75,14 @@
   import {
     bracketChainRounds,
     buildBracketView,
+    chaseWinTally,
     isBracketLevel,
     isBracketRoot,
     isLevelComplete,
     nextLevelLabel,
     splitBracketLabel
   } from '../lib/brackets.js';
+  import type { ChaseFinalTally } from '../lib/brackets.js';
   import {
     advanceLevelReq,
     advanceRoundReq,
@@ -623,8 +627,11 @@
     for (const root of rounds.filter(isBracketChainRoot)) {
       const chain = bracketChainRounds(root, rounds);
       const final = chain[chain.length - 1];
-      const finalHeats = final ? heatsByRound(final.id) : [];
-      if (final && finalHeats.length === 1 && isLevelComplete(final.id, heats)) {
+      // A Chase-the-Ace final's champion comes from its race-win tally (the chase effect below), not
+      // a single-heat ranking — skip it here so the two paths never fight over the champion.
+      if (!final || isChaseTheAceFormat(final.format)) continue;
+      const finalHeats = heatsByRound(final.id);
+      if (finalHeats.length === 1 && isLevelComplete(final.id, heats)) {
         if (championByRoot[root.id] === undefined) {
           session
             .roundRanking(final.id)
@@ -637,6 +644,61 @@
       }
     }
   });
+
+  // ── Chase-the-Ace final tally (series score + champion) ──────────────────────────────────────
+  // A chase final is a multi-race series: it has one heat per race (`cta-r0`, `cta-r1`, …) and the
+  // first finalist to `wins_to_win` race-wins is champion. The engine ranking exposes only an overall
+  // placement, so the FRONTEND counts the race winners: for each chase-final root we fetch every
+  // completed race's result once (guarded), cache it, and replay the cache into a per-root tally
+  // (wins per finalist + the champion). The bracket tree collapses the N races into one node off this.
+  let chaseResultByHeat = $state<Record<string, HeatResult>>({});
+  // Fetched-once guard (in-flight or done) so a result is pulled a single time, like championByRoot.
+  const chaseFetchedHeats = new Set<string>();
+  let chaseTallyByRoot = $state<Record<RoundId, ChaseFinalTally>>({});
+  // The race index of a `cta-r{n}` heat id, to walk the races in order (champion = first to target).
+  function chaseRaceIndex(heatId: string): number {
+    const m = /^cta-r(\d+)$/.exec(heatId);
+    return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+  }
+  $effect(() => {
+    // Re-run as heats finalize and as fetched race results arrive.
+    void heats;
+    const cache = chaseResultByHeat;
+    const next: Record<RoundId, ChaseFinalTally> = {};
+    for (const root of rounds.filter(isBracketChainRoot)) {
+      const chain = bracketChainRounds(root, rounds);
+      const final = chain[chain.length - 1];
+      if (!final || !isChaseTheAceFormat(final.format)) continue;
+      // The final's completed races, in race order.
+      const completed = heatsByRound(final.id)
+        .filter((h) => h.phase === 'Final')
+        .sort((a, b) => chaseRaceIndex(a.heat) - chaseRaceIndex(b.heat));
+      // Fetch each completed race result exactly once; the resolve caches it and re-triggers this.
+      for (const h of completed) {
+        if (!chaseFetchedHeats.has(h.heat)) {
+          chaseFetchedHeats.add(h.heat);
+          session
+            .fetchHeatResult(h.heat)
+            .then((res) => {
+              if (res) chaseResultByHeat = { ...chaseResultByHeat, [h.heat]: res };
+            })
+            .catch(() => {});
+        }
+      }
+      const target = Math.max(1, Math.round(Number(final.params?.wins_to_win ?? 2)));
+      const results = completed
+        .map((h) => cache[h.heat])
+        .filter((r): r is HeatResult => r !== undefined);
+      next[root.id] = chaseWinTally(results, target);
+    }
+    chaseTallyByRoot = next;
+  });
+
+  // The champion of a bracket root: a chase final's comes from its win tally; a normal final's from
+  // the single-heat ranking (championByRoot). One resolver so the header chip + tree agree.
+  function championOf(root: RoundDef): CompetitorRef | undefined {
+    return chaseTallyByRoot[root.id]?.champion ?? championByRoot[root.id];
+  }
 
   // The BracketTree view-model for a chain root — its level columns stitched from the chain rounds +
   // their heats, winners inferred from the next level's lineups (the final's from the champion).
@@ -665,10 +727,11 @@
       rounds,
       heats,
       callsign,
-      championByRoot[root.id],
+      championOf(root),
       levelOneField,
       heatSize,
-      advance
+      advance,
+      chaseTallyByRoot[root.id]
     );
   }
 
@@ -1642,7 +1705,7 @@
     {:else}
       {#each rounds.filter(isBracketRoot) as root (root.id)}
         {@const view = bracketViewFor(root)}
-        {@const champ = championByRoot[root.id]}
+        {@const champ = championOf(root)}
         {@const bracketName = splitBracketLabel(root.label).name || 'Bracket'}
         <section class="bracket-container" aria-label={`Bracket — ${bracketName}`}>
           <header class="bracket-header">

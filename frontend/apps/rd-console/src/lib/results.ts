@@ -12,7 +12,7 @@
  * lossless, since it is the exact wire value.
  */
 
-import type { Bracket, BracketMatch, BracketRound } from '@gridfpv/components';
+import type { Bracket, BracketMatch, BracketRound, BracketSlot } from '@gridfpv/components';
 import type {
   CompetitorRef,
   CompletedHeat,
@@ -20,6 +20,19 @@ import type {
   HeatResult,
   Placement
 } from '@gridfpv/types';
+
+import { chaseWinTally } from './brackets.js';
+
+/** The race index of a Chase-the-Ace heat id (`cta-r{n}`), for ordering races; else +∞ (sorts last). */
+function chaseRaceIndex(heatId: string): number {
+  const m = /^cta-r(\d+)$/.exec(heatId);
+  return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+/** Whether a heat id belongs to a Chase-the-Ace final (race ids are `cta-r{n}`). */
+function isChaseHeatId(heatId: string): boolean {
+  return heatId.startsWith('cta-');
+}
 
 /** The top (winning) placement's competitor ref, if the heat has any places. */
 function winnerOf(result: HeatResult): CompetitorRef | undefined {
@@ -37,10 +50,15 @@ function winnerOf(result: HeatResult): CompetitorRef | undefined {
  * replaced wholesale.
  */
 export function bracketFromOutcome(outcome: EventOutcome): Bracket {
-  const heats = outcome.bracket_heats;
-  if (heats.length === 0) return { rounds: [] };
+  const allHeats = outcome.bracket_heats;
+  if (allHeats.length === 0) return { rounds: [] };
 
-  const matches: BracketMatch[] = heats.map((h: CompletedHeat) => {
+  // A Chase-the-Ace final's race heats (`cta-r{n}`) collapse into ONE final match (see below); the
+  // remaining heats group into single-elim levels by halving as before.
+  const chaseHeats = allHeats.filter((h) => isChaseHeatId(h.heat));
+  const normalHeats = allHeats.filter((h) => !isChaseHeatId(h.heat));
+
+  const matches: BracketMatch[] = normalHeats.map((h: CompletedHeat) => {
     const winner = winnerOf(h.result);
     return {
       heat: h.heat,
@@ -62,7 +80,41 @@ export function bracketFromOutcome(outcome: EventOutcome): Bracket {
     rounds.unshift({ name: roundNameFor(size, roundMatches.length), matches: roundMatches });
     size *= 2;
   }
+
+  // Append the collapsed Chase-the-Ace final as the last round when present.
+  if (chaseHeats.length > 0) rounds.push(chaseFinalRound(chaseHeats));
   return { rounds };
+}
+
+/**
+ * Collapse a Chase-the-Ace final's race heats into ONE `Final` round with a single match: the
+ * finalists as slots carrying their series score (race-win count), the champion (first to the
+ * winning count) marked, and a `"Best of N · races"` caption. The wins target is inferred from the
+ * results (the outcome may not carry `wins_to_win`) by {@link chaseWinTally}.
+ */
+function chaseFinalRound(chaseHeats: CompletedHeat[]): BracketRound {
+  const ordered = chaseHeats
+    .slice()
+    .sort((a, b) => chaseRaceIndex(a.heat) - chaseRaceIndex(b.heat));
+  const tally = chaseWinTally(
+    ordered.map((h) => h.result),
+    undefined
+  );
+  // The finalists in seed order: the first race's field, then any others (each race flies them all).
+  const finalists: CompetitorRef[] = [];
+  for (const h of ordered) {
+    for (const p of h.result.places) {
+      const ref = p.competitor.competitor;
+      if (!finalists.includes(ref)) finalists.push(ref);
+    }
+  }
+  const slots: BracketSlot[] = finalists.map((ref) => ({
+    competitor: ref,
+    score: tally.wins[ref] ?? 0,
+    winner: tally.champion !== undefined && ref === tally.champion
+  }));
+  const note = `Best of ${tally.target * 2 - 1} · ${tally.racesRun} race${tally.racesRun === 1 ? '' : 's'}`;
+  return { name: 'Final', matches: [{ heat: undefined, note, slots }] };
 }
 
 function roundNameFor(size: number, count: number): string {

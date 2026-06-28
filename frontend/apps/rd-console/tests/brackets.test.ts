@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { HeatSummary, RoundDef } from '@gridfpv/types';
+import type { HeatResult, HeatSummary, RoundDef } from '@gridfpv/types';
 import {
   bracketChainRounds,
   buildBracketView,
+  chaseWinTally,
   groupRoundsForDisplay,
   heatWinnersSource,
   isBracketRoot,
@@ -180,6 +181,159 @@ describe('buildBracketView — built-ahead levels render with TBD placeholder ma
     const view = buildBracketView(SEMIS, [QUAL, FINAL, SEMIS], [], (r) => r, undefined, 16, 4, 1);
     expect(view.rounds[0].matches.length).toBe(4);
     expect(view.rounds[1].matches.length).toBe(1);
+  });
+});
+
+describe('chaseWinTally — counts race winners, finds the champion', () => {
+  /** A scored race result from `[competitor, position]` rows. */
+  function res(rows: [string, number][]): HeatResult {
+    return {
+      places: rows.map(([competitor, position]) => ({
+        competitor: { adapter: 'rh-1', competitor },
+        position,
+        laps: 3,
+        metric: { BestLapMicros: 1 }
+      }))
+    };
+  }
+
+  it('tallies wins per finalist and crowns the first to the target', () => {
+    // A wins r0, B wins r1 (1-1), A wins r2 (2-1) → A champion at race 2.
+    const t = chaseWinTally(
+      [
+        res([
+          ['A', 1],
+          ['B', 2]
+        ]),
+        res([
+          ['B', 1],
+          ['A', 2]
+        ]),
+        res([
+          ['A', 1],
+          ['B', 2]
+        ])
+      ],
+      2
+    );
+    expect(t.wins).toEqual({ A: 2, B: 1 });
+    expect(t.racesRun).toBe(3);
+    expect(t.target).toBe(2);
+    expect(t.champion).toBe('A');
+  });
+
+  it('leaves the champion undefined while no finalist has reached the target', () => {
+    const t = chaseWinTally(
+      [
+        res([
+          ['A', 1],
+          ['B', 2]
+        ]),
+        res([
+          ['B', 1],
+          ['A', 2]
+        ])
+      ],
+      2
+    );
+    expect(t.wins).toEqual({ A: 1, B: 1 });
+    expect(t.champion).toBeUndefined();
+  });
+
+  it('infers the target (most wins) when none is given — the Results-page path', () => {
+    const t = chaseWinTally([
+      res([
+        ['A', 1],
+        ['B', 2]
+      ]),
+      res([
+        ['A', 1],
+        ['B', 2]
+      ])
+    ]);
+    // No explicit target → inferred as the max win count (2); champion is the one who reached it.
+    expect(t.target).toBe(2);
+    expect(t.champion).toBe('A');
+  });
+
+  it('returns an empty, champion-less tally for no races', () => {
+    const t = chaseWinTally([], 2);
+    expect(t).toEqual({ wins: {}, target: 2, racesRun: 0, champion: undefined });
+  });
+});
+
+describe('buildBracketView — collapses a Chase-the-Ace final into one match', () => {
+  // A 2-up chase final seeded straight from a ranking (a single-level chain): it is BOTH the root and
+  // the final level. Three race heats (cta-r0..r2), all flying the same field in seed order.
+  const CHASE = round({
+    id: 'cta',
+    label: 'Aces — Final',
+    format: 'chase_the_ace',
+    params: { wins_to_win: '2' },
+    seeding: { FromRanking: { source_rounds: ['q'], top_n: 2 } }
+  });
+  const chaseHeats = [
+    heat('cta-r0', 'cta', ['A', 'B']),
+    heat('cta-r1', 'cta', ['A', 'B']),
+    heat('cta-r2', 'cta', ['A', 'B'])
+  ];
+
+  it('renders ONE final match with per-finalist scores, a note, and the champion marked', () => {
+    const tally = { wins: { A: 2, B: 1 }, target: 2, racesRun: 3, champion: 'A' };
+    const view = buildBracketView(
+      CHASE,
+      [QUAL, CHASE],
+      chaseHeats,
+      (r) => `P-${r}`,
+      tally.champion,
+      2,
+      2,
+      1,
+      tally
+    );
+    // A single-level chain → one column named by its level ("Final"), with exactly one match.
+    expect(view.rounds.map((r) => r.name)).toEqual(['Final']);
+    expect(view.rounds[0].matches).toHaveLength(1);
+    const match = view.rounds[0].matches[0];
+    // The race counter caption: best-of-(2N-1) over the races run.
+    expect(match.note).toBe('Best of 3 · 3 races');
+    expect(match.slots).toHaveLength(2);
+    const a = match.slots.find((s) => s.competitor === 'A')!;
+    const b = match.slots.find((s) => s.competitor === 'B')!;
+    // Series scores ride on the slots; the 2-win finalist is the winner, labels resolve.
+    expect(a.score).toBe(2);
+    expect(a.winner).toBe(true);
+    expect(a.label).toBe('P-A');
+    expect(b.score).toBe(1);
+    expect(b.winner).toBe(false);
+  });
+
+  it('shows a "Series" note and zero scores before any race tally exists', () => {
+    const view = buildBracketView(CHASE, [QUAL, CHASE], chaseHeats, (r) => r, undefined, 2, 2, 1);
+    const match = view.rounds[0].matches[0];
+    expect(match.note).toBe('Series');
+    expect(match.slots.every((s) => s.score === 0 && !s.winner)).toBe(true);
+  });
+
+  it('renders a single placeholder match for a built-ahead chase final with no races yet', () => {
+    const view = buildBracketView(CHASE, [QUAL, CHASE], [], (r) => r, undefined, 2, 2, 1);
+    expect(view.rounds[0].matches).toHaveLength(1);
+    const match = view.rounds[0].matches[0];
+    expect(match.note).toBe('Series');
+    expect(match.slots.every((s) => s.competitor === undefined)).toBe(true);
+  });
+
+  it('does NOT collapse a non-chase (single-elim) final — it renders one match per heat', () => {
+    // The plain single-elim FINAL keeps its per-heat match (no note, no scores).
+    const heats = [
+      heat('sf-1', 'semis', ['A', 'D']),
+      heat('sf-2', 'semis', ['B', 'C']),
+      heat('f-1', 'final', ['A', 'B'])
+    ];
+    const view = buildBracketView(SEMIS, [QUAL, FINAL, SEMIS], heats, (r) => r, 'A', 4, 2);
+    const finalMatch = view.rounds[1].matches[0];
+    expect(finalMatch.note).toBeUndefined();
+    expect(finalMatch.slots.every((s) => s.score === undefined)).toBe(true);
   });
 });
 

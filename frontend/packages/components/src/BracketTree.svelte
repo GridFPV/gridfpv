@@ -17,18 +17,28 @@
     <section class="round" role="group" aria-label={round.name}>
       <h4 class="round-name">{round.name}</h4>
       {#each round.matches as match, mi (match.heat ?? round.name + '-' + mi)}
-        <div class="match" role="group" aria-label={match.heat ?? `Match ${mi + 1}`}>
-          {#each match.slots as slot, si (si)}
-            <div
-              class="slot"
-              class:winner={slot.winner}
-              role="treeitem"
-              aria-selected={slot.winner ?? false}
-            >
-              <span class="competitor">{slot.label ?? slot.competitor ?? 'TBD'}</span>
-              {#if slot.winner}<span class="check" aria-hidden="true">✓</span>{/if}
-            </div>
-          {/each}
+        <div class="match-wrap">
+          {#if match.note}<p class="match-note">{match.note}</p>{/if}
+          <div class="match" role="group" aria-label={match.heat ?? `Match ${mi + 1}`}>
+            {#each match.slots as slot, si (si)}
+              <div
+                class="slot"
+                class:winner={slot.winner}
+                role="treeitem"
+                aria-selected={slot.winner ?? false}
+              >
+                <span class="competitor">{slot.label ?? slot.competitor ?? 'TBD'}</span>
+                <span class="slot-trailing">
+                  {#if slot.score !== undefined}<span
+                      class="score"
+                      aria-label={`${slot.score} ${slot.score === 1 ? 'win' : 'wins'}`}
+                      >{slot.score}</span
+                    >{/if}
+                  {#if slot.winner}<span class="check" aria-hidden="true">✓</span>{/if}
+                </span>
+              </div>
+            {/each}
+          </div>
         </div>
       {/each}
     </section>
@@ -53,6 +63,19 @@
     min-width: 10rem;
   }
   .round-name {
+    margin: 0;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+  }
+  .match-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-1);
+  }
+  .match-note {
     margin: 0;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-2xs);
@@ -85,6 +108,28 @@
   }
   .slot.winner .competitor {
     color: var(--gf-accent);
+  }
+  .slot-trailing {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  .score {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.25rem;
+    padding: 0 var(--gf-space-1);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-border-subtle);
+    color: var(--gf-text);
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-bold);
+    font-variant-numeric: tabular-nums;
+  }
+  .slot.winner .score {
+    background: var(--gf-accent);
+    color: var(--gf-on-accent, var(--gf-elevated));
   }
   .check {
     color: var(--gf-accent);
