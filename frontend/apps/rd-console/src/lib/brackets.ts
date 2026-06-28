@@ -24,11 +24,72 @@
  * of truth.
  */
 
-import type { Bracket, BracketMatch, BracketRound } from '@gridfpv/components';
-import type { CompetitorRef, HeatSummary, RoundDef, RoundId, SeedingRule } from '@gridfpv/types';
+import type { Bracket, BracketMatch, BracketRound, BracketSlot } from '@gridfpv/components';
+import type {
+  CompetitorRef,
+  HeatResult,
+  HeatSummary,
+  RoundDef,
+  RoundId,
+  SeedingRule
+} from '@gridfpv/types';
 
-import { isBracketFormat } from './formats.js';
+import { isBracketFormat, isChaseTheAceFormat } from './formats.js';
 import { bracketLevelFields } from './standings.js';
+
+/**
+ * The replayed state of a **Chase-the-Ace** final — the per-finalist race-win tally a chase series
+ * carries, computed by {@link chaseWinTally} from the final round's completed-race results. The
+ * frontend counts race winners itself because the engine ranking exposes only an overall placement,
+ * not a per-finalist win count; this is the "series score" the collapsed final node renders.
+ */
+export interface ChaseFinalTally {
+  /** Race-wins per finalist (`competitor ref → wins`); finalists with no win yet may be absent. */
+  wins: Record<CompetitorRef, number>;
+  /** The race-wins needed to take the final (`wins_to_win`, ≥ 1). */
+  target: number;
+  /** How many of the final's races have been scored. */
+  racesRun: number;
+  /** The champion — the first finalist to reach {@link target} race-wins — once one exists. */
+  champion?: CompetitorRef;
+}
+
+/** The race winner of one scored race: its position-1 placement (else the first listed). */
+function raceWinner(result: HeatResult): CompetitorRef | undefined {
+  const top = result.places.find((p) => p.position === 1) ?? result.places[0];
+  return top?.competitor.competitor;
+}
+
+/**
+ * Count a Chase-the-Ace final's race winners into a {@link ChaseFinalTally}. `results` must be in
+ * **race order** (`cta-r0`, `cta-r1`, …) so the champion — the first finalist to reach `target`
+ * race-wins — is found correctly. When `target` is omitted (e.g. the Results-page path, where the
+ * outcome may not carry `wins_to_win`) it is **inferred** as the most wins any finalist holds (≥ 1),
+ * so the champion is the finalist who first reached that winning count.
+ */
+export function chaseWinTally(results: HeatResult[], target?: number): ChaseFinalTally {
+  const wins: Record<CompetitorRef, number> = {};
+  const winners: CompetitorRef[] = [];
+  for (const r of results) {
+    const w = raceWinner(r);
+    if (w === undefined) continue;
+    wins[w] = (wins[w] ?? 0) + 1;
+    winners.push(w);
+  }
+  const maxWins = Object.values(wins).reduce((m, v) => Math.max(m, v), 0);
+  const effectiveTarget = Math.max(1, target ?? maxWins);
+  // The champion is the first finalist to reach the target, walking the races in order.
+  let champion: CompetitorRef | undefined;
+  const running: Record<CompetitorRef, number> = {};
+  for (const w of winners) {
+    running[w] = (running[w] ?? 0) + 1;
+    if (running[w] >= effectiveTarget) {
+      champion = w;
+      break;
+    }
+  }
+  return { wins, target: effectiveTarget, racesRun: results.length, champion };
+}
 
 /** The `source_round` a `FromHeatWinners` seeding points at, or `undefined` for any other rule. */
 export function heatWinnersSource(seeding: SeedingRule): RoundId | undefined {
@@ -108,6 +169,9 @@ export function isLevelComplete(roundId: RoundId, heats: HeatSummary[]): boolean
  *   every level — empty seats reading as "TBD" — not just the levels whose heats already exist.
  * @param heatSize the pilots per heat the bracket groups on (`single_elim`'s `heat_size`).
  * @param advance how many advance out of each heat (`single_elim`'s `advance`); shapes the geometry.
+ * @param chaseFinal the replayed {@link ChaseFinalTally} when the final level is a Chase-the-Ace
+ *   round — its N race heats collapse into ONE final match showing the per-finalist series score
+ *   (a slot `score`) + a race-counter caption (the match `note`), the champion marked the winner.
  */
 export function buildBracketView(
   root: RoundDef,
@@ -117,7 +181,8 @@ export function buildBracketView(
   champion: CompetitorRef | undefined,
   levelOneField: number,
   heatSize: number,
-  advance: number = Math.max(1, Math.floor(heatSize / 2))
+  advance: number = Math.max(1, Math.floor(heatSize / 2)),
+  chaseFinal?: ChaseFinalTally
 ): Bracket {
   const chain = bracketChainRounds(root, rounds);
   const levels = chain.map((r) => ({ round: r, heats: heatsOf(r.id, heats) }));
@@ -132,6 +197,37 @@ export function buildBracketView(
       (levels[li + 1]?.heats ?? []).flatMap((h) => h.lineup)
     );
     const isFinalLevel = li === levels.length - 1;
+
+    // A **Chase-the-Ace** final collapses its N race heats into ONE match (the whole field flies
+    // every race, so the per-race heats are not distinct matches): the finalists are the slots, each
+    // carrying its series score (race-win count), with the champion marked and a race-counter note.
+    if (isFinalLevel && isChaseTheAceFormat(level.round.format)) {
+      const finalists: CompetitorRef[] = [];
+      for (const h of level.heats) {
+        for (const ref of h.lineup) if (!finalists.includes(ref)) finalists.push(ref);
+      }
+      const target =
+        chaseFinal?.target ?? Math.max(1, Math.round(Number(level.round.params?.wins_to_win ?? 2)));
+      const racesRun = chaseFinal?.racesRun ?? 0;
+      const note =
+        chaseFinal && racesRun > 0
+          ? `Best of ${target * 2 - 1} · ${racesRun} race${racesRun === 1 ? '' : 's'}`
+          : 'Series';
+      const champ = chaseFinal?.champion;
+      const slots: BracketSlot[] = finalists.length
+        ? finalists.map((ref) => ({
+            competitor: ref,
+            label: label(ref),
+            score: chaseFinal?.wins[ref] ?? 0,
+            winner: champ !== undefined && ref === champ
+          }))
+        : // No race heats yet (built-ahead final): one placeholder match of TBD finalist seats.
+          Array.from({ length: Math.max(2, Math.round(fields[li] ?? slotsPerMatch)) }, () => ({}));
+      return {
+        name: splitBracketLabel(level.round.label).level,
+        matches: [{ heat: undefined, note, slots }]
+      };
+    }
 
     // The real heats this level already has, with winners inferred as before.
     const realMatches: BracketMatch[] = level.heats.map((h) => ({

@@ -28,6 +28,12 @@ export interface BracketSlot {
   label?: string;
   /** Marks the slot that advanced from this match (the heat's winner). */
   winner?: boolean;
+  /**
+   * Optional **series score** — a finalist's running race-win count in a multi-race series (the
+   * Chase-the-Ace final). Rendered as a compact win-count pill on the slot. `undefined` (the normal
+   * single-heat match case) shows no pill; `0` is a real score and *does* render a pill.
+   */
+  score?: number;
 }
 
 /** A single heat in the bracket (two or more seats racing for advancement). */
@@ -36,6 +42,11 @@ export interface BracketMatch {
   heat?: HeatId;
   /** The seats in this match, in lineup order. */
   slots: BracketSlot[];
+  /**
+   * Optional small caption rendered above the match box — e.g. a series summary like
+   * `"Best of 3 · 2 races"` for a collapsed Chase-the-Ace final. `undefined` shows no caption.
+   */
+  note?: string;
 }
 
 /** One round of the bracket (e.g. quarterfinals), earliest round first. */

@@ -1677,6 +1677,113 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
   });
 });
 
+// ── Chase-the-Ace final: collapsed series node + champion (multi-race final) ───────────────────
+
+describe('EventRounds (Chase-the-Ace final — series node + champion)', () => {
+  // A 2-up Chase-the-Ace final seeded straight off a ranking (a single-level chain): it is its own
+  // root and final level. Three completed races: p1 (AceOne) wins r0 & r2, p2 (Bolt) wins r1 → p1
+  // reaches wins_to_win=2 → champion.
+  const ACE_FINAL: RoundDef = {
+    ...QUAL,
+    id: 'cta',
+    label: 'Aces — Final',
+    format: 'chase_the_ace',
+    params: { wins_to_win: '2' },
+    seeding: { FromRanking: { source_rounds: ['q'], top_n: 2 } }
+  };
+  const ACE_EVENT: EventMeta = { ...EVENT, roster: ['p1', 'p2'], rounds: [ACE_FINAL] };
+  const CHASE_HEATS: HeatSummary[] = [
+    { heat: 'cta-r0', lineup: ['p1', 'p2'], round: 'cta', phase: 'Final', is_current: false },
+    { heat: 'cta-r1', lineup: ['p1', 'p2'], round: 'cta', phase: 'Final', is_current: false },
+    { heat: 'cta-r2', lineup: ['p1', 'p2'], round: 'cta', phase: 'Final', is_current: false }
+  ];
+
+  /** A heat-result snapshot body from `[ref, position]` rows (the shape fetchHeatResult reads). */
+  function snapshot(rows: [string, number][]) {
+    return {
+      body: {
+        HeatResult: {
+          places: rows.map(([competitor, position]) => ({
+            competitor: { adapter: 'rh-1', competitor },
+            position,
+            laps: 3,
+            metric: { BestLapMicros: 1 }
+          }))
+        }
+      }
+    };
+  }
+  const RACE_RESULTS: Record<string, ReturnType<typeof snapshot>> = {
+    'cta-r0': snapshot([
+      ['p1', 1],
+      ['p2', 2]
+    ]),
+    'cta-r1': snapshot([
+      ['p2', 1],
+      ['p1', 2]
+    ]),
+    'cta-r2': snapshot([
+      ['p1', 1],
+      ['p2', 2]
+    ])
+  };
+  // A fetch stub serving the per-heat result snapshots fetchHeatResult pulls.
+  function raceFetch() {
+    return vi.fn(async (url: string) => {
+      const m = /snapshot\/heat\/([^?]+)/.exec(String(url));
+      const heat = m ? decodeURIComponent(m[1]) : '';
+      const snap = RACE_RESULTS[heat];
+      if (!snap) return { ok: false, json: async () => ({}) } as unknown as Response;
+      return { ok: true, json: async () => snap } as unknown as Response;
+    });
+  }
+
+  function aceImpls() {
+    return {
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => CHASE_HEATS)
+    };
+  }
+
+  it('collapses the chase final to ONE node with a series caption + score pills', async () => {
+    const { session } = makeTestSession({ ...aceImpls(), event: ACE_EVENT });
+    vi.stubGlobal('fetch', raceFetch());
+    render(EventRounds, { session });
+
+    const tournaments = (await screen.findByRole('heading', { name: 'Tournaments' })).closest(
+      'section'
+    )!;
+    const panel = (await within(tournaments).findByLabelText(/Bracket — Aces/i)) as HTMLElement;
+
+    // The three races render as a SINGLE match node (not three), with the best-of-N race caption.
+    await waitFor(() => expect(panel.querySelectorAll('.match').length).toBe(1));
+    await waitFor(() =>
+      expect(panel.querySelector('.match-note')?.textContent).toBe('Best of 3 · 3 races')
+    );
+    // Each finalist seat carries a series-score pill.
+    expect(panel.querySelectorAll('.score').length).toBe(2);
+  });
+
+  it('crowns the chase champion in the header chip once the tally reaches the target', async () => {
+    const { session } = makeTestSession({ ...aceImpls(), event: ACE_EVENT });
+    vi.stubGlobal('fetch', raceFetch());
+    render(EventRounds, { session });
+
+    const tournaments = (await screen.findByRole('heading', { name: 'Tournaments' })).closest(
+      'section'
+    )!;
+    const panel = (await within(tournaments).findByLabelText(/Bracket — Aces/i)) as HTMLElement;
+
+    // The champion chip resolves p1 → its callsign (never the raw ref) once p1 has the 2 wins.
+    await waitFor(() => {
+      const chip = panel.querySelector('.bracket-champion');
+      expect(chip?.textContent).toContain('AceOne');
+    });
+    expect(panel.querySelector('.bracket-champion')?.textContent).not.toContain('p1');
+  });
+});
+
 // ── Open-practice format: the active-channels picker (open-practice Slice 2) ───────────────────
 
 // A primary timer with 4 node seats, the first three configured to Raceband R1/R2 + a custom MHz.
