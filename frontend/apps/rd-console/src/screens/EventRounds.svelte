@@ -73,7 +73,6 @@
   import {
     bracketChainRounds,
     buildBracketView,
-    groupRoundsForDisplay,
     isBracketLevel,
     isBracketRoot,
     isLevelComplete,
@@ -83,6 +82,7 @@
   import {
     advanceLevelReq,
     advanceRoundReq,
+    bracketLevelFields,
     bracketSizeOptions,
     rosterRoundReq
   } from '../lib/standings.js';
@@ -357,6 +357,12 @@
   let advanceSourceClass = $state<ClassId | ''>('');
   let advanceName = $state('');
   let advanceSize = $state(8);
+  // Pilots per heat — how many seats each bracket heat holds (head-to-head = 2). Capped at the
+  // timer's nodes; a larger heat size builds a shallower bracket.
+  let advanceHeatSize = $state(2);
+  // How many of each bracket heat advance to the next level (head-to-head = 1). 1..heatSize-1; a
+  // 4-up heat can advance its top 2 (default) or just the top 1.
+  let advanceMoveOn = $state(1);
   let advanceFinalKind = $state<'single' | 'chase'>('single');
   let advanceFinalWins = $state(2);
   // The bracket's win condition — one for all its heats (each race decided directly): First-to-N
@@ -396,11 +402,30 @@
         : 0
       : advanceSize
   );
-  // How many levels the field produces (ceil(log2) — a non-power-of-two roster byes up), for the
-  // modal's summary.
+  // How many levels the field produces given the chosen heat size + advance-per-heat (each level
+  // groups the field into heats of `advanceHeatSize`, `advanceMoveOn` advancing), for the summary.
   const advanceLevels = $derived(
-    advanceFieldSize >= 2 ? Math.ceil(Math.log2(advanceFieldSize)) : 0
+    advanceFieldSize >= 2
+      ? bracketLevelFields(advanceFieldSize, advanceHeatSize, advanceMoveOn).length
+      : 0
   );
+
+  // The selectable advance-per-heat counts: 1..heatSize-1 (advance at least one, eliminate at least
+  // one).
+  const moveOnOptions = $derived(
+    Array.from({ length: Math.max(1, advanceHeatSize - 1) }, (_, i) => i + 1)
+  );
+  // Keep advance-per-heat in step with pilots-per-heat: when the heat size changes, default move-on
+  // to its top half (so a 4-up heat defaults to advancing 2); otherwise just keep it in range.
+  let lastAdvanceHeatSize = $state(2);
+  $effect(() => {
+    if (advanceHeatSize !== lastAdvanceHeatSize) {
+      lastAdvanceHeatSize = advanceHeatSize;
+      advanceMoveOn = Math.max(1, Math.min(Math.floor(advanceHeatSize / 2), advanceHeatSize - 1));
+    } else if (advanceMoveOn > advanceHeatSize - 1) {
+      advanceMoveOn = Math.max(1, Math.min(advanceMoveOn, advanceHeatSize - 1));
+    }
+  });
 
   // Reset the modal's shared fields (structure / name / win / final defaults) — the entry points then
   // set the seed kind + source.
@@ -411,6 +436,8 @@
     advanceWinKind = 'FirstToLaps';
     advanceWinLaps = 3;
     advanceWinMinutes = 2;
+    advanceHeatSize = 2;
+    advanceMoveOn = Math.max(1, Math.floor(advanceHeatSize / 2));
   }
 
   function openAdvance(round: RoundDef) {
@@ -459,11 +486,14 @@
     const useChase = advanceFinalKind === 'chase';
     const final0 = useChase ? { format: 'chase_the_ace', winsToWin: advanceFinalWins } : undefined;
 
+    // Resolve the seed kind to its field size + level-1 builder. A class roster is always ready (fill
+    // level 1 now); a round is ready once finished.
     let fieldSize: number;
     let sourceLabel: string;
-    let readyNow: boolean;
-    let level1Req: NewRoundReq;
     let sourceDesc: string;
+    let readyNow: boolean;
+    let classIdForLevel1: ClassId | '' = '';
+    let sourceForLevel1: RoundDef | undefined;
     if (advanceSeedKind === 'class') {
       const classId = advanceSourceClass;
       fieldSize = classId ? classRosterSize(classId) : 0;
@@ -471,14 +501,10 @@
         toast.error('Pick a class with at least two pilots to build a bracket.');
         return;
       }
-      const levels = Math.max(1, Math.ceil(Math.log2(fieldSize)));
       sourceLabel = className(classId);
       sourceDesc = sourceLabel;
       readyNow = true; // the roster is filled now
-      // Level 1 may also be the final (a 2-pilot roster, levels === 1).
-      const final = levels === 1 ? final0 : undefined;
-      const label = `${name} — ${nextLevelLabel(sourceLabel, Math.ceil(fieldSize / 2), 0)}`;
-      level1Req = rosterRoundReq(classId, label, winCondition, final);
+      classIdForLevel1 = classId;
     } else {
       const source = advanceModalRound;
       fieldSize = advanceSize;
@@ -486,32 +512,52 @@
         toast.error('Need at least two pilots in the field to build a bracket.');
         return;
       }
-      const levels = Math.max(1, Math.ceil(Math.log2(fieldSize)));
       sourceLabel = source.label;
       sourceDesc = source.label;
       readyNow = roundFinished(source.id);
-      const final = levels === 1 ? final0 : undefined;
-      const label = `${name} — ${nextLevelLabel(sourceLabel, Math.ceil(fieldSize / 2), 0)}`;
-      level1Req = advanceRoundReq(source, fieldSize, label, winCondition, final);
+      sourceForLevel1 = source;
     }
+
+    // The field entering each level + the level count, from the chosen heat size + advance-per-heat:
+    // each level groups the field into heats of `advanceHeatSize`, `advanceMoveOn` advancing per
+    // heat, down to the single-heat final (see bracketLevelFields).
+    const fields = bracketLevelFields(fieldSize, advanceHeatSize, advanceMoveOn);
+    const levels = fields.length;
 
     advancing = true;
     try {
-      const levels = Math.max(1, Math.ceil(Math.log2(fieldSize)));
       // Each level is named "‹Bracket name› — ‹Level›" so multiple brackets in one event stay
       // distinct (the container header shows the name, the tree shows the level).
       let firstLevelId: RoundId | undefined;
       let prev: RoundDef | undefined;
       for (let i = 1; i <= levels; i++) {
-        const heatCount = Math.ceil(fieldSize / 2 ** i); // heats this level holds (the final = 1)
+        const heatCount = Math.ceil(fields[i - 1] / advanceHeatSize); // heats this level holds (final = 1)
         const isFinal = i === levels;
         const final = isFinal && useChase ? final0 : undefined;
+        const label = `${name} — ${nextLevelLabel(sourceLabel, heatCount, i - 1)}`;
         let req: NewRoundReq;
         if (i === 1) {
-          req = level1Req;
+          req =
+            advanceSeedKind === 'class'
+              ? rosterRoundReq(
+                  classIdForLevel1,
+                  label,
+                  winCondition,
+                  advanceHeatSize,
+                  advanceMoveOn,
+                  final
+                )
+              : advanceRoundReq(
+                  sourceForLevel1!,
+                  fieldSize,
+                  label,
+                  winCondition,
+                  advanceHeatSize,
+                  advanceMoveOn,
+                  final
+                );
         } else {
-          const label = `${name} — ${nextLevelLabel(sourceLabel, heatCount, i - 1)}`;
-          req = advanceLevelReq(prev!, label, winCondition, final);
+          req = advanceLevelReq(prev!, label, winCondition, advanceHeatSize, advanceMoveOn, final);
         }
         const created = await session.createRound(req);
         if (!created) {
@@ -595,7 +641,35 @@
   // The BracketTree view-model for a chain root — its level columns stitched from the chain rounds +
   // their heats, winners inferred from the next level's lineups (the final's from the champion).
   function bracketViewFor(root: RoundDef): Bracket {
-    return buildBracketView(root, rounds, heats, callsign, championByRoot[root.id]);
+    // The pilots-per-heat the bracket was built with (single_elim's heat_size; head-to-head = 2) and
+    // how many advance per heat (single_elim's advance; default floor(heatSize/2)). Both shape the
+    // built-out geometry — how many (TBD) matches each level shows.
+    const heatSize = Math.max(2, Math.round(Number(root.params?.heat_size ?? 2)));
+    const advance = Math.max(
+      1,
+      Math.round(Number(root.params?.advance ?? Math.floor(heatSize / 2)))
+    );
+    // The level-1 field (the seed count): a ranking seed's top_n, a roster seed's class roster size,
+    // else the root's current heats' total lineup count. Drives how many (TBD) matches each level shows.
+    const seed = root.seeding;
+    let levelOneField: number;
+    if (typeof seed === 'object' && 'FromRanking' in seed) {
+      levelOneField = seed.FromRanking.top_n;
+    } else if (seed === 'FromRoster') {
+      levelOneField = classRosterSize(root.classes[0] ?? '');
+    } else {
+      levelOneField = heatsByRound(root.id).reduce((sum, h) => sum + h.lineup.length, 0);
+    }
+    return buildBracketView(
+      root,
+      rounds,
+      heats,
+      callsign,
+      championByRoot[root.id],
+      levelOneField,
+      heatSize,
+      advance
+    );
   }
 
   // The bracket container's sub-line: where it was seeded from + the cut size + how many levels.
@@ -1287,16 +1361,6 @@
     subtitle="Define this event's rounds — eligible classes, format, win condition, and seeding. Rounds are added as you go."
   >
     {#snippet actions()}
-      <!-- Build a single-elim tournament from a finished round's ranking or straight off a class
-           roster (no qualifying needed). Offered once there's a bracketable source. -->
-      <Button
-        variant="secondary"
-        size="sm"
-        onclick={openBuildTournament}
-        disabled={bracketableRounds.length === 0 && bracketableClasses.length === 0}
-      >
-        Build tournament
-      </Button>
       <Button
         variant="secondary"
         size="sm"
@@ -1544,39 +1608,55 @@
           </section>
         {/snippet}
 
-        <!-- Group the rounds for display: a single-elim bracket's level-rounds fold into ONE Bracket
-             container (header + the whole-chain BracketTree + the level rounds nested as their own
-             cards); every other round renders standalone. Each level stays a first-class round
-             (run / advance / edit) inside the container. -->
-        {#each groupRoundsForDisplay(rounds) as group (group.kind === 'bracket' ? group.root.id : group.round.id)}
-          {#if group.kind === 'bracket'}
-            {@const view = bracketViewFor(group.root)}
-            {@const champ = championByRoot[group.root.id]}
-            {@const bracketName = splitBracketLabel(group.root.label).name || 'Bracket'}
-            <section class="bracket-container" aria-label={`Bracket — ${bracketName}`}>
-              <header class="bracket-header">
-                <div class="bracket-headline">
-                  <h3 class="bracket-title">{bracketName}</h3>
-                  {#if champ}
-                    <span class="bracket-champion">Champion · {callsign(champ)}</span>
-                  {/if}
-                </div>
-                <p class="bracket-sub">{bracketSubtitle(group.root)}</p>
-              </header>
-              {#if view.rounds.length > 0}
-                <div class="bracket-view"><BracketTree bracket={view} /></div>
-              {/if}
-              <div class="bracket-levels">
-                {#each group.levels as level (level.id)}
-                  {@render roundCard(level)}
-                {/each}
-              </div>
-            </section>
-          {:else}
-            {@render roundCard(group.round)}
-          {/if}
+        <!-- Every round — including each bracket level — shows as a normal heat card. The bracket
+             tree itself lives in its own Tournaments card below. -->
+        {#each rounds as round (round.id)}
+          {@render roundCard(round)}
         {/each}
       </div>
+    {/if}
+  </Card>
+
+  <!-- Tournaments — the built-out bracket(s) for this event, each as a BracketTree. A bracket's level
+       rounds run/advance from the Heats card above (as normal heat cards); this card is the read-only
+       picture of the whole chain (built-ahead levels show TBD seats until they fill). -->
+  <Card
+    title="Tournaments"
+    subtitle="The bracket for each tournament you build. Run and advance its levels from the Heats card above."
+  >
+    {#snippet actions()}
+      <!-- Build a single-elim tournament from a finished round's ranking or straight off a class
+           roster (no qualifying needed). Offered once there's a bracketable source. -->
+      <Button
+        variant="secondary"
+        size="sm"
+        onclick={openBuildTournament}
+        disabled={bracketableRounds.length === 0 && bracketableClasses.length === 0}
+      >
+        Build tournament
+      </Button>
+    {/snippet}
+
+    {#if rounds.filter(isBracketRoot).length === 0}
+      <p class="empty" role="status">Build a tournament to see its bracket here.</p>
+    {:else}
+      {#each rounds.filter(isBracketRoot) as root (root.id)}
+        {@const view = bracketViewFor(root)}
+        {@const champ = championByRoot[root.id]}
+        {@const bracketName = splitBracketLabel(root.label).name || 'Bracket'}
+        <section class="bracket-container" aria-label={`Bracket — ${bracketName}`}>
+          <header class="bracket-header">
+            <div class="bracket-headline">
+              <h3 class="bracket-title">{bracketName}</h3>
+              {#if champ}
+                <span class="bracket-champion">Champion · {callsign(champ)}</span>
+              {/if}
+            </div>
+            <p class="bracket-sub">{bracketSubtitle(root)}</p>
+          </header>
+          <div class="bracket-view"><BracketTree bracket={view} /></div>
+        </section>
+      {/each}
     {/if}
   </Card>
   <!-- The add / edit round form is a modal Dialog (backdrop, focus trap, Esc-to-close) — opened by
@@ -2135,6 +2215,23 @@
           <Input bind:value={advanceName} aria-label="Bracket name" placeholder="e.g. Pro" />
         </Field>
         <div class="form-grid">
+          <Field label="Pilots per heat" hint="How many race each bracket heat. 2 = head-to-head.">
+            <Select bind:value={advanceHeatSize} aria-label="Pilots per heat">
+              {#each groupSizeOptions as n (n)}
+                <option value={n}>{n}</option>
+              {/each}
+            </Select>
+          </Field>
+          <Field
+            label="Advance per heat"
+            hint="Top N of each heat progress; the rest are eliminated."
+          >
+            <Select bind:value={advanceMoveOn} aria-label="Advance per heat">
+              {#each moveOnOptions as n (n)}
+                <option value={n}>{n}</option>
+              {/each}
+            </Select>
+          </Field>
           <Field label="Win condition" hint="How every bracket heat is decided.">
             <Select bind:value={advanceWinKind} aria-label="Bracket win condition">
               <option value="FirstToLaps">First to N laps</option>
@@ -2496,14 +2593,6 @@
     margin: 0;
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
-  }
-  /* The level cards sit under the tree on a left rail, so they read as "inside" the bracket. */
-  .bracket-levels {
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-3);
-    padding-left: var(--gf-space-3);
-    border-left: 2px solid var(--gf-border-subtle);
   }
   .heat-count-chip {
     font-size: var(--gf-font-size-sm);

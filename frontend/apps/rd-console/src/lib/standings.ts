@@ -43,6 +43,29 @@ export function bracketSizeOptions(fieldSize: number): number[] {
   return out;
 }
 
+/** The field size entering each bracket level, given the level-1 field, the heat size, and how many
+ * advance per heat (`advance`, default `floor(heatSize/2)`). Each level groups the field into heats
+ * of `heatSize`, `advance` advancing per heat; the bracket ends at the level that is a single heat
+ * (the final). Returns one entry per level (length = level count). */
+export function bracketLevelFields(
+  fieldSize: number,
+  heatSize: number,
+  advance = Math.max(1, Math.floor(heatSize / 2))
+): number[] {
+  const k = Math.max(2, Math.floor(heatSize));
+  // Each heat must advance at least one and leave at least one behind (else the bracket never shrinks).
+  const adv = Math.max(1, Math.min(advance, heatSize - 1));
+  const fields: number[] = [];
+  let field = Math.max(2, Math.floor(fieldSize));
+  for (let guard = 0; guard < 16; guard++) {
+    fields.push(field);
+    const heats = Math.ceil(field / k);
+    if (heats <= 1) break; // a single heat = the final
+    field = heats * adv; // advancers to the next level
+  }
+  return fields;
+}
+
 /**
  * The overall **final** of a bracket: how the last level is decided. Omit (single race = the bracket
  * format) or `{ format: 'chase_the_ace', winsToWin }` for a multi-race Chase-the-Ace final. Shared by
@@ -62,7 +85,8 @@ function withFinal(
   if (final.format === 'chase_the_ace') {
     return {
       format: 'chase_the_ace',
-      params: { wins_to_win: String(Math.max(1, Math.round(final.winsToWin ?? 2))) }
+      // Keep the base params (e.g. heat_size — harmless on a chase final) and add wins_to_win.
+      params: { ...base.params, wins_to_win: String(Math.max(1, Math.round(final.winsToWin ?? 2))) }
     };
   }
   return { format: final.format, params: base.params };
@@ -80,11 +104,23 @@ export function advanceRoundReq(
   topN: number,
   label: string,
   winCondition: WinCondition,
+  heatSize: number,
+  advance: number,
   final?: BracketFinal
 ): NewRoundReq {
   // `final` applies only when this round IS the final (a 2-up bracket's single level); otherwise it
-  // is a normal single_elim level.
-  const { format, params } = withFinal({ format: 'single_elim', params: {} }, final);
+  // is a normal single_elim level. `heat_size` (pilots per heat) is what `single_elim` groups on,
+  // `advance` how many of each heat progress (default head-to-head = 1).
+  const { format, params } = withFinal(
+    {
+      format: 'single_elim',
+      params: {
+        heat_size: String(Math.max(2, Math.round(heatSize))),
+        advance: String(Math.max(1, Math.round(advance)))
+      }
+    },
+    final
+  );
   return {
     label,
     classes: [...source.classes],
@@ -118,9 +154,20 @@ export function rosterRoundReq(
   classId: string,
   label: string,
   winCondition: WinCondition,
+  heatSize: number,
+  advance: number,
   final?: BracketFinal
 ): NewRoundReq {
-  const { format, params } = withFinal({ format: 'single_elim', params: {} }, final);
+  const { format, params } = withFinal(
+    {
+      format: 'single_elim',
+      params: {
+        heat_size: String(Math.max(2, Math.round(heatSize))),
+        advance: String(Math.max(1, Math.round(advance)))
+      }
+    },
+    final
+  );
   return {
     label,
     classes: [classId],
@@ -148,10 +195,19 @@ export function advanceLevelReq(
   level: RoundDef,
   label: string,
   winCondition: WinCondition,
+  heatSize: number,
+  advance: number,
   final?: BracketFinal
 ): NewRoundReq {
   const { format, params } = withFinal(
-    { format: level.format, params: { ...(level.params ?? {}) } },
+    {
+      format: level.format,
+      params: {
+        ...(level.params ?? {}),
+        heat_size: String(Math.max(2, Math.round(heatSize))),
+        advance: String(Math.max(1, Math.round(advance)))
+      }
+    },
     final
   );
   return {

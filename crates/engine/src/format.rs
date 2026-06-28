@@ -549,7 +549,7 @@ impl FormatRegistry {
     ///   **not** a separate param here.
     /// - `round_robin`: `rounds` ("Heats per pilot", 3), `heat_size` (4). The ranking metric is
     ///   likewise **derived from the win condition**, not a separate param.
-    /// - `single_elim`: `heat_size` (number, 2).
+    /// - `single_elim`: `heat_size` (number, 2), `advance` ("Advance per heat", 1).
     /// - `double_elim`: `bracket_reset` (bool, on).
     /// - `multi_main`: `main_size` (number, 4).
     /// - `open_practice`: no params (the active channels are the field, carried by the round's
@@ -610,7 +610,10 @@ impl FormatRegistry {
             },
             FormatSchema {
                 name: "single_elim".into(),
-                params: vec![FormatParam::number("heat_size", "Heat size", "2")],
+                params: vec![
+                    FormatParam::number("heat_size", "Heat size", "2"),
+                    FormatParam::number("advance", "Advance per heat", "1"),
+                ],
             },
             FormatSchema {
                 name: "timed_qual".into(),

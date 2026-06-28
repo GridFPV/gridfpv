@@ -1514,6 +1514,78 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
       seeding: { FromHeatWinners: { source_round: 'lvl1' } }
     });
   });
+
+  it('Build tournament: a "Pilots per heat" select rides along as the bracket heat_size + shapes the chain', async () => {
+    const createRoundImpl = chainCreateImpl();
+    const { session } = makeTestSession({ ...baseHeatsImpls(), createRoundImpl, event: EVENT_4 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to bracket' }));
+    // The modal offers a Pilots-per-heat picker (default head-to-head = 2) and an Advance-per-heat
+    // picker (default 1 for a 2-up heat).
+    const perHeat = (await screen.findByLabelText('Pilots per heat')) as HTMLSelectElement;
+    expect(perHeat.value).toBe('2');
+    expect((screen.getByLabelText('Advance per heat') as HTMLSelectElement).value).toBe('1');
+
+    // A 4-up heat over a 4-seed field is a single heat → one level (the final). Advance-per-heat
+    // defaults to the top half (2) when pilots-per-heat changes.
+    await fireEvent.change(perHeat, { target: { value: '4' } });
+    expect((screen.getByLabelText('Advance per heat') as HTMLSelectElement).value).toBe('2');
+    await fireEvent.click(screen.getByRole('button', { name: 'Build bracket' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    expect(createRoundImpl.mock.calls[0][2]).toMatchObject({
+      format: 'single_elim',
+      params: { heat_size: '4', advance: '2' },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 4 } }
+    });
+  });
+
+  it('Build tournament: an "Advance per heat" of 1 over a 4-up field rides along as params.advance + deepens the chain', async () => {
+    // EVENT_8: an 8-seed field so a 4-up heat leaves room for multiple levels.
+    const EVENT_8: EventMeta = {
+      ...EVENT_WITH_MEMBERS,
+      roster: ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8'],
+      classes_membership: [
+        {
+          class: 'c1',
+          pilots: [
+            { pilot: 'p1' },
+            { pilot: 'p2' },
+            { pilot: 'p3' },
+            { pilot: 'p4' },
+            { pilot: 'p5' },
+            { pilot: 'p6' },
+            { pilot: 'p7' },
+            { pilot: 'p8' }
+          ]
+        }
+      ]
+    };
+    const createRoundImpl = chainCreateImpl();
+    const { session } = makeTestSession({ ...baseHeatsImpls(), createRoundImpl, event: EVENT_8 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Advance to bracket' }));
+    const perHeat = (await screen.findByLabelText('Pilots per heat')) as HTMLSelectElement;
+    await fireEvent.change(perHeat, { target: { value: '4' } });
+    // Override advance-per-heat down to 1 (only the heat winner progresses).
+    await fireEvent.change(screen.getByLabelText('Advance per heat'), { target: { value: '1' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Build bracket' }));
+
+    // 8 seeds, 4-up, advance 1: geometry [8, 2] → 2 levels (a 4-up first level of 2 heats → 2
+    // advance → a 2-up final). Both carry advance '1'.
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(2));
+    expect(createRoundImpl.mock.calls[0][2]).toMatchObject({
+      format: 'single_elim',
+      params: { heat_size: '4', advance: '1' },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 8 } }
+    });
+    expect(createRoundImpl.mock.calls[1][2]).toMatchObject({
+      params: { heat_size: '4', advance: '1' },
+      seeding: { FromHeatWinners: { source_round: 'lvl1' } }
+    });
+  });
 });
 
 // ── Bracket level advancement + visualization (#217, decisions D13) ────────────────────────────
@@ -1546,17 +1618,52 @@ describe('EventRounds (bracket levels — advance + visualization)', () => {
     };
   }
 
-  it('renders the chain as a BracketTree on the root level, with its level columns', async () => {
+  it('renders the chain as a BracketTree in the Tournaments card, with its level columns', async () => {
     const { session } = makeTestSession({
       ...bracketImpls(SEMI_HEATS),
       event: BRACKET_EVENT
     });
     render(EventRounds, { session });
 
-    // The bracket container groups the chain (header + tree + the nested level cards).
-    const panel = (await screen.findByLabelText(/Bracket — Pro/i)) as HTMLElement;
-    // The Semifinals level shows (both as the tree column and the nested level card — at least once).
+    // The bracket tree now lives in its own Tournaments card (not folded into the Heats list).
+    const tournaments = (await screen.findByRole('heading', { name: 'Tournaments' })).closest(
+      'section'
+    )!;
+    const panel = (await within(tournaments).findByLabelText(/Bracket — Pro/i)) as HTMLElement;
+    // The Semifinals level shows as a tree column inside the container.
     expect(within(panel).getAllByText('Semifinals').length).toBeGreaterThan(0);
+  });
+
+  it('shows each bracket level as a flat round card in the Heats card', async () => {
+    const { session } = makeTestSession({
+      ...bracketImpls(SEMI_HEATS),
+      event: BRACKET_EVENT
+    });
+    render(EventRounds, { session });
+
+    // The Heats card now lists every round flat — the bracket level is a normal heat card there,
+    // titled by its (full) round label, not folded inside a bracket container.
+    const heatsCard = (await screen.findByRole('heading', { name: 'Heats' })).closest('section')!;
+    expect(within(heatsCard).getByText('Pro — Semifinals')).toBeInTheDocument();
+    // The bracket container itself is NOT in the Heats card (it moved to Tournaments).
+    expect(within(heatsCard).queryByLabelText(/Bracket — Pro/i)).toBeNull();
+  });
+
+  it('shows an empty Tournaments card when no bracket has been built', async () => {
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [] as HeatSummary[]),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const tournaments = (await screen.findByRole('heading', { name: 'Tournaments' })).closest(
+      'section'
+    )!;
+    expect(
+      within(tournaments).getByText(/Build a tournament to see its bracket here/i)
+    ).toBeInTheDocument();
   });
 
   it('does not offer "Advance to bracket" on a bracket level (it is already part of a chain)', async () => {
