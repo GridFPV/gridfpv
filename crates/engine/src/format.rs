@@ -539,10 +539,10 @@ impl FormatRegistry {
                 name: "double_elim".into(),
                 params: vec![FormatParam::boolean("bracket_reset", "Bracket reset", "1")],
             },
-            FormatSchema {
-                name: "multi_main".into(),
-                params: vec![FormatParam::number("main_size", "Main size", "4")],
-            },
+            // NOTE: multi_main shelved (a bracket-style finals format) — registered in
+            // [`standard`](Self::standard) so persisted `multi_main` rounds still validate/replay, but
+            // omitted from the offered set so the Rounds UI can't add one until it gets a proper
+            // finals builder (the per-main final-type work is deferred).
             // Open practice (open-practice format): one open heat over the active channels, no
             // config knobs (the active channels are the field, carried by the round's seeding —
             // see [`OpenPractice`]). Kept in sorted name order (after `multi_main`, before
@@ -1289,7 +1289,6 @@ mod tests {
             vec![
                 "chase_the_ace",
                 "double_elim",
-                "multi_main",
                 "open_practice",
                 "round_robin",
                 "single_elim",
@@ -1306,6 +1305,10 @@ mod tests {
         );
         // …yet it remains registered, so it's the offered set that shrank, not the registry.
         assert!(FormatRegistry::standard().contains("zippyq"));
+        // multi_main is likewise shelved — registered (persisted rounds load) but not offered, until
+        // it gets a proper finals builder.
+        assert!(!offered.contains(&"multi_main"));
+        assert!(FormatRegistry::standard().contains("multi_main"));
         // Chase the Ace IS offered (it carries a param schema for the editor) but the Rounds UI
         // shows it only as a final-level format — the general round picker filters it out client-side.
         assert!(offered.contains(&"chase_the_ace"));
