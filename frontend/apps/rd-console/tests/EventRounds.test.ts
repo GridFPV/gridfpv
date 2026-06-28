@@ -48,30 +48,54 @@ const EVENT: EventMeta = {
 };
 
 // The offered format set (`GET /formats`) — ZippyQ is shelved (#218) so it is **not** offered.
-const FORMATS = ['double_elim', 'multi_main', 'round_robin', 'single_elim', 'timed_qual'];
+const FORMATS = [
+  'double_elim',
+  'head_to_head',
+  'multi_main',
+  'round_robin',
+  'single_elim',
+  'timed_qual'
+];
 
 // The format param schemas the screen reads (`GET /formats`). `timed_qual` declares its `rounds`
 // param labelled **"Heats per pilot"** (the qualifying-metric param is gone — the metric is derived
-// from the win condition) plus a synthetic enum `tiebreak` to exercise enum-field rendering; the
-// rest declare none, so they show no Format options section. Params surface inline as proper labeled
-// fields (Rounds form redesign item 4).
-const SCHEMAS = FORMATS.map((name) =>
-  name === 'timed_qual'
-    ? {
-        name,
-        params: [
-          { key: 'rounds', label: 'Heats per pilot', kind: 'number' as const, default: '3' },
-          {
-            key: 'tiebreak',
-            label: 'Tiebreak',
-            kind: 'enum' as const,
-            options: ['best_lap', 'count_back'],
-            default: 'best_lap'
-          }
-        ]
-      }
-    : { name, params: [] }
-);
+// from the win condition) plus a synthetic enum `tiebreak` to exercise enum-field rendering;
+// `head_to_head` declares group size + a scoring enum (the points table is authored by a dedicated
+// editor, not a generic param); the rest declare none, so they show no Format options section. Params
+// surface inline as proper labeled fields (Rounds form redesign item 4).
+const SCHEMAS = FORMATS.map((name) => {
+  if (name === 'timed_qual') {
+    return {
+      name,
+      params: [
+        { key: 'rounds', label: 'Heats per pilot', kind: 'number' as const, default: '3' },
+        {
+          key: 'tiebreak',
+          label: 'Tiebreak',
+          kind: 'enum' as const,
+          options: ['best_lap', 'count_back'],
+          default: 'best_lap'
+        }
+      ]
+    };
+  }
+  if (name === 'head_to_head') {
+    return {
+      name,
+      params: [
+        { key: 'group_size', label: 'Group size', kind: 'number' as const, default: '2' },
+        {
+          key: 'scoring',
+          label: 'Scoring',
+          kind: 'enum' as const,
+          options: ['placement', 'points'],
+          default: 'placement'
+        }
+      ]
+    };
+  }
+  return { name, params: [] };
+});
 
 const CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
@@ -110,9 +134,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     const impls = baseImpls();
     const created: RoundDef = {
       id: 'r2',
-      label: 'RR Heats',
+      label: 'H2H Heats',
       classes: ['c1', 'c2'],
-      format: 'round_robin',
+      format: 'head_to_head',
       params: {},
       win_condition: 'BestLap',
       seeding: 'FromRoster',
@@ -133,9 +157,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
 
     await fireEvent.input(await screen.findByLabelText('Label'), {
-      target: { value: 'RR Heats' }
+      target: { value: 'H2H Heats' }
     });
-    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'round_robin' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
     // The eligible class is a single-select dropdown (Rounds form redesign item 6).
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
     await fireEvent.change(screen.getByLabelText('Win condition'), {
@@ -152,17 +176,17 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(eventId).toBe('e1');
     // The single-select class stores a one-element `classes` list.
     expect(req).toMatchObject({
-      label: 'RR Heats',
+      label: 'H2H Heats',
       classes: ['c1'],
-      format: 'round_robin',
+      format: 'head_to_head',
       win_condition: 'BestLap',
       seeding: 'FromRoster'
     });
-    // Best-lap qualifying carries its race time as the round time limit (so it can't run forever).
+    // Best-lap carries its race time as the round time limit (so it can't run forever).
     expect(req.time_limit_secs).toBe(90);
     // The new round appears in the Rounds list (its label also seeds the Heats section).
     const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
-    await within(roundsCard).findByText('RR Heats');
+    await within(roundsCard).findByText('H2H Heats');
   });
 
   it('reveals the FromRanking source-rounds multi-select (+ top N) and authors it', async () => {
@@ -377,7 +401,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(req.params).toEqual({ rounds: '5', tiebreak: 'count_back' });
   });
 
-  it('shows no Format options section for a format that declares no params', async () => {
+  it('re-seeds the Format options when switching formats — dropping stale prior-format params', async () => {
     const impls = baseImpls();
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
     const { session } = makeTestSession({
@@ -389,19 +413,25 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Q' } });
-    // zippyq declares no params → no params fields show, and switching away from timed_qual drops
-    // its params from the submitted request.
+    // timed_qual shows its "Heats per pilot" param…
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
     expect(await screen.findByLabelText('Heats per pilot value')).toBeInTheDocument();
-    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'zippyq' } });
+    // …switching to Head-to-Head re-seeds the params: the timed_qual param is gone, replaced by the
+    // head_to_head params (Group size), and the stale timed_qual params don't reach the request.
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
     await waitFor(() =>
       expect(screen.queryByLabelText('Heats per pilot value')).not.toBeInTheDocument()
     );
+    expect(await screen.findByLabelText('Group size value')).toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
-    expect(createRoundImpl.mock.calls[0][2].params).toEqual({});
+    // Only head_to_head's params (its schema defaults), not timed_qual's rounds/tiebreak.
+    expect(createRoundImpl.mock.calls[0][2].params).toEqual({
+      group_size: '2',
+      scoring: 'placement'
+    });
   });
 
   it('defaults the channel-mode toggle to Per-heat on a new round and carries the choice', async () => {
@@ -448,17 +478,65 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(options).not.toContain('FirstToLaps');
   });
 
-  it('shows the First-to-N win condition for a non-qualifying (bracket) format', async () => {
-    // A bracket format keeps the full win-condition catalogue, including First-to-N laps.
+  it('shows the First-to-N win condition for a non-qualifying (head-to-head) format', async () => {
+    // A racing (non-qualifying) format keeps the full win-condition catalogue, including First-to-N.
     const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Mains' } });
-    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'single_elim' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
 
     const win = (await screen.findByLabelText('Win condition')) as HTMLSelectElement;
     expect(Array.from(win.options).map((o) => o.value)).toContain('FirstToLaps');
+  });
+
+  it('Add-round offers only the three round types — not tournament structures (D17 taxonomy)', async () => {
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    const fmt = (await screen.findByLabelText('Format')) as HTMLSelectElement;
+    const opts = Array.from(fmt.options).map((o) => o.value);
+    // The directly-addable round types are offered…
+    expect(opts).toContain('head_to_head');
+    expect(opts).toContain('timed_qual');
+    // …tournament structures are composed via the builder, never added directly.
+    expect(opts).not.toContain('round_robin');
+    expect(opts).not.toContain('single_elim');
+    expect(opts).not.toContain('double_elim');
+    expect(opts).not.toContain('multi_main');
+  });
+
+  it('head-to-head Points scoring shows the per-position points editor and submits the table', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'H2H' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+
+    // Placement scoring (the default) shows no points editor…
+    expect(screen.queryByLabelText('Points for 1st place')).toBeNull();
+    // …switching to Points reveals the per-position editor seeded with the MultiGP-style default.
+    await fireEvent.change(screen.getByLabelText('Scoring value'), { target: { value: 'points' } });
+    const first = (await screen.findByLabelText('Points for 1st place')) as HTMLInputElement;
+    expect(first.value).toBe('10');
+    // Edit the win value to a steeper 25.
+    await fireEvent.input(first, { target: { value: '25' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const req = createRoundImpl.mock.calls[0][2];
+    expect(req.format).toBe('head_to_head');
+    expect(req.params.scoring).toBe('points');
+    expect(req.params.points).toBe('25, 6, 4, 3, 2, 1');
   });
 
   it('shows the rounds param as "Heats per pilot" for a qualifying format', async () => {
