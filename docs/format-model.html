@@ -33,6 +33,19 @@
       </p>
     </div>
 
+    <div class="callout">
+      <p>
+        <strong>Core tenet — all racing is built from atomic formats.</strong> The three round types
+        (Practice, Time Trial, Head-to-Head) are the <em>building blocks</em>; a <strong>tournament
+        structure</strong> (round-robin, single/double elimination, multi-main, …) never reimplements
+        racing — it <strong>composes atomic format rounds</strong> to build its structure. The
+        workflow is: <em>build the formats, then a structure leverages those formats to assemble
+        itself.</em> The engine is refactored to honour this — one racing generator (Head-to-Head),
+        with structures driving it — rather than a silo generator per structure. This is a key tenet
+        of how we build, not just a format menu.
+      </p>
+    </div>
+
     <h2>1 · Three round types</h2>
     <p>The Add-round picker offers exactly these. Everything an RD flies is one of them:</p>
     <table>
@@ -115,24 +128,31 @@
       <li><strong>Double Elimination, Multi-Main, Chase-the-Ace final</strong> = further structures over Head-to-Head — deferred (single-elim first).</li>
     </ul>
 
-    <h2>5 · Mapping to the engine we have</h2>
+    <h2>5 · Engine refactor (structures compose the building block)</h2>
     <p>
-      The engine keeps its generators as the <em>mechanics</em>; this is mostly a re-framing of the
-      RD-facing vocabulary over them:
+      Honouring the core tenet, the engine is <strong>refactored</strong> rather than re-labelled: one
+      racing generator (<strong>Head-to-Head</strong>) becomes the building block, and the bespoke
+      per-structure generators dissolve into <em>Head-to-Head + composition</em>:
     </p>
     <ul>
-      <li><strong>Time Trial</strong> ≈ <code>timed_qual</code> (relabel; Best-Lap → Best-of-N).</li>
-      <li><strong>Head-to-Head + Points</strong> ≈ <code>round_robin</code> + a configurable points table.</li>
-      <li><strong>Head-to-Head + Placement</strong> ≈ <code>single_elim</code> (the bracket builder already chains these).</li>
-      <li><strong>Practice</strong> ≈ <code>open_practice</code> (+ an optional class name).</li>
-      <li><code>multi_main</code> / <code>double_elim</code> / <code>chase_the_ace</code> stay registered as structures/finals, surfaced only through builders — not in the Add-round picker.</li>
+      <li><strong>Head-to-Head</strong> — the new atomic racing generator: group size, per-heat win condition, scoring (Points with a custom table / Placement). It races a field and ranks it — nothing else.</li>
+      <li><strong>Round Robin</strong> — recomposed: the rotation + points aggregation that lives in <code>round_robin</code> today becomes a structure driving Head-to-Head (all-play-all passes, Points). <code>round_robin</code> is retired into this composition.</li>
+      <li><strong>Single-Elim Bracket</strong> — recomposed: a chain of Head-to-Head (group 2, Placement) rounds; the 1-v-8 pairing becomes <em>seeding the builder applies</em> and "winners advance" is the existing <code>FromHeatWinners</code> carry. <code>single_elim</code>'s bespoke pairing/advancement folds into Head-to-Head + the builder.</li>
+      <li><strong>Time Trial</strong> ≈ <code>timed_qual</code> (relabel; Best-Lap → Best-of-N). <strong>Practice</strong> ≈ <code>open_practice</code> (+ optional class name).</li>
+      <li><strong>Double-Elim / Multi-Main / Chase-the-Ace</strong> — further structures over Head-to-Head (Chase-the-Ace is already structure-shaped: repeated Head-to-Head races, first-to-N wins).</li>
     </ul>
+    <p class="note">
+      Net: the structures <em>leverage the atomic formats</em> to assemble themselves, exactly per the
+      tenet — the engine ends with one racing mechanic plus composition, not a silo per structure.
+    </p>
 
     <h2 id="rollout">6 · Rollout</h2>
     <ol>
-      <li><strong>Bracket win-condition picker</strong> — the "Advance to bracket" modal picks one win condition for all the bracket's heats (default First-to-N; option Most-laps). Small, independent.</li>
-      <li><strong>Head-to-Head round format</strong> — a directly-addable racing round: group size, per-heat win condition, scoring (Points with a custom table, or Placement). This is what round-robin and brackets sit on.</li>
-      <li><strong>Taxonomy collapse</strong> — Add-round becomes Practice / Time Trial / Head-to-Head; Time Trial → Best-of-N; round-robin/single-elim move under Head-to-Head + structures; Practice gains the class name.</li>
+      <li><strong>Bracket win-condition picker</strong> — the "Advance to bracket" modal picks one win condition for all the bracket's heats (default First-to-N; option Most-laps). <em>Shipped.</em></li>
+      <li><strong>Head-to-Head building-block generator</strong> — the atomic racing format: group size, per-heat win condition, scoring (Points with a custom table, or Placement). Built first, because the structures compose it.</li>
+      <li><strong>Recompose Round Robin</strong> over Head-to-Head (all-play-all + Points), retiring the bespoke <code>round_robin</code> generator.</li>
+      <li><strong>Recompose the Bracket</strong> over Head-to-Head (Placement + seeding + the existing FromHeatWinners chain), folding away <code>single_elim</code>.</li>
+      <li><strong>Taxonomy collapse</strong> — Add-round becomes Practice / Time Trial / Head-to-Head; Time Trial → Best-of-N; Practice gains the class name; the structures are reached only through builders.</li>
     </ol>
     <p>
       User-facing docs (the guide's <em>Formats</em> page) track <em>shipped</em> behaviour, so they are
