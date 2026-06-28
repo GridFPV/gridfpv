@@ -17,6 +17,7 @@ pub mod scoring;
 // Concrete formats on the `format::Generator` interface (#33/#34/#35).
 pub mod chase_the_ace;
 pub mod double_elim;
+pub mod head_to_head;
 pub mod multi_main;
 pub mod round_robin;
 pub mod single_elim;
