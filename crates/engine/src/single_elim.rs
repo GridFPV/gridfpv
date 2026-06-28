@@ -21,8 +21,9 @@
 //!    order this still produces a deterministic, stable pairing.)
 //! 3. **Chunk into heats.** The bracket order is split into heats of `heat_size` competitors
 //!    (default **2**, i.e. head-to-head; set `heat_size=4` for 4-up heats). Each heat advances
-//!    its **top half** (`heat_size / 2`, at least one): head-to-head advances the winner; a
-//!    4-up heat advances its top two.
+//!    `advance` competitors (default `heat_size / 2`, at least one): head-to-head advances the
+//!    winner; a 4-up heat advances its top two by default, or set `advance=1` to advance only the
+//!    winner of each 4-up heat.
 //!
 //! The generator emits exactly that one level's heats, then declares the level
 //! [`Complete`](GeneratorStep::Complete). There is **no** next-level layout inside it; the next
@@ -66,9 +67,11 @@ use crate::scoring::HeatResult;
 pub struct SingleElim {
     /// The field in seed/draw order (the recorded [`SeedingOutcome`] already applied).
     field: Vec<CompetitorRef>,
-    /// Competitors per heat (default 2 = head-to-head). Each heat advances its top half
-    /// (`heat_size / 2`, at least one).
+    /// Competitors per heat (default 2 = head-to-head). Each heat advances `advance` competitors.
     heat_size: usize,
+    /// How many competitors advance out of each heat (at least one). Defaults to the top half
+    /// (`heat_size / 2`); the RD can override it (e.g. a 4-up heat advancing only the top 1).
+    advance: usize,
 }
 
 impl SingleElim {
@@ -78,18 +81,29 @@ impl SingleElim {
     /// Build over a `field` in seed order with the given `heat_size` (clamped to a minimum of
     /// 2 — a heat needs at least two competitors to eliminate anyone).
     pub fn new(field: Vec<CompetitorRef>, heat_size: usize) -> Self {
+        let heat_size = heat_size.max(2);
         Self {
             field,
-            heat_size: heat_size.max(2),
+            heat_size,
+            advance: (heat_size / 2).max(1),
         }
     }
 
-    /// The registry constructor: applies the recorded `seeding` draw to `field` and reads the
-    /// optional `heat_size` param (default 2 = head-to-head).
+    /// Override how many competitors advance out of each heat (clamped to a minimum of 1 — a heat
+    /// must advance someone). Defaults to `heat_size / 2`.
+    pub fn with_advance(mut self, advance: usize) -> Self {
+        self.advance = advance.max(1);
+        self
+    }
+
+    /// The registry constructor: applies the recorded `seeding` draw to `field`, reads the optional
+    /// `heat_size` param (default 2 = head-to-head) and the optional `advance` param (how many
+    /// advance per heat, default `heat_size / 2`).
     pub fn from_config(config: &FormatConfig) -> Box<dyn Generator> {
         let field = config.seeding.apply(&config.field);
         let heat_size = config.param_usize("heat_size", 2);
-        Box::new(Self::new(field, heat_size))
+        let advance = config.param_usize("advance", heat_size / 2);
+        Box::new(Self::new(field, heat_size).with_advance(advance))
     }
 
     /// Register this format under [`NAME`](Self::NAME).
@@ -97,10 +111,12 @@ impl SingleElim {
         registry.register(Self::NAME, Self::from_config);
     }
 
-    /// How many competitors advance out of a heat of `n` competitors: the top half, at least
-    /// one. (Head-to-head → 1; 4-up → 2; a short 3-up chunk → 1.)
+    /// How many competitors advance out of a heat of `n` competitors: the configured `advance`,
+    /// clamped so at least one advances, at least one is eliminated, and never more than `n`.
+    /// (Head-to-head → 1; a 4-up heat with `advance=2` → 2, with `advance=1` → 1; a short chunk
+    /// shorter than `advance` advances all but one.)
     fn advance_count(&self, n: usize) -> usize {
-        (self.heat_size / 2).min(n.saturating_sub(1)).max(1).min(n)
+        self.advance.min(n.saturating_sub(1)).max(1).min(n)
     }
 
     /// The heat id for heat `index` (0-based) of this level. A single level numbers its heats
@@ -435,6 +451,84 @@ mod tests {
         assert_eq!(&names(&ranking)[..4], &["2", "1", "4", "5"]);
         assert_eq!(ranking[0].position, 1);
         assert_eq!(ranking[3].position, 4);
+    }
+
+    #[test]
+    fn four_up_level_with_advance_one_advances_only_the_winner() {
+        // A 4-up heat with `advance=1`: only the heat winner progresses; the other three are
+        // eliminated. With 8 seeds + 4-up, two heats each yield one advancer → 2 advance overall.
+        let mut g =
+            SingleElim::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]), 4).with_advance(1);
+        let _ = g.next(&[]);
+        let completed = vec![
+            CompletedHeat::new(
+                "se-h0",
+                result(&[("2", 1, 6), ("1", 2, 5), ("8", 3, 4), ("7", 4, 3)]),
+            ),
+            CompletedHeat::new(
+                "se-h1",
+                result(&[("4", 1, 6), ("5", 2, 5), ("3", 3, 4), ("6", 4, 3)]),
+            ),
+        ];
+        assert_eq!(g.next(&completed), GeneratorStep::Complete);
+        let ranking = g.ranking(&completed);
+        // Only the two heat winners (2, then 4 in heat order) advance — exactly `advance` per heat.
+        assert_eq!(&names(&ranking)[..2], &["2", "4"]);
+        assert_eq!(ranking[0].position, 1);
+        assert_eq!(ranking[1].position, 2);
+        // The remaining six are eliminated (band 1) — three per heat.
+        assert!(ranking[2].position >= 3);
+    }
+
+    #[test]
+    fn advance_defaults_to_half_the_heat_size_when_no_param() {
+        // No `advance` param → default `heat_size / 2`: a 4-up heat advances its top two.
+        let cfg = FormatConfig::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]))
+            .with_param("heat_size", "4");
+        let mut g = SingleElim::from_config(&cfg);
+        let _ = g.next(&[]);
+        let completed = vec![
+            CompletedHeat::new(
+                "se-h0",
+                result(&[("2", 1, 6), ("1", 2, 5), ("8", 3, 4), ("7", 4, 3)]),
+            ),
+            CompletedHeat::new(
+                "se-h1",
+                result(&[("4", 1, 6), ("5", 2, 5), ("3", 3, 4), ("6", 4, 3)]),
+            ),
+        ];
+        assert_eq!(g.next(&completed), GeneratorStep::Complete);
+        // Default advance (heat_size/2 = 2) → top two of each heat: 2,1,4,5 in heat order.
+        assert_eq!(&names(&g.ranking(&completed))[..4], &["2", "1", "4", "5"]);
+    }
+
+    #[test]
+    fn registry_reads_the_advance_param() {
+        let mut registry = FormatRegistry::new();
+        SingleElim::register(&mut registry);
+        // 4-up heats but advance=1: each heat carries exactly one to the next level.
+        let cfg = FormatConfig::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]))
+            .with_param("heat_size", "4")
+            .with_param("advance", "1");
+        let g = registry.build(SingleElim::NAME, &cfg).unwrap();
+        let completed = vec![
+            CompletedHeat::new(
+                "se-h0",
+                result(&[("2", 1, 6), ("1", 2, 5), ("8", 3, 4), ("7", 4, 3)]),
+            ),
+            CompletedHeat::new(
+                "se-h1",
+                result(&[("4", 1, 6), ("5", 2, 5), ("3", 3, 4), ("6", 4, 3)]),
+            ),
+        ];
+        // The FromHeatWinners carry = the advancers band: exactly one per heat (2, then 4).
+        let advancers: Vec<String> = g
+            .ranking(&completed)
+            .iter()
+            .take(2)
+            .map(|e| e.competitor.0.clone())
+            .collect();
+        assert_eq!(advancers, vec!["2", "4"]);
     }
 
     #[test]

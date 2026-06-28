@@ -28,6 +28,7 @@ import type { Bracket, BracketMatch, BracketRound } from '@gridfpv/components';
 import type { CompetitorRef, HeatSummary, RoundDef, RoundId, SeedingRule } from '@gridfpv/types';
 
 import { isBracketFormat } from './formats.js';
+import { bracketLevelFields } from './standings.js';
 
 /** The `source_round` a `FromHeatWinners` seeding points at, or `undefined` for any other rule. */
 export function heatWinnersSource(seeding: SeedingRule): RoundId | undefined {
@@ -102,16 +103,28 @@ export function isLevelComplete(roundId: RoundId, heats: HeatSummary[]): boolean
  * @param heats the scheduled heats (lineups + phases).
  * @param label resolve a `CompetitorRef` to a display string (callsign).
  * @param champion the overall bracket winner, marked on the final's heat when known.
+ * @param levelOneField the seed count entering level 1 (the bracket size / roster size). With
+ *   `heatSize` this derives the expected match count per level, so a built-ahead bracket renders
+ *   every level — empty seats reading as "TBD" — not just the levels whose heats already exist.
+ * @param heatSize the pilots per heat the bracket groups on (`single_elim`'s `heat_size`).
+ * @param advance how many advance out of each heat (`single_elim`'s `advance`); shapes the geometry.
  */
 export function buildBracketView(
   root: RoundDef,
   rounds: RoundDef[],
   heats: HeatSummary[],
   label: (ref: CompetitorRef) => string,
-  champion?: CompetitorRef
+  champion: CompetitorRef | undefined,
+  levelOneField: number,
+  heatSize: number,
+  advance: number = Math.max(1, Math.floor(heatSize / 2))
 ): Bracket {
   const chain = bracketChainRounds(root, rounds);
   const levels = chain.map((r) => ({ round: r, heats: heatsOf(r.id, heats) }));
+  // The geometry of the whole bracket: the field entering each level, so a level with no (or fewer)
+  // heats yet still renders the right number of (TBD) matches.
+  const fields = bracketLevelFields(levelOneField, heatSize, advance);
+  const slotsPerMatch = Math.max(2, Math.floor(heatSize));
 
   const bracketRounds: BracketRound[] = levels.map((level, li) => {
     // The set of competitors seated in the NEXT level — anyone here who is there advanced.
@@ -120,7 +133,8 @@ export function buildBracketView(
     );
     const isFinalLevel = li === levels.length - 1;
 
-    const matches: BracketMatch[] = level.heats.map((h) => ({
+    // The real heats this level already has, with winners inferred as before.
+    const realMatches: BracketMatch[] = level.heats.map((h) => ({
       heat: h.heat,
       slots: h.lineup.map((ref) => ({
         competitor: ref,
@@ -128,6 +142,18 @@ export function buildBracketView(
         winner: isFinalLevel ? champion !== undefined && ref === champion : nextLineups.has(ref)
       }))
     }));
+
+    // How many matches this level should ultimately hold (from the bracket geometry). Falls back to
+    // the real heat count when the geometry doesn't reach this level (an unexpected extra level).
+    const expectedMatches =
+      fields[li] !== undefined ? Math.ceil((fields[li] ?? 0) / slotsPerMatch) : realMatches.length;
+
+    // Pad with placeholder (TBD) matches up to the expected count: a level with no/fewer heats yet
+    // still shows its shape, each empty slot ({}) rendering as "TBD".
+    const matches: BracketMatch[] = [...realMatches];
+    for (let m = matches.length; m < expectedMatches; m++) {
+      matches.push({ heat: undefined, slots: Array.from({ length: slotsPerMatch }, () => ({})) });
+    }
 
     // The tree column shows just the level name (e.g. "Quarterfinals"), stripping the bracket-name
     // prefix that the level's round label carries ("‹Bracket› — ‹Level›") — the container header
