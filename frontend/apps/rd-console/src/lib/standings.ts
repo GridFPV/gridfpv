@@ -79,9 +79,9 @@ export function advanceRoundReq(
   source: RoundDef,
   topN: number,
   label: string,
+  winCondition: WinCondition,
   final?: BracketFinal
 ): NewRoundReq {
-  const win_condition: WinCondition = source.win_condition;
   // `final` applies only when this round IS the final (a 2-up bracket's single level); otherwise it
   // is a normal single_elim level.
   const { format, params } = withFinal({ format: 'single_elim', params: {} }, final);
@@ -90,11 +90,9 @@ export function advanceRoundReq(
     classes: [...source.classes],
     format,
     params,
-    win_condition,
-    // Carry the source's race time too: a bracket inherits the qual's win condition, and a
-    // ranking-only condition (Best Lap / Best N Consecutive) needs a time limit to end its heats —
-    // without it the server rejects the round (a scored round must be able to end).
-    time_limit_secs: source.time_limit_secs,
+    // The bracket's chosen win condition decides every heat (First-to-N / Most-laps-in-N-min), not the
+    // qual's ranking metric. Both self-terminate, so no separate race time is needed.
+    win_condition: winCondition,
     seeding: {
       // Advancing one round seeds the bracket from that single round (issue #51: `source_rounds` is
       // a list — a one-element list here; the Rounds form lets the RD add more sources after).
@@ -121,7 +119,12 @@ export function advanceRoundLabel(source: RoundDef): string {
  * `{ format: 'chase_the_ace', winsToWin }` for a multi-race Chase-the-Ace final. A Chase-the-Ace
  * level carries only its `wins_to_win` param (its field is the seeded finalists, not heat-sized).
  */
-export function advanceLevelReq(level: RoundDef, label: string, final?: BracketFinal): NewRoundReq {
+export function advanceLevelReq(
+  level: RoundDef,
+  label: string,
+  winCondition: WinCondition,
+  final?: BracketFinal
+): NewRoundReq {
   const { format, params } = withFinal(
     { format: level.format, params: { ...(level.params ?? {}) } },
     final
@@ -131,10 +134,9 @@ export function advanceLevelReq(level: RoundDef, label: string, final?: BracketF
     classes: [...level.classes],
     format,
     params,
-    win_condition: level.win_condition,
-    // Carry the level's race time forward too, so a ranking-only win condition still ends its
-    // heats (a scored round must be able to end — server validation).
-    time_limit_secs: level.time_limit_secs,
+    // Every bracket level shares the bracket's win condition (set once in the builder); it
+    // self-terminates, so no race time is carried.
+    win_condition: winCondition,
     seeding: { FromHeatWinners: { source_round: level.id } },
     channel_mode: level.channel_mode
   };

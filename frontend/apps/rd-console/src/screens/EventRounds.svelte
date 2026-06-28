@@ -342,7 +342,19 @@
   let advanceSize = $state(8);
   let advanceFinalKind = $state<'single' | 'chase'>('single');
   let advanceFinalWins = $state(2);
+  // The bracket's win condition — one for all its heats (each race decided directly): First-to-N
+  // laps (the head-to-head default) or Most laps in N minutes. Both self-terminate (no race time).
+  let advanceWinKind = $state<'FirstToLaps' | 'Timed'>('FirstToLaps');
+  let advanceWinLaps = $state(3);
+  let advanceWinMinutes = $state(2);
   let advancing = $state(false);
+
+  // The bracket's chosen win condition, as a wire WinCondition.
+  function bracketWinCondition(): WinCondition {
+    return advanceWinKind === 'Timed'
+      ? { Timed: { window_micros: Math.max(1, Math.round(advanceWinMinutes * 60 * 1_000_000)) } }
+      : { FirstToLaps: { n: Math.max(1, Math.round(advanceWinLaps)) } };
+  }
 
   // The selectable bracket sizes for the modal's source round — powers of two that fit its field.
   const advanceSizeOptions = $derived(
@@ -360,6 +372,9 @@
     advanceSize = options.length > 0 ? options[options.length - 1] : 0; // largest that fits
     advanceFinalKind = 'single';
     advanceFinalWins = 2;
+    advanceWinKind = 'FirstToLaps';
+    advanceWinLaps = 3;
+    advanceWinMinutes = 2;
     advanceOpen = true;
   }
   function cancelAdvance() {
@@ -383,6 +398,7 @@
     try {
       const levels = Math.round(Math.log2(size)); // size is a power of two
       const useChase = advanceFinalKind === 'chase';
+      const winCondition = bracketWinCondition(); // one win condition for every bracket heat
       // Each level is named "‹Bracket name› — ‹Level›" so multiple brackets in one event stay
       // distinct (the container header shows the name, the tree shows the level).
       const name = advanceName.trim() || 'Bracket';
@@ -398,8 +414,8 @@
             : undefined;
         const req =
           i === 1
-            ? advanceRoundReq(source, size, label, final)
-            : advanceLevelReq(prev, label, final);
+            ? advanceRoundReq(source, size, label, winCondition, final)
+            : advanceLevelReq(prev, label, winCondition, final);
         const created = await session.createRound(req);
         if (!created) {
           toast.info('A control token is required to manage rounds.');
@@ -1813,6 +1829,26 @@
               {/each}
             </Select>
           </Field>
+          <Field label="Win condition" hint="How every bracket heat is decided.">
+            <Select bind:value={advanceWinKind} aria-label="Bracket win condition">
+              <option value="FirstToLaps">First to N laps</option>
+              <option value="Timed">Most laps in N minutes</option>
+            </Select>
+          </Field>
+          {#if advanceWinKind === 'FirstToLaps'}
+            <Field label="Laps">
+              <Input type="number" min="1" bind:value={advanceWinLaps} aria-label="Bracket laps" />
+            </Field>
+          {:else}
+            <Field label="Minutes">
+              <Input
+                type="number"
+                min="1"
+                bind:value={advanceWinMinutes}
+                aria-label="Bracket minutes"
+              />
+            </Field>
+          {/if}
           <Field label="Final format">
             <Select bind:value={advanceFinalKind} aria-label="Final format">
               <option value="single">Single race</option>
