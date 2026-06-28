@@ -1442,6 +1442,78 @@ describe('EventRounds (per-round standings + advance-to-bracket — Slice 5/6b)'
     expect(options).toContain('Top 2');
     expect(options).not.toContain('Top 4');
   });
+
+  it('Build tournament: the header button opens the modal; a class roster builds the FromRoster chain', async () => {
+    const createRoundImpl = chainCreateImpl();
+    const { session, sendSpy } = makeTestSession({
+      ...baseHeatsImpls(),
+      createRoundImpl,
+      event: EVENT_4
+    });
+    render(EventRounds, { session });
+
+    // The standalone Rounds-header button opens the Build tournament modal (distinct from the
+    // per-round "Advance to bracket" button).
+    await fireEvent.click(await screen.findByRole('button', { name: 'Build tournament' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+    // Switching the seed source to a class roster reveals the Class picker (no Source round / size).
+    expect(screen.queryByLabelText('Class')).toBeNull();
+    await fireEvent.change(await screen.findByLabelText('Seed from'), {
+      target: { value: 'class' }
+    });
+    const classPicker = (await screen.findByLabelText('Class')) as HTMLSelectElement;
+    await fireEvent.change(classPicker, { target: { value: 'c1' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Build bracket' }));
+
+    // c1 has 4 members → ceil(log2(4)) = 2 levels. Level 1 seeds FromRoster off the class, carrying
+    // the chosen win condition (First to 3 laps, the default); level 2 (the final) chains
+    // FromHeatWinners of level 1. Both are single_elim and run for the class.
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(2));
+    expect(createRoundImpl.mock.calls[0][2]).toMatchObject({
+      format: 'single_elim',
+      classes: ['c1'],
+      seeding: 'FromRoster',
+      win_condition: { FirstToLaps: { n: 3 } }
+    });
+    expect(createRoundImpl.mock.calls[1][2]).toMatchObject({
+      format: 'single_elim',
+      seeding: { FromHeatWinners: { source_round: 'lvl1' } }
+    });
+    // The roster is ready now, so level 1 fills immediately.
+    await waitFor(() =>
+      expect(sendSpy).toHaveBeenCalledWith({ FillRound: { round: 'lvl1', mode: 'All' } })
+    );
+  });
+
+  it('Build tournament: seeded from a finished round still builds the single_elim FromRanking chain', async () => {
+    const createRoundImpl = chainCreateImpl();
+    const { session } = makeTestSession({
+      ...baseHeatsImpls(),
+      createRoundImpl,
+      event: EVENT_4
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Build tournament' }));
+    // A bracketable round exists, so the modal defaults to the round seed: the Source round picker
+    // is pre-set to r1 and the size defaults to the largest power-of-two that fits the 4-pilot field.
+    const source = (await screen.findByLabelText('Source round')) as HTMLSelectElement;
+    expect(source.value).toBe('r1');
+    expect((screen.getByLabelText('Bracket size') as HTMLSelectElement).value).toBe('4');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Build bracket' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(2));
+    expect(createRoundImpl.mock.calls[0][2]).toMatchObject({
+      format: 'single_elim',
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 4 } }
+    });
+    expect(createRoundImpl.mock.calls[1][2]).toMatchObject({
+      seeding: { FromHeatWinners: { source_round: 'lvl1' } }
+    });
+  });
 });
 
 // ── Bracket level advancement + visualization (#217, decisions D13) ────────────────────────────

@@ -107,6 +107,31 @@ export function advanceRoundLabel(source: RoundDef): string {
 }
 
 /**
+ * Assemble the **first bracket level** seeded straight from a **class roster** — a tournament built
+ * without a qualifying round (Build tournament, seed source = the pilot list). The level is a
+ * `single_elim` round over `classId`, seeded `FromRoster` (the class's members, in roster/seed order),
+ * carrying the bracket's chosen win condition. The generator bracket-pairs the field and byes any odd
+ * seed, so it works for any roster size. `final` applies only when this single level *is* the final
+ * (a 2-pilot roster). The next levels chain off it with {@link advanceLevelReq}.
+ */
+export function rosterRoundReq(
+  classId: string,
+  label: string,
+  winCondition: WinCondition,
+  final?: BracketFinal
+): NewRoundReq {
+  const { format, params } = withFinal({ format: 'single_elim', params: {} }, final);
+  return {
+    label,
+    classes: [classId],
+    format,
+    params,
+    win_condition: winCondition,
+    seeding: 'FromRoster'
+  };
+}
+
+/**
  * Assemble the request for the **next bracket level** advancing `level` produces (#217, decisions
  * D13: one round per level). Unlike {@link advanceRoundReq} (quali → level 1, seeded `FromRanking`),
  * a level → next-level advance reuses the same bracket format and is seeded
