@@ -505,11 +505,15 @@
       <dt>Rationale</dt>
       <dd>Separating <em>racing type</em> from <em>structure</em> (and <em>win condition</em> from
       <em>scoring</em>) matches how RDs reason — "practice / qualify / race", then "how do I bracket
-      them" — and collapses the Add-round menu to three honest choices while the engine keeps its
-      generators as the mechanics underneath. Refines D11 (Time-Trial naming) and reframes D10/D14:
-      Multi-Main and the elim brackets become builder-assembled structures, not menu formats.
-      Rolls out in stages (bracket win-condition picker → Head-to-Head format → taxonomy collapse);
-      until each stage ships the console keeps the legacy names.</dd>
+      them". <strong>Key tenet:</strong> all racing is built from the <strong>atomic formats</strong>;
+      a tournament <strong>structure composes format rounds</strong> to assemble itself and never
+      reimplements racing. The engine is <strong>refactored</strong> to honour this — one racing
+      generator (Head-to-Head), with round-robin / brackets / multi-main / chase-the-ace driving it —
+      rather than a silo generator per structure (so <code>round_robin</code> / <code>single_elim</code>
+      dissolve into Head-to-Head + composition). Refines D11 (Time-Trial naming) and reframes D10/D14.
+      Rolls out: bracket win-condition picker (shipped) → Head-to-Head building block → recompose
+      round-robin → recompose the bracket → taxonomy collapse; the console keeps legacy names until
+      each stage ships. Full spec: <a href="format-model.html">Format Model</a>.</dd>
     </dl>
 
     <footer class="doc-footer">
