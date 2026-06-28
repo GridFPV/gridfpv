@@ -21,7 +21,7 @@ use gridfpv_events::CompetitorRef;
 
 use crate::format::{
     CompletedHeat, FormatConfig, FormatRegistry, Generator, GeneratorStep, HeatPlan, RankEntry,
-    rank_by,
+    parse_points_table, position_points, rank_by,
 };
 
 /// How a Head-to-Head round turns its heats' finishes into a ranking. See the module docs.
@@ -69,7 +69,9 @@ impl HeadToHead {
         let field = config.seeding.apply(&config.field);
         let group_size = config.param_usize("group_size", Self::DEFAULT_GROUP_SIZE);
         let scoring = match config.params.get("scoring").map(String::as_str) {
-            Some("points") => Scoring::Points(parse_points_table(config.params.get("points"))),
+            Some("points") => Scoring::Points(parse_points_table(
+                config.params.get("points").map(String::as_str),
+            )),
             _ => Scoring::Placement,
         };
         Box::new(Self::new(field, group_size, scoring))
@@ -92,18 +94,6 @@ impl HeadToHead {
             .enumerate()
             .map(|(index, chunk)| HeatPlan::new(Self::heat_id(index), chunk.to_vec()))
             .collect()
-    }
-
-    /// The points a finishing `position` (1-based) earns in a heat of `heat_size` under the round's
-    /// scoring table (the linear `heat_size − position + 1` when no explicit table is configured).
-    fn points_for(table: &Option<Vec<u32>>, position: u32, heat_size: usize) -> i64 {
-        match table {
-            Some(t) => t
-                .get((position as usize).saturating_sub(1))
-                .copied()
-                .unwrap_or(0) as i64,
-            None => (heat_size as i64 - position as i64 + 1).max(0),
-        }
     }
 }
 
@@ -141,7 +131,8 @@ impl Generator for HeadToHead {
                     for place in &heat.result.places {
                         *totals
                             .entry(place.competitor.competitor.clone())
-                            .or_insert(0) += Self::points_for(table, place.position, heat_size);
+                            .or_insert(0) +=
+                            position_points(table.as_deref(), place.position, heat_size);
                     }
                 }
                 let rows: Vec<(CompetitorRef, i64)> =
@@ -174,18 +165,6 @@ impl Generator for HeadToHead {
             }
         }
     }
-}
-
-/// Parse a `points` config value — a comma/space-separated per-position list like `"10, 7, 5, 3"` —
-/// into a table. An absent value, or one with no parseable entries, yields `None` (linear fallback).
-fn parse_points_table(value: Option<&String>) -> Option<Vec<u32>> {
-    let raw = value?;
-    let table: Vec<u32> = raw
-        .split([',', ' '])
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.trim().parse::<u32>().ok())
-        .collect();
-    if table.is_empty() { None } else { Some(table) }
 }
 
 /// A trivial 1, 2, 3, … ranking from the seed order — the provisional ranking before any heat is run.

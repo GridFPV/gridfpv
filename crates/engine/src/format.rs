@@ -232,6 +232,34 @@ pub fn bracket_pairs(seeds: &[CompetitorRef]) -> Vec<CompetitorRef> {
     out
 }
 
+/// The **finishing-position points** a `position` (1-based) earns in a heat of `heat_size`, the
+/// shared scoring building block (D17) every points-based structure uses so they all score racing
+/// the same way. With an explicit per-position `table` (1st most, descending; positions past the
+/// table earn 0) the table decides; with no table it falls back to the linear `heat_size − position +
+/// 1` (winner of a `k`-up heat gets `k`, last gets `1`). Never negative.
+pub fn position_points(table: Option<&[u32]>, position: u32, heat_size: usize) -> i64 {
+    match table {
+        Some(t) => t
+            .get((position as usize).saturating_sub(1))
+            .copied()
+            .unwrap_or(0) as i64,
+        None => (heat_size as i64 - position as i64 + 1).max(0),
+    }
+}
+
+/// Parse a per-position **points table** config value — a comma/space-separated list like
+/// `"10, 7, 5, 3"` (index 0 = 1st place) — into a table for [`position_points`]. An absent value, or
+/// one with no parseable entries, yields `None` (the linear fallback). Shared by every points-based
+/// structure so the editable table is read the same way everywhere.
+pub fn parse_points_table(raw: Option<&str>) -> Option<Vec<u32>> {
+    let table: Vec<u32> = raw?
+        .split([',', ' '])
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.trim().parse::<u32>().ok())
+        .collect();
+    if table.is_empty() { None } else { Some(table) }
+}
+
 // --- Recorded outcomes (RE §6) ----------------------------------------------
 
 /// A **recorded** seeding draw: the resolved outcome of a one-time random ordering,

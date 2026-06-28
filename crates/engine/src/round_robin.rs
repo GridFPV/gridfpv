@@ -51,10 +51,13 @@
 //! drives that); the cross-heat **aggregation** ranks pilots by a [`RrMetric`]:
 //!
 //! - [`RrMetric::Points`] (**default**) — finishing-position points, *lower position =
-//!   more points*. A pilot in a heat of `k` scores `k - position + 1` points for that
-//!   heat (the winner of a `k`-pilot heat gets `k`, last gets `1`); points sum across
-//!   all the pilot's heats and **more points = better**. The classic round-robin
-//!   standing: consistently finishing near the front wins.
+//!   more points*. By default a pilot in a heat of `k` scores `k - position + 1` points
+//!   for that heat (the winner of a `k`-pilot heat gets `k`, last gets `1`); points sum
+//!   across all the pilot's heats and **more points = better**. A configurable
+//!   per-position **points table** (the `points` param, e.g. a steep MultiGP-style
+//!   `25,20,16,…`) overrides the linear default via the shared
+//!   [`crate::format::position_points`] — the same editable table every points-based
+//!   structure scores with (D17), so a steep curve can reward winning over consistency.
 //! - [`RrMetric::TotalLaps`] — the sum of laps banked across all the pilot's heats;
 //!   **more laps = better**.
 //!
@@ -70,7 +73,7 @@ use gridfpv_events::CompetitorRef;
 
 use crate::format::{
     CompletedHeat, FormatConfig, FormatRegistry, Generator, GeneratorStep, HeatPlan, RankEntry,
-    rank_by,
+    parse_points_table, position_points, rank_by,
 };
 
 /// Which aggregate the cross-heat ranking ranks pilots by. See the module docs.
@@ -115,6 +118,9 @@ pub struct RoundRobin {
     heat_size: usize,
     /// Which aggregate the cross-heat ranking ranks by.
     metric: RrMetric,
+    /// The per-position points table for [`RrMetric::Points`] (`None` ⇒ the linear `k − pos + 1`
+    /// default). The same editable table every points-based structure uses (D17).
+    points_table: Option<Vec<u32>>,
 }
 
 impl RoundRobin {
@@ -144,7 +150,15 @@ impl RoundRobin {
             // progress; one pilot per heat is the sensible floor.
             heat_size: heat_size.max(1),
             metric,
+            points_table: None,
         }
+    }
+
+    /// Set the per-position points table used by [`RrMetric::Points`] (builder style, so the many
+    /// `new` call-sites stay unchanged). `None` keeps the linear default.
+    pub fn with_points(mut self, table: Option<Vec<u32>>) -> Self {
+        self.points_table = table;
+        self
     }
 
     /// The registry constructor: applies the recorded `seeding` draw to `field`, reads
@@ -156,7 +170,8 @@ impl RoundRobin {
         let rounds = config.param_usize("rounds", Self::DEFAULT_ROUNDS);
         let heat_size = config.param_usize("heat_size", Self::DEFAULT_HEAT_SIZE);
         let metric = RrMetric::parse(config.params.get("metric").map(String::as_str));
-        Box::new(Self::new(field, rounds, heat_size, metric))
+        let points_table = parse_points_table(config.params.get("points").map(String::as_str));
+        Box::new(Self::new(field, rounds, heat_size, metric).with_points(points_table))
     }
 
     /// Register this format under [`NAME`](Self::NAME).
@@ -251,10 +266,14 @@ impl Generator for RoundRobin {
             let heat_size = heat.result.places.len() as i64;
             for place in &heat.result.places {
                 let gain = match self.metric {
-                    // Finishing-position points: a heat of `k` awards `k` to the winner
-                    // (position 1) down to `1` for last (position k). Tied pilots share a
+                    // Finishing-position points from the shared scoring helper: the configured
+                    // per-position table, or the linear `k − pos + 1` default. Tied pilots share a
                     // position and so are awarded the same points.
-                    RrMetric::Points => (heat_size - place.position as i64 + 1).max(0),
+                    RrMetric::Points => position_points(
+                        self.points_table.as_deref(),
+                        place.position,
+                        heat_size as usize,
+                    ),
                     // Total laps banked in this heat.
                     RrMetric::TotalLaps => place.laps as i64,
                 };
@@ -543,6 +562,52 @@ mod tests {
         assert_eq!(ranking[0].position, 1);
         assert_eq!(ranking[3].competitor, cref("D"));
         assert_eq!(ranking[3].position, 4);
+    }
+
+    /// The same three rounds, scored two ways, to prove the editable per-position points table
+    /// actually changes the standings (D17): a steep table rewards wins over consistent seconds, so
+    /// it flips the runner-up. P wins twice, R wins once, Q is second all three rounds.
+    fn three_round_points_fixture() -> Vec<CompletedHeat> {
+        vec![
+            CompletedHeat::new("rr-r1-h1", result(&[("P", 1, 9), ("Q", 2, 8), ("R", 3, 7)])),
+            CompletedHeat::new("rr-r2-h1", result(&[("P", 1, 9), ("Q", 2, 8), ("R", 3, 7)])),
+            CompletedHeat::new("rr-r3-h1", result(&[("R", 1, 9), ("Q", 2, 8), ("P", 3, 7)])),
+        ]
+    }
+
+    #[test]
+    fn points_metric_linear_default_rewards_consistency() {
+        // Linear (heat of 3 → 3/2/1): P=7, Q=6, R=5 → Q's three seconds out-point R's single win.
+        let g = RoundRobin::new(field(&["P", "Q", "R"]), 3, 3, RrMetric::Points);
+        assert_eq!(
+            names(&g.ranking(&three_round_points_fixture())),
+            vec!["P", "Q", "R"]
+        );
+    }
+
+    #[test]
+    fn points_metric_steep_table_rewards_winning() {
+        // Steep table 10/2/1: P=21, R=12, Q=6 → R's win leapfrogs Q's three seconds. The table flips
+        // the runner-up versus the linear default above.
+        let g = RoundRobin::new(field(&["P", "Q", "R"]), 3, 3, RrMetric::Points)
+            .with_points(Some(vec![10, 2, 1]));
+        assert_eq!(
+            names(&g.ranking(&three_round_points_fixture())),
+            vec!["P", "R", "Q"]
+        );
+    }
+
+    #[test]
+    fn config_reads_a_points_table_param() {
+        let cfg = FormatConfig::new(field(&["P", "Q", "R"]))
+            .with_param("rounds", "3")
+            .with_param("heat_size", "3")
+            .with_param("points", "10, 2, 1");
+        let g = RoundRobin::from_config(&cfg);
+        assert_eq!(
+            names(&g.ranking(&three_round_points_fixture())),
+            vec!["P", "R", "Q"]
+        );
     }
 
     #[test]
