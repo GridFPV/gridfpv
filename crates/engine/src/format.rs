@@ -570,6 +570,21 @@ impl FormatRegistry {
                 name: "double_elim".into(),
                 params: vec![FormatParam::boolean("bracket_reset", "Bracket reset", "1")],
             },
+            // Head-to-Head (D17): the atomic racing round type the Add-round picker offers. Group
+            // size + scoring (Placement, or Points — the per-position points table is authored by a
+            // dedicated editor in the round form, not a generic param field).
+            FormatSchema {
+                name: "head_to_head".into(),
+                params: vec![
+                    FormatParam::number("group_size", "Group size", "2"),
+                    FormatParam::enumerated(
+                        "scoring",
+                        "Scoring",
+                        &["placement", "points"],
+                        "placement",
+                    ),
+                ],
+            },
             // NOTE: multi_main shelved (a bracket-style finals format) — registered in
             // [`standard`](Self::standard) so persisted `multi_main` rounds still validate/replay, but
             // omitted from the offered set so the Rounds UI can't add one until it gets a proper
@@ -1321,11 +1336,21 @@ mod tests {
             vec![
                 "chase_the_ace",
                 "double_elim",
+                "head_to_head",
                 "open_practice",
                 "round_robin",
                 "single_elim",
                 "timed_qual",
             ]
+        );
+        // Head-to-Head carries group size + scoring; the points table is authored by the form editor.
+        let h2h = schemas.iter().find(|s| s.name == "head_to_head").unwrap();
+        assert_eq!(
+            h2h.params
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["group_size", "scoring"]
         );
         // Chase the Ace carries its `wins_to_win` param (default 2) for the params editor.
         let cta = schemas.iter().find(|s| s.name == "chase_the_ace").unwrap();

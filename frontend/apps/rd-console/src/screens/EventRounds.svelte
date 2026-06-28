@@ -59,8 +59,9 @@
   import {
     fieldsForFormat,
     formatLabel,
-    isBracketFormat,
+    isHeadToHeadFormat,
     isQualifyingFormat,
+    isRoundTypeFormat,
     OPEN_PRACTICE
   } from '../lib/formats.js';
   import {
@@ -629,13 +630,14 @@
 
   // Bracket formats (single/double elim, Chase the Ace) are built via "Advance to bracket" (the
   // full-chain builder), never added as a standalone round — a bracket level added by hand would be
-  // an orphan (roster-seeded, no chain). So hide them from the Add-round picker. They stay selectable
-  // ONLY when editing an existing bracket round (to adjust a level / switch its final format).
-  // multi_main is NOT a bracket chain (a one-round tiered final), so it stays a normal Add-round format.
+  // The Add-round picker offers only the three round TYPES (Practice / Time Trial / Head-to-Head,
+  // D17). Tournament structures (round-robin, single/double elim, multi-main) are composed from
+  // Head-to-Head via the tournament builder, not added directly — so they never appear here. The
+  // format of an existing non-round-type round stays selectable ONLY while editing that round (to
+  // adjust it), so the dropdown still shows its current format.
   const formatOptions = $derived.by(() => {
     const editingRound = editing !== undefined ? rounds.find((r) => r.id === editing) : undefined;
-    const allowBracket = editingRound !== undefined && isBracketFormat(editingRound.format);
-    return formats.filter((f) => !isBracketFormat(f) || allowBracket);
+    return formats.filter((f) => isRoundTypeFormat(f) || editingRound?.format === f);
   });
 
   let label = $state('');
@@ -659,6 +661,11 @@
   // (or the edited round's stored value). On a format switch the map is re-seeded to the new
   // format's declared params. The wire shape is this same `key → value` map.
   let paramValues = $state<Record<string, string>>({});
+  // The per-position points table for a Head-to-Head **Points** round (1st place first), authored by
+  // the points editor and serialized to the `points` param on submit. A steep MultiGP-style default
+  // the RD can edit/grow/shrink; positions beyond the list score 0.
+  const DEFAULT_POINTS_TABLE = [10, 6, 4, 3, 2, 1];
+  let pointsTable = $state<number[]>([...DEFAULT_POINTS_TABLE]);
   // The round's channel mode (Static = fixed channels / channel-balanced heats; Per-heat = assigned
   // per heat, for brackets). Defaulted by format on the backend; the toggle overrides it.
   let channelMode = $state<ChannelMode>('PerHeat');
@@ -700,6 +707,10 @@
   // conditions (Best lap, Best N consecutive, Timed — Most Laps); First-to-N-laps is not a
   // qualifying metric and is hidden for these formats.
   const isQualifying = $derived(isQualifyingFormat(format));
+  // A Head-to-Head round, and whether it ranks by a points table (vs placement) — the latter drives
+  // the per-position points editor.
+  const isHeadToHead = $derived(isHeadToHeadFormat(format));
+  const h2hPoints = $derived(isHeadToHead && paramValues['scoring'] === 'points');
   const canSubmitOpenPractice = $derived(
     isOpenPractice && label.trim().length > 0 && selectedNodes.size > 0
   );
@@ -772,6 +783,7 @@
     seedTopN = 8;
     selectedNodes = new Set();
     paramValues = {};
+    pointsTable = [...DEFAULT_POINTS_TABLE];
     lastParamFormat = ''; // force the format effect to re-seed the new format's params
     channelMode = 'PerHeat';
     // Heat-lifecycle config defaults — match the engine (5:00 staging, 2.0–5.0s start, 30s grace).
@@ -800,6 +812,7 @@
     // Seed the param values from the round's stored params; the format effect then fills any of the
     // format's declared params this round didn't set from their defaults.
     paramValues = { ...(round.params ?? {}) };
+    pointsTable = parsePointsTable(round.params?.points);
     lastParamFormat = ''; // force the format effect to re-seed against this round's format
     channelMode = round.channel_mode ?? 'PerHeat';
 
@@ -932,7 +945,40 @@
       const value = paramValues[p.key];
       if (value !== undefined) out[p.key] = value;
     }
+    // Head-to-Head Points: serialize the authored points table (1st place first) into the `points`
+    // param the engine scores with. Placement scoring ignores it, so only send it for Points.
+    if (isHeadToHead && paramValues['scoring'] === 'points') {
+      out.points = pointsTable.map((n) => Math.max(0, Math.round(n || 0))).join(', ');
+    }
     return out;
+  }
+
+  // ── Head-to-Head points editor ───────────────────────────────────────────────
+  /** Parse a stored `points` CSV (e.g. "10, 6, 4") into a table; falls back to the default. */
+  function parsePointsTable(csv: string | undefined): number[] {
+    const parsed = (csv ?? '')
+      .split(/[,\s]+/)
+      .filter((s) => s.length > 0)
+      .map((s) => Math.max(0, Math.round(Number(s) || 0)));
+    return parsed.length > 0 ? parsed : [...DEFAULT_POINTS_TABLE];
+  }
+  /** The ordinal label for a finishing position (1 → "1st", 2 → "2nd", …). */
+  function ordinal(n: number): string {
+    const mod100 = n % 100;
+    if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+    const suffix = ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th';
+    return `${n}${suffix}`;
+  }
+  function setPointsAt(index: number, value: string) {
+    const next = [...pointsTable];
+    next[index] = Math.max(0, Math.round(Number(value) || 0));
+    pointsTable = next;
+  }
+  function addPointsRow() {
+    if (pointsTable.length < 16) pointsTable = [...pointsTable, 0];
+  }
+  function removePointsRow() {
+    if (pointsTable.length > 2) pointsTable = pointsTable.slice(0, -1);
   }
 
   // ── Heat-lifecycle config builders (Slice 3) ─────────────────────────────────
@@ -1644,6 +1690,47 @@
         </fieldset>
       {/if}
 
+      <!-- Head-to-Head Points: the per-position points table (item 4 — the editor lives in the
+           Head-to-Head inputs, shown only when Scoring is Points). 1st place first; positions beyond
+           the list score 0. A steep MultiGP-style default the RD can edit and grow/shrink. -->
+      {#if h2hPoints}
+        <fieldset class="config-group">
+          <legend class="config-legend">Points per position</legend>
+          <p class="inline-note">
+            Points awarded by finishing position, summed across the round. Positions beyond the list
+            score 0.
+          </p>
+          <div class="points-editor" role="group" aria-label="Points per position">
+            {#each pointsTable as value, i (i)}
+              <Field label={ordinal(i + 1)}>
+                <Input
+                  type="number"
+                  min="0"
+                  {value}
+                  aria-label={`Points for ${ordinal(i + 1)} place`}
+                  oninput={(e: Event) =>
+                    setPointsAt(i, (e.currentTarget as HTMLInputElement).value)}
+                />
+              </Field>
+            {/each}
+          </div>
+          <div class="points-actions">
+            <Button
+              type="button"
+              variant="ghost"
+              onclick={addPointsRow}
+              disabled={pointsTable.length >= 16}>+ Position</Button
+            >
+            <Button
+              type="button"
+              variant="ghost"
+              onclick={removePointsRow}
+              disabled={pointsTable.length <= 2}>− Position</Button
+            >
+          </div>
+        </fieldset>
+      {/if}
+
       <fieldset class="config-group">
         <legend class="config-legend">Start &amp; timing</legend>
         <div class="form-grid">
@@ -2094,6 +2181,21 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-3);
+  }
+  /* Head-to-Head points editor: a wrapping row of compact per-position number fields, plus the
+     add/remove-position actions beneath. */
+  .points-editor {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-3);
+  }
+  .points-editor :global(.gf-field) {
+    width: 5.5rem;
+  }
+  .points-actions {
+    display: flex;
+    gap: var(--gf-space-2);
+    margin-top: var(--gf-space-2);
   }
   .param-toggle {
     display: inline-flex;

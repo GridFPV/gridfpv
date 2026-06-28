@@ -1405,6 +1405,7 @@ describe('race Slice 2a: rounds', () => {
     expect(schemas.map((s) => s.name)).toEqual([
       'chase_the_ace',
       'double_elim',
+      'head_to_head',
       'open_practice',
       'round_robin',
       'single_elim',

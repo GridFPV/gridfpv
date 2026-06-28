@@ -38,6 +38,20 @@ export function isChaseTheAceFormat(format: string | undefined | null): boolean 
   return format === CHASE_THE_ACE;
 }
 
+/**
+ * The **Head-to-Head** racing format key (D17) — the atomic racing round: a field split into heats of
+ * `group_size`, each won by the round's win condition, then ranked by `scoring` (Placement, or Points
+ * from a per-position table authored in the round form). It is the building block tournament
+ * structures compose; as a directly-addable round it is one of the three round types the Add-round
+ * picker offers.
+ */
+export const HEAD_TO_HEAD = 'head_to_head';
+
+/** Whether a format key is the Head-to-Head racing format. */
+export function isHeadToHeadFormat(format: string | undefined | null): boolean {
+  return format === HEAD_TO_HEAD;
+}
+
 /** Whether a format key is the multi-main finals format. */
 export function isMultiMainFormat(format: string | undefined | null): boolean {
   return format === MULTI_MAIN;
@@ -73,6 +87,20 @@ export function isQualifyingFormat(format: string | undefined | null): boolean {
 }
 
 /**
+ * The three **round types** the Add-round picker offers (D17 taxonomy): Practice ({@link OPEN_PRACTICE}),
+ * Time Trial (`timed_qual`), and Head-to-Head ({@link HEAD_TO_HEAD}). Everything an RD flies directly is
+ * one of these. Tournament *structures* (round-robin, single/double elim, multi-main) are **not** round
+ * types — they are composed from Head-to-Head via the tournament builder, so they never appear in the
+ * Add-round menu (only via editing an existing structure round, or the builder).
+ */
+export const ROUND_TYPE_FORMATS: readonly string[] = [OPEN_PRACTICE, 'timed_qual', HEAD_TO_HEAD];
+
+/** Whether a format key is one of the three directly-addable round types (vs a tournament structure). */
+export function isRoundTypeFormat(format: string | undefined | null): boolean {
+  return !!format && ROUND_TYPE_FORMATS.includes(format);
+}
+
+/**
  * The friendly, human-readable label for each known format key (the engine's
  * `FormatRegistry::standard` names). The form selector, the Rounds list, and the Heats area all
  * render this in place of the raw key while the key stays the stored wire value.
@@ -93,7 +121,8 @@ export const FORMAT_LABELS: Readonly<Record<string, string>> = {
   single_elim: 'Single Elimination',
   double_elim: 'Double Elimination',
   multi_main: 'Multi-Main',
-  chase_the_ace: 'Chase the Ace'
+  chase_the_ace: 'Chase the Ace',
+  head_to_head: 'Head-to-Head'
 };
 
 /**
