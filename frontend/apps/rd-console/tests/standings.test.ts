@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { RoundDef } from '@gridfpv/types';
+import type { RoundDef, WinCondition } from '@gridfpv/types';
 import { advanceRoundLabel, advanceRoundReq, bracketTopNDefault } from '../src/lib/standings.js';
+
+/** The bracket's chosen win condition (one for all heats) — head-to-head default First-to-N. */
+const WIN: WinCondition = { FirstToLaps: { n: 3 } };
 
 describe('bracketTopNDefault — largest power-of-two ≤ field size', () => {
   it('returns the field exactly when it is already a power of two', () => {
@@ -40,29 +43,30 @@ describe('advanceRoundReq — the seeded single_elim payload', () => {
     protest_window: 'Off'
   };
 
-  it('builds a single_elim round seeded FromRanking from the source round, carrying its classes + win condition', () => {
-    const req = advanceRoundReq(SOURCE, 8, 'Qualifying — Bracket');
+  it('builds a single_elim round seeded FromRanking, carrying classes + the bracket win condition', () => {
+    const req = advanceRoundReq(SOURCE, 8, 'Qualifying — Bracket', WIN);
     expect(req).toEqual({
       label: 'Qualifying — Bracket',
       classes: ['c1', 'c2'],
       format: 'single_elim',
       params: {},
-      win_condition: { Timed: { window_micros: 120_000_000 } },
+      // The bracket carries its OWN win condition (set in the builder), not the source's.
+      win_condition: { FirstToLaps: { n: 3 } },
       seeding: { FromRanking: { source_rounds: ['r1'], top_n: 8 } }
     });
   });
 
   it('clamps a non-integer / sub-1 top_n to at least 1', () => {
-    expect(advanceRoundReq(SOURCE, 0, 'x').seeding).toEqual({
+    expect(advanceRoundReq(SOURCE, 0, 'x', WIN).seeding).toEqual({
       FromRanking: { source_rounds: ['r1'], top_n: 1 }
     });
-    expect(advanceRoundReq(SOURCE, 4.7, 'x').seeding).toEqual({
+    expect(advanceRoundReq(SOURCE, 4.7, 'x', WIN).seeding).toEqual({
       FromRanking: { source_rounds: ['r1'], top_n: 5 }
     });
   });
 
   it('does not mutate the source round classes array', () => {
-    const req = advanceRoundReq(SOURCE, 8, 'x');
+    const req = advanceRoundReq(SOURCE, 8, 'x', WIN);
     expect(req.classes).not.toBe(SOURCE.classes);
     expect(req.classes).toEqual(SOURCE.classes);
   });
