@@ -62,7 +62,8 @@
     isHeadToHeadFormat,
     isQualifyingFormat,
     isRoundTypeFormat,
-    OPEN_PRACTICE
+    OPEN_PRACTICE,
+    ROUND_TYPE_FORMATS
   } from '../lib/formats.js';
   import {
     heatDisplayName as sharedHeatDisplayName,
@@ -637,7 +638,14 @@
   // adjust it), so the dropdown still shows its current format.
   const formatOptions = $derived.by(() => {
     const editingRound = editing !== undefined ? rounds.find((r) => r.id === editing) : undefined;
-    return formats.filter((f) => isRoundTypeFormat(f) || editingRound?.format === f);
+    const offered = formats.filter((f) => isRoundTypeFormat(f) || editingRound?.format === f);
+    // Order the round types Open Practice → Time Trials → Head-to-Head (ROUND_TYPE_FORMATS order);
+    // an editing-only structure format (not a round type) sorts after them.
+    const rank = (f: string) => {
+      const i = ROUND_TYPE_FORMATS.indexOf(f);
+      return i < 0 ? ROUND_TYPE_FORMATS.length : i;
+    };
+    return offered.slice().sort((a, b) => rank(a) - rank(b));
   });
 
   let label = $state('');
@@ -774,7 +782,13 @@
     editing = undefined;
     label = '';
     selectedClass = '';
-    format = formats[0] ?? '';
+    // Default a new round to the first offered racing round type (Time Trials), not whatever the
+    // schema list happens to lead with (which may be a filtered-out structure) — so the form always
+    // opens on a selectable round type, and not the special open-practice form.
+    format =
+      ROUND_TYPE_FORMATS.find((f) => f !== OPEN_PRACTICE && formats.includes(f)) ??
+      formats[0] ??
+      '';
     winKind = 'Timed';
     winSeconds = 120;
     winLaps = 3;
