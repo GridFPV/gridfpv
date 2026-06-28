@@ -498,9 +498,9 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     const fmt = (await screen.findByLabelText('Format')) as HTMLSelectElement;
     const opts = Array.from(fmt.options).map((o) => o.value);
-    // The directly-addable round types are offered…
-    expect(opts).toContain('head_to_head');
-    expect(opts).toContain('timed_qual');
+    // Only the directly-addable round types, in taxonomy order (Open Practice → Time Trials →
+    // Head-to-Head); the base mock has no open_practice, so it's timed_qual then head_to_head.
+    expect(opts).toEqual(['timed_qual', 'head_to_head']);
     // …tournament structures are composed via the builder, never added directly.
     expect(opts).not.toContain('round_robin');
     expect(opts).not.toContain('single_elim');
