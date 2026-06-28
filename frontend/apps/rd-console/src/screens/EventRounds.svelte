@@ -556,6 +556,12 @@
 
   // A heat only needs a round + a non-empty lineup; the id is generated, the name is optional.
   const canBuild = $derived(buildRound !== '' && buildSelected.size > 0);
+  // A hand-built heat can hold at most the primary timer's node count — the most pilots it can run at
+  // once. No primary timer ⇒ no cap (the RD will set a timer before running it).
+  const heatNodeCap = $derived(
+    primaryTimer?.node_count && primaryTimer.node_count > 0 ? primaryTimer.node_count : Infinity
+  );
+  const buildAtNodeCap = $derived(buildSelected.size >= heatNodeCap);
 
   // Mint a unique, round-scoped heat id in the readable generator style (`<round>-h-<suffix>`). The
   // suffix is a short random base36 token, and we re-roll on the (vanishingly rare) chance it
@@ -583,7 +589,9 @@
   function toggleMember(pid: PilotId) {
     const next = new Set(buildSelected);
     if (next.has(pid)) next.delete(pid);
-    else next.add(pid);
+    // Don't let the lineup exceed the primary timer's node count — a heat can't run more pilots than
+    // there are nodes.
+    else if (!buildAtNodeCap) next.add(pid);
     buildSelected = next;
   }
 
@@ -622,7 +630,11 @@
   // seeding are kept as discriminator + a couple of numeric knobs, assembled into the wire shapes on
   // submit; each format's declared params are surfaced inline as proper labeled fields (item 4).
 
-  type WinKind = 'Timed' | 'FirstToLaps' | 'BestLap' | 'BestConsecutive';
+  // Win-condition kinds the form authors. `BestOfN` is the converged time-trial metric — best of N
+  // laps, where N = 1 is just the best single lap (it serialises to BestLap on the wire) and N > 1 is
+  // the best N consecutive laps (BestConsecutive). Head-to-Head offers only Timed / FirstToLaps;
+  // qualifying offers only Timed / BestOfN; everything else offers all three.
+  type WinKind = 'Timed' | 'FirstToLaps' | 'BestOfN';
   type SeedKind = 'FromRoster' | 'FromRanking';
 
   let editing = $state<RoundId | undefined>(undefined);
@@ -719,6 +731,22 @@
   // the per-position points editor.
   const isHeadToHead = $derived(isHeadToHeadFormat(format));
   const h2hPoints = $derived(isHeadToHead && paramValues['scoring'] === 'points');
+  // Group size (pilots per heat) is capped at the primary timer's node count — the most pilots a heat
+  // can physically run; default 8 when no primary timer is set yet.
+  const maxGroupSize = $derived(Math.max(2, primaryTimer?.node_count || 8));
+  const groupSizeOptions = $derived(Array.from({ length: maxGroupSize - 1 }, (_, i) => i + 2));
+  // Head-to-Head Points: the points table has exactly one row per finishing position — i.e. group_size
+  // rows. Resize it as the group size changes, keeping entered values and padding new rows with 0.
+  $effect(() => {
+    if (!h2hPoints) return;
+    const n = Math.max(
+      2,
+      Math.min(maxGroupSize, Math.round(Number(paramValues['group_size']) || 2))
+    );
+    if (pointsTable.length !== n) {
+      pointsTable = Array.from({ length: n }, (_, i) => pointsTable[i] ?? 0);
+    }
+  });
   const canSubmitOpenPractice = $derived(
     isOpenPractice && label.trim().length > 0 && selectedNodes.size > 0
   );
@@ -766,12 +794,15 @@
     }
   });
 
-  // Keep the win condition valid for the chosen format: a qualifying format (timed_qual /
-  // round_robin) offers only the qualifying conditions, so if the form is sitting on First-to-N-laps
-  // when a qualifying format is selected, snap it to Best lap (the qualifying default). The win
-  // condition then drives the qualifying ranking metric (Rounds form redesign).
+  // Keep the win condition valid for the chosen format. A qualifying format offers only Timed /
+  // Best-of-N, so snap off First-to-N to Best-of-N. Head-to-Head offers only Timed / First-to-N
+  // (Best-of-N is a time-trial metric, not how you decide a race), so snap off Best-of-N to
+  // First-to-N. The win condition then drives the round's ranking / advancement.
   $effect(() => {
-    if (isQualifying && winKind === 'FirstToLaps') winKind = 'BestLap';
+    if (isQualifying && winKind === 'FirstToLaps') winKind = 'BestOfN';
+  });
+  $effect(() => {
+    if (isHeadToHead && winKind === 'BestOfN') winKind = 'FirstToLaps';
   });
 
   function setParamValue(key: string, value: string) {
@@ -832,7 +863,9 @@
 
     const wc = round.win_condition;
     if (typeof wc === 'string') {
-      winKind = 'BestLap';
+      // 'BestLap' on the wire is Best-of-N with N = 1.
+      winKind = 'BestOfN';
+      winLaps = 1;
     } else if ('Timed' in wc) {
       winKind = 'Timed';
       winSeconds = Math.round(wc.Timed.window_micros / 1_000_000);
@@ -840,12 +873,12 @@
       winKind = 'FirstToLaps';
       winLaps = wc.FirstToLaps.n;
     } else if ('BestConsecutive' in wc) {
-      winKind = 'BestConsecutive';
+      winKind = 'BestOfN';
       winLaps = wc.BestConsecutive.n;
     }
-    // Best-lap / best-consecutive store their race time as the round's time limit (see submit) —
-    // load it back into the Race time field so editing shows it.
-    if ((winKind === 'BestLap' || winKind === 'BestConsecutive') && round.time_limit_secs != null) {
+    // Best-of-N stores its race time as the round's time limit (see submit) — load it back into the
+    // Race time field so editing shows it.
+    if (winKind === 'BestOfN' && round.time_limit_secs != null) {
       winSeconds = Math.round(round.time_limit_secs);
     }
 
@@ -919,11 +952,13 @@
         return { Timed: { window_micros: Math.max(0, Math.round(winSeconds * 1_000_000)) } };
       case 'FirstToLaps':
         return { FirstToLaps: { n: Math.max(1, Math.round(winLaps)) } };
-      case 'BestConsecutive':
-        return { BestConsecutive: { n: Math.max(1, Math.round(winLaps)) } };
-      case 'BestLap':
-      default:
-        return 'BestLap';
+      case 'BestOfN':
+      default: {
+        // Best of N laps: N = 1 is the best single lap (BestLap on the wire); N > 1 is the best N
+        // consecutive laps (BestConsecutive). The engine is unchanged — only the UI converged.
+        const n = Math.max(1, Math.round(winLaps));
+        return n === 1 ? 'BestLap' : { BestConsecutive: { n } };
+      }
     }
   }
 
@@ -987,12 +1022,6 @@
     const next = [...pointsTable];
     next[index] = Math.max(0, Math.round(Number(value) || 0));
     pointsTable = next;
-  }
-  function addPointsRow() {
-    if (pointsTable.length < 16) pointsTable = [...pointsTable, 0];
-  }
-  function removePointsRow() {
-    if (pointsTable.length > 2) pointsTable = pointsTable.slice(0, -1);
   }
 
   // ── Heat-lifecycle config builders (Slice 3) ─────────────────────────────────
@@ -1070,7 +1099,7 @@
       // via its own window; first-to-laps ends on the lap target; open practice uses its minutes field.
       time_limit_secs: isOpenPractice
         ? buildTimeLimitSecs()
-        : winKind === 'BestLap' || winKind === 'BestConsecutive'
+        : winKind === 'BestOfN'
           ? Math.max(1, Math.round(winSeconds))
           : undefined,
       seeding: isOpenPractice
@@ -1116,11 +1145,13 @@
 
   // --- Read-only summaries for the list ----------------------------------------------------------
   function winSummary(wc: WinCondition): string {
+    // Best-of-N display (converged): 'BestLap' on the wire is best of 1 lap; BestConsecutive{n} is
+    // best of N laps.
     if (typeof wc === 'string') return 'Best lap';
     if ('Timed' in wc)
       return `Timed — Most Laps · ${Math.round(wc.Timed.window_micros / 1_000_000)}s`;
     if ('FirstToLaps' in wc) return `First to ${wc.FirstToLaps.n} laps`;
-    if ('BestConsecutive' in wc) return `Best ${wc.BestConsecutive.n} consecutive`;
+    if ('BestConsecutive' in wc) return `Best of ${wc.BestConsecutive.n} laps`;
     return 'Best lap';
   }
 
@@ -1499,12 +1530,13 @@
               {#if !isQualifying}
                 <option value="FirstToLaps">First to N laps</option>
               {/if}
-              <option value="BestLap">Best lap</option>
-              <option value="BestConsecutive">Best N consecutive</option>
+              {#if !isHeadToHead}
+                <option value="BestOfN">Best of N laps</option>
+              {/if}
             </Select>
           </Field>
 
-          {#if winKind === 'Timed' || winKind === 'BestLap' || winKind === 'BestConsecutive'}
+          {#if winKind === 'Timed' || winKind === 'BestOfN'}
             <Field
               label="Race time (seconds)"
               hint={winKind === 'Timed'
@@ -1514,8 +1546,11 @@
               <Input type="number" min="1" bind:value={winSeconds} aria-label="Race time seconds" />
             </Field>
           {/if}
-          {#if winKind === 'FirstToLaps' || winKind === 'BestConsecutive'}
-            <Field label="Laps">
+          {#if winKind === 'FirstToLaps' || winKind === 'BestOfN'}
+            <Field
+              label="Laps"
+              hint={winKind === 'BestOfN' ? 'N = 1 is the best single lap.' : undefined}
+            >
               <Input type="number" min="1" bind:value={winLaps} aria-label="Laps" />
             </Field>
           {/if}
@@ -1661,9 +1696,22 @@
                 label={schema.label}
                 hint={schema.key === 'rounds'
                   ? '0 = open-ended: generate the next heat on demand until you stop.'
-                  : undefined}
+                  : schema.key === 'group_size'
+                    ? 'Pilots per heat — capped at the primary timer’s node count.'
+                    : undefined}
               >
-                {#if schema.kind === 'bool'}
+                {#if schema.key === 'group_size'}
+                  <Select
+                    value={value || '2'}
+                    aria-label={`${schema.label} value`}
+                    onchange={(e: Event) =>
+                      setParamValue(schema.key, (e.currentTarget as HTMLSelectElement).value)}
+                  >
+                    {#each groupSizeOptions as n (n)}
+                      <option value={String(n)}>{n}</option>
+                    {/each}
+                  </Select>
+                {:else if schema.kind === 'bool'}
                   <label class="param-toggle">
                     <input
                       type="checkbox"
@@ -1705,14 +1753,15 @@
       {/if}
 
       <!-- Head-to-Head Points: the per-position points table (item 4 — the editor lives in the
-           Head-to-Head inputs, shown only when Scoring is Points). 1st place first; positions beyond
-           the list score 0. A steep MultiGP-style default the RD can edit and grow/shrink. -->
+           Head-to-Head inputs, shown only when Scoring is Points). One row per finishing position,
+           following the group size; 1st place first. A steep MultiGP-style default the RD can edit
+           (0 is fine for the tail). -->
       {#if h2hPoints}
         <fieldset class="config-group">
           <legend class="config-legend">Points per position</legend>
           <p class="inline-note">
-            Points awarded by finishing position, summed across the round. Positions beyond the list
-            score 0.
+            Points awarded by finishing position (one per pilot in the group), summed across the
+            round. Edit freely — 0 is fine.
           </p>
           <div class="points-editor" role="group" aria-label="Points per position">
             {#each pointsTable as value, i (i)}
@@ -1727,20 +1776,6 @@
                 />
               </Field>
             {/each}
-          </div>
-          <div class="points-actions">
-            <Button
-              type="button"
-              variant="ghost"
-              onclick={addPointsRow}
-              disabled={pointsTable.length >= 16}>+ Position</Button
-            >
-            <Button
-              type="button"
-              variant="ghost"
-              onclick={removePointsRow}
-              disabled={pointsTable.length <= 2}>− Position</Button
-            >
           </div>
         </fieldset>
       {/if}
@@ -1869,6 +1904,7 @@
               <input
                 type="checkbox"
                 checked={buildSelected.has(pid)}
+                disabled={!buildSelected.has(pid) && buildAtNodeCap}
                 onchange={() => toggleMember(pid)}
                 aria-label={`Select ${callsign(pid)}`}
               />
@@ -1877,6 +1913,12 @@
           {/each}
         </div>
       </Field>
+      {#if buildAtNodeCap && Number.isFinite(heatNodeCap)}
+        <p class="inline-note" role="status">
+          All {heatNodeCap} nodes on the primary timer are taken — a heat can't run more pilots than the
+          timer has nodes.
+        </p>
+      {/if}
     </form>
     {#snippet footer()}
       <Button variant="ghost" type="button" onclick={cancelBuild} disabled={building}>

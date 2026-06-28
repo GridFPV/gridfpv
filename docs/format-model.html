@@ -152,12 +152,22 @@
       <li><strong>Head-to-Head building-block generator</strong> — the atomic racing format: group size, per-heat win condition, scoring (Points with a custom table, or Placement). Built first, because the structures compose it.</li>
       <li><strong>Recompose Round Robin</strong> over Head-to-Head (all-play-all + Points), retiring the bespoke <code>round_robin</code> generator.</li>
       <li><strong>Recompose the Bracket</strong> over Head-to-Head (Placement + seeding + the existing FromHeatWinners chain), folding away <code>single_elim</code>.</li>
-      <li><strong>Taxonomy collapse</strong> — Add-round becomes Practice / Time Trial / Head-to-Head; Time Trial → Best-of-N; Practice gains the class name; the structures are reached only through builders.</li>
+      <li><strong>Taxonomy collapse</strong> — Add-round becomes Practice / Time Trial / Head-to-Head (ordered Open Practice → Time Trials → Head-to-Head); Time Trial → Best-of-N (one metric, N=1 = best lap); Head-to-Head carries group size (a dropdown capped at the primary timer's node count), per-heat win condition (Timed / First-to-N only), and scoring (Placement, or Points with a per-position editor that follows the group size). Hand-built heats cap their lineup at the node count. <em>Shipped.</em></li>
+      <li><strong>Build tournament</strong> — one action that assembles a structure (single/double elim, round-robin, multi-main) from a seed source: <em>either</em> a prior round's ranking <em>or</em> the roster/pilot list (so you can bracket without qualifying). Its rounds + heats appear in the normal Rounds / Heats area. Double-elim's grand final is the normal final choice (single race / Chase-the-Ace), not a bracket reset.</li>
     </ol>
     <p>
       User-facing docs (the guide's <em>Formats</em> page) track <em>shipped</em> behaviour, so they are
       updated per stage as each lands — not ahead of the build.
     </p>
+
+    <h2>7 · Future work — the Tournament view</h2>
+    <p>
+      Ideas to keep in mind once Build-tournament lands (not yet scheduled):
+    </p>
+    <ul>
+      <li>Rename the <strong>bracket container</strong> to <strong>Tournament</strong> — it holds any structure (round-robin, multi-main, double-elim), not just a bracket.</li>
+      <li>Give a tournament its <strong>own page</strong>: edit all its config in one place, see the visualization, and click a round or heat to pop its existing edit modal.</li>
+    </ul>
 
     <footer class="doc-footer">
       <p>See also: <a href="race-engine.html">Race Engine</a> · <a href="decisions.html">Decisions</a> (D15) · <a href="heat-lifecycle.html">Heat Lifecycle</a></p>
