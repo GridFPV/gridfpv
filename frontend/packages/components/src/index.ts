@@ -19,6 +19,7 @@
 export { default as Leaderboard } from './Leaderboard.svelte';
 export { default as StandingsTable } from './StandingsTable.svelte';
 export { default as BracketTree } from './BracketTree.svelte';
+export { default as RoundRobinView } from './RoundRobinView.svelte';
 export { default as HeatSheet } from './HeatSheet.svelte';
 export { default as RaceClock } from './RaceClock.svelte';
 export { default as PilotCard } from './PilotCard.svelte';
@@ -44,3 +45,10 @@ export { formatClock, formatMicros, formatMetric, medalFor } from './format.js';
 
 // View-model types
 export type { Bracket, BracketRound, BracketMatch, BracketSlot } from './bracket.js';
+export type {
+  RoundRobin,
+  RoundRobinStanding,
+  RoundRobinRotation,
+  RoundRobinHeat,
+  RoundRobinEntry
+} from './roundRobin.js';

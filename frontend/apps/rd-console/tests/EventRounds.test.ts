@@ -1907,3 +1907,160 @@ describe('EventRounds — open-practice active-channels picker', () => {
     );
   });
 });
+
+// ── Round-robin tournament: builder + visualization ────────────────────────────────────────────
+
+describe('EventRounds — round-robin builder + visualization', () => {
+  const COMET: Pilot = { id: 'p3', callsign: 'Comet', vtx_types: [] };
+  const DASH: Pilot = { id: 'p4', callsign: 'Dash', vtx_types: [] };
+  // A 4-member field so r1 is a bracketable/seedable round.
+  const EVENT_4: EventMeta = {
+    ...EVENT,
+    roster: ['p1', 'p2', 'p3', 'p4'],
+    classes_membership: [
+      { class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }, { pilot: 'p3' }, { pilot: 'p4' }] }
+    ]
+  };
+
+  function rrImpls(heats: HeatSummary[] = []) {
+    return {
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT, COMET, DASH]),
+      listHeatsImpl: vi.fn(async () => heats)
+    };
+  }
+
+  it('shows the round-robin config (Rounds + Heat size=4 + points editor) and hides bracket-only fields', async () => {
+    const { session } = makeTestSession({ ...rrImpls(), event: EVENT_4 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Build tournament' }));
+    // The structure picker offers Round robin; selecting it swaps in the round-robin config.
+    await fireEvent.change(await screen.findByLabelText('Structure'), {
+      target: { value: 'round_robin' }
+    });
+
+    // Round robin shows Rounds (heats per pilot) + Heat size (default 4) + the points editor…
+    expect(await screen.findByLabelText('Rounds')).toBeInTheDocument();
+    const heatSize = (await screen.findByLabelText('Heat size')) as HTMLSelectElement;
+    expect(heatSize.value).toBe('4');
+    expect(screen.getByLabelText('Points for 1st place')).toBeInTheDocument();
+
+    // …and hides the bracket-only fields.
+    expect(screen.queryByLabelText('Pilots per heat')).toBeNull();
+    expect(screen.queryByLabelText('Advance per heat')).toBeNull();
+    expect(screen.queryByLabelText('Final format')).toBeNull();
+  });
+
+  it('builds a SINGLE round_robin round from the modal (one createRound with the right req)', async () => {
+    const created: RoundDef = {
+      ...QUAL,
+      id: 'rr1',
+      label: 'Sprint Series',
+      format: 'round_robin',
+      params: { rounds: '3', heat_size: '4', points: '10,6,4,3,2,1' },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 4 } }
+    };
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
+    const { session } = makeTestSession({ ...rrImpls(), createRoundImpl, event: EVENT_4 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Build tournament' }));
+    await fireEvent.change(await screen.findByLabelText('Structure'), {
+      target: { value: 'round_robin' }
+    });
+    // The round seed defaults to r1, top_n to the largest power-of-two fitting the 4-pilot field (4).
+    await fireEvent.input(await screen.findByLabelText('Round-robin name'), {
+      target: { value: 'Sprint Series' }
+    });
+    await fireEvent.input(screen.getByLabelText('Rounds'), { target: { value: '3' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Build round robin' }));
+
+    // Exactly ONE round is created — no level chain.
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    expect(createRoundImpl.mock.calls[0][2]).toMatchObject({
+      label: 'Sprint Series',
+      format: 'round_robin',
+      params: { rounds: '3', heat_size: '4', points: '10,6,4,3,2,1' },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 4 } }
+    });
+  });
+
+  it('renders a round_robin round as a standings table (Points) + rotation grid with callsigns', async () => {
+    const RR_ROUND: RoundDef = {
+      ...QUAL,
+      id: 'rr1',
+      label: 'Sprint Series',
+      format: 'round_robin',
+      params: { rounds: '2', heat_size: '2', points: '10,6,4,3,2,1' },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 2 } }
+    };
+    const RR_HEATS: HeatSummary[] = [
+      { heat: 'rr-r1-h1', lineup: ['p1', 'p2'], round: 'rr1', phase: 'Final', is_current: false },
+      { heat: 'rr-r2-h1', lineup: ['p1', 'p2'], round: 'rr1', phase: 'Final', is_current: false }
+    ];
+    const roundRankingImpl = vi.fn(async (_b, _e, _round) => [
+      { competitor: 'p1', position: 1 },
+      { competitor: 'p2', position: 2 }
+    ]);
+    // The heat-result snapshots fetchHeatResult pulls (p1 wins both heats).
+    const snap = (rows: [string, number][]) => ({
+      body: {
+        HeatResult: {
+          places: rows.map(([competitor, position]) => ({
+            competitor: { adapter: 'rh-1', competitor },
+            position,
+            laps: 3,
+            metric: { BestLapMicros: 30_000_000 }
+          }))
+        }
+      }
+    });
+    const RESULTS: Record<string, ReturnType<typeof snap>> = {
+      'rr-r1-h1': snap([
+        ['p1', 1],
+        ['p2', 2]
+      ]),
+      'rr-r2-h1': snap([
+        ['p1', 1],
+        ['p2', 2]
+      ])
+    };
+    const { session } = makeTestSession({
+      ...rrImpls(RR_HEATS),
+      roundRankingImpl,
+      event: { ...EVENT_4, rounds: [RR_ROUND] }
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const m = /snapshot\/heat\/([^?]+)/.exec(String(url));
+        const heat = m ? decodeURIComponent(m[1]) : '';
+        const s = RESULTS[heat];
+        return s
+          ? ({ ok: true, json: async () => s } as unknown as Response)
+          : ({ ok: false, json: async () => ({}) } as unknown as Response);
+      })
+    );
+    render(EventRounds, { session });
+
+    const tournaments = (await screen.findByRole('heading', { name: 'Tournaments' })).closest(
+      'section'
+    )!;
+    const panel = (await within(tournaments).findByLabelText(
+      /Round robin — Sprint Series/i
+    )) as HTMLElement;
+
+    // The standings table shows a Points column and resolves callsigns (never the raw refs).
+    const table = within(panel).getByRole('table', { name: /Round-robin standings/i });
+    expect(within(table).getByText('Points')).toBeInTheDocument();
+    await waitFor(() => expect(within(table).getByText('AceOne')).toBeInTheDocument());
+    expect(within(table).getByText('Bolt')).toBeInTheDocument();
+    expect(within(table).queryByText('p1')).toBeNull();
+
+    // The per-rotation grid shows both rotations.
+    expect(within(panel).getByText('Rotation 1')).toBeInTheDocument();
+    expect(within(panel).getByText('Rotation 2')).toBeInTheDocument();
+  });
+});

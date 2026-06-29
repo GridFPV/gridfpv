@@ -584,6 +584,96 @@ describe('Results — time-trial round standings (Best lap + win-condition metri
   });
 });
 
+describe('Results — round-robin tournament view', () => {
+  // A round_robin round seeded from the qualifier; two scored rotation heats (p1 wins both).
+  const RR: RoundDef = {
+    ...QUAL,
+    id: 'rr1',
+    label: 'Sprint Series',
+    format: 'round_robin',
+    params: { rounds: '2', heat_size: '2', points: '10,6,4,3,2,1' },
+    seeding: { FromRanking: { source_rounds: ['r1'], top_n: 2 } }
+  };
+  const RR_HEATS: HeatSummary[] = [
+    {
+      heat: 'rr-r1-h1',
+      lineup: ['p1', 'p2'],
+      round: 'rr1',
+      class: 'c1',
+      phase: 'Final',
+      is_current: false
+    },
+    {
+      heat: 'rr-r2-h1',
+      lineup: ['p1', 'p2'],
+      round: 'rr1',
+      class: 'c1',
+      phase: 'Final',
+      is_current: false
+    }
+  ];
+  const rrRanking = vi.fn(async () => [
+    { competitor: 'p1', position: 1 },
+    { competitor: 'p2', position: 2 }
+  ]);
+  const rrResult = (rows: [string, number][]) => ({
+    body: {
+      HeatResult: {
+        places: rows.map(([competitor, position]) => ({
+          competitor: { adapter: 'rh', competitor },
+          position,
+          laps: 3,
+          metric: { BestLapMicros: 30_000_000 }
+        }))
+      }
+    }
+  });
+
+  it('lists the round-robin round in the selector and renders standings (Points) + the rotation grid', async () => {
+    const { session } = makeTestSession({
+      event: { ...EVENT, rounds: [RR] },
+      listClassesImpl: vi.fn(async () => [OPEN]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => RR_HEATS),
+      roundRankingImpl: rrRanking,
+      classStandingsImpl: vi.fn(async () => STANDINGS)
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const m = /snapshot\/heat\/([^?]+)/.exec(String(url));
+        const heat = m ? decodeURIComponent(m[1]) : '';
+        return RR_HEATS.some((h) => h.heat === heat)
+          ? ({
+              ok: true,
+              json: async () =>
+                rrResult([
+                  ['p1', 1],
+                  ['p2', 2]
+                ])
+            } as unknown as Response)
+          : ({ ok: false, json: async () => ({}) } as unknown as Response);
+      })
+    );
+    render(Results, { session });
+
+    // The view defaults to the round-robin tournament (it has run).
+    const select = (await screen.findByLabelText('Results view')) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('roundrobin:rr1'));
+
+    // The standings table shows a Points column and resolved callsigns (never raw refs).
+    const table = await screen.findByRole('table', { name: /Round-robin standings/i });
+    expect(within(table).getByText('Points')).toBeInTheDocument();
+    await waitFor(() => expect(within(table).getByText('AceOne')).toBeInTheDocument());
+    expect(within(table).getByText('Bolt')).toBeInTheDocument();
+    expect(within(table).queryByText('p1')).toBeNull();
+
+    // The per-rotation grid renders both rotations.
+    expect(screen.getByText('Rotation 1')).toBeInTheDocument();
+    expect(screen.getByText('Rotation 2')).toBeInTheDocument();
+  });
+});
+
 describe('Results — event-level projections (kept from #56)', () => {
   it('renders a heat result, ranking, and bracket from typed fixtures', () => {
     render(Results, { heatResult, standings, outcome: eventOutcome });

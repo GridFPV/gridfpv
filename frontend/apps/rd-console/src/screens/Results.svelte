@@ -26,11 +26,12 @@
     BracketTree,
     Button,
     Card,
+    RoundRobinView,
     Select,
     formatMicros,
     toast
   } from '@gridfpv/components';
-  import type { Bracket } from '@gridfpv/components';
+  import type { Bracket, RoundRobin } from '@gridfpv/components';
   import type {
     Class,
     ClassId,
@@ -59,6 +60,12 @@
   } from '../lib/brackets.js';
   import type { ChaseFinalTally } from '../lib/brackets.js';
   import { isChaseTheAceFormat, isTimedQualFormat } from '../lib/formats.js';
+  import {
+    buildRoundRobinView,
+    isRoundRobinRound,
+    parseRoundRobinPoints
+  } from '../lib/roundRobin.js';
+  import { heatNameById } from '../lib/heats.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let {
@@ -135,17 +142,27 @@
   // non-bracket round (by label), then one per-class entry per event class.
   type ViewOption =
     | { value: string; label: string; kind: 'tournament'; root: RoundDef }
+    | { value: string; label: string; kind: 'roundrobin'; round: RoundDef }
     | { value: string; label: string; kind: 'round'; round: RoundDef }
     | { value: string; label: string; kind: 'class'; classId: ClassId };
 
   const tournamentRoots = $derived<RoundDef[]>(rounds.filter(isBracketRoot));
-  const plainRounds = $derived<RoundDef[]>(rounds.filter((r) => !isBracketLevel(r)));
+  // Round-robin rounds group with the tournaments (their own RoundRobinView), so they are excluded
+  // from the plain-round ranking views below.
+  const roundRobinRounds = $derived<RoundDef[]>(rounds.filter(isRoundRobinRound));
+  const plainRounds = $derived<RoundDef[]>(
+    rounds.filter((r) => !isBracketLevel(r) && !isRoundRobinRound(r))
+  );
 
   const viewOptions = $derived.by<ViewOption[]>(() => {
     const opts: ViewOption[] = [];
     for (const root of tournamentRoots) {
       const name = splitBracketLabel(root.label).name || root.label;
       opts.push({ value: `tournament:${root.id}`, label: name, kind: 'tournament', root });
+    }
+    for (const round of roundRobinRounds) {
+      const name = splitBracketLabel(round.label).name || round.label;
+      opts.push({ value: `roundrobin:${round.id}`, label: name, kind: 'roundrobin', round });
     }
     for (const round of plainRounds) {
       opts.push({ value: `round:${round.id}`, label: round.label, kind: 'round', round });
@@ -171,6 +188,12 @@
       return heats.some((h) => h.round !== undefined && ids.has(h.round));
     });
     if (runRoots.length > 0) return `tournament:${runRoots[runRoots.length - 1].id}`;
+
+    // Else the latest round-robin round that has run (grouped with the tournaments).
+    const runRobins = roundRobinRounds.filter((r) =>
+      heatsByRound(r.id).some((h) => h.phase === 'Final')
+    );
+    if (runRobins.length > 0) return `roundrobin:${runRobins[runRobins.length - 1].id}`;
 
     // Else the latest non-bracket round with a finalized heat.
     const scoredRounds = plainRounds.filter((r) =>
@@ -231,18 +254,20 @@
     if (!session) return;
     void session.liveState;
     void heats;
-    for (const root of tournamentRoots) {
-      for (const lr of bracketChainRounds(root, rounds)) {
-        for (const h of heatsByRound(lr.id)) {
-          if (h.phase !== 'Final' || fetchedResultHeats.has(h.heat)) continue;
-          fetchedResultHeats.add(h.heat);
-          session
-            .fetchHeatResult(h.heat)
-            .then((res) => {
-              if (res) resultByHeat = { ...resultByHeat, [h.heat]: res };
-            })
-            .catch(() => {});
-        }
+    const chainRounds = [
+      ...tournamentRoots.flatMap((root) => bracketChainRounds(root, rounds)),
+      ...roundRobinRounds
+    ];
+    for (const lr of chainRounds) {
+      for (const h of heatsByRound(lr.id)) {
+        if (h.phase !== 'Final' || fetchedResultHeats.has(h.heat)) continue;
+        fetchedResultHeats.add(h.heat);
+        session
+          .fetchHeatResult(h.heat)
+          .then((res) => {
+            if (res) resultByHeat = { ...resultByHeat, [h.heat]: res };
+          })
+          .catch(() => {});
       }
     }
   });
@@ -315,6 +340,35 @@
       advance,
       chaseTallyByRoot[root.id]
     );
+  }
+
+  // The RoundRobinView view-model for a round-robin round: standings ordered by its ranking
+  // (`rankingRows`, fetched for the current view) + the per-rotation grid, both off the round's heats
+  // and the shared per-heat result cache. Friendly callsigns + heat names (never raw refs/ids).
+  function roundRobinViewFor(round: RoundDef): RoundRobin {
+    return buildRoundRobinView(rankingRows, heatsByRound(round.id), {
+      pointsTable: parseRoundRobinPoints(round.params?.points),
+      label: callsign,
+      heatName: (h) => heatNameById(h.heat, heats, rounds),
+      resultByHeat: (id) => resultByHeat[id]
+    });
+  }
+
+  // A round-robin view's sub-line: where it was seeded from + the rotations.
+  function roundRobinSubtitle(round: RoundDef): string {
+    const seed = round.seeding;
+    const parts: string[] = [];
+    if (typeof seed === 'object' && 'FromRanking' in seed) {
+      const srcId = seed.FromRanking.source_rounds[0];
+      const src = rounds.find((r) => r.id === srcId);
+      parts.push(src ? `from ${src.label}` : 'seeded from a ranking');
+      parts.push(`top ${seed.FromRanking.top_n}`);
+    } else if (seed === 'FromRoster' && round.classes[0]) {
+      parts.push(`from ${className(round.classes[0])}`);
+    }
+    const rotations = Math.max(0, Math.round(Number(round.params?.rounds ?? 0)));
+    if (rotations > 0) parts.push(`${rotations} ${rotations === 1 ? 'rotation' : 'rotations'}`);
+    return parts.join(' · ');
   }
 
   // The bracket container's sub-line: where it was seeded from + the cut + how many levels. Resolves
@@ -444,6 +498,7 @@
     const v = currentView;
     if (!v) return undefined;
     if (v.kind === 'round') return v.round.id;
+    if (v.kind === 'roundrobin') return v.round.id;
     if (v.kind === 'tournament') {
       const chain = bracketChainRounds(v.root, rounds);
       return chain[chain.length - 1]?.id;
@@ -555,16 +610,18 @@
 
   {#if session}
     <Card
-      title={currentView?.kind === 'tournament'
+      title={currentView?.kind === 'tournament' || currentView?.kind === 'roundrobin'
         ? currentView.label
         : currentView?.kind === 'round'
           ? `${currentView.label} standings`
           : 'Standings'}
       subtitle={currentView?.kind === 'tournament'
         ? bracketSubtitle(currentView.root)
-        : currentView?.kind === 'class'
-          ? "Per-class season standings, aggregated across the class's rounds."
-          : undefined}
+        : currentView?.kind === 'roundrobin'
+          ? roundRobinSubtitle(currentView.round)
+          : currentView?.kind === 'class'
+            ? "Per-class season standings, aggregated across the class's rounds."
+            : undefined}
     >
       {#snippet actions()}
         {#if viewOptions.length > 1}
@@ -602,6 +659,8 @@
             {@render rankTable(`${currentView.label} final standings`, tournamentRows)}
           {/if}
         </div>
+      {:else if currentView?.kind === 'roundrobin'}
+        <RoundRobinView view={roundRobinViewFor(currentView.round)} />
       {:else if currentView?.kind === 'round'}
         {#if isTimedQualFormat(currentView.round.format)}
           {#if roundStandingsLoading && roundStandingRows.length === 0}

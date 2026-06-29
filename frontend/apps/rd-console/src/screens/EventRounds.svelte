@@ -27,10 +27,11 @@
     Dialog,
     Field,
     Input,
+    RoundRobinView,
     Select,
     toast
   } from '@gridfpv/components';
-  import type { Bracket } from '@gridfpv/components';
+  import type { Bracket, RoundRobin } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
     ChannelMode,
@@ -88,8 +89,15 @@
     advanceRoundReq,
     bracketLevelFields,
     bracketSizeOptions,
+    roundRobinRoundReq,
     rosterRoundReq
   } from '../lib/standings.js';
+  import {
+    buildRoundRobinView,
+    isRoundRobinRound,
+    parseRoundRobinPoints,
+    RR_DEFAULT_POINTS
+  } from '../lib/roundRobin.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -369,6 +377,14 @@
   let advanceMoveOn = $state(1);
   let advanceFinalKind = $state<'single' | 'chase'>('single');
   let advanceFinalWins = $state(2);
+  // ── Round-robin config (its own knobs; the bracket structure ignores these) ──────────────────
+  // Round robin is a single round, not a level chain: `advanceRrRounds` is the rotations / heats per
+  // pilot, `advanceRrHeatSize` the pilots per heat (default 4), and `advanceRrPoints` the per-position
+  // points table (reusing the Head-to-Head editor shape). Win condition + seeding reuse the shared
+  // advance state below.
+  let advanceRrRounds = $state(3);
+  let advanceRrHeatSize = $state(4);
+  let advanceRrPoints = $state<number[]>([...RR_DEFAULT_POINTS]);
   // The bracket's win condition — one for all its heats (each race decided directly): First-to-N
   // laps (the head-to-head default) or Most laps in N minutes. Both self-terminate (no race time).
   let advanceWinKind = $state<'FirstToLaps' | 'Timed'>('FirstToLaps');
@@ -442,6 +458,16 @@
     advanceWinMinutes = 2;
     advanceHeatSize = 2;
     advanceMoveOn = Math.max(1, Math.floor(advanceHeatSize / 2));
+    advanceRrRounds = 3;
+    advanceRrHeatSize = 4;
+    advanceRrPoints = [...RR_DEFAULT_POINTS];
+  }
+
+  /** Set the round-robin per-position points table value at `index` (reuses the H2H editor shape). */
+  function setRrPointsAt(index: number, value: string) {
+    const next = [...advanceRrPoints];
+    next[index] = Math.max(0, Math.round(Number(value) || 0));
+    advanceRrPoints = next;
   }
 
   function openAdvance(round: RoundDef) {
@@ -520,6 +546,48 @@
       sourceDesc = source.label;
       readyNow = roundFinished(source.id);
       sourceForLevel1 = source;
+    }
+
+    // ── Round robin: ONE round, not a level chain ────────────────────────────────────────────────
+    // Create a single round_robin round seeded from the chosen round's ranking (top-N) or the class
+    // roster, then fill it (`All`) when the seed is ready (a class roster / a finished round). No
+    // level chain is built.
+    if (advanceStructure === 'round_robin') {
+      const req: NewRoundReq = roundRobinRoundReq({
+        label: name,
+        rounds: advanceRrRounds,
+        heatSize: advanceRrHeatSize,
+        points: advanceRrPoints,
+        winCondition,
+        seed:
+          advanceSeedKind === 'class'
+            ? { kind: 'roster', classId: classIdForLevel1 }
+            : { kind: 'ranking', source: sourceForLevel1!, topN: fieldSize }
+      });
+      advancing = true;
+      try {
+        const created = await session.createRound(req);
+        if (!created) {
+          toast.info('A control token is required to manage rounds.');
+          return;
+        }
+        if (readyNow) {
+          const ack = await session.fillRound(created.id, 'All');
+          if (!ack.ok) {
+            toast.info(ack.error?.message ?? 'The round fills when the source is ready.');
+          }
+        }
+        await refreshHeats();
+        toast.success(`“${name}” round robin built from ${sourceDesc} — ${fieldSize} seeds.`);
+        advanceOpen = false;
+        advanceModalRound = undefined;
+        advanceSourceClass = '';
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : String(e));
+      } finally {
+        advancing = false;
+      }
+      return;
     }
 
     // The field entering each level + the level count, from the chosen heat size + advance-per-heat:
@@ -750,6 +818,77 @@
     parts.push(`${levels} ${levels === 1 ? 'level' : 'levels'}`);
     return parts.join(' · ');
   }
+
+  // --- Round-robin visualization --------------------------------------------------------------
+  // A round_robin round shows as a RoundRobinView (aggregate standings + per-rotation grid) in the
+  // Tournaments container. Its standings order is the canonical `roundRanking`; the points + best lap
+  // are computed from each heat's scored result. So we fetch the ranking per round-robin round (kept
+  // fresh as heats finalize) and each finalized heat's result once (guarded), mirroring the bracket
+  // champion/chase fetchers above.
+  const roundRobinRounds = $derived(rounds.filter(isRoundRobinRound));
+
+  let rrRankingByRound = $state<Record<RoundId, RankEntry[]>>({});
+  $effect(() => {
+    // Re-run as heats finalize so a freshly-scored heat re-aggregates the ranking.
+    void heats;
+    for (const r of roundRobinRounds) {
+      session
+        .roundRanking(r.id)
+        .then((rows) => (rrRankingByRound = { ...rrRankingByRound, [r.id]: rows }))
+        // An unscored round 400s — leave it empty (the view falls back to lineup order).
+        .catch(() => {});
+    }
+  });
+
+  let rrResultByHeat = $state<Record<string, HeatResult>>({});
+  const rrFetchedHeats = new Set<string>();
+  $effect(() => {
+    void heats;
+    for (const r of roundRobinRounds) {
+      for (const h of heatsByRound(r.id)) {
+        if (h.phase !== 'Final' || rrFetchedHeats.has(h.heat)) continue;
+        rrFetchedHeats.add(h.heat);
+        session
+          .fetchHeatResult(h.heat)
+          .then((res) => {
+            if (res) rrResultByHeat = { ...rrResultByHeat, [h.heat]: res };
+          })
+          .catch(() => {});
+      }
+    }
+  });
+
+  // The RoundRobinView view-model for a round-robin round: standings ordered by its ranking + the
+  // per-rotation heat grid, both off the round's heats and the fetched results. Friendly callsigns +
+  // heat names (never raw refs/ids — CLAUDE.md).
+  function roundRobinViewFor(round: RoundDef): RoundRobin {
+    return buildRoundRobinView(rrRankingByRound[round.id] ?? [], heatsByRound(round.id), {
+      pointsTable: parseRoundRobinPoints(round.params?.points),
+      label: callsign,
+      heatName: (h) => heatDisplayName(round, h),
+      resultByHeat: (id) => rrResultByHeat[id]
+    });
+  }
+
+  // The round-robin container sub-line: where it was seeded from + the rotations.
+  function roundRobinSubtitle(round: RoundDef): string {
+    const seed = round.seeding;
+    const parts: string[] = [];
+    if (typeof seed === 'object' && 'FromRanking' in seed) {
+      const srcId = seed.FromRanking.source_rounds[0];
+      const src = rounds.find((r) => r.id === srcId);
+      parts.push(src ? `from ${src.label}` : 'seeded from a ranking');
+      parts.push(`top ${seed.FromRanking.top_n}`);
+    } else if (seed === 'FromRoster' && round.classes[0]) {
+      parts.push(`from ${className(round.classes[0])}`);
+    }
+    const rotations = Math.max(1, Math.round(Number(round.params?.rounds ?? 0)));
+    if (rotations > 0) parts.push(`${rotations} ${rotations === 1 ? 'rotation' : 'rotations'}`);
+    return parts.join(' · ');
+  }
+
+  // The tournaments shown in the Tournaments container: bracket roots + round-robin rounds.
+  const tournamentRounds = $derived(rounds.filter((r) => isBracketRoot(r) || isRoundRobinRound(r)));
 
   // --- Manual heat build (replaces the retired NewHeat free-text form) ---------------------------
   // Pick a round, then select from that round's **eligible class members** (real roster pilots, no
@@ -1700,25 +1839,40 @@
       </Button>
     {/snippet}
 
-    {#if rounds.filter(isBracketRoot).length === 0}
+    {#if tournamentRounds.length === 0}
       <p class="empty" role="status">Build a tournament to see its bracket here.</p>
     {:else}
-      {#each rounds.filter(isBracketRoot) as root (root.id)}
-        {@const view = bracketViewFor(root)}
-        {@const champ = championOf(root)}
-        {@const bracketName = splitBracketLabel(root.label).name || 'Bracket'}
-        <section class="bracket-container" aria-label={`Bracket — ${bracketName}`}>
-          <header class="bracket-header">
-            <div class="bracket-headline">
-              <h3 class="bracket-title">{bracketName}</h3>
-              {#if champ}
-                <span class="bracket-champion">Champion · {callsign(champ)}</span>
-              {/if}
-            </div>
-            <p class="bracket-sub">{bracketSubtitle(root)}</p>
-          </header>
-          <div class="bracket-view"><BracketTree bracket={view} /></div>
-        </section>
+      {#each tournamentRounds as root (root.id)}
+        {#if isRoundRobinRound(root)}
+          {@const rrView = roundRobinViewFor(root)}
+          {@const rrName = splitBracketLabel(root.label).name || root.label}
+          <section class="bracket-container" aria-label={`Round robin — ${rrName}`}>
+            <header class="bracket-header">
+              <div class="bracket-headline">
+                <h3 class="bracket-title">{rrName}</h3>
+                <span class="bracket-champion">Round Robin</span>
+              </div>
+              <p class="bracket-sub">{roundRobinSubtitle(root)}</p>
+            </header>
+            <div class="bracket-view"><RoundRobinView view={rrView} /></div>
+          </section>
+        {:else}
+          {@const view = bracketViewFor(root)}
+          {@const champ = championOf(root)}
+          {@const bracketName = splitBracketLabel(root.label).name || 'Bracket'}
+          <section class="bracket-container" aria-label={`Bracket — ${bracketName}`}>
+            <header class="bracket-header">
+              <div class="bracket-headline">
+                <h3 class="bracket-title">{bracketName}</h3>
+                {#if champ}
+                  <span class="bracket-champion">Champion · {callsign(champ)}</span>
+                {/if}
+              </div>
+              <p class="bracket-sub">{bracketSubtitle(root)}</p>
+            </header>
+            <div class="bracket-view"><BracketTree bracket={view} /></div>
+          </section>
+        {/if}
       {/each}
     {/if}
   </Card>
@@ -2202,6 +2356,7 @@
         <Field label="Structure" hint="More tournament structures land here later.">
           <Select bind:value={advanceStructure} aria-label="Structure">
             <option value="single_elim">Single Elimination</option>
+            <option value="round_robin">Round robin</option>
           </Select>
         </Field>
         <Field label="Seed from" hint="A finished round's ranking, or a class roster.">
@@ -2270,32 +2425,61 @@
         {/if}
       {/if}
       {#if advanceFieldSize >= 2}
+        {@const isRoundRobin = advanceStructure === 'round_robin'}
         <Field
-          label="Bracket name"
+          label={isRoundRobin ? 'Round-robin name' : 'Bracket name'}
           required
-          hint="Names every level (“‹name› — Quarterfinals”, …) so multiple brackets in one event stay distinct."
+          hint={isRoundRobin
+            ? 'Names this round robin (shown in the Tournaments list and Results).'
+            : 'Names every level (“‹name› — Quarterfinals”, …) so multiple brackets in one event stay distinct.'}
         >
-          <Input bind:value={advanceName} aria-label="Bracket name" placeholder="e.g. Pro" />
+          <Input
+            bind:value={advanceName}
+            aria-label={isRoundRobin ? 'Round-robin name' : 'Bracket name'}
+            placeholder="e.g. Pro"
+          />
         </Field>
         <div class="form-grid">
-          <Field label="Pilots per heat" hint="How many race each bracket heat. 2 = head-to-head.">
-            <Select bind:value={advanceHeatSize} aria-label="Pilots per heat">
-              {#each groupSizeOptions as n (n)}
-                <option value={n}>{n}</option>
-              {/each}
-            </Select>
-          </Field>
+          {#if isRoundRobin}
+            <!-- Round robin: rotations (heats per pilot) + heat size — no advance-per-heat / final. -->
+            <Field label="Rounds" hint="Heats per pilot — how many rotations each pilot races.">
+              <Input type="number" min="1" bind:value={advanceRrRounds} aria-label="Rounds" />
+            </Field>
+            <Field label="Heat size" hint="Pilots per heat.">
+              <Select bind:value={advanceRrHeatSize} aria-label="Heat size">
+                {#each groupSizeOptions as n (n)}
+                  <option value={n}>{n}</option>
+                {/each}
+              </Select>
+            </Field>
+          {:else}
+            <Field
+              label="Pilots per heat"
+              hint="How many race each bracket heat. 2 = head-to-head."
+            >
+              <Select bind:value={advanceHeatSize} aria-label="Pilots per heat">
+                {#each groupSizeOptions as n (n)}
+                  <option value={n}>{n}</option>
+                {/each}
+              </Select>
+            </Field>
+            <Field
+              label="Advance per heat"
+              hint="Top N of each heat progress; the rest are eliminated."
+            >
+              <Select bind:value={advanceMoveOn} aria-label="Advance per heat">
+                {#each moveOnOptions as n (n)}
+                  <option value={n}>{n}</option>
+                {/each}
+              </Select>
+            </Field>
+          {/if}
           <Field
-            label="Advance per heat"
-            hint="Top N of each heat progress; the rest are eliminated."
+            label="Win condition"
+            hint={isRoundRobin
+              ? 'How every heat is decided — the round ranking aggregates the results.'
+              : 'How every bracket heat is decided.'}
           >
-            <Select bind:value={advanceMoveOn} aria-label="Advance per heat">
-              {#each moveOnOptions as n (n)}
-                <option value={n}>{n}</option>
-              {/each}
-            </Select>
-          </Field>
-          <Field label="Win condition" hint="How every bracket heat is decided.">
             <Select bind:value={advanceWinKind} aria-label="Bracket win condition">
               <option value="FirstToLaps">First to N laps</option>
               <option value="Timed">Most laps in N minutes</option>
@@ -2315,27 +2499,61 @@
               />
             </Field>
           {/if}
-          <Field label="Final format">
-            <Select bind:value={advanceFinalKind} aria-label="Final format">
-              <option value="single">Single race</option>
-              <option value="chase">Chase the Ace</option>
-            </Select>
-          </Field>
-          {#if advanceFinalKind === 'chase'}
-            <Field
-              label="Wins to win"
-              hint="First to this many race-wins takes the final (default 2)."
-            >
-              <Input type="number" min="1" bind:value={advanceFinalWins} aria-label="Wins to win" />
+          {#if !isRoundRobin}
+            <Field label="Final format">
+              <Select bind:value={advanceFinalKind} aria-label="Final format">
+                <option value="single">Single race</option>
+                <option value="chase">Chase the Ace</option>
+              </Select>
             </Field>
+            {#if advanceFinalKind === 'chase'}
+              <Field
+                label="Wins to win"
+                hint="First to this many race-wins takes the final (default 2)."
+              >
+                <Input
+                  type="number"
+                  min="1"
+                  bind:value={advanceFinalWins}
+                  aria-label="Wins to win"
+                />
+              </Field>
+            {/if}
           {/if}
         </div>
-        <p class="advance-note small" role="status">
-          {advanceLevels}
-          {advanceLevels === 1 ? 'level' : 'levels'} down to the Final{advanceFinalKind === 'chase'
-            ? ' (Chase the Ace)'
-            : ''}.
-        </p>
+        {#if isRoundRobin}
+          <!-- Round-robin points table (reuses the Head-to-Head editor): points awarded per finishing
+               position, summed across the round into the standings (1st place first). -->
+          <fieldset class="config-group">
+            <legend class="config-legend">Points per position</legend>
+            <p class="inline-note">
+              Points awarded by finishing position, summed across the round. Edit freely — 0 is
+              fine.
+            </p>
+            <div class="points-editor" role="group" aria-label="Points per position">
+              {#each advanceRrPoints as value, i (i)}
+                <Field label={ordinal(i + 1)}>
+                  <Input
+                    type="number"
+                    min="0"
+                    {value}
+                    aria-label={`Points for ${ordinal(i + 1)} place`}
+                    oninput={(e: Event) =>
+                      setRrPointsAt(i, (e.currentTarget as HTMLInputElement).value)}
+                  />
+                </Field>
+              {/each}
+            </div>
+          </fieldset>
+        {:else}
+          <p class="advance-note small" role="status">
+            {advanceLevels}
+            {advanceLevels === 1 ? 'level' : 'levels'} down to the Final{advanceFinalKind ===
+            'chase'
+              ? ' (Chase the Ace)'
+              : ''}.
+          </p>
+        {/if}
       {/if}
     </form>
     {#snippet footer()}
@@ -2348,7 +2566,7 @@
         loading={advancing}
         disabled={advanceFieldSize < 2 || advanceName.trim().length === 0}
       >
-        Build bracket
+        {advanceStructure === 'round_robin' ? 'Build round robin' : 'Build bracket'}
       </Button>
     {/snippet}
   </Dialog>
