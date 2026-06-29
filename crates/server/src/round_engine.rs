@@ -51,7 +51,7 @@ use gridfpv_engine::format::{
 };
 use gridfpv_engine::heat::{HeatState, heat_state};
 use gridfpv_engine::schedule::{Frequency, FrequencyPool, allocate};
-use gridfpv_engine::scoring::HeatResult;
+use gridfpv_engine::scoring::{HeatResult, Metric, WinCondition};
 use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, Pass, RoundId, SourceTime};
 use gridfpv_projection::lap_list;
 use serde::{Deserialize, Serialize};
@@ -668,6 +668,152 @@ pub fn round_ranking(
         .ok_or_else(|| FillError::UnknownFormat(round.format.clone()))?;
     let completed = completed_heats(round, events);
     Ok(generator.ranking(&completed))
+}
+
+// --- Per-round standings (time-trial / qual display) ----------------------------------------
+
+/// The **win-condition metric** a round's standings are ranked by — the tagged mirror of the
+/// round's [`win_condition`](RoundDef::win_condition), carrying the value the ranking is *by*.
+///
+/// This is the headline number the Rounds stage shows next to each pilot: the fastest single lap
+/// ([`BestLap`](RoundMetric::BestLap)), the fastest N-consecutive-lap window
+/// ([`BestConsecutive`](RoundMetric::BestConsecutive)), or the most laps banked
+/// ([`MostLaps`](RoundMetric::MostLaps)) — mapped from the win condition exactly as
+/// [`qual_metric_for`] derives the qualifying metric. The lap-time variants carry `None` for a
+/// pilot who set no qualifying value (no lap / fewer than `n` laps), so a no-show still renders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum RoundMetric {
+    /// [`WinCondition::BestLap`] (and the non-qualifying [`WinCondition::FirstToLaps`]): the pilot's
+    /// fastest single lap across the round, in microseconds, or `None` if they completed no lap.
+    BestLap {
+        /// Fastest single lap (µs), or `None` for no completed lap.
+        #[ts(type = "number | null")]
+        micros: Option<i64>,
+    },
+    /// [`WinCondition::BestConsecutive`]: the pilot's smallest sum of `n` consecutive laps across
+    /// the round, in microseconds, or `None` if they never completed `n` consecutive laps.
+    BestConsecutive {
+        /// How many consecutive laps the window spans.
+        n: u32,
+        /// Smallest consecutive-window sum (µs), or `None` if fewer than `n` laps.
+        #[ts(type = "number | null")]
+        micros: Option<i64>,
+    },
+    /// [`WinCondition::Timed`] (Most Laps): the most laps the pilot banked in any single heat.
+    MostLaps {
+        /// Most laps in a heat (0 if the pilot completed no lap).
+        laps: u32,
+    },
+}
+
+/// One pilot's **per-round standing** for the Rounds stage's time-trial (timed_qual) display.
+///
+/// Built by [`round_standings`] for a single round: each pilot's [`position`](RoundStanding::position)
+/// (exactly the [`round_ranking`] order, so the standings and the ranking never disagree), their
+/// **best single lap** ([`best_lap_micros`](RoundStanding::best_lap_micros), *always* computed so the
+/// UI can show a Best-lap column regardless of win condition), their **most laps in a heat**
+/// ([`laps`](RoundStanding::laps)), and the win-condition [`metric`](RoundStanding::metric) the
+/// ranking is by. Pure + deterministic — the same log + meta always yields the same standings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RoundStanding {
+    /// The competitor this standing is for (the pilot's source-local handle).
+    pub competitor: CompetitorRef,
+    /// 1-based position; tied competitors share a position with the same dense, tie-aware
+    /// "1, 2, 2, 4" convention as [`RankEntry`] — and exactly matches [`round_ranking`].
+    pub position: u32,
+    /// The pilot's **best single lap** across the round's heats, in microseconds, or `None` when
+    /// they completed no lap. *Always* computed (independent of the win condition) so a Best-lap
+    /// column can sit alongside the ranking metric.
+    #[ts(type = "number | null")]
+    pub best_lap_micros: Option<i64>,
+    /// The most laps the pilot banked in any single heat (under the round's win condition) — the
+    /// most-laps metric value and lap-count context. `0` for a pilot who completed no lap.
+    pub laps: u32,
+    /// The win-condition metric the ranking is *by* (the tagged mirror of the round's win
+    /// condition). `best_lap_micros` is always present alongside this.
+    pub metric: RoundMetric,
+}
+
+/// A round's **standings** for the time-trial (timed_qual) display (designed for it, sensible for
+/// any format): one [`RoundStanding`] per pilot, in [`round_ranking`] order.
+///
+/// For each pilot it computes, across the round's [`completed_heats`] (scored under the round's
+/// [`win_condition`](RoundDef::win_condition)):
+///
+/// - **`best_lap_micros`** — their fastest single lap, folded from the same finalized heats via the
+///   lap-list projection ([`round_best_laps`]), *independent* of the win condition (so a most-laps
+///   round still shows a real best lap). Always present.
+/// - **`laps`** — the most laps they banked in any single heat (the win-condition lap count).
+/// - **`metric`** — the value the ranking is by, built from the win condition like
+///   [`qual_metric_for`]: [`BestConsecutive`](WinCondition::BestConsecutive) → the smallest
+///   consecutive-window sum across their heats; [`Timed`](WinCondition::Timed) → most laps;
+///   [`BestLap`](WinCondition::BestLap) / [`FirstToLaps`](WinCondition::FirstToLaps) → the best lap.
+/// - **`position`** — reused straight from [`round_ranking`] (`generator.ranking(completed)`), so the
+///   standings positions are byte-for-byte the ranking's, including the whole-field seeding (a no-show
+///   still appears, ranked last, with a null metric).
+///
+/// Pure and deterministic — the same log + meta always yields the same standings.
+pub fn round_standings(
+    meta: &EventMeta,
+    round: &RoundDef,
+    events: &[Event],
+) -> Result<Vec<RoundStanding>, FillError> {
+    // Positions come straight from the ranking, so standings + ranking can never disagree — and the
+    // whole-field seeding (no-shows ranked last) is inherited for free.
+    let ranking = round_ranking(meta, round, events)?;
+    // The round's scored heats (the same view the ranking ranked over) for the win-condition metric
+    // + lap counts, and the lap-list best single lap per pilot (win-condition-independent).
+    let completed = completed_heats(round, events);
+    let best_laps = round_best_laps(round, events);
+
+    // Per-pilot aggregates across the round's heats: most laps in a heat, and the smallest
+    // best-consecutive window sum (when the round is scored under BestConsecutive).
+    let mut most_laps: BTreeMap<CompetitorRef, u32> = BTreeMap::new();
+    let mut best_consec: BTreeMap<CompetitorRef, i64> = BTreeMap::new();
+    for heat in &completed {
+        for place in &heat.result.places {
+            let competitor = place.competitor.competitor.clone();
+            most_laps
+                .entry(competitor.clone())
+                .and_modify(|m| *m = (*m).max(place.laps))
+                .or_insert(place.laps);
+            if let Metric::BestConsecutiveMicros(Some(sum)) = place.metric {
+                best_consec
+                    .entry(competitor)
+                    .and_modify(|s| *s = (*s).min(sum))
+                    .or_insert(sum);
+            }
+        }
+    }
+
+    Ok(ranking
+        .into_iter()
+        .map(|entry| {
+            let competitor = entry.competitor;
+            let best_lap_micros = best_laps.get(&competitor).copied();
+            let laps = most_laps.get(&competitor).copied().unwrap_or(0);
+            let metric = match round.win_condition {
+                WinCondition::BestConsecutive { n } => RoundMetric::BestConsecutive {
+                    n,
+                    micros: best_consec.get(&competitor).copied(),
+                },
+                WinCondition::Timed { .. } => RoundMetric::MostLaps { laps },
+                // Best lap and the non-qualifying First-to-N both display the best single lap.
+                WinCondition::BestLap | WinCondition::FirstToLaps { .. } => RoundMetric::BestLap {
+                    micros: best_lap_micros,
+                },
+            };
+            RoundStanding {
+                competitor,
+                position: entry.position,
+                best_lap_micros,
+                laps,
+                metric,
+            }
+        })
+        .collect())
 }
 
 // --- Per-class standings (race redesign Slice 5/6a) -----------------------------------------
@@ -1845,6 +1991,174 @@ mod tests {
         // B banked more laps → ranks ahead of A under the most-laps qualifying metric.
         assert_eq!(ranking[0].competitor, CompetitorRef("B".into()));
         assert_eq!(ranking[0].position, 1);
+    }
+
+    // --- Per-round standings (time-trial / qual display) ----------------------------------------
+
+    /// A scored heat over `pilots`, each flying the given absolute lap-gate pass times (µs), run to
+    /// Final and tagged with the round + class. The first time is the holeshot; each later time
+    /// completes a lap.
+    fn scored_heat(heat: &str, round: &str, class: &str, pilots: &[(&str, &[i64])]) -> Vec<Event> {
+        let names: Vec<&str> = pilots.iter().map(|(n, _)| *n).collect();
+        let mut log = vec![scheduled(heat, round, class, &names)];
+        let mut passes = Vec::new();
+        let mut seq = 0u64;
+        for (name, times) in pilots {
+            for &t in *times {
+                passes.push(pass(name, t, seq));
+                seq += 1;
+            }
+        }
+        log.extend(run_heat_events(heat, passes));
+        log
+    }
+
+    /// The `(competitor, position)` pairs of a standings list — to assert parity with the ranking.
+    fn positions(standings: &[RoundStanding]) -> Vec<(CompetitorRef, u32)> {
+        standings
+            .iter()
+            .map(|s| (s.competitor.clone(), s.position))
+            .collect()
+    }
+
+    /// Look up a standing by competitor name.
+    fn standing<'a>(standings: &'a [RoundStanding], name: &str) -> &'a RoundStanding {
+        standings
+            .iter()
+            .find(|s| s.competitor.0 == name)
+            .unwrap_or_else(|| panic!("no standing for {name}"))
+    }
+
+    #[test]
+    fn round_standings_best_consecutive_populates_metric_and_best_lap() {
+        // A timed_qual round scored under BestConsecutive{3}: each pilot's best lap is always
+        // computed, the metric carries the smallest 3-consec window, and positions match the ranking.
+        let mut round = qual_round("q1", "open");
+        round.win_condition = WinCondition::BestConsecutive { n: 3 };
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        // A: four 1.0s laps → best-3-consec 3.0s, best lap 1.0s.
+        // B: four 1.5s laps → best-3-consec 4.5s, best lap 1.5s.
+        let log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[
+                ("A", &[0, 1_000_000, 2_000_000, 3_000_000, 4_000_000]),
+                ("B", &[0, 1_500_000, 3_000_000, 4_500_000, 6_000_000]),
+            ],
+        );
+
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        // Positions are byte-for-byte the ranking's.
+        let ranking = round_ranking(&meta, &round, &log).unwrap();
+        assert_eq!(
+            positions(&standings),
+            ranking
+                .iter()
+                .map(|e| (e.competitor.clone(), e.position))
+                .collect::<Vec<_>>()
+        );
+
+        let a = standing(&standings, "A");
+        assert_eq!(a.position, 1);
+        assert_eq!(a.best_lap_micros, Some(1_000_000));
+        assert_eq!(
+            a.metric,
+            RoundMetric::BestConsecutive {
+                n: 3,
+                micros: Some(3_000_000)
+            }
+        );
+        let b = standing(&standings, "B");
+        assert_eq!(b.position, 2);
+        assert_eq!(b.best_lap_micros, Some(1_500_000));
+        assert_eq!(
+            b.metric,
+            RoundMetric::BestConsecutive {
+                n: 3,
+                micros: Some(4_500_000)
+            }
+        );
+    }
+
+    #[test]
+    fn round_standings_timed_reports_most_laps_metric() {
+        // A Timed round: the metric is MostLaps with the per-pilot lap counts, best lap still set.
+        let mut round = qual_round("q1", "open");
+        round.win_condition = WinCondition::Timed {
+            window_micros: 100_000_000,
+        };
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        // Within the 100s window: B completes 3 laps, A completes 2.
+        let log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[
+                ("A", &[0, 10_000_000, 20_000_000]),
+                ("B", &[0, 10_000_000, 20_000_000, 30_000_000]),
+            ],
+        );
+
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        let b = standing(&standings, "B");
+        assert_eq!(b.position, 1);
+        assert_eq!(b.metric, RoundMetric::MostLaps { laps: 3 });
+        assert_eq!(b.laps, 3);
+        // Best lap is still folded from the real lap durations, independent of the win condition.
+        assert_eq!(b.best_lap_micros, Some(10_000_000));
+        let a = standing(&standings, "A");
+        assert_eq!(a.metric, RoundMetric::MostLaps { laps: 2 });
+        assert_eq!(a.laps, 2);
+    }
+
+    #[test]
+    fn round_standings_best_lap_metric_equals_best_lap_micros() {
+        // A BestLap round: the metric is BestLap and equals best_lap_micros for every pilot.
+        let round = qual_round("q1", "open"); // win_condition defaults to BestLap
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[
+                ("A", &[0, 1_000_000, 3_000_000]), // laps 1.0s, 2.0s → best 1.0s
+                ("B", &[0, 1_500_000, 3_000_000]), // laps 1.5s, 1.5s → best 1.5s
+            ],
+        );
+
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        let a = standing(&standings, "A");
+        assert_eq!(a.position, 1);
+        assert_eq!(a.best_lap_micros, Some(1_000_000));
+        assert_eq!(
+            a.metric,
+            RoundMetric::BestLap {
+                micros: a.best_lap_micros
+            }
+        );
+        let b = standing(&standings, "B");
+        assert_eq!(
+            b.metric,
+            RoundMetric::BestLap {
+                micros: Some(1_500_000)
+            }
+        );
+    }
+
+    #[test]
+    fn round_standings_no_lap_pilot_ranks_last_with_null_metric() {
+        // Z only crosses the holeshot (no completed lap) → ranks last with a null metric + best lap.
+        let round = qual_round("q1", "open"); // BestLap
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "Z"])]);
+        let log = scored_heat("q-1", "q1", "open", &[("A", &[0, 1_000_000]), ("Z", &[0])]);
+
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        let z = standing(&standings, "Z");
+        assert_eq!(z.position, 2);
+        assert_eq!(z.best_lap_micros, None);
+        assert_eq!(z.laps, 0);
+        assert_eq!(z.metric, RoundMetric::BestLap { micros: None });
     }
 
     /// A `RankEntry` for a competitor at a 1-based position (aggregation test helper).

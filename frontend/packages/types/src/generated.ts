@@ -95,6 +95,8 @@ export type * from '@bindings/ProtocolError';
 export type * from '@bindings/RankEntry';
 export type * from '@bindings/RoundDef';
 export type * from '@bindings/RoundId';
+export type * from '@bindings/RoundMetric';
+export type * from '@bindings/RoundStanding';
 export type * from '@bindings/Scope';
 export type * from '@bindings/SeedingRule';
 export type * from '@bindings/ServerHello';

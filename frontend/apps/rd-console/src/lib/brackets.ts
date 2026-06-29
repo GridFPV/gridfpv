@@ -29,6 +29,7 @@ import type {
   CompetitorRef,
   HeatResult,
   HeatSummary,
+  RankEntry,
   RoundDef,
   RoundId,
   SeedingRule
@@ -141,6 +142,111 @@ export function bracketChainRounds(root: RoundDef, rounds: RoundDef[]): RoundDef
 /** A round's heats, in list (generation) order. */
 function heatsOf(roundId: RoundId, heats: HeatSummary[]): HeatSummary[] {
   return heats.filter((h) => h.round === roundId);
+}
+
+/**
+ * The default **per-position points table** for tournament placement — the same `[10, 6, 4, 3, 2, 1]`
+ * shape the Head-to-Head round's points editor seeds with. A finish in position `p` scores
+ * `DEFAULT_BRACKET_POINTS[p - 1]`; any position past the table (a deep heat) scores `0`. Used as the
+ * within-tier tiebreak in {@link tournamentPlacement}: pilots eliminated from the *same* multi-pilot
+ * heat tie on placement tier, so points order them, with seed only breaking a points tie.
+ */
+export const DEFAULT_BRACKET_POINTS: readonly number[] = [10, 6, 4, 3, 2, 1];
+
+/**
+ * The **full-field tournament standing** of a bracket chain — every pilot who raced any level, ranked
+ * by how deep they got and, within a depth tier, by **points then seed**.
+ *
+ * Unlike the final level's `roundRanking` (only the finalists), this ranks the *whole* field. A
+ * pilot's standing is their **placement tier** — how far they advanced:
+ *
+ *  - **champion** → tier 0;
+ *  - a pilot whose deepest level is the **final** but who isn't the champion (the runner-up / other
+ *    finalists) → tier 1;
+ *  - a pilot eliminated at level `i` → `finalIndex - i + 1` (so the level before the final = tier 2,
+ *    the one before that = tier 3, … — deeper is always a better, lower tier).
+ *
+ * Within a tier, **seed alone can't order pilots eliminated from the *same* 4–8-pilot heat**, so the
+ * tier is ranked by **points descending**, falling back to **seed ascending** (lower = better) only
+ * when points tie. For today's 2-up brackets the two SF losers tie on points (each 2nd in their
+ * head-to-head), so seed still breaks them — the higher seed taking 3rd; for a multi-pilot heat the
+ * pilots' distinct finishes give distinct points that order the tier. Positions are 1-based and
+ * tie-aware (competition-ranking `1, 2, 2, 4` — see {@link RankEntry}): a true tie is the same tier
+ * AND points AND seed.
+ *
+ * Pure + fetch-free: the caller supplies the chain rounds, a per-level heats accessor (the level's
+ * heat lineups), the champion ref (may be `undefined` for an in-progress bracket — then tier 0 is
+ * empty and the finalists lead as tier 1), `seedOf(ref) => number` (lower = better; a non-finite
+ * result — an unknown seed — sorts last), and `pointsOf(ref) => number` (higher = better; a pilot
+ * with no scored finish in the chain is `0`, so an in-progress / partial bracket falls back to seed).
+ *
+ * @param chain the bracket chain rounds, earliest level first (see {@link bracketChainRounds}).
+ * @param heatsByLevel resolve a level round's id to its scheduled heats (lineups).
+ * @param champion the overall bracket winner, or `undefined` while the final is undecided.
+ * @param seedOf a competitor's bracket seed (lower = better); non-finite sorts the pilot last.
+ * @param pointsOf a competitor's points across the chain's scored heats (higher = better; default 0).
+ */
+export function tournamentPlacement(
+  chain: RoundDef[],
+  heatsByLevel: (roundId: RoundId) => HeatSummary[],
+  champion: CompetitorRef | undefined,
+  seedOf: (ref: CompetitorRef) => number,
+  pointsOf: (ref: CompetitorRef) => number
+): RankEntry[] {
+  const finalIndex = chain.length - 1;
+  if (finalIndex < 0) return [];
+
+  // The deepest level index each competitor appears in (across the chain's heat lineups).
+  const deepest = new Map<CompetitorRef, number>();
+  chain.forEach((round, li) => {
+    for (const h of heatsByLevel(round.id)) {
+      for (const ref of h.lineup) {
+        const prev = deepest.get(ref);
+        if (prev === undefined || li > prev) deepest.set(ref, li);
+      }
+    }
+  });
+  // The champion always counts as having reached the final, even if the final's heats aren't read.
+  if (champion !== undefined && !deepest.has(champion)) deepest.set(champion, finalIndex);
+
+  const tierOf = (ref: CompetitorRef, depth: number): number =>
+    champion !== undefined && ref === champion ? 0 : finalIndex - depth + 1;
+
+  const normSeed = (ref: CompetitorRef): number => {
+    const s = seedOf(ref);
+    return Number.isFinite(s) ? s : Number.POSITIVE_INFINITY;
+  };
+  const normPoints = (ref: CompetitorRef): number => {
+    const p = pointsOf(ref);
+    return Number.isFinite(p) ? p : 0;
+  };
+
+  const ranked = [...deepest.entries()]
+    .map(([competitor, depth]) => ({
+      competitor,
+      tier: tierOf(competitor, depth),
+      points: normPoints(competitor),
+      seed: normSeed(competitor)
+    }))
+    // Within a tier: points descending, then seed ascending (lower = better).
+    .sort((a, b) => a.tier - b.tier || b.points - a.points || a.seed - b.seed);
+
+  // 1-based, tie-aware (competition-ranking) positions: a tie shares the leader's position and the
+  // next distinct entry skips past (1, 2, 2, 4). A tie is the same tier AND points AND seed.
+  const out: RankEntry[] = [];
+  let position = 0;
+  let prevTier: number | undefined;
+  let prevPoints: number | undefined;
+  let prevSeed: number | undefined;
+  ranked.forEach((entry, k) => {
+    if (entry.tier !== prevTier || entry.points !== prevPoints || entry.seed !== prevSeed)
+      position = k + 1;
+    prevTier = entry.tier;
+    prevPoints = entry.points;
+    prevSeed = entry.seed;
+    out.push({ competitor: entry.competitor, position });
+  });
+  return out;
 }
 
 /** Whether every one of `round`'s heats is scored (`Final`) — and there is at least one. */

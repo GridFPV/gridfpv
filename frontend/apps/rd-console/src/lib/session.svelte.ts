@@ -71,6 +71,7 @@ import {
   deleteRound,
   listHeats,
   roundRanking,
+  roundStandings,
   classStandings,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
@@ -107,6 +108,7 @@ import type {
   RankEntry,
   RoundDef,
   RoundId,
+  RoundStanding,
   Scope,
   SignalTraceView,
   Timer,
@@ -339,6 +341,7 @@ export class Session {
   #deleteRoundImpl: typeof deleteRound;
   #listHeatsImpl: typeof listHeats;
   #roundRankingImpl: typeof roundRanking;
+  #roundStandingsImpl: typeof roundStandings;
   #classStandingsImpl: typeof classStandings;
 
   constructor(opts?: {
@@ -377,6 +380,7 @@ export class Session {
     deleteRoundImpl?: typeof deleteRound;
     listHeatsImpl?: typeof listHeats;
     roundRankingImpl?: typeof roundRanking;
+    roundStandingsImpl?: typeof roundStandings;
     classStandingsImpl?: typeof classStandings;
     baseUrl?: string;
     autoRestore?: boolean;
@@ -416,6 +420,7 @@ export class Session {
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
     this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
     this.#roundRankingImpl = opts?.roundRankingImpl ?? roundRanking;
+    this.#roundStandingsImpl = opts?.roundStandingsImpl ?? roundStandings;
     this.#classStandingsImpl = opts?.classStandingsImpl ?? classStandings;
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
@@ -915,6 +920,20 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
     return this.#roundRankingImpl(this.baseUrl, event.id, roundId, { token: this.#token });
+  }
+
+  /**
+   * Read a **round's standings** (`GET /events/{id}/rounds/{round}/standings`) — the time-trial
+   * (timed_qual) display. One {@link RoundStanding} per pilot for the round: each pilot's best single
+   * lap plus the win-condition metric they're ranked on (best-N-consecutive time, lap count, or best
+   * lap), in the same order (and with the same positions) as {@link roundRanking}. No-op (resolves
+   * `[]`) when no event is selected; rejects on a non-2xx / transport failure (an unscorable round is
+   * a 400 the stage surfaces).
+   */
+  roundStandings(roundId: RoundId): Promise<RoundStanding[]> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve([]);
+    return this.#roundStandingsImpl(this.baseUrl, event.id, roundId, { token: this.#token });
   }
 
   /**

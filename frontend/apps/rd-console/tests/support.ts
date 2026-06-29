@@ -39,6 +39,7 @@ import type {
   deleteRound,
   listHeats,
   roundRanking,
+  roundStandings,
   classStandings
 } from '@gridfpv/protocol-client';
 import type {
@@ -114,6 +115,9 @@ export interface TimerImpls {
   /** The round-ranking + class-standings reads (race redesign Slice 5/6a) — back the Results +
    * EventRounds standings/advance tests. */
   roundRankingImpl?: typeof roundRanking;
+  /** The time-trial round-standings read (Best lap + win-condition metric) — backs the Results
+   * timed_qual round-view tests. */
+  roundStandingsImpl?: typeof roundStandings;
   classStandingsImpl?: typeof classStandings;
 }
 
@@ -216,6 +220,7 @@ export function makeTestSession(
     listHeatsImpl: opts?.listHeatsImpl,
     // Ranking + standings read seams (race redesign Slice 5/6a): inert unless overridden.
     roundRankingImpl: opts?.roundRankingImpl,
+    roundStandingsImpl: opts?.roundStandingsImpl,
     classStandingsImpl: opts?.classStandingsImpl
   });
   // Seed a token (so privileged sends don't trigger the lazy prompt) and enter the event,
