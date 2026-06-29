@@ -350,7 +350,8 @@
       pointsTable: parseRoundRobinPoints(round.params?.points),
       label: callsign,
       heatName: (h) => heatNameById(h.heat, heats, rounds),
-      resultByHeat: (id) => resultByHeat[id]
+      resultByHeat: (id) => resultByHeat[id],
+      bestLapOf: (ref) => rrBestLap.get(ref)
     });
   }
 
@@ -565,6 +566,34 @@
     if ('MostLaps' in m) return String(m.MostLaps.laps);
     return '';
   }
+
+  // --- Round-robin best lap ----------------------------------------------------------------------
+  // The round-robin standings' Best-lap column sources from the dedicated standings endpoint, which
+  // ALWAYS computes best lap regardless of the round's win condition (a race-scored heat's result
+  // metric is the win-condition metric, e.g. ReachedAt, not a best lap, so best lap can't be read off
+  // the heat-result metric). Fetched for a round-robin view, refreshed on a live advance.
+  const roundRobinRoundId = $derived.by<RoundId | undefined>(() =>
+    currentView?.kind === 'roundrobin' ? currentView.round.id : undefined
+  );
+  let rrBestLap = $state<Map<CompetitorRef, number | null>>(new Map());
+  $effect(() => {
+    if (!session) return;
+    const rid = roundRobinRoundId;
+    void session.liveState;
+    if (!rid) {
+      rrBestLap = new Map();
+      return;
+    }
+    session
+      .roundStandings(rid)
+      .then((rows) => {
+        const m = new Map<CompetitorRef, number | null>();
+        for (const s of rows) m.set(s.competitor, s.best_lap_micros);
+        rrBestLap = m;
+      })
+      // An unscored round 400s — leave it empty (every pilot shows "—").
+      .catch(() => (rrBestLap = new Map()));
+  });
 
   // --- Per-class standings ----------------------------------------------------------------------
   // The season-join read for the selected class, re-fetched on class change or a live advance.

@@ -17,7 +17,6 @@ import type {
   HeatId,
   HeatResult,
   HeatSummary,
-  Metric,
   RankEntry,
   RoundDef
 } from '@gridfpv/types';
@@ -63,12 +62,6 @@ export function rotationNumberOf(heatId: string): number | undefined {
 function heatNumberOf(heatId: string): number {
   const m = /^rr-r\d+-h(\d+)$/.exec(heatId);
   return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
-}
-
-/** A placement's best single lap in micros, when the metric carries one (else `undefined`). */
-function bestLapOf(metric: Metric): number | undefined {
-  if ('BestLapMicros' in metric && metric.BestLapMicros != null) return metric.BestLapMicros;
-  return undefined;
 }
 
 /**
@@ -128,23 +121,29 @@ export function groupRoundRobinRotations(
 /**
  * The aggregate standings rows for a round-robin round, in the **canonical** order `ranking`
  * (`session.roundRanking`) returns. Each pilot's `points` is the `pointsTable` summed over their
- * finishes across every scored heat, and `bestLapMicros` the min best-lap across their heats (when
- * available). A pilot with no scored finish totals 0 points / no best lap, so a part-run round still
- * renders in ranking order.
+ * finishes across every scored heat; `bestLapMicros` comes from `bestLapOf` — the dedicated round
+ * standings endpoint, which **always** computes best lap regardless of the round's win condition (a
+ * race-scored heat's result metric is the win-condition metric, e.g. `ReachedAt`, not a best lap, so
+ * best lap can no longer be read off the heat-result metric). A pilot with no scored finish totals 0
+ * points, and a pilot with no recorded lap shows no best lap, so a part-run round still renders in
+ * ranking order.
  *
  * When `ranking` is empty (the round isn't scored yet) the rows fall back to the heats' lineup order
  * (deduped, first-seen) so the table still shows the field with zero points.
+ *
+ * @param bestLapOf resolve a competitor ref to their best single lap in micros (`null`/`undefined`
+ *   when they have none) — sourced from `session.roundStandings`, never the heat-result metric.
  */
 export function roundRobinStandings(
   ranking: RankEntry[],
   heats: HeatSummary[],
   pointsTable: number[],
   label: (ref: CompetitorRef) => string,
-  resultByHeat: (heatId: HeatId) => HeatResult | undefined
+  resultByHeat: (heatId: HeatId) => HeatResult | undefined,
+  bestLapOf: (ref: CompetitorRef) => number | null | undefined
 ): RoundRobinStanding[] {
-  // Aggregate points + best lap per competitor across every scored heat.
+  // Aggregate points per competitor across every scored heat (best lap comes from `bestLapOf`).
   const points = new Map<CompetitorRef, number>();
-  const bestLap = new Map<CompetitorRef, number>();
   for (const h of heats) {
     const res = resultByHeat(h.heat);
     if (!res) continue;
@@ -152,11 +151,6 @@ export function roundRobinStandings(
       const ref = p.competitor.competitor;
       const pts = pointsTable[p.position - 1] ?? 0;
       points.set(ref, (points.get(ref) ?? 0) + pts);
-      const lap = bestLapOf(p.metric);
-      if (lap !== undefined) {
-        const prev = bestLap.get(ref);
-        if (prev === undefined || lap < prev) bestLap.set(ref, lap);
-      }
     }
   }
 
@@ -165,7 +159,7 @@ export function roundRobinStandings(
     label: label(ref),
     position,
     points: points.get(ref) ?? 0,
-    bestLapMicros: bestLap.get(ref)
+    bestLapMicros: bestLapOf(ref) ?? undefined
   });
 
   if (ranking.length > 0) {
@@ -191,10 +185,19 @@ export function buildRoundRobinView(
     label: (ref: CompetitorRef) => string;
     heatName: (h: HeatSummary) => string;
     resultByHeat: (heatId: HeatId) => HeatResult | undefined;
+    /** Best single lap (micros) per competitor — from `session.roundStandings`, win-condition-agnostic. */
+    bestLapOf: (ref: CompetitorRef) => number | null | undefined;
   }
 ): RoundRobin {
   return {
-    standings: roundRobinStandings(ranking, heats, opts.pointsTable, opts.label, opts.resultByHeat),
+    standings: roundRobinStandings(
+      ranking,
+      heats,
+      opts.pointsTable,
+      opts.label,
+      opts.resultByHeat,
+      opts.bestLapOf
+    ),
     rotations: groupRoundRobinRotations(heats, opts.heatName, opts.label, opts.resultByHeat)
   };
 }

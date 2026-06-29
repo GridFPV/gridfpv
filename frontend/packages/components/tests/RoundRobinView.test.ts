@@ -45,9 +45,13 @@ describe('RoundRobinView', () => {
     expect(within(table).getByText('Points')).toBeInTheDocument();
     expect(within(table).getByText('AceOne')).toBeInTheDocument();
     expect(within(table).getByText('Bolt')).toBeInTheDocument();
-    // The summed points show; a null best-lap renders as the em dash.
+    // The summed points show.
     expect(within(table).getByText('20')).toBeInTheDocument();
     expect(within(table).getByText('12')).toBeInTheDocument();
+    // The Best-lap column shows the formatted time for a pilot who has one (28.000)…
+    expect(within(table).getByText('28.000')).toBeInTheDocument();
+    // …and the em dash only for the pilot whose best lap is genuinely absent (null).
+    expect(within(table).getByText('—')).toBeInTheDocument();
   });
 
   it('renders the per-rotation grid, each heat listing its lineup', () => {

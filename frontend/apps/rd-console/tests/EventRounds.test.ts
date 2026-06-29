@@ -9,6 +9,7 @@ import type {
   NewRoundReq,
   Pilot,
   RoundDef,
+  RoundStanding,
   Timer
 } from '@gridfpv/types';
 import EventRounds from '../src/screens/EventRounds.svelte';
@@ -2004,6 +2005,26 @@ describe('EventRounds — round-robin builder + visualization', () => {
       { competitor: 'p1', position: 1 },
       { competitor: 'p2', position: 2 }
     ]);
+    // The dedicated standings endpoint (always computes best lap regardless of win condition):
+    // AceOne has a best lap (→ "41.250"), Bolt has none (null → "—").
+    const roundStandingsImpl = vi.fn(
+      async (): Promise<RoundStanding[]> => [
+        {
+          competitor: 'p1',
+          position: 1,
+          best_lap_micros: 41_250_000,
+          laps: 3,
+          metric: { MostLaps: { laps: 3 } }
+        },
+        {
+          competitor: 'p2',
+          position: 2,
+          best_lap_micros: null,
+          laps: 3,
+          metric: { MostLaps: { laps: 3 } }
+        }
+      ]
+    );
     // The heat-result snapshots fetchHeatResult pulls (p1 wins both heats).
     const snap = (rows: [string, number][]) => ({
       body: {
@@ -2030,6 +2051,7 @@ describe('EventRounds — round-robin builder + visualization', () => {
     const { session } = makeTestSession({
       ...rrImpls(RR_HEATS),
       roundRankingImpl,
+      roundStandingsImpl,
       event: { ...EVENT_4, rounds: [RR_ROUND] }
     });
     vi.stubGlobal(
@@ -2058,6 +2080,11 @@ describe('EventRounds — round-robin builder + visualization', () => {
     await waitFor(() => expect(within(table).getByText('AceOne')).toBeInTheDocument());
     expect(within(table).getByText('Bolt')).toBeInTheDocument();
     expect(within(table).queryByText('p1')).toBeNull();
+
+    // The Best-lap column sources from the standings endpoint (not the win-condition heat metric):
+    // AceOne's best lap shows; Bolt (no lap) shows the em dash.
+    await waitFor(() => expect(within(table).getByText('41.250')).toBeInTheDocument());
+    expect(within(table).getByText('—')).toBeInTheDocument();
 
     // The per-rotation grid shows both rotations.
     expect(within(panel).getByText('Rotation 1')).toBeInTheDocument();
