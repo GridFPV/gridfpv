@@ -551,7 +551,7 @@ impl FormatRegistry {
     ///   likewise **derived from the win condition**, not a separate param.
     /// - `single_elim`: `heat_size` (number, 2), `advance` ("Advance per heat", 1).
     /// - `double_elim`: `bracket_reset` (bool, on).
-    /// - `multi_main`: `main_size` (number, 4).
+    /// - `multi_main`: `main_size` ("Main size", 4), `bump_n` ("Bump-up count", 0).
     /// - `open_practice`: no params (the active channels are the field, carried by the round's
     ///   `AllChannels` seeding).
     /// - `zippyq`: **not offered** — shelved (#218); still registered in
@@ -585,10 +585,18 @@ impl FormatRegistry {
                     ),
                 ],
             },
-            // NOTE: multi_main shelved (a bracket-style finals format) — registered in
-            // [`standard`](Self::standard) so persisted `multi_main` rounds still validate/replay, but
-            // omitted from the offered set so the Rounds UI can't add one until it gets a proper
-            // finals builder (the per-main final-type work is deferred).
+            // Multi-tier mains (#219, D14): a finals format split by qualifying rank — the field is
+            // sliced into mains of `main_size` (A-main = top N, …) racing for placement, and the mains
+            // stack into the final standings. `bump_n` (default 0) turns the independent tiered mains
+            // into a bottom-up bump-up ladder: each main's top N bump into the main above. Offered via
+            // the tournament builder (Multi-main structure), not the Add-round picker.
+            FormatSchema {
+                name: "multi_main".into(),
+                params: vec![
+                    FormatParam::number("main_size", "Main size", "4"),
+                    FormatParam::number("bump_n", "Bump-up count", "0"),
+                ],
+            },
             // Open practice (open-practice format): one open heat over the active channels, no
             // config knobs (the active channels are the field, carried by the round's seeding —
             // see [`OpenPractice`]). Kept in sorted name order (after `multi_main`, before
@@ -1340,6 +1348,7 @@ mod tests {
                 "chase_the_ace",
                 "double_elim",
                 "head_to_head",
+                "multi_main",
                 "open_practice",
                 "round_robin",
                 "single_elim",
@@ -1365,10 +1374,15 @@ mod tests {
         );
         // …yet it remains registered, so it's the offered set that shrank, not the registry.
         assert!(FormatRegistry::standard().contains("zippyq"));
-        // multi_main is likewise shelved — registered (persisted rounds load) but not offered, until
-        // it gets a proper finals builder.
-        assert!(!offered.contains(&"multi_main"));
+        // multi_main is offered (#219, D14) via the tournament builder: it carries `main_size` +
+        // `bump_n` for the builder's config, and is registered like every other format.
+        assert!(offered.contains(&"multi_main"));
         assert!(FormatRegistry::standard().contains("multi_main"));
+        let mm = schemas.iter().find(|s| s.name == "multi_main").unwrap();
+        assert_eq!(
+            mm.params.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
+            vec!["main_size", "bump_n"]
+        );
         // Chase the Ace IS offered (it carries a param schema for the editor) but the Rounds UI
         // shows it only as a final-level format — the general round picker filters it out client-side.
         assert!(offered.contains(&"chase_the_ace"));

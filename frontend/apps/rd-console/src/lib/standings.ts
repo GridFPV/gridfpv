@@ -227,6 +227,52 @@ export function roundRobinRoundReq(opts: {
 }
 
 /**
+ * Assemble the request for a **multi-main** round (format `multi_main`) — a single finals round whose
+ * heats are the tiered mains (A-main = the top `main_size` seeds, B-main the next, …) racing for
+ * placement, and whose `session.roundRanking` concatenates the mains' results tier-by-tier into the
+ * final standing (every A-main finisher above every B-main finisher, …). Like round-robin it is **not**
+ * a level chain: one round holds the whole structure.
+ *
+ * Seeded EITHER from a finished round's ranking (`{ kind: 'ranking', source, topN }` →
+ * `FromRanking { source_rounds: [source.id], top_n }`, carrying the source round's classes) OR
+ * straight off a class roster (`{ kind: 'roster', classId }` → `FromRoster`, over that one class).
+ * Mirrors {@link roundRobinRoundReq} EXACTLY in shape/signature.
+ *
+ * `mainSize` is the pilots per main tier (clamped ≥ 2). `bumpN` is the bump-up count: how many of each
+ * main's top finishers advance up to the next main (clamped ≥ 0; `0` = independent tiered mains, `> 0`
+ * = a bottom-up bump ladder). There is no points table — the ranking is by tier then in-heat position.
+ */
+export function multiMainRoundReq(opts: {
+  label: string;
+  mainSize: number;
+  bumpN: number;
+  winCondition: WinCondition;
+  seed: { kind: 'ranking'; source: RoundDef; topN: number } | { kind: 'roster'; classId: string };
+}): NewRoundReq {
+  const { label, mainSize, bumpN, winCondition, seed } = opts;
+  const params: Record<string, string> = {
+    main_size: String(Math.max(2, Math.round(mainSize))),
+    bump_n: String(Math.max(0, Math.round(bumpN)))
+  };
+  return {
+    label,
+    classes: seed.kind === 'ranking' ? [...seed.source.classes] : [seed.classId],
+    format: 'multi_main',
+    params,
+    win_condition: winCondition,
+    seeding:
+      seed.kind === 'ranking'
+        ? {
+            FromRanking: {
+              source_rounds: [seed.source.id],
+              top_n: Math.max(1, Math.round(seed.topN))
+            }
+          }
+        : 'FromRoster'
+  };
+}
+
+/**
  * Assemble the request for the **next bracket level** advancing `level` produces (#217, decisions
  * D13: one round per level). Unlike {@link advanceRoundReq} (quali → level 1, seeded `FromRanking`),
  * a level → next-level advance reuses the same bracket format and is seeded

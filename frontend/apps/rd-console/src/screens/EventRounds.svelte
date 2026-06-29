@@ -27,11 +27,12 @@
     Dialog,
     Field,
     Input,
+    MultiMainView,
     RoundRobinView,
     Select,
     toast
   } from '@gridfpv/components';
-  import type { Bracket, RoundRobin } from '@gridfpv/components';
+  import type { Bracket, MultiMain, RoundRobin } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
     ChannelMode,
@@ -89,6 +90,7 @@
     advanceRoundReq,
     bracketLevelFields,
     bracketSizeOptions,
+    multiMainRoundReq,
     roundRobinRoundReq,
     rosterRoundReq
   } from '../lib/standings.js';
@@ -98,6 +100,7 @@
     parseRoundRobinPoints,
     RR_DEFAULT_POINTS
   } from '../lib/roundRobin.js';
+  import { buildMultiMainView, isMultiMainRound, mainTierName } from '../lib/multiMain.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -385,6 +388,12 @@
   let advanceRrRounds = $state(3);
   let advanceRrHeatSize = $state(4);
   let advanceRrPoints = $state<number[]>([...RR_DEFAULT_POINTS]);
+  // ── Multi-main config (its own knobs; the bracket / round-robin structures ignore these) ─────────
+  // Multi-main is a single finals round, not a level chain: `advanceMmMainSize` is the pilots per main
+  // tier (A-main = top N, …), `advanceMmBumpN` how many of each main's top finishers bump up to the
+  // next main (0 = independent tiered mains). Win condition + seeding reuse the shared advance state.
+  let advanceMmMainSize = $state(4);
+  let advanceMmBumpN = $state(0);
   // The bracket's win condition — one for all its heats (each race decided directly): First-to-N
   // laps (the head-to-head default) or Most laps in N minutes. Both self-terminate (no race time).
   let advanceWinKind = $state<'FirstToLaps' | 'Timed'>('FirstToLaps');
@@ -461,6 +470,8 @@
     advanceRrRounds = 3;
     advanceRrHeatSize = 4;
     advanceRrPoints = [...RR_DEFAULT_POINTS];
+    advanceMmMainSize = 4;
+    advanceMmBumpN = 0;
   }
 
   /** Set the round-robin per-position points table value at `index` (reuses the H2H editor shape). */
@@ -579,6 +590,47 @@
         }
         await refreshHeats();
         toast.success(`“${name}” round robin built from ${sourceDesc} — ${fieldSize} seeds.`);
+        advanceOpen = false;
+        advanceModalRound = undefined;
+        advanceSourceClass = '';
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : String(e));
+      } finally {
+        advancing = false;
+      }
+      return;
+    }
+
+    // ── Multi-main: ONE round, not a level chain ─────────────────────────────────────────────────
+    // Create a single multi_main round seeded from the chosen round's ranking (top-N) or the class
+    // roster, then fill it (`All`) when the seed is ready (a class roster / a finished round). No level
+    // chain is built (mirrors the round-robin branch above).
+    if (advanceStructure === 'multi_main') {
+      const req: NewRoundReq = multiMainRoundReq({
+        label: name,
+        mainSize: advanceMmMainSize,
+        bumpN: advanceMmBumpN,
+        winCondition,
+        seed:
+          advanceSeedKind === 'class'
+            ? { kind: 'roster', classId: classIdForLevel1 }
+            : { kind: 'ranking', source: sourceForLevel1!, topN: fieldSize }
+      });
+      advancing = true;
+      try {
+        const created = await session.createRound(req);
+        if (!created) {
+          toast.info('A control token is required to manage rounds.');
+          return;
+        }
+        if (readyNow) {
+          const ack = await session.fillRound(created.id, 'All');
+          if (!ack.ok) {
+            toast.info(ack.error?.message ?? 'The round fills when the source is ready.');
+          }
+        }
+        await refreshHeats();
+        toast.success(`“${name}” multi-main built from ${sourceDesc} — ${fieldSize} seeds.`);
         advanceOpen = false;
         advanceModalRound = undefined;
         advanceSourceClass = '';
@@ -908,8 +960,79 @@
     return parts.join(' · ');
   }
 
-  // The tournaments shown in the Tournaments container: bracket roots + round-robin rounds.
-  const tournamentRounds = $derived(rounds.filter((r) => isBracketRoot(r) || isRoundRobinRound(r)));
+  // --- Multi-main visualization ---------------------------------------------------------------
+  // A multi_main round shows as a MultiMainView (standings + a Tier column) in the Tournaments
+  // container. Its standings order is the canonical `roundRanking`; each pilot's tier is derived from
+  // the main-X heat they raced in (its result, else its lineup). So we fetch the ranking per
+  // multi-main round (kept fresh as mains finalize) and each finalized main's result once (guarded),
+  // mirroring the round-robin fetchers above.
+  const multiMainRounds = $derived(rounds.filter(isMultiMainRound));
+
+  let mmRankingByRound = $state<Record<RoundId, RankEntry[]>>({});
+  $effect(() => {
+    // Re-run as mains finalize so a freshly-scored main re-aggregates the ranking.
+    void heats;
+    for (const r of multiMainRounds) {
+      session
+        .roundRanking(r.id)
+        .then((rows) => (mmRankingByRound = { ...mmRankingByRound, [r.id]: rows }))
+        // An unscored round 400s — leave it empty (the view falls back to lineup order).
+        .catch(() => {});
+    }
+  });
+
+  let mmResultByHeat = $state<Record<string, HeatResult>>({});
+  const mmFetchedHeats = new Set<string>();
+  $effect(() => {
+    void heats;
+    for (const r of multiMainRounds) {
+      for (const h of heatsByRound(r.id)) {
+        if (h.phase !== 'Final' || mmFetchedHeats.has(h.heat)) continue;
+        mmFetchedHeats.add(h.heat);
+        session
+          .fetchHeatResult(h.heat)
+          .then((res) => {
+            if (res) mmResultByHeat = { ...mmResultByHeat, [h.heat]: res };
+          })
+          .catch(() => {});
+      }
+    }
+  });
+
+  // The MultiMainView view-model for a multi-main round: standings ordered by its ranking, each tagged
+  // with its tier (from the main-X heat the pilot raced in). Friendly callsigns (never raw refs —
+  // CLAUDE.md).
+  function multiMainViewFor(round: RoundDef): MultiMain {
+    return buildMultiMainView(mmRankingByRound[round.id] ?? [], heatsByRound(round.id), {
+      label: callsign,
+      tierNameOf: mainTierName,
+      resultByHeat: (id) => mmResultByHeat[id]
+    });
+  }
+
+  // The multi-main container sub-line: where it was seeded from + the main size + bump-up count.
+  function multiMainSubtitle(round: RoundDef): string {
+    const seed = round.seeding;
+    const parts: string[] = [];
+    if (typeof seed === 'object' && 'FromRanking' in seed) {
+      const srcId = seed.FromRanking.source_rounds[0];
+      const src = rounds.find((r) => r.id === srcId);
+      parts.push(src ? `from ${src.label}` : 'seeded from a ranking');
+      parts.push(`top ${seed.FromRanking.top_n}`);
+    } else if (seed === 'FromRoster' && round.classes[0]) {
+      parts.push(`from ${className(round.classes[0])}`);
+    }
+    const mainSize = Math.max(2, Math.round(Number(round.params?.main_size ?? 4)));
+    parts.push(`mains of ${mainSize}`);
+    const bumpN = Math.max(0, Math.round(Number(round.params?.bump_n ?? 0)));
+    if (bumpN > 0) parts.push(`bump ${bumpN}`);
+    return parts.join(' · ');
+  }
+
+  // The tournaments shown in the Tournaments container: bracket roots + round-robin + multi-main rounds.
+  const tournamentRounds = $derived(
+    rounds.filter((r) => isBracketRoot(r) || isRoundRobinRound(r) || isMultiMainRound(r))
+  );
 
   // --- Manual heat build (replaces the retired NewHeat free-text form) ---------------------------
   // Pick a round, then select from that round's **eligible class members** (real roster pilots, no
@@ -1877,6 +2000,19 @@
             </header>
             <div class="bracket-view"><RoundRobinView view={rrView} /></div>
           </section>
+        {:else if isMultiMainRound(root)}
+          {@const mmView = multiMainViewFor(root)}
+          {@const mmName = splitBracketLabel(root.label).name || root.label}
+          <section class="bracket-container" aria-label={`Multi-main — ${mmName}`}>
+            <header class="bracket-header">
+              <div class="bracket-headline">
+                <h3 class="bracket-title">{mmName}</h3>
+                <span class="bracket-champion">Multi-Main</span>
+              </div>
+              <p class="bracket-sub">{multiMainSubtitle(root)}</p>
+            </header>
+            <div class="bracket-view"><MultiMainView view={mmView} /></div>
+          </section>
         {:else}
           {@const view = bracketViewFor(root)}
           {@const champ = championOf(root)}
@@ -2378,6 +2514,7 @@
           <Select bind:value={advanceStructure} aria-label="Structure">
             <option value="single_elim">Single Elimination</option>
             <option value="round_robin">Round robin</option>
+            <option value="multi_main">Multi-main</option>
           </Select>
         </Field>
         <Field label="Seed from" hint="A finished round's ranking, or a class roster.">
@@ -2447,16 +2584,28 @@
       {/if}
       {#if advanceFieldSize >= 2}
         {@const isRoundRobin = advanceStructure === 'round_robin'}
+        {@const isMultiMain = advanceStructure === 'multi_main'}
+        {@const isBracket = !isRoundRobin && !isMultiMain}
         <Field
-          label={isRoundRobin ? 'Round-robin name' : 'Bracket name'}
+          label={isRoundRobin
+            ? 'Round-robin name'
+            : isMultiMain
+              ? 'Multi-main name'
+              : 'Bracket name'}
           required
           hint={isRoundRobin
             ? 'Names this round robin (shown in the Tournaments list and Results).'
-            : 'Names every level (“‹name› — Quarterfinals”, …) so multiple brackets in one event stay distinct.'}
+            : isMultiMain
+              ? 'Names this multi-main (shown in the Tournaments list and Results).'
+              : 'Names every level (“‹name› — Quarterfinals”, …) so multiple brackets in one event stay distinct.'}
         >
           <Input
             bind:value={advanceName}
-            aria-label={isRoundRobin ? 'Round-robin name' : 'Bracket name'}
+            aria-label={isRoundRobin
+              ? 'Round-robin name'
+              : isMultiMain
+                ? 'Multi-main name'
+                : 'Bracket name'}
             placeholder="e.g. Pro"
           />
         </Field>
@@ -2472,6 +2621,20 @@
                   <option value={n}>{n}</option>
                 {/each}
               </Select>
+            </Field>
+          {:else if isMultiMain}
+            <!-- Multi-main: pilots per main tier + bump-up count — no advance-per-heat / final / points. -->
+            <Field
+              label="Main size"
+              hint="Pilots per main — the A-main is the top N seeds, then B, …"
+            >
+              <Input type="number" min="2" bind:value={advanceMmMainSize} aria-label="Main size" />
+            </Field>
+            <Field
+              label="Bump-up count"
+              hint="Top N from each main advance to the next main up; 0 = independent A/B/C mains."
+            >
+              <Input type="number" min="0" bind:value={advanceMmBumpN} aria-label="Bump-up count" />
             </Field>
           {:else}
             <Field
@@ -2499,7 +2662,9 @@
             label="Win condition"
             hint={isRoundRobin
               ? 'How every heat is decided — the round ranking aggregates the results.'
-              : 'How every bracket heat is decided.'}
+              : isMultiMain
+                ? 'How every main is decided — the standings stack the mains tier by tier.'
+                : 'How every bracket heat is decided.'}
           >
             <Select bind:value={advanceWinKind} aria-label="Bracket win condition">
               <option value="FirstToLaps">First to N laps</option>
@@ -2520,7 +2685,7 @@
               />
             </Field>
           {/if}
-          {#if !isRoundRobin}
+          {#if isBracket}
             <Field label="Final format">
               <Select bind:value={advanceFinalKind} aria-label="Final format">
                 <option value="single">Single race</option>
@@ -2566,6 +2731,15 @@
               {/each}
             </div>
           </fieldset>
+        {:else if isMultiMain}
+          <p class="advance-note small" role="status">
+            Splits the {advanceFieldSize} seeds into mains of {Math.max(
+              2,
+              Math.round(advanceMmMainSize)
+            )} (A-Main, B-Main, …){Math.max(0, Math.round(advanceMmBumpN)) > 0
+              ? `, top ${Math.max(0, Math.round(advanceMmBumpN))} of each bumping up`
+              : ''}. The standings stack the mains tier by tier.
+          </p>
         {:else}
           <p class="advance-note small" role="status">
             {advanceLevels}
@@ -2587,7 +2761,11 @@
         loading={advancing}
         disabled={advanceFieldSize < 2 || advanceName.trim().length === 0}
       >
-        {advanceStructure === 'round_robin' ? 'Build round robin' : 'Build bracket'}
+        {advanceStructure === 'round_robin'
+          ? 'Build round robin'
+          : advanceStructure === 'multi_main'
+            ? 'Build multi-main'
+            : 'Build bracket'}
       </Button>
     {/snippet}
   </Dialog>

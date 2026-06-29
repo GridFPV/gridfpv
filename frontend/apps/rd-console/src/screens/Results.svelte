@@ -26,12 +26,13 @@
     BracketTree,
     Button,
     Card,
+    MultiMainView,
     RoundRobinView,
     Select,
     formatMicros,
     toast
   } from '@gridfpv/components';
-  import type { Bracket, RoundRobin } from '@gridfpv/components';
+  import type { Bracket, MultiMain, RoundRobin } from '@gridfpv/components';
   import type {
     Class,
     ClassId,
@@ -65,7 +66,8 @@
     isRoundRobinRound,
     parseRoundRobinPoints
   } from '../lib/roundRobin.js';
-  import { heatNameById } from '../lib/heats.js';
+  import { buildMultiMainView, isMultiMainRound } from '../lib/multiMain.js';
+  import { heatNameById, mainTierName } from '../lib/heats.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let {
@@ -143,15 +145,17 @@
   type ViewOption =
     | { value: string; label: string; kind: 'tournament'; root: RoundDef }
     | { value: string; label: string; kind: 'roundrobin'; round: RoundDef }
+    | { value: string; label: string; kind: 'multimain'; round: RoundDef }
     | { value: string; label: string; kind: 'round'; round: RoundDef }
     | { value: string; label: string; kind: 'class'; classId: ClassId };
 
   const tournamentRoots = $derived<RoundDef[]>(rounds.filter(isBracketRoot));
-  // Round-robin rounds group with the tournaments (their own RoundRobinView), so they are excluded
-  // from the plain-round ranking views below.
+  // Round-robin + multi-main rounds group with the tournaments (their own standings views), so they
+  // are excluded from the plain-round ranking views below.
   const roundRobinRounds = $derived<RoundDef[]>(rounds.filter(isRoundRobinRound));
+  const multiMainRounds = $derived<RoundDef[]>(rounds.filter(isMultiMainRound));
   const plainRounds = $derived<RoundDef[]>(
-    rounds.filter((r) => !isBracketLevel(r) && !isRoundRobinRound(r))
+    rounds.filter((r) => !isBracketLevel(r) && !isRoundRobinRound(r) && !isMultiMainRound(r))
   );
 
   const viewOptions = $derived.by<ViewOption[]>(() => {
@@ -163,6 +167,10 @@
     for (const round of roundRobinRounds) {
       const name = splitBracketLabel(round.label).name || round.label;
       opts.push({ value: `roundrobin:${round.id}`, label: name, kind: 'roundrobin', round });
+    }
+    for (const round of multiMainRounds) {
+      const name = splitBracketLabel(round.label).name || round.label;
+      opts.push({ value: `multimain:${round.id}`, label: name, kind: 'multimain', round });
     }
     for (const round of plainRounds) {
       opts.push({ value: `round:${round.id}`, label: round.label, kind: 'round', round });
@@ -194,6 +202,12 @@
       heatsByRound(r.id).some((h) => h.phase === 'Final')
     );
     if (runRobins.length > 0) return `roundrobin:${runRobins[runRobins.length - 1].id}`;
+
+    // Else the latest multi-main round that has run (grouped with the tournaments).
+    const runMains = multiMainRounds.filter((r) =>
+      heatsByRound(r.id).some((h) => h.phase === 'Final')
+    );
+    if (runMains.length > 0) return `multimain:${runMains[runMains.length - 1].id}`;
 
     // Else the latest non-bracket round with a finalized heat.
     const scoredRounds = plainRounds.filter((r) =>
@@ -256,7 +270,8 @@
     void heats;
     const chainRounds = [
       ...tournamentRoots.flatMap((root) => bracketChainRounds(root, rounds)),
-      ...roundRobinRounds
+      ...roundRobinRounds,
+      ...multiMainRounds
     ];
     for (const lr of chainRounds) {
       for (const h of heatsByRound(lr.id)) {
@@ -369,6 +384,36 @@
     }
     const rotations = Math.max(0, Math.round(Number(round.params?.rounds ?? 0)));
     if (rotations > 0) parts.push(`${rotations} ${rotations === 1 ? 'rotation' : 'rotations'}`);
+    return parts.join(' · ');
+  }
+
+  // The MultiMainView view-model for a multi-main round: standings ordered by its ranking
+  // (`rankingRows`, fetched for the current view), each tagged with the tier the pilot raced in (from
+  // the main-X heat, via mainTierName + the shared per-heat result cache). Friendly callsigns.
+  function multiMainViewFor(round: RoundDef): MultiMain {
+    return buildMultiMainView(rankingRows, heatsByRound(round.id), {
+      label: callsign,
+      tierNameOf: mainTierName,
+      resultByHeat: (id) => resultByHeat[id]
+    });
+  }
+
+  // A multi-main view's sub-line: where it was seeded from + the main size + bump-up count.
+  function multiMainSubtitle(round: RoundDef): string {
+    const seed = round.seeding;
+    const parts: string[] = [];
+    if (typeof seed === 'object' && 'FromRanking' in seed) {
+      const srcId = seed.FromRanking.source_rounds[0];
+      const src = rounds.find((r) => r.id === srcId);
+      parts.push(src ? `from ${src.label}` : 'seeded from a ranking');
+      parts.push(`top ${seed.FromRanking.top_n}`);
+    } else if (seed === 'FromRoster' && round.classes[0]) {
+      parts.push(`from ${className(round.classes[0])}`);
+    }
+    const mainSize = Math.max(2, Math.round(Number(round.params?.main_size ?? 4)));
+    parts.push(`mains of ${mainSize}`);
+    const bumpN = Math.max(0, Math.round(Number(round.params?.bump_n ?? 0)));
+    if (bumpN > 0) parts.push(`bump ${bumpN}`);
     return parts.join(' · ');
   }
 
@@ -500,6 +545,7 @@
     if (!v) return undefined;
     if (v.kind === 'round') return v.round.id;
     if (v.kind === 'roundrobin') return v.round.id;
+    if (v.kind === 'multimain') return v.round.id;
     if (v.kind === 'tournament') {
       const chain = bracketChainRounds(v.root, rounds);
       return chain[chain.length - 1]?.id;
@@ -639,7 +685,9 @@
 
   {#if session}
     <Card
-      title={currentView?.kind === 'tournament' || currentView?.kind === 'roundrobin'
+      title={currentView?.kind === 'tournament' ||
+      currentView?.kind === 'roundrobin' ||
+      currentView?.kind === 'multimain'
         ? currentView.label
         : currentView?.kind === 'round'
           ? `${currentView.label} standings`
@@ -648,9 +696,11 @@
         ? bracketSubtitle(currentView.root)
         : currentView?.kind === 'roundrobin'
           ? roundRobinSubtitle(currentView.round)
-          : currentView?.kind === 'class'
-            ? "Per-class season standings, aggregated across the class's rounds."
-            : undefined}
+          : currentView?.kind === 'multimain'
+            ? multiMainSubtitle(currentView.round)
+            : currentView?.kind === 'class'
+              ? "Per-class season standings, aggregated across the class's rounds."
+              : undefined}
     >
       {#snippet actions()}
         {#if viewOptions.length > 1}
@@ -690,6 +740,8 @@
         </div>
       {:else if currentView?.kind === 'roundrobin'}
         <RoundRobinView view={roundRobinViewFor(currentView.round)} />
+      {:else if currentView?.kind === 'multimain'}
+        <MultiMainView view={multiMainViewFor(currentView.round)} />
       {:else if currentView?.kind === 'round'}
         {#if isTimedQualFormat(currentView.round.format)}
           {#if roundStandingsLoading && roundStandingRows.length === 0}
