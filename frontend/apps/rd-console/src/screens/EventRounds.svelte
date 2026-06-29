@@ -840,6 +840,25 @@
     }
   });
 
+  // Best lap per competitor, per round — sourced from the dedicated standings endpoint, which ALWAYS
+  // computes best lap regardless of the round's win condition (a race-scored heat's result metric is
+  // the win-condition metric, e.g. ReachedAt, not a best lap). Refreshed as heats finalize.
+  let rrBestLapByRound = $state<Record<RoundId, Map<CompetitorRef, number | null>>>({});
+  $effect(() => {
+    void heats;
+    for (const r of roundRobinRounds) {
+      session
+        .roundStandings(r.id)
+        .then((rows) => {
+          const m = new Map<CompetitorRef, number | null>();
+          for (const s of rows) m.set(s.competitor, s.best_lap_micros);
+          rrBestLapByRound = { ...rrBestLapByRound, [r.id]: m };
+        })
+        // An unscored round 400s — leave it empty (every pilot shows "—").
+        .catch(() => {});
+    }
+  });
+
   let rrResultByHeat = $state<Record<string, HeatResult>>({});
   const rrFetchedHeats = new Set<string>();
   $effect(() => {
@@ -862,11 +881,13 @@
   // per-rotation heat grid, both off the round's heats and the fetched results. Friendly callsigns +
   // heat names (never raw refs/ids — CLAUDE.md).
   function roundRobinViewFor(round: RoundDef): RoundRobin {
+    const bestLap = rrBestLapByRound[round.id];
     return buildRoundRobinView(rrRankingByRound[round.id] ?? [], heatsByRound(round.id), {
       pointsTable: parseRoundRobinPoints(round.params?.points),
       label: callsign,
       heatName: (h) => heatDisplayName(round, h),
-      resultByHeat: (id) => rrResultByHeat[id]
+      resultByHeat: (id) => rrResultByHeat[id],
+      bestLapOf: (ref) => bestLap?.get(ref)
     });
   }
 

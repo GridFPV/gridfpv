@@ -616,6 +616,26 @@ describe('Results — round-robin tournament view', () => {
     { competitor: 'p1', position: 1 },
     { competitor: 'p2', position: 2 }
   ]);
+  // The dedicated standings endpoint that always computes best lap regardless of win condition: p1
+  // has one (→ "41.250"), p2 has none (null → "—").
+  const rrStandings = vi.fn(
+    async (): Promise<RoundStanding[]> => [
+      {
+        competitor: 'p1',
+        position: 1,
+        best_lap_micros: 41_250_000,
+        laps: 3,
+        metric: { MostLaps: { laps: 3 } }
+      },
+      {
+        competitor: 'p2',
+        position: 2,
+        best_lap_micros: null,
+        laps: 3,
+        metric: { MostLaps: { laps: 3 } }
+      }
+    ]
+  );
   const rrResult = (rows: [string, number][]) => ({
     body: {
       HeatResult: {
@@ -636,6 +656,7 @@ describe('Results — round-robin tournament view', () => {
       listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
       listHeatsImpl: vi.fn(async () => RR_HEATS),
       roundRankingImpl: rrRanking,
+      roundStandingsImpl: rrStandings,
       classStandingsImpl: vi.fn(async () => STANDINGS)
     });
     vi.stubGlobal(
@@ -667,6 +688,11 @@ describe('Results — round-robin tournament view', () => {
     await waitFor(() => expect(within(table).getByText('AceOne')).toBeInTheDocument());
     expect(within(table).getByText('Bolt')).toBeInTheDocument();
     expect(within(table).queryByText('p1')).toBeNull();
+
+    // The Best-lap column sources from the standings endpoint (not the win-condition heat metric):
+    // AceOne's real best lap shows; Bolt (no lap) shows the em dash.
+    await waitFor(() => expect(within(table).getByText('41.250')).toBeInTheDocument());
+    expect(within(table).getByText('—')).toBeInTheDocument();
 
     // The per-rotation grid renders both rotations.
     expect(screen.getByText('Rotation 1')).toBeInTheDocument();
