@@ -19,6 +19,7 @@ import {
   createRound,
   PRACTICE_EVENT_ID,
   roundRanking,
+  roundStandings,
   setClassMembership,
   setEventClasses,
   setEventRoster
@@ -105,6 +106,15 @@ describe('GET round ranking + class standings serve the season-join projections'
     const ranking = await roundRanking(director.baseUrl, PRACTICE_EVENT_ID, round.id);
     expect(ranking.map((e) => e.competitor)).toEqual([pilotA.id, pilotB.id]);
     expect(ranking[0].position).toBe(1);
+
+    // 1b) The round standings: same competitors + positions as the ranking, each with a best lap
+    // and the BestLap win-condition metric (this round is scored under BestLap).
+    const standingsByRound = await roundStandings(director.baseUrl, PRACTICE_EVENT_ID, round.id);
+    expect(standingsByRound.map((s) => [s.competitor, s.position])).toEqual(
+      ranking.map((e) => [e.competitor, e.position])
+    );
+    expect(standingsByRound[0].best_lap_micros).toBeTypeOf('number');
+    expect(standingsByRound[0].metric).toHaveProperty('BestLap');
 
     // 2) The class standings: one row per pilot, aggregated across the class's rounds, best first.
     const standings = await classStandings(director.baseUrl, PRACTICE_EVENT_ID, klass.id);

@@ -58,6 +58,18 @@ export function isMultiMainFormat(format: string | undefined | null): boolean {
 }
 
 /**
+ * The **Time Trials** (qualifying) format key. The wire key is the persistence-stable `timed_qual`
+ * (only the friendly label was renamed Qualifying → Time Trials, #218 / D11); a time-trial round is
+ * ranked by its win-condition metric (best lap / best-N-consecutive / most laps).
+ */
+export const TIMED_QUAL = 'timed_qual';
+
+/** Whether a format key is the Time Trials (time-trial / qualifying) format. */
+export function isTimedQualFormat(format: string | undefined | null): boolean {
+  return format === TIMED_QUAL;
+}
+
+/**
  * The **bracket** format keys — the elimination chains whose rounds are bracket *levels* (decisions
  * D13: one round per level). A bracket is authored as a chain of rounds: a level-1 round seeded
  * `FromRanking` (the quali cut), then each next level seeded `FromHeatWinners` of the prior level.

@@ -444,6 +444,13 @@ pub fn router(registry: EventRegistry) -> Router {
             "/events/{event_id}/rounds/{round_id}/ranking",
             get(round_ranking),
         )
+        // A round's **standings** (time-trial / qual display): the per-pilot rows for a round — each
+        // pilot's best lap plus the win-condition metric they're ranked on, in ranking order. Open,
+        // no token (a read, like the ranking route).
+        .route(
+            "/events/{event_id}/rounds/{round_id}/standings",
+            get(round_standings),
+        )
         // A class's **standings** (race redesign Slice 5/6a): the per-pilot rows aggregated across
         // the class's rounds (the season-join shape the Results UI reads). Open, no token.
         .route(
@@ -1240,6 +1247,40 @@ async fn round_ranking(
     let (events, _cursor) = state.read()?;
     let ranking = round_engine::round_ranking(&meta, round, &events).map_err(fill_error)?;
     Ok(Json(ranking))
+}
+
+/// `GET /events/{event_id}/rounds/{round_id}/standings` — a round's **standings** (time-trial / qual
+/// display).
+///
+/// The per-pilot rows for a single round ([`round_engine::round_standings`]): each pilot's best
+/// single lap plus the win-condition metric they're ranked on (best-N-consecutive time, lap count,
+/// or best lap), in [`round_engine::round_ranking`] order so the standings + ranking never disagree.
+/// A read (open, no token, like the ranking route). An unknown event or round is a typed **404**; a
+/// round that cannot be scored (unknown format, dangling seeding source) is a **400**.
+async fn round_standings(
+    State(registry): State<EventRegistry>,
+    Path((event_id, round_id)): Path<(EventId, RoundId)>,
+) -> Result<Json<Vec<round_engine::RoundStanding>>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
+    let meta = registry.meta_of(&event_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        )
+    })?;
+    let round = meta
+        .rounds
+        .iter()
+        .find(|r| r.id == round_id)
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::UnknownScope,
+                format!("no round with id {:?} in this event", round_id.0),
+            )
+        })?;
+    let (events, _cursor) = state.read()?;
+    let standings = round_engine::round_standings(&meta, round, &events).map_err(fill_error)?;
+    Ok(Json(standings))
 }
 
 /// `GET /events/{event_id}/classes/{class_id}/standings` — a class's **standings** (race redesign

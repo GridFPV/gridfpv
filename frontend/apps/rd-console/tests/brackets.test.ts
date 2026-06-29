@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { HeatResult, HeatSummary, RoundDef } from '@gridfpv/types';
+import type { CompetitorRef, HeatResult, HeatSummary, RoundDef } from '@gridfpv/types';
 import {
   bracketChainRounds,
   buildBracketView,
@@ -9,7 +9,8 @@ import {
   isBracketRoot,
   isLevelComplete,
   nextLevelLabel,
-  splitBracketLabel
+  splitBracketLabel,
+  tournamentPlacement
 } from '../src/lib/brackets.js';
 
 /** A minimal RoundDef builder — only the fields the bracket-chain logic reads matter. */
@@ -388,5 +389,217 @@ describe('nextLevelLabel — size-driven default', () => {
     expect(nextLevelLabel('Bracket', 4, 0)).toBe('Quarterfinals');
     expect(nextLevelLabel('Bracket', 8, 0)).toBe('Round of 16');
     expect(nextLevelLabel('Bracket', 16, 0)).toBe('Round of 32');
+  });
+});
+
+describe('tournamentPlacement — full-field standing by placement tier, ties by points then seed', () => {
+  // A seedOf from a {ref → seed} map (lower = better); an absent ref has no seed (+∞, sorts last).
+  const seedFrom =
+    (seeds: Record<string, number>) =>
+    (ref: CompetitorRef): number =>
+      seeds[ref] ?? Number.POSITIVE_INFINITY;
+  // A pointsOf from a {ref → points} map (higher = better); an absent ref scores 0.
+  const pointsFrom =
+    (points: Record<string, number>) =>
+    (ref: CompetitorRef): number =>
+      points[ref] ?? 0;
+  // Equal points for every pilot — so the seed tiebreak alone decides (the pre-points behaviour).
+  const noPoints = (): number => 0;
+
+  it('ranks a 4-pilot single-elim full field — champion, runner-up, then SF losers by seed', () => {
+    // Two semis (root) → a one-heat final. Seeds: A=1, B=2, C=3, D=4.
+    // Semis pair A vs D and B vs C; the final is D vs B; champion = D.
+    const semis = round({
+      id: 'semis',
+      label: 'Semifinals',
+      seeding: { FromRanking: { source_rounds: ['q'], top_n: 4 } }
+    });
+    const final = round({
+      id: 'final',
+      label: 'Final',
+      seeding: { FromHeatWinners: { source_round: 'semis' } }
+    });
+    const heats: HeatSummary[] = [
+      heat('s1', 'semis', ['A', 'D']),
+      heat('s2', 'semis', ['B', 'C']),
+      heat('f1', 'final', ['D', 'B'])
+    ];
+    const byLevel = (id: string) => heats.filter((h) => h.round === id);
+    const rows = tournamentPlacement(
+      [semis, final],
+      byLevel,
+      'D',
+      seedFrom({ A: 1, B: 2, C: 3, D: 4 }),
+      noPoints
+    );
+    // Champion D first; runner-up B (the other finalist) second; then the SF losers by seed:
+    // A (seed 1) before C (seed 3).
+    expect(rows).toEqual([
+      { competitor: 'D', position: 1 },
+      { competitor: 'B', position: 2 },
+      { competitor: 'A', position: 3 },
+      { competitor: 'C', position: 4 }
+    ]);
+    // The within-tier order is by SEED, not lineup order: A (seed 1) precedes C (seed 3).
+    expect(rows.map((r) => r.competitor)).toEqual(['D', 'B', 'A', 'C']);
+  });
+
+  it('tiers a 3-level bracket (QF → SF → Final): champion 0, finalist 1, SF losers 2, QF losers 3', () => {
+    // 8 seeds → QF (4 heats, root) → SF (2 heats) → Final (1 heat). Champion = A (seed 1).
+    const qf = round({
+      id: 'qf',
+      label: 'Quarterfinals',
+      seeding: { FromRanking: { source_rounds: ['q'], top_n: 8 } }
+    });
+    const sf = round({
+      id: 'sf',
+      label: 'Semifinals',
+      seeding: { FromHeatWinners: { source_round: 'qf' } }
+    });
+    const final = round({
+      id: 'final',
+      label: 'Final',
+      seeding: { FromHeatWinners: { source_round: 'sf' } }
+    });
+    const heats: HeatSummary[] = [
+      // QF: A,B,C,D advance; E,F,G,H eliminated here (tier 3).
+      heat('qf1', 'qf', ['A', 'H']),
+      heat('qf2', 'qf', ['D', 'E']),
+      heat('qf3', 'qf', ['B', 'G']),
+      heat('qf4', 'qf', ['C', 'F']),
+      // SF: A,B advance; C,D eliminated here (tier 2).
+      heat('sf1', 'sf', ['A', 'D']),
+      heat('sf2', 'sf', ['B', 'C']),
+      // Final: A beats B.
+      heat('f1', 'final', ['A', 'B'])
+    ];
+    const byLevel = (id: string) => heats.filter((h) => h.round === id);
+    const seeds = { A: 1, B: 2, C: 3, D: 4, E: 5, F: 6, G: 7, H: 8 };
+    const rows = tournamentPlacement([qf, sf, final], byLevel, 'A', seedFrom(seeds), noPoints);
+    // A champion (1); B finalist (2); SF losers C,D by seed (3,4); QF losers E,F,G,H by seed (5-8).
+    expect(rows).toEqual([
+      { competitor: 'A', position: 1 },
+      { competitor: 'B', position: 2 },
+      { competitor: 'C', position: 3 },
+      { competitor: 'D', position: 4 },
+      { competitor: 'E', position: 5 },
+      { competitor: 'F', position: 6 },
+      { competitor: 'G', position: 7 },
+      { competitor: 'H', position: 8 }
+    ]);
+  });
+
+  it('ranks a partial bracket (final undecided, no champion): finalists tier 1, earlier losers below, by seed', () => {
+    const semis = round({
+      id: 'semis',
+      label: 'Semifinals',
+      seeding: { FromRanking: { source_rounds: ['q'], top_n: 4 } }
+    });
+    const final = round({
+      id: 'final',
+      label: 'Final',
+      seeding: { FromHeatWinners: { source_round: 'semis' } }
+    });
+    // The final's two finalists are seated (B, D) but no champion yet; SF losers A, C are tier 2.
+    const heats: HeatSummary[] = [
+      heat('s1', 'semis', ['A', 'D']),
+      heat('s2', 'semis', ['B', 'C']),
+      heat('f1', 'final', ['D', 'B'], 'Staged')
+    ];
+    const byLevel = (id: string) => heats.filter((h) => h.round === id);
+    const rows = tournamentPlacement(
+      [semis, final],
+      byLevel,
+      undefined,
+      seedFrom({ A: 1, B: 2, C: 3, D: 4 }),
+      noPoints
+    );
+    // No champion → tier 0 empty. Finalists B,D are tier 1, ordered by seed (B=2 before D=4); the SF
+    // losers A,C are tier 2, by seed (A=1 before C=3).
+    expect(rows).toEqual([
+      { competitor: 'B', position: 1 },
+      { competitor: 'D', position: 2 },
+      { competitor: 'A', position: 3 },
+      { competitor: 'C', position: 4 }
+    ]);
+  });
+
+  it('shares a position for a true tie (same tier, unknown seed) — competition ranking', () => {
+    const only = round({
+      id: 'lvl',
+      label: 'Final',
+      seeding: { FromRanking: { source_rounds: ['q'], top_n: 2 } }
+    });
+    const heats: HeatSummary[] = [heat('h1', 'lvl', ['X', 'Y'])];
+    const byLevel = (id: string) => heats.filter((h) => h.round === id);
+    // Neither X nor Y has a seed (+∞), equal points, and there is no champion → both tier 1, tie →
+    // both position 1.
+    const rows = tournamentPlacement(
+      [only],
+      byLevel,
+      undefined,
+      () => Number.POSITIVE_INFINITY,
+      noPoints
+    );
+    expect(rows.every((r) => r.position === 1)).toBe(true);
+  });
+
+  it('orders a tier by POINTS desc when pilots share it (a 4-up heat) — points beat seed', () => {
+    // A single 4-up heat, no champion → all four are tier 1. Seeds run OPPOSITE to points, so a
+    // points-ordered result (A,B,C,D) proves points are the primary within-tier key, not seed.
+    const lvl = round({
+      id: 'lvl',
+      label: 'Final',
+      seeding: { FromRanking: { source_rounds: ['q'], top_n: 4 } }
+    });
+    const heats: HeatSummary[] = [heat('h1', 'lvl', ['A', 'B', 'C', 'D'])];
+    const byLevel = (id: string) => heats.filter((h) => h.round === id);
+    const rows = tournamentPlacement(
+      [lvl],
+      byLevel,
+      undefined,
+      seedFrom({ A: 4, B: 3, C: 2, D: 1 }), // seed favours D, C, B, A
+      pointsFrom({ A: 10, B: 6, C: 4, D: 3 }) // points favour A, B, C, D
+    );
+    expect(rows).toEqual([
+      { competitor: 'A', position: 1 },
+      { competitor: 'B', position: 2 },
+      { competitor: 'C', position: 3 },
+      { competitor: 'D', position: 4 }
+    ]);
+  });
+
+  it('falls back to SEED within a tier when points TIE (2-up SF losers) — higher seed takes 3rd', () => {
+    // The 4-pilot single-elim: champion D, runner-up B; the two SF losers A and C each placed 2nd in
+    // their head-to-head, so they TIE on points — seed breaks them, A (seed 1) before C (seed 3) → 3rd.
+    const semis = round({
+      id: 'semis',
+      label: 'Semifinals',
+      seeding: { FromRanking: { source_rounds: ['q'], top_n: 4 } }
+    });
+    const final = round({
+      id: 'final',
+      label: 'Final',
+      seeding: { FromHeatWinners: { source_round: 'semis' } }
+    });
+    const heats: HeatSummary[] = [
+      heat('s1', 'semis', ['A', 'D']),
+      heat('s2', 'semis', ['B', 'C']),
+      heat('f1', 'final', ['D', 'B'])
+    ];
+    const byLevel = (id: string) => heats.filter((h) => h.round === id);
+    const rows = tournamentPlacement(
+      [semis, final],
+      byLevel,
+      'D',
+      seedFrom({ A: 1, B: 2, C: 3, D: 4 }),
+      pointsFrom({ D: 16, B: 10, A: 6, C: 6 }) // A and C tie at 6 → seed decides
+    );
+    expect(rows).toEqual([
+      { competitor: 'D', position: 1 },
+      { competitor: 'B', position: 2 },
+      { competitor: 'A', position: 3 },
+      { competitor: 'C', position: 4 }
+    ]);
   });
 });

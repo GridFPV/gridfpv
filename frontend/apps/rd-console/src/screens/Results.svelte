@@ -42,6 +42,7 @@
     RankEntry,
     RoundDef,
     RoundId,
+    RoundStanding,
     EventOutcome
   } from '@gridfpv/types';
   import { bracketFromOutcome, downloadJson, toExportJson } from '../lib/results.js';
@@ -49,13 +50,15 @@
     bracketChainRounds,
     buildBracketView,
     chaseWinTally,
+    DEFAULT_BRACKET_POINTS,
     isBracketLevel,
     isBracketRoot,
     isLevelComplete,
-    splitBracketLabel
+    splitBracketLabel,
+    tournamentPlacement
   } from '../lib/brackets.js';
   import type { ChaseFinalTally } from '../lib/brackets.js';
-  import { isChaseTheAceFormat } from '../lib/formats.js';
+  import { isChaseTheAceFormat, isTimedQualFormat } from '../lib/formats.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let {
@@ -218,20 +221,43 @@
     }
   });
 
+  // Per-heat scored results across EVERY bracket-chain level, fetched once each (guarded) and cached.
+  // The read stream only carries `LiveRaceState`; a scored `HeatResult` is a separate heat-scope read.
+  // Two readers replay this cache: the chase-final series tally (below) and the full-field points
+  // tiebreak (`pointsOfFor`). Refreshed on a live advance / heats change so a freshly-scored heat lands.
+  let resultByHeat = $state<Record<string, HeatResult>>({});
+  const fetchedResultHeats = new Set<string>();
+  $effect(() => {
+    if (!session) return;
+    void session.liveState;
+    void heats;
+    for (const root of tournamentRoots) {
+      for (const lr of bracketChainRounds(root, rounds)) {
+        for (const h of heatsByRound(lr.id)) {
+          if (h.phase !== 'Final' || fetchedResultHeats.has(h.heat)) continue;
+          fetchedResultHeats.add(h.heat);
+          session
+            .fetchHeatResult(h.heat)
+            .then((res) => {
+              if (res) resultByHeat = { ...resultByHeat, [h.heat]: res };
+            })
+            .catch(() => {});
+        }
+      }
+    }
+  });
+
   // The chase-final series tally: the engine ranking exposes only an overall placement, so the
-  // frontend counts the race winners. Fetch each completed race result once (guarded), cache it, and
-  // replay the cache into a per-root tally (wins per finalist + the champion).
-  let chaseResultByHeat = $state<Record<string, HeatResult>>({});
-  const chaseFetchedHeats = new Set<string>();
+  // frontend counts the race winners. Replays the shared per-heat result cache into a per-root tally
+  // (wins per finalist + the champion).
   let chaseTallyByRoot = $state<Record<RoundId, ChaseFinalTally>>({});
   function chaseRaceIndex(heatId: string): number {
     const m = /^cta-r(\d+)$/.exec(heatId);
     return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
   }
   $effect(() => {
-    if (!session) return;
     void heats;
-    const cache = chaseResultByHeat;
+    const cache = resultByHeat;
     const next: Record<RoundId, ChaseFinalTally> = {};
     for (const root of tournamentRoots) {
       const chain = bracketChainRounds(root, rounds);
@@ -240,17 +266,6 @@
       const completed = heatsByRound(final.id)
         .filter((h) => h.phase === 'Final')
         .sort((a, b) => chaseRaceIndex(a.heat) - chaseRaceIndex(b.heat));
-      for (const h of completed) {
-        if (!chaseFetchedHeats.has(h.heat)) {
-          chaseFetchedHeats.add(h.heat);
-          session
-            .fetchHeatResult(h.heat)
-            .then((res) => {
-              if (res) chaseResultByHeat = { ...chaseResultByHeat, [h.heat]: res };
-            })
-            .catch(() => {});
-        }
-      }
       const target = Math.max(1, Math.round(Number(final.params?.wins_to_win ?? 2)));
       const results = completed
         .map((h) => cache[h.heat])
@@ -318,10 +333,113 @@
     return parts.join(' · ');
   }
 
+  // --- Tournament full-field seeds + placement --------------------------------------------------
+  // The tournament view's "Final standings" rank the WHOLE field by bracket placement (how deep each
+  // pilot got), breaking ties within a depth tier by SEED (lower seed = better). The seed source is
+  // the bracket's `seeding`: a qualifier-seeded (`FromRanking`) bracket seeds off the source round's
+  // ranking position; a roster-seeded (`FromRoster`) one off the pilot's order in the class roster.
+
+  // The source round rankings backing a `FromRanking` bracket's seeds (`source round id → ref →
+  // position`). Fetched per qualifier-seeded root and refreshed on a live advance (mirrors the
+  // round-ranking effect), so the seed = that ranking's 1-based position.
+  let seedRankingByRound = $state<Record<RoundId, Map<CompetitorRef, number>>>({});
+  $effect(() => {
+    if (!session) return;
+    void session.liveState;
+    for (const root of tournamentRoots) {
+      const seed = root.seeding;
+      if (typeof seed !== 'object' || !('FromRanking' in seed)) continue;
+      const srcId = seed.FromRanking.source_rounds[0];
+      if (!srcId) continue;
+      session
+        .roundRanking(srcId)
+        .then((rows) => {
+          seedRankingByRound = {
+            ...seedRankingByRound,
+            [srcId]: new Map(rows.map((r) => [r.competitor, r.position] as const))
+          };
+        })
+        .catch(() => {});
+    }
+  });
+
+  // A `seedOf(ref) => number` for a bracket root (lower = better; unknown → +∞, sorts last):
+  //  - `FromRanking`: the source round's ranking position (the qualifier seed).
+  //  - `FromRoster`: the pilot's 1-based index in the class's roster membership (else the event roster).
+  //  - fallback: the final-round ranking order, then chain lineup order.
+  function seedOfFor(root: RoundDef): (ref: CompetitorRef) => number {
+    const seed = root.seeding;
+    if (typeof seed === 'object' && 'FromRanking' in seed) {
+      const srcId = seed.FromRanking.source_rounds[0];
+      const m = srcId ? seedRankingByRound[srcId] : undefined;
+      if (m && m.size > 0) return (ref) => m.get(ref) ?? Number.POSITIVE_INFINITY;
+    }
+    if (seed === 'FromRoster') {
+      const classId = root.classes[0] ?? '';
+      const membership = session?.currentEvent?.classes_membership ?? [];
+      const pilots = membership.find((mm) => mm.class === classId)?.pilots ?? [];
+      if (pilots.length > 0) {
+        const order = new Map(pilots.map((p, i) => [p.pilot, i + 1] as const));
+        return (ref) => order.get(ref) ?? Number.POSITIVE_INFINITY;
+      }
+      const roster = session?.currentEvent?.roster ?? [];
+      if (roster.length > 0) {
+        const order = new Map(roster.map((p, i) => [p, i + 1] as const));
+        return (ref) => order.get(ref) ?? Number.POSITIVE_INFINITY;
+      }
+    }
+    // Fallback: the final-round ranking order, then the chain's lineup order.
+    const fallback = new Map<CompetitorRef, number>();
+    let n = 1;
+    for (const r of rankingRows) if (!fallback.has(r.competitor)) fallback.set(r.competitor, n++);
+    for (const lr of bracketChainRounds(root, rounds))
+      for (const h of heatsByRound(lr.id))
+        for (const ref of h.lineup) if (!fallback.has(ref)) fallback.set(ref, n++);
+    return (ref) => fallback.get(ref) ?? Number.POSITIVE_INFINITY;
+  }
+
+  // A `pointsOf(ref) => number` for a bracket root: sum the default per-position points table over the
+  // pilot's finishes across every scored heat in the chain (from the shared per-heat result cache).
+  // Seed alone can't order pilots eliminated from the SAME multi-pilot heat, so points are the primary
+  // within-tier tiebreak; a pilot with no scored finish (in-progress / partial bracket) totals 0, so
+  // seed still orders. Reactive: reads `resultByHeat`, so a freshly-fetched result re-ranks the field.
+  function pointsOfFor(root: RoundDef): (ref: CompetitorRef) => number {
+    const cache = resultByHeat;
+    const totals = new Map<CompetitorRef, number>();
+    for (const lr of bracketChainRounds(root, rounds)) {
+      for (const h of heatsByRound(lr.id)) {
+        const res = cache[h.heat];
+        if (!res) continue;
+        for (const place of res.places) {
+          const ref = place.competitor.competitor;
+          const pts = DEFAULT_BRACKET_POINTS[place.position - 1] ?? 0;
+          totals.set(ref, (totals.get(ref) ?? 0) + pts);
+        }
+      }
+    }
+    return (ref) => totals.get(ref) ?? 0;
+  }
+
+  // The selected tournament's FULL-FIELD final standing: every pilot in the bracket, by placement
+  // tier then points then seed (champion first). The tier + seed come fetch-free from the chain's
+  // heat lineups + the champion; the points tiebreak replays the per-heat result cache.
+  const tournamentRows = $derived.by<RankEntry[]>(() => {
+    const v = currentView;
+    if (v?.kind !== 'tournament') return [];
+    const chain = bracketChainRounds(v.root, rounds);
+    return tournamentPlacement(
+      chain,
+      heatsByRound,
+      championOf(v.root),
+      seedOfFor(v.root),
+      pointsOfFor(v.root)
+    );
+  });
+
   // --- Round / final-standings ranking ----------------------------------------------------------
-  // The ranking shown for a round view (the round's own ranking) or a tournament view (its final
-  // level's ranking → "Final standings"). Re-fetched when the displayed round or the live state
-  // changes, so a freshly-scored heat re-aggregates.
+  // The ranking shown for a round view (the round's own ranking). Re-fetched when the displayed round
+  // or the live state changes, so a freshly-scored heat re-aggregates. (The tournament view's "Final
+  // standings" use the full-field `tournamentRows` above, not this round ranking.)
   const rankingRoundId = $derived.by<RoundId | undefined>(() => {
     const v = currentView;
     if (!v) return undefined;
@@ -349,6 +467,49 @@
       .catch(() => (rankingRows = []))
       .finally(() => (rankingLoading = false));
   });
+
+  // --- Time-trial round standings (Best lap + the win-condition metric) -------------------------
+  // A TIME-TRIAL (timed_qual) round view shows the richer per-pilot standings — each pilot's best
+  // single lap plus the metric the round is won by (best lap / best-N-consecutive / most laps) —
+  // instead of the bare ranking. Fetched only for a timed_qual round view, refreshed on a live advance.
+  const timedQualRoundId = $derived.by<RoundId | undefined>(() => {
+    const v = currentView;
+    return v?.kind === 'round' && isTimedQualFormat(v.round.format) ? v.round.id : undefined;
+  });
+  let roundStandingRows = $state<RoundStanding[]>([]);
+  let roundStandingsLoading = $state(false);
+  $effect(() => {
+    if (!session) return;
+    const rid = timedQualRoundId;
+    void session.liveState;
+    if (!rid) {
+      roundStandingRows = [];
+      return;
+    }
+    roundStandingsLoading = true;
+    session
+      .roundStandings(rid)
+      .then((rows) => (roundStandingRows = rows))
+      .catch(() => (roundStandingRows = []))
+      .finally(() => (roundStandingsLoading = false));
+  });
+
+  // The win-condition metric column for the time-trial table: its header (or `undefined` when the
+  // metric is Best lap, which the dedicated Best-lap column already covers), and each row's value. The
+  // metric is round-wide (the win condition), so the header reads off the first standing.
+  const ttMetricHeader = $derived.by<string | undefined>(() => {
+    const m = roundStandingRows[0]?.metric;
+    if (!m) return undefined;
+    if ('BestConsecutive' in m) return `Best ${m.BestConsecutive.n} consec`;
+    if ('MostLaps' in m) return 'Laps';
+    return undefined;
+  });
+  function ttMetricValue(s: RoundStanding): string {
+    const m = s.metric;
+    if ('BestConsecutive' in m) return formatMicros(m.BestConsecutive.micros);
+    if ('MostLaps' in m) return String(m.MostLaps.laps);
+    return '';
+  }
 
   // --- Per-class standings ----------------------------------------------------------------------
   // The season-join read for the selected class, re-fetched on class change or a live advance.
@@ -433,18 +594,27 @@
         </div>
         <div class="final-standings">
           <h3 class="sub-head">Final standings</h3>
-          {#if rankingLoading && rankingRows.length === 0}
-            <p class="empty" role="status">Loading standings…</p>
-          {:else if rankingRows.length === 0}
+          {#if tournamentRows.length === 0}
             <p class="empty" role="status">
-              The final standings appear once the bracket's final is scored.
+              The final standings appear as the bracket's heats are run.
             </p>
           {:else}
-            {@render rankTable(`${currentView.label} final standings`)}
+            {@render rankTable(`${currentView.label} final standings`, tournamentRows)}
           {/if}
         </div>
       {:else if currentView?.kind === 'round'}
-        {#if rankingLoading && rankingRows.length === 0}
+        {#if isTimedQualFormat(currentView.round.format)}
+          {#if roundStandingsLoading && roundStandingRows.length === 0}
+            <p class="empty" role="status">Loading standings…</p>
+          {:else if roundStandingRows.length === 0}
+            <p class="empty" role="status">
+              Nothing scored for <strong>{currentView.label}</strong> yet — standings populate as the
+              round is scored.
+            </p>
+          {:else}
+            {@render ttTable(currentView.label, roundStandingRows)}
+          {/if}
+        {:else if rankingLoading && rankingRows.length === 0}
           <p class="empty" role="status">Loading standings…</p>
         {:else if rankingRows.length === 0}
           <p class="empty" role="status">
@@ -452,7 +622,7 @@
             is scored.
           </p>
         {:else}
-          {@render rankTable(`${currentView.label} standings`)}
+          {@render rankTable(`${currentView.label} standings`, rankingRows)}
         {/if}
       {:else if currentView?.kind === 'class'}
         {#if classLoading && classRows.length === 0}
@@ -511,7 +681,7 @@
   {/if}
 </section>
 
-{#snippet rankTable(caption: string)}
+{#snippet rankTable(caption: string, rows: RankEntry[])}
   <table class="standings" aria-label={caption}>
     <thead>
       <tr>
@@ -520,10 +690,37 @@
       </tr>
     </thead>
     <tbody>
-      {#each rankingRows as row (row.competitor)}
+      {#each rows as row (row.competitor)}
         <tr>
           <td class="pos"><span class="badge">{row.position}</span></td>
           <td class="pilot">{callsign(row.competitor)}</td>
+        </tr>
+      {/each}
+    </tbody>
+  </table>
+{/snippet}
+
+{#snippet ttTable(label: string, rows: RoundStanding[])}
+  <table class="standings" aria-label={`${label} standings`}>
+    <thead>
+      <tr>
+        <th scope="col" class="pos">Pos</th>
+        <th scope="col" class="pilot">Pilot</th>
+        <th scope="col" class="num">Best lap</th>
+        {#if ttMetricHeader}
+          <th scope="col" class="num">{ttMetricHeader}</th>
+        {/if}
+      </tr>
+    </thead>
+    <tbody>
+      {#each rows as row (row.competitor)}
+        <tr>
+          <td class="pos"><span class="badge">{row.position}</span></td>
+          <td class="pilot">{callsign(row.competitor)}</td>
+          <td class="num">{formatMicros(row.best_lap_micros)}</td>
+          {#if ttMetricHeader}
+            <td class="num">{ttMetricValue(row)}</td>
+          {/if}
         </tr>
       {/each}
     </tbody>

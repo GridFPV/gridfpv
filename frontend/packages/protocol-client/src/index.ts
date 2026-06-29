@@ -47,6 +47,7 @@ export {
   deleteRound,
   listHeats,
   roundRanking,
+  roundStandings,
   classStandings,
   PRACTICE_EVENT_ID
 } from './client.js';

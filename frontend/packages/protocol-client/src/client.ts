@@ -42,6 +42,7 @@ import type {
   RankEntry,
   RoundDef,
   RoundId,
+  RoundStanding,
   Scope,
   SetClassHiddenRequest,
   Snapshot,
@@ -1050,6 +1051,34 @@ export async function roundRanking(
   if (!resp.ok)
     throw new Error(`GET /events/${eventId}/rounds/${roundId}/ranking failed: HTTP ${resp.status}`);
   return (await resp.json()) as RankEntry[];
+}
+
+/**
+ * Read a round's **standings** (`GET /events/{id}/rounds/{round}/standings`) — the time-trial / qual
+ * display. A read (open, no token): one {@link RoundStanding} per pilot for a single round — each
+ * pilot's best single lap plus the win-condition metric they're ranked on (best-N-consecutive time,
+ * lap count, or best lap), in the same order (and with the same positions) as {@link roundRanking}.
+ * Resolves the standings (best first), or rejects on a non-2xx / transport failure; an unknown event
+ * or round is a 404, an unscorable round a 400.
+ */
+export async function roundStandings(
+  baseUrl: string,
+  eventId: EventId,
+  roundId: RoundId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<RoundStanding[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/standings`,
+    { headers }
+  );
+  if (!resp.ok)
+    throw new Error(
+      `GET /events/${eventId}/rounds/${roundId}/standings failed: HTTP ${resp.status}`
+    );
+  return (await resp.json()) as RoundStanding[];
 }
 
 /**
