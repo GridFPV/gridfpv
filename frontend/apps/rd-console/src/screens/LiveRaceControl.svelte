@@ -443,7 +443,10 @@
           competitor: { adapter: '', competitor: ref },
           position: i + 1,
           laps: p.laps_completed,
-          metric: { BestLapMicros: p.last_lap_micros ?? null }
+          metric: { BestLapMicros: p.last_lap_micros ?? null },
+          // No per-pilot fastest lap in the live progress stream; this provisional board does not
+          // tie-break on it, so leave it absent.
+          best_lap_micros: null
         };
       })
     };

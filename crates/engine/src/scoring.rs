@@ -104,6 +104,16 @@ pub struct Placement {
     pub laps: u32,
     /// The condition-specific deciding metric for this competitor.
     pub metric: Metric,
+    /// The competitor's **fastest single completed lap** in this heat, in microseconds, or
+    /// `None` if they completed no timed lap. Computed from the run's lap durations
+    /// **independently of the win condition** (so e.g. a [`WinCondition::FirstToLaps`]
+    /// placement still carries a real best-lap, not the win metric), with thrown-out laps
+    /// excluded. Cross-heat rankings use it to break ties — round-robin breaks pilots equal
+    /// on points by their faster best lap. Defaults to `None` so older snapshots that
+    /// predate the field still deserialise.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub best_lap_micros: Option<i64>,
     /// Whether this competitor was **disqualified** by an adjudication
     /// ([`gridfpv_events::Penalty::Disqualify`] via
     /// [`gridfpv_events::Event::PenaltyApplied`]). A disqualified competitor is ranked
@@ -136,6 +146,7 @@ impl Default for Placement {
             position: 0,
             laps: 0,
             metric: Metric::LastLapAt(None),
+            best_lap_micros: None,
             disqualified: false,
         }
     }
@@ -578,19 +589,20 @@ pub fn score_events(
 /// distinct group's position skipping past them (1, 2, 2, 4). DQ'd placements carry
 /// [`Placement::disqualified`] `= true`.
 fn rank<K: Ord + Clone>(
-    rows: Vec<(CompetitorKey, u32, Metric, K)>,
+    rows: Vec<(CompetitorKey, u32, Metric, Option<i64>, K)>,
     adj: &Adjudications,
 ) -> HeatResult {
     // Pair each row with its DQ flag; the flag is the *primary* sort key (false < true),
     // so every disqualified competitor ranks after every non-disqualified one.
-    let mut rows: Vec<(bool, CompetitorKey, u32, Metric, K)> = rows
+    let mut rows: Vec<(bool, CompetitorKey, u32, Metric, Option<i64>, K)> = rows
         .into_iter()
-        .map(|(competitor, laps, metric, key)| {
+        .map(|(competitor, laps, metric, best_lap_micros, key)| {
             (
                 adj.is_dq(&competitor.competitor),
                 competitor,
                 laps,
                 metric,
+                best_lap_micros,
                 key,
             )
         })
@@ -599,7 +611,7 @@ fn rank<K: Ord + Clone>(
     // deterministic tie-break so two rows are never "equal" for sorting purposes.
     rows.sort_by(|a, b| {
         a.0.cmp(&b.0)
-            .then_with(|| a.4.cmp(&b.4))
+            .then_with(|| a.5.cmp(&b.5))
             .then_with(|| a.1.cmp(&b.1))
     });
 
@@ -608,7 +620,9 @@ fn rank<K: Ord + Clone>(
     // plus the rank key. A DQ'd competitor never shares a position with a non-DQ'd one.
     let mut prev_group: Option<(bool, K)> = None;
     let mut position = 0u32;
-    for (index, (disqualified, competitor, laps, metric, key)) in rows.into_iter().enumerate() {
+    for (index, (disqualified, competitor, laps, metric, best_lap_micros, key)) in
+        rows.into_iter().enumerate()
+    {
         let group = (disqualified, key);
         if prev_group.as_ref() != Some(&group) {
             position = (index as u32) + 1;
@@ -619,6 +633,7 @@ fn rank<K: Ord + Clone>(
             position,
             laps,
             metric,
+            best_lap_micros,
             disqualified,
         });
     }
@@ -626,6 +641,15 @@ fn rank<K: Ord + Clone>(
         places,
         voided: false,
     }
+}
+
+/// The competitor's **fastest single completed lap** (smallest duration, µs) among `laps`, or
+/// `None` if they completed none. Win-condition-independent: every per-condition scorer reports
+/// it on its [`Placement`] so a cross-heat ranking can break ties on best lap regardless of how
+/// the heat was won. `laps` are the **counted** laps (thrown-out laps already excluded), so a
+/// thrown-out lap can never be a competitor's best lap.
+fn fastest_lap_micros(laps: &[&ScoredLap]) -> Option<i64> {
+    laps.iter().map(|lap| lap.duration_micros).min()
 }
 
 /// Timed: count laps whose completing pass is strictly before the cutoff, rank by
@@ -648,8 +672,12 @@ fn score_timed(
             // HARD cutoff: strictly-before. A lap completing exactly at the cutoff
             // (or after) does not count — no finishing the in-progress lap. Thrown-out laps are
             // already excluded by `counted` before the cutoff filter.
-            let counted: Vec<&ScoredLap> = run
-                .counted(adj)
+            let all_counted = run.counted(adj);
+            // Best single lap is win-condition-independent: a lap the competitor actually flew is
+            // a real lap even if it landed outside the timed window, so it is taken over every
+            // counted lap, not just the windowed ones.
+            let best_lap = fastest_lap_micros(&all_counted);
+            let counted: Vec<&ScoredLap> = all_counted
                 .into_iter()
                 .filter(|lap| lap.at.micros < cutoff)
                 .collect();
@@ -666,7 +694,13 @@ fn score_timed(
                     .map(|t| t.micros.saturating_add(added))
                     .unwrap_or(i64::MAX),
             );
-            (run.competitor, count, Metric::LastLapAt(last_at), key)
+            (
+                run.competitor,
+                count,
+                Metric::LastLapAt(last_at),
+                best_lap,
+                key,
+            )
         })
         .collect();
     rank(rows, adj)
@@ -685,6 +719,8 @@ fn score_first_to_laps(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatResul
             // reacher below `n`, exactly as if the lap had not been flown for scoring purposes.
             let laps = run.counted(adj);
             let count = laps.len() as u32;
+            // Best single lap, independent of the first-to-N win metric (which is a reach-time).
+            let best_lap = fastest_lap_micros(&laps);
             // `n` laps means the n-th completed lap (1-based) — index n-1.
             let reached_at = if n >= 1 && count >= n {
                 Some(laps[(n - 1) as usize].at)
@@ -707,7 +743,13 @@ fn score_first_to_laps(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatResul
                         .unwrap_or(i64::MAX),
                 ),
             };
-            (run.competitor, count, Metric::ReachedAt(reached_at), key)
+            (
+                run.competitor,
+                count,
+                Metric::ReachedAt(reached_at),
+                best_lap,
+                key,
+            )
         })
         .collect();
     rank(rows, adj)
@@ -749,6 +791,8 @@ fn score_best_lap(runs: Vec<Run>, adj: &Adjudications) -> HeatResult {
                 run.competitor,
                 count,
                 Metric::BestLapMicros(best_micros),
+                // The win metric here *is* the fastest single lap, so report it directly.
+                best_micros,
                 key,
             )
         })
@@ -771,6 +815,8 @@ fn score_best_consecutive(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatRe
             // of consecutiveness (it is excluded, not skipped-over), matching the lap-count model.
             let laps = run.counted(adj);
             let count = laps.len() as u32;
+            // Best single lap, independent of the consecutive-sum win metric.
+            let best_lap = fastest_lap_micros(&laps);
             // Slide an `n`-wide window over the laps; pick the smallest sum, tie-
             // broken by the earlier window-end (last lap's completion time).
             let best = laps
@@ -793,6 +839,7 @@ fn score_best_consecutive(runs: Vec<Run>, n: u32, adj: &Adjudications) -> HeatRe
                 run.competitor,
                 count,
                 Metric::BestConsecutiveMicros(best_sum),
+                best_lap,
                 key,
             )
         })
@@ -988,6 +1035,53 @@ mod tests {
         assert_eq!(place(&r, "D").position, 3);
         assert_eq!(place(&r, "D").laps, 2);
         assert_eq!(place(&r, "C").metric, Metric::ReachedAt(None));
+    }
+
+    // --- best_lap_micros (win-condition-independent fastest single lap) ------
+
+    #[test]
+    fn first_to_laps_placement_carries_fastest_single_lap_not_the_win_metric() {
+        // A's laps: 3s, 2s, 4s ⇒ fastest single lap 2s. The win metric is ReachedAt (a time),
+        // so best_lap_micros must be the 2s lap duration, independent of the win condition.
+        let passes = run("A", &[0, 3_000_000, 5_000_000, 9_000_000]);
+        let r = score(&passes, WinCondition::FirstToLaps { n: 3 }, start());
+        assert_eq!(place(&r, "A").best_lap_micros, Some(2_000_000));
+        // And the win metric is still the reach-time, not the best lap.
+        assert_eq!(
+            place(&r, "A").metric,
+            Metric::ReachedAt(Some(SourceTime::from_micros(9_000_000)))
+        );
+    }
+
+    #[test]
+    fn timed_placement_carries_fastest_single_lap_even_outside_the_window() {
+        // Window 10s. A's laps complete at 5s (dur 5s) and 12s (dur 7s); the 2nd lands past the
+        // cutoff so it does not COUNT, but it is a real flown lap. Fastest single lap is still the
+        // 5s one. (Here the windowed lap is also the fastest, but the point is best lap is taken
+        // over every counted lap, not just the windowed ones.)
+        let passes = run("A", &[0, 5_000_000, 12_000_000]);
+        let r = score(
+            &passes,
+            WinCondition::Timed {
+                window_micros: 10_000_000,
+            },
+            start(),
+        );
+        assert_eq!(place(&r, "A").laps, 1, "only the windowed lap counts");
+        assert_eq!(
+            place(&r, "A").best_lap_micros,
+            Some(5_000_000),
+            "best lap is the fastest of every flown lap"
+        );
+    }
+
+    #[test]
+    fn placement_with_no_completed_lap_has_no_best_lap() {
+        // Z has a single pass (no completed lap) ⇒ best_lap_micros is None under any condition.
+        let passes = run("Z", &[1_000_000]);
+        let r = score(&passes, WinCondition::FirstToLaps { n: 1 }, start());
+        assert_eq!(place(&r, "Z").best_lap_micros, None);
+        assert_eq!(place(&r, "Z").laps, 0);
     }
 
     // --- BestLap ------------------------------------------------------------

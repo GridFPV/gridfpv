@@ -193,7 +193,8 @@ describe('chaseWinTally — counts race winners, finds the champion', () => {
         competitor: { adapter: 'rh-1', competitor },
         position,
         laps: 3,
-        metric: { BestLapMicros: 1 }
+        metric: { BestLapMicros: 1 },
+        best_lap_micros: 1
       }))
     };
   }
