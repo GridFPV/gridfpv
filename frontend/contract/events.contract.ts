@@ -1406,15 +1406,20 @@ describe('race Slice 2a: rounds', () => {
       'chase_the_ace',
       'double_elim',
       'head_to_head',
+      'multi_main',
       'open_practice',
       'round_robin',
       'single_elim',
       'timed_qual'
     ]);
     expect(schemas.map((s) => s.name)).not.toContain('zippyq');
-    // multi_main is shelved — registered (persisted rounds load) but not offered, until it gets a
-    // proper finals builder.
-    expect(schemas.map((s) => s.name)).not.toContain('multi_main');
+    // multi_main is offered (#219, D14): a finals structure built via the tournament builder. It
+    // declares `main_size` (number, default 4) + `bump_n` (number, default 0).
+    const mm = schemas.find((s) => s.name === 'multi_main')!;
+    expect(mm.params.find((p) => p.key === 'main_size')?.kind).toBe('number');
+    expect(mm.params.find((p) => p.key === 'main_size')?.default).toBe('4');
+    expect(mm.params.find((p) => p.key === 'bump_n')?.kind).toBe('number');
+    expect(mm.params.find((p) => p.key === 'bump_n')?.default).toBe('0');
     // Chase the Ace (a final-format) declares `wins_to_win` (number, default 2). The Rounds UI shows
     // it only as a final-level format — the general round picker filters it out client-side.
     const cta = schemas.find((s) => s.name === 'chase_the_ace')!;

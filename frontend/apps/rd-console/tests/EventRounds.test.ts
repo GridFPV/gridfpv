@@ -2090,3 +2090,160 @@ describe('EventRounds — round-robin builder + visualization', () => {
     expect(within(panel).queryByText('Rotation 1')).not.toBeInTheDocument();
   });
 });
+
+describe('EventRounds — multi-main builder + visualization', () => {
+  const COMET: Pilot = { id: 'p3', callsign: 'Comet', vtx_types: [] };
+  const DASH: Pilot = { id: 'p4', callsign: 'Dash', vtx_types: [] };
+  // A 4-member field so r1 is a bracketable/seedable round.
+  const EVENT_4: EventMeta = {
+    ...EVENT,
+    roster: ['p1', 'p2', 'p3', 'p4'],
+    classes_membership: [
+      { class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }, { pilot: 'p3' }, { pilot: 'p4' }] }
+    ]
+  };
+
+  function mmImpls(heats: HeatSummary[] = []) {
+    return {
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT, COMET, DASH]),
+      listHeatsImpl: vi.fn(async () => heats)
+    };
+  }
+
+  it('shows the multi-main config (Main size=4 + Bump-up count) and hides points + bracket-only fields', async () => {
+    const { session } = makeTestSession({ ...mmImpls(), event: EVENT_4 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Build tournament' }));
+    // The structure picker offers Multi-main; selecting it swaps in the multi-main config.
+    await fireEvent.change(await screen.findByLabelText('Structure'), {
+      target: { value: 'multi_main' }
+    });
+
+    // Multi-main shows Main size (default 4) + Bump-up count + the win condition…
+    const mainSize = (await screen.findByLabelText('Main size')) as HTMLInputElement;
+    expect(mainSize.value).toBe('4');
+    expect(screen.getByLabelText('Bump-up count')).toBeInTheDocument();
+    expect(screen.getByLabelText('Bracket win condition')).toBeInTheDocument();
+
+    // …and hides the points editor + bracket-only + round-robin-only fields.
+    expect(screen.queryByLabelText('Points for 1st place')).toBeNull();
+    expect(screen.queryByLabelText('Pilots per heat')).toBeNull();
+    expect(screen.queryByLabelText('Advance per heat')).toBeNull();
+    expect(screen.queryByLabelText('Final format')).toBeNull();
+    expect(screen.queryByLabelText('Rounds')).toBeNull();
+  });
+
+  it('builds a SINGLE multi_main round from the modal (one createRound with the right req)', async () => {
+    const created: RoundDef = {
+      ...QUAL,
+      id: 'mm1',
+      label: 'Finals',
+      format: 'multi_main',
+      params: { main_size: '4', bump_n: '0' },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 4 } }
+    };
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => created);
+    const { session } = makeTestSession({ ...mmImpls(), createRoundImpl, event: EVENT_4 });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Build tournament' }));
+    await fireEvent.change(await screen.findByLabelText('Structure'), {
+      target: { value: 'multi_main' }
+    });
+    // The round seed defaults to r1, top_n to the largest power-of-two fitting the 4-pilot field (4).
+    await fireEvent.input(await screen.findByLabelText('Multi-main name'), {
+      target: { value: 'Finals' }
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Build multi-main' }));
+
+    // Exactly ONE round is created — no level chain.
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    expect(createRoundImpl.mock.calls[0][2]).toMatchObject({
+      label: 'Finals',
+      format: 'multi_main',
+      params: { main_size: '4', bump_n: '0' },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 4 } }
+    });
+  });
+
+  it('renders a multi_main round as a standings table with a Tier column + callsigns', async () => {
+    const MM_ROUND: RoundDef = {
+      ...QUAL,
+      id: 'mm1',
+      label: 'Finals',
+      format: 'multi_main',
+      params: { main_size: '2', bump_n: '0' },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 4 } }
+    };
+    const MM_HEATS: HeatSummary[] = [
+      { heat: 'main-A', lineup: ['p1', 'p2'], round: 'mm1', phase: 'Final', is_current: false },
+      { heat: 'main-B', lineup: ['p3', 'p4'], round: 'mm1', phase: 'Final', is_current: false }
+    ];
+    // The canonical ranking concatenates A-main then B-main.
+    const roundRankingImpl = vi.fn(async (_b, _e, _round) => [
+      { competitor: 'p1', position: 1 },
+      { competitor: 'p2', position: 2 },
+      { competitor: 'p3', position: 3 },
+      { competitor: 'p4', position: 4 }
+    ]);
+    const snap = (rows: [string, number][]) => ({
+      body: {
+        HeatResult: {
+          places: rows.map(([competitor, position]) => ({
+            competitor: { adapter: 'rh-1', competitor },
+            position,
+            laps: 3,
+            metric: { BestLapMicros: 30_000_000 }
+          }))
+        }
+      }
+    });
+    const RESULTS: Record<string, ReturnType<typeof snap>> = {
+      'main-A': snap([
+        ['p1', 1],
+        ['p2', 2]
+      ]),
+      'main-B': snap([
+        ['p3', 1],
+        ['p4', 2]
+      ])
+    };
+    const { session } = makeTestSession({
+      ...mmImpls(MM_HEATS),
+      roundRankingImpl,
+      event: { ...EVENT_4, rounds: [MM_ROUND] }
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const m = /snapshot\/heat\/([^?]+)/.exec(String(url));
+        const heat = m ? decodeURIComponent(m[1]) : '';
+        const s = RESULTS[heat];
+        return s
+          ? ({ ok: true, json: async () => s } as unknown as Response)
+          : ({ ok: false, json: async () => ({}) } as unknown as Response);
+      })
+    );
+    render(EventRounds, { session });
+
+    const tournaments = (await screen.findByRole('heading', { name: 'Tournaments' })).closest(
+      'section'
+    )!;
+    const panel = (await within(tournaments).findByLabelText(
+      /Multi-main — Finals/i
+    )) as HTMLElement;
+
+    // The standings table shows a Tier column + resolves callsigns (never the raw refs).
+    const table = within(panel).getByRole('table', { name: /Multi-main standings/i });
+    expect(within(table).getByText('Tier')).toBeInTheDocument();
+    await waitFor(() => expect(within(table).getByText('AceOne')).toBeInTheDocument());
+    expect(within(table).getByText('Dash')).toBeInTheDocument();
+    expect(within(table).queryByText('p1')).toBeNull();
+    // The A-main pilots show A-Main, the B-main pilots show B-Main.
+    await waitFor(() => expect(within(table).getAllByText('A-Main').length).toBe(2));
+    expect(within(table).getAllByText('B-Main').length).toBe(2);
+  });
+});

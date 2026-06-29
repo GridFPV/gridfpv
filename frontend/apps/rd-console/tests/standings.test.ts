@@ -5,6 +5,7 @@ import {
   advanceRoundReq,
   bracketLevelFields,
   bracketTopNDefault,
+  multiMainRoundReq,
   roundRobinRoundReq
 } from '../src/lib/standings.js';
 
@@ -199,6 +200,82 @@ describe('roundRobinRoundReq — the seeded round_robin payload', () => {
       rounds: 3,
       heatSize: 4,
       points: [10],
+      winCondition: WIN,
+      seed: { kind: 'ranking', source: SOURCE, topN: 4 }
+    });
+    expect(req.classes).not.toBe(SOURCE.classes);
+    expect(req.classes).toEqual(SOURCE.classes);
+  });
+});
+
+describe('multiMainRoundReq — the seeded multi_main payload', () => {
+  const SOURCE: RoundDef = {
+    id: 'r1',
+    label: 'Qualifying',
+    classes: ['c1', 'c2'],
+    format: 'timed_qual',
+    params: { rounds: '2' },
+    win_condition: { Timed: { window_micros: 120_000_000 } },
+    seeding: 'FromRoster',
+    channel_mode: 'Static',
+    staging_timer_secs: 300,
+    start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+    grace_window: { Duration: { micros: 3000000 } },
+    protest_window: 'Off'
+  };
+
+  it('builds a multi_main round seeded FromRanking, with main_size/bump_n params', () => {
+    const req = multiMainRoundReq({
+      label: 'Finals',
+      mainSize: 4,
+      bumpN: 0,
+      winCondition: WIN,
+      seed: { kind: 'ranking', source: SOURCE, topN: 8 }
+    });
+    expect(req).toEqual({
+      label: 'Finals',
+      // Carries the source round's classes (like roundRobinRoundReq / advanceRoundReq).
+      classes: ['c1', 'c2'],
+      format: 'multi_main',
+      params: { main_size: '4', bump_n: '0' },
+      win_condition: { FirstToLaps: { n: 3 } },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 8 } }
+    });
+  });
+
+  it('builds a multi_main round seeded FromRoster off a single class, carrying bump_n', () => {
+    const req = multiMainRoundReq({
+      label: 'MM',
+      mainSize: 3,
+      bumpN: 1,
+      winCondition: WIN,
+      seed: { kind: 'roster', classId: 'c9' }
+    });
+    expect(req).toMatchObject({
+      classes: ['c9'],
+      format: 'multi_main',
+      params: { main_size: '3', bump_n: '1' },
+      seeding: 'FromRoster'
+    });
+  });
+
+  it('clamps/rounds main_size (≥2), bump_n (≥0), and top_n (≥1)', () => {
+    const req = multiMainRoundReq({
+      label: 'x',
+      mainSize: 1,
+      bumpN: -3,
+      winCondition: WIN,
+      seed: { kind: 'ranking', source: SOURCE, topN: 0 }
+    });
+    expect(req.params).toEqual({ main_size: '2', bump_n: '0' });
+    expect(req.seeding).toEqual({ FromRanking: { source_rounds: ['r1'], top_n: 1 } });
+  });
+
+  it('does not mutate the source round classes array', () => {
+    const req = multiMainRoundReq({
+      label: 'x',
+      mainSize: 4,
+      bumpN: 0,
       winCondition: WIN,
       seed: { kind: 'ranking', source: SOURCE, topN: 4 }
     });
