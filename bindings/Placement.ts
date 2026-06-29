@@ -30,6 +30,16 @@ laps: number,
  */
 metric: Metric, 
 /**
+ * The competitor's **fastest single completed lap** in this heat, in microseconds, or
+ * `None` if they completed no timed lap. Computed from the run's lap durations
+ * **independently of the win condition** (so e.g. a [`WinCondition::FirstToLaps`]
+ * placement still carries a real best-lap, not the win metric), with thrown-out laps
+ * excluded. Cross-heat rankings use it to break ties — round-robin breaks pilots equal
+ * on points by their faster best lap. Defaults to `None` so older snapshots that
+ * predate the field still deserialise.
+ */
+best_lap_micros: number | null, 
+/**
  * Whether this competitor was **disqualified** by an adjudication
  * ([`gridfpv_events::Penalty::Disqualify`] via
  * [`gridfpv_events::Event::PenaltyApplied`]). A disqualified competitor is ranked

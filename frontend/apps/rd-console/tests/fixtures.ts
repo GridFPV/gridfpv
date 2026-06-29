@@ -32,13 +32,15 @@ export const heatResult: HeatResult = {
       competitor: { adapter: 'rh-1', competitor: 'ALICE' },
       position: 1,
       laps: 3,
-      metric: { BestLapMicros: 41_250_000 }
+      metric: { BestLapMicros: 41_250_000 },
+      best_lap_micros: 41_250_000
     },
     {
       competitor: { adapter: 'rh-1', competitor: 'BOB' },
       position: 2,
       laps: 3,
-      metric: { BestLapMicros: 42_100_000 }
+      metric: { BestLapMicros: 42_100_000 },
+      best_lap_micros: 42_100_000
     }
   ]
 };
@@ -134,13 +136,15 @@ export const eventOutcome: EventOutcome = {
             competitor: { adapter: 'rh-1', competitor: 'ALICE' },
             position: 1,
             laps: 3,
-            metric: { BestLapMicros: 41_000_000 }
+            metric: { BestLapMicros: 41_000_000 },
+            best_lap_micros: 41_000_000
           },
           {
             competitor: { adapter: 'rh-1', competitor: 'DANA' },
             position: 2,
             laps: 3,
-            metric: { BestLapMicros: 45_000_000 }
+            metric: { BestLapMicros: 45_000_000 },
+            best_lap_micros: 45_000_000
           }
         ]
       }
@@ -153,13 +157,15 @@ export const eventOutcome: EventOutcome = {
             competitor: { adapter: 'rh-1', competitor: 'BOB' },
             position: 1,
             laps: 3,
-            metric: { BestLapMicros: 42_000_000 }
+            metric: { BestLapMicros: 42_000_000 },
+            best_lap_micros: 42_000_000
           },
           {
             competitor: { adapter: 'rh-1', competitor: 'CARMEN' },
             position: 2,
             laps: 3,
-            metric: { BestLapMicros: 46_000_000 }
+            metric: { BestLapMicros: 46_000_000 },
+            best_lap_micros: 46_000_000
           }
         ]
       }
@@ -172,13 +178,15 @@ export const eventOutcome: EventOutcome = {
             competitor: { adapter: 'rh-1', competitor: 'ALICE' },
             position: 1,
             laps: 3,
-            metric: { BestLapMicros: 40_000_000 }
+            metric: { BestLapMicros: 40_000_000 },
+            best_lap_micros: 40_000_000
           },
           {
             competitor: { adapter: 'rh-1', competitor: 'BOB' },
             position: 2,
             laps: 3,
-            metric: { BestLapMicros: 41_500_000 }
+            metric: { BestLapMicros: 41_500_000 },
+            best_lap_micros: 41_500_000
           }
         ]
       }

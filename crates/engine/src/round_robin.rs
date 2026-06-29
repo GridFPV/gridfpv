@@ -258,6 +258,10 @@ impl Generator for RoundRobin {
         // ranking. The accumulated score is "more is better", so we negate it into a
         // smaller-is-better rank key for `rank_by`.
         let mut totals: BTreeMap<CompetitorRef, i64> = BTreeMap::new();
+        // Per competitor, the **fastest single lap** they flew across every heat (the min of each
+        // heat's `best_lap_micros`, ignoring heats where they completed no lap). Breaks ties on
+        // points/laps: equal score → the faster best lap ranks higher.
+        let mut best_lap: BTreeMap<CompetitorRef, i64> = BTreeMap::new();
         for competitor in &self.field {
             totals.entry(competitor.clone()).or_insert(0);
         }
@@ -280,14 +284,27 @@ impl Generator for RoundRobin {
                 *totals
                     .entry(place.competitor.competitor.clone())
                     .or_insert(0) += gain;
+                // Track the competitor's fastest lap across heats (smaller is better). A heat with
+                // no completed lap contributes nothing.
+                if let Some(lap) = place.best_lap_micros {
+                    best_lap
+                        .entry(place.competitor.competitor.clone())
+                        .and_modify(|m| *m = (*m).min(lap))
+                        .or_insert(lap);
+                }
             }
         }
 
-        // Rank key: negate the accumulated score so more points / laps = smaller key =
-        // better; `rank_by` adds the competitor ref as the final, total tie-break.
-        let rows: Vec<(CompetitorRef, i64)> = totals
+        // Rank key: negate the accumulated score so more points / laps = smaller key = better, then
+        // break ties by fastest lap ascending (smaller = better; a pilot with no lap sorts after one
+        // with a lap via `i64::MAX`). `rank_by` adds the competitor ref as the final, total
+        // tie-break.
+        let rows: Vec<(CompetitorRef, (i64, i64))> = totals
             .into_iter()
-            .map(|(competitor, score)| (competitor, -score))
+            .map(|(competitor, score)| {
+                let fastest = best_lap.get(&competitor).copied().unwrap_or(i64::MAX);
+                (competitor, (-score, fastest))
+            })
             .collect();
         rank_by(rows)
     }
@@ -328,6 +345,28 @@ mod tests {
                     position: *position,
                     laps: *laps,
                     metric: Metric::LastLapAt(None),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Build a `HeatResult` from `(name, position, laps, best_lap_micros)` rows — the best-lap
+    /// variant of [`result`], for exercising the fastest-lap tie-break.
+    fn result_bl(rows: &[(&str, u32, u32, Option<i64>)]) -> HeatResult {
+        HeatResult {
+            places: rows
+                .iter()
+                .map(|(name, position, laps, best)| Placement {
+                    competitor: CompetitorKey {
+                        adapter: AdapterId(ADAPTER.into()),
+                        competitor: cref(name),
+                    },
+                    position: *position,
+                    laps: *laps,
+                    metric: Metric::LastLapAt(None),
+                    best_lap_micros: *best,
                     ..Default::default()
                 })
                 .collect(),
@@ -622,6 +661,74 @@ mod tests {
         let ranking = g.ranking(&completed);
         assert_eq!(ranking[0].competitor, cref("A"));
         assert_eq!(ranking[0].position, 1);
+    }
+
+    #[test]
+    fn ranking_breaks_equal_points_by_fastest_single_lap() {
+        // X and Y finish equal on points across the round-robin (each wins one heat, loses one),
+        // but X flew a faster fastest-lap, so X ranks ahead of Y.
+        let g = RoundRobin::new(field(&["X", "Y", "Z", "W"]), 2, 2, RrMetric::Points);
+        let completed = vec![
+            // Round 1: X beats Z; Y beats W. X best lap 2.0s, Y best lap 2.5s.
+            CompletedHeat::new(
+                "rr-r1-h1",
+                result_bl(&[("X", 1, 5, Some(2_000_000)), ("Z", 2, 4, Some(2_400_000))]),
+            ),
+            CompletedHeat::new(
+                "rr-r1-h2",
+                result_bl(&[("Y", 1, 5, Some(2_500_000)), ("W", 2, 4, Some(2_600_000))]),
+            ),
+            // Round 2: X and Y both lose their heats, so each ends on the same points. X still has
+            // the faster fastest-lap (2.1s vs Y's 2.5s).
+            CompletedHeat::new(
+                "rr-r2-h1",
+                result_bl(&[("Z", 1, 5, Some(2_300_000)), ("X", 2, 4, Some(2_100_000))]),
+            ),
+            CompletedHeat::new(
+                "rr-r2-h2",
+                result_bl(&[("W", 1, 5, Some(2_700_000)), ("Y", 2, 4, Some(2_500_000))]),
+            ),
+        ];
+        // Every pilot ends on 3 points (each won one heat, lost one), so the standing is decided
+        // entirely by fastest lap: X 2.0s, Z 2.3s, Y 2.5s, W 2.6s.
+        let ranking = g.ranking(&completed);
+        assert_eq!(names(&ranking), vec!["X", "Z", "Y", "W"]);
+        let x = ranking
+            .iter()
+            .position(|e| e.competitor == cref("X"))
+            .unwrap();
+        let y = ranking
+            .iter()
+            .position(|e| e.competitor == cref("Y"))
+            .unwrap();
+        assert!(
+            x < y,
+            "X (faster best lap) must rank ahead of Y on the same points"
+        );
+        // The fastest-lap tie-break splits the equal-points pilots into distinct positions.
+        assert!(ranking[x].position < ranking[y].position);
+    }
+
+    #[test]
+    fn ranking_fastest_lap_tiebreak_sorts_a_no_lap_pilot_behind_one_with_a_lap() {
+        // M and N tie on points; M completed a lap, N never did (no best_lap). M ranks ahead.
+        let g = RoundRobin::new(field(&["M", "N"]), 1, 2, RrMetric::Points);
+        let completed = vec![CompletedHeat::new(
+            "rr-r1-h1",
+            // Genuine points tie: both share position 1 (e.g. an all-tied heat), M has a lap.
+            result_bl(&[("M", 1, 1, Some(3_000_000)), ("N", 1, 0, None)]),
+        )];
+        let ranking = g.ranking(&completed);
+        assert_eq!(
+            ranking[0].competitor,
+            cref("M"),
+            "the pilot with a lap ranks first"
+        );
+        assert_eq!(
+            ranking[1].competitor,
+            cref("N"),
+            "the no-lap pilot sorts behind"
+        );
     }
 
     #[test]

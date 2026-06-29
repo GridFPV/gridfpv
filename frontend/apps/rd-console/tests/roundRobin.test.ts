@@ -15,7 +15,8 @@ function result(rows: [string, number, number?][]): HeatResult {
       competitor: { adapter: 'rh-1', competitor },
       position,
       laps: 3,
-      metric: { BestLapMicros: bestLap ?? null }
+      metric: { BestLapMicros: bestLap ?? null },
+      best_lap_micros: bestLap ?? null
     }))
   };
 }

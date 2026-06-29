@@ -167,6 +167,7 @@ fn remap(place: &Placement, as_ref: &CompetitorRef) -> Placement {
         position: place.position,
         laps: place.laps,
         metric: place.metric,
+        best_lap_micros: place.best_lap_micros,
         disqualified: place.disqualified,
     }
 }

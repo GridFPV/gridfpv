@@ -20,19 +20,22 @@ export const heatResult: HeatResult = {
       competitor: { adapter: 'rh-1', competitor: 'ALICE' },
       position: 1,
       laps: 3,
-      metric: { BestLapMicros: 41_250_000 }
+      metric: { BestLapMicros: 41_250_000 },
+      best_lap_micros: 41_250_000
     },
     {
       competitor: { adapter: 'rh-1', competitor: 'BOB' },
       position: 2,
       laps: 3,
-      metric: { BestLapMicros: 42_100_000 }
+      metric: { BestLapMicros: 42_100_000 },
+      best_lap_micros: 42_100_000
     },
     {
       competitor: { adapter: 'rh-1', competitor: 'CARMEN' },
       position: 3,
       laps: 2,
-      metric: { BestLapMicros: null }
+      metric: { BestLapMicros: null },
+      best_lap_micros: null
     }
   ]
 };
