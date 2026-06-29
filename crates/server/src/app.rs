@@ -1609,11 +1609,30 @@ async fn snapshot_heat(
             ))
         }
         HeatProjection::Result => {
-            // The win condition is heat / format config not carried in the raw log; the
-            // snapshot scores the heat's passes under a neutral best-lap qualifying rule
-            // so the result body is populated. The authoritative per-heat win condition is
-            // applied by the engine when scoring is driven (#45); refining the served
-            // result to the configured condition is part of that work.
+            // Score under the heat's ROUND win condition (#45), mirroring
+            // `round_engine::completed_heats`: resolve the heat's round from its
+            // `HeatScheduled` tag, then look its `RoundDef::win_condition` up in the event
+            // meta. A heat with no associated round (an ad-hoc / open-practice heat) falls
+            // back to a neutral best-lap qualifying rule, so an un-tagged heat is unchanged.
+            let win_condition = events
+                .iter()
+                .find_map(|e| match e {
+                    Event::HeatScheduled {
+                        heat: h,
+                        round: Some(round),
+                        ..
+                    } if *h == heat => Some(round.clone()),
+                    _ => None,
+                })
+                .and_then(|round_id| {
+                    registry.meta_of(&event_id).and_then(|meta| {
+                        meta.rounds
+                            .iter()
+                            .find(|r| r.id == round_id)
+                            .map(|r| r.win_condition)
+                    })
+                })
+                .unwrap_or(WinCondition::BestLap);
             let race_start = heat_events
                 .iter()
                 .filter_map(first_pass_at)
@@ -1624,7 +1643,7 @@ async fn snapshot_heat(
             // re-enumerated window would match the wrong offset.
             ProjectionBody::HeatResult(score_with_global_offsets(
                 heat_offsets.iter().map(|(o, e)| (*o, e)),
-                WinCondition::BestLap,
+                win_condition,
                 race_start,
             ))
         }
@@ -1779,6 +1798,8 @@ mod tests {
     // `Body` and `Request` come in via `use super::*` (they are `use`d at module level for
     // the smart fallback); the tests reach them through the glob.
     use super::*;
+    use crate::events::{NewRoundReq, SeedingRule};
+    use gridfpv_engine::scoring::Metric;
     use gridfpv_events::{AdapterId, GateIndex, HeatTransition, LogRef, Pass};
     use gridfpv_projection::CompetitorKey;
     use http_body_util::BodyExt;
@@ -1834,6 +1855,67 @@ mod tests {
                 transition: HeatTransition::Finalized,
             },
         ]
+    }
+
+    /// A registry whose Practice event carries a round with `win_condition` and a heat `q-1`
+    /// tagged with that round, driven Scheduled → Final over the given lap-gate `passes`. Used to
+    /// prove the result projection scores under the heat's round win condition (#45).
+    fn registry_with_round_heat(
+        win_condition: WinCondition,
+        time_limit_secs: Option<u32>,
+        passes: Vec<Event>,
+    ) -> EventRegistry {
+        let registry = EventRegistry::new(None).unwrap();
+        let event_id = EventId(PRACTICE_EVENT_ID.into());
+        let round = registry
+            .add_round(
+                &event_id,
+                NewRoundReq {
+                    label: "Race".into(),
+                    classes: vec![],
+                    format: "timed_qual".into(),
+                    params: std::collections::BTreeMap::new(),
+                    win_condition: Some(win_condition),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs,
+                    channel_mode: None,
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                },
+            )
+            .expect("round adds (empty classes validate)");
+
+        let heat = || HeatId("q-1".into());
+        let changed = |t| Event::HeatStateChanged {
+            heat: heat(),
+            transition: t,
+        };
+        let mut events = vec![
+            Event::HeatScheduled {
+                heat: heat(),
+                lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+                class: None,
+                round: Some(round.id.clone()),
+                frequencies: vec![],
+                label: None,
+            },
+            changed(HeatTransition::Staged),
+            changed(HeatTransition::Armed),
+            changed(HeatTransition::Running),
+        ];
+        events.extend(passes);
+        events.push(changed(HeatTransition::Finished));
+        events.push(changed(HeatTransition::Finalized));
+
+        let state = registry
+            .resolve(&event_id)
+            .expect("Practice is always present");
+        for e in &events {
+            state.append(e.clone(), None).unwrap();
+        }
+        registry
     }
 
     use crate::events::{EventRegistry, PRACTICE_EVENT_ID};
@@ -2048,6 +2130,104 @@ mod tests {
             ProjectionBody::HeatResult(result) => {
                 // Both A and B placed.
                 assert_eq!(result.places.len(), 2);
+            }
+            other => panic!("expected heat result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn heat_scope_result_uses_round_first_to_laps_win_condition() {
+        // A completes three laps earlier than B, but B holds the single fastest lap (0.5s). Under
+        // the round's First-to-3 win condition the order is by who reached lap 3 first (A), and the
+        // placement metric is `ReachedAt` — NOT the hardcoded best-lap placeholder (#45) that would
+        // have ordered B first by best lap.
+        let passes = vec![
+            pass("A", 0, 1),
+            pass("B", 0, 1),
+            pass("A", 1_000_000, 2), // A lap 1 = 1.0s
+            pass("B", 500_000, 2),   // B lap 1 = 0.5s (the single fastest lap)
+            pass("A", 2_000_000, 3), // A lap 2 = 1.0s
+            pass("A", 3_000_000, 4), // A reaches lap 3 at t = 3.0s
+            pass("B", 3_500_000, 3), // B lap 2 = 3.0s
+            pass("B", 4_000_000, 4), // B reaches lap 3 at t = 4.0s
+        ];
+        let registry = registry_with_round_heat(WinCondition::FirstToLaps { n: 3 }, None, passes);
+        let (status, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/heat/q-1?projection=result",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::HeatResult(result) => {
+                assert_eq!(result.places.len(), 2);
+                // A first: reached lap 3 at 3.0s (before B's 4.0s) — by the race, not best lap.
+                let first = &result.places[0];
+                assert_eq!(first.competitor.competitor, CompetitorRef("A".into()));
+                assert_eq!(first.position, 1);
+                assert_eq!(
+                    first.metric,
+                    Metric::ReachedAt(Some(SourceTime::from_micros(3_000_000)))
+                );
+                let second = &result.places[1];
+                assert_eq!(second.competitor.competitor, CompetitorRef("B".into()));
+                assert_eq!(
+                    second.metric,
+                    Metric::ReachedAt(Some(SourceTime::from_micros(4_000_000)))
+                );
+            }
+            other => panic!("expected heat result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn heat_scope_result_uses_round_best_consecutive_win_condition() {
+        // A best-2-consecutive round: the placement metric is `BestConsecutiveMicros`, ranking by
+        // the smallest 2-lap window (A's 2.0s beats B's 6.0s).
+        let passes = vec![
+            pass("A", 0, 1),
+            pass("A", 1_000_000, 2), // 1.0s
+            pass("A", 2_000_000, 3), // 1.0s → best 2-consec = 2.0s
+            pass("B", 0, 1),
+            pass("B", 3_000_000, 2), // 3.0s
+            pass("B", 6_000_000, 3), // 3.0s → best 2-consec = 6.0s
+        ];
+        let registry =
+            registry_with_round_heat(WinCondition::BestConsecutive { n: 2 }, Some(60), passes);
+        let (status, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/heat/q-1?projection=result",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::HeatResult(result) => {
+                let first = &result.places[0];
+                assert_eq!(first.competitor.competitor, CompetitorRef("A".into()));
+                assert_eq!(first.position, 1);
+                assert_eq!(first.metric, Metric::BestConsecutiveMicros(Some(2_000_000)));
+            }
+            other => panic!("expected heat result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn heat_scope_result_no_round_falls_back_to_best_lap() {
+        // `recorded_heat`'s q-1 carries `round: None` (an ad-hoc heat with no round), so the result
+        // still scores under the best-lap fallback — the placement metric is `BestLapMicros`, so the
+        // un-tagged heat's behaviour is unchanged. A's fastest lap (2.5s) beats B's (4.0s).
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, snap) = get_snapshot(
+            registry,
+            "/events/practice/snapshot/heat/q-1?projection=result",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::HeatResult(result) => {
+                let first = &result.places[0];
+                assert_eq!(first.competitor.competitor, CompetitorRef("A".into()));
+                assert_eq!(first.metric, Metric::BestLapMicros(Some(2_500_000)));
             }
             other => panic!("expected heat result, got {other:?}"),
         }

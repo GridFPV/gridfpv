@@ -129,6 +129,30 @@ describe('seam 1: snapshot routes are path-scoped', () => {
     expect(Object.keys((snap?.json as { body: object }).body)).toEqual(['LapList']);
   });
 
+  it('projection=result places carry the win-condition metric (best-lap fallback, round-less heat)', async () => {
+    // The contract heat was scheduled with no round, so the result scores under the best-lap
+    // fallback (#45 — the result now scores under the heat's ROUND win condition, falling back to
+    // best lap for a round-less / ad-hoc heat). The previous `it` ran the heat, so it now has laps:
+    // each placement carries a `BestLapMicros` metric — the win-condition-derived metric on the
+    // wire, NOT a bare placement. Poll until the scored places appear.
+    const deadline = Date.now() + 8_000;
+    let places: Array<{ metric: Record<string, unknown> }> = [];
+    while (Date.now() < deadline) {
+      const { json } = await getSnapshot(
+        `/events/practice/snapshot/heat/${HEAT}?projection=result`
+      );
+      places = (
+        json as { body: { HeatResult: { places: Array<{ metric: Record<string, unknown> }> } } }
+      ).body.HeatResult.places;
+      if (places.length > 0) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(places.length).toBeGreaterThan(0);
+    for (const place of places) {
+      expect(Object.keys(place.metric)).toEqual(['BestLapMicros']);
+    }
+  });
+
   it('an unknown SCOPE id → 404 ProtocolError(UnknownScope), not a silent Snapshot', async () => {
     // A real path with a missing id: the contract is a typed 404, not a 200 fallback.
     const { status, json } = await getSnapshot('/events/practice/snapshot/heat/does-not-exist');
