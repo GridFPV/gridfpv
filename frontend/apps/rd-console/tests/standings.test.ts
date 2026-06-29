@@ -4,7 +4,8 @@ import {
   advanceRoundLabel,
   advanceRoundReq,
   bracketLevelFields,
-  bracketTopNDefault
+  bracketTopNDefault,
+  roundRobinRoundReq
 } from '../src/lib/standings.js';
 
 /** The bracket's chosen win condition (one for all heats) — head-to-head default First-to-N. */
@@ -123,5 +124,85 @@ describe('advanceRoundReq — the seeded single_elim payload', () => {
 
   it('proposes a sensible default bracket label', () => {
     expect(advanceRoundLabel(SOURCE)).toBe('Qualifying — Bracket');
+  });
+});
+
+describe('roundRobinRoundReq — the seeded round_robin payload', () => {
+  const SOURCE: RoundDef = {
+    id: 'r1',
+    label: 'Qualifying',
+    classes: ['c1', 'c2'],
+    format: 'timed_qual',
+    params: { rounds: '2' },
+    win_condition: { Timed: { window_micros: 120_000_000 } },
+    seeding: 'FromRoster',
+    channel_mode: 'Static',
+    staging_timer_secs: 300,
+    start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
+    grace_window: { Duration: { micros: 3000000 } },
+    protest_window: 'Off'
+  };
+
+  it('builds a round_robin round seeded FromRanking, with rounds/heat_size/points params', () => {
+    const req = roundRobinRoundReq({
+      label: 'Round Robin',
+      rounds: 3,
+      heatSize: 4,
+      points: [10, 6, 4, 3, 2, 1],
+      winCondition: WIN,
+      seed: { kind: 'ranking', source: SOURCE, topN: 8 }
+    });
+    expect(req).toEqual({
+      label: 'Round Robin',
+      // Carries the source round's classes (like advanceRoundReq).
+      classes: ['c1', 'c2'],
+      format: 'round_robin',
+      params: { rounds: '3', heat_size: '4', points: '10,6,4,3,2,1' },
+      win_condition: { FirstToLaps: { n: 3 } },
+      seeding: { FromRanking: { source_rounds: ['r1'], top_n: 8 } }
+    });
+  });
+
+  it('builds a round_robin round seeded FromRoster off a single class', () => {
+    const req = roundRobinRoundReq({
+      label: 'RR',
+      rounds: 2,
+      heatSize: 3,
+      points: [5, 3, 1],
+      winCondition: WIN,
+      seed: { kind: 'roster', classId: 'c9' }
+    });
+    expect(req).toMatchObject({
+      classes: ['c9'],
+      format: 'round_robin',
+      params: { rounds: '2', heat_size: '3', points: '5,3,1' },
+      seeding: 'FromRoster'
+    });
+  });
+
+  it('clamps/rounds the rounds (≥1), heat_size (≥2), points (≥0), and top_n (≥1)', () => {
+    const req = roundRobinRoundReq({
+      label: 'x',
+      rounds: 0,
+      heatSize: 1,
+      points: [10, -2, 3.6],
+      winCondition: WIN,
+      seed: { kind: 'ranking', source: SOURCE, topN: 0 }
+    });
+    expect(req.params).toEqual({ rounds: '1', heat_size: '2', points: '10,0,4' });
+    expect(req.seeding).toEqual({ FromRanking: { source_rounds: ['r1'], top_n: 1 } });
+  });
+
+  it('does not mutate the source round classes array', () => {
+    const req = roundRobinRoundReq({
+      label: 'x',
+      rounds: 3,
+      heatSize: 4,
+      points: [10],
+      winCondition: WIN,
+      seed: { kind: 'ranking', source: SOURCE, topN: 4 }
+    });
+    expect(req.classes).not.toBe(SOURCE.classes);
+    expect(req.classes).toEqual(SOURCE.classes);
   });
 });
