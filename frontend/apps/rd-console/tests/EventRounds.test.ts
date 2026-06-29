@@ -1988,7 +1988,7 @@ describe('EventRounds — round-robin builder + visualization', () => {
     });
   });
 
-  it('renders a round_robin round as a standings table (Points) + rotation grid with callsigns', async () => {
+  it('renders a round_robin round as a standings table (Points) with callsigns', async () => {
     const RR_ROUND: RoundDef = {
       ...QUAL,
       id: 'rr1',
@@ -2086,8 +2086,7 @@ describe('EventRounds — round-robin builder + visualization', () => {
     await waitFor(() => expect(within(table).getByText('41.250')).toBeInTheDocument());
     expect(within(table).getByText('—')).toBeInTheDocument();
 
-    // The per-rotation grid shows both rotations.
-    expect(within(panel).getByText('Rotation 1')).toBeInTheDocument();
-    expect(within(panel).getByText('Rotation 2')).toBeInTheDocument();
+    // Simplified viz: standings only, no per-rotation grid (heats live in the Heats area).
+    expect(within(panel).queryByText('Rotation 1')).not.toBeInTheDocument();
   });
 });

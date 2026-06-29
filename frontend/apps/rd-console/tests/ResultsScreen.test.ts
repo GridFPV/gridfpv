@@ -649,7 +649,7 @@ describe('Results — round-robin tournament view', () => {
     }
   });
 
-  it('lists the round-robin round in the selector and renders standings (Points) + the rotation grid', async () => {
+  it('lists the round-robin round in the selector and renders standings (Points)', async () => {
     const { session } = makeTestSession({
       event: { ...EVENT, rounds: [RR] },
       listClassesImpl: vi.fn(async () => [OPEN]),
@@ -694,9 +694,8 @@ describe('Results — round-robin tournament view', () => {
     await waitFor(() => expect(within(table).getByText('41.250')).toBeInTheDocument());
     expect(within(table).getByText('—')).toBeInTheDocument();
 
-    // The per-rotation grid renders both rotations.
-    expect(screen.getByText('Rotation 1')).toBeInTheDocument();
-    expect(screen.getByText('Rotation 2')).toBeInTheDocument();
+    // Simplified viz: standings only, no per-rotation grid (heats live in the Heats area).
+    expect(screen.queryByText('Rotation 1')).not.toBeInTheDocument();
   });
 });
 

@@ -54,13 +54,11 @@ describe('RoundRobinView', () => {
     expect(within(table).getByText('—')).toBeInTheDocument();
   });
 
-  it('renders the per-rotation grid, each heat listing its lineup', () => {
+  it('shows only the standings — no per-rotation grid (heats live in the Heats area)', () => {
     const { container } = render(RoundRobinView, { view: VIEW });
-    expect(screen.getByText('Rotation 1')).toBeInTheDocument();
-    expect(screen.getByText('Rotation 2')).toBeInTheDocument();
-    expect(screen.getByText('Round Robin Heat 1')).toBeInTheDocument();
-    // One heat box per rotation here.
-    expect(container.querySelectorAll('.rr-heat').length).toBe(2);
+    expect(screen.queryByText('Rotation 1')).not.toBeInTheDocument();
+    expect(screen.queryByText('Round Robin Heat 1')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('.rr-heat').length).toBe(0);
   });
 
   it('shows an empty standings note when there are no rows yet', () => {
