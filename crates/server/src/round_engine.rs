@@ -2612,7 +2612,7 @@ mod tests {
         let round = qual_round("q1", "open");
         let meta = meta_with(vec![round], vec![member("open", &["A", "B"])]);
 
-        // The first heat the generator emits is `round-1`.
+        // The first heat the generator emits is the rotation-1 chunk (`tq-r1-h1`).
         let first = fill_round(&meta, &no_timers(), &RoundId("q1".into()), &[]).unwrap();
         let heat_id = match first {
             FillOutcome::Scheduled { heat, .. } => heat.0,

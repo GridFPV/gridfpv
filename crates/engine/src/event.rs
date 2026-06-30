@@ -482,7 +482,7 @@ mod tests {
         // Best laps: A 1.6, B 1.8, C 1.7 across two rounds → A, C, B.
         let mut run = fixture(vec![
             (
-                "round-1",
+                "tq-r1-h1",
                 best_lap_result(&[
                     ("A", Some(2_000_000)),
                     ("B", Some(1_900_000)),
@@ -490,7 +490,7 @@ mod tests {
                 ]),
             ),
             (
-                "round-2",
+                "tq-r2-h1",
                 best_lap_result(&[
                     ("A", Some(1_600_000)),
                     ("B", Some(1_800_000)),
