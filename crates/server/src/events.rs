@@ -2878,13 +2878,11 @@ mod tests {
         let open = seed_class(&reg, "Open");
         reg.set_classes(&event.id, vec![open.clone()]).unwrap();
 
-        // timed_qual / round_robin → Static; the bracket formats → PerHeat (RD-overridable).
+        // timed_qual → Static; every other registered format → PerHeat (RD-overridable). Only
+        // registered formats are exercised here (add_round validates the format), so the carved-out
+        // bracket formats are gone — zippyq stands in for the `_ => PerHeat` default.
         let cases = [
             ("timed_qual", ChannelMode::Static),
-            ("round_robin", ChannelMode::Static),
-            ("single_elim", ChannelMode::PerHeat),
-            ("double_elim", ChannelMode::PerHeat),
-            ("multi_main", ChannelMode::PerHeat),
             ("zippyq", ChannelMode::PerHeat),
         ];
         for (format, expected) in cases {
@@ -2926,7 +2924,7 @@ mod tests {
                 UpdateRoundReq {
                     label: "Open Practice".to_string(),
                     classes: vec![open.clone(), spec.clone()],
-                    format: "single_elim".to_string(),
+                    format: "head_to_head".to_string(),
                     params: BTreeMap::from([("advance".to_string(), "2".to_string())]),
                     win_condition: Some(WinCondition::FirstToLaps { n: 5 }),
                     seeding: SeedingRule::FromRoster,
@@ -2942,13 +2940,13 @@ mod tests {
         assert_eq!(updated.id, round.id, "the id is not editable");
         assert_eq!(updated.label, "Open Practice");
         assert_eq!(updated.classes, vec![open, spec]);
-        assert_eq!(updated.format, "single_elim");
+        assert_eq!(updated.format, "head_to_head");
         assert_eq!(updated.params.get("advance").map(String::as_str), Some("2"));
 
         // The list reflects the update (still one round).
         let rounds = reg.rounds_of(&event.id).unwrap();
         assert_eq!(rounds.len(), 1);
-        assert_eq!(rounds[0].format, "single_elim");
+        assert_eq!(rounds[0].format, "head_to_head");
 
         // Remove: the round is gone; removing it again is a 404.
         let meta = reg.remove_round(&event.id, &round.id).unwrap();
@@ -3057,7 +3055,7 @@ mod tests {
         // FromHeatWinners (bracket advancement, #217) validates its single source the same way:
         // a dangling source is rejected, an existing one is accepted, and self-seeding is caught.
         let mut dangling_winners = round_req("Next level", vec![bracket.classes[0].clone()]);
-        dangling_winners.format = "single_elim".to_string();
+        dangling_winners.format = "head_to_head".to_string();
         dangling_winners.seeding = SeedingRule::FromHeatWinners {
             source_round: RoundId("does-not-exist".into()),
         };
@@ -3067,7 +3065,7 @@ mod tests {
         ));
 
         let mut next_level = round_req("Next level", vec![bracket.classes[0].clone()]);
-        next_level.format = "single_elim".to_string();
+        next_level.format = "head_to_head".to_string();
         next_level.seeding = SeedingRule::FromHeatWinners {
             source_round: bracket.id.clone(),
         };
@@ -3117,7 +3115,7 @@ mod tests {
 
         // FromRankingRange with take == 0 → Invalid.
         let mut zero_take = round_req("C-main", vec![open.clone()]);
-        zero_take.format = "single_elim".to_string();
+        zero_take.format = "head_to_head".to_string();
         zero_take.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
         zero_take.seeding = SeedingRule::FromRankingRange {
             source_rounds: vec![q.id.clone()],
@@ -3131,7 +3129,7 @@ mod tests {
 
         // An empty Combine → Invalid.
         let mut empty_combine = round_req("Empty", vec![open.clone()]);
-        empty_combine.format = "single_elim".to_string();
+        empty_combine.format = "head_to_head".to_string();
         empty_combine.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
         empty_combine.seeding = SeedingRule::Combine { sources: vec![] };
         assert!(matches!(
@@ -3147,7 +3145,7 @@ mod tests {
             };
         }
         let mut too_deep = round_req("Deep", vec![open.clone()]);
-        too_deep.format = "single_elim".to_string();
+        too_deep.format = "head_to_head".to_string();
         too_deep.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
         too_deep.seeding = seeding;
         assert!(matches!(
@@ -3157,7 +3155,7 @@ mod tests {
 
         // A dangling source nested inside a Combine is still caught (the collector recurses).
         let mut nested_dangling = round_req("Nested dangling", vec![open.clone()]);
-        nested_dangling.format = "single_elim".to_string();
+        nested_dangling.format = "head_to_head".to_string();
         nested_dangling.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
         nested_dangling.seeding = SeedingRule::Combine {
             sources: vec![SeedingRule::FromRanking {
@@ -3172,7 +3170,7 @@ mod tests {
 
         // A well-formed Combine of two real-source sub-rules is accepted (the B-main shape).
         let mut b_main = round_req("B-main", vec![open]);
-        b_main.format = "single_elim".to_string();
+        b_main.format = "head_to_head".to_string();
         b_main.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
         b_main.seeding = SeedingRule::Combine {
             sources: vec![

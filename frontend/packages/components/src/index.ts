@@ -18,9 +18,6 @@
 // Race-domain components
 export { default as Leaderboard } from './Leaderboard.svelte';
 export { default as StandingsTable } from './StandingsTable.svelte';
-export { default as BracketTree } from './BracketTree.svelte';
-export { default as RoundRobinView } from './RoundRobinView.svelte';
-export { default as MultiMainView } from './MultiMainView.svelte';
 export { default as HeatSheet } from './HeatSheet.svelte';
 export { default as RaceClock } from './RaceClock.svelte';
 export { default as PilotCard } from './PilotCard.svelte';
@@ -43,14 +40,3 @@ export { toast, toasts, type Toast, type ToastTone } from './primitives/toast.sv
 
 // Presentational helpers (pure, framework-agnostic)
 export { formatClock, formatMicros, formatMetric, medalFor } from './format.js';
-
-// View-model types
-export type { Bracket, BracketRound, BracketMatch, BracketSlot } from './bracket.js';
-export type {
-  RoundRobin,
-  RoundRobinStanding,
-  RoundRobinRotation,
-  RoundRobinHeat,
-  RoundRobinEntry
-} from './roundRobin.js';
-export type { MultiMain, MultiMainStanding } from './multiMain.js';

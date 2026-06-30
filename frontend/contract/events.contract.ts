@@ -1219,14 +1219,14 @@ describe('race Slice 2a: rounds', () => {
     // Race redesign Slice 7a: channel_mode defaults by format — timed_qual → 'Static'.
     expect(round.channel_mode).toBe('Static');
 
-    // A bracket format defaults to 'PerHeat'; an explicit channel_mode overrides the default.
+    // A non-Static format defaults to 'PerHeat'; an explicit channel_mode overrides the default.
     const bracket = (
       await addRound(
         event.id,
         {
-          label: 'Bracket',
+          label: 'Head to Head',
           classes: ['mgp-open'],
-          format: 'single_elim',
+          format: 'head_to_head',
           win_condition: 'BestLap',
           time_limit_secs: 60
         },
@@ -1259,14 +1259,14 @@ describe('race Slice 2a: rounds', () => {
     const updated = await mutateRound(event.id, round.id, 'PUT', {
       label: 'Open Qualifying',
       classes: ['mgp-open'],
-      format: 'single_elim',
-      params: { advance: '2' },
+      format: 'head_to_head',
+      params: { group_size: '2' },
       win_condition: { FirstToLaps: { n: 5 } }
     });
     expect(updated.status).toBe(200);
     const updatedRound = updated.body as RoundDef;
     expect(updatedRound.id).toBe(round.id);
-    expect(updatedRound.format).toBe('single_elim');
+    expect(updatedRound.format).toBe('head_to_head');
 
     // DELETE removes it; a second DELETE is a 404 UnknownScope.
     expect((await mutateRound(event.id, round.id, 'DELETE')).status).toBe(200);
@@ -1373,7 +1373,7 @@ describe('race Slice 2a: rounds', () => {
       {
         label: 'Bracket',
         classes: ['mgp-open'],
-        format: 'single_elim',
+        format: 'head_to_head',
         win_condition: 'BestLap',
         seeding: { FromRanking: { source_rounds: ['does-not-exist'], top_n: 4 } }
       },
@@ -1402,28 +1402,17 @@ describe('race Slice 2a: rounds', () => {
     // (open-practice format) with no param knobs. ZippyQ is shelved (#218) — still registered (so
     // persisted `zippyq` rounds validate, see the `POST /rounds` accepts-registered-format guard) but
     // omitted from this offered set so a new round can't select it.
-    expect(schemas.map((s) => s.name)).toEqual([
-      'chase_the_ace',
-      'double_elim',
-      'head_to_head',
-      'multi_main',
-      'open_practice',
-      'round_robin',
-      'single_elim',
-      'timed_qual'
-    ]);
+    expect(schemas.map((s) => s.name)).toEqual(['head_to_head', 'open_practice', 'timed_qual']);
     expect(schemas.map((s) => s.name)).not.toContain('zippyq');
-    // multi_main is offered (#219, D14): a finals structure built via the tournament builder. It
-    // declares `main_size` (number, default 4) + `bump_n` (number, default 0).
-    const mm = schemas.find((s) => s.name === 'multi_main')!;
-    expect(mm.params.find((p) => p.key === 'main_size')?.kind).toBe('number');
-    expect(mm.params.find((p) => p.key === 'main_size')?.default).toBe('4');
-    expect(mm.params.find((p) => p.key === 'bump_n')?.kind).toBe('number');
-    expect(mm.params.find((p) => p.key === 'bump_n')?.default).toBe('0');
-    // Chase the Ace (a final-format) declares `wins_to_win` (number, default 2). The Rounds UI shows
-    // it only as a final-level format — the general round picker filters it out client-side.
-    const cta = schemas.find((s) => s.name === 'chase_the_ace')!;
-    expect(cta.params.find((p) => p.key === 'wins_to_win')?.default).toBe('2');
+    // head_to_head (D17, the atomic racing round) declares `group_size` (number, default 2) + a
+    // `scoring` enum (placement | points, default placement).
+    const h2h = schemas.find((s) => s.name === 'head_to_head')!;
+    expect(h2h.params.find((p) => p.key === 'group_size')?.kind).toBe('number');
+    expect(h2h.params.find((p) => p.key === 'group_size')?.default).toBe('2');
+    const scoring = h2h.params.find((p) => p.key === 'scoring')!;
+    expect(scoring.kind).toBe('enum');
+    expect(scoring.options).toEqual(['placement', 'points']);
+    expect(scoring.default).toBe('placement');
     // open_practice declares no params (its active channels are the field, via AllChannels seeding).
     expect(schemas.find((s) => s.name === 'open_practice')!.params).toEqual([]);
     // timed_qual declares `rounds` (number, default 3) relabeled "Heats per pilot". It declares NO
@@ -1435,13 +1424,6 @@ describe('race Slice 2a: rounds', () => {
     expect(rounds.default).toBe('3');
     expect(rounds.label).toBe('Heats per pilot');
     expect(tq.params.find((p) => p.key === 'metric')).toBeUndefined();
-    // round_robin likewise declares no `metric` param (its `rounds` is also "Heats per pilot").
-    const rr = schemas.find((s) => s.name === 'round_robin')!;
-    expect(rr.params.find((p) => p.key === 'metric')).toBeUndefined();
-    expect(rr.params.find((p) => p.key === 'rounds')?.label).toBe('Heats per pilot');
-    // double_elim declares a bool `bracket_reset`.
-    const de = schemas.find((s) => s.name === 'double_elim')!;
-    expect(de.params.find((p) => p.key === 'bracket_reset')?.kind).toBe('bool');
   });
 });
 

@@ -391,9 +391,6 @@
             standings={session.protocolState?.body && 'Ranking' in session.protocolState.body
               ? session.protocolState.body.Ranking
               : undefined}
-            outcome={session.protocolState?.body && 'EventOutcome' in session.protocolState.body
-              ? session.protocolState.body.EventOutcome
-              : undefined}
           />
         {/if}
       </main>

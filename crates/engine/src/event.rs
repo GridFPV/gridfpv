@@ -16,7 +16,7 @@
 //!    ranking — the seeds, best first.
 //! 2. **Seed the bracket.** [`crate::format::advance_top_n`] takes the top `bracket_size`
 //!    of that ranking and feeds them, *in qualifying-rank order*, as the seeded field of
-//!    a [`crate::single_elim::SingleElim`].
+//!    a per-level bracket generator (caller-supplied).
 //! 3. **Bracket.** The bracket runs to completion; its winner is the survivor at the top
 //!    of its final ranking, and that ranking is the final event standings.
 //!
@@ -302,7 +302,6 @@ mod tests {
 
     use super::*;
     use crate::scoring::{Metric, score_events};
-    use crate::single_elim::SingleElim;
     use crate::timed_qual::{QualMetric, TimedQualifying};
     use gridfpv_events::{AdapterId, CompetitorRef, GateIndex, LogRef, Pass};
 
@@ -477,27 +476,6 @@ mod tests {
         }
     }
 
-    fn h2h(winner: &str, loser: &str) -> HeatResult {
-        use crate::scoring::Placement;
-        use gridfpv_projection::CompetitorKey;
-        HeatResult {
-            places: [(winner, 1u32, 5u32), (loser, 2, 3)]
-                .iter()
-                .map(|(name, position, laps)| Placement {
-                    competitor: CompetitorKey {
-                        adapter: AdapterId(ADAPTER.into()),
-                        competitor: cref(name),
-                    },
-                    position: *position,
-                    laps: *laps,
-                    metric: Metric::LastLapAt(None),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn run_format_drives_qualifying_to_a_ranking() {
         let mut qual = TimedQualifying::new(field(&["A", "B", "C"]), 2, QualMetric::BestLap);
@@ -523,90 +501,5 @@ mod tests {
         let (heats, ranking) = run_format(&mut qual, &mut run, 100);
         assert_eq!(heats.len(), 2);
         assert_eq!(names(&ranking), vec!["A", "C", "B"]);
-    }
-
-    #[test]
-    fn run_event_qualifying_seeds_bracket_to_a_winner() {
-        // Four-pilot field: qualifying ranks A,B,C,D; a 4-seed head-to-head bracket
-        // where the top seed wins every heat → A wins the event.
-        let mut qual = TimedQualifying::new(field(&["A", "B", "C", "D"]), 1, QualMetric::BestLap);
-        let mut run = fixture(vec![
-            (
-                "round-1",
-                best_lap_result(&[
-                    ("A", Some(1_500_000)),
-                    ("B", Some(1_600_000)),
-                    ("C", Some(1_700_000)),
-                    ("D", Some(1_800_000)),
-                ]),
-            ),
-            // Bracket level 1 (quarters/semis): A v D, B v C (bracket order A,D,B,C). Heat ids
-            // are scoped per level: `l1-se-h{index}`.
-            ("l1-se-h0", h2h("A", "D")),
-            ("l1-se-h1", h2h("B", "C")),
-            // Bracket level 2 (the final): A v B → `l2-se-h0`.
-            ("l2-se-h0", h2h("A", "B")),
-        ]);
-
-        let outcome = run_event(
-            &mut qual,
-            |seeds| Box::new(SingleElim::new(seeds, 2)),
-            4,
-            &mut run,
-            100,
-        );
-
-        assert_eq!(names(&outcome.qualifying), vec!["A", "B", "C", "D"]);
-        assert_eq!(outcome.bracket_seeds, field(&["A", "B", "C", "D"]));
-        assert_eq!(outcome.winner(), Some(&cref("A")));
-        assert_eq!(outcome.bracket[0].position, 1);
-        assert_eq!(
-            outcome.bracket.iter().filter(|e| e.position == 1).count(),
-            1,
-            "exactly one event winner"
-        );
-    }
-
-    #[test]
-    fn run_event_is_deterministic_on_replay() {
-        let build = || TimedQualifying::new(field(&["A", "B", "C", "D"]), 1, QualMetric::BestLap);
-        let make_run = || {
-            fixture(vec![
-                (
-                    "round-1",
-                    best_lap_result(&[
-                        ("A", Some(1_500_000)),
-                        ("B", Some(1_600_000)),
-                        ("C", Some(1_700_000)),
-                        ("D", Some(1_800_000)),
-                    ]),
-                ),
-                ("l1-se-h0", h2h("A", "D")),
-                ("l1-se-h1", h2h("B", "C")),
-                ("l2-se-h0", h2h("A", "B")),
-            ])
-        };
-
-        let mut q1 = build();
-        let mut r1 = make_run();
-        let first = run_event(
-            &mut q1,
-            |s| Box::new(SingleElim::new(s, 2)),
-            4,
-            &mut r1,
-            100,
-        );
-
-        let mut q2 = build();
-        let mut r2 = make_run();
-        let second = run_event(
-            &mut q2,
-            |s| Box::new(SingleElim::new(s, 2)),
-            4,
-            &mut r2,
-            100,
-        );
-
-        assert_eq!(first, second, "the full event replays identically");
     }
 }

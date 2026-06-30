@@ -423,7 +423,7 @@ async fn round_driven_mock_race_flow_e2e() {
         NewRoundReq {
             label: "Bracket".into(),
             classes: vec![class_id.clone()],
-            format: "single_elim".into(),
+            format: "head_to_head".into(),
             params: BTreeMap::new(),
             win_condition: Some(gridfpv_engine::scoring::WinCondition::FirstToLaps { n: laps }),
             time_limit_secs: None,
@@ -431,7 +431,7 @@ async fn round_driven_mock_race_flow_e2e() {
                 source_rounds: vec![qual.id.clone()],
                 top_n: 2,
             },
-            // single_elim defaults to PerHeat anyway; keep it explicit for the bracket carry.
+            // head_to_head defaults to PerHeat anyway; keep it explicit for the bracket carry.
             channel_mode: Some(ChannelMode::PerHeat),
             staging_timer_secs: None,
             start_procedure: None,
