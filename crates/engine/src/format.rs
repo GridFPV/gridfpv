@@ -179,6 +179,22 @@ pub trait Generator {
     /// has returned [`GeneratorStep::Complete`]. Best-placed competitor first, ties
     /// sharing a position (see [`RankEntry`]).
     fn ranking(&self, completed: &[CompletedHeat]) -> Vec<RankEntry>;
+
+    /// The competitors that **advance** out of this round — the bracket-advancement carry a
+    /// `FromHeatWinners` successor level seeds from (decisions D13, #217), in advancement order
+    /// (each heat's winners in heat order, then byes).
+    ///
+    /// The default derives them from [`ranking`](Self::ranking) via [`ranking_advancers`] — every
+    /// competitor ranked strictly better than the worst (bottom) band. That is correct only when
+    /// the eliminated all tie at the single worst position (a head-to-head level). A format whose
+    /// heats eliminate **several** pilots at distinct in-heat positions — a 4-up heat advancing two
+    /// ranks its two losers at *different* overall positions — **overrides** this to return its real
+    /// advancing set, so the carry is exactly the winners and not the better-placed losers too.
+    ///
+    /// [`ranking`]: Self::ranking
+    fn advancers(&self, completed: &[CompletedHeat]) -> Vec<CompetitorRef> {
+        ranking_advancers(&self.ranking(completed))
+    }
 }
 
 // --- Advancement & seeding helpers (RE §5) ----------------------------------
@@ -217,6 +233,26 @@ pub fn advance_range(ranking: &[RankEntry], skip: usize, take: usize) -> Vec<Com
         .skip(skip)
         .take(take)
         .map(|entry| entry.competitor.clone())
+        .collect()
+}
+
+/// The advancers **derived from a ranking** — every competitor ranked **strictly better than the
+/// worst position** (the bottom band). The fallback the default [`Generator::advancers`] uses, and
+/// the provisional carry a bracket level uses before it completes.
+///
+/// This is only correct when the eliminated competitors **all share the single worst position**
+/// (one loser per heat, tied last) — true for a head-to-head level. A level whose heats eliminate
+/// **several** pilots at **distinct** in-heat positions (a 4-up heat's 3rd + 4th place rank, say,
+/// 5th and 7th overall) would wrongly keep the better-placed losers, so such a format **overrides**
+/// [`Generator::advancers`] to return its real advancing set rather than relying on this.
+pub fn ranking_advancers(ranking: &[RankEntry]) -> Vec<CompetitorRef> {
+    let Some(worst) = ranking.iter().map(|e| e.position).max() else {
+        return Vec::new();
+    };
+    ranking
+        .iter()
+        .filter(|e| e.position < worst)
+        .map(|e| e.competitor.clone())
         .collect()
 }
 
