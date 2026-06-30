@@ -6,8 +6,8 @@
    * {@link ClassManager} (directory CRUD: the add / edit / remove form for Custom classes, plus the
    * locked, read-only built-ins the Director seeds), mirroring how {@link PilotsPage} hosts
    * {@link PilotManager} — the manager is reusable; only its
-   * host differs (a routed page here; the in-event {@link EventClasses} embeds the same component
-   * with per-event selection layered on). `Breadcrumbs` + the brand root get you home from here.
+   * host differs (a routed page here; the in-event {@link EventClassesRoster} embeds the same
+   * component with per-event selection layered on). `Breadcrumbs` + the brand root get you home.
    */
   import { Button, Card } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';

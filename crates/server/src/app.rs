@@ -80,7 +80,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use gridfpv_engine::format::{FormatRegistry, FormatSchema};
-use gridfpv_engine::scoring::{WinCondition, score_with_global_offsets};
+use gridfpv_engine::scoring::{HeatResult, WinCondition, score_with_global_offsets};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{
     LapList, lap_list_marshaled, marshaling_log, registrations, signal_trace,
@@ -1634,19 +1634,12 @@ async fn snapshot_heat(
                     })
                 })
                 .unwrap_or(WinCondition::BestLap);
-            let race_start = heat_events
-                .iter()
-                .filter_map(first_pass_at)
-                .min()
-                .unwrap_or(SourceTime::from_micros(0));
-            // Score with the window's PRESERVED global offsets so a `RulingReversed` (a UI
-            // reverse-DQ) un-applies the penalty at its true global `LogRef` target (#55) — a
-            // re-enumerated window would match the wrong offset.
-            ProjectionBody::HeatResult(score_with_global_offsets(
-                heat_offsets.iter().map(|(o, e)| (*o, e)),
-                win_condition,
-                race_start,
-            ))
+            // Score over the heat's FULL adjudicated window via the one shared helper the
+            // round/class standings also use ([`round_engine::completed_heats`] →
+            // [`score_heat_window`]), so the per-heat result and the standings can never
+            // disagree on an adjudicated heat (#226). The helper preserves the window's global
+            // offsets so a `RulingReversed` / `LapThrownOut` resolves to its true `LogRef` (#55).
+            ProjectionBody::HeatResult(score_heat_window(&events, &heat, win_condition))
         }
         HeatProjection::Signal => {
             // The signal-as-evidence trace (marshaling Slice 1): fold the heat window's
@@ -1772,6 +1765,41 @@ pub(crate) fn heat_window(events: &[Event], heat: &HeatId) -> Vec<Event> {
         .into_iter()
         .map(|(_, e)| e)
         .collect()
+}
+
+/// Score a single heat over its **full adjudicated event window** under `win_condition` — the
+/// one scoring path shared by the per-heat result projection ([`HeatProjection::Result`]) and
+/// the round / class standings ([`round_engine::completed_heats`]), so the heat page and the
+/// standings can never disagree on an adjudicated heat (#226).
+///
+/// Before this existed, the standings path scored each heat over a **pass-only** list (every
+/// marshaling adjudication — DQ / time / throw-out / void / lap-edit — discarded), so a heat's
+/// standings showed the raw on-track result while its heat page showed the adjudicated one. This
+/// closes that split-brain by giving both call sites the *same* window + scorer.
+///
+/// Windows the log to the heat via [`heat_window_offsets`] (the heat's passes **and** every
+/// adjudication that falls while the heat is active), **preserving each event's global append
+/// offset** so a [`RulingReversed`](gridfpv_events::Event::RulingReversed) /
+/// [`LapThrownOut`](gridfpv_events::Event::LapThrownOut) resolves to its true `LogRef` target —
+/// a re-enumerated window would match the wrong offset (#55). The race clock is the window's
+/// earliest lap-gate pass. Scores via [`score_with_global_offsets`] under the round's win
+/// condition, so penalties / throw-outs / voids / lap-edits all land.
+pub(crate) fn score_heat_window(
+    events: &[Event],
+    heat: &HeatId,
+    win_condition: WinCondition,
+) -> HeatResult {
+    let heat_offsets = heat_window_offsets(events, heat);
+    let race_start = heat_offsets
+        .iter()
+        .filter_map(|(_, e)| first_pass_at(e))
+        .min()
+        .unwrap_or(SourceTime::from_micros(0));
+    score_with_global_offsets(
+        heat_offsets.iter().map(|(o, e)| (*o, e)),
+        win_condition,
+        race_start,
+    )
 }
 
 /// Render a [`ProtocolError`] as an HTTP error response (protocol.html §9.8): the JSON

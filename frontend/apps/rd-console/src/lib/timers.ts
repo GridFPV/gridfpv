@@ -45,3 +45,15 @@ export const MOCK_TIMER_ID = 'mock';
 export function isBuiltInMock(timer: Timer): boolean {
   return timer.id === MOCK_TIMER_ID;
 }
+
+/**
+ * Whether a timer is usable right now — i.e. "connected" for the at-a-glance summary count.
+ *
+ * A built-in **Mock** reports `Ready` (it needs nothing external); a live **RotorHazard** reports
+ * `Connected` once its socket is up. Both count. `Configured` (a RH timer that isn't dialed in yet),
+ * `Connecting`, `Disconnected`, and `Error` do NOT — the timer isn't ready to run a heat. Centralized
+ * here so the predicate can't drift between the hub and the timer screens.
+ */
+export function isTimerConnected(timer: Timer): boolean {
+  return timer.status === 'Connected' || timer.status === 'Ready';
+}

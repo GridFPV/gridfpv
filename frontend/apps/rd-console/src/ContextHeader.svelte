@@ -268,7 +268,8 @@
     min-width: 0;
   }
   .ctx-timer-name {
-    font-size: var(--gf-font-size-2xs);
+    /* The bound timer's name is config data — bumped one step (2xs → xs) for sunlight readability. */
+    font-size: var(--gf-font-size-xs);
     color: var(--gf-text-muted);
     text-transform: uppercase;
     letter-spacing: var(--gf-tracking-caps);

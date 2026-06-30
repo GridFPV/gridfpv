@@ -899,6 +899,37 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     );
     expect(screen.queryByLabelText('Time limit hours')).toBeNull();
   });
+
+  it('blocks submit when a Timed round has its race time cleared (P1-6)', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Timed R1' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    // Time Trials defaults the win condition to Timed; the "Race time (seconds)" field shows.
+    const raceTime = await screen.findByLabelText('Race time seconds');
+    const addBtn = () => screen.getByRole('button', { name: 'Add round' }) as HTMLButtonElement;
+
+    // With a valid race time, the form is submittable.
+    expect(addBtn().disabled).toBe(false);
+
+    // Clearing the race time blocks submit (it would otherwise build a NaN/0-µs window).
+    await fireEvent.input(raceTime, { target: { value: '' } });
+    expect(addBtn().disabled).toBe(true);
+    await fireEvent.click(addBtn());
+    expect(createRoundImpl).not.toHaveBeenCalled();
+
+    // Restoring a valid race time re-enables submit.
+    await fireEvent.input(raceTime, { target: { value: '90' } });
+    expect(addBtn().disabled).toBe(false);
+  });
 });
 
 describe('EventRounds (Heats — fill round, heats list, manual build)', () => {

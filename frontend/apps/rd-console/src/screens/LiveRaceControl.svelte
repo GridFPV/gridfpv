@@ -359,7 +359,10 @@
   // While the heat is Unofficial (provisional) and the round armed a protest window, count the wall
   // clock down to the logged auto-official deadline so the RD sees "auto-official in M:SS". Inactive
   // (no countdown) when the window is Off — the result then stays provisional until manual Finalize.
-  const protest = useProtestClock(() => live?.lifecycle);
+  const protest = useProtestClock(
+    () => live?.lifecycle,
+    () => session.serverNowMs()
+  );
 
   // ── Start-tone countdown (RD-console-only) ───────────────────────────────────────────────────
   // While the heat is Armed, count the wall clock down to the start tone (the server-authoritative

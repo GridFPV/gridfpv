@@ -16,6 +16,7 @@
   import { Card } from '@gridfpv/components';
   import type { Timer } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
+  import { isTimerConnected } from '../lib/timers.js';
 
   let {
     session,
@@ -39,9 +40,11 @@
   let timerCount = $state<number | undefined | null>(undefined);
   let connectedTimers = $state<number | undefined | null>(undefined);
 
-  // A timer is "connected" when its live status is Ready (the sources report Ready once reachable).
+  // A timer is "connected" when it is usable now: a Mock reports Ready, a live RotorHazard reports
+  // Connected once its socket is up (a Configured-but-not-dialed-in RH does NOT count). Shared
+  // predicate (`isTimerConnected`) so the count can't drift from the timer screens.
   function countConnected(timers: Timer[]): number {
-    return timers.filter((t) => t.status === 'Ready').length;
+    return timers.filter(isTimerConnected).length;
   }
 
   $effect(() => {

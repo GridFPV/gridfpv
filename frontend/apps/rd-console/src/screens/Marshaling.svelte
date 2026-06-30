@@ -89,7 +89,10 @@
   // auto-official countdown when the round armed a protest window. The Finalize/Revert transitions
   // below now act on it from here too (B) — targeting the marshaled heat, never Race Control's.
   const lifecycle = $derived(marshalLive?.lifecycle);
-  const protest = useProtestClock(() => marshalLive?.lifecycle);
+  const protest = useProtestClock(
+    () => marshalLive?.lifecycle,
+    () => session.serverNowMs()
+  );
 
   // The captured RSSI trace for this heat (`?projection=signal`, Slice 1), pulled alongside the
   // lap list + audit by `refreshMarshaling`. A heat that captured signal (a RotorHazard heat) has
@@ -369,6 +372,12 @@
   }
   // Filed protests are resolvable by their log offset (the audit entry's `at_ref`).
   const filedProtests = $derived((audit ?? []).filter((e) => e.kind === 'ProtestFiled'));
+  const resolvedProtests = $derived((audit ?? []).filter((e) => e.kind === 'ProtestResolved'));
+  // Open (unresolved) protests = filed minus resolved (the audit carries no filed→resolved link, so
+  // this is a count). Finalizing while a protest is open would lock a result that's still under
+  // dispute, so the Finalize action is gated on this being zero (a result isn't "defensible" with an
+  // open protest). Clamped ≥ 0 defensively.
+  const openProtestCount = $derived(Math.max(0, filedProtests.length - resolvedProtests.length));
   let resolveProtestRef = $state<number | ''>('');
   let protestOutcome = $state<ProtestOutcome>('Upheld');
   async function doResolveProtest(): Promise<void> {
@@ -392,7 +401,7 @@
   // never Race Control's current heat — marshaling issues no SetCurrentHeat. Same append→re-fold path
   // as every correction, so the badge + buttons update via afterCorrection.
   async function doFinalize(): Promise<void> {
-    if (!heat) return;
+    if (!heat || openProtestCount > 0) return;
     const ack = await session.send(commandForAction('Finalize', heat));
     if (ack.ok) await afterCorrection();
   }
@@ -804,9 +813,21 @@
         <fieldset class="result-actions">
           <legend>Heat result</legend>
           {#if marshalPhase === 'Unofficial'}
-            <p class="muted">Provisional — finalize to lock the result as official.</p>
-            <button type="button" class="finalize" onclick={doFinalize} disabled={!heat}
-              >Finalize → Official</button
+            {#if openProtestCount > 0}
+              <p class="muted protest-block" role="status">
+                Resolve {openProtestCount} open protest{openProtestCount === 1 ? '' : 's'} before finalizing.
+              </p>
+            {:else}
+              <p class="muted">Provisional — finalize to lock the result as official.</p>
+            {/if}
+            <button
+              type="button"
+              class="finalize"
+              onclick={doFinalize}
+              disabled={!heat || openProtestCount > 0}
+              title={openProtestCount > 0
+                ? `Resolve ${openProtestCount} open protest(s) first`
+                : undefined}>Finalize → Official</button
             >
           {:else if marshalPhase === 'Final'}
             <p class="muted">Official — revert to re-open the result for correction.</p>
@@ -1070,6 +1091,10 @@
   }
   .result-actions {
     border-color: color-mix(in srgb, var(--gf-accent) 35%, var(--gf-border));
+  }
+  .protest-block {
+    color: color-mix(in srgb, var(--gf-danger) 80%, var(--gf-text));
+    font-weight: var(--gf-font-weight-semibold);
   }
   .finalize {
     border: 1px solid var(--gf-accent);

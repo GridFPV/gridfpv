@@ -45,7 +45,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gridfpv_engine::event::score_marshaled;
 use gridfpv_engine::format::{
     CompletedHeat, FormatConfig, FormatRegistry, GeneratorStep, RankEntry, advance_range,
     advance_top_n,
@@ -53,8 +52,7 @@ use gridfpv_engine::format::{
 use gridfpv_engine::heat::{HeatState, heat_state};
 use gridfpv_engine::schedule::{Frequency, FrequencyPool, allocate};
 use gridfpv_engine::scoring::{HeatResult, Metric, WinCondition};
-use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, Pass, RoundId, SourceTime};
-use gridfpv_projection::lap_list;
+use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, RoundId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -645,25 +643,23 @@ fn qual_metric_for(
 ///
 /// A heat counts as completed when it was scheduled tagged with this round *and* its folded
 /// [`HeatState`] is [`Final`](HeatState::Final) (the FSM terminal the `Finalize` command
-/// reaches). Each is scored via [`score_marshaled`] over the passes that heat produced (the
-/// per-heat pass window, see [`heat_passes`]). The order is the order the heats were first
-/// scheduled, which is the order the generator emitted them — so the history fed to
-/// [`Generator::next`](gridfpv_engine::format::Generator::next) matches what
-/// [`run_format`](gridfpv_engine::event::run_format) accumulated.
+/// reaches). Each is scored over its **full adjudicated event window** (passes *and* every
+/// marshaling adjudication — DQ / time / throw-out / void / lap-edit) via the one shared
+/// [`score_heat_window`](crate::app::score_heat_window) the per-heat result projection uses, so
+/// the standings can never disagree with the heat page on an adjudicated heat (#226). The order
+/// is the order the heats were first scheduled, which is the order the generator emitted them —
+/// so the history fed to [`Generator::next`](gridfpv_engine::format::Generator::next) matches
+/// what [`run_format`](gridfpv_engine::event::run_format) accumulated.
 pub fn completed_heats(round: &RoundDef, events: &[Event]) -> Vec<CompletedHeat> {
     finalized_heat_ids(round, events)
         .into_iter()
         .map(|heat| {
-            let passes = heat_passes(events, &heat);
-            let race_start = passes
-                .first()
-                .map(|p| p.at)
-                .unwrap_or_else(|| SourceTime::from_micros(0));
-            // Score the corrected/marshaled view of this heat's passes under the round's
-            // win condition — the same scorer `run_event` uses, so the ranking the
-            // generator sees matches a wholesale run.
-            let pass_events: Vec<Event> = passes.into_iter().map(Event::Pass).collect();
-            let result: HeatResult = score_marshaled(&pass_events, round.win_condition, race_start);
+            // Score over the heat's FULL adjudicated window with PRESERVED global offsets — the
+            // SAME path the per-heat result projection (`app.rs` `HeatProjection::Result`) uses, so
+            // an adjudication that moves the heat page moves the standings too (#226). The previous
+            // pass-only `score_marshaled` discarded every adjudication, leaving the raw on-track
+            // score here while the heat page showed the corrected one — the split-brain this closes.
+            let result = crate::app::score_heat_window(events, &heat, round.win_condition);
             // The generator keys `next`/`ranking` on the heat ids it **emitted**. The kept formats
             // log those ids verbatim, so `unscope_heat_id` is a pass-through (the bracket formats that
             // round-scoped per-level ids were carved out for the primitives-first release).
@@ -712,19 +708,22 @@ fn finalized_heat_ids(round: &RoundDef, events: &[Event]) -> Vec<HeatId> {
 /// Every competitor's **best (fastest) lap** (µs) across a round's finalized heats, keyed by
 /// source-local [`CompetitorRef`] — the standings best-lap source.
 ///
-/// For each finalized heat (the same set [`completed_heats`] scores) this folds [`heat_best_laps`]
-/// — the [`lap_list`] minimum lap over the heat's passes — keeping the smallest lap per competitor.
-/// Reusing the round's finalized heats + the projection's lap fold means the best lap is read from
-/// exactly the laps that decided the round, independent of the round's win condition. A competitor
-/// with no completed lap across the round is absent from the map.
+/// For each of the round's [`completed_heats`] this keeps the smallest
+/// [`Placement::best_lap_micros`](gridfpv_engine::scoring::Placement::best_lap_micros) per
+/// competitor — the fastest single lap the **adjudicated** scoring computed (thrown-out / voided
+/// laps already excluded, inserted / adjusted laps already included), *independent* of the round's
+/// win condition. Sourcing it from the same adjudicated heat result the standings rank over (rather
+/// than the raw lap list) means a thrown-out lap no longer counts as a pilot's best (#226). A
+/// competitor with no completed lap across the round is absent from the map.
 fn round_best_laps(round: &RoundDef, events: &[Event]) -> BTreeMap<CompetitorRef, i64> {
     let mut best: BTreeMap<CompetitorRef, i64> = BTreeMap::new();
-    for heat in finalized_heat_ids(round, events) {
-        let passes = heat_passes(events, &heat);
-        for (competitor, lap) in heat_best_laps(&passes) {
-            best.entry(competitor)
-                .and_modify(|existing| *existing = (*existing).min(lap))
-                .or_insert(lap);
+    for heat in completed_heats(round, events) {
+        for place in &heat.result.places {
+            if let Some(lap) = place.best_lap_micros {
+                best.entry(place.competitor.competitor.clone())
+                    .and_modify(|existing| *existing = (*existing).min(lap))
+                    .or_insert(lap);
+            }
         }
     }
     best
@@ -1075,34 +1074,6 @@ fn rounds_for_class<'a>(meta: &'a EventMeta, class: &ClassId) -> Vec<&'a RoundDe
     meta.rounds
         .iter()
         .filter(|r| r.classes.contains(class))
-        .collect()
-}
-
-/// Every competitor's **best (fastest) lap** (µs) across a heat, keyed by source-local
-/// [`CompetitorRef`].
-///
-/// Derived from the *same* corrected lap view the scorer ranks from — [`lap_list`] over the heat's
-/// lap-gate passes (the marshaling-aware [`corrected_passes`](gridfpv_projection::corrected_passes)
-/// fold, identical to the no-adjudications case here) — so a standing's best lap comes from exactly
-/// the laps that decided the heat, with **no second lap definition**.
-///
-/// This deliberately does *not* read the placement [`Metric`](gridfpv_engine::scoring::Metric):
-/// only a [`BestLap`](gridfpv_engine::scoring::WinCondition::BestLap) heat scores a lap *duration*
-/// into its metric; a [`Timed`](gridfpv_engine::scoring::WinCondition::Timed) /
-/// [`FirstToLaps`](gridfpv_engine::scoring::WinCondition::FirstToLaps) race scores a completion
-/// *time*, which is not a lap duration — so reading the metric would (and did) leave
-/// `best_lap_micros` null for every race round even though real per-lap durations exist. Folding
-/// the lap list gives the minimum lap regardless of win condition. A competitor with no completed
-/// lap is simply absent from the map.
-fn heat_best_laps(passes: &[Pass]) -> BTreeMap<CompetitorRef, i64> {
-    let pass_events: Vec<Event> = passes.iter().cloned().map(Event::Pass).collect();
-    let laps = lap_list(&pass_events);
-    laps.competitors
-        .into_iter()
-        .filter_map(|c| {
-            let best = c.best().map(|lap| lap.duration_micros)?;
-            Some((c.competitor.competitor, best))
-        })
         .collect()
 }
 
@@ -1554,49 +1525,6 @@ pub fn round_class(meta: &EventMeta, round_id: &RoundId) -> Option<ClassId> {
         .and_then(single_class)
 }
 
-/// The lap-gate **passes a heat produced**, in log order (race redesign Slice 3a).
-///
-/// The raw log does not tag passes with a heat, so we window them: a pass is attributed to
-/// the heat that was **Running** when it was appended. We replay the log in order, tracking
-/// the currently-running heat (set on a `Running` transition, cleared on any terminal /
-/// off-ramp transition), and collect the passes that land while `heat` is the running one.
-/// This is the same "passes are consumed only while the heat is Running" rule the heat FSM
-/// states (race-engine.html §2), applied to isolate one heat's passes for scoring.
-///
-/// Sufficient for the sequential mock-race flow the Slice-3 e2e drives (one heat runs at a
-/// time); concurrent multi-class running and a precise per-heat pass log tag are a later
-/// refinement (the seam is here, not in the scorer).
-fn heat_passes(events: &[Event], heat: &HeatId) -> Vec<Pass> {
-    let mut running: Option<HeatId> = None;
-    let mut out: Vec<Pass> = Vec::new();
-    for event in events {
-        match event {
-            Event::HeatStateChanged {
-                heat: h,
-                transition,
-            } => {
-                use gridfpv_events::HeatTransition as T;
-                match transition {
-                    T::Running => running = Some(h.clone()),
-                    // Any exit from Running (forward to Finished/Finalized or an off-ramp)
-                    // closes that heat's pass window.
-                    T::Finished | T::Finalized | T::Aborted | T::Restarted | T::Discarded
-                        if running.as_ref() == Some(h) =>
-                    {
-                        running = None;
-                    }
-                    _ => {}
-                }
-            }
-            Event::Pass(pass) if running.as_ref() == Some(heat) => {
-                out.push(pass.clone());
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1607,7 +1535,7 @@ mod tests {
     };
     use crate::scope::{ClassId as ScopeClassId, EventId, PilotId};
     use gridfpv_engine::scoring::WinCondition;
-    use gridfpv_events::{AdapterId, GateIndex, HeatTransition, SourceTime};
+    use gridfpv_events::{AdapterId, GateIndex, HeatTransition, LogRef, Pass, Penalty, SourceTime};
     use std::collections::BTreeMap;
 
     const ADAPTER: &str = "mock";
@@ -2239,6 +2167,272 @@ mod tests {
         assert_eq!(z.best_lap_micros, None);
         assert_eq!(z.laps, 0);
         assert_eq!(z.metric, RoundMetric::BestLap { micros: None });
+    }
+
+    // --- #226: heat-level adjudications must reach standings / seeding / class results ------
+    //
+    // Before the fix, `completed_heats` scored each heat over a PASS-ONLY list (every
+    // adjudication discarded), so the standings showed the raw on-track result while the heat
+    // page (app.rs `HeatProjection::Result`) showed the adjudicated one. These drive an
+    // adjudication through each projection and assert it MOVES the result — they fail on the old
+    // pass-only path and pass on the shared full-window scorer (`crate::app::score_heat_window`).
+
+    /// A 2-pilot `head_to_head` round (Placement scoring) over `class`, scored under `win`.
+    /// Head-to-Head ranks by finishing position, so a DQ / time penalty that reshuffles the
+    /// heat's placements reshuffles the round ranking too.
+    fn h2h_round(id: &str, class: &str, win: WinCondition) -> RoundDef {
+        RoundDef {
+            id: RoundId(id.into()),
+            label: id.into(),
+            classes: vec![ScopeClassId(class.into())],
+            format: "head_to_head".into(),
+            params: BTreeMap::new(),
+            win_condition: win,
+            seeding: SeedingRule::FromRoster,
+            channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            time_limit_secs: None,
+        }
+    }
+
+    /// A `PenaltyApplied` for a competitor in a heat (DQ / time penalty).
+    fn penalty_applied(heat: &str, competitor: &str, penalty: Penalty) -> Event {
+        Event::PenaltyApplied {
+            heat: HeatId(heat.into()),
+            competitor: CompetitorRef(competitor.into()),
+            penalty,
+        }
+    }
+
+    /// The global append offset of a competitor's lap-gate pass at `at` µs — the `LogRef` a
+    /// `LapThrownOut` / `RulingReversed` targets (offsets must be PRESERVED, not re-enumerated).
+    fn pass_offset(log: &[Event], competitor: &str, at: i64) -> u64 {
+        log.iter()
+            .position(|e| {
+                matches!(e, Event::Pass(p)
+                    if p.competitor.0 == competitor && p.at == SourceTime::from_micros(at))
+            })
+            .expect("pass present in log") as u64
+    }
+
+    /// The competitor refs of a ranking, best-first.
+    fn ranking_order(ranking: &[RankEntry]) -> Vec<String> {
+        ranking.iter().map(|e| e.competitor.0.clone()).collect()
+    }
+
+    #[test]
+    fn dq_sinks_the_pilot_in_round_ranking_standings_and_class_standings() {
+        // FirstToLaps head-to-head: A reaches lap 1 first (on-track winner), B second. A DQ on A
+        // sinks A below B in EVERY projection — not the raw on-track order.
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 1 });
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log = scored_heat(
+            "h2h-1",
+            "h2h",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        log.push(penalty_applied(
+            "h2h-1",
+            "A",
+            Penalty::Disqualify { reason: None },
+        ));
+
+        // round_ranking: B first, A last (DQ'd) — not A-first by raw reach time.
+        let ranking = round_ranking(&meta, &round, &log).unwrap();
+        assert_eq!(ranking_order(&ranking), vec!["B", "A"]);
+
+        // round_standings: positions mirror the ranking.
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        assert_eq!(standing(&standings, "B").position, 1);
+        assert_eq!(standing(&standings, "A").position, 2);
+
+        // class_standings: B (round pos 1) outscores the DQ'd A (round pos 2).
+        let class = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        assert_eq!(class.standings[0].competitor.0, "B");
+        assert!(
+            class.standings[0].points > class.standings[1].points,
+            "the DQ'd pilot scores fewer class points"
+        );
+    }
+
+    #[test]
+    fn lap_thrown_out_reorders_ranking_and_drops_the_pilots_best_lap() {
+        // timed_qual BestLap: A's fastest lap (1.0s) beats B (2.0s) on track. Throwing out that
+        // lap leaves A with only a 3.0s lap — so B now ranks ahead AND A's standings best-lap
+        // excludes the thrown-out lap.
+        let round = qual_round("q1", "open"); // BestLap
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[("A", &[0, 1_000_000, 4_000_000]), ("B", &[0, 2_000_000])],
+        );
+
+        // Sanity: on track A leads on best lap.
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            vec!["A", "B"]
+        );
+
+        // Throw out A's 1.0s lap (the lap ENDING at the pass @1.0s).
+        let target = pass_offset(&log, "A", 1_000_000);
+        log.push(Event::LapThrownOut {
+            target: LogRef(target),
+        });
+
+        // Ranking flips: A's remaining lap is 3.0s, slower than B's 2.0s.
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            vec!["B", "A"]
+        );
+
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        assert_eq!(
+            standing(&standings, "A").best_lap_micros,
+            Some(3_000_000),
+            "the thrown-out 1.0s lap is excluded from A's best lap"
+        );
+        assert_eq!(standing(&standings, "B").best_lap_micros, Some(2_000_000));
+        assert_eq!(standing(&standings, "B").position, 1);
+        assert_eq!(standing(&standings, "A").position, 2);
+    }
+
+    #[test]
+    fn time_added_changes_finishing_order_under_first_to_laps() {
+        // FirstToLaps head-to-head: A reaches lap 1 at 1.0s, B at 2.0s (A on-track winner). A
+        // 3.0s TimeAdded pushes A's deciding reach-time to 4.0s — behind B's 2.0s, flipping it.
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 1 });
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log = scored_heat(
+            "h2h-1",
+            "h2h",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            vec!["A", "B"]
+        );
+
+        log.push(penalty_applied(
+            "h2h-1",
+            "A",
+            Penalty::TimeAdded { micros: 3_000_000 },
+        ));
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            vec!["B", "A"]
+        );
+    }
+
+    #[test]
+    fn heat_voided_is_handled_in_the_projections() {
+        // A voided heat: the projections still compute (no panic) and the heat result is flagged
+        // voided, so a downstream consumer can nullify it.
+        let round = qual_round("q1", "open");
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        log.push(Event::HeatVoided {
+            heat: HeatId("q-1".into()),
+        });
+
+        // completed_heats flags the void; the standings still resolve over the round.
+        let completed = completed_heats(&round, &log);
+        assert!(
+            !completed.is_empty() && completed.iter().all(|h| h.result.voided),
+            "the heat is flagged voided"
+        );
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        assert_eq!(
+            standings.len(),
+            2,
+            "standings still computed over a voided heat"
+        );
+    }
+
+    #[test]
+    fn per_heat_result_and_round_standings_agree_on_an_adjudicated_heat() {
+        // The split-brain (#226) closed: the per-heat result projection (app.rs
+        // `HeatProjection::Result` → `score_heat_window`) and `round_standings` now score the
+        // SAME adjudicated window, so they agree on who the DQ sinks.
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 1 });
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log = scored_heat(
+            "h2h-1",
+            "h2h",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        log.push(penalty_applied(
+            "h2h-1",
+            "A",
+            Penalty::Disqualify { reason: None },
+        ));
+
+        // The per-heat result the heat page shows, via the exact shared helper app.rs uses.
+        let heat_result =
+            crate::app::score_heat_window(&log, &HeatId("h2h-1".into()), round.win_condition);
+        let dq_pilot = heat_result
+            .places
+            .iter()
+            .find(|p| p.disqualified)
+            .map(|p| p.competitor.competitor.0.clone());
+        assert_eq!(dq_pilot.as_deref(), Some("A"), "the heat page DQs A");
+
+        // round_standings, going independently through completed_heats → round_ranking, ranks A
+        // last — the SAME pilot the heat page sinks.
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        let last = standings.iter().max_by_key(|s| s.position).unwrap();
+        assert_eq!(last.competitor.0, "A");
+    }
+
+    #[test]
+    fn ruling_reversed_restores_the_original_ranking() {
+        // RulingReversed un-applies a DQ at its true global LogRef (offsets PRESERVED, not
+        // re-enumerated): a DQ on A sinks A, then reversing that DQ restores the clean order.
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 1 });
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let base = scored_heat(
+            "h2h-1",
+            "h2h",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        let clean = ranking_order(&round_ranking(&meta, &round, &base).unwrap());
+        assert_eq!(clean, vec!["A", "B"]);
+
+        // Apply a DQ on A — A sinks. Its append offset is the global `LogRef` a reversal targets.
+        let mut log = base.clone();
+        let dq_offset = log.len() as u64;
+        log.push(penalty_applied(
+            "h2h-1",
+            "A",
+            Penalty::Disqualify { reason: None },
+        ));
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            vec!["B", "A"]
+        );
+
+        // Reverse the DQ at its append offset — the original order is restored. A re-enumerated
+        // window would target the wrong offset and fail to restore.
+        log.push(Event::RulingReversed {
+            target: LogRef(dq_offset),
+        });
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            clean
+        );
     }
 
     /// A `RankEntry` for a competitor at a 1-based position (aggregation test helper).
@@ -3009,30 +3203,6 @@ mod tests {
         assert!(matches!(first[1], FillOutcome::Scheduled { .. }));
         assert_eq!(first[2], FillOutcome::Complete);
         assert_eq!(first[3], FillOutcome::Complete);
-    }
-
-    #[test]
-    fn heat_passes_windows_to_the_running_heat() {
-        // Two heats run back to back; each heat's passes attribute only to it.
-        let mut log = vec![
-            scheduled("h1", "q1", "open", &["A"]),
-            scheduled("h2", "q1", "open", &["B"]),
-        ];
-        log.extend(run_heat_events(
-            "h1",
-            vec![pass("A", 0, 0), pass("A", 1_000, 1)],
-        ));
-        log.extend(run_heat_events(
-            "h2",
-            vec![pass("B", 0, 0), pass("B", 2_000, 1)],
-        ));
-
-        let h1 = heat_passes(&log, &HeatId("h1".into()));
-        let h2 = heat_passes(&log, &HeatId("h2".into()));
-        assert_eq!(h1.len(), 2);
-        assert!(h1.iter().all(|p| p.competitor == CompetitorRef("A".into())));
-        assert_eq!(h2.len(), 2);
-        assert!(h2.iter().all(|p| p.competitor == CompetitorRef("B".into())));
     }
 
     // --- Multi-main seeding: FromRankingRange + Combine (depth-guarded) --------------------

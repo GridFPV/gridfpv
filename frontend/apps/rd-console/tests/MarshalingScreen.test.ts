@@ -258,6 +258,67 @@ describe('Marshaling (Slice 3)', () => {
     ).toBeUndefined();
   });
 
+  it('blocks Finalize while a protest is open (P1-4)', async () => {
+    const live: LiveRaceState = {
+      ...liveRunning,
+      phase: 'Unofficial',
+      lifecycle: { Provisional: {} }
+    };
+    // One filed protest, no resolution → one open protest.
+    const audit: AuditEntry[] = [
+      {
+        kind: 'ProtestFiled',
+        at: 1_700_000_000_000_000,
+        at_ref: 22,
+        competitor: 'BOB',
+        summary: 'Protest filed: contact'
+      }
+    ];
+    const { session, sendSpy } = makeTestSession({ live, laps: lapList, audit });
+    render(Marshaling, { session });
+
+    const finalize = screen.getByRole('button', { name: /Finalize/ }) as HTMLButtonElement;
+    expect(finalize.disabled).toBe(true);
+    expect(screen.getByText(/Resolve 1 open protest/)).toBeInTheDocument();
+    // Clicking the disabled gate sends no Finalize command.
+    await fireEvent.click(finalize);
+    expect(
+      sendSpy.mock.calls.find(([c]) => typeof c === 'object' && c !== null && 'Finalize' in c)
+    ).toBeUndefined();
+  });
+
+  it('re-enables Finalize once every open protest is resolved (P1-4)', async () => {
+    const live: LiveRaceState = {
+      ...liveRunning,
+      phase: 'Unofficial',
+      lifecycle: { Provisional: {} }
+    };
+    // A filed protest AND its resolution → no open protests.
+    const audit: AuditEntry[] = [
+      {
+        kind: 'ProtestFiled',
+        at: 1_700_000_000_000_000,
+        at_ref: 22,
+        competitor: 'BOB',
+        summary: 'Protest filed: contact'
+      },
+      {
+        kind: 'ProtestResolved',
+        at: 1_700_000_000_000_001,
+        at_ref: 23,
+        competitor: 'BOB',
+        summary: 'Protest resolved: denied'
+      }
+    ];
+    const { session, sendSpy } = makeTestSession({ live, laps: lapList, audit });
+    render(Marshaling, { session });
+
+    const finalize = screen.getByRole('button', { name: /Finalize/ }) as HTMLButtonElement;
+    expect(finalize.disabled).toBe(false);
+    await fireEvent.click(finalize);
+    expect(sendSpy).toHaveBeenCalledWith({ Finalize: { heat: 'heat-1' } });
+  });
+
   it('reverts a finalized marshaled heat (Final→Unofficial) after confirm', async () => {
     const live: LiveRaceState = { ...liveRunning, phase: 'Final', lifecycle: 'Official' };
     const { session, sendSpy } = makeTestSession({ live, laps: lapList });
