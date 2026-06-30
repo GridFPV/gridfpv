@@ -93,7 +93,7 @@ describe('useProtestClock (injected server clock)', () => {
   });
 
   it('defaults to Date.now() when no clock is injected', () => {
-    let lifecycle = $state<LifecycleState | undefined>(provisional(Date.now() + 8_000));
+    const lifecycle = $state<LifecycleState | undefined>(provisional(Date.now() + 8_000));
     let clock!: ReturnType<typeof useProtestClock>;
     const cleanup = $effect.root(() => {
       clock = useProtestClock(() => lifecycle);
