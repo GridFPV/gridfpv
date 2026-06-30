@@ -288,7 +288,7 @@ impl Run {
 pub fn race_end_reached(passes: &[Pass], condition: WinCondition, race_start: SourceTime) -> bool {
     match condition {
         WinCondition::Timed { window_micros } => {
-            let cutoff = race_start.micros + window_micros;
+            let cutoff = race_start.micros.saturating_add(window_micros);
             passes
                 .iter()
                 .any(|p| p.gate.is_lap_gate() && p.at.micros >= cutoff)
@@ -665,7 +665,7 @@ fn score_timed(
     window_micros: i64,
     adj: &Adjudications,
 ) -> HeatResult {
-    let cutoff = race_start.micros + window_micros;
+    let cutoff = race_start.micros.saturating_add(window_micros);
     let rows = runs
         .into_iter()
         .map(|run| {
@@ -1312,6 +1312,19 @@ mod tests {
         // …and well after, too.
         let after = run("A", &[0, 5_000_000, 12_000_000]);
         assert!(race_end_reached(&after, cond, start()));
+    }
+
+    #[test]
+    fn timed_cutoff_saturates_instead_of_overflowing() {
+        // P2: `race_start.micros + window_micros` would overflow (panic in debug) at the extremes;
+        // a saturating add clamps to `i64::MAX` so the predicate stays total. A near-max start plus
+        // a large window must not panic — and no real pass lands at/after the saturated cutoff.
+        let cond = WinCondition::Timed {
+            window_micros: i64::MAX,
+        };
+        let near_max = SourceTime::from_micros(i64::MAX - 1);
+        let passes = run("A", &[0, 5_000_000, 9_000_000]);
+        assert!(!race_end_reached(&passes, cond, near_max));
     }
 
     #[test]

@@ -1079,19 +1079,19 @@ impl EventRegistry {
         // to `<data_dir>/timers.json`. Shares the same data dir as the events.
         let (sim_laps, sim_lap_ms) = sim_defaults();
         let timers = TimerRegistry::new(data_dir.clone(), sim_laps, sim_lap_ms)
-            .map_err(|e| RegistryError(format!("could not build timer registry: {e}")))?;
+            .map_err(|e| RegistryError::io(format!("could not build timer registry: {e}")))?;
 
         // Build the Director-wide application-level pilot directory (issue #74): the pilots
         // persisted to `<data_dir>/pilots.json` (empty on first boot — there is no built-in
         // pilot). Shares the same data dir as the events and timers.
         let pilots = PilotDirectory::new(data_dir.clone())
-            .map_err(|e| RegistryError(format!("could not build pilot directory: {e}")))?;
+            .map_err(|e| RegistryError::io(format!("could not build pilot directory: {e}")))?;
 
         // Build the Director-wide application-level class directory (issue #84): the classes
         // persisted to `<data_dir>/classes.json` (empty on first boot — there is no built-in
         // class). Shares the same data dir as the events, timers, and pilots.
         let classes = ClassDirectory::new(data_dir.clone())
-            .map_err(|e| RegistryError(format!("could not build class directory: {e}")))?;
+            .map_err(|e| RegistryError::io(format!("could not build class directory: {e}")))?;
 
         // Seed Practice: an in-memory (non-persistent) log, sharing the one token store.
         let practice_id = EventId(PRACTICE_EVENT_ID.to_string());
@@ -1121,7 +1121,7 @@ impl EventRegistry {
 
         if let Some(dir) = &data_dir {
             std::fs::create_dir_all(dir).map_err(|e| {
-                RegistryError(format!("could not create data dir {}: {e}", dir.display()))
+                RegistryError::io(format!("could not create data dir {}: {e}", dir.display()))
             })?;
             // Reload every previously-created event (issue #111): scan the data dir for the
             // per-event `<id>.sqlite` files and restore each event's `EventMeta` + its log into
@@ -1196,13 +1196,13 @@ impl EventRegistry {
             .events
             .get(id)
             .map(|e| e.meta.clone())
-            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
         reg.active_event = Some(id.clone());
         // Persist best-effort; a write failure is logged-shaped (returned) but the in-memory
         // state is already updated so the live session is correct regardless.
         if let Some(dir) = reg.data_dir.clone() {
             write_persisted_active_event(&dir, id)
-                .map_err(|e| RegistryError(format!("could not persist active event: {e}")))?;
+                .map_err(|e| RegistryError::io(format!("could not persist active event: {e}")))?;
         }
         Ok(meta)
     }
@@ -1219,8 +1219,8 @@ impl EventRegistry {
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
-        event.meta.timers = ids;
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
+        event.meta.timers = dedup_preserving_order(ids);
         // Drop a now-stale primary (issue #112): if the previously-designated primary is no longer
         // in the selection, clear it so [`EventMeta::effective_primary`] falls back to the first
         // selected timer rather than pointing at a deselected timer.
@@ -1254,10 +1254,10 @@ impl EventRegistry {
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
         if let Some(primary) = &primary {
             if !event.meta.timers.contains(primary) {
-                return Err(RegistryError(format!(
+                return Err(RegistryError::invalid(format!(
                     "primary timer {:?} is not in the event's selected timers",
                     primary.0
                 )));
@@ -1288,8 +1288,8 @@ impl EventRegistry {
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
-        event.meta.roster = pilot_ids;
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
+        event.meta.roster = dedup_preserving_order(pilot_ids);
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
@@ -1308,8 +1308,8 @@ impl EventRegistry {
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
-        event.meta.classes = ids;
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
+        event.meta.classes = dedup_preserving_order(ids);
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
@@ -1339,7 +1339,7 @@ impl EventRegistry {
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
         // Last-write-wins, set-membership semantics: replace the class's entry, drop it when the
         // new list is empty, so re-applying the same membership is idempotent.
         event.meta.classes_membership.retain(|m| m.class != class);
@@ -1382,12 +1382,19 @@ impl EventRegistry {
         // The effective win condition (an omitted one stores the inert default) — used both to
         // validate the round can end and to build the `RoundDef` below.
         let win_condition = req.win_condition.unwrap_or_else(default_win_condition);
+        // Default the channel mode **by format** when the request omits it (Slice 7a):
+        // `timed_qual`/`round_robin` → Static, the bracket formats → PerHeat; an explicit
+        // request value overrides. Resolved *before* validation so the Static/seeding rule can run.
+        let channel_mode = req
+            .channel_mode
+            .unwrap_or_else(|| ChannelMode::default_for_format(&req.format));
         validate_round_fields(
             &event.meta,
             &directory,
             &req.classes,
             &req.format,
             &req.seeding,
+            channel_mode,
             &win_condition,
             req.time_limit_secs,
             None,
@@ -1402,12 +1409,6 @@ impl EventRegistry {
             }
         };
 
-        // Default the channel mode **by format** when the request omits it (Slice 7a):
-        // `timed_qual`/`round_robin` → Static, the bracket formats → PerHeat; an explicit
-        // request value overrides.
-        let channel_mode = req
-            .channel_mode
-            .unwrap_or_else(|| ChannelMode::default_for_format(&req.format));
         let round = RoundDef {
             id: round_id,
             label: req.label,
@@ -1462,22 +1463,24 @@ impl EventRegistry {
             return Err(RoundError::RoundNotFound(round_id.0.clone()));
         }
         let win_condition = req.win_condition.unwrap_or_else(default_win_condition);
+        // As with add: an omitted channel mode defaults by the (new) format; an explicit value
+        // overrides. The round is replaced wholesale, so the mode is re-derived each update.
+        // Resolved *before* validation so the Static/seeding rule can run.
+        let channel_mode = req
+            .channel_mode
+            .unwrap_or_else(|| ChannelMode::default_for_format(&req.format));
         validate_round_fields(
             &event.meta,
             &directory,
             &req.classes,
             &req.format,
             &req.seeding,
+            channel_mode,
             &win_condition,
             req.time_limit_secs,
             Some(round_id),
         )?;
 
-        // As with add: an omitted channel mode defaults by the (new) format; an explicit value
-        // overrides. The round is replaced wholesale, so the mode is re-derived each update.
-        let channel_mode = req
-            .channel_mode
-            .unwrap_or_else(|| ChannelMode::default_for_format(&req.format));
         let round = RoundDef {
             id: round_id.clone(),
             label: req.label,
@@ -1547,7 +1550,7 @@ impl EventRegistry {
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
         if !event.meta.roster.contains(&pilot) {
             event.meta.roster.push(pilot);
         }
@@ -1570,7 +1573,7 @@ impl EventRegistry {
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| RegistryError(format!("no event with id {:?}", id.0)))?;
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
         event.meta.roster.retain(|p| p != pilot);
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
@@ -1654,7 +1657,7 @@ impl EventRegistry {
             Some(dir) => {
                 let path = event_db_path(dir, &id);
                 let log = SqliteLog::open(&path).map_err(|e| {
-                    RegistryError(format!("could not open event log {}: {e}", path.display()))
+                    RegistryError::io(format!("could not open event log {}: {e}", path.display()))
                 })?;
                 (AppState::with_tokens(log, reg.tokens.clone()), true)
             }
@@ -1721,7 +1724,7 @@ impl EventRegistry {
         let mut reg = self.write();
 
         if id.0 == PRACTICE_EVENT_ID {
-            return Err(RegistryError(
+            return Err(RegistryError::invalid(
                 "the built-in Practice event cannot be deleted".to_string(),
             ));
         }
@@ -1729,7 +1732,10 @@ impl EventRegistry {
         // `AppState` is the sole holder) so the on-disk files are unlocked for removal below.
         let removed = reg.events.remove(id);
         if removed.is_none() {
-            return Err(RegistryError(format!("no event with id {:?}", id.0)));
+            return Err(RegistryError::not_found(format!(
+                "no event with id {:?}",
+                id.0
+            )));
         }
         drop(removed);
 
@@ -1783,7 +1789,7 @@ fn remove_event_files(dir: &Path, id: &EventId) -> Result<(), RegistryError> {
     match std::fs::remove_file(&main) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(RegistryError(format!(
+        Err(e) => Err(RegistryError::io(format!(
             "could not delete event log {}: {e}",
             main.display()
         ))),
@@ -1797,15 +1803,15 @@ fn remove_event_files(dir: &Path, id: &EventId) -> Result<(), RegistryError> {
 fn persist_event_meta(dir: &Path, meta: &EventMeta) -> Result<(), RegistryError> {
     let path = event_db_path(dir, &meta.id);
     let log = SqliteLog::open(&path).map_err(|e| {
-        RegistryError(format!(
+        RegistryError::io(format!(
             "could not open event log {} to persist meta: {e}",
             path.display()
         ))
     })?;
     let json = serde_json::to_string(meta)
-        .map_err(|e| RegistryError(format!("could not serialise event meta: {e}")))?;
+        .map_err(|e| RegistryError::io(format!("could not serialise event meta: {e}")))?;
     log.set_meta(EVENT_META_KEY, &json)
-        .map_err(|e| RegistryError(format!("could not persist event meta: {e}")))?;
+        .map_err(|e| RegistryError::io(format!("could not persist event meta: {e}")))?;
     Ok(())
 }
 
@@ -1858,16 +1864,43 @@ fn restore_persisted_events(
         // Open the event's own log and read its persisted meta back.
         let log = match SqliteLog::open(&path) {
             Ok(log) => log,
-            Err(_) => continue, // unreadable file — skip, don't fail boot
+            Err(e) => {
+                // An unreadable file — skip, don't fail boot, but make it LOUD: a silent skip here
+                // would vanish the event with no trace (release-hardening P1-6).
+                eprintln!(
+                    "WARNING: skipping event log {} on boot: could not open it: {e}",
+                    path.display()
+                );
+                continue;
+            }
         };
         let meta = match log.get_meta(EVENT_META_KEY) {
             Ok(Some(json)) => match serde_json::from_str::<EventMeta>(&json) {
                 Ok(meta) => meta,
-                Err(_) => continue, // unparseable meta — skip
+                Err(e) => {
+                    // Unparseable meta — skip, but LOUDLY. A non-additive `EventMeta` change would
+                    // make EVERY prior event fail to parse and silently disappear on upgrade; this
+                    // log line is the only signal that happened (release-hardening P1-6).
+                    eprintln!(
+                        "ERROR: skipping event {:?} (log {}): its persisted meta could not be \
+                         parsed — a non-additive EventMeta change can do this: {e}",
+                        stem,
+                        path.display()
+                    );
+                    continue;
+                }
             },
             // No persisted meta (a pre-#111 file, or a half-written create) — skip rather
             // than fabricate a name; without meta the event isn't safely reconstructable.
-            Ok(None) | Err(_) => continue,
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!(
+                    "WARNING: skipping event {:?} (log {}): could not read its persisted meta: {e}",
+                    stem,
+                    path.display()
+                );
+                continue;
+            }
         };
 
         let state = AppState::with_tokens(log, tokens.clone());
@@ -1898,13 +1931,61 @@ fn write_persisted_active_event(dir: &Path, id: &EventId) -> std::io::Result<()>
     std::fs::write(active_event_path(dir), &id.0)
 }
 
-/// An error creating an event or its registry (a storage failure, a bad data dir).
+/// An error mutating the event registry (a missing event, an invalid request, or a storage
+/// failure). Carries a [`RegistryErrorKind`] so the HTTP layer can map an *unknown id* to `404`, a
+/// *bad request* to `400`, and an *I/O / persistence* failure to `500` — mirroring [`PilotError`].
+///
+/// This matters because the in-memory state is mutated **before** the write-through: a persistence
+/// failure must surface as a `500`, not a `404`/`400`, so the caller knows the change did not durably
+/// land (issue: release-hardening P1-7).
 #[derive(Debug, Clone)]
-pub struct RegistryError(pub String);
+pub struct RegistryError {
+    /// What kind of failure this is (drives the HTTP status the handler picks).
+    pub kind: RegistryErrorKind,
+    /// A human-readable message.
+    pub message: String,
+}
+
+/// The class of a [`RegistryError`], so a handler can pick the right status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryErrorKind {
+    /// The addressed event/entity does not exist → 404.
+    NotFound,
+    /// A bad request value (e.g. a primary timer not in the selection) → 400.
+    Invalid,
+    /// A server-side storage / persistence failure → 500.
+    Io,
+}
+
+impl RegistryError {
+    /// An unknown-id error (HTTP 404).
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            kind: RegistryErrorKind::NotFound,
+            message: message.into(),
+        }
+    }
+
+    /// A validation / bad-request error (HTTP 400).
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            kind: RegistryErrorKind::Invalid,
+            message: message.into(),
+        }
+    }
+
+    /// An I/O / persistence error (HTTP 500).
+    pub fn io(message: impl Into<String>) -> Self {
+        Self {
+            kind: RegistryErrorKind::Io,
+            message: message.into(),
+        }
+    }
+}
 
 impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "event registry error: {}", self.0)
+        write!(f, "event registry error: {}", self.message)
     }
 }
 
@@ -1941,7 +2022,7 @@ impl std::error::Error for RoundError {}
 
 impl From<RegistryError> for RoundError {
     fn from(e: RegistryError) -> Self {
-        RoundError::Invalid(e.0)
+        RoundError::Invalid(e.message)
     }
 }
 
@@ -1979,10 +2060,18 @@ fn collect_source_rounds<'a>(
         return Err(RoundError::Invalid("seeding nesting too deep".to_string()));
     }
     match seeding {
-        SeedingRule::FromRanking { source_rounds, .. } => {
+        SeedingRule::FromRanking {
+            source_rounds,
+            top_n,
+        } => {
             if source_rounds.is_empty() {
                 return Err(RoundError::Invalid(
                     "FromRanking seeding must name at least one source round".to_string(),
+                ));
+            }
+            if *top_n == 0 {
+                return Err(RoundError::Invalid(
+                    "FromRanking top_n must be > 0".to_string(),
                 ));
             }
             acc.extend(source_rounds.iter());
@@ -2027,10 +2116,23 @@ fn validate_round_fields(
     classes: &[ClassId],
     format: &str,
     seeding: &SeedingRule,
+    channel_mode: ChannelMode,
     win_condition: &WinCondition,
     time_limit_secs: Option<u32>,
     editing: Option<&RoundId>,
 ) -> Result<(), RoundError> {
+    // A `Static` round (time-trial / qualifying, GQ-style) forms its raced field straight from class
+    // membership via the channel-balanced builder, but `round_ranking`/standings rank the
+    // *seeding-resolved* field. Those only agree when seeding is the identity `FromRoster`; any other
+    // seeding (creatable only via the raw API — the rounds form pairs Static with FromRoster) would
+    // race a different field than it ranks. Reject it (release-hardening P1-2).
+    if channel_mode == ChannelMode::Static && !matches!(seeding, SeedingRule::FromRoster) {
+        return Err(RoundError::Invalid(
+            "a Static (time-trial / qualifying) round must use FromRoster seeding; use a \
+             PerHeat round for ranking- or bracket-seeded fields"
+                .to_string(),
+        ));
+    }
     // A **scored** round's heats must be able to END. `Timed` / `FirstToLaps` self-terminate; `BestLap`
     // / `BestConsecutive` only *rank* (they never end a heat), so they need a race time
     // (`time_limit_secs`) — without one the heat would run forever. Open practice is exempt: it
@@ -2092,6 +2194,19 @@ fn validate_round_fields(
     }
 
     Ok(())
+}
+
+/// Deduplicate `items` **preserving first-seen order** — a wholesale per-event selection (roster /
+/// classes / timers) records each id at most once, so a duplicate in the request never double-counts
+/// (a duplicate timer, for instance, would otherwise double-feed the source bridge).
+fn dedup_preserving_order<T: PartialEq>(items: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = Vec::with_capacity(items.len());
+    for item in items {
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// The default per-event timer selection (issue #73): just the built-in **Mock**
@@ -2999,8 +3114,10 @@ mod tests {
             Err(RoundError::Invalid(_))
         ));
 
-        // FromRanking with a dangling source round → Invalid.
+        // FromRanking with a dangling source round → Invalid. (Ranking-seeded fields are PerHeat;
+        // a Static round must use FromRoster — P1-2.)
         let mut dangling = round_req("Bracket", vec![open.clone()]);
+        dangling.channel_mode = Some(ChannelMode::PerHeat);
         dangling.seeding = SeedingRule::FromRanking {
             source_rounds: vec![RoundId("does-not-exist".into())],
             top_n: 4,
@@ -3015,6 +3132,7 @@ mod tests {
             .add_round(&event.id, round_req("Qualifying", vec![open.clone()]))
             .unwrap();
         let mut bracket = round_req("Bracket", vec![open]);
+        bracket.channel_mode = Some(ChannelMode::PerHeat);
         bracket.seeding = SeedingRule::FromRanking {
             source_rounds: vec![q.id.clone()],
             top_n: 4,
@@ -3043,7 +3161,7 @@ mod tests {
                     top_n: 2,
                 },
                 time_limit_secs: None,
-                channel_mode: None,
+                channel_mode: Some(ChannelMode::PerHeat),
                 staging_timer_secs: None,
                 start_procedure: None,
                 grace_window: None,
@@ -3187,6 +3305,102 @@ mod tests {
         };
         let b_main = reg.add_round(&event.id, b_main).unwrap();
         assert!(matches!(b_main.seeding, SeedingRule::Combine { .. }));
+    }
+
+    #[test]
+    fn static_round_rejects_non_from_roster_seeding() {
+        // P1-2: a Static round forms its field from class membership but ranks the seeding-resolved
+        // field — they only agree under FromRoster. Any other seeding on a Static round is rejected.
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Static Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        let q = reg
+            .add_round(&event.id, round_req("Qualifying", vec![open.clone()]))
+            .unwrap();
+
+        // Static + FromRanking → Invalid.
+        let mut bad = round_req("Bad", vec![open.clone()]);
+        bad.channel_mode = Some(ChannelMode::Static);
+        bad.seeding = SeedingRule::FromRanking {
+            source_rounds: vec![q.id.clone()],
+            top_n: 4,
+        };
+        assert!(matches!(
+            reg.add_round(&event.id, bad),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // Static + FromRoster → ok (the time-trial / qualifying default).
+        let mut ok = round_req("Good", vec![open.clone()]);
+        ok.channel_mode = Some(ChannelMode::Static);
+        assert!(reg.add_round(&event.id, ok).is_ok());
+
+        // The SAME ranking seeding is fine on a PerHeat round (the bracket path).
+        let mut per_heat = round_req("PerHeat", vec![open]);
+        per_heat.channel_mode = Some(ChannelMode::PerHeat);
+        per_heat.seeding = SeedingRule::FromRanking {
+            source_rounds: vec![q.id],
+            top_n: 4,
+        };
+        assert!(reg.add_round(&event.id, per_heat).is_ok());
+    }
+
+    #[test]
+    fn from_ranking_rejects_zero_top_n() {
+        // P2: a `FromRanking { top_n: 0 }` advances nobody — reject it, like FromRankingRange.take.
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Zero Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        let q = reg
+            .add_round(&event.id, round_req("Qualifying", vec![open.clone()]))
+            .unwrap();
+
+        let mut zero = round_req("Bracket", vec![open]);
+        zero.channel_mode = Some(ChannelMode::PerHeat);
+        zero.seeding = SeedingRule::FromRanking {
+            source_rounds: vec![q.id],
+            top_n: 0,
+        };
+        assert!(matches!(
+            reg.add_round(&event.id, zero),
+            Err(RoundError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn wholesale_selections_dedup_preserving_order() {
+        // P2: roster / classes / timers store each id once, preserving first-seen order — a
+        // duplicate timer would otherwise double-feed the source bridge.
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Dedup Event")).unwrap();
+
+        let a = seed_class(&reg, "A");
+        let b = seed_class(&reg, "B");
+        let meta = reg
+            .set_classes(&event.id, vec![a.clone(), b.clone(), a.clone()])
+            .unwrap();
+        assert_eq!(meta.classes, vec![a, b]);
+
+        let mock = TimerId(MOCK_TIMER_ID.to_string());
+        let meta = reg
+            .set_timers(&event.id, vec![mock.clone(), mock.clone()])
+            .unwrap();
+        assert_eq!(meta.timers, vec![mock]);
+
+        let p = reg
+            .pilots()
+            .create(&crate::pilots::CreatePilotRequest {
+                callsign: "P".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let meta = reg
+            .set_roster(&event.id, vec![p.clone(), p.clone()])
+            .unwrap();
+        assert_eq!(meta.roster, vec![p]);
     }
 
     #[test]
@@ -3447,6 +3661,41 @@ mod tests {
         assert_eq!(restored.rounds[0].label, "Qualifying R1");
         assert_eq!(restored.rounds[0].format, "timed_qual");
         assert_eq!(restored.rounds[0].seeding, SeedingRule::FromRoster);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restores_an_older_additive_event_meta_json() {
+        // P1-6 back-compat: a known-good *older* EventMeta JSON (only the pre-#73 core fields,
+        // before timers/roster/classes/rounds existed) must still load on a newer Director — the
+        // additive fields take their serde defaults. Mirrors the pilots/classes/timers back-compat
+        // load tests, and guards the loud-skip logging added for unparseable meta.
+        let dir = std::env::temp_dir().join(format!("gridfpv-meta-backcompat-{}", short_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = EventId("legacy-event".into());
+        let legacy_json = r#"{
+            "id": "legacy-event",
+            "name": "Legacy Spring Cup",
+            "created_at": 1700000000000,
+            "persistent": true
+        }"#;
+        {
+            // Hand-write the older shape directly into the event's sqlite meta sidecar.
+            let path = event_db_path(&dir, &id);
+            let log = SqliteLog::open(&path).unwrap();
+            log.set_meta(EVENT_META_KEY, legacy_json).unwrap();
+        }
+        // Reopen the registry over the dir → the older event restores with defaulted additive fields.
+        let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+        let restored = reg.meta_of(&id).expect("older event restored");
+        assert_eq!(restored.name, "Legacy Spring Cup");
+        assert_eq!(restored.created_at, 1_700_000_000_000);
+        assert!(restored.persistent);
+        assert!(restored.timers.is_empty());
+        assert!(restored.roster.is_empty());
+        assert!(restored.classes.is_empty());
+        assert!(restored.rounds.is_empty());
+        assert!(restored.classes_membership.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

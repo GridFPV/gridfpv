@@ -294,7 +294,14 @@ async fn round_driven_mock_race_flow_e2e() {
     let event = EventId(event_meta["id"].as_str().unwrap().to_string());
     let state = registry.resolve(&event).unwrap();
 
-    // 2) Select the class for the event.
+    // 2) Roster the pilots (membership is scoped to the event roster), then select the class.
+    control_put(
+        &app,
+        &format!("/events/{}/roster", event.0),
+        &token,
+        serde_json::json!({ "pilot_ids": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
+    )
+    .await;
     control_put(
         &app,
         &format!("/events/{}/classes", event.0),
@@ -602,6 +609,13 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
 
     control_put(
         &app,
+        &format!("/events/{}/roster", event.0),
+        &token,
+        serde_json::json!({ "pilot_ids": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
+    )
+    .await;
+    control_put(
+        &app,
         &format!("/events/{}/classes", event.0),
         &token,
         serde_json::json!({ "ids": [class_id.0] }),
@@ -724,6 +738,13 @@ async fn static_channel_balanced_qual_flow_e2e() {
     let event = EventId(event_meta["id"].as_str().unwrap().to_string());
     let state = registry.resolve(&event).unwrap();
 
+    control_put(
+        &app,
+        &format!("/events/{}/roster", event.0),
+        &token,
+        serde_json::json!({ "pilot_ids": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
+    )
+    .await;
     control_put(
         &app,
         &format!("/events/{}/classes", event.0),
@@ -959,6 +980,13 @@ async fn fast_auto_event(
     let event_meta: serde_json::Value = serde_json::from_str(&body).unwrap();
     let event = EventId(event_meta["id"].as_str().unwrap().to_string());
 
+    control_put(
+        &app,
+        &format!("/events/{}/roster", event.0),
+        &token,
+        serde_json::json!({ "pilot_ids": pilots.iter().map(|p| p.0.clone()).collect::<Vec<_>>() }),
+    )
+    .await;
     control_put(
         &app,
         &format!("/events/{}/classes", event.0),

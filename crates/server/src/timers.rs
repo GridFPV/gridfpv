@@ -595,6 +595,35 @@ fn read_persisted_timers(dir: &Path) -> Option<Vec<Timer>> {
     serde_json::from_str(&raw).ok()
 }
 
+/// The largest Mock `laps` count we accept (release-hardening P2): a sane ceiling so a fat-fingered
+/// or hostile value can't ask the sim to generate a runaway number of laps per pilot.
+pub const MAX_MOCK_LAPS: u32 = 1000;
+
+/// Validate a timer's effective configuration (release-hardening P2), returning a human-readable
+/// message on the first problem (the caller maps it to a `400`).
+///
+/// Rejects a `node_count` of `0` (it caps every heat to **no** pilots — nothing could ever race),
+/// an empty/whitespace RotorHazard URL (nothing to dial), and a Mock `laps` count beyond
+/// [`MAX_MOCK_LAPS`] (a runaway sim). `node_count` is passed in so the merged value can be checked
+/// on a partial edit.
+pub fn validate_timer_config(kind: &TimerKind, node_count: u32) -> Result<(), String> {
+    if node_count == 0 {
+        return Err(
+            "node_count must be at least 1 (a 0-node timer caps every heat to no pilots)"
+                .to_string(),
+        );
+    }
+    match kind {
+        TimerKind::Rotorhazard { url } if url.trim().is_empty() => {
+            Err("a RotorHazard timer requires a non-empty server URL".to_string())
+        }
+        TimerKind::Mock { laps, .. } if *laps > MAX_MOCK_LAPS => {
+            Err(format!("laps must be at most {MAX_MOCK_LAPS}"))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// An error mutating the timer registry (a persistence failure, an unknown id, a protected delete).
 #[derive(Debug, Clone)]
 pub struct TimerError(pub String);
@@ -645,6 +674,54 @@ fn short_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_timer_config_rejects_bad_configs() {
+        // A 0-node timer caps every heat to no pilots — rejected (P2).
+        assert!(
+            validate_timer_config(
+                &TimerKind::Mock {
+                    laps: 5,
+                    lap_ms: 100
+                },
+                0
+            )
+            .is_err()
+        );
+        // An empty / whitespace RotorHazard URL can never be dialed — rejected.
+        assert!(validate_timer_config(&TimerKind::Rotorhazard { url: "   ".into() }, 8).is_err());
+        // A runaway Mock laps count is rejected.
+        assert!(
+            validate_timer_config(
+                &TimerKind::Mock {
+                    laps: MAX_MOCK_LAPS + 1,
+                    lap_ms: 100
+                },
+                8
+            )
+            .is_err()
+        );
+        // A sane config passes.
+        assert!(
+            validate_timer_config(
+                &TimerKind::Mock {
+                    laps: 5,
+                    lap_ms: 2500
+                },
+                8
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_timer_config(
+                &TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into()
+                },
+                8
+            )
+            .is_ok()
+        );
+    }
 
     fn sim_req(name: &str) -> CreateTimerRequest {
         CreateTimerRequest {
