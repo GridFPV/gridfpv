@@ -54,7 +54,7 @@ use gridfpv_events::CompetitorRef;
 
 use crate::format::{
     CompletedHeat, FormatConfig, FormatRegistry, Generator, GeneratorStep, HeatPlan, RankEntry,
-    bracket_pairs, rank_by, result_ranking,
+    bracket_pairs, rank_by, ranking_advancers, result_ranking,
 };
 use crate::scoring::HeatResult;
 
@@ -260,6 +260,21 @@ impl Generator for SingleElim {
         }
         rank_by(rows)
     }
+
+    /// The level's **advancing set** — each heat's top `advance` finishers in heat order, then any
+    /// byes. Overrides the ranking-derived default ([`ranking_advancers`]), which is wrong for a
+    /// 4-up level: a heat advancing two eliminates two at distinct in-heat positions (3rd, 4th), so
+    /// the eliminated do **not** share one worst band and the "better than worst" rule would keep
+    /// the 3rd-place losers too. The replay's `advanced` is exactly the winners, however many heats
+    /// the level had. Provisional (the ranking fallback) before the level completes.
+    fn advancers(&self, completed: &[CompletedHeat]) -> Vec<CompetitorRef> {
+        let replay = self.replay(completed);
+        if replay.complete {
+            replay.advanced
+        } else {
+            ranking_advancers(&self.ranking(completed))
+        }
+    }
 }
 
 /// A trivial 1, 2, 3, … ranking straight from a seed/bracket order — the provisional ranking
@@ -451,6 +466,56 @@ mod tests {
         assert_eq!(&names(&ranking)[..4], &["2", "1", "4", "5"]);
         assert_eq!(ranking[0].position, 1);
         assert_eq!(ranking[3].position, 4);
+    }
+
+    #[test]
+    fn four_up_level_advancers_carry_exactly_the_winners_not_the_better_losers() {
+        // The FromHeatWinners carry (`Generator::advancers`) of a 4-up level must be **exactly** the
+        // top two of each heat — the four advancers, in heat order — and NOT the 3rd-place losers.
+        // The eliminated rank at distinct overall positions (3rd-place losers 5th, 4th-place losers
+        // 7th), so they do NOT share one worst band; a ranking `position < worst` filter would keep
+        // the two 5th-placed losers too (6 carried, not 4). The override returns the replay's real
+        // advancing set, fixing that. Two heats of four advancing two each → exactly 4 carry.
+        let mut g = SingleElim::new(field(&["1", "2", "3", "4", "5", "6", "7", "8"]), 4);
+        let _ = g.next(&[]);
+        let completed = vec![
+            CompletedHeat::new(
+                "se-h0",
+                result(&[("2", 1, 6), ("1", 2, 5), ("8", 3, 4), ("7", 4, 3)]),
+            ),
+            CompletedHeat::new(
+                "se-h1",
+                result(&[("4", 1, 6), ("5", 2, 5), ("3", 3, 4), ("6", 4, 3)]),
+            ),
+        ];
+        let advancers: Vec<String> = g
+            .advancers(&completed)
+            .iter()
+            .map(|c| c.0.clone())
+            .collect();
+        assert_eq!(advancers, vec!["2", "1", "4", "5"]);
+        // The default ranking-derived heuristic would have wrongly carried the two 5th-placed losers
+        // (8 and 3) too — guard that the fix does not regress to that.
+        assert!(!advancers.contains(&"8".to_string()));
+        assert!(!advancers.contains(&"3".to_string()));
+    }
+
+    #[test]
+    fn head_to_head_advancers_match_the_ranking_default() {
+        // For a head-to-head level the eliminated DO share one worst band, so the override and the
+        // ranking-derived default agree: each heat's single winner carries, in heat order.
+        let mut g = SingleElim::new(field(&["1", "2", "3", "4"]), 2);
+        let _ = g.next(&[]);
+        let completed = vec![
+            CompletedHeat::new("se-h0", h2h("1", "4")),
+            CompletedHeat::new("se-h1", h2h("2", "3")),
+        ];
+        let advancers: Vec<String> = g
+            .advancers(&completed)
+            .iter()
+            .map(|c| c.0.clone())
+            .collect();
+        assert_eq!(advancers, vec!["1", "2"]);
     }
 
     #[test]

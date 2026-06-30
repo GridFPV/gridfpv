@@ -474,33 +474,36 @@ fn merged_source_ranking(
 /// The **heat winners** of a (bracket-level) source round, in heat order — the field a
 /// [`SeedingRule::FromHeatWinners`] successor level seeds from (decisions D13, #217).
 ///
-/// A single-elimination *level* is one round whose [`round_ranking`] lists its **advancers**
-/// (each heat's winner — the top half — in heat order, then any bye) first, ahead of the
-/// **eliminated**, who all share the single worst position (each heat's losers tie at the bottom
-/// band). The winners are therefore exactly the ranking entries whose position is **strictly
-/// better than that worst band**, taken in ranking (heat) order. This carries forward however many
-/// heats the level had — head-to-head advances one per heat, a 4-up heat advances two — so the next
-/// level's size follows the bracket rather than a fixed top-N.
+/// The winners are the source format's **advancing set** — [`Generator::advancers`], each heat's
+/// top `advance` finishers in heat order, then any byes. This carries forward however many heats the
+/// level had — head-to-head advances one per heat, a 4-up heat advances two — so the next level's
+/// size follows the bracket rather than a fixed top-N. Using the generator's advancers (rather than
+/// a ranking-position filter) is what makes a **4-up** level carry correctly: its two heat losers
+/// rank at *distinct* in-heat positions (3rd, 4th), so they do not share one worst band and a
+/// "better than the worst position" filter would wrongly keep the 3rd-place losers too.
 ///
-/// Before the source level is complete its ranking is provisional, so the winners are provisional
-/// too (the carry recomputes deterministically as the source level's heats finalize — the same
-/// off-the-log property [`FromRanking`](SeedingRule::FromRanking) has). A source round whose
-/// ranking is a single band (one competitor, or none finalized yet) advances no one.
+/// Before the source level is complete its advancers are provisional (the carry recomputes
+/// deterministically as the source level's heats finalize — the same off-the-log property
+/// [`FromRanking`](SeedingRule::FromRanking) has). A source round that advances no one (one
+/// competitor, or none finalized yet) yields an empty field.
 fn heat_winners(
     meta: &EventMeta,
     source: &RoundDef,
     events: &[Event],
     depth: usize,
 ) -> Result<Vec<CompetitorRef>, FillError> {
-    let ranking = round_ranking_at(meta, source, events, depth + 1)?;
-    let Some(worst) = ranking.iter().map(|e| e.position).max() else {
-        return Ok(Vec::new());
-    };
-    Ok(ranking
-        .iter()
-        .filter(|e| e.position < worst)
-        .map(|e| e.competitor.clone())
-        .collect())
+    // The carry is the source format's **advancing set** — `Generator::advancers`, not a
+    // ranking-position heuristic. Single-elim overrides it to return each heat's top `advance`
+    // finishers, which is correct for a 4-up level too (a position-`< worst` filter would wrongly
+    // keep a 4-up heat's 3rd-place losers, since the eliminated do not share one worst band). Built
+    // from the same field + log as `round_ranking_at`, one depth deeper (the seeding-cycle guard).
+    let field = round_field_at(meta, source, events, depth + 1)?;
+    let registry = FormatRegistry::standard();
+    let generator = registry
+        .build(&source.format, &format_config(source, field))
+        .ok_or_else(|| FillError::UnknownFormat(source.format.clone()))?;
+    let completed = completed_heats(source, events);
+    Ok(generator.advancers(&completed))
 }
 
 /// Merge several rounds' rankings into **one aggregated ranking, best-per-pilot** (issue #51
