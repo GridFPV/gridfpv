@@ -1030,6 +1030,22 @@ describe('race Slice 1a: per-class membership', () => {
     return ((await res.json()) as Pilot).id;
   }
 
+  /** Select the event's classes + roster the pilots — the prerequisite for setting membership. */
+  async function selectClassesAndRoster(
+    eventId: string,
+    classIds: string[],
+    pilotIds: string[]
+  ): Promise<void> {
+    const put = (path: string, body: unknown): Promise<Response> =>
+      fetch(`${eventRoot(director.baseUrl, eventId)}/${path}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify(body)
+      });
+    await put('classes', { ids: classIds });
+    await put('roster', { pilot_ids: pilotIds });
+  }
+
   it('a new event has no class membership (additive, omit-when-empty)', async () => {
     const event = (await createEvent('Membership Default', TOKEN)).body as EventMeta;
     expect(event.classes_membership).toBeUndefined();
@@ -1039,6 +1055,9 @@ describe('race Slice 1a: per-class membership', () => {
     const event = (await createEvent('Membership Event', TOKEN)).body as EventMeta;
     const a = await makePilot('Member A');
     const b = await makePilot('Member B');
+    // The event must select the class and roster the pilots before membership (the class is
+    // event-scoped and members must be on the roster — same rule round validation enforces).
+    await selectClassesAndRoster(event.id, ['mgp-open'], [a, b]);
 
     // Set the Open built-in class's membership (bare ids → channel-less slots, via the serde shim).
     const ok = await setMembership(event.id, 'mgp-open', [a, b], TOKEN);
@@ -1076,6 +1095,7 @@ describe('race Slice 1a: per-class membership', () => {
     const event = (await createEvent('Channel Membership', TOKEN)).body as EventMeta;
     const a = await makePilot('Chan A');
     const b = await makePilot('Chan B');
+    await selectClassesAndRoster(event.id, ['mgp-open'], [a, b]);
 
     // The event's default primary is the built-in Mock, whose available channels include Raceband
     // R1/R2 (5658 / 5695). Assigning those is accepted and round-trips on the slot's `channel`.
@@ -1484,6 +1504,12 @@ describe('race Slice 3a: FillRound (round-driven engine)', () => {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ ids: ['mgp-open'] })
+    });
+    // Roster the pilots before membership (members must be on the event roster).
+    await fetch(`${eventRoot(director.baseUrl, event.id)}/roster`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ pilot_ids: pilotIds })
     });
     await fetch(`${eventRoot(director.baseUrl, event.id)}/classes/mgp-open/membership`, {
       method: 'PUT',
