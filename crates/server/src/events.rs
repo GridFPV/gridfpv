@@ -602,6 +602,38 @@ pub enum SeedingRule {
         /// [`EventMeta::rounds`].
         source_round: RoundId,
     },
+    /// Seed from a **slice** of one or more prior rounds' aggregated ranking — the multi-main /
+    /// consolation seam (MultiGP multi-main). Like [`FromRanking`](Self::FromRanking) the field is
+    /// the **best-per-pilot ranking aggregated across `source_rounds`** (see the round engine's
+    /// `resolve_seeding`), but rather than the top-N it takes the window `skip+1 ..= skip+take` of
+    /// that ranking — e.g. a C-main seeded from qual seeds 13–20 is `skip: 12, take: 8`. Each entry
+    /// of `source_rounds` must name another [`RoundDef`] in the same event; `take` must be `> 0`.
+    ///
+    /// **Serde back-compat:** mirrors [`FromRanking`](Self::FromRanking)'s lenient body — the
+    /// enum's hand-written [`Deserialize`](SeedingRule#impl-Deserialize) reads either the current
+    /// `source_rounds` array or a legacy single `source_round` string. Purely additive.
+    FromRankingRange {
+        /// The prior rounds this round seeds from — each must exist in [`EventMeta::rounds`].
+        /// Aggregated best-per-pilot when more than one is named. Always at least one entry.
+        source_rounds: Vec<RoundId>,
+        /// How many of the aggregated ranking's leading places to **skip** before taking — the
+        /// 0-based start of the window (seed 13 is `skip: 12`).
+        skip: usize,
+        /// How many places to take after the skip — the window width. Must be `> 0`.
+        take: usize,
+    },
+    /// Seed from the **union of sub-sources** — the composition primitive a real MultiGP multi-main
+    /// wires per-main brackets bottom-up with (e.g. a B-main = the next six qual seeds **plus** the
+    /// top two out of the C-main final). Each sub-rule in `sources` is resolved independently and
+    /// the results are **concatenated in order**, de-duplicated keeping each competitor's **first**
+    /// occurrence — so a competitor that two sources both name is seeded once, at the earlier
+    /// source's position. `sources` must be non-empty; sub-rules may themselves be `Combine`
+    /// (serde handles the self-reference), bounded by a nesting-depth cap at add/update.
+    Combine {
+        /// The sub-rules whose fields are concatenated (in order) then de-duplicated first-wins.
+        /// Each is resolved exactly as a standalone seeding rule. Always at least one entry.
+        sources: Vec<SeedingRule>,
+    },
     /// Seed from a set of active **channels** rather than pilots — the **open-practice** seeding
     /// (open-practice format). The field builder lays each node index out as a `node-{i}`
     /// [`CompetitorRef`](gridfpv_events::CompetitorRef) (the timer-seat handle the timer emits
@@ -654,14 +686,30 @@ impl<'de> Deserialize<'de> for SeedingRule {
             source_rounds: Option<Vec<RoundId>>,
         }
 
-        // An untagged shadow of the externally-tagged enum. `FromRanking` / `FromHeatWinners` carry
-        // the lenient bodies; the other variants reuse the same field shapes as `SeedingRule` so they
-        // round-trip 1:1.
+        // `FromRankingRange` mirrors `FromRanking`'s lenient body (current `source_rounds` array or
+        // legacy single `source_round` string) and adds the `skip` / `take` window.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FromRankingRangeBody {
+            #[serde(default)]
+            source_rounds: Option<Vec<RoundId>>,
+            #[serde(default)]
+            source_round: Option<RoundId>,
+            skip: usize,
+            take: usize,
+        }
+
+        // An untagged shadow of the externally-tagged enum. `FromRanking` / `FromRankingRange` /
+        // `FromHeatWinners` carry the lenient bodies; the other variants reuse the same field shapes
+        // as `SeedingRule` so they round-trip 1:1. `Combine`'s `sources` is `Vec<SeedingRule>` — the
+        // recursive self-reference dispatches back through this same hand-written `Deserialize`.
         #[derive(Deserialize)]
         enum Shadow {
             FromRoster,
             FromRanking(FromRankingBody),
+            FromRankingRange(FromRankingRangeBody),
             FromHeatWinners(FromHeatWinnersBody),
+            Combine { sources: Vec<SeedingRule> },
             AllChannels { channels: Vec<usize> },
         }
 
@@ -689,6 +737,25 @@ impl<'de> Deserialize<'de> for SeedingRule {
                 Ok(SeedingRule::FromHeatWinners { source_round })
             }
             Shadow::AllChannels { channels } => Ok(SeedingRule::AllChannels { channels }),
+            Shadow::Combine { sources } => Ok(SeedingRule::Combine { sources }),
+            Shadow::FromRankingRange(body) => {
+                let source_rounds = match (body.source_rounds, body.source_round) {
+                    // Current shape — the explicit list wins.
+                    (Some(rounds), _) => rounds,
+                    // Legacy shape — lift the single source to a one-element list.
+                    (None, Some(single)) => vec![single],
+                    (None, None) => {
+                        return Err(D::Error::custom(
+                            "FromRankingRange seeding requires `source_rounds` (or legacy `source_round`)",
+                        ));
+                    }
+                };
+                Ok(SeedingRule::FromRankingRange {
+                    source_rounds,
+                    skip: body.skip,
+                    take: body.take,
+                })
+            }
             Shadow::FromRanking(body) => {
                 let source_rounds = match (body.source_rounds, body.source_round) {
                     // Current shape — the explicit list wins.
@@ -1886,6 +1953,73 @@ impl From<RegistryError> for RoundError {
 /// [`FormatRegistry::standard`] name; or a [`SeedingRule::FromRanking`]'s `source_rounds` is empty
 /// or names a round that does not exist in this event (excluding `editing` — a round may not seed
 /// from itself).
+/// The maximum nesting depth a [`SeedingRule`] may reach — the `Combine`-within-`Combine` cap
+/// checked at add/update (and mirrored at fill time by the round engine's depth guard, which also
+/// bounds cross-round seeding cycles). A real multi-main composes only a couple of levels deep; the
+/// cap rejects pathological / malicious nesting before it can be stored.
+pub(crate) const MAX_SEEDING_DEPTH: usize = 8;
+
+/// Walk a [`SeedingRule`] collecting every **source round** it names into `acc`, recursing into
+/// [`Combine`](SeedingRule::Combine) sub-sources, while enforcing the per-rule structural
+/// invariants and the [`MAX_SEEDING_DEPTH`] nesting cap (race redesign multi-main).
+///
+/// Pushes the sources of [`FromRanking`](SeedingRule::FromRanking),
+/// [`FromRankingRange`](SeedingRule::FromRankingRange) and
+/// [`FromHeatWinners`](SeedingRule::FromHeatWinners); ignores [`FromRoster`](SeedingRule::FromRoster)
+/// / [`AllChannels`](SeedingRule::AllChannels) (no source rounds). Rejects: a `FromRanking` /
+/// `FromRankingRange` with an empty source list, a `FromRankingRange` whose `take` is `0`, an empty
+/// `Combine.sources`, and nesting deeper than [`MAX_SEEDING_DEPTH`]. The caller validates the
+/// collected source rounds (existence + no self-seed) afterwards.
+fn collect_source_rounds<'a>(
+    seeding: &'a SeedingRule,
+    acc: &mut Vec<&'a RoundId>,
+    depth: usize,
+) -> Result<(), RoundError> {
+    if depth > MAX_SEEDING_DEPTH {
+        return Err(RoundError::Invalid("seeding nesting too deep".to_string()));
+    }
+    match seeding {
+        SeedingRule::FromRanking { source_rounds, .. } => {
+            if source_rounds.is_empty() {
+                return Err(RoundError::Invalid(
+                    "FromRanking seeding must name at least one source round".to_string(),
+                ));
+            }
+            acc.extend(source_rounds.iter());
+        }
+        SeedingRule::FromRankingRange {
+            source_rounds,
+            take,
+            ..
+        } => {
+            if source_rounds.is_empty() {
+                return Err(RoundError::Invalid(
+                    "FromRankingRange seeding must name at least one source round".to_string(),
+                ));
+            }
+            if *take == 0 {
+                return Err(RoundError::Invalid(
+                    "FromRankingRange take must be > 0".to_string(),
+                ));
+            }
+            acc.extend(source_rounds.iter());
+        }
+        SeedingRule::FromHeatWinners { source_round } => acc.push(source_round),
+        SeedingRule::Combine { sources } => {
+            if sources.is_empty() {
+                return Err(RoundError::Invalid(
+                    "Combine sources must be non-empty".to_string(),
+                ));
+            }
+            for sub in sources {
+                collect_source_rounds(sub, acc, depth + 1)?;
+            }
+        }
+        SeedingRule::FromRoster | SeedingRule::AllChannels { .. } => {}
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_round_fields(
     meta: &EventMeta,
@@ -1937,23 +2071,12 @@ fn validate_round_fields(
 
     // The seeding rules that name **source rounds** (the bracket/cut carries) must name rounds
     // that exist in this event and may never name the round being edited (a round can't seed from
-    // itself). `FromRanking` may name several (issue #51 multi-select) and requires at least one;
-    // `FromHeatWinners` (bracket advancement, #217) names exactly one prior level.
+    // itself). `FromRanking` / `FromRankingRange` may name several (issue #51 multi-select) and
+    // require at least one; `FromHeatWinners` (bracket advancement, #217) names exactly one prior
+    // level; `Combine` recurses into its sub-sources. The recursive collector also enforces the
+    // per-rule invariants (`take > 0`, non-empty `Combine`) and the nesting-depth cap as it walks.
     let mut source_rounds: Vec<&RoundId> = Vec::new();
-    match seeding {
-        SeedingRule::FromRanking {
-            source_rounds: s, ..
-        } => {
-            if s.is_empty() {
-                return Err(RoundError::Invalid(
-                    "FromRanking seeding must name at least one source round".to_string(),
-                ));
-            }
-            source_rounds.extend(s.iter());
-        }
-        SeedingRule::FromHeatWinners { source_round } => source_rounds.push(source_round),
-        SeedingRule::FromRoster | SeedingRule::AllChannels { .. } => {}
-    }
+    collect_source_rounds(seeding, &mut source_rounds, 0)?;
     for source_round in source_rounds {
         if Some(source_round) == editing {
             return Err(RoundError::Invalid(
@@ -2980,6 +3103,95 @@ mod tests {
     }
 
     #[test]
+    fn round_validation_rejects_bad_multi_main_seeding() {
+        // The multi-main carries (FromRankingRange / Combine) validate through the shared recursive
+        // `collect_source_rounds`: a zero-width range, an empty Combine, an over-deep nesting, and a
+        // dangling source nested inside a Combine are all rejected; a well-formed Combine is accepted.
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Multi-main Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        let q = reg
+            .add_round(&event.id, round_req("Qualifying", vec![open.clone()]))
+            .unwrap();
+
+        // FromRankingRange with take == 0 → Invalid.
+        let mut zero_take = round_req("C-main", vec![open.clone()]);
+        zero_take.format = "single_elim".to_string();
+        zero_take.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
+        zero_take.seeding = SeedingRule::FromRankingRange {
+            source_rounds: vec![q.id.clone()],
+            skip: 12,
+            take: 0,
+        };
+        assert!(matches!(
+            reg.add_round(&event.id, zero_take),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // An empty Combine → Invalid.
+        let mut empty_combine = round_req("Empty", vec![open.clone()]);
+        empty_combine.format = "single_elim".to_string();
+        empty_combine.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
+        empty_combine.seeding = SeedingRule::Combine { sources: vec![] };
+        assert!(matches!(
+            reg.add_round(&event.id, empty_combine),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // A Combine nested past MAX_SEEDING_DEPTH → Invalid (rejected at add, before it can be stored).
+        let mut seeding = SeedingRule::FromRoster;
+        for _ in 0..(MAX_SEEDING_DEPTH + 2) {
+            seeding = SeedingRule::Combine {
+                sources: vec![seeding],
+            };
+        }
+        let mut too_deep = round_req("Deep", vec![open.clone()]);
+        too_deep.format = "single_elim".to_string();
+        too_deep.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
+        too_deep.seeding = seeding;
+        assert!(matches!(
+            reg.add_round(&event.id, too_deep),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // A dangling source nested inside a Combine is still caught (the collector recurses).
+        let mut nested_dangling = round_req("Nested dangling", vec![open.clone()]);
+        nested_dangling.format = "single_elim".to_string();
+        nested_dangling.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
+        nested_dangling.seeding = SeedingRule::Combine {
+            sources: vec![SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("does-not-exist".into())],
+                top_n: 2,
+            }],
+        };
+        assert!(matches!(
+            reg.add_round(&event.id, nested_dangling),
+            Err(RoundError::Invalid(_))
+        ));
+
+        // A well-formed Combine of two real-source sub-rules is accepted (the B-main shape).
+        let mut b_main = round_req("B-main", vec![open]);
+        b_main.format = "single_elim".to_string();
+        b_main.win_condition = Some(WinCondition::FirstToLaps { n: 3 });
+        b_main.seeding = SeedingRule::Combine {
+            sources: vec![
+                SeedingRule::FromRankingRange {
+                    source_rounds: vec![q.id.clone()],
+                    skip: 6,
+                    take: 6,
+                },
+                SeedingRule::FromRanking {
+                    source_rounds: vec![q.id.clone()],
+                    top_n: 2,
+                },
+            ],
+        };
+        let b_main = reg.add_round(&event.id, b_main).unwrap();
+        assert!(matches!(b_main.seeding, SeedingRule::Combine { .. }));
+    }
+
+    #[test]
     fn scored_round_requires_an_end_condition() {
         let reg = EventRegistry::new(None).unwrap();
         let event = reg.create(&req("Ends Event")).unwrap();
@@ -3148,6 +3360,67 @@ mod tests {
             serde_json::from_str::<SeedingRule>(&json).unwrap(),
             winners,
             "FromHeatWinners round-trips through serialize → deserialize"
+        );
+    }
+
+    #[test]
+    fn multi_main_seeding_round_trips_and_is_back_compat() {
+        use serde_json::from_str;
+
+        // FromRankingRange: current `source_rounds` shape + skip/take.
+        let range = SeedingRule::FromRankingRange {
+            source_rounds: vec![RoundId("qual".into())],
+            skip: 12,
+            take: 8,
+        };
+        let json = serde_json::to_string(&range).unwrap();
+        assert_eq!(from_str::<SeedingRule>(&json).unwrap(), range);
+
+        // FromRankingRange accepts the legacy single `source_round` key (lifted to a one-element list).
+        let legacy_range = r#"{"FromRankingRange":{"source_round":"qual","skip":12,"take":8}}"#;
+        assert_eq!(from_str::<SeedingRule>(legacy_range).unwrap(), range);
+
+        // Combine — including a NESTED Combine — round-trips through serialize → deserialize (the
+        // recursive self-reference dispatches back through the hand-written Deserialize).
+        let combine = SeedingRule::Combine {
+            sources: vec![
+                SeedingRule::FromRankingRange {
+                    source_rounds: vec![RoundId("qual".into())],
+                    skip: 6,
+                    take: 6,
+                },
+                SeedingRule::Combine {
+                    sources: vec![SeedingRule::FromRanking {
+                        source_rounds: vec![RoundId("c-final".into())],
+                        top_n: 2,
+                    }],
+                },
+            ],
+        };
+        let json = serde_json::to_string(&combine).unwrap();
+        assert_eq!(
+            from_str::<SeedingRule>(&json).unwrap(),
+            combine,
+            "a nested Combine round-trips"
+        );
+
+        // The legacy variants are unaffected by the additive variants.
+        assert_eq!(
+            from_str::<SeedingRule>(r#""FromRoster""#).unwrap(),
+            SeedingRule::FromRoster
+        );
+        assert_eq!(
+            from_str::<SeedingRule>(r#"{"FromRanking":{"source_round":"q","top_n":4}}"#).unwrap(),
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("q".into())],
+                top_n: 4,
+            }
+        );
+        assert_eq!(
+            from_str::<SeedingRule>(r#"{"FromHeatWinners":{"source_round":"qf"}}"#).unwrap(),
+            SeedingRule::FromHeatWinners {
+                source_round: RoundId("qf".into()),
+            }
         );
     }
 

@@ -201,6 +201,25 @@ pub fn advance_top_n(ranking: &[RankEntry], n: usize) -> Vec<CompetitorRef> {
         .collect()
 }
 
+/// Advance a **ranking slice** — the competitors at positions `skip+1 ..= skip+take`, in ranking
+/// order (best first) — the seeds for a *lower* main / consolation bracket (e.g. a C-main = qual
+/// seeds 13–20 is `skip = 12, take = 8`).
+///
+/// A thin `ranking.iter().skip(skip).take(take)` over the already-total, deterministic
+/// [`RankEntry`] order, so the slice is deterministic too (including across a tie at either
+/// boundary, where the tie's deterministic intra-group order decides the cut). `skip` past the end
+/// of the ranking yields an empty slice; `take == 0` yields empty; a `take` that runs past the end
+/// simply returns the remaining competitors. The generalisation of [`advance_top_n`] (which is
+/// `advance_range(ranking, 0, n)`) to an arbitrary window.
+pub fn advance_range(ranking: &[RankEntry], skip: usize, take: usize) -> Vec<CompetitorRef> {
+    ranking
+        .iter()
+        .skip(skip)
+        .take(take)
+        .map(|entry| entry.competitor.clone())
+        .collect()
+}
+
 /// Build the next heat's lineup by **seeding from a ranking**: take the competitors in
 /// `order` and lay them into a heat in that order, which *is* the seed order.
 ///
@@ -1033,6 +1052,40 @@ mod tests {
     fn advance_top_n_clamps_to_the_field() {
         let ranking = seed_ranking(&field(&["A", "B"]));
         assert_eq!(advance_top_n(&ranking, 5), field(&["A", "B"]));
+    }
+
+    // --- advance_range ------------------------------------------------------
+
+    #[test]
+    fn advance_range_takes_the_slice_in_order() {
+        // The B-main slice: seeds 3–4 of a 6-deep ranking (skip 2, take 2).
+        let ranking = seed_ranking(&field(&["A", "B", "C", "D", "E", "F"]));
+        assert_eq!(advance_range(&ranking, 2, 2), field(&["C", "D"]));
+    }
+
+    #[test]
+    fn advance_range_skip_zero_is_top_n() {
+        let ranking = seed_ranking(&field(&["A", "B", "C", "D"]));
+        assert_eq!(advance_range(&ranking, 0, 2), advance_top_n(&ranking, 2));
+    }
+
+    #[test]
+    fn advance_range_take_zero_is_empty() {
+        let ranking = seed_ranking(&field(&["A", "B", "C"]));
+        assert!(advance_range(&ranking, 1, 0).is_empty());
+    }
+
+    #[test]
+    fn advance_range_skip_past_end_is_empty() {
+        let ranking = seed_ranking(&field(&["A", "B"]));
+        assert!(advance_range(&ranking, 5, 3).is_empty());
+    }
+
+    #[test]
+    fn advance_range_take_past_end_clamps() {
+        let ranking = seed_ranking(&field(&["A", "B", "C"]));
+        // skip 1, take 10 → just the remaining two.
+        assert_eq!(advance_range(&ranking, 1, 10), field(&["B", "C"]));
     }
 
     // --- bracket_pairs ------------------------------------------------------

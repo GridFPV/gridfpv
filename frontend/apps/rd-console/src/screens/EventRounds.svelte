@@ -1692,6 +1692,17 @@
       // Bracket-level advancement (#217): seeded from the prior level's heat winners.
       return `Winners of ${roundLabel(seed.FromHeatWinners.source_round)}`;
     }
+    if ('FromRankingRange' in seed) {
+      // Multi-main / consolation slice: seeds skip+1 … skip+take of the aggregated ranking.
+      const { source_rounds, skip, take } = seed.FromRankingRange;
+      const labels = source_rounds.map(roundLabel);
+      const from = labels.length > 0 ? labels.join(', ') : '—';
+      return `Seeds ${skip + 1}–${skip + take} from ${from}`;
+    }
+    if ('Combine' in seed) {
+      // Union of sub-sources (the multi-main composition): summarize each sub-rule in order.
+      return `Combine: ${seed.Combine.sources.map(seedSummary).join(' + ')}`;
+    }
     const { source_rounds, top_n } = seed.FromRanking;
     // One source round reads "Top N from <round>"; several read "Top N from <a>, <b>" (issue #51
     // aggregated seeding). An empty list (shouldn't occur — the form requires one) degrades cleanly.
