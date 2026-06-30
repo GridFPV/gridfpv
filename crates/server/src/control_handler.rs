@@ -2117,9 +2117,11 @@ mod tests {
     }
 
     /// Build an event with an 8-node Raceband timer over a class of `pilots`, plus a single
-    /// **round_robin** round (`rounds=1`, `heat_size=2`) — a *deterministic* format whose one
-    /// generator step emits the whole round's heats. Returns the registry, event id, and round id.
-    /// Used by the fill-all (#216) tests.
+    /// **head_to_head** round (`group_size=heat_size`) — a *deterministic* format whose one
+    /// generator step emits the whole round's heats (the field split into groups). Returns the
+    /// registry, event id, and round id. Used by the fill-all (#216) tests. (Was `round_robin`
+    /// before that format was carved out for the primitives-first release; head_to_head has the same
+    /// "one step emits the whole round" shape the fill-all tests need.)
     #[cfg(test)]
     fn round_robin_event(
         pilots: &[&str],
@@ -2193,11 +2195,8 @@ mod tests {
                 NewRoundReq {
                     label: "Round Robin".into(),
                     classes: vec![class],
-                    format: "round_robin".into(),
-                    params: BTreeMap::from([
-                        ("rounds".into(), "1".into()),
-                        ("heat_size".into(), heat_size.to_string()),
-                    ]),
+                    format: "head_to_head".into(),
+                    params: BTreeMap::from([("group_size".into(), heat_size.to_string())]),
                     win_condition: Some(WinCondition::BestLap),
                     seeding: SeedingRule::FromRoster,
                     // Best-lap only ranks, so a scored round needs a race time to end (validation).

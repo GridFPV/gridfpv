@@ -17,28 +17,6 @@
 export const OPEN_PRACTICE = 'open_practice';
 
 /**
- * The **multi-main** finals format key (#219, decisions D14) — a finals **split by qualifying rank**:
- * the ranked field is sliced into mains of `main_size` (A-main = top N, B-main = next N, …) racing in
- * parallel for placement, and the mains' results **stack** into the final standings (A-main →
- * places 1..N, B-main → N+1..2N, …). Its heats are the mains, so they are named "A-Main", "B-Main",
- * … off the heat's tier rather than "<Round> Heat <N>" (see the heat-naming helper).
- */
-export const MULTI_MAIN = 'multi_main';
-
-/**
- * The **Chase the Ace** final-format key — a multi-race final: the seeded final field races
- * repeatedly until the first pilot to `wins_to_win` race-wins (default 2) is champion. It is a
- * bracket **final level** (so it folds into the bracket container) and is **dynamic** — each race
- * only appears once the prior is scored (it single-steps, like open practice), never a batch.
- */
-export const CHASE_THE_ACE = 'chase_the_ace';
-
-/** Whether a format key is the Chase-the-Ace final format. */
-export function isChaseTheAceFormat(format: string | undefined | null): boolean {
-  return format === CHASE_THE_ACE;
-}
-
-/**
  * The **Head-to-Head** racing format key (D17) — the atomic racing round: a field split into heats of
  * `group_size`, each won by the round's win condition, then ranked by `scoring` (Placement, or Points
  * from a per-position table authored in the round form). It is the building block tournament
@@ -50,11 +28,6 @@ export const HEAD_TO_HEAD = 'head_to_head';
 /** Whether a format key is the Head-to-Head racing format. */
 export function isHeadToHeadFormat(format: string | undefined | null): boolean {
   return format === HEAD_TO_HEAD;
-}
-
-/** Whether a format key is the multi-main finals format. */
-export function isMultiMainFormat(format: string | undefined | null): boolean {
-  return format === MULTI_MAIN;
 }
 
 /**
@@ -70,28 +43,13 @@ export function isTimedQualFormat(format: string | undefined | null): boolean {
 }
 
 /**
- * The **bracket** format keys — the elimination chains whose rounds are bracket *levels* (decisions
- * D13: one round per level). A bracket is authored as a chain of rounds: a level-1 round seeded
- * `FromRanking` (the quali cut), then each next level seeded `FromHeatWinners` of the prior level.
- * Today only `single_elim` ships its level chain end-to-end; `double_elim`'s cross-bracket seeding
- * (D13/D14) is the named-next design problem, so it is listed for labelling but its UI advancement
- * is not yet driven here.
- */
-export const BRACKET_FORMATS: readonly string[] = ['single_elim', 'double_elim', CHASE_THE_ACE];
-
-/** Whether a format key is a bracket (elimination) format whose rounds are bracket levels (D13). */
-export function isBracketFormat(format: string | undefined | null): boolean {
-  return !!format && BRACKET_FORMATS.includes(format);
-}
-
-/**
- * The **qualifying** format keys — `timed_qual` and `round_robin`. For these the cross-round
+ * The **qualifying** format keys — currently just `timed_qual`. For these the cross-round
  * ranking metric *is* the win condition (the qualifying metric is derived from the win condition,
  * not a separate stored param — Rounds form redesign), so the win-condition dropdown offers only
  * the qualifying-applicable conditions (Best lap, Best N consecutive, Timed — Most Laps) and the
  * separate metric field is gone.
  */
-export const QUALIFYING_FORMATS: readonly string[] = ['timed_qual', 'round_robin'];
+export const QUALIFYING_FORMATS: readonly string[] = ['timed_qual'];
 
 /** Whether a format key is a qualifying format (its win condition drives the qualifying metric). */
 export function isQualifyingFormat(format: string | undefined | null): boolean {
@@ -125,15 +83,10 @@ export const FORMAT_LABELS: Readonly<Record<string, string>> = {
   // The `timed_qual` wire key is unchanged (persistence-stable); only the friendly label was
   // renamed Qualifying → Time Trials (#218 / decisions D11).
   timed_qual: 'Time Trials',
-  round_robin: 'Round Robin',
   // NOTE: ZippyQ shelved (#218) — the generator stays registered (so persisted `zippyq` rounds
   // still load) but the format is excluded from the offered set, so a new round can't select it.
   // Its label is kept here so any persisted `zippyq` round still renders a friendly name.
   zippyq: 'ZippyQ',
-  single_elim: 'Single Elimination',
-  double_elim: 'Double Elimination',
-  multi_main: 'Multi-Main',
-  chase_the_ace: 'Chase the Ace',
   head_to_head: 'Head-to-Head'
 };
 
@@ -195,8 +148,8 @@ export function isOpenPracticeFormat(format: string | undefined | null): boolean
 /**
  * Whether a format's heats are **deterministic** — its whole set of heats is a pure function of the
  * field (and, across rounds, the prior heats' results), so the round can be filled in **one action**
- * ("Generate heats", #216). Every format *except* Open Practice is deterministic: Time Trials, Round
- * Robin, Multi-Main, and the bracket structures all draw a fixed schedule from the roster/ranking.
+ * ("Generate heats", #216). Every format *except* Open Practice is deterministic: Time Trials and
+ * Head-to-Head draw a fixed schedule from the roster/ranking.
  *
  * Open Practice is the lone **dynamic** format — its channel-seated practice heats are created on
  * demand, with no fixed set — so it single-steps ("Add next heat") instead. Defined as "not open
@@ -204,9 +157,7 @@ export function isOpenPracticeFormat(format: string | undefined | null): boolean
  * default rather than silently excluded.
  */
 export function isDeterministicFormat(format: string | undefined | null): boolean {
-  // Open Practice and Chase the Ace are the dynamic formats: their next heat appears on demand /
-  // only once the prior is scored (a CTA race needs the previous race's result), so they single-step.
-  return !!format && !isOpenPracticeFormat(format) && !isChaseTheAceFormat(format);
+  return !!format && !isOpenPracticeFormat(format);
 }
 
 /**

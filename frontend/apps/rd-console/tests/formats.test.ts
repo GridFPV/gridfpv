@@ -10,13 +10,10 @@ import {
 
 describe('formats — friendly-name mapping (Rounds form redesign item 1)', () => {
   it('maps each known format key to its friendly label', () => {
-    expect(formatLabel('double_elim')).toBe('Double Elimination');
     expect(formatLabel('open_practice')).toBe('Open Practice');
-    expect(formatLabel('single_elim')).toBe('Single Elimination');
+    expect(formatLabel('head_to_head')).toBe('Head-to-Head');
     // `timed_qual` is the stable wire key; only its friendly label was renamed (#218).
     expect(formatLabel('timed_qual')).toBe('Time Trials');
-    expect(formatLabel('round_robin')).toBe('Round Robin');
-    expect(formatLabel('multi_main')).toBe('Multi-Main');
     // ZippyQ is shelved (not offered) but a persisted `zippyq` round still resolves a friendly name.
     expect(formatLabel('zippyq')).toBe('ZippyQ');
   });
@@ -47,7 +44,7 @@ describe('formats — friendly-name mapping (Rounds form redesign item 1)', () =
 
   it('treats every format but open practice as deterministic (#216 generate-all eligibility)', () => {
     // Deterministic: generate-all in one action.
-    for (const det of ['timed_qual', 'round_robin', 'multi_main', 'single_elim', 'double_elim']) {
+    for (const det of ['timed_qual', 'head_to_head']) {
       expect(isDeterministicFormat(det)).toBe(true);
     }
     // Open practice is the lone dynamic format — single-step.
@@ -70,9 +67,9 @@ describe('formats — dynamic field set per format (Rounds form redesign item 2)
     expect(f.params).toBe(false);
   });
 
-  it('a bracket format shows class + win + seeding + channel mode + params (not channels)', () => {
-    for (const bracket of ['single_elim', 'double_elim', 'multi_main']) {
-      const f = fieldsForFormat(bracket);
+  it('a roster-seeded racing format shows the full class/win/seeding block', () => {
+    for (const fmt of ['timed_qual', 'head_to_head', 'zippyq']) {
+      const f = fieldsForFormat(fmt);
       expect(f.eligibleClass).toBe(true);
       expect(f.winCondition).toBe(true);
       expect(f.seeding).toBe(true);
@@ -80,16 +77,6 @@ describe('formats — dynamic field set per format (Rounds form redesign item 2)
       expect(f.params).toBe(true);
       expect(f.activeChannels).toBe(false);
       expect(f.timeLimit).toBe(false);
-    }
-  });
-
-  it('a roster-seeded qual format shows the full class/win/seeding block too', () => {
-    for (const qual of ['timed_qual', 'round_robin', 'zippyq']) {
-      const f = fieldsForFormat(qual);
-      expect(f.eligibleClass).toBe(true);
-      expect(f.winCondition).toBe(true);
-      expect(f.seeding).toBe(true);
-      expect(f.activeChannels).toBe(false);
     }
   });
 });

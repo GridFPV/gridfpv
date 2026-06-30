@@ -18,7 +18,7 @@
  */
 import type { HeatId, HeatSummary, RoundDef } from '@gridfpv/types';
 
-import { isDeterministicFormat, isMultiMainFormat, OPEN_PRACTICE } from './formats.js';
+import { isDeterministicFormat, OPEN_PRACTICE } from './formats.js';
 
 /** The fixed display name for the single auto-created open-practice heat. */
 export const OPEN_PRACTICE_HEAT_NAME = 'Open Practice Heat';
@@ -28,9 +28,11 @@ export function isOpenPracticeRound(round: RoundDef): boolean {
   return round.format === OPEN_PRACTICE;
 }
 
-/** Whether `round` is a multi-main finals round (its heats are tiered mains, A/B/C). */
+/** Whether `round` is a multi-main finals round (its heats are tiered mains, A/B/C). Multi-main
+ * authoring is retired (primitives-first release); this stays so any persisted `multi_main` round
+ * still resolves its heat tier names rather than leaking a raw id. */
 export function isMultiMainRound(round: RoundDef): boolean {
-  return isMultiMainFormat(round.format);
+  return round.format === 'multi_main';
 }
 
 /**

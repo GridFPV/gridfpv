@@ -502,6 +502,12 @@ impl FormatParam {
     }
 
     /// A boolean param with a default (`"1"` / `"0"`).
+    ///
+    /// No standard format currently declares a boolean param (the only user, `double_elim`'s
+    /// `bracket_reset`, was carved out for the primitives-first release), but the
+    /// [`Bool`](ParamKind::Bool) kind and its frontend rendering path are still supported, so this
+    /// constructor is kept for the next format that needs a toggle param.
+    #[allow(dead_code)]
     fn boolean(key: &str, label: &str, default: &str) -> Self {
         Self {
             key: key.into(),
@@ -555,10 +561,7 @@ impl FormatRegistry {
 
     /// A registry pre-populated with every **production** format the engine ships:
     /// [`timed_qual`](crate::timed_qual::TimedQualifying), [`zippyq`](crate::zippyq::ZippyQ),
-    /// [`single_elim`](crate::single_elim::SingleElim),
-    /// [`double_elim`](crate::double_elim::DoubleElim),
-    /// [`round_robin`](crate::round_robin::RoundRobin),
-    /// [`multi_main`](crate::multi_main::MultiMain), and the casual
+    /// [`head_to_head`](crate::head_to_head::HeadToHead), and the casual
     /// [`open_practice`](OpenPractice) format.
     ///
     /// This is the single authority for "which format names are valid": the server validates a
@@ -569,13 +572,6 @@ impl FormatRegistry {
         let mut registry = Self::new();
         crate::timed_qual::TimedQualifying::register(&mut registry);
         crate::zippyq::ZippyQ::register(&mut registry);
-        crate::single_elim::SingleElim::register(&mut registry);
-        crate::double_elim::DoubleElim::register(&mut registry);
-        crate::round_robin::RoundRobin::register(&mut registry);
-        crate::multi_main::MultiMain::register(&mut registry);
-        // Chase the Ace (final-format): registered so its rounds build/replay; offered to the UI
-        // contextually as a final-level format (not in `standard_schemas` as a general round).
-        crate::chase_the_ace::ChaseTheAce::register(&mut registry);
         // Head-to-Head (D17): the atomic racing building block the structures compose. Registered so
         // its rounds build/replay; UI offering + the points-table editor land with the rollout.
         crate::head_to_head::HeadToHead::register(&mut registry);
@@ -602,29 +598,13 @@ impl FormatRegistry {
     /// - `timed_qual`: `rounds` ("Heats per pilot", number, 3). The ranking metric is **derived
     ///   from the round's win condition** (the qualifying metric *is* the win condition), so it is
     ///   **not** a separate param here.
-    /// - `round_robin`: `rounds` ("Heats per pilot", 3), `heat_size` (4). The ranking metric is
-    ///   likewise **derived from the win condition**, not a separate param.
-    /// - `single_elim`: `heat_size` (number, 2), `advance` ("Advance per heat", 1).
-    /// - `double_elim`: `bracket_reset` (bool, on).
-    /// - `multi_main`: `main_size` ("Main size", 4), `bump_n` ("Bump-up count", 0).
+    /// - `head_to_head`: `group_size` ("Group size", 2), `scoring` ("Scoring", placement/points).
     /// - `open_practice`: no params (the active channels are the field, carried by the round's
     ///   `AllChannels` seeding).
     /// - `zippyq`: **not offered** — shelved (#218); still registered in
     ///   [`standard`](Self::standard) so persisted rounds load, but omitted from this offered set.
     pub fn standard_schemas() -> Vec<FormatSchema> {
         vec![
-            // Chase the Ace (final-format): offered so the round form + edit form can render its
-            // `wins_to_win` param and the final-format selector can pick it. The Rounds UI surfaces
-            // it **only as a final-level format** (filtered out of the general round picker) — a
-            // multi-race final, not a regular round.
-            FormatSchema {
-                name: "chase_the_ace".into(),
-                params: vec![FormatParam::number("wins_to_win", "Wins to win", "2")],
-            },
-            FormatSchema {
-                name: "double_elim".into(),
-                params: vec![FormatParam::boolean("bracket_reset", "Bracket reset", "1")],
-            },
             // Head-to-Head (D17): the atomic racing round type the Add-round picker offers. Group
             // size + scoring (Placement, or Points — the per-position points table is authored by a
             // dedicated editor in the round form, not a generic param field).
@@ -640,43 +620,13 @@ impl FormatRegistry {
                     ),
                 ],
             },
-            // Multi-tier mains (#219, D14): a finals format split by qualifying rank — the field is
-            // sliced into mains of `main_size` (A-main = top N, …) racing for placement, and the mains
-            // stack into the final standings. `bump_n` (default 0) turns the independent tiered mains
-            // into a bottom-up bump-up ladder: each main's top N bump into the main above. Offered via
-            // the tournament builder (Multi-main structure), not the Add-round picker.
-            FormatSchema {
-                name: "multi_main".into(),
-                params: vec![
-                    FormatParam::number("main_size", "Main size", "4"),
-                    FormatParam::number("bump_n", "Bump-up count", "0"),
-                ],
-            },
             // Open practice (open-practice format): one open heat over the active channels, no
             // config knobs (the active channels are the field, carried by the round's seeding —
-            // see [`OpenPractice`]). Kept in sorted name order (after `multi_main`, before
-            // `round_robin`) to match [`names`](Self::names).
+            // see [`OpenPractice`]). Kept in sorted name order (after `head_to_head`, before
+            // `timed_qual`) to match [`names`](Self::names).
             FormatSchema {
                 name: OpenPractice::NAME.into(),
                 params: Vec::new(),
-            },
-            FormatSchema {
-                name: "round_robin".into(),
-                // No `metric` param: the cross-round ranking metric is **derived from the round's
-                // win condition** (the qualifying metric *is* the win condition — Rounds form
-                // redesign), not a separate stored knob. The `rounds` param is "Heats per pilot":
-                // how many heats each pilot flies (their best result ranks).
-                params: vec![
-                    FormatParam::number("rounds", "Heats per pilot", "3"),
-                    FormatParam::number("heat_size", "Heat size", "4"),
-                ],
-            },
-            FormatSchema {
-                name: "single_elim".into(),
-                params: vec![
-                    FormatParam::number("heat_size", "Heat size", "2"),
-                    FormatParam::number("advance", "Advance per heat", "1"),
-                ],
             },
             FormatSchema {
                 name: "timed_qual".into(),
@@ -1401,17 +1351,7 @@ mod tests {
         let registry = FormatRegistry::standard();
         assert_eq!(
             registry.names(),
-            vec![
-                "chase_the_ace",
-                "double_elim",
-                "head_to_head",
-                "multi_main",
-                "open_practice",
-                "round_robin",
-                "single_elim",
-                "timed_qual",
-                "zippyq",
-            ]
+            vec!["head_to_head", "open_practice", "timed_qual", "zippyq",]
         );
         assert!(registry.contains("open_practice"));
         // The validation surface the server uses.
@@ -1431,19 +1371,7 @@ mod tests {
         // what keeps it un-selectable for a new round while persisted `zippyq` rounds still load.
         let schemas = FormatRegistry::standard_schemas();
         let offered: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(
-            offered,
-            vec![
-                "chase_the_ace",
-                "double_elim",
-                "head_to_head",
-                "multi_main",
-                "open_practice",
-                "round_robin",
-                "single_elim",
-                "timed_qual",
-            ]
-        );
+        assert_eq!(offered, vec!["head_to_head", "open_practice", "timed_qual"]);
         // Head-to-Head carries group size + scoring; the points table is authored by the form editor.
         let h2h = schemas.iter().find(|s| s.name == "head_to_head").unwrap();
         assert_eq!(
@@ -1453,29 +1381,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["group_size", "scoring"]
         );
-        // Chase the Ace carries its `wins_to_win` param (default 2) for the params editor.
-        let cta = schemas.iter().find(|s| s.name == "chase_the_ace").unwrap();
-        assert_eq!(cta.params.len(), 1);
-        assert_eq!(cta.params[0].key, "wins_to_win");
         assert!(
             !offered.contains(&"zippyq"),
             "ZippyQ is shelved (#218) — must not be offered"
         );
         // …yet it remains registered, so it's the offered set that shrank, not the registry.
         assert!(FormatRegistry::standard().contains("zippyq"));
-        // multi_main is offered (#219, D14) via the tournament builder: it carries `main_size` +
-        // `bump_n` for the builder's config, and is registered like every other format.
-        assert!(offered.contains(&"multi_main"));
-        assert!(FormatRegistry::standard().contains("multi_main"));
-        let mm = schemas.iter().find(|s| s.name == "multi_main").unwrap();
-        assert_eq!(
-            mm.params.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
-            vec!["main_size", "bump_n"]
-        );
-        // Chase the Ace IS offered (it carries a param schema for the editor) but the Rounds UI
-        // shows it only as a final-level format — the general round picker filters it out client-side.
-        assert!(offered.contains(&"chase_the_ace"));
-        assert!(FormatRegistry::standard().contains("chase_the_ace"));
     }
 
     #[test]
