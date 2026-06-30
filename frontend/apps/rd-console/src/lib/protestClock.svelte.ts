@@ -21,7 +21,7 @@
  * keeps the family together.
  *
  * Usage (inside a component, so the `$effect` has an owner):
- *   const protest = useProtestClock(() => live?.lifecycle);
+ *   const protest = useProtestClock(() => live?.lifecycle, () => session.serverNowMs());
  *   {#if protest.active}Provisional — auto-official in {formatProtest(protest.remainingMs)}{/if}
  */
 
@@ -57,7 +57,8 @@ function deadlineMs(lifecycle: LifecycleState | undefined | null): number | unde
  * be called during component setup so its internal `$effect` is owned (torn down on unmount).
  */
 export function useProtestClock(
-  getLifecycle: () => LifecycleState | undefined | null
+  getLifecycle: () => LifecycleState | undefined | null,
+  nowMs: () => number = () => Date.now()
 ): ProtestClockState {
   let remainingMs = $state(0);
   let active = $state(false);
@@ -73,7 +74,9 @@ export function useProtestClock(
     const advance = () => {
       // Count DOWN to the absolute deadline, clamped at zero: the auto-finalize lands from the
       // runtime, and the stream then flips the heat to Final, so the countdown never shows negative.
-      remainingMs = Math.max(0, at - Date.now());
+      // `nowMs()` is the SERVER clock (offset-corrected) — the auto-official deadline is a server
+      // instant, so a skewed RD device would otherwise mis-read the remaining time (clock-skew rule).
+      remainingMs = Math.max(0, at - nowMs());
     };
     advance();
     const id = setInterval(advance, TICK_MS);

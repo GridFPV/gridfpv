@@ -183,10 +183,16 @@
   let heats = $state<HeatSummary[]>([]);
   let fillingRound = $state<RoundId | undefined>(undefined);
 
+  // A heats-load FAILURE is tracked distinctly from a round that genuinely has no heats yet, so the
+  // list can show a "Couldn't load — retry" state instead of the misleading "No heats yet" empty
+  // state (P1-5). The toast still surfaces the message.
+  let heatsError = $state(false);
   async function refreshHeats() {
     try {
       heats = await session.listHeats();
+      heatsError = false;
     } catch (e) {
+      heatsError = true;
       toast.error(e instanceof Error ? e.message : String(e));
     }
   }
@@ -741,7 +747,12 @@
   function buildWinCondition(): WinCondition {
     switch (winKind) {
       case 'Timed':
-        return { Timed: { window_micros: Math.max(0, Math.round(winSeconds * 1_000_000)) } };
+        // Clamp to a non-zero window: clearing the seconds input leaves `winSeconds`
+        // undefined/NaN, which would otherwise serialize a NaN/0-µs window (an instantly-elapsed
+        // heat). `(winSeconds || 0)` guards the NaN; `Math.max(1, …)` keeps the window positive.
+        return {
+          Timed: { window_micros: Math.max(1, Math.round((winSeconds || 0) * 1_000_000)) }
+        };
       case 'FirstToLaps':
         return { FirstToLaps: { n: Math.max(1, Math.round(winLaps)) } };
       case 'BestOfN':
@@ -860,14 +871,22 @@
     return total > 0 ? total : undefined;
   }
 
+  // Whether the win condition needs a "Race time (seconds)" value (Timed window, and Best-of-N which
+  // is always timed): both read `winSeconds` and would build a NaN/0-µs window if it were left blank.
+  const needsRaceTime = $derived(winKind === 'Timed' || winKind === 'BestOfN');
+  const raceTimeValid = $derived(Number.isFinite(Number(winSeconds)) && Number(winSeconds) >= 1);
+
   // The form is submittable once it has a label, a single eligible class, a format, and — when
-  // seeding from a ranking — at least one chosen source round (the multi-select, issue #51).
+  // seeding from a ranking — at least one chosen source round (the multi-select, issue #51). When the
+  // win condition is timed (Timed / Best-of-N) a valid race time is also required (else the heat
+  // would run forever / build a degenerate window).
   const canSubmit = $derived(
     isOpenPractice
       ? canSubmitOpenPractice
       : label.trim().length > 0 &&
           selectedClass !== '' &&
           format.length > 0 &&
+          (!needsRaceTime || raceTimeValid) &&
           (seedKind === 'FromRoster' || (seedKind === 'FromRanking' && seedSources.size > 0))
   );
 
@@ -892,7 +911,7 @@
       time_limit_secs: isOpenPractice
         ? buildTimeLimitSecs()
         : winKind === 'BestOfN'
-          ? Math.max(1, Math.round(winSeconds))
+          ? Math.max(1, Math.round(winSeconds || 0))
           : undefined,
       seeding: isOpenPractice
         ? { AllChannels: { channels: [...selectedNodes].sort((a, b) => a - b) } }
@@ -979,12 +998,16 @@
       // Union of sub-sources (the multi-main composition): summarize each sub-rule in order.
       return `Combine: ${seed.Combine.sources.map(seedSummary).join(' + ')}`;
     }
-    const { source_rounds, top_n } = seed.FromRanking;
-    // One source round reads "Top N from <round>"; several read "Top N from <a>, <b>" (issue #51
-    // aggregated seeding). An empty list (shouldn't occur — the form requires one) degrades cleanly.
-    const labels = source_rounds.map(roundLabel);
-    const from = labels.length > 0 ? labels.join(', ') : '—';
-    return `Top ${top_n} from ${from}`;
+    if (seed && 'FromRanking' in seed) {
+      const { source_rounds, top_n } = seed.FromRanking;
+      // One source round reads "Top N from <round>"; several read "Top N from <a>, <b>" (issue #51
+      // aggregated seeding). An empty list (shouldn't occur — the form requires one) degrades cleanly.
+      const labels = source_rounds.map(roundLabel);
+      const from = labels.length > 0 ? labels.join(', ') : '—';
+      return `Top ${top_n} from ${from}`;
+    }
+    // Unknown / future seeding shape — never throw (seedSummary runs per round in the list render).
+    return '—';
   }
 </script>
 
@@ -1158,7 +1181,15 @@
                 {/if}
 
                 {#if heatsByRound(round.id).length === 0}
-                  {#if isOpenPracticeRound(round)}
+                  {#if heatsError}
+                    <p class="empty small" role="alert">
+                      Couldn't load heats — <button
+                        type="button"
+                        class="link-btn"
+                        onclick={refreshHeats}>try again</button
+                      >.
+                    </p>
+                  {:else if isOpenPracticeRound(round)}
                     <p class="empty small" role="status">
                       The practice heat is being prepared — it is created automatically for an
                       open-practice round.
@@ -1369,14 +1400,14 @@
         </Field>
       {/if}
 
-      <!-- Seeding (Rounds form redesign item 2): roster-seeded (qual) or ranking-seeded (bracket).
-             The FromRanking source-rounds multi-select + top-N reveals for the bracket / cut case;
+      <!-- Seeding (Rounds form redesign item 2): roster-seeded, or seeded from a prior round's
+             ranking. The FromRanking source-rounds multi-select + top-N reveals for the ranking case;
              several source rounds are aggregated best-per-pilot (issue #51). -->
       {#if fields.seeding}
         <Field
           label="Seeding"
           hint={seedKind === 'FromRanking'
-            ? 'Draw this round from one or more prior rounds’ rankings (the bracket / cut case).'
+            ? 'Draw this round from one or more prior rounds’ rankings.'
             : 'Draw straight from the eligible class’ roster membership.'}
         >
           <Select bind:value={seedKind} aria-label="Seeding">
@@ -1424,7 +1455,7 @@
           label="Channel mode"
           hint={channelMode === 'Static'
             ? 'Static = each pilot’s fixed channel; heats are channel-balanced (time-trial / qualifying).'
-            : 'Per-heat = channels assigned per heat from the timer’s pool (for brackets).'}
+            : 'Per-heat = channels assigned per heat from the timer’s pool.'}
         >
           <Select bind:value={channelMode} aria-label="Channel mode">
             <option value="Static">Static</option>
@@ -2015,6 +2046,15 @@
   }
   .empty strong {
     color: var(--gf-text);
+  }
+  .link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--gf-accent);
+    text-decoration: underline;
+    cursor: pointer;
   }
   .heat-list {
     list-style: none;

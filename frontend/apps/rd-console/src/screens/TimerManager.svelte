@@ -8,7 +8,7 @@
    * stray 400 is surfaced gracefully. Ids are auto-generated server-side — never shown or asked for.
    *
    * It is used two ways, so the CRUD lives in one place:
-   *  - the picker's {@link Timers} modal embeds it **CRUD-only** (no event context to select for);
+   *  - the {@link TimersPage} embeds it **CRUD-only** (no event context to select for);
    *  - the in-event {@link EventTimers} screen embeds it and layers **per-event selection** on top,
    *    via the optional `rowLead` snippet (a checkbox per row) and `listHeader`/`listFooter`
    *    snippets (the selection count + Save).
@@ -743,7 +743,8 @@
     flex-wrap: wrap;
     gap: var(--gf-space-2);
     margin-top: 2px;
-    font-size: var(--gf-font-size-xs);
+    /* Actual config data (the assigned channels) — bumped up one step for sunlight readability. */
+    font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
   }
   .timer-channels .nodes {

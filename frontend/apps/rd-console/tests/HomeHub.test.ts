@@ -48,6 +48,17 @@ const TIMERS: Timer[] = [
     id: 'rh-1',
     name: 'Track RH',
     kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
+    // A live RH that's up: Connected counts toward "connected" (not just Mock's Ready).
+    status: 'Connected',
+    channel_capability: 'Flexible',
+    node_count: 8,
+    available_channels: []
+  },
+  {
+    id: 'rh-2',
+    name: 'Spare RH',
+    kind: { Rotorhazard: { url: 'http://rh2.local:5000' } },
+    // Configured but not dialed in yet: does NOT count.
     status: 'Configured',
     channel_capability: 'Flexible',
     node_count: 8,
@@ -88,7 +99,7 @@ describe('HomeHub (app-level landing, #118)', () => {
     expect(screen.getByRole('heading', { name: 'Timers' })).toBeInTheDocument();
 
     // Summaries settle per card (count + unit are separate spans): 2 pilots, 3 classes, 2 events,
-    // 2 timers · 1 connected (only Mock is Ready).
+    // 3 timers · 2 connected (Mock is Ready + the live RH is Connected; the Configured RH is excluded).
     const pilotsCard = screen.getByRole('heading', { name: 'Pilots' }).closest('button')!;
     const classesCard = screen.getByRole('heading', { name: 'Classes' }).closest('button')!;
     const eventsCard = screen.getByRole('heading', { name: 'Events' }).closest('button')!;
@@ -100,7 +111,7 @@ describe('HomeHub (app-level landing, #118)', () => {
     await waitFor(() => expect(within(eventsCard).getByText('2')).toBeInTheDocument());
     expect(within(eventsCard).getByText('events')).toBeInTheDocument();
     await waitFor(() => expect(within(timersCard).getByText('timers')).toBeInTheDocument());
-    expect(within(timersCard).getByText(/1 connected/)).toBeInTheDocument();
+    expect(within(timersCard).getByText(/2 connected/)).toBeInTheDocument();
   });
 
   it('navigates to each page on card click', async () => {

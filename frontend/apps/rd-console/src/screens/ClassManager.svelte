@@ -10,10 +10,10 @@
    *
    * It is built **reusable** so the same CRUD lives in one place:
    *  - the {@link ClassesPage} embeds it for directory CRUD;
-   *  - the in-event {@link EventClasses} embeds it and layers **per-event selection** on top, via the
-   *    optional `rowLead` snippet (a checkbox per row), the `listHeader`/`listFooter` snippets (the
-   *    selection count + Save), and `rowChecked` (the selected-row highlight) — the very seam
-   *    {@link PilotManager} exposes for {@link EventRoster}. **Selection concerns live in that host,
+   *  - the in-event {@link EventClassesRoster} embeds it and layers **per-event selection** on top,
+   *    via the optional `rowLead` snippet (a checkbox per row), the `listHeader`/`listFooter` snippets
+   *    (the selection count + Save), and `rowChecked` (the selected-row highlight) — the very seam
+   *    {@link PilotManager} exposes for the in-event roster. **Selection concerns live in that host,
    *    not here** — this component is purely the directory + form.
    *
    * New classes the RD creates are always **`Custom`** (the create form has no org source picker).

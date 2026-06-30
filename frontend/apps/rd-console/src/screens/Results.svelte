@@ -18,6 +18,7 @@
    */
   import { StandingsTable, Button, Card, Select, formatMicros, toast } from '@gridfpv/components';
   import type {
+    ChannelCatalogEntry,
     Class,
     ClassId,
     ClassStanding,
@@ -25,13 +26,17 @@
     HeatResult,
     HeatSummary,
     Pilot,
+    PilotId,
+    PilotProgress,
     RankEntry,
     RoundDef,
     RoundId,
     RoundStanding
   } from '@gridfpv/types';
-  import { downloadJson, toExportJson } from '../lib/results.js';
+  import { buildResultsExport, downloadJson, toExportJson } from '../lib/results.js';
   import { isTimedQualFormat } from '../lib/formats.js';
+  import { createCompetitorNameResolver } from '../lib/competitorName.js';
+  import { channelLabel, nodeIndexOf } from '../lib/channels.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let {
@@ -47,30 +52,80 @@
   const hasEventProjection = $derived(!!heatResult || !!(standings && standings.length));
 
   // --- Directory (class names + callsigns) -------------------------------------------------------
-  // Resolved once: the class directory (class id → name) and the pilot directory (competitor ref →
-  // callsign). Every displayed competitor resolves through `callsign` — never the raw ref (CLAUDE.md).
+  // The class directory (class id → name), the pilot directory (callsigns), and the channel catalog.
+  // Every displayed competitor resolves through the SHARED resolver (`createCompetitorNameResolver`,
+  // the same one Live control + Marshaling use) — never the raw ref / `node-0` (CLAUDE.md). Class
+  // names resolve through `className`, which shows a neutral placeholder while the directory loads
+  // rather than flashing the raw id.
   let classes = $state<Class[]>([]);
   let pilots = $state<Pilot[]>([]);
+  let catalog = $state<ChannelCatalogEntry[]>([]);
+  // Loaded-flags so a not-yet-resolved name renders a neutral placeholder ("—") instead of the raw
+  // id while the directory read is still in flight (the flash-the-raw-id bug).
+  let classesLoaded = $state(false);
+  let pilotsLoaded = $state(false);
 
   const eventClassIds = $derived<ClassId[]>(session?.currentEvent?.classes ?? []);
   const eventClasses = $derived<Class[]>(
     eventClassIds.map((id) => classes.find((c) => c.id === id)).filter((c): c is Class => !!c)
   );
-  const className = (id: ClassId): string => classes.find((c) => c.id === id)?.name ?? id;
-  const pilotByRef = $derived(new Map(pilots.map((p) => [p.id, p] as const)));
-  const callsign = (ref: CompetitorRef): string => pilotByRef.get(ref)?.callsign ?? ref;
+  // A class id → its friendly name; never the raw id. A neutral placeholder shows while the directory
+  // loads or for an unknown id (CLAUDE.md: never print the raw id to the screen).
+  const className = (id: ClassId): string =>
+    classesLoaded ? (classes.find((c) => c.id === id)?.name ?? '—') : '—';
 
   $effect(() => {
     if (!session) return;
     session
       .listClasses()
-      .then((list) => (classes = list))
+      .then((list) => ((classes = list), (classesLoaded = true)))
       .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
     session
       .listPilots()
-      .then((list) => (pilots = list))
+      .then((list) => ((pilots = list), (pilotsLoaded = true)))
       .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
+    session
+      .listChannels()
+      .then((list) => (catalog = list))
+      .catch(() => (catalog = []));
   });
+
+  // ── Friendly competitor names (the shared resolver) ──
+  // A ref resolves to: (1) an explicit Register binding's callsign, (2) the ref-as-pilot-id callsign
+  // (the common roster-seeded heat), (3) an open-practice `node-{i}` seat's channel label, else (4)
+  // the bare handle. Results aggregates across heats, so the channel map is the UNION of every heat's
+  // frequency assignment, and the explicit bindings come from the live stream's current heat
+  // (best-effort — the bulk of refs are roster-seeded or node seats, which resolve without it).
+  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
+  const explicitPilotByRef = $derived(
+    new Map<CompetitorRef, PilotId>(
+      (session?.liveState?.progress ?? [])
+        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
+        .map((p) => [p.competitor, p.pilot])
+    )
+  );
+  const channelByRef = $derived.by(() => {
+    const map = new Map<CompetitorRef, string>();
+    for (const h of heats)
+      for (const [ref, mhz] of h.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
+    return map;
+  });
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
+    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef })
+  );
+
+  // The display name for a competitor ref. Shows "—" while the pilot directory loads (so a
+  // roster-seeded ref never flashes as its raw id), and a neutral "Node N" for an unresolved
+  // open-practice seat (never the raw `node-0`). A genuine free-text sim handle is its own label.
+  function resolveName(ref: CompetitorRef): string {
+    if (!pilotsLoaded) return '—';
+    const name = competitorName(ref);
+    if (name === ref) {
+      const idx = nodeIndexOf(ref);
+      if (idx !== undefined) return `Node ${idx + 1}`;
+    }
+    return name;
+  }
 
   // --- Rounds + heats (the phase inputs) --------------------------------------------------------
   // The event's rounds (read off `currentEvent`, kept live by the session) and the scheduled-heats
@@ -78,6 +133,11 @@
   const rounds = $derived<RoundDef[]>(session?.currentEvent?.rounds ?? []);
   let heats = $state<HeatSummary[]>([]);
   let heatsLoaded = $state(false);
+  // Bumped by the per-view "Try again" button; the fetch effects read it so a retry re-runs them.
+  let reloadNonce = $state(0);
+  function retry() {
+    reloadNonce += 1;
+  }
 
   async function refreshHeats() {
     if (!session) return;
@@ -152,19 +212,24 @@
   );
   let rankingRows = $state<RankEntry[]>([]);
   let rankingLoading = $state(false);
+  // A load FAILURE is distinct from a genuinely-empty round: track it so the view can show a
+  // "Couldn't load — retry" state instead of the misleading "nothing scored yet" empty state (P1-5).
+  let rankingError = $state(false);
   $effect(() => {
     if (!session) return;
     const rid = rankingRoundId;
     void session.liveState;
+    void reloadNonce;
     if (!rid) {
       rankingRows = [];
       return;
     }
     rankingLoading = true;
+    rankingError = false;
     session
       .roundRanking(rid)
-      .then((rows) => (rankingRows = rows))
-      .catch(() => (rankingRows = []))
+      .then((rows) => ((rankingRows = rows), (rankingError = false)))
+      .catch(() => ((rankingRows = []), (rankingError = true)))
       .finally(() => (rankingLoading = false));
   });
 
@@ -178,19 +243,22 @@
   });
   let roundStandingRows = $state<RoundStanding[]>([]);
   let roundStandingsLoading = $state(false);
+  let roundStandingsError = $state(false);
   $effect(() => {
     if (!session) return;
     const rid = timedQualRoundId;
     void session.liveState;
+    void reloadNonce;
     if (!rid) {
       roundStandingRows = [];
       return;
     }
     roundStandingsLoading = true;
+    roundStandingsError = false;
     session
       .roundStandings(rid)
-      .then((rows) => (roundStandingRows = rows))
-      .catch(() => (roundStandingRows = []))
+      .then((rows) => ((roundStandingRows = rows), (roundStandingsError = false)))
+      .catch(() => ((roundStandingRows = []), (roundStandingsError = true)))
       .finally(() => (roundStandingsLoading = false));
   });
 
@@ -206,6 +274,7 @@
   });
   function ttMetricValue(s: RoundStanding): string {
     const m = s.metric;
+    if (!m) return '';
     if ('BestConsecutive' in m) return formatMicros(m.BestConsecutive.micros);
     if ('MostLaps' in m) return String(m.MostLaps.laps);
     return '';
@@ -218,30 +287,41 @@
   );
   let classRows = $state<ClassStanding[]>([]);
   let classLoading = $state(false);
+  let classError = $state(false);
   $effect(() => {
     if (!session) return;
     const cls = selectedClassId;
     void session.liveState;
+    void reloadNonce;
     if (cls === '') {
       classRows = [];
       return;
     }
     classLoading = true;
+    classError = false;
     session
       .classStandings(cls)
-      .then((s) => (classRows = s.standings))
-      .catch(() => (classRows = []))
+      .then((s) => ((classRows = s.standings), (classError = false)))
+      .catch(() => ((classRows = []), (classError = true)))
       .finally(() => (classLoading = false));
   });
 
+  const roundLabelFor = (id: RoundId): string => rounds.find((r) => r.id === id)?.label ?? '—';
+
+  // Export the CURRENT views with FRIENDLY names baked in (P1-2): competitor refs → callsigns and
+  // class/round ids → their labels, so the JSON is human-usable, not a raw-ref wire dump. The raw ref
+  // is preserved alongside (`competitor_ref`) so the export stays traceable. The legacy event-level
+  // projection (`heatResult` / `standings`) is carried through as well.
   function exportAll() {
-    const payload = {
-      class_standings:
-        selectedClassId !== '' ? { class: selectedClassId, standings: classRows } : undefined,
-      round_ranking: rankingRoundId ? { round: rankingRoundId, ranking: rankingRows } : undefined,
-      heatResult,
-      standings
-    };
+    const payload = buildResultsExport({
+      resolveCompetitor: resolveName,
+      className: selectedClassId !== '' ? className(selectedClassId) : undefined,
+      classStandings: selectedClassId !== '' ? classRows : undefined,
+      roundLabel: rankingRoundId ? roundLabelFor(rankingRoundId) : undefined,
+      roundRanking: rankingRoundId ? rankingRows : undefined,
+      standings,
+      heatResult
+    });
     downloadJson('gridfpv-results.json', toExportJson(payload));
   }
 </script>
@@ -275,6 +355,8 @@
         {#if isTimedQualFormat(currentView.round.format)}
           {#if roundStandingsLoading && roundStandingRows.length === 0}
             <p class="empty" role="status">Loading standings…</p>
+          {:else if roundStandingsError}
+            {@render loadError()}
           {:else if roundStandingRows.length === 0}
             <p class="empty" role="status">
               Nothing scored for <strong>{currentView.label}</strong> yet — standings populate as the
@@ -285,6 +367,8 @@
           {/if}
         {:else if rankingLoading && rankingRows.length === 0}
           <p class="empty" role="status">Loading standings…</p>
+        {:else if rankingError}
+          {@render loadError()}
         {:else if rankingRows.length === 0}
           <p class="empty" role="status">
             Nothing scored for <strong>{currentView.label}</strong> yet — standings populate as the round
@@ -296,6 +380,8 @@
       {:else if currentView?.kind === 'class'}
         {#if classLoading && classRows.length === 0}
           <p class="empty" role="status">Loading standings…</p>
+        {:else if classError}
+          {@render loadError()}
         {:else if classRows.length === 0}
           <p class="empty" role="status">
             Nothing scored for <strong>{className(currentView.classId)}</strong> yet — standings populate
@@ -317,7 +403,7 @@
               {#each classRows as row (row.competitor)}
                 <tr>
                   <td class="pos"><span class="badge">{row.position}</span></td>
-                  <td class="pilot">{callsign(row.competitor)}</td>
+                  <td class="pilot">{resolveName(row.competitor)}</td>
                   <td class="num points">{row.points}</td>
                   <td class="num">{formatMicros(row.best_lap_micros)}</td>
                   <td class="num">{row.total_laps}</td>
@@ -344,6 +430,13 @@
   {/if}
 </section>
 
+{#snippet loadError()}
+  <div class="load-error" role="alert">
+    <p>Couldn't load the standings.</p>
+    <Button variant="secondary" size="sm" onclick={retry}>Try again</Button>
+  </div>
+{/snippet}
+
 {#snippet rankTable(caption: string, rows: RankEntry[])}
   <table class="standings" aria-label={caption}>
     <thead>
@@ -356,7 +449,7 @@
       {#each rows as row (row.competitor)}
         <tr>
           <td class="pos"><span class="badge">{row.position}</span></td>
-          <td class="pilot">{callsign(row.competitor)}</td>
+          <td class="pilot">{resolveName(row.competitor)}</td>
         </tr>
       {/each}
     </tbody>
@@ -379,7 +472,7 @@
       {#each rows as row (row.competitor)}
         <tr>
           <td class="pos"><span class="badge">{row.position}</span></td>
-          <td class="pilot">{callsign(row.competitor)}</td>
+          <td class="pilot">{resolveName(row.competitor)}</td>
           <td class="num">{formatMicros(row.best_lap_micros)}</td>
           {#if ttMetricHeader}
             <td class="num">{ttMetricValue(row)}</td>
@@ -414,6 +507,17 @@
   }
   .empty strong {
     color: var(--gf-text);
+  }
+  .load-error {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--gf-space-3);
+    color: var(--gf-text-secondary);
+    font-size: var(--gf-font-size-md);
+  }
+  .load-error p {
+    margin: 0;
   }
 
   .standings {
