@@ -10,7 +10,7 @@ import {
 
 describe('formats — friendly-name mapping (Rounds form redesign item 1)', () => {
   it('maps each known format key to its friendly label', () => {
-    expect(formatLabel('open_practice')).toBe('Open Practice');
+    expect(formatLabel('open_practice')).toBe('Practice');
     expect(formatLabel('head_to_head')).toBe('Head-to-Head');
     // `timed_qual` is the stable wire key; only its friendly label was renamed (#218).
     expect(formatLabel('timed_qual')).toBe('Time Trials');

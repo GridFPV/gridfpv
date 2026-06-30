@@ -79,7 +79,9 @@ export function isRoundTypeFormat(format: string | undefined | null): boolean {
  * of the key via {@link formatLabel}, so the UI never shows a bare `snake_case` token.
  */
 export const FORMAT_LABELS: Readonly<Record<string, string>> = {
-  open_practice: 'Open Practice',
+  // The `open_practice` wire key is unchanged (persistence-stable); only the friendly label was
+  // shortened "Open Practice" → "Practice".
+  open_practice: 'Practice',
   // The `timed_qual` wire key is unchanged (persistence-stable); only the friendly label was
   // renamed Qualifying → Time Trials (#218 / decisions D11).
   timed_qual: 'Time Trials',

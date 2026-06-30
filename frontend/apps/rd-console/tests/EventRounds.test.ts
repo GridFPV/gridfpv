@@ -1024,9 +1024,9 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     expect(dashes.length).toBe(2);
   });
 
-  it("names an open-practice round's auto-created heat 'Open Practice Heat' (not its id)", async () => {
+  it("names an open-practice round's auto-created heat 'Practice Heat' (not its id)", async () => {
     // An open-practice round (open_practice format + AllChannels seeding) auto-creates one heat;
-    // it should display as "Open Practice Heat" rather than the generated heat id.
+    // it should display as "Practice Heat" rather than the generated heat id.
     const OP_ROUND: RoundDef = {
       id: 'op1',
       label: 'Open Practice',
@@ -1055,7 +1055,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     render(EventRounds, { session });
 
     // The heat shows the friendly name; the generated id is not rendered.
-    const nameEl = await screen.findByText('Open Practice Heat');
+    const nameEl = await screen.findByText('Practice Heat');
     expect(nameEl).toHaveClass('heat-id');
     expect(screen.queryByText('op1-heat-7x2')).toBeNull();
   });
