@@ -98,9 +98,9 @@ use crate::classes::{
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
-    ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, NewRoundReq, RoundDef, RoundError,
-    SetActiveEventRequest, SetClassMembershipRequest, SetEventClassesRequest,
-    SetEventRosterRequest, UpdateRoundReq,
+    ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, NewRoundReq, RegistryError,
+    RegistryErrorKind, RoundDef, RoundError, SetActiveEventRequest, SetClassMembershipRequest,
+    SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{HeatSummary, heat_summaries, live_state, with_heat_timing};
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
@@ -557,16 +557,12 @@ async fn delete_event(
     State(registry): State<EventRegistry>,
     Path(event_id): Path<EventId>,
 ) -> Result<StatusCode, ProtocolError> {
-    registry.delete(&event_id).map_err(|e| {
-        // A protected-Practice delete is a client error (BadRequest); a genuinely unknown id is a
-        // 404. Distinguish by whether the event still resolves (it does not after a real delete).
-        let code = if registry.resolve(&event_id).is_some() {
-            ErrorCode::BadRequest
-        } else {
-            ErrorCode::UnknownScope
-        };
-        ProtocolError::new(code, e.to_string())
-    })?;
+    // The registry types the failure: a protected-Practice delete is a client error (BadRequest),
+    // a genuinely unknown id is a 404, and a file-removal (I/O) failure is a 500 — note the
+    // in-memory drop already happened, so an I/O failure must NOT read as a 404.
+    registry
+        .delete(&event_id)
+        .map_err(registry_error_to_protocol)?;
     Ok(StatusCode::OK)
 }
 
@@ -596,7 +592,7 @@ async fn set_active_event(
 ) -> Result<Json<EventMeta>, ProtocolError> {
     let meta = registry
         .set_active(&body.id)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -638,6 +634,11 @@ async fn create_timer(
     State(registry): State<EventRegistry>,
     Json(body): Json<CreateTimerRequest>,
 ) -> Result<Json<Timer>, ProtocolError> {
+    // Reject a bad config up front as a 400 (release-hardening P2): a 0 node count, an empty RH URL,
+    // or a runaway Mock laps count.
+    let node_count = body.node_count.unwrap_or(crate::timers::DEFAULT_NODE_COUNT);
+    crate::timers::validate_timer_config(&body.kind, node_count)
+        .map_err(|msg| ProtocolError::new(ErrorCode::BadRequest, msg))?;
     let timer = registry
         .timers()
         .create(&body)
@@ -656,6 +657,15 @@ async fn update_timer(
     Path(timer_id): Path<TimerId>,
     Json(body): Json<UpdateTimerRequest>,
 ) -> Result<Json<Timer>, ProtocolError> {
+    // Validate the *effective* post-edit config as a 400 (release-hardening P2): merge the partial
+    // request onto the existing timer so a partial edit (e.g. just `node_count: 0`) is still caught.
+    // A nonexistent id is left to `update` to report as a 404.
+    if let Some(existing) = registry.timers().get(&timer_id) {
+        let kind = body.kind.clone().unwrap_or(existing.kind);
+        let node_count = body.node_count.unwrap_or(existing.node_count);
+        crate::timers::validate_timer_config(&kind, node_count)
+            .map_err(|msg| ProtocolError::new(ErrorCode::BadRequest, msg))?;
+    }
     let timer = registry
         .timers()
         .update(&timer_id, &body)
@@ -723,11 +733,11 @@ async fn set_event_timers(
     }
     registry
         .set_timers(&event_id, body.ids)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(registry_error_to_protocol)?;
     // Record the primary in the same request (it is now guaranteed in the just-set selection).
     let meta = registry
         .set_primary_timer(&event_id, body.primary)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -747,15 +757,7 @@ async fn set_event_primary_timer(
 ) -> Result<Json<EventMeta>, ProtocolError> {
     let meta = registry
         .set_primary_timer(&event_id, body.id)
-        .map_err(|e| {
-            // "not in the selection" is a bad request; an unknown event is a 404.
-            let code = if e.0.contains("not in the event's selected timers") {
-                ErrorCode::BadRequest
-            } else {
-                ErrorCode::UnknownScope
-            };
-            ProtocolError::new(code, e.to_string())
-        })?;
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -817,6 +819,20 @@ async fn delete_pilot(
     Ok(StatusCode::OK)
 }
 
+/// Map a [`RegistryError`] to a typed [`ProtocolError`] (release-hardening P1-7): an unknown id is
+/// an `UnknownScope` (404), a bad request is a `BadRequest` (400), and an **I/O / persistence**
+/// failure is `Internal` (500). The last is the load-bearing case: the in-memory state is mutated
+/// before the write-through, so a failed write must surface as a 500 (not a 404/400) — the change
+/// did not durably land. Mirrors [`pilot_error_to_protocol`] / [`class_error_to_protocol`].
+fn registry_error_to_protocol(error: RegistryError) -> ProtocolError {
+    let code = match error.kind {
+        RegistryErrorKind::NotFound => ErrorCode::UnknownScope,
+        RegistryErrorKind::Invalid => ErrorCode::BadRequest,
+        RegistryErrorKind::Io => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, error.to_string())
+}
+
 /// Map a [`PilotError`] to a typed [`ProtocolError`] (issue #74): a validation failure is a
 /// `BadRequest` (400), an unknown id is an `UnknownScope` (404), and a persistence failure is
 /// `Internal` (500).
@@ -851,7 +867,7 @@ async fn set_event_roster(
     }
     let meta = registry
         .set_roster(&event_id, body.pilot_ids)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -871,7 +887,7 @@ async fn add_to_roster(
     }
     let meta = registry
         .add_to_roster(&event_id, pilot_id)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -886,7 +902,7 @@ async fn remove_from_roster(
 ) -> Result<Json<EventMeta>, ProtocolError> {
     let meta = registry
         .remove_from_roster(&event_id, &pilot_id)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -1027,7 +1043,7 @@ async fn set_event_classes(
     }
     let meta = registry
         .set_classes(&event_id, body.ids)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -1060,18 +1076,37 @@ async fn set_class_membership(
             ));
         }
     }
+    // The event must exist (else a 404). Beyond directory existence, membership is scoped to **this
+    // event** (release-hardening P1-5): the class must be one the event *selected* and every pilot
+    // must be on the event's *roster* — otherwise a raw API call could seat a non-roster pilot or a
+    // class the event never picked, and the raced field would diverge from the seeding/standings
+    // (which resolve against the roster). Mirrors `validate_round_fields`'s class-selection guard.
+    let meta = registry.meta_of(&event_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        )
+    })?;
+    if !meta.classes.contains(&class_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!("class {:?} is not selected by this event", class_id.0),
+        ));
+    }
+    for slot in &body.pilots {
+        if !meta.roster.contains(&slot.pilot) {
+            return Err(ProtocolError::new(
+                ErrorCode::BadRequest,
+                format!("pilot {:?} is not on this event's roster", slot.pilot.0),
+            ));
+        }
+    }
     // Validate each assigned channel (race redesign Slice 7a) against the event's **primary**
     // timer's available-channels pool — the GQ-style fixed channel must be one the timer offers.
     // The pool may exceed the timer's `node_count` (node_count caps only pilots-per-heat), so any
     // channel in the pool is valid; we never cap the number of distinct channels at node_count.
     let assigned: Vec<u16> = body.pilots.iter().filter_map(|s| s.channel).collect();
     if !assigned.is_empty() {
-        let meta = registry.meta_of(&event_id).ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::UnknownScope,
-                format!("no event with id {:?}", event_id.0),
-            )
-        })?;
         let timer = meta
             .effective_primary()
             .and_then(|id| registry.timers().get(&id));
@@ -1096,7 +1131,7 @@ async fn set_class_membership(
     }
     let meta = registry
         .set_class_membership(&event_id, class_id, body.pilots)
-        .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -1827,7 +1862,7 @@ mod tests {
     // `Body` and `Request` come in via `use super::*` (they are `use`d at module level for
     // the smart fallback); the tests reach them through the glob.
     use super::*;
-    use crate::events::{NewRoundReq, SeedingRule};
+    use crate::events::{MemberSlot, NewRoundReq, SeedingRule};
     use gridfpv_engine::scoring::Metric;
     use gridfpv_events::{AdapterId, GateIndex, HeatTransition, LogRef, Pass};
     use gridfpv_projection::CompetitorKey;
@@ -3212,6 +3247,143 @@ mod tests {
                 laps: 9,
                 lap_ms: 100
             }
+        );
+    }
+
+    // --- P2: timer config validation ----------------------------------------
+
+    #[tokio::test]
+    async fn post_timer_rejects_zero_node_count() {
+        let (registry, _state, _) = state_with(vec![]);
+        let body = CreateTimerRequest {
+            name: "Zero".into(),
+            kind: TimerKind::Mock {
+                laps: 1,
+                lap_ms: 50,
+            },
+            channel_capability: None,
+            node_count: Some(0),
+            available_channels: None,
+        };
+        let (status, _) = post_timer(registry, &body, None).await;
+        // A 0-node timer caps every heat to no pilots — rejected as a 400, not silently created.
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // --- P1-5: membership is scoped to the event's roster + class selection --
+
+    /// Seed a class C (directory + **selected**) and pilot P (directory + **roster**) on Practice,
+    /// returning their ids alongside an extra pilot Q and class D that are in the directory but
+    /// *not* on the roster / selection.
+    fn membership_fixture(
+        registry: &EventRegistry,
+    ) -> (ClassId, ClassId, PilotId, PilotId, EventId) {
+        let event = EventId(PRACTICE_EVENT_ID.into());
+        let class_c = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Open".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let class_d = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Unselected".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let pilot_p = registry
+            .pilots()
+            .create(&CreatePilotRequest {
+                callsign: "Rostered".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let pilot_q = registry
+            .pilots()
+            .create(&CreatePilotRequest {
+                callsign: "Outsider".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        registry.set_classes(&event, vec![class_c.clone()]).unwrap();
+        registry.set_roster(&event, vec![pilot_p.clone()]).unwrap();
+        (class_c, class_d, pilot_p, pilot_q, event)
+    }
+
+    async fn put_membership(
+        registry: EventRegistry,
+        event: &EventId,
+        class: &ClassId,
+        pilots: Vec<PilotId>,
+    ) -> StatusCode {
+        let body = SetClassMembershipRequest {
+            pilots: pilots.into_iter().map(MemberSlot::new).collect(),
+        };
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/events/{}/classes/{}/membership",
+                        event.0, class.0
+                    ))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response.status()
+    }
+
+    #[tokio::test]
+    async fn put_membership_rejects_non_roster_pilot_and_non_selected_class() {
+        let (registry, _state, _) = state_with(vec![]);
+        let (class_c, class_d, pilot_p, pilot_q, event) = membership_fixture(&registry);
+
+        // Happy path: a selected class + a rostered pilot is accepted.
+        assert_eq!(
+            put_membership(registry.clone(), &event, &class_c, vec![pilot_p.clone()]).await,
+            StatusCode::OK
+        );
+
+        // A pilot in the directory but NOT on the event roster → 400.
+        assert_eq!(
+            put_membership(registry.clone(), &event, &class_c, vec![pilot_q]).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // A class in the directory but NOT selected by the event → 400.
+        assert_eq!(
+            put_membership(registry, &event, &class_d, vec![pilot_p]).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    // --- P1-7: a registry I/O failure maps to a 500, not a 404/400 ----------
+
+    #[test]
+    fn registry_error_kinds_map_to_the_right_status() {
+        use crate::events::RegistryError;
+        // An I/O / persistence failure is a 500 — the load-bearing case: in-memory state was already
+        // mutated, so it must NOT read as a 404/400.
+        assert_eq!(
+            registry_error_to_protocol(RegistryError::io("disk full")).code,
+            ErrorCode::Internal
+        );
+        assert_eq!(
+            registry_error_to_protocol(RegistryError::not_found("nope")).code,
+            ErrorCode::UnknownScope
+        );
+        assert_eq!(
+            registry_error_to_protocol(RegistryError::invalid("bad")).code,
+            ErrorCode::BadRequest
         );
     }
 }

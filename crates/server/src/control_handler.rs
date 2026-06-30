@@ -532,6 +532,22 @@ pub fn apply_fill_round(
         },
         // Iterate the single step until the round is terminal, capped defensively.
         FillMode::All => {
+            // An open-ended `Static` round (rounds=0) never reports Complete — its generator yields
+            // the next heat on demand forever — so a batch `All` fill would loop to the cap and
+            // schedule MAX_FILL_ALL_HEATS heats while acking ok (release-hardening P1-8). Reject it
+            // up front and steer the RD to single-step fills.
+            if let Some(def) = meta.rounds.iter().find(|r| r.id == round) {
+                if crate::round_engine::is_open_ended_static(def) {
+                    return CommandAck::failed(ProtocolError::new(
+                        ErrorCode::BadRequest,
+                        format!(
+                            "round {:?} is open-ended (no fixed heat count); use single-step fill \
+                             instead of fill-all",
+                            round.0
+                        ),
+                    ));
+                }
+            }
             for _ in 0..MAX_FILL_ALL_HEATS {
                 match fill_round_once(registry, &meta, state, &round) {
                     FillStep::Appended => continue,
@@ -679,7 +695,24 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::Start { heat } => heat_transition(state, heat, HeatCommand::Start),
         Command::SkipCountdown { heat } => heat_transition(state, heat, HeatCommand::SkipCountdown),
         Command::ForceEnd { heat } => heat_transition(state, heat, HeatCommand::ForceEnd),
-        Command::Finalize { heat } => heat_transition(state, heat, HeatCommand::Finalize),
+        Command::Finalize { heat } => {
+            // Gate finalize on **open protests** (release-hardening P1-4): a heat with a filed,
+            // unresolved protest must not be finalized — the result is still contested. The RD
+            // resolves (or reverses a resolution of) the protest first. The auto-official protest
+            // window is a separate, additive timer and does not run through this command path.
+            let (events, _cursor) = state.read()?;
+            let open = open_protest_count(&events, &heat);
+            if open > 0 {
+                return Err(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    format!(
+                        "cannot finalize heat {:?}: resolve {open} open protest(s) first",
+                        heat.0
+                    ),
+                ));
+            }
+            heat_transition(state, heat, HeatCommand::Finalize)
+        }
         // `Advance` on the real control path is intercepted by `apply_command_in_event`
         // (it loads the next heat too — see `apply_advance`). On the bare-`apply_command`
         // path it records just the `Final → Advanced` transition (no next-heat selection),
@@ -972,6 +1005,45 @@ fn require_ruling_target(state: &AppState, target: LogRef) -> Result<(), Protoco
             format!("log offset {} is out of range", target.0),
         )),
     }
+}
+
+/// Count a heat's **open protests** (release-hardening P1-4): [`Event::ProtestFiled`] facts for
+/// `heat` that have no *effective* resolution.
+///
+/// A protest (filed at offset `f`) is closed by a [`Event::ProtestResolved`] whose `target` is `f`
+/// — **unless** that resolution was itself reversed by a [`Event::RulingReversed`] (the structural
+/// "void the void"), which re-opens the protest. So the open set is: filed-for-this-heat minus the
+/// filings that carry a non-reversed resolution. Used to gate `Finalize`.
+fn open_protest_count(events: &[Event], heat: &HeatId) -> usize {
+    use std::collections::HashSet;
+    // Ruling offsets reversed by a `RulingReversed` (a reversed protest-resolution re-opens it).
+    let reversed: HashSet<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::RulingReversed { target } => Some(target.0),
+            _ => None,
+        })
+        .collect();
+    // Filing offsets that have an effective (non-reversed) resolution.
+    let resolved: HashSet<u64> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, e)| match e {
+            Event::ProtestResolved { target, .. } if !reversed.contains(&(offset as u64)) => {
+                Some(target.0)
+            }
+            _ => None,
+        })
+        .collect();
+    // Filed protests for this heat with no effective resolution are still open.
+    events
+        .iter()
+        .enumerate()
+        .filter(|(offset, e)| {
+            matches!(e, Event::ProtestFiled { heat: h, .. } if h == heat)
+                && !resolved.contains(&(*offset as u64))
+        })
+        .count()
 }
 
 /// Require that `target` names a real [`Event::ProtestFiled`] in the log — the cheap target check
@@ -1750,6 +1822,97 @@ mod tests {
         assert_eq!(before.len(), after.len());
     }
 
+    /// P1-4: `Finalize` is **gated on open protests** — a heat with a filed, unresolved protest
+    /// cannot be finalized (rejected, appends nothing); once the protest is resolved, finalize is
+    /// allowed.
+    #[test]
+    fn finalize_is_gated_on_open_protests() {
+        use gridfpv_events::ProtestOutcome;
+        let state = scheduled_state(); // offset 0: HeatScheduled q-1
+        // Drive q-1 to Unofficial (finalizable).
+        for cmd in [
+            Command::Stage { heat: heat() },
+            Command::Start { heat: heat() },
+            Command::SkipCountdown { heat: heat() },
+            Command::ForceEnd { heat: heat() },
+        ] {
+            assert!(apply_command(&state, cmd).ok);
+        }
+
+        // File a protest against the heat.
+        assert!(
+            apply_command(
+                &state,
+                Command::FileProtest {
+                    heat: heat(),
+                    competitor: CompetitorRef("A".into()),
+                    note: "contested".into(),
+                },
+            )
+            .ok
+        );
+        let (before, _) = state.read().unwrap();
+        let filed = before
+            .iter()
+            .position(|e| matches!(e, Event::ProtestFiled { .. }))
+            .expect("protest filed") as u64;
+
+        // Finalize is rejected while the protest is open — and appends nothing.
+        let ack = apply_command(&state, Command::Finalize { heat: heat() });
+        assert!(!ack.ok, "finalize must be blocked by an open protest");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        let (after, _) = state.read().unwrap();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "blocked finalize appends nothing"
+        );
+
+        // Resolve the protest, then finalize is allowed.
+        assert!(
+            apply_command(
+                &state,
+                Command::ResolveProtest {
+                    target: LogRef(filed),
+                    outcome: ProtestOutcome::Denied,
+                },
+            )
+            .ok
+        );
+        let ack = apply_command(&state, Command::Finalize { heat: heat() });
+        assert!(ack.ok, "after resolution finalize is allowed: {ack:?}");
+    }
+
+    /// P1-4 unit: `open_protest_count` — a filed protest is open until an *effective* (non-reversed)
+    /// resolution closes it; reversing the resolution re-opens it.
+    #[test]
+    fn open_protest_count_tracks_resolution_and_reversal() {
+        use gridfpv_events::ProtestOutcome;
+        let h = heat();
+        let filed = Event::ProtestFiled {
+            heat: h.clone(),
+            competitor: CompetitorRef("A".into()),
+            note: "x".into(),
+        };
+        // Just a filing → open.
+        assert_eq!(open_protest_count(std::slice::from_ref(&filed), &h), 1);
+        // Filing + resolution → closed.
+        let resolved = vec![
+            filed.clone(),
+            Event::ProtestResolved {
+                target: LogRef(0),
+                outcome: ProtestOutcome::Denied,
+            },
+        ];
+        assert_eq!(open_protest_count(&resolved, &h), 0);
+        // Reversing the resolution (at offset 1) re-opens the protest.
+        let mut reversed = resolved.clone();
+        reversed.push(Event::RulingReversed { target: LogRef(1) });
+        assert_eq!(open_protest_count(&reversed, &h), 1);
+        // A protest for a DIFFERENT heat doesn't count.
+        assert_eq!(open_protest_count(&[filed], &HeatId("other".into())), 0);
+    }
+
     /// The **generalized** `ReverseRuling` (Slice 6) accepts a throw-out, a protest resolution, and
     /// a heat-void as targets — not just a penalty — and still rejects a non-ruling.
     #[test]
@@ -2291,6 +2454,123 @@ mod tests {
         assert_eq!(
             after_first, after_second,
             "fill-all is idempotent: the second run appends nothing"
+        );
+    }
+
+    /// P1-8: a `FillMode::All` on an **open-ended `Static` round** (`rounds=0`) is rejected up front
+    /// — its generator never reports Complete, so without the guard a fill-all would schedule up to
+    /// the 1000-heat cap while acking ok. Here it acks **failed** (BadRequest) and schedules nothing.
+    #[test]
+    fn fill_round_all_rejects_an_open_ended_static_round() {
+        use crate::classes::CreateClassRequest;
+        use crate::events::{CreateEventRequest, MemberSlot, NewRoundReq, SeedingRule};
+        use crate::pilots::CreatePilotRequest;
+        use crate::timers::{ChannelCapability, CreateTimerRequest, TimerKind};
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let registry = EventRegistry::new(None).unwrap();
+        let timer = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "8-node".into(),
+                kind: TimerKind::Mock { laps: 1, lap_ms: 1 },
+                channel_capability: Some(ChannelCapability::Flexible),
+                node_count: Some(8),
+                available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+            })
+            .unwrap();
+        let class = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Open".into(),
+                source: Default::default(),
+                reference: None,
+                description: None,
+            })
+            .unwrap()
+            .id;
+        let pilots: Vec<_> = ["alpha", "bravo"]
+            .iter()
+            .map(|cs| {
+                registry
+                    .pilots()
+                    .create(&CreatePilotRequest {
+                        callsign: (*cs).into(),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        let event = registry
+            .create(&CreateEventRequest {
+                name: "E".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap()
+            .id;
+        registry.set_classes(&event, vec![class.clone()]).unwrap();
+        let channels = [5658u16, 5695u16];
+        registry
+            .set_class_membership(
+                &event,
+                class.clone(),
+                pilots
+                    .into_iter()
+                    .zip(channels)
+                    .map(|(pilot, ch)| MemberSlot {
+                        pilot,
+                        channel: Some(ch),
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        registry.set_timers(&event, vec![timer.id]).unwrap();
+        // A `timed_qual` round defaults to `ChannelMode::Static`; `rounds=0` makes it open-ended.
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    label: "Time Trials".into(),
+                    classes: vec![class],
+                    format: "timed_qual".into(),
+                    params: BTreeMap::from([("rounds".into(), "0".into())]),
+                    win_condition: Some(WinCondition::BestLap),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(60),
+                    channel_mode: None,
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                },
+            )
+            .unwrap();
+        let event_id = EventId(event.0.clone());
+        let state = registry.resolve(&event_id).unwrap();
+
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.id.clone(),
+                mode: FillMode::All,
+            },
+        );
+        assert!(
+            !ack.ok,
+            "fill-all on an open-ended static round must be rejected"
+        );
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        assert_eq!(
+            heats_in_round(&state, &round.id),
+            0,
+            "the rejected fill-all scheduled NO heats (not 1000)"
         );
     }
 

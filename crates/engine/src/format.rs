@@ -306,11 +306,16 @@ pub fn position_points(table: Option<&[u32]>, position: u32, heat_size: usize) -
 /// `"10, 7, 5, 3"` (index 0 = 1st place) — into a table for [`position_points`]. An absent value, or
 /// one with no parseable entries, yields `None` (the linear fallback). Shared by every points-based
 /// structure so the editable table is read the same way everywhere.
+///
+/// A non-numeric token (e.g. the `x` in `"10, x, 3"`) is treated as **0 in place** rather than
+/// dropped, so it does not silently *shift* every later position up a place (which would award the
+/// wrong points). Empty tokens (from adjacent separators / trailing commas) are skipped.
 pub fn parse_points_table(raw: Option<&str>) -> Option<Vec<u32>> {
     let table: Vec<u32> = raw?
         .split([',', ' '])
+        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .filter_map(|s| s.trim().parse::<u32>().ok())
+        .map(|s| s.parse::<u32>().unwrap_or(0))
         .collect();
     if table.is_empty() { None } else { Some(table) }
 }
@@ -1072,6 +1077,28 @@ mod tests {
         let ranking = seed_ranking(&field(&["A", "B", "C"]));
         // skip 1, take 10 → just the remaining two.
         assert_eq!(advance_range(&ranking, 1, 10), field(&["B", "C"]));
+    }
+
+    // --- parse_points_table -------------------------------------------------
+
+    #[test]
+    fn parse_points_table_reads_a_plain_list() {
+        assert_eq!(
+            parse_points_table(Some("10, 7, 5, 3")),
+            Some(vec![10, 7, 5, 3])
+        );
+    }
+
+    #[test]
+    fn parse_points_table_treats_a_bad_token_as_zero_in_place() {
+        // The `x` must NOT shift 3 up into 2nd place: it becomes a 0 where it stands.
+        assert_eq!(parse_points_table(Some("10, x, 3")), Some(vec![10, 0, 3]));
+    }
+
+    #[test]
+    fn parse_points_table_none_for_absent_or_unparseable() {
+        assert_eq!(parse_points_table(None), None);
+        assert_eq!(parse_points_table(Some("   ")), None);
     }
 
     // --- bracket_pairs ------------------------------------------------------

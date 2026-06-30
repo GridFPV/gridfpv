@@ -569,6 +569,17 @@ pub fn is_open_practice(round: &RoundDef) -> bool {
         && matches!(round.seeding, SeedingRule::AllChannels { .. })
 }
 
+/// Whether `round` is an **open-ended `Static` round** (release-hardening P1-8): a
+/// [`ChannelMode::Static`] round whose `rounds` param is `0` (an unbounded "heats per pilot").
+///
+/// Such a round's [`fill_round_static`] generator **never** reports `Complete` — it manufactures
+/// the next heat on demand forever — so a `FillMode::All` batch fill would loop to the defensive cap
+/// (logging a spurious "generator bug" warning) instead of converging. The handler uses this to
+/// reject `FillMode::All` for the round and steer the RD to single-step fills instead.
+pub fn is_open_ended_static(round: &RoundDef) -> bool {
+    round.channel_mode == ChannelMode::Static && static_round_count(round) == 0
+}
+
 /// The **round-scoped** heat id for an open-practice round (issue #54): `"<round_id>-heat"`.
 ///
 /// The open-practice format generator emits a fixed `"open-practice"` heat id, so two open-practice
