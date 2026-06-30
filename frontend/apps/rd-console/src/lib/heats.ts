@@ -20,8 +20,8 @@ import type { HeatId, HeatSummary, RoundDef } from '@gridfpv/types';
 
 import { isDeterministicFormat, OPEN_PRACTICE } from './formats.js';
 
-/** The fixed display name for the single auto-created open-practice heat. */
-export const OPEN_PRACTICE_HEAT_NAME = 'Open Practice Heat';
+/** The fixed display name for the single auto-created practice heat. */
+export const OPEN_PRACTICE_HEAT_NAME = 'Practice Heat';
 
 /** Whether `round` is an open-practice round (its single heat is named, not numbered). */
 export function isOpenPracticeRound(round: RoundDef): boolean {
