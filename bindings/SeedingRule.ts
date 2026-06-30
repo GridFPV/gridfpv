@@ -24,7 +24,26 @@ top_n: number, } } | { "FromHeatWinners": {
  * The prior bracket-level round whose heat winners seed this round — must exist in
  * [`EventMeta::rounds`].
  */
-source_round: RoundId, } } | { "AllChannels": { 
+source_round: RoundId, } } | { "FromRankingRange": { 
+/**
+ * The prior rounds this round seeds from — each must exist in [`EventMeta::rounds`].
+ * Aggregated best-per-pilot when more than one is named. Always at least one entry.
+ */
+source_rounds: Array<RoundId>, 
+/**
+ * How many of the aggregated ranking's leading places to **skip** before taking — the
+ * 0-based start of the window (seed 13 is `skip: 12`).
+ */
+skip: number, 
+/**
+ * How many places to take after the skip — the window width. Must be `> 0`.
+ */
+take: number, } } | { "Combine": { 
+/**
+ * The sub-rules whose fields are concatenated (in order) then de-duplicated first-wins.
+ * Each is resolved exactly as a standalone seeding rule. Always at least one entry.
+ */
+sources: Array<SeedingRule>, } } | { "AllChannels": { 
 /**
  * The active channels as **node indices** (the timer-seat indices the RD made live), laid
  * out as `node-{i}` competitor refs by the field builder, in this order.

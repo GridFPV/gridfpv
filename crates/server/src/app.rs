@@ -1208,9 +1208,10 @@ fn fill_error(err: round_engine::FillError) -> ProtocolError {
     use round_engine::FillError;
     let code = match err {
         FillError::UnknownRound(_) | FillError::UnknownSourceRound(_) => ErrorCode::UnknownScope,
-        FillError::EmptyField(_) | FillError::UnknownFormat(_) | FillError::MissingChannel(_) => {
-            ErrorCode::BadRequest
-        }
+        FillError::EmptyField(_)
+        | FillError::UnknownFormat(_)
+        | FillError::MissingChannel(_)
+        | FillError::SeedingTooDeep => ErrorCode::BadRequest,
     };
     ProtocolError::new(code, err.to_string())
 }

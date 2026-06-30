@@ -47,7 +47,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gridfpv_engine::event::score_marshaled;
 use gridfpv_engine::format::{
-    CompletedHeat, FormatConfig, FormatRegistry, GeneratorStep, RankEntry, advance_top_n,
+    CompletedHeat, FormatConfig, FormatRegistry, GeneratorStep, RankEntry, advance_range,
+    advance_top_n,
 };
 use gridfpv_engine::heat::{HeatState, heat_state};
 use gridfpv_engine::schedule::{Frequency, FrequencyPool, allocate};
@@ -122,6 +123,11 @@ pub enum FillError {
     /// assigned channel** (race redesign Slice 7a): static channel-balanced formation needs every
     /// member to carry a fixed channel. The inner `String` names the pilot missing one.
     MissingChannel(String),
+    /// Seeding resolution recursed past [`MAX_SEEDING_DEPTH`](crate::events::MAX_SEEDING_DEPTH) —
+    /// either a [`Combine`](crate::events::SeedingRule::Combine) nested too deeply, or a cross-round
+    /// seeding **cycle** (e.g. round A seeds `FromRanking` B while B seeds `FromRanking` A). A guard
+    /// that turns an otherwise-unbounded recursion / stack overflow into a typed `400`.
+    SeedingTooDeep,
 }
 
 impl std::fmt::Display for FillError {
@@ -145,6 +151,12 @@ impl std::fmt::Display for FillError {
                 write!(
                     f,
                     "static-channel round member {pilot:?} has no assigned channel"
+                )
+            }
+            FillError::SeedingTooDeep => {
+                write!(
+                    f,
+                    "seeding nesting too deep (a Combine nested too far, or a cross-round seeding cycle)"
                 )
             }
         }
@@ -318,29 +330,65 @@ fn single_class(round: &RoundDef) -> Option<ClassId> {
     }
 }
 
-/// Build a round's **field** as engine [`CompetitorRef`]s (race redesign Slice 3a).
-///
-/// - [`SeedingRule::FromRoster`] (the default): the union of the eligible classes'
-///   [`classes_membership`](EventMeta::classes_membership), in class-selection then
-///   membership (roster/seed) order, de-duplicated so a pilot in two eligible classes
-///   appears once. Each pilot id maps straight to a [`CompetitorRef`] of the same string
-///   — the handle the lineup carries and the timer emits passes for.
-/// - [`SeedingRule::FromRanking`]: the **top-N** of the source rounds' **aggregated** ranking (the
-///   qualifying→bracket carry). For a single source round this is exactly that round's ranking; for
-///   several (issue #51 multi-select) the rankings are merged **best-per-pilot** by
-///   [`aggregate_rankings`] before taking the top-N — exactly the phase-2 seeding
-///   [`run_event`](gridfpv_engine::event::run_event) does over the combined field.
-/// - [`SeedingRule::FromHeatWinners`]: the source (bracket-level) round's **heat winners**, in heat
-///   order — the bracket **advancement** carry (decisions D13, #217). See [`heat_winners`].
+/// Build a round's **field** as engine [`CompetitorRef`]s (race redesign Slice 3a) — the round's
+/// eligible classes + its [`SeedingRule`] resolved by [`resolve_seeding`] at depth 0. See
+/// [`resolve_seeding`] for the per-variant semantics (roster / ranking top-N / ranking slice /
+/// heat-winners / combine / channels) and the recursion-depth guard.
 fn round_field(
     meta: &EventMeta,
     round: &RoundDef,
     events: &[Event],
 ) -> Result<Vec<CompetitorRef>, FillError> {
-    match &round.seeding {
+    round_field_at(meta, round, events, 0)
+}
+
+/// Depth-carrying [`round_field`]: resolve the round's seeding at recursion `depth`.
+///
+/// The public [`round_field`] enters at depth 0; the seeding resolver threads `depth` through every
+/// cross-round / `Combine` hop so a too-deep `Combine` or a cross-round seeding **cycle** is caught
+/// as [`FillError::SeedingTooDeep`] rather than overflowing the stack (see [`resolve_seeding`]).
+fn round_field_at(
+    meta: &EventMeta,
+    round: &RoundDef,
+    events: &[Event],
+    depth: usize,
+) -> Result<Vec<CompetitorRef>, FillError> {
+    resolve_seeding(meta, &round.classes, &round.seeding, events, depth)
+}
+
+/// Resolve a [`SeedingRule`] to a round's **field** as engine [`CompetitorRef`]s (race redesign
+/// Slice 3a; multi-main `FromRankingRange` / `Combine`).
+///
+/// - [`SeedingRule::FromRoster`] (the default): the union of the eligible `classes`'
+///   [`classes_membership`](EventMeta::classes_membership), in class-selection then membership
+///   (roster/seed) order, de-duplicated so a pilot in two eligible classes appears once.
+/// - [`SeedingRule::FromRanking`]: the **top-N** of the source rounds' best-per-pilot
+///   [`aggregate_rankings`] (the qualifying→bracket carry, issue #51 multi-select).
+/// - [`SeedingRule::FromRankingRange`]: a **slice** (`skip` / `take`) of that same merged ranking —
+///   the multi-main / consolation carry (e.g. a C-main = qual seeds 13–20).
+/// - [`SeedingRule::FromHeatWinners`]: the source (bracket-level) round's **heat winners**, in heat
+///   order — the bracket advancement carry (decisions D13, #217).
+/// - [`SeedingRule::Combine`]: the **union** of each sub-rule's resolved field, concatenated in
+///   order and de-duplicated keeping each competitor's first occurrence — the multi-main composition
+///   primitive. Each sub-rule resolves against the same `classes`.
+///
+/// `depth` bounds recursion: it is incremented across each cross-round (`round_ranking` →
+/// `resolve_seeding`) hop and each `Combine` level, and past
+/// [`MAX_SEEDING_DEPTH`](crate::events::MAX_SEEDING_DEPTH) yields [`FillError::SeedingTooDeep`].
+fn resolve_seeding(
+    meta: &EventMeta,
+    classes: &[ClassId],
+    seeding: &SeedingRule,
+    events: &[Event],
+    depth: usize,
+) -> Result<Vec<CompetitorRef>, FillError> {
+    if depth > crate::events::MAX_SEEDING_DEPTH {
+        return Err(FillError::SeedingTooDeep);
+    }
+    match seeding {
         SeedingRule::FromRoster => {
             let mut field: Vec<CompetitorRef> = Vec::new();
-            for class in &round.classes {
+            for class in classes {
                 if let Some(membership) = meta.classes_membership.iter().find(|m| &m.class == class)
                 {
                     for slot in &membership.pilots {
@@ -357,16 +405,18 @@ fn round_field(
             source_rounds,
             top_n,
         } => {
-            // Compute each source round's ranking (the same provisional-or-final ranking the engine
-            // seeds a single-source bracket from), then merge them best-per-pilot into one ranking.
-            let mut rankings: Vec<Vec<RankEntry>> = Vec::with_capacity(source_rounds.len());
-            for source_id in source_rounds {
-                let source = round_of(meta, source_id)
-                    .map_err(|_| FillError::UnknownSourceRound(source_id.0.clone()))?;
-                rankings.push(round_ranking(meta, source, events)?);
-            }
-            let merged = aggregate_rankings(&rankings);
+            let merged = merged_source_ranking(meta, source_rounds, events, depth)?;
             Ok(advance_top_n(&merged, *top_n))
+        }
+        // The multi-main / consolation carry: the same merged best-per-pilot ranking as
+        // `FromRanking`, but seeded from the window `skip+1 ..= skip+take` rather than the top-N.
+        SeedingRule::FromRankingRange {
+            source_rounds,
+            skip,
+            take,
+        } => {
+            let merged = merged_source_ranking(meta, source_rounds, events, depth)?;
+            Ok(advance_range(&merged, *skip, *take))
         }
         // Bracket advancement (decisions D13, #217): the field is the source level's **heat
         // winners** — the competitors that advanced out of each heat, in heat order. This is how a
@@ -375,7 +425,22 @@ fn round_field(
         SeedingRule::FromHeatWinners { source_round } => {
             let source = round_of(meta, source_round)
                 .map_err(|_| FillError::UnknownSourceRound(source_round.0.clone()))?;
-            Ok(heat_winners(meta, source, events)?)
+            heat_winners(meta, source, events, depth)
+        }
+        // The multi-main composition primitive: resolve each sub-rule against the same `classes`,
+        // concatenate the fields in order, and de-duplicate keeping each competitor's **first**
+        // occurrence — so a competitor two sub-sources both name is seeded once, at the earlier
+        // source's position. Each sub-rule resolves one level deeper (bounding the nesting).
+        SeedingRule::Combine { sources } => {
+            let mut field: Vec<CompetitorRef> = Vec::new();
+            for sub in sources {
+                for competitor in resolve_seeding(meta, classes, sub, events, depth + 1)? {
+                    if !field.contains(&competitor) {
+                        field.push(competitor);
+                    }
+                }
+            }
+            Ok(field)
         }
         // Open practice (open-practice format): the field is the active **channels**, each node
         // index laid out as a `node-{i}` competitor ref (the timer-seat handle) in the given order.
@@ -385,6 +450,25 @@ fn round_field(
             .map(|i| CompetitorRef(format!("node-{i}")))
             .collect()),
     }
+}
+
+/// The **merged best-per-pilot ranking** across `source_rounds` — the shared front of the
+/// `FromRanking` / `FromRankingRange` carries. Each source round's provisional-or-final ranking is
+/// computed (one level deeper, so the depth guard bounds cross-round cycles) then merged via
+/// [`aggregate_rankings`]. A source id not in this event is [`FillError::UnknownSourceRound`].
+fn merged_source_ranking(
+    meta: &EventMeta,
+    source_rounds: &[RoundId],
+    events: &[Event],
+    depth: usize,
+) -> Result<Vec<RankEntry>, FillError> {
+    let mut rankings: Vec<Vec<RankEntry>> = Vec::with_capacity(source_rounds.len());
+    for source_id in source_rounds {
+        let source = round_of(meta, source_id)
+            .map_err(|_| FillError::UnknownSourceRound(source_id.0.clone()))?;
+        rankings.push(round_ranking_at(meta, source, events, depth + 1)?);
+    }
+    Ok(aggregate_rankings(&rankings))
 }
 
 /// The **heat winners** of a (bracket-level) source round, in heat order — the field a
@@ -406,8 +490,9 @@ fn heat_winners(
     meta: &EventMeta,
     source: &RoundDef,
     events: &[Event],
+    depth: usize,
 ) -> Result<Vec<CompetitorRef>, FillError> {
-    let ranking = round_ranking(meta, source, events)?;
+    let ranking = round_ranking_at(meta, source, events, depth + 1)?;
     let Some(worst) = ranking.iter().map(|e| e.position).max() else {
         return Ok(Vec::new());
     };
@@ -661,7 +746,20 @@ pub fn round_ranking(
     round: &RoundDef,
     events: &[Event],
 ) -> Result<Vec<RankEntry>, FillError> {
-    let field = round_field(meta, round, events)?;
+    round_ranking_at(meta, round, events, 0)
+}
+
+/// Depth-carrying [`round_ranking`]: build the round's ranking with the seeding recursion `depth`
+/// threaded through, so a `FromRanking` / `FromRankingRange` / `FromHeatWinners` source — itself a
+/// cross-round seeding hop into [`round_field_at`] — stays bounded by the depth guard (a cross-round
+/// seeding cycle returns [`FillError::SeedingTooDeep`] instead of overflowing the stack).
+fn round_ranking_at(
+    meta: &EventMeta,
+    round: &RoundDef,
+    events: &[Event],
+    depth: usize,
+) -> Result<Vec<RankEntry>, FillError> {
+    let field = round_field_at(meta, round, events, depth)?;
     let registry = FormatRegistry::standard();
     let generator = registry
         .build(&round.format, &format_config(round, field))
@@ -3477,5 +3575,185 @@ mod tests {
         assert!(h1.iter().all(|p| p.competitor == CompetitorRef("A".into())));
         assert_eq!(h2.len(), 2);
         assert!(h2.iter().all(|p| p.competitor == CompetitorRef("B".into())));
+    }
+
+    // --- Multi-main seeding: FromRankingRange + Combine (depth-guarded) --------------------
+
+    /// A round seeded by an arbitrary `seeding` rule over the `open` class — for the multi-main
+    /// `FromRankingRange` / `Combine` field tests. Format/win-condition are inert here (only the
+    /// field builder is exercised), so `single_elim` + a sensible win condition keep it valid.
+    fn seeded_round(id: &str, seeding: SeedingRule) -> RoundDef {
+        RoundDef {
+            id: RoundId(id.into()),
+            label: id.into(),
+            classes: vec![ScopeClassId("open".into())],
+            format: "single_elim".into(),
+            params: BTreeMap::new(),
+            win_condition: WinCondition::FirstToLaps { n: 1 },
+            seeding,
+            channel_mode: ChannelMode::PerHeat,
+            staging_timer_secs: default_staging_timer_secs(),
+            start_procedure: StartProcedure::default(),
+            grace_window: default_grace_window(),
+            protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            time_limit_secs: None,
+        }
+    }
+
+    /// A finalized `q1` qual heat ranking the listed pilots best-first (increasing best laps).
+    fn qual_ranking_log(order: &[&str]) -> Vec<Event> {
+        finishing_heat("q-1", "q1", "open", order)
+    }
+
+    #[test]
+    fn from_ranking_range_resolves_the_right_slice() {
+        // q1 ranks A>B>C>D>E>F>G>H. A FromRankingRange{skip:2, take:3} is the window seeds 3–5.
+        let qual = qual_round("q1", "open");
+        let rr = seeded_round(
+            "rr",
+            SeedingRule::FromRankingRange {
+                source_rounds: vec![RoundId("q1".into())],
+                skip: 2,
+                take: 3,
+            },
+        );
+        let meta = meta_with(
+            vec![qual, rr.clone()],
+            vec![member("open", &["A", "B", "C", "D", "E", "F", "G", "H"])],
+        );
+        let log = qual_ranking_log(&["A", "B", "C", "D", "E", "F", "G", "H"]);
+
+        let field = round_field(&meta, &rr, &log).unwrap();
+        assert_eq!(
+            field,
+            lineup(&["C", "D", "E"]),
+            "FromRankingRange takes the skip..skip+take window of the merged ranking"
+        );
+    }
+
+    #[test]
+    fn combine_concatenates_and_dedupes_keeping_first_occurrence() {
+        // q1 ranks A>B>C>D. Combine[ FromRankingRange{skip:2,take:2} (→ C,D),
+        // FromRanking{top_n:3} (→ A,B,C) ] concatenates C,D,A,B,C and dedupes first-wins → C,D,A,B.
+        // C is named by both sources; it is seeded once, at the *earlier* source's position.
+        let qual = qual_round("q1", "open");
+        let combined = seeded_round(
+            "cmb",
+            SeedingRule::Combine {
+                sources: vec![
+                    SeedingRule::FromRankingRange {
+                        source_rounds: vec![RoundId("q1".into())],
+                        skip: 2,
+                        take: 2,
+                    },
+                    SeedingRule::FromRanking {
+                        source_rounds: vec![RoundId("q1".into())],
+                        top_n: 3,
+                    },
+                ],
+            },
+        );
+        let meta = meta_with(
+            vec![qual, combined.clone()],
+            vec![member("open", &["A", "B", "C", "D"])],
+        );
+        let log = qual_ranking_log(&["A", "B", "C", "D"]);
+
+        let field = round_field(&meta, &combined, &log).unwrap();
+        assert_eq!(
+            field,
+            lineup(&["C", "D", "A", "B"]),
+            "Combine concatenates in order then dedupes keeping each ref's first occurrence"
+        );
+    }
+
+    #[test]
+    fn combine_over_a_provisional_source_matches_from_ranking_gating() {
+        // Gating parity: with q1 NOT yet run (no finalized heat), its ranking is provisional. A
+        // Combine wrapping a FromRanking yields exactly what the bare FromRanking does over the same
+        // provisional source — the carry is not gated on the source being Final (same as FromRanking).
+        let qual = qual_round("q1", "open");
+        let bare = seeded_round(
+            "bare",
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("q1".into())],
+                top_n: 2,
+            },
+        );
+        let wrapped = seeded_round(
+            "wrapped",
+            SeedingRule::Combine {
+                sources: vec![SeedingRule::FromRanking {
+                    source_rounds: vec![RoundId("q1".into())],
+                    top_n: 2,
+                }],
+            },
+        );
+        let meta = meta_with(
+            vec![qual, bare.clone(), wrapped.clone()],
+            vec![member("open", &["A", "B", "C", "D"])],
+        );
+        // Empty log → q1 has no finalized heat → its ranking is the provisional whole-field order.
+        let log: Vec<Event> = vec![];
+
+        let bare_field = round_field(&meta, &bare, &log).unwrap();
+        let wrapped_field = round_field(&meta, &wrapped, &log).unwrap();
+        assert!(
+            !bare_field.is_empty(),
+            "a provisional source still yields a (provisional) field"
+        );
+        assert_eq!(
+            wrapped_field, bare_field,
+            "Combine over a provisional source matches the bare FromRanking carry"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_combine_is_rejected_as_too_deep() {
+        // Nest Combine far past MAX_SEEDING_DEPTH; resolving must return SeedingTooDeep, not overflow.
+        let mut seeding = SeedingRule::FromRoster;
+        for _ in 0..(crate::events::MAX_SEEDING_DEPTH + 2) {
+            seeding = SeedingRule::Combine {
+                sources: vec![seeding],
+            };
+        }
+        let round = seeded_round("deep", seeding);
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+
+        assert_eq!(
+            round_field(&meta, &round, &[]),
+            Err(FillError::SeedingTooDeep),
+            "an over-deep Combine is rejected, not a stack overflow"
+        );
+    }
+
+    #[test]
+    fn cross_round_seeding_cycle_is_rejected_as_too_deep() {
+        // A seeds FromRanking B, B seeds FromRanking A — a mutual cycle. The shared depth thread
+        // through round_ranking→resolve_seeding bounds it: SeedingTooDeep instead of a stack overflow.
+        let a = seeded_round(
+            "ra",
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("rb".into())],
+                top_n: 2,
+            },
+        );
+        let b = seeded_round(
+            "rb",
+            SeedingRule::FromRanking {
+                source_rounds: vec![RoundId("ra".into())],
+                top_n: 2,
+            },
+        );
+        let meta = meta_with(
+            vec![a.clone(), b.clone()],
+            vec![member("open", &["A", "B", "C", "D"])],
+        );
+
+        assert_eq!(
+            round_field(&meta, &a, &[]),
+            Err(FillError::SeedingTooDeep),
+            "a 2-round seeding cycle terminates with SeedingTooDeep"
+        );
     }
 }
