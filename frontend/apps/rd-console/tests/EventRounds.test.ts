@@ -83,6 +83,7 @@ const SCHEMAS = FORMATS.map((name) => {
       name,
       params: [
         { key: 'group_size', label: 'Group size', kind: 'number' as const, default: '2' },
+        { key: 'rotations', label: 'Heats per group', kind: 'number' as const, default: '1' },
         {
           key: 'scoring',
           label: 'Scoring',
@@ -261,6 +262,52 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(req.seeding).toEqual({ FromRanking: { source_rounds: ['r1', 'r1b'], top_n: 8 } });
   });
 
+  it("caps the FromRanking cut at the source round's field, not an arbitrary number", async () => {
+    // The source round raced two heats with 3 distinct pilots — "top 10" of a 3-pilot ranking is
+    // meaningless, so the input advertises the bound and the authored seed clamps to it.
+    const impls = baseImpls();
+    const raced: HeatSummary[] = [
+      {
+        heat: 'q-1',
+        lineup: ['p1', 'p2'],
+        class: 'c1',
+        round: 'r1',
+        phase: 'Final',
+        is_current: false
+      },
+      { heat: 'q-2', lineup: ['p3'], class: 'c1', round: 'r1', phase: 'Final', is_current: false }
+    ];
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
+      ...QUAL,
+      id: 'r2',
+      label: 'Mains',
+      format: 'single_elim'
+    }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      listHeatsImpl: vi.fn(async () => raced),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Mains' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'single_elim' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.change(screen.getByLabelText('Seeding'), { target: { value: 'FromRanking' } });
+    await fireEvent.click(await screen.findByLabelText('Seed from Qualifying R1'));
+
+    const topN = (await screen.findByLabelText('Top N')) as HTMLInputElement;
+    await waitFor(() => expect(topN.max).toBe('3'));
+    await fireEvent.input(topN, { target: { value: '10' } });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req2] = createRoundImpl.mock.calls[0];
+    expect(req2.seeding).toEqual({ FromRanking: { source_rounds: ['r1'], top_n: 3 } });
+  });
+
   it('edits an existing round via updateRound, seeded from its current fields', async () => {
     const impls = baseImpls();
     const updateRoundImpl = vi.fn(async (_b, _e, _id, req) => ({ ...QUAL, ...req }));
@@ -428,6 +475,36 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     // Only head_to_head's params (its schema defaults), not timed_qual's rounds/tiebreak.
     expect(createRoundImpl.mock.calls[0][2].params).toEqual({
       group_size: '2',
+      rotations: '1',
+      scoring: 'placement'
+    });
+  });
+
+  it('authors a multi-rotation Head-to-Head: the rotations param reaches the request', async () => {
+    // "Heats per group" (rotations) — the same groups race N times, points accumulating (ProSpec
+    // style). The knob is a plain schema param, so it serializes into `params` like the rest.
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'ProSpec' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.input(await screen.findByLabelText('Heats per group value'), {
+      target: { value: '3' }
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    expect(createRoundImpl.mock.calls[0][2].params).toEqual({
+      group_size: '2',
+      rotations: '3',
       scoring: 'placement'
     });
   });

@@ -1,18 +1,32 @@
 //! Head-to-Head — the **atomic racing format** (format-model.html, decision D17): split a field into
-//! heats of `group_size`, race them once, and rank the field. It is the building block every
+//! heats of `group_size`, race them, and rank the field. It is the building block every
 //! tournament structure composes — a round-robin drives it all-play-all, a bracket chains it with
-//! placement + winners-advance. Head-to-Head itself does **one pass** and **one job**: race + rank.
+//! placement + winners-advance.
+//!
+//! # One grouping decision per round
+//!
+//! A Head-to-Head round makes its grouping decision **once**, at fill: the field splits into
+//! consecutive groups of `group_size`. With `rotations` = 1 (the default) that single pass is the
+//! whole round — everyone races exactly once. With `rotations` = N the **same groups** run back to
+//! back N times (MultiGP ProSpec-style points racing: same pilots, same channels, run it again) and
+//! the scoring accumulates. What a rotations knob deliberately does NOT do is re-group between
+//! heats — the moment opponents change, something has to *decide* the new groups, and that is
+//! seeding work, i.e. a tournament **structure** (round-robin all-play-all, a bracket's
+//! winners-advance, …), not the atomic round.
 //!
 //! # Scoring
 //!
-//! - [`Scoring::Placement`] — rank by **finishing position** across the heats (all heat-winners first,
-//!   then all runners-up, …), breaking a band by laps. This is what a bracket reads (winners advance).
+//! - [`Scoring::Placement`] — rank by **finishing position** (all heat-winners first, then all
+//!   runners-up, …), breaking a band by laps. Over several rotations a pilot's **best single
+//!   result** counts. This is what a bracket reads (winners advance).
 //! - [`Scoring::Points`] — each finish earns points from a **per-position table** (1st most,
-//!   descending; positions past the table earn 0); rank by total points. With no explicit table the
-//!   points fall back to the linear `heat_size − position + 1`. This is what a round-robin sums.
+//!   descending; positions past the table earn 0), **summed across every heat flown**; rank by
+//!   total. With no explicit table the points fall back to the linear `heat_size − position + 1`.
+//!   This is what a round-robin sums — and what makes multi-rotation racing meaningful.
 //!
 //! For a single pass (one heat per pilot) Points and Placement rank alike; the table earns its keep
-//! when a structure runs Head-to-Head over many passes and **sums** the points (round-robin).
+//! over many passes — a structure driving Head-to-Head repeatedly (round-robin), or this round's
+//! own `rotations`.
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,15 +47,19 @@ pub enum Scoring {
     Points(Option<Vec<u32>>),
 }
 
-/// A Head-to-Head racing round over a seeded field. `next` emits one pass of heats (the field split
-/// into groups of [`group_size`](Self::group_size)) then completes; `ranking` ranks the field under
-/// the configured [`Scoring`].
+/// A Head-to-Head racing round over a seeded field. `next` emits the round's heats (the field split
+/// into groups of [`group_size`](Self::group_size), the same groups repeated
+/// [`rotations`](Self::rotations) times) then completes; `ranking` ranks the field under the
+/// configured [`Scoring`].
 pub struct HeadToHead {
     /// The field in seed/draw order (the recorded seeding already applied) — the split order and the
     /// final ranking's deterministic tie-break.
     field: Vec<CompetitorRef>,
     /// Pilots per heat (clamped to ≥ 2 — a head-to-head heat needs at least two to be a race).
     group_size: usize,
+    /// How many times each group races (clamped to ≥ 1). The grouping is drawn once; every rotation
+    /// runs the **same** groups — see the module docs for why re-grouping is a structure's job.
+    rotations: usize,
     /// How the round ranks its heats' finishes.
     scoring: Scoring,
 }
@@ -53,28 +71,39 @@ impl HeadToHead {
     /// The default group size when unconfigured (head-to-head proper).
     pub const DEFAULT_GROUP_SIZE: usize = 2;
 
-    /// Build over a `field` in seed order with the given group size (clamped to ≥ 2) and scoring.
-    pub fn new(field: Vec<CompetitorRef>, group_size: usize, scoring: Scoring) -> Self {
+    /// The default rotations when unconfigured — the classic single pass (everyone races once).
+    pub const DEFAULT_ROTATIONS: usize = 1;
+
+    /// Build over a `field` in seed order with the given group size (clamped to ≥ 2), rotations
+    /// (clamped to ≥ 1), and scoring.
+    pub fn new(
+        field: Vec<CompetitorRef>,
+        group_size: usize,
+        rotations: usize,
+        scoring: Scoring,
+    ) -> Self {
         Self {
             field,
             group_size: group_size.max(2),
+            rotations: rotations.max(1),
             scoring,
         }
     }
 
-    /// The registry constructor: applies the recorded seeding draw, reads `group_size` (default 2)
-    /// and the `scoring` param (`points` ⇒ [`Scoring::Points`] reading the `points` per-position
-    /// table; anything else / absent ⇒ [`Scoring::Placement`]).
+    /// The registry constructor: applies the recorded seeding draw, reads `group_size` (default 2),
+    /// `rotations` (default 1) and the `scoring` param (`points` ⇒ [`Scoring::Points`] reading the
+    /// `points` per-position table; anything else / absent ⇒ [`Scoring::Placement`]).
     pub fn from_config(config: &FormatConfig) -> Box<dyn Generator> {
         let field = config.seeding.apply(&config.field);
         let group_size = config.param_usize("group_size", Self::DEFAULT_GROUP_SIZE);
+        let rotations = config.param_usize("rotations", Self::DEFAULT_ROTATIONS);
         let scoring = match config.params.get("scoring").map(String::as_str) {
             Some("points") => Scoring::Points(parse_points_table(
                 config.params.get("points").map(String::as_str),
             )),
             _ => Scoring::Placement,
         };
-        Box::new(Self::new(field, group_size, scoring))
+        Box::new(Self::new(field, group_size, rotations, scoring))
     }
 
     /// Register this format under [`NAME`](Self::NAME).
@@ -82,25 +111,39 @@ impl HeadToHead {
         registry.register(Self::NAME, Self::from_config);
     }
 
-    /// The heat id for heat `index` (0-based) of this round's single pass.
-    fn heat_id(index: usize) -> String {
-        format!("h2h-h{index}")
+    /// The heat id for heat `index` (0-based) of rotation `rotation` (0-based). A single-rotation
+    /// round keeps the historical `h2h-h{index}` ids (so persisted single-pass rounds keep
+    /// resolving); a multi-rotation round scopes them `h2h-r{rotation}-h{index}` (the `tq-r{n}-h{m}`
+    /// convention).
+    fn heat_id(&self, rotation: usize, index: usize) -> String {
+        if self.rotations == 1 {
+            format!("h2h-h{index}")
+        } else {
+            let r = rotation + 1;
+            format!("h2h-r{r}-h{index}")
+        }
     }
 
-    /// The field split into consecutive heats of `group_size` (the last possibly short).
+    /// The field split into consecutive heats of `group_size` (the last possibly short), the same
+    /// groups repeated for each rotation in order (rotation 1's heats first).
     fn lay_out(&self) -> Vec<HeatPlan> {
-        self.field
-            .chunks(self.group_size)
-            .enumerate()
-            .map(|(index, chunk)| HeatPlan::new(Self::heat_id(index), chunk.to_vec()))
+        (0..self.rotations)
+            .flat_map(|rotation| {
+                self.field
+                    .chunks(self.group_size)
+                    .enumerate()
+                    .map(move |(index, chunk)| (rotation, index, chunk.to_vec()))
+            })
+            .map(|(rotation, index, chunk)| HeatPlan::new(self.heat_id(rotation, index), chunk))
             .collect()
     }
 }
 
 impl Generator for HeadToHead {
     fn next(&mut self, completed: &[CompletedHeat]) -> GeneratorStep {
-        // A lone (or empty) field has nothing to race. Otherwise emit the single pass of heats and
-        // complete once they are all in.
+        // A lone (or empty) field has nothing to race. Otherwise emit every rotation's heats up
+        // front (the grouping is fixed, so the whole schedule is known at fill — points racing
+        // schedules all heats up front, D17) and complete once they are all in.
         if self.field.len() <= 1 {
             return GeneratorStep::Complete;
         }
@@ -140,8 +183,9 @@ impl Generator for HeadToHead {
                 rank_by(rows)
             }
             // Placement: band by finishing position (lower = better), breaking a band by laps (more =
-            // better → negated). A pilot who hasn't raced sorts last. One heat per pilot in a single
-            // pass; if a pilot somehow has several, the best (position, then laps) wins.
+            // better → negated). A pilot who hasn't raced sorts last. Over several rotations (or if
+            // a pilot somehow has several heats) the best (position, then laps) counts — placement
+            // reads a pilot's best single result; accumulating across heats is Points' job.
             Scoring::Placement => {
                 let mut best: BTreeMap<CompetitorRef, (u32, i64)> = BTreeMap::new();
                 for heat in completed {
@@ -225,16 +269,16 @@ mod tests {
 
     #[test]
     fn splits_the_field_into_heats_of_group_size() {
-        let mut g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, Scoring::Placement);
+        let mut g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 1, Scoring::Placement);
         assert_eq!(heat_ids(&g.next(&[])), vec!["h2h-h0", "h2h-h1"]);
         // 4-up groups: one heat.
-        let mut g4 = HeadToHead::new(field(&["A", "B", "C", "D"]), 4, Scoring::Placement);
+        let mut g4 = HeadToHead::new(field(&["A", "B", "C", "D"]), 4, 1, Scoring::Placement);
         assert_eq!(heat_ids(&g4.next(&[])), vec!["h2h-h0"]);
     }
 
     #[test]
     fn completes_once_its_single_pass_is_in() {
-        let mut g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, Scoring::Placement);
+        let mut g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 1, Scoring::Placement);
         let done = vec![
             CompletedHeat::new("h2h-h0", result(&[("A", 1, 5), ("B", 2, 4)])),
             CompletedHeat::new("h2h-h1", result(&[("C", 1, 5), ("D", 2, 4)])),
@@ -244,7 +288,7 @@ mod tests {
 
     #[test]
     fn placement_bands_winners_first_then_by_laps() {
-        let g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, Scoring::Placement);
+        let g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 1, Scoring::Placement);
         // Heat 0: A wins (5 laps), B 2nd (4). Heat 1: C wins (6 laps), D 2nd (3).
         let done = vec![
             CompletedHeat::new("h2h-h0", result(&[("A", 1, 5), ("B", 2, 4)])),
@@ -261,6 +305,7 @@ mod tests {
         let g = HeadToHead::new(
             field(&["A", "B", "C", "D"]),
             2,
+            1,
             Scoring::Points(Some(vec![10, 6, 3, 1])),
         );
         let done = vec![
@@ -275,7 +320,7 @@ mod tests {
 
     #[test]
     fn points_fall_back_to_linear_without_a_table() {
-        let g = HeadToHead::new(field(&["A", "B", "C"]), 3, Scoring::Points(None));
+        let g = HeadToHead::new(field(&["A", "B", "C"]), 3, 1, Scoring::Points(None));
         // One 3-up heat: A 1st (3 pts), B 2nd (2), C 3rd (1).
         let done = vec![CompletedHeat::new(
             "h2h-h0",
@@ -286,14 +331,100 @@ mod tests {
 
     #[test]
     fn provisional_ranking_is_the_seed_order() {
-        let g = HeadToHead::new(field(&["A", "B", "C"]), 2, Scoring::Placement);
+        let g = HeadToHead::new(field(&["A", "B", "C"]), 2, 1, Scoring::Placement);
         assert_eq!(names(&g.ranking(&[])), vec!["A", "B", "C"]);
     }
 
     #[test]
     fn group_size_clamps_to_two() {
-        let g = HeadToHead::new(field(&["A", "B", "C", "D"]), 1, Scoring::Placement);
+        let g = HeadToHead::new(field(&["A", "B", "C", "D"]), 1, 1, Scoring::Placement);
         assert_eq!(g.group_size, 2);
+    }
+
+    #[test]
+    fn rotations_repeat_the_same_groups_with_rotation_scoped_ids() {
+        // 4 pilots, 2-up, 2 rotations: the SAME two groups run twice, rotation 1's heats first.
+        let mut g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 2, Scoring::Points(None));
+        let step = g.next(&[]);
+        assert_eq!(
+            heat_ids(&step),
+            vec!["h2h-r1-h0", "h2h-r1-h1", "h2h-r2-h0", "h2h-r2-h1"]
+        );
+        // Every rotation's heat `index` carries the identical lineup (one grouping decision).
+        let GeneratorStep::Run(heats) = step else {
+            panic!("expected Run")
+        };
+        assert_eq!(heats[0].lineup, heats[2].lineup);
+        assert_eq!(heats[1].lineup, heats[3].lineup);
+    }
+
+    #[test]
+    fn rotations_clamp_to_one_and_keep_the_single_pass_ids() {
+        // rotations = 0 clamps to the classic single pass — historical `h2h-h{N}` ids preserved.
+        let mut g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 0, Scoring::Placement);
+        assert_eq!(heat_ids(&g.next(&[])), vec!["h2h-h0", "h2h-h1"]);
+    }
+
+    #[test]
+    fn completes_only_after_every_rotation_is_in() {
+        let mut g = HeadToHead::new(field(&["A", "B"]), 2, 2, Scoring::Points(None));
+        // Rotation 1 done, rotation 2 outstanding → still Run.
+        let first = vec![CompletedHeat::new(
+            "h2h-r1-h0",
+            result(&[("A", 1, 5), ("B", 2, 4)]),
+        )];
+        assert!(matches!(g.next(&first), GeneratorStep::Run(_)));
+        // Both rotations in → Complete.
+        let both = vec![
+            CompletedHeat::new("h2h-r1-h0", result(&[("A", 1, 5), ("B", 2, 4)])),
+            CompletedHeat::new("h2h-r2-h0", result(&[("B", 1, 5), ("A", 2, 4)])),
+        ];
+        assert_eq!(g.next(&both), GeneratorStep::Complete);
+    }
+
+    #[test]
+    fn points_accumulate_across_rotations() {
+        // Two rotations of the same 2-up groups, linear points (1st = 2, 2nd = 1).
+        // A wins both of its heats (4 pts); C and D split theirs (3 pts each); B loses both (2).
+        let g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 2, Scoring::Points(None));
+        let done = vec![
+            CompletedHeat::new("h2h-r1-h0", result(&[("A", 1, 5), ("B", 2, 4)])),
+            CompletedHeat::new("h2h-r1-h1", result(&[("C", 1, 5), ("D", 2, 4)])),
+            CompletedHeat::new("h2h-r2-h0", result(&[("A", 1, 5), ("B", 2, 4)])),
+            CompletedHeat::new("h2h-r2-h1", result(&[("D", 1, 5), ("C", 2, 4)])),
+        ];
+        let ranking = g.ranking(&done);
+        assert_eq!(names(&ranking), vec!["A", "C", "D", "B"]);
+        assert_eq!(ranking[0].position, 1);
+        // C and D tie on 3 points and share position 2.
+        assert_eq!(ranking[1].position, 2);
+        assert_eq!(ranking[2].position, 2);
+        assert_eq!(ranking[3].position, 4);
+    }
+
+    #[test]
+    fn placement_across_rotations_reads_the_best_single_result() {
+        // 2 rotations, placement scoring: B wins rotation 2, so B joins the winners band; the band
+        // orders by laps (A's winning 6 > B's winning 5).
+        let g = HeadToHead::new(field(&["A", "B"]), 2, 2, Scoring::Placement);
+        let done = vec![
+            CompletedHeat::new("h2h-r1-h0", result(&[("A", 1, 6), ("B", 2, 5)])),
+            CompletedHeat::new("h2h-r2-h0", result(&[("B", 1, 5), ("A", 2, 4)])),
+        ];
+        assert_eq!(names(&g.ranking(&done)), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn registry_reads_the_rotations_param() {
+        let mut registry = FormatRegistry::new();
+        HeadToHead::register(&mut registry);
+        let cfg = FormatConfig::new(field(&["A", "B", "C", "D"]))
+            .with_param("group_size", "2")
+            .with_param("rotations", "3")
+            .with_param("scoring", "points");
+        let mut g = registry.build(HeadToHead::NAME, &cfg).unwrap();
+        // 2 groups × 3 rotations.
+        assert_eq!(heat_ids(&g.next(&[])).len(), 6);
     }
 
     #[test]

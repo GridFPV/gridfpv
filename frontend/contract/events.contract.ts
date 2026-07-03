@@ -1424,11 +1424,16 @@ describe('race Slice 2a: rounds', () => {
     // omitted from this offered set so a new round can't select it.
     expect(schemas.map((s) => s.name)).toEqual(['head_to_head', 'open_practice', 'timed_qual']);
     expect(schemas.map((s) => s.name)).not.toContain('zippyq');
-    // head_to_head (D17, the atomic racing round) declares `group_size` (number, default 2) + a
-    // `scoring` enum (placement | points, default placement).
+    // head_to_head (D17, the atomic racing round) declares `group_size` (number, default 2) +
+    // `rotations` ("Heats per group", number, default 1 — the same groups race N times, scoring
+    // accumulating) + a `scoring` enum (placement | points, default placement).
     const h2h = schemas.find((s) => s.name === 'head_to_head')!;
     expect(h2h.params.find((p) => p.key === 'group_size')?.kind).toBe('number');
     expect(h2h.params.find((p) => p.key === 'group_size')?.default).toBe('2');
+    const rotations = h2h.params.find((p) => p.key === 'rotations')!;
+    expect(rotations.kind).toBe('number');
+    expect(rotations.default).toBe('1');
+    expect(rotations.label).toBe('Heats per group');
     const scoring = h2h.params.find((p) => p.key === 'scoring')!;
     expect(scoring.kind).toBe('enum');
     expect(scoring.options).toEqual(['placement', 'points']);
