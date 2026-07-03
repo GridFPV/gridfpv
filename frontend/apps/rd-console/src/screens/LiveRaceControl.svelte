@@ -70,6 +70,22 @@
   // re-fetched whenever the stream advances (so a freshly-staged OR freshly-scheduled heat appears).
   let catalog = $state<ChannelCatalogEntry[]>([]);
   let heats = $state<HeatSummary[]>([]);
+  // A FAILED pilots/heats directory read must be visible (#340): swallowing it into an empty array
+  // left every ref/heat-id rendering raw with no hint anything was wrong. Track a load-error flag
+  // per read (keeping the last good data rather than wiping it), surface a "Couldn't load — retry"
+  // state + a toast (the Results-screen pattern), and let the RD retry explicitly via the nonce.
+  let pilotsError = $state(false);
+  let heatsError = $state(false);
+  let directoryRetryNonce = $state(0);
+  const directoryError = $derived(pilotsError || heatsError);
+  function retryDirectory(): void {
+    directoryRetryNonce += 1;
+  }
+  /** Toast once on the transition INTO the error state (the effects re-run on every stream tick). */
+  function noteDirectoryError(alreadyFailing: boolean): void {
+    if (!alreadyFailing)
+      toast.error('Couldn’t load the pilot/heat directory — names may show as raw ids.');
+  }
   $effect(() => {
     session
       .listChannels()
@@ -84,10 +100,14 @@
     // (the backend force-emits one when a heat is scheduled), so touching it refreshes the picker the
     // moment a heat appears — without changing `current_heat` (no focus steal).
     void session.protocolState;
+    void directoryRetryNonce;
     session
       .listHeats()
-      .then((h) => (heats = h))
-      .catch(() => (heats = []));
+      .then((h) => ((heats = h), (heatsError = false)))
+      .catch(() => {
+        noteDirectoryError(directoryError);
+        heatsError = true;
+      });
   });
 
   // The current heat's ref → channel-label map (race redesign Slice 4b). Empty for a sim/free-text
@@ -111,10 +131,14 @@
   let pilots = $state<Pilot[]>([]);
   $effect(() => {
     void session.protocolState;
+    void directoryRetryNonce;
     session
       .listPilots()
-      .then((p) => (pilots = p))
-      .catch(() => (pilots = []));
+      .then((p) => ((pilots = p), (pilotsError = false)))
+      .catch(() => {
+        noteDirectoryError(directoryError);
+        pilotsError = true;
+      });
   });
   const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
   // A competitor ref → its bound pilot id from the live `progress`, which carries an **explicit**
@@ -636,6 +660,15 @@
     <ErrorBanner error={session.lastCommandError} ondismiss={() => session.clearCommandError()} />
   {/if}
 
+  {#if directoryError}
+    <!-- A failed pilots/heats directory read (#340): without it, names silently fall back to raw
+         refs with no hint anything went wrong. Visible error + explicit retry (Results pattern). -->
+    <div class="dir-error" role="alert">
+      <p>Couldn’t load the pilot/heat directory — names may show as raw ids.</p>
+      <Button variant="secondary" size="sm" onclick={retryDirectory}>Try again</Button>
+    </div>
+  {/if}
+
   {#if canControl}
     <div class="controls" role="group" aria-label="Heat transitions">
       <span class="controls-label">Transitions</span>
@@ -898,6 +931,22 @@
   }
 
   /* ── Transition controls ─────────────────────────────────────────────────── */
+  /* The directory-load error state (#340): visible, with an explicit retry. */
+  .dir-error {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-3) var(--gf-space-4);
+    border: 1px solid color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-danger-soft);
+  }
+  .dir-error p {
+    margin: 0;
+    color: var(--gf-text);
+    font-size: var(--gf-font-size-sm);
+  }
   .controls {
     display: flex;
     flex-direction: column;

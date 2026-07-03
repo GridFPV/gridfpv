@@ -311,7 +311,7 @@
   // Export the CURRENT views with FRIENDLY names baked in (P1-2): competitor refs → callsigns and
   // class/round ids → their labels, so the JSON is human-usable, not a raw-ref wire dump. The raw ref
   // is preserved alongside (`competitor_ref`) so the export stays traceable. The legacy event-level
-  // projection (`heatResult` / `standings`) is carried through as well.
+  // projection (`heatResult` / `standings`) resolves the same way (#341).
   function exportAll() {
     const payload = buildResultsExport({
       resolveCompetitor: resolveName,

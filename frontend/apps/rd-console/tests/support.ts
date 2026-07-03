@@ -189,7 +189,11 @@ export function makeTestSession(
     deleteTimerImpl: opts?.deleteTimerImpl,
     setEventTimersImpl: opts?.setEventTimersImpl,
     setPrimaryTimerImpl: opts?.setPrimaryTimerImpl,
-    listPilotsImpl: opts?.listPilotsImpl,
+    // The pilots/heats directory reads default to an INERT SUCCESS (empty list), not the real
+    // fetch-backed impls: `fetch` is stubbed to fail below, and a failed directory read now renders
+    // a visible error state (#340) — which would leak into every test that doesn't override these
+    // seams. Resolving `[]` preserves the old default semantics (empty directory, no error).
+    listPilotsImpl: opts?.listPilotsImpl ?? (async () => []),
     // Pilot-directory write seams (issue #74): inert unless a test overrides them.
     createPilotImpl: opts?.createPilotImpl,
     updatePilotImpl: opts?.updatePilotImpl,
@@ -216,8 +220,9 @@ export function makeTestSession(
     createRoundImpl: opts?.createRoundImpl,
     updateRoundImpl: opts?.updateRoundImpl,
     deleteRoundImpl: opts?.deleteRoundImpl,
-    // Scheduled-heats read seam (race redesign Slice 3b): inert unless a test overrides it.
-    listHeatsImpl: opts?.listHeatsImpl,
+    // Scheduled-heats read seam (race redesign Slice 3b): inert success unless a test overrides it
+    // (see the listPilotsImpl note — a failing default would trip the #340 error state everywhere).
+    listHeatsImpl: opts?.listHeatsImpl ?? (async () => []),
     // Ranking + standings read seams (race redesign Slice 5/6a): inert unless overridden.
     roundRankingImpl: opts?.roundRankingImpl,
     roundStandingsImpl: opts?.roundStandingsImpl,

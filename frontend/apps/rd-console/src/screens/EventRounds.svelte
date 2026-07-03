@@ -903,11 +903,18 @@
   // is always timed): both read `winSeconds` and would build a NaN/0-µs window if it were left blank.
   const needsRaceTime = $derived(winKind === 'Timed' || winKind === 'BestOfN');
   const raceTimeValid = $derived(Number.isFinite(Number(winSeconds)) && Number(winSeconds) >= 1);
+  // The "Laps" field backs First-to-N and Best-of-N: clearing it left `winLaps` blank and the
+  // builder silently clamped it to 1 (#340) — block submit instead, the race-time pattern (#329).
+  const needsLaps = $derived(winKind === 'FirstToLaps' || winKind === 'BestOfN');
+  const lapsValid = $derived(Number.isFinite(Number(winLaps)) && Number(winLaps) >= 1);
+  // Same for the FromRanking "Take top" cut: a cleared field silently saved `top_n: 1` (#340).
+  const seedTopNValid = $derived(Number.isFinite(Number(seedTopN)) && Number(seedTopN) >= 1);
 
   // The form is submittable once it has a label, a single eligible class, a format, and — when
-  // seeding from a ranking — at least one chosen source round (the multi-select, issue #51). When the
-  // win condition is timed (Timed / Best-of-N) a valid race time is also required (else the heat
-  // would run forever / build a degenerate window).
+  // seeding from a ranking — at least one chosen source round (the multi-select, issue #51) plus a
+  // valid "Take top" cut. When the win condition is timed (Timed / Best-of-N) a valid race time is
+  // also required (else the heat would run forever / build a degenerate window), and a lap-target
+  // condition (First-to-N / Best-of-N) requires a valid lap count (else 1 would silently save).
   const canSubmit = $derived(
     isOpenPractice
       ? canSubmitOpenPractice
@@ -915,7 +922,9 @@
           selectedClass !== '' &&
           format.length > 0 &&
           (!needsRaceTime || raceTimeValid) &&
-          (seedKind === 'FromRoster' || (seedKind === 'FromRanking' && seedSources.size > 0))
+          (!needsLaps || lapsValid) &&
+          (seedKind === 'FromRoster' ||
+            (seedKind === 'FromRanking' && seedSources.size > 0 && seedTopNValid))
   );
 
   async function submit() {

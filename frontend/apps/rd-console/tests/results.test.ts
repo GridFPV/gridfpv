@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ClassStanding, CompetitorRef, RankEntry } from '@gridfpv/types';
+import type { ClassStanding, CompetitorRef, HeatResult, RankEntry } from '@gridfpv/types';
 import { buildResultsExport, toExportJson } from '../src/lib/results.js';
 
 describe('toExportJson', () => {
@@ -59,5 +59,40 @@ describe('buildResultsExport (friendly names, P1-2)', () => {
     // The raw ref is still present (as competitor_ref) for traceability, but the displayed name wins.
     const parsed = JSON.parse(json);
     expect(parsed.class_standings.standings[0].competitor).toBe('AceOne');
+  });
+
+  // #341: the legacy event-level sections (`standings` / `heatResult`) were carried through as-is,
+  // so their competitor fields leaked raw refs even though every other view resolved. They must
+  // resolve through the same resolver, raw ref kept alongside.
+  it('resolves the legacy standings + heat-result sections too (#341)', () => {
+    const standings: RankEntry[] = [{ competitor: 'p1', position: 1 }];
+    const heatResult: HeatResult = {
+      places: [
+        {
+          competitor: { adapter: 'rh-1', competitor: 'p1' },
+          position: 1,
+          laps: 3,
+          metric: { BestLapMicros: 41_250_000 },
+          best_lap_micros: 41_250_000
+        }
+      ]
+    };
+    const out = buildResultsExport({ resolveCompetitor, standings, heatResult });
+
+    // The standings rows resolve like every other view (raw ref kept alongside).
+    expect(out.standings?.[0].competitor).toBe('AceOne');
+    expect(out.standings?.[0].competitor_ref).toBe('p1');
+    expect(out.standings?.[0].position).toBe(1);
+
+    // The heat result's placements resolve the CompetitorKey's ref; the payload is preserved.
+    expect(out.heatResult?.places[0].competitor).toBe('AceOne');
+    expect(out.heatResult?.places[0].competitor_ref).toBe('p1');
+    expect(out.heatResult?.places[0].position).toBe(1);
+    expect(out.heatResult?.places[0].laps).toBe(3);
+
+    // Nothing in the serialized export shows a bare raw ref as the display field.
+    const parsed = JSON.parse(toExportJson(out));
+    expect(parsed.standings[0].competitor).toBe('AceOne');
+    expect(parsed.heatResult.places[0].competitor).toBe('AceOne');
   });
 });

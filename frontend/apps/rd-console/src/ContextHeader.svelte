@@ -21,7 +21,7 @@
    * freezes on Unofficial/Final, and resets when there's no live heat — everywhere, not just
    * on the live screen, which now drives its clock from the same source.
    */
-  import { StatusPill, RaceClock } from '@gridfpv/components';
+  import { StatusPill, RaceClock, toast } from '@gridfpv/components';
   import type { HeatSummary } from '@gridfpv/types';
   import type { Session } from './lib/session.svelte.js';
   import { useRaceClock } from './lib/raceClock.svelte.js';
@@ -58,13 +58,27 @@
   // Touching `currentEvent` makes it re-read the instant the event settles. Rounds come straight off
   // the event, so the `$derived` name re-resolves the moment either heats or the event changes.
   let heats = $state<HeatSummary[]>([]);
+  // A FAILED heats read must be visible (#340): swallowing it into an empty array made the header
+  // silently render the raw heat id with no hint anything was wrong. Track a load-error flag
+  // (keeping the last good data rather than wiping it), show a compact "Couldn't load — retry"
+  // state in place of the heat name, and toast once on the transition into the error state.
+  let heatsError = $state(false);
+  let heatsRetryNonce = $state(0);
+  function retryHeats(): void {
+    heatsRetryNonce += 1;
+  }
   $effect(() => {
     void session.currentEvent;
     void session.protocolState;
+    void heatsRetryNonce;
     session
       .listHeats()
-      .then((h) => (heats = h))
-      .catch(() => (heats = []));
+      .then((h) => ((heats = h), (heatsError = false)))
+      .catch(() => {
+        if (!heatsError)
+          toast.error('Couldn’t load the heats directory — heat names may not resolve.');
+        heatsError = true;
+      });
   });
   const heatName = $derived(
     heat ? heatNameById(heat, heats, session.currentEvent?.rounds ?? []) : ''
@@ -112,7 +126,19 @@
       <span class="ctx-sep" aria-hidden="true"></span>
       <div class="ctx-heat">
         <span class="ctx-heat-label">Heat</span>
-        <span class="ctx-heat-id">{heatName}</span>
+        {#if heatsError}
+          <!-- The heats read failed (#340): show the error state (with retry) instead of silently
+               falling back to the raw heat id. -->
+          <button
+            type="button"
+            class="ctx-load-error"
+            onclick={retryHeats}
+            title="Couldn’t load the heats directory — heat names may not resolve. Click to retry."
+            >Couldn’t load — retry</button
+          >
+        {:else}
+          <span class="ctx-heat-id">{heatName}</span>
+        {/if}
       </div>
       {#if phase}
         <span class="ctx-phase"><StatusPill {phase} size="sm" /></span>
@@ -239,6 +265,18 @@
   .ctx-idle {
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-faint);
+  }
+  /* The heats-directory load-error state (#340): compact, in place of the heat name. */
+  .ctx-load-error {
+    background: var(--gf-danger-soft);
+    border: 1px solid color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
+    border-radius: var(--gf-radius-sm);
+    padding: var(--gf-space-1) var(--gf-space-2);
+    color: var(--gf-text);
+    font-family: inherit;
+    font-size: var(--gf-font-size-xs);
+    cursor: pointer;
+    white-space: nowrap;
   }
   .ctx-phase {
     display: inline-flex;
