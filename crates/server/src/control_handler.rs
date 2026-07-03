@@ -15,7 +15,7 @@
 //! | command group | validation | appended event |
 //! |---------------|------------|----------------|
 //! | heat-loop (`Stage`/`Start`/`SkipCountdown`/`ForceEnd`/`Finalize`/`Advance`/`Revert`/`Abort`/`Restart`/`Discard`) | [`heat::heat_state`] folds the heat's current state; [`heat::apply`] checks the transition is legal | [`Event::HeatStateChanged`] with the engine-returned [`HeatTransition`](gridfpv_events::HeatTransition) |
-//! | [`Command::ScheduleHeat`] | none (it creates the heat) | [`Event::HeatScheduled`] |
+//! | [`Command::ScheduleHeat`] | the id is genuinely **new**, the lineup seats no competitor twice, and a `round`/`class` tag resolves against the event meta (round exists; class selected + round-eligible; pilot refs are eligible members) — #335 | [`Event::HeatScheduled`] |
 //! | [`Command::SetCurrentHeat`] | the heat exists in the log | [`Event::CurrentHeatSelected`] |
 //! | [`Command::Register`] | none (the binding is always recordable; last-registration-wins folds downstream) | [`Event::CompetitorRegistered`] |
 //! | [`Command::VoidDetection`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::DetectionVoided`] |
@@ -322,6 +322,20 @@ pub fn apply_command_in_event(
 /// Handle [`Command::ScheduleHeat`] (race redesign Slice 4a) — create a heat with its lineup, with
 /// the **channel assignment + heat-size cap** the round-driven path also applies.
 ///
+/// Validated before anything is appended (#335, the #330 hardening pattern — a raw API call must
+/// not lay down a heat the UI could never build); every failure is a typed `400`:
+///
+/// - the heat id is genuinely **new** ([`require_new_heat_id`] — a duplicate would re-seed an
+///   existing, possibly Final, heat back to `Scheduled`);
+/// - the lineup seats no competitor twice ([`require_distinct_lineup`]);
+/// - a `round` tag names one of the event's rounds; a `class` tag names a class the event
+///   selects — and, when both are tagged, one **eligible** for that round;
+/// - on a tagged heat, every lineup ref that names a **directory pilot** is a member of the
+///   tagged round's eligible classes' membership (the same field FillRound / the console's
+///   eligible-members picker resolves) — see [`validate_tagged_lineup`]. Non-pilot refs
+///   (`node-{i}` timer seats, sim free-text names) pass through, so practice-style heats keep
+///   scheduling.
+///
 /// The cap (lineup ≤ the event's effective primary timer's node count) is enforced here and an
 /// oversized lineup is a typed `400` (nothing appended). Channels are assigned from the timer's
 /// available set unless the caller supplied an explicit `frequencies` set (the caller — a test, a
@@ -347,6 +361,15 @@ fn apply_schedule_heat(
             format!("no event with id {:?}", event_id.0),
         ));
     };
+
+    // #335 validation, all-or-nothing before the append: the log-only guards (fresh id, distinct
+    // lineup) plus the meta-scoped tag/membership checks.
+    if let Err(err) = require_new_heat_id(state, &heat)
+        .and_then(|()| require_distinct_lineup(&lineup))
+        .and_then(|()| validate_tagged_lineup(registry, &meta, &lineup, &class, &round))
+    {
+        return CommandAck::failed(err);
+    }
 
     // Caller-supplied frequencies win (manual override / test); otherwise assign from the event's
     // timer. Either way the heat-size cap is enforced against the event's timer.
@@ -389,6 +412,136 @@ fn apply_schedule_heat(
         Ok(_offset) => CommandAck::ok(),
         Err(err) => CommandAck::failed(err),
     }
+}
+
+/// Require that `heat` names a genuinely **new** heat — one the log never scheduled (#335).
+///
+/// The fold ([`heat::heat_state`]) deliberately re-seeds a repeated `HeatScheduled` back to
+/// `Scheduled` (robustness on replay), so *accepting* a duplicate id would silently reset an
+/// existing — possibly finished/**Final** — heat and orphan its result (#341). A re-run of a raced
+/// heat is a `Discard`/`Restart` transition on the existing heat, never a re-schedule; a new heat
+/// takes a fresh id (the console mints collision-checked ids for exactly this reason).
+fn require_new_heat_id(state: &AppState, heat: &HeatId) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    if heat::heat_state(&events, heat).is_some() {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "a heat with id {:?} already exists; use Discard/Restart to re-run it, or pick a \
+                 fresh id",
+                heat.0
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a lineup that seats the **same competitor twice** (#335): a lineup ref is the handle
+/// passes/channels key on, so a duplicate would merge two seats into one pilot's lap stream.
+fn require_distinct_lineup(lineup: &[gridfpv_events::CompetitorRef]) -> Result<(), ProtocolError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for competitor in lineup {
+        if !seen.insert(competitor.0.as_str()) {
+            return Err(ProtocolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "competitor {:?} appears more than once in the lineup",
+                    competitor.0
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `ScheduleHeat`'s **round/class tag + lineup** against the event meta (#335).
+///
+/// - A `round` tag must name one of the event's rounds; a `class` tag must be one the event
+///   selects and — when a round is also tagged — **eligible** for that round (in the round's
+///   `classes`). An untagged (free-text / practice) heat skips all of this.
+/// - On a tagged heat, every lineup ref that names a **directory pilot** must be an *eligible
+///   member*: the union of the tagged round's eligible classes' membership (mirroring how
+///   FillRound's `FromRoster` field and the console's eligible-members picker resolve), or the
+///   tagged class's own membership when only a class is tagged. Refs that are **not** directory
+///   pilots pass through — `node-{i}` timer seats (the open-practice channel lineup) and sim
+///   free-text names have no membership to check — so practice-style heats keep scheduling.
+fn validate_tagged_lineup(
+    registry: &EventRegistry,
+    meta: &crate::events::EventMeta,
+    lineup: &[gridfpv_events::CompetitorRef],
+    class: &Option<gridfpv_events::ClassId>,
+    round: &Option<gridfpv_events::RoundId>,
+) -> Result<(), ProtocolError> {
+    // (1) The round tag resolves to this event's round definition.
+    let round_def = match round {
+        Some(id) => match meta.rounds.iter().find(|r| &r.id == id) {
+            Some(def) => Some(def),
+            None => {
+                return Err(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    format!("no round with id {:?} in this event", id.0),
+                ));
+            }
+        },
+        None => None,
+    };
+
+    // (2) The class tag is selected by the event, and eligible for the tagged round.
+    if let Some(class_id) = class {
+        if !meta.classes.contains(class_id) {
+            return Err(ProtocolError::new(
+                ErrorCode::BadRequest,
+                format!("class {:?} is not selected by this event", class_id.0),
+            ));
+        }
+        if let Some(def) = round_def {
+            if !def.classes.contains(class_id) {
+                return Err(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    format!(
+                        "class {:?} is not eligible for round {:?}",
+                        class_id.0, def.id.0
+                    ),
+                ));
+            }
+        }
+    }
+
+    // (3) Membership: only for a tagged heat, and only for pilot-shaped refs.
+    if round_def.is_none() && class.is_none() {
+        return Ok(());
+    }
+    // The eligible member set — the tagged round's eligible classes (the round wins when both are
+    // tagged: its `classes` already contain the class per check 2), else the tagged class alone.
+    let eligible_classes: Vec<&gridfpv_events::ClassId> = match round_def {
+        Some(def) => def.classes.iter().collect(),
+        None => class.iter().collect(),
+    };
+    let mut members = std::collections::BTreeSet::new();
+    for cls in eligible_classes {
+        if let Some(membership) = meta.classes_membership.iter().find(|m| &m.class == cls) {
+            for slot in &membership.pilots {
+                members.insert(slot.pilot.0.as_str());
+            }
+        }
+    }
+    let pilots = registry.pilots();
+    for competitor in lineup {
+        // A ref is "pilot-shaped" when it names a directory pilot — the console's build path
+        // seats pilot ids verbatim as refs. Anything else (node seats, free-text) passes.
+        if pilots.exists(&gridfpv_events::PilotId(competitor.0.clone()))
+            && !members.contains(competitor.0.as_str())
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "pilot {:?} is not a member of the tagged round/class's eligible classes",
+                    competitor.0
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The defensive cap on `FillMode::All`'s loop (#216): a real deterministic format always
@@ -749,9 +902,11 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             Ok(Event::CurrentHeatSelected { heat })
         }
 
-        // --- Scheduling: creates the heat, so no prior-state check. The class/round/
-        // frequency tags are carried straight through (default-absent for the
-        // free-text path). ---
+        // --- Scheduling: creates the heat, so the prior-state check is INVERTED — the id must
+        // be new (a duplicate would re-seed an existing heat, #335) and the lineup distinct.
+        // The class/round/frequency tags are carried straight through (default-absent for the
+        // free-text path); the meta-scoped tag validation lives on the event-aware path
+        // (`apply_schedule_heat`), which is the only one the real control endpoints drive. ---
         Command::ScheduleHeat {
             heat,
             lineup,
@@ -759,14 +914,18 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             round,
             frequencies,
             label,
-        } => Ok(Event::HeatScheduled {
-            heat,
-            lineup,
-            class,
-            round,
-            frequencies,
-            label,
-        }),
+        } => {
+            require_new_heat_id(state, &heat)?;
+            require_distinct_lineup(&lineup)?;
+            Ok(Event::HeatScheduled {
+                heat,
+                lineup,
+                class,
+                round,
+                frequencies,
+                label,
+            })
+        }
 
         // --- FillRound is intercepted by `apply_command_in_event` (it needs the event
         // meta, not just the log) and never reaches here on the real control path. The arm
@@ -1297,6 +1456,86 @@ mod tests {
             Event::HeatScheduled { heat: h, label: Some(l), .. }
                 if *h == heat() && l == "Featured Heat"
         )));
+    }
+
+    /// A `ScheduleHeat` seating the same competitor twice is rejected with a typed `BadRequest`
+    /// and appends nothing (#335) — a duplicate ref would merge two seats into one lap stream.
+    #[test]
+    fn schedule_heat_rejects_a_duplicate_competitor_in_the_lineup() {
+        let state = AppState::new(InMemoryLog::default());
+        let ack = apply_command(
+            &state,
+            Command::ScheduleHeat {
+                heat: heat(),
+                lineup: vec![CompetitorRef("A".into()), CompetitorRef("A".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
+                label: None,
+            },
+        );
+        assert!(!ack.ok, "a duplicate lineup entry must be rejected");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        let (events, _) = state.read().unwrap();
+        assert!(events.is_empty(), "a rejected ScheduleHeat appends nothing");
+    }
+
+    /// `ScheduleHeat` on an id that already exists is rejected (#335 / #341): the fold re-seeds a
+    /// repeated `HeatScheduled` back to `Scheduled`, so accepting the duplicate would silently
+    /// reset a **Final** heat and orphan its result. The heat must stay Final; a re-run goes
+    /// through `Discard`/`Restart`, never a re-schedule.
+    #[test]
+    fn schedule_heat_rejects_an_existing_heat_id() {
+        use gridfpv_engine::heat::{HeatState, heat_state};
+
+        // q-1 driven all the way to Final.
+        let state = drive_current_to(&[
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ]);
+        let (before, _) = state.read().unwrap();
+        assert_eq!(heat_state(&before, &heat()), Some(HeatState::Final));
+
+        let ack = apply_command(
+            &state,
+            Command::ScheduleHeat {
+                heat: heat(),
+                lineup: vec![CompetitorRef("A".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
+                label: None,
+            },
+        );
+        assert!(!ack.ok, "re-scheduling an existing id must be rejected");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+
+        // Nothing appended; the heat is still Final — NOT re-seeded to Scheduled.
+        let (after, _) = state.read().unwrap();
+        assert_eq!(before.len(), after.len(), "nothing was appended");
+        assert_eq!(
+            heat_state(&after, &heat()),
+            Some(HeatState::Final),
+            "the finished heat keeps its state"
+        );
+
+        // A merely-Scheduled heat is protected the same way (only genuinely-new ids pass).
+        let state = scheduled_state();
+        let ack = apply_command(
+            &state,
+            Command::ScheduleHeat {
+                heat: heat(),
+                lineup: vec![CompetitorRef("A".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
+                label: None,
+            },
+        );
+        assert!(!ack.ok, "a scheduled id is not a fresh id either");
     }
 
     /// `SetCurrentHeat` validates the heat exists, then appends a `CurrentHeatSelected` — and the
@@ -2310,6 +2549,242 @@ mod tests {
         assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
         let after = state.read().unwrap().0.len();
         assert_eq!(before, after, "a rejected FillRound appends nothing");
+    }
+
+    // --- #335: ScheduleHeat tag + membership validation (the event-aware path) ---------------
+
+    /// An 8-node event over a class of `pilots` with a single timed_qual round — the tagged
+    /// ScheduleHeat fixture. Returns the registry, event id, round id, class id, and the member
+    /// pilot ids (in membership order).
+    #[cfg(test)]
+    fn tagged_schedule_fixture(
+        pilots: &[&str],
+    ) -> (
+        EventRegistry,
+        EventId,
+        gridfpv_events::RoundId,
+        gridfpv_events::ClassId,
+        Vec<gridfpv_events::PilotId>,
+    ) {
+        use crate::timers::{ChannelCapability, CreateTimerRequest, TimerKind};
+        let timer_req = CreateTimerRequest {
+            name: "8-node".into(),
+            kind: TimerKind::Mock { laps: 1, lap_ms: 1 },
+            channel_capability: Some(ChannelCapability::Flexible),
+            node_count: Some(8),
+            available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+        };
+        let (registry, event_id, round) = event_with_timer_and_round(timer_req, pilots);
+        let meta = registry.meta_of(&event_id).unwrap();
+        let class = meta.classes[0].clone();
+        let members = meta.classes_membership[0]
+            .pilots
+            .iter()
+            .map(|s| s.pilot.clone())
+            .collect();
+        (registry, event_id, round, class, members)
+    }
+
+    /// The tagged ScheduleHeat under test, with the fixture's default shape (no explicit
+    /// frequencies, no label) — each test varies the tag/lineup it cares about.
+    #[cfg(test)]
+    fn schedule_tagged(
+        registry: &EventRegistry,
+        event_id: &EventId,
+        state: &AppState,
+        heat: &str,
+        lineup: Vec<CompetitorRef>,
+        class: Option<gridfpv_events::ClassId>,
+        round: Option<gridfpv_events::RoundId>,
+    ) -> CommandAck {
+        apply_command_in_event(
+            registry,
+            event_id,
+            state,
+            Command::ScheduleHeat {
+                heat: HeatId(heat.into()),
+                lineup,
+                class,
+                round,
+                frequencies: vec![],
+                label: None,
+            },
+        )
+    }
+
+    /// A `round` tag must name one of the event's rounds (#335) — a dangling tag would create a
+    /// heat no round view lists and no generator accounts for.
+    #[test]
+    fn schedule_heat_rejects_an_unknown_round_tag() {
+        use gridfpv_events::RoundId;
+        let (registry, event_id, _round, _class, members) = tagged_schedule_fixture(&["a", "b"]);
+        let state = registry.resolve(&event_id).unwrap();
+        let lineup = vec![CompetitorRef(members[0].0.clone())];
+        let ack = schedule_tagged(
+            &registry,
+            &event_id,
+            &state,
+            "x-1",
+            lineup,
+            None,
+            Some(RoundId("nope".into())),
+        );
+        assert!(!ack.ok, "a dangling round tag must be rejected");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        let (events, _) = state.read().unwrap();
+        assert!(events.is_empty(), "a rejected ScheduleHeat appends nothing");
+    }
+
+    /// A `class` tag must be one the event **selects** (#335) — mirroring the membership PUT's
+    /// class-selection guard (#330).
+    #[test]
+    fn schedule_heat_rejects_an_unselected_class_tag() {
+        use gridfpv_events::ClassId;
+        let (registry, event_id, _round, _class, members) = tagged_schedule_fixture(&["a", "b"]);
+        let state = registry.resolve(&event_id).unwrap();
+        let lineup = vec![CompetitorRef(members[0].0.clone())];
+        let ack = schedule_tagged(
+            &registry,
+            &event_id,
+            &state,
+            "x-1",
+            lineup,
+            Some(ClassId("nope".into())),
+            None,
+        );
+        assert!(!ack.ok, "an unselected class tag must be rejected");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+    }
+
+    /// With BOTH tags, the class must be **eligible** for the round (in its `classes`) — a
+    /// selected-but-ineligible class would file the heat under a round that never runs it (#335).
+    #[test]
+    fn schedule_heat_rejects_a_class_not_eligible_for_the_round() {
+        use crate::classes::CreateClassRequest;
+        let (registry, event_id, round, class, members) = tagged_schedule_fixture(&["a", "b"]);
+        // A second directory class, selected by the event but NOT eligible for the round.
+        let spec = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Spec".into(),
+                source: Default::default(),
+                reference: None,
+                description: None,
+            })
+            .unwrap()
+            .id;
+        registry
+            .set_classes(&event_id, vec![class, spec.clone()])
+            .unwrap();
+        let state = registry.resolve(&event_id).unwrap();
+        let lineup = vec![CompetitorRef(members[0].0.clone())];
+        let ack = schedule_tagged(
+            &registry,
+            &event_id,
+            &state,
+            "x-1",
+            lineup,
+            Some(spec),
+            Some(round),
+        );
+        assert!(!ack.ok, "a round-ineligible class tag must be rejected");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+    }
+
+    /// On a tagged heat, a lineup ref naming a **directory pilot** must be an eligible member —
+    /// a real pilot outside the round's classes' membership must not be seated (#335, closing
+    /// the manual bypass of FillRound's membership-resolved field).
+    #[test]
+    fn schedule_heat_rejects_a_non_member_pilot_on_a_tagged_heat() {
+        use crate::pilots::CreatePilotRequest;
+        let (registry, event_id, round, class, members) = tagged_schedule_fixture(&["a", "b"]);
+        // A directory pilot who is NOT in the round's class membership.
+        let outsider = registry
+            .pilots()
+            .create(&CreatePilotRequest {
+                callsign: "outsider".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let state = registry.resolve(&event_id).unwrap();
+        let lineup = vec![
+            CompetitorRef(members[0].0.clone()),
+            CompetitorRef(outsider.0.clone()),
+        ];
+        let ack = schedule_tagged(
+            &registry,
+            &event_id,
+            &state,
+            "x-1",
+            lineup,
+            Some(class),
+            Some(round),
+        );
+        assert!(!ack.ok, "a non-member directory pilot must be rejected");
+        assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+        let (events, _) = state.read().unwrap();
+        assert!(events.is_empty(), "a rejected ScheduleHeat appends nothing");
+    }
+
+    /// The happy paths stay open (#335): eligible members schedule tagged; **non-pilot refs**
+    /// (`node-{i}` timer seats — the open-practice channel lineup — and sim free-text names)
+    /// pass the membership check; and an **untagged** heat validates none of it.
+    #[test]
+    fn schedule_heat_accepts_members_node_seats_and_untagged_lineups() {
+        use crate::pilots::CreatePilotRequest;
+        let (registry, event_id, round, class, members) = tagged_schedule_fixture(&["a", "b"]);
+        let state = registry.resolve(&event_id).unwrap();
+
+        // Eligible members, tagged with their round + class — the console's build path.
+        let lineup: Vec<CompetitorRef> =
+            members.iter().map(|p| CompetitorRef(p.0.clone())).collect();
+        let ack = schedule_tagged(
+            &registry,
+            &event_id,
+            &state,
+            "x-1",
+            lineup,
+            Some(class),
+            Some(round.clone()),
+        );
+        assert!(ack.ok, "eligible members schedule tagged: {ack:?}");
+
+        // A node-seat ref on a tagged heat is NOT membership-checked (the practice-style path).
+        let ack = schedule_tagged(
+            &registry,
+            &event_id,
+            &state,
+            "x-2",
+            vec![CompetitorRef("node-0".into())],
+            None,
+            Some(round),
+        );
+        assert!(ack.ok, "node-seat refs pass the membership check: {ack:?}");
+
+        // An untagged heat skips tag validation entirely — even for a known non-member pilot
+        // (the free-text / ad-hoc path stays as permissive as before).
+        let outsider = registry
+            .pilots()
+            .create(&CreatePilotRequest {
+                callsign: "outsider".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let ack = schedule_tagged(
+            &registry,
+            &event_id,
+            &state,
+            "x-3",
+            vec![CompetitorRef(outsider.0.clone())],
+            None,
+            None,
+        );
+        assert!(
+            ack.ok,
+            "an untagged heat is not membership-checked: {ack:?}"
+        );
     }
 
     /// Build an event with an 8-node Raceband timer over a class of `pilots`, plus a single

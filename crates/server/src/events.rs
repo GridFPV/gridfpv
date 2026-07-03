@@ -1290,6 +1290,11 @@ impl EventRegistry {
             .get_mut(id)
             .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
         event.meta.roster = dedup_preserving_order(pilot_ids);
+        // Membership is the finer roster × classes join, so a pilot dropped from the roster must
+        // not linger in any class's membership (#336) — a stale slot would still be seated by
+        // FillRound/ScheduleHeat, bypassing the roster/membership validation the membership PUT
+        // enforces. Surviving members keep their slots (and their assigned channels) untouched.
+        prune_membership_to_roster(&mut event.meta);
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
@@ -1310,6 +1315,15 @@ impl EventRegistry {
             .get_mut(id)
             .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
         event.meta.classes = dedup_preserving_order(ids);
+        // A deselected class's membership goes with it (#336): membership only means anything for
+        // a class the event runs, and a stale entry would still field pilots if the class were
+        // reselected later under different assumptions (or be resolved by a round that still
+        // names it). Memberships of the surviving selection are untouched.
+        let selected = event.meta.classes.clone();
+        event
+            .meta
+            .classes_membership
+            .retain(|m| selected.contains(&m.class));
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
@@ -1575,6 +1589,9 @@ impl EventRegistry {
             .get_mut(id)
             .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
         event.meta.roster.retain(|p| p != pilot);
+        // Same staleness hole as the roster PUT (#336): the removed pilot's membership slots go
+        // with them, so no class can still seat a pilot who left the event.
+        prune_membership_to_roster(&mut event.meta);
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
@@ -2207,6 +2224,22 @@ fn dedup_preserving_order<T: PartialEq>(items: Vec<T>) -> Vec<T> {
         }
     }
     out
+}
+
+/// Drop every [`classes_membership`](EventMeta::classes_membership) slot whose pilot is **not on
+/// the roster** (#336) — the shared prune the roster-shrinking mutations (the roster PUT and the
+/// per-pilot DELETE) apply so membership never outlives the roster it joins. A membership entry
+/// left with no pilots is removed entirely (no empty entries are persisted — the same invariant
+/// [`EventRegistry::set_class_membership`] keeps). Surviving slots are untouched, so a remaining
+/// member keeps their assigned channel.
+fn prune_membership_to_roster(meta: &mut EventMeta) {
+    let roster = &meta.roster;
+    for membership in &mut meta.classes_membership {
+        membership
+            .pilots
+            .retain(|slot| roster.contains(&slot.pilot));
+    }
+    meta.classes_membership.retain(|m| !m.pilots.is_empty());
 }
 
 /// The default per-event timer selection (issue #73): just the built-in **Mock**
@@ -3401,6 +3434,119 @@ mod tests {
             .set_roster(&event.id, vec![p.clone(), p.clone()])
             .unwrap();
         assert_eq!(meta.roster, vec![p]);
+    }
+
+    /// Seed a directory pilot by callsign — the membership-prune tests' shorthand.
+    fn seed_pilot(reg: &EventRegistry, callsign: &str) -> PilotId {
+        reg.pilots()
+            .create(&crate::pilots::CreatePilotRequest {
+                callsign: callsign.to_string(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn roster_shrink_prunes_the_departed_pilots_membership() {
+        // #336: a pilot dropped from the roster must not linger in classes_membership —
+        // a stale slot would still be seated by FillRound, bypassing the membership PUT's
+        // roster guard. Surviving members keep their slots AND their assigned channels.
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Shrink Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        let (a, b) = (seed_pilot(&reg, "alpha"), seed_pilot(&reg, "bravo"));
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        reg.set_roster(&event.id, vec![a.clone(), b.clone()])
+            .unwrap();
+        reg.set_class_membership(
+            &event.id,
+            open.clone(),
+            vec![
+                MemberSlot {
+                    pilot: a.clone(),
+                    channel: Some(5658),
+                },
+                MemberSlot {
+                    pilot: b.clone(),
+                    channel: Some(5917),
+                },
+            ],
+        )
+        .unwrap();
+
+        // Shrink the roster to just A: B's membership slot goes with them.
+        let meta = reg.set_roster(&event.id, vec![a.clone()]).unwrap();
+        assert_eq!(meta.classes_membership.len(), 1);
+        let membership = &meta.classes_membership[0];
+        assert_eq!(membership.class, open);
+        assert_eq!(membership.pilots.len(), 1, "B's slot is pruned");
+        assert_eq!(membership.pilots[0].pilot, a);
+        assert_eq!(
+            membership.pilots[0].channel,
+            Some(5658),
+            "the surviving member keeps their channel"
+        );
+
+        // Emptying the roster removes the now-empty membership entry entirely (no empty
+        // entries are persisted — the set_class_membership invariant).
+        let meta = reg.set_roster(&event.id, vec![]).unwrap();
+        assert!(meta.classes_membership.is_empty());
+    }
+
+    #[test]
+    fn removing_a_roster_pilot_prunes_their_membership() {
+        // The per-pilot DELETE has the same staleness hole as the roster PUT (#336).
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Remove Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        let (a, b) = (seed_pilot(&reg, "alpha"), seed_pilot(&reg, "bravo"));
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        reg.set_roster(&event.id, vec![a.clone(), b.clone()])
+            .unwrap();
+        reg.set_class_membership(&event.id, open, slots(vec![a.clone(), b.clone()]))
+            .unwrap();
+
+        let meta = reg.remove_from_roster(&event.id, &b).unwrap();
+        assert_eq!(meta.roster, vec![a.clone()]);
+        assert_eq!(meta.classes_membership.len(), 1);
+        assert_eq!(meta.classes_membership[0].pilots.len(), 1);
+        assert_eq!(meta.classes_membership[0].pilots[0].pilot, a);
+    }
+
+    #[test]
+    fn class_deselect_prunes_its_membership() {
+        // #336: deselecting a class drops its membership entry — a stale entry would still
+        // field pilots through any round that names the class. The surviving class's
+        // membership (channels included) is untouched.
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Deselect Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        let spec = seed_class(&reg, "Spec");
+        let (a, b) = (seed_pilot(&reg, "alpha"), seed_pilot(&reg, "bravo"));
+        reg.set_classes(&event.id, vec![open.clone(), spec.clone()])
+            .unwrap();
+        reg.set_roster(&event.id, vec![a.clone(), b.clone()])
+            .unwrap();
+        reg.set_class_membership(
+            &event.id,
+            open.clone(),
+            vec![MemberSlot {
+                pilot: a.clone(),
+                channel: Some(5658),
+            }],
+        )
+        .unwrap();
+        reg.set_class_membership(&event.id, spec.clone(), slots(vec![b.clone()]))
+            .unwrap();
+
+        // Deselect Spec: its membership entry goes; Open's survives channel-intact.
+        let meta = reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        assert_eq!(meta.classes, vec![open.clone()]);
+        assert_eq!(meta.classes_membership.len(), 1);
+        assert_eq!(meta.classes_membership[0].class, open);
+        assert_eq!(meta.classes_membership[0].pilots[0].pilot, a);
+        assert_eq!(meta.classes_membership[0].pilots[0].channel, Some(5658));
     }
 
     #[test]
