@@ -55,6 +55,7 @@ export type * from '@bindings/CreateTimerRequest';
 export type * from '@bindings/Cursor';
 export type * from '@bindings/ErrorCode';
 export type * from '@bindings/Event';
+export type * from '@bindings/EventAuditEntry';
 export type * from '@bindings/EventId';
 export type * from '@bindings/EventMeta';
 export type * from '@bindings/EventOutcome';

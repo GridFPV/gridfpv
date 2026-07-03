@@ -84,7 +84,7 @@ use gridfpv_engine::format::{FormatRegistry, FormatSchema};
 use gridfpv_engine::scoring::{HeatResult, WinCondition, score_corrected_with_global_offsets};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{
-    LapList, lap_list_marshaled, marshaling_log, registrations, signal_trace,
+    AuditEntry, LapList, lap_list_marshaled, marshaling_log, registrations, signal_trace,
 };
 use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
 use serde::Deserialize;
@@ -439,6 +439,10 @@ pub fn router(registry: EventRegistry) -> Router {
         // Per-event scheduled **heats** (race redesign Slice 3b): the round-tagged heats list the
         // Heats UI reads — open, no token (a read), like the snapshot routes.
         .route("/events/{event_id}/heats", get(list_heats))
+        // The event-wide **audit trail** (the "defensible results" review surface): every heat's
+        // marshaling audit fold, heat-tagged and merged newest-first — what the console's Audit
+        // page reads. Open, no token (a read, like the heats list and the snapshot routes).
+        .route("/events/{event_id}/audit", get(event_audit))
         // A round's **ranking** (race redesign Slice 5/6a): the ordered per-pilot ranking the
         // engine seeds `FromRanking` from — what the bracket-carry UI displays. Open, no token.
         .route(
@@ -1342,6 +1346,85 @@ async fn class_standings(
     let (events, _cursor) = state.read()?;
     let standings = round_engine::class_standings(&meta, &class_id, &events).map_err(fill_error)?;
     Ok(Json(standings))
+}
+
+/// One row of the **event-wide** audit trail (`GET /events/{event_id}/audit`): a per-heat
+/// marshaling [`AuditEntry`] plus the heat it belongs to.
+///
+/// The per-heat [`AuditEntry`] deliberately carries no heat id — it is served from a heat-scoped
+/// route where the heat is implicit. The event-wide read merges every heat's trail into one list,
+/// so each entry must say *which* heat it rules on; the console's Audit page renders (and filters
+/// by) that tag. The entry's own fields are flattened onto the row, so on the wire this is "an
+/// `AuditEntry` plus `heat`" — additive, no re-modelling.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct EventAuditEntry {
+    /// The heat this ruling belongs to — attributed by the same heat-window rules Marshaling's
+    /// per-heat audit uses ([`heat_window_offsets`]), so the two views can never disagree.
+    pub heat: HeatId,
+    /// The per-heat audit fact itself (kind / when / offset / competitor / summary), flattened.
+    #[serde(flatten)]
+    pub entry: AuditEntry,
+}
+
+/// Fold the whole event log into the **event-wide audit trail**, newest first.
+///
+/// For each heat the log ever scheduled (the distinct `HeatScheduled` ids, in order), this runs
+/// the *existing* per-heat audit fold — [`marshaling_log`] over that heat's
+/// [`heat_window_offsets`], exactly the pipeline the heat-scoped `?projection=audit` snapshot
+/// uses — tags each entry with the heat id, merges all heats, and sorts by the entry's global
+/// append offset **descending** (append order is time order, so newest first). Reusing the
+/// shipped window attribution is the point: a ruling filed about a *finished* heat while a later
+/// heat is live lands under the marshaled heat here too, and a **Restarted** heat's pre-restart
+/// rulings are absent (the window folds from the heat's current run by design — an abandoned
+/// run's rulings are not part of the heat's result, so they are not part of its audit either).
+pub(crate) fn event_audit_log(stored: &[StoredEvent]) -> Vec<EventAuditEntry> {
+    let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
+    // The distinct heats ever scheduled, in first-scheduled order (a re-schedule of the same id
+    // must not fold — and double-report — the same window twice).
+    let mut heats: Vec<HeatId> = Vec::new();
+    for event in &events {
+        if let Event::HeatScheduled { heat, .. } = event {
+            if !heats.contains(heat) {
+                heats.push(heat.clone());
+            }
+        }
+    }
+    let mut entries: Vec<EventAuditEntry> = Vec::new();
+    for heat in &heats {
+        let offsets = heat_window_offsets(&events, heat);
+        let trail = marshaling_log(
+            offsets
+                .iter()
+                .map(|(o, e)| (stored.get(*o as usize).and_then(|s| s.recorded_at), *o, e)),
+            heat,
+        );
+        entries.extend(trail.into_iter().map(|entry| EventAuditEntry {
+            heat: heat.clone(),
+            entry,
+        }));
+    }
+    // Newest first across the whole event: the global append offset is the one total order every
+    // heat's entries share (recorded_at can be absent), so descending offset is descending time.
+    entries.sort_by_key(|e| std::cmp::Reverse(e.entry.at_ref));
+    entries
+}
+
+/// `GET /events/{event_id}/audit` — the **event-wide** audit trail (the "defensible results"
+/// review surface).
+///
+/// Serves every heat's marshaling audit fold, heat-tagged and merged newest-first (see
+/// [`event_audit_log`]). This is what the console's Audit page reads: the full searchable ruling
+/// history for the event, while Marshaling keeps only the marshaled heat's recent entries. An
+/// open read (no token), like the heats list and the snapshot routes; an unknown event is a
+/// typed **404**.
+async fn event_audit(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Json<Vec<EventAuditEntry>>, ProtocolError> {
+    let state = resolve_event(&registry, &event_id)?;
+    let (stored, _cursor) = state.read_stored()?;
+    Ok(Json(event_audit_log(&stored)))
 }
 
 /// `POST /events/{event_id}/auth/join-token` — mint a fresh **read-only** join token
@@ -2366,6 +2449,161 @@ mod tests {
             }
             other => panic!("expected marshaling audit, got {other:?}"),
         }
+    }
+
+    // --- The event-wide audit read (`GET /events/{event_id}/audit`) -----------------------------
+
+    /// `GET /events/practice/audit`, deserialized. The route serves plain `Vec<EventAuditEntry>`
+    /// (no snapshot envelope — it is a directory-style read like `/heats`).
+    async fn get_event_audit(registry: EventRegistry) -> (StatusCode, Vec<EventAuditEntry>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .uri("/events/practice/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let entries = serde_json::from_slice::<Vec<EventAuditEntry>>(&bytes).unwrap_or_default();
+        (status, entries)
+    }
+
+    /// The heat-loop events for a second heat `q-2` (C and D), appended after `recorded_heat`'s
+    /// `q-1`. With `recorded_heat` first (offsets 0..=10), these land at offsets 11..=18 — the
+    /// two passes at 15 and 16.
+    fn second_heat() -> Vec<Event> {
+        let changed = |t| Event::HeatStateChanged {
+            heat: HeatId("q-2".into()),
+            transition: t,
+        };
+        vec![
+            Event::HeatScheduled {
+                heat: HeatId("q-2".into()),
+                lineup: vec![CompetitorRef("C".into()), CompetitorRef("D".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
+                label: None,
+            },
+            changed(HeatTransition::Staged),
+            changed(HeatTransition::Armed),
+            changed(HeatTransition::Running),
+            pass("C", 1_000_000, 1),
+            pass("C", 4_000_000, 2),
+            changed(HeatTransition::Finished),
+            changed(HeatTransition::Finalized),
+        ]
+    }
+
+    #[tokio::test]
+    async fn event_audit_merges_heats_newest_first_with_correct_heat_tags() {
+        // Two heats run back-to-back, then two rulings appended AFTER both have run: first a void
+        // targeting q-2's second pass (offset 16 → window-attributed to q-2), then a penalty
+        // heat-tagged to q-1 — the FIRST heat, filed while it is long finished. The tag (not the
+        // position in the log) must decide the heat it lands under.
+        let mut events = recorded_heat(); // q-1 at offsets 0..=10
+        events.extend(second_heat()); // q-2 at offsets 11..=18
+        events.push(Event::DetectionVoided {
+            target: LogRef(16), // q-2's second pass → belongs to q-2
+        });
+        events.push(Event::PenaltyApplied {
+            heat: HeatId("q-1".into()),
+            competitor: CompetitorRef("A".into()),
+            penalty: gridfpv_events::Penalty::Disqualify { reason: None },
+        });
+        let (registry, _state, _) = state_with(events);
+
+        let (status, entries) = get_event_audit(registry).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(entries.len(), 2, "two rulings, no passes");
+        // Newest first: the penalty (offset 20) precedes the void (offset 19)…
+        assert_eq!(entries[0].entry.at_ref, LogRef(20));
+        assert_eq!(
+            entries[0].entry.kind,
+            gridfpv_projection::AuditKind::PenaltyApplied
+        );
+        // …and it is tagged to q-1 (the heat it names), NOT q-2 (the heat last active in the log).
+        assert_eq!(entries[0].heat, HeatId("q-1".into()));
+        assert_eq!(entries[1].entry.at_ref, LogRef(19));
+        assert_eq!(entries[1].entry.kind, gridfpv_projection::AuditKind::Voided);
+        assert_eq!(entries[1].heat, HeatId("q-2".into()));
+    }
+
+    #[tokio::test]
+    async fn event_audit_omits_a_restarted_heats_pre_restart_rulings() {
+        // A ruling made during q-1's FIRST run, then the heat is Restarted and re-raced. The heat
+        // window folds from the current run only (a reset abandons the prior run and everything
+        // ruled about it), so the pre-restart penalty must NOT appear in the event audit — while a
+        // post-restart ruling does.
+        let heat = || HeatId("q-1".into());
+        let changed = |t| Event::HeatStateChanged {
+            heat: heat(),
+            transition: t,
+        };
+        let events = vec![
+            Event::HeatScheduled {
+                heat: heat(),
+                lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+                class: None,
+                round: None,
+                frequencies: vec![],
+                label: None,
+            },
+            changed(HeatTransition::Staged),
+            changed(HeatTransition::Armed),
+            changed(HeatTransition::Running),
+            pass("A", 1_000_000, 1),
+            // The abandoned run's ruling (offset 5): a penalty filed mid-first-run.
+            Event::PenaltyApplied {
+                heat: heat(),
+                competitor: CompetitorRef("A".into()),
+                penalty: gridfpv_events::Penalty::Disqualify { reason: None },
+            },
+            changed(HeatTransition::Restarted), // offset 6 — abandons the run above
+            changed(HeatTransition::Staged),
+            changed(HeatTransition::Armed),
+            changed(HeatTransition::Running),
+            pass("A", 1_000_000, 2),
+            pass("A", 4_000_000, 3),
+            changed(HeatTransition::Finished),
+            changed(HeatTransition::Finalized),
+            // The current run's ruling (offset 14): survives.
+            Event::PenaltyApplied {
+                heat: heat(),
+                competitor: CompetitorRef("B".into()),
+                penalty: gridfpv_events::Penalty::TimeAdded { micros: 2_000_000 },
+            },
+        ];
+        let (registry, _state, _) = state_with(events);
+
+        let (status, entries) = get_event_audit(registry).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the current run's ruling — the pre-restart DQ is abandoned with its run"
+        );
+        assert_eq!(entries[0].entry.at_ref, LogRef(14));
+        assert_eq!(entries[0].heat, heat());
+        assert_eq!(entries[0].entry.competitor, Some(CompetitorRef("B".into())));
+    }
+
+    #[tokio::test]
+    async fn event_audit_on_unknown_event_is_not_found() {
+        let (registry, _state, _) = state_with(recorded_heat());
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .uri("/events/no-such-event/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

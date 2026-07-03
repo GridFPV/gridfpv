@@ -29,6 +29,7 @@ import type {
   CreatePilotRequest,
   CreateTimerRequest,
   Cursor,
+  EventAuditEntry,
   EventId,
   EventMeta,
   FormatSchema,
@@ -1026,6 +1027,26 @@ export async function listHeats(
   const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/heats`, { headers });
   if (!resp.ok) throw new Error(`GET /events/${eventId}/heats failed: HTTP ${resp.status}`);
   return (await resp.json()) as HeatSummary[];
+}
+
+/**
+ * Read an event's **event-wide audit trail** (`GET /events/{id}/audit`) — the "defensible
+ * results" review surface. A read (open, no token): every heat's marshaling audit fold,
+ * heat-tagged ({@link EventAuditEntry} = the per-heat `AuditEntry` fields plus `heat`) and merged
+ * **newest first** across the whole event — what the console's Audit page renders and filters.
+ * Resolves the list, or rejects on a non-2xx / transport failure; an unknown event is a 404.
+ */
+export async function eventAudit(
+  baseUrl: string,
+  eventId: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<EventAuditEntry[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/audit`, { headers });
+  if (!resp.ok) throw new Error(`GET /events/${eventId}/audit failed: HTTP ${resp.status}`);
+  return (await resp.json()) as EventAuditEntry[];
 }
 
 /**

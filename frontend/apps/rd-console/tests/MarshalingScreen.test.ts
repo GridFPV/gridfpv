@@ -374,23 +374,54 @@ describe('Marshaling (Slice 3)', () => {
     expect(sendSpy).toHaveBeenCalledWith({ Revert: { heat: 'heat-1' } });
   });
 
-  it('renders the audit trail newest-first', () => {
+  // ── The Recent-rulings strip (the full trail moved to the event-wide Audit page) ─────────────
+  it('the Recent-rulings strip renders the latest entries newest-first (composed lines)', () => {
     const { session } = makeTestSession({
       live: liveRunning,
       laps: lapList,
       audit: marshalingAudit
     });
     render(Marshaling, { session });
-    const panel = within(screen.getByRole('complementary', { name: 'Audit trail' }));
+    const panel = within(screen.getByRole('complementary', { name: 'Recent rulings' }));
     const entries = panel.getAllByRole('listitem');
     // Newest first: the DQ (at_ref 20) precedes the void (at_ref 18). The competitor name is composed
     // from the STRUCTURED ref (resolved to its callsign — here the bare ref, no directory seeded).
     expect(entries[0]).toHaveTextContent('CARMEN · DQ applied');
     // The void names no competitor structurally, but its target (ref 12) is ALICE's lap-1 end pass
     // in the lap list — the line resolves her name and renders the raw "(ref 12)" only as the
-    // trailing "· #12" detail (#337).
+    // trailing "· #12" detail (#337 — the SHARED auditRender helpers).
     expect(entries[1]).toHaveTextContent('ALICE · Detection voided · #12');
     expect(entries[1]).not.toHaveTextContent('(ref 12)');
+  });
+
+  it('the strip shows at most the latest 3 entries — the full history lives on the Audit page', () => {
+    // Four rulings, newest first (as the server serves them): only the first three render.
+    const audit: AuditEntry[] = [40, 30, 20, 10].map((at_ref) => ({
+      kind: 'PenaltyApplied' as const,
+      at: 1_700_000_000_000_000 + at_ref,
+      at_ref,
+      competitor: 'BOB',
+      summary: `DQ applied (strike ${at_ref})`
+    }));
+    const { session } = makeTestSession({ live: liveRunning, laps: lapList, audit });
+    render(Marshaling, { session });
+    const panel = within(screen.getByRole('complementary', { name: 'Recent rulings' }));
+    expect(panel.getAllByRole('listitem')).toHaveLength(3);
+    expect(panel.getByText(/strike 40/)).toBeInTheDocument();
+    expect(panel.queryByText(/strike 10/)).toBeNull();
+  });
+
+  it('"View full audit →" jumps to the Audit tab pre-filtered to the MARSHALED heat', async () => {
+    const onviewaudit = vi.fn();
+    const { session } = makeTestSession({
+      live: liveRunning,
+      laps: lapList,
+      audit: marshalingAudit
+    });
+    render(Marshaling, { session, onviewaudit });
+    await fireEvent.click(screen.getByRole('button', { name: 'View full audit →' }));
+    // The seam receives the marshaled heat as the prefilter (the shell deposits it + switches tab).
+    expect(onviewaudit).toHaveBeenCalledWith({ heat: 'heat-1' });
   });
 
   // ── Slice 4: the signal-as-evidence RSSI graph ────────────────────────────────────────
@@ -731,10 +762,10 @@ describe('Marshaling (Slice 3)', () => {
       expect(goose.value).toBe('goose-yla6dp');
     });
 
-    it('composes the audit line with the RESOLVED callsign from the structured ref', async () => {
+    it('composes the strip line with the RESOLVED callsign from the structured ref', async () => {
       const { session } = renderFN();
       render(Marshaling, { session });
-      const panel = within(screen.getByRole('complementary', { name: 'Audit trail' }));
+      const panel = within(screen.getByRole('complementary', { name: 'Recent rulings' }));
       // The DQ line shows the callsign, never the raw pilot id.
       await waitFor(() => expect(panel.getByText('Goose · DQ applied')).toBeInTheDocument());
       expect(panel.getByText('Maverick · Protest filed: cut the course')).toBeInTheDocument();
@@ -809,10 +840,11 @@ describe('Marshaling (Slice 3)', () => {
       const resolveLabels = Array.from(resolve.options).map((o) => o.textContent?.trim());
       expect(resolveLabels).toContain('Protest filed: contact — Maverick · #21');
 
-      // The audit lines resolve the same targets: callsign first, the offset only as "· #N".
-      const panel = within(screen.getByRole('complementary', { name: 'Audit trail' }));
+      // The strip's lines resolve the same targets (SHARED helpers): callsign first, the offset
+      // only as "· #N", never a server-baked "(ref N)". The lap-addressed throw-out (3rd-newest,
+      // within the latest-3 strip) resolves Maverick through the lap list.
+      const panel = within(screen.getByRole('complementary', { name: 'Recent rulings' }));
       expect(panel.getByText('Maverick · Lap thrown out · #12')).toBeInTheDocument();
-      expect(panel.getByText('Maverick · Protest upheld · #21')).toBeInTheDocument();
       expect(panel.queryByText(/\(ref \d+\)/)).not.toBeInTheDocument();
     });
 
@@ -950,8 +982,8 @@ describe('Marshaling (Slice 3)', () => {
       expect(opts).toContain('Maverick');
       const mav = Array.from(ruling.options).find((o) => o.textContent?.trim() === 'Maverick')!;
       expect(mav.value).toBe('node-0');
-      // The audit line composes the resolved callsign from the structured ref.
-      const panel = within(screen.getByRole('complementary', { name: 'Audit trail' }));
+      // The strip line composes the resolved callsign from the structured ref.
+      const panel = within(screen.getByRole('complementary', { name: 'Recent rulings' }));
       expect(panel.getByText('Maverick · DQ applied')).toBeInTheDocument();
       // The raw "node-0" must appear NOWHERE the resolver renders a name.
       expect(screen.queryByRole('heading', { name: 'node-0' })).not.toBeInTheDocument();

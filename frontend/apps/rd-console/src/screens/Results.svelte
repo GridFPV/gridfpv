@@ -37,16 +37,24 @@
   import { isTimedQualFormat } from '../lib/formats.js';
   import { createCompetitorNameResolver } from '../lib/competitorName.js';
   import { channelLabel, nodeIndexOf } from '../lib/channels.js';
+  import type { AuditPrefilter } from '../lib/auditFilter.svelte.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let {
     session,
     heatResult = undefined,
-    standings = undefined
+    standings = undefined,
+    onviewaudit = undefined
   }: {
     session?: Session;
     heatResult?: HeatResult;
     standings?: RankEntry[];
+    /**
+     * Jump to the event-wide Audit page pre-filtered to a pilot (each ROUND-standings row's
+     * "audit" affordance — the defensible-results answer to "why is this pilot placed here?").
+     * The shell wires this to the auditFilter seam (`openAudit(setTab, prefilter)`).
+     */
+    onviewaudit?: (prefilter: AuditPrefilter) => void;
   } = $props();
 
   const hasEventProjection = $derived(!!heatResult || !!(standings && standings.length));
@@ -437,6 +445,22 @@
   </div>
 {/snippet}
 
+{#snippet auditLink(competitor: CompetitorRef)}
+  <!-- The per-pilot jump to the Audit page (round views only): every placement is backed by the
+       ruling history, and this is the one-click path to it, pre-filtered to the pilot. -->
+  {#if onviewaudit}
+    <button
+      type="button"
+      class="audit-link"
+      onclick={() => onviewaudit({ pilot: competitor })}
+      title="View this pilot’s rulings on the Audit page"
+      aria-label={`View audit for ${resolveName(competitor)}`}
+    >
+      audit
+    </button>
+  {/if}
+{/snippet}
+
 {#snippet rankTable(caption: string, rows: RankEntry[])}
   <table class="standings" aria-label={caption}>
     <thead>
@@ -449,7 +473,7 @@
       {#each rows as row (row.competitor)}
         <tr>
           <td class="pos"><span class="badge">{row.position}</span></td>
-          <td class="pilot">{resolveName(row.competitor)}</td>
+          <td class="pilot">{resolveName(row.competitor)}{@render auditLink(row.competitor)}</td>
         </tr>
       {/each}
     </tbody>
@@ -472,7 +496,7 @@
       {#each rows as row (row.competitor)}
         <tr>
           <td class="pos"><span class="badge">{row.position}</span></td>
-          <td class="pilot">{resolveName(row.competitor)}</td>
+          <td class="pilot">{resolveName(row.competitor)}{@render auditLink(row.competitor)}</td>
           <td class="num">{formatMicros(row.best_lap_micros)}</td>
           {#if ttMetricHeader}
             <td class="num">{ttMetricValue(row)}</td>
@@ -553,6 +577,30 @@
   .standings .pilot {
     font-weight: var(--gf-font-weight-semibold);
     letter-spacing: var(--gf-tracking-tight);
+  }
+  /* The per-pilot Audit-page jump: a quiet pill after the callsign (round views). */
+  .audit-link {
+    margin-left: var(--gf-space-2);
+    padding: 0.05em 0.55em;
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-pill);
+    background: transparent;
+    color: var(--gf-text-muted);
+    font-family: inherit;
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    cursor: pointer;
+    vertical-align: middle;
+  }
+  .audit-link:hover {
+    border-color: var(--gf-accent);
+    color: var(--gf-accent);
+  }
+  .audit-link:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
   }
   .standings .pos {
     width: 2.75em;
