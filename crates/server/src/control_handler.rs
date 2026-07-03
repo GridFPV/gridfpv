@@ -431,6 +431,7 @@ fn fill_round_once(
             heat,
             lineup,
             frequencies: static_freqs,
+            field_draw,
         }) => {
             let class = round_engine::round_class(meta, round);
             // Channel assignment differs by the round's channel mode (race redesign Slice 7a):
@@ -467,6 +468,21 @@ fn fill_round_once(
                     }
                 },
             };
+            // FREEZE-AT-FILL (#334): a carry-seeded round's first fill records its resolved
+            // field BEFORE the heat, so every later read (fills, ranking, standings, dependent
+            // seeding) replays this draw instead of re-resolving a source whose adjudications
+            // may have since moved.
+            if let Some(field) = field_draw {
+                if let Err(err) = state.append(
+                    Event::RoundFieldDrawn {
+                        round: round.clone(),
+                        field,
+                    },
+                    None,
+                ) {
+                    return FillStep::Failed(CommandAck::failed(err));
+                }
+            }
             let event = Event::HeatScheduled {
                 heat,
                 lineup,

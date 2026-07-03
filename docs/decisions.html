@@ -219,6 +219,16 @@
       <dd>The <code>FromRanking</code> UI cut was renamed <strong>"Top N advance" → "Take top"</strong>
       (PR #332), and the value is now <strong>bounded by the source rounds' real field</strong> — you
       cannot take more pilots than the source ranking actually contains.</dd>
+      <dt>Update (2026-07-03) — the carry freezes at first fill (#334)</dt>
+      <dd>A carry seeding (<code>FromRanking</code> / <code>FromRankingRange</code> /
+      <code>FromHeatWinners</code> / <code>Combine</code>) is resolved <strong>once, at the round's
+      first fill</strong>, recorded in the log (<code>Event::RoundFieldDrawn</code>), and every later
+      read — fills, ranking, standings, dependent seeding — replays the recorded draw. Live
+      re-resolution let an adjudication on the <em>source</em> round, landing after the dependent
+      round had raced, silently rewrite who its field "was" (raced results vanished from its
+      ranking). Before the first fill, resolution stays live (a build-ahead round tracks its source
+      until it draws), and roster seedings (<code>FromRoster</code> / <code>AllChannels</code>) never
+      freeze — a late entrant still joins mid-round. The user's call: freeze, not warn.</dd>
     </dl>
 
     <h2>D9 · The native desktop app embeds the Director, ships portable-only, stores data next to the exe — <em>implemented</em></h2>

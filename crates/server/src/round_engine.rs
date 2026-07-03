@@ -88,6 +88,11 @@ pub enum FillOutcome {
         /// from the timer's pool via [`assign_for_event`], the prior behaviour). The handler still
         /// enforces the node-count cap either way.
         frequencies: Option<Vec<(CompetitorRef, u16)>>,
+        /// The round's **field draw to record** (freeze-at-fill, #334): `Some` exactly when
+        /// this is a carry-seeded round's FIRST scheduled heat and no draw is recorded yet.
+        /// The handler appends the [`Event::RoundFieldDrawn`] *before* the `HeatScheduled`,
+        /// freezing the resolution every later read replays.
+        field_draw: Option<Vec<CompetitorRef>>,
     },
     /// The round is complete — the generator returned
     /// [`GeneratorStep::Complete`](gridfpv_engine::format::GeneratorStep::Complete). No
@@ -351,7 +356,39 @@ fn round_field_at(
     events: &[Event],
     depth: usize,
 ) -> Result<Vec<CompetitorRef>, FillError> {
+    // FREEZE-AT-FILL (#334): a carry seeding's field is drawn ONCE — at the round's first
+    // fill — and recorded in the log; every later read replays the recorded draw. Live
+    // re-resolution let an adjudication on the SOURCE round, landing after this round had
+    // already raced, silently rewrite who this round's field "was" (raced results vanished
+    // from its ranking). Before the first fill there is no draw and resolution stays live —
+    // a build-ahead round keeps tracking its source until it actually fills.
+    if seeding_freezes(&round.seeding) {
+        if let Some(field) = recorded_field(events, &round.id) {
+            return Ok(field);
+        }
+    }
     resolve_seeding(meta, &round.classes, &round.seeding, events, depth)
+}
+
+/// Whether a [`SeedingRule`]'s resolution is **frozen at first fill** (issue #334).
+///
+/// The carry seedings — those derived from another round's outcome — freeze: their meaning is
+/// "the standings *as advanced*", a draw the RD saw and raced. Roster-derived seedings stay
+/// live so a late entrant added to the class mid-round still joins the field/ranking.
+fn seeding_freezes(seeding: &SeedingRule) -> bool {
+    !matches!(
+        seeding,
+        SeedingRule::FromRoster | SeedingRule::AllChannels { .. }
+    )
+}
+
+/// The round's **recorded field draw**, if one was frozen at fill ([`Event::RoundFieldDrawn`]).
+/// Last one wins (a round refilled after a `Discard`-style reset re-records).
+fn recorded_field(events: &[Event], round_id: &RoundId) -> Option<Vec<CompetitorRef>> {
+    events.iter().rev().find_map(|event| match event {
+        Event::RoundFieldDrawn { round, field } if round == round_id => Some(field.clone()),
+        _ => None,
+    })
 }
 
 /// Resolve a [`SeedingRule`] to a round's **field** as engine [`CompetitorRef`]s (race redesign
@@ -1268,6 +1305,12 @@ fn fill_round_per_heat(
     if field.is_empty() {
         return Err(FillError::EmptyField(round_id.0.clone()));
     }
+    // FREEZE-AT-FILL (#334): a carry seeding records its resolved draw alongside the round's
+    // FIRST scheduled heat (the handler appends `RoundFieldDrawn` before the `HeatScheduled`).
+    // From then on `round_field` replays the recorded draw — see `round_field_at`.
+    let field_draw = (seeding_freezes(&round.seeding)
+        && recorded_field(events, round_id).is_none())
+    .then(|| field.clone());
 
     let registry = FormatRegistry::standard();
     let mut generator = registry
@@ -1330,6 +1373,7 @@ fn fill_round_per_heat(
                     // Per-heat: the handler assigns channels from the timer pool (first-fit), except
                     // for open practice which carries empty frequencies (the lineup is channels).
                     frequencies: open_practice_frequencies,
+                    field_draw,
                 }),
                 // Every plan the generator wants this step is already scheduled (the RD
                 // re-issued FillRound before scoring the outstanding heat): nothing new to
@@ -1406,6 +1450,9 @@ fn fill_round_static(
                 heat,
                 lineup,
                 frequencies: Some(assignment),
+                // Static rounds are validated FromRoster-only, and roster seedings never
+                // freeze (late entrants stay welcome) — no draw to record.
+                field_draw: None,
             })
         }
         // Fixed-count: every planned channel-balanced heat is already scheduled → the round is
@@ -2702,6 +2749,127 @@ mod tests {
         }
     }
 
+    #[test]
+    fn carry_seeding_freezes_at_first_fill_and_survives_source_adjudication() {
+        // FREEZE-AT-FILL (#334): once a FromRanking round fills, its field is a RECORDED draw —
+        // adjudicating the SOURCE round afterwards must not rewrite who the dependent round's
+        // field was (raced results would vanish from its ranking). A sibling round that has NOT
+        // yet filled keeps resolving live (build-ahead tracks its source until it draws).
+        let qual = qual_round("q1", "open");
+        let mut fill_now = h2h_round("dep", "open", WinCondition::FirstToLaps { n: 1 });
+        fill_now.seeding = SeedingRule::FromRanking {
+            source_rounds: vec![RoundId("q1".into())],
+            top_n: 2,
+        };
+        fill_now.params.insert("group_size".into(), "2".into());
+        let mut fill_later = h2h_round("dep2", "open", WinCondition::FirstToLaps { n: 1 });
+        fill_later.seeding = SeedingRule::FromRanking {
+            source_rounds: vec![RoundId("q1".into())],
+            top_n: 2,
+        };
+        fill_later.params.insert("group_size".into(), "2".into());
+        let meta = meta_with(
+            vec![qual.clone(), fill_now.clone(), fill_later.clone()],
+            vec![member("open", &["A", "B", "C"])],
+        );
+
+        // Qualifier: A (1.0s) beats B (2.0s) beats C (3.0s) → top-2 carry = [A, B].
+        let mut log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[
+                ("A", &[0, 1_000_000]),
+                ("B", &[0, 2_000_000]),
+                ("C", &[0, 3_000_000]),
+            ],
+        );
+
+        // Fill `dep` the way the real handler does: record the draw, then the heat.
+        let FillOutcome::Scheduled {
+            heat,
+            lineup,
+            field_draw,
+            ..
+        } = fill_round(&meta, &no_timers(), &fill_now.id, &log).unwrap()
+        else {
+            panic!("expected a scheduled heat");
+        };
+        let drawn = field_draw.expect("a carry seeding's first fill records its draw");
+        assert_eq!(names_of(&drawn), vec!["A", "B"]);
+        log.push(Event::RoundFieldDrawn {
+            round: fill_now.id.clone(),
+            field: drawn,
+        });
+        let names: Vec<&str> = lineup.iter().map(|c| c.0.as_str()).collect();
+        log.push(scheduled(&heat.0, "dep", "open", &names));
+
+        // NOW the source adjudication lands: DQ A in the qualifier — its live ranking becomes
+        // [B, C] and a live top-2 carry would be [B, C].
+        log.push(penalty_applied(
+            "q-1",
+            "A",
+            Penalty::Disqualify { reason: None },
+        ));
+
+        // The FILLED round's field is frozen at its recorded draw…
+        assert_eq!(
+            names_of(&round_field(&meta, &fill_now, &log).unwrap()),
+            vec!["A", "B"],
+            "the filled round keeps the field it actually raced"
+        );
+        // …its next fill draws from the SAME frozen field (no second RoundFieldDrawn either)…
+        match fill_round(&meta, &no_timers(), &fill_now.id, &log).unwrap() {
+            FillOutcome::Scheduled { field_draw, .. } => {
+                assert!(
+                    field_draw.is_none(),
+                    "the draw is recorded once, not per heat"
+                );
+            }
+            FillOutcome::Complete | FillOutcome::AlreadyScheduled => {}
+            other => panic!("unexpected fill outcome {other:?}"),
+        }
+        // …while the NOT-yet-filled sibling resolves live and sees the adjudicated carry.
+        assert_eq!(
+            names_of(&round_field(&meta, &fill_later, &log).unwrap()),
+            vec!["B", "C"],
+            "an unfilled round keeps tracking its source until it draws"
+        );
+    }
+
+    #[test]
+    fn roster_seeding_stays_live_after_fill() {
+        // FromRoster never freezes (#334): a late entrant added to the class after the round
+        // filled still joins the round's field (and with it the ranking's no-value tail).
+        let round = h2h_round("r1", "open", WinCondition::FirstToLaps { n: 1 });
+        let meta_before = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log: Vec<Event> = Vec::new();
+        match fill_round(&meta_before, &no_timers(), &round.id, &log).unwrap() {
+            FillOutcome::Scheduled {
+                heat,
+                lineup,
+                field_draw,
+                ..
+            } => {
+                assert!(field_draw.is_none(), "a roster seeding records no draw");
+                let names: Vec<&str> = lineup.iter().map(|c| c.0.as_str()).collect();
+                log.push(scheduled(&heat.0, "r1", "open", &names));
+            }
+            other => panic!("unexpected fill outcome {other:?}"),
+        }
+        // The late entrant lands in the membership; the round's field follows live.
+        let meta_after = meta_with(vec![round.clone()], vec![member("open", &["A", "B", "C"])]);
+        assert_eq!(
+            names_of(&round_field(&meta_after, &round, &log).unwrap()),
+            vec!["A", "B", "C"]
+        );
+    }
+
+    /// The bare names of a resolved field (freeze-at-fill test helper).
+    fn names_of(field: &[CompetitorRef]) -> Vec<&str> {
+        field.iter().map(|c| c.0.as_str()).collect()
+    }
+
     /// A `RankEntry` for a competitor at a 1-based position (aggregation test helper).
     fn rank(competitor: &str, position: u32) -> RankEntry {
         RankEntry {
@@ -2788,6 +2956,7 @@ mod tests {
                 heat,
                 lineup,
                 frequencies,
+                ..
             } => {
                 // Issue #54: the heat id is **round-scoped** (`<round_id>-heat`), not the generator's
                 // fixed `"open-practice"`, so two open-practice rounds get distinct heats.
@@ -2969,6 +3138,7 @@ mod tests {
                     heat,
                     lineup,
                     frequencies,
+                    ..
                 } => {
                     let freqs = frequencies.expect("static round assigns channels itself");
                     // Each heat is ≤ node cap and channel-distinct.
