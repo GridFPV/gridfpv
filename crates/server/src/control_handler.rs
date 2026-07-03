@@ -715,7 +715,8 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             // Gate finalize on **open protests** (release-hardening P1-4): a heat with a filed,
             // unresolved protest must not be finalized — the result is still contested. The RD
             // resolves (or reverses a resolution of) the protest first. The auto-official protest
-            // window is a separate, additive timer and does not run through this command path.
+            // window appends its `Finalized` directly (not through this command path) but checks
+            // this same `open_protest_count` predicate before doing so (issue #338).
             let (events, _cursor) = state.read()?;
             let open = open_protest_count(&events, &heat);
             if open > 0 {
@@ -1039,8 +1040,13 @@ fn require_ruling_target(state: &AppState, target: LogRef) -> Result<(), Protoco
 /// A protest (filed at offset `f`) is closed by a [`Event::ProtestResolved`] whose `target` is `f`
 /// — **unless** that resolution was itself reversed by a [`Event::RulingReversed`] (the structural
 /// "void the void"), which re-opens the protest. So the open set is: filed-for-this-heat minus the
-/// filings that carry a non-reversed resolution. Used to gate `Finalize`.
-fn open_protest_count(events: &[Event], heat: &HeatId) -> usize {
+/// filings that carry a non-reversed resolution.
+///
+/// This is **the** open-protest predicate: it gates the manual [`Command::Finalize`] here *and*
+/// the runtime's auto-official driver (`spawn_auto_official_driver` in the app crate, issue #338)
+/// — both finalize paths must agree on what "still contested" means, so the definition lives in
+/// exactly one place. `pub` for that reuse.
+pub fn open_protest_count(events: &[Event], heat: &HeatId) -> usize {
     use std::collections::HashSet;
     // Ruling offsets reversed by a `RulingReversed` (a reversed protest-resolution re-opens it).
     let reversed: HashSet<u64> = events
