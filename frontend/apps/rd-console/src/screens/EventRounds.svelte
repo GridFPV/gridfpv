@@ -558,6 +558,30 @@
   // The other rounds a FromRanking seed may draw from (every round but the one being edited).
   const sourceCandidates = $derived(rounds.filter((r) => r.id !== editing));
 
+  // The most pilots a FromRanking cut can take: the distinct competitors racing in the selected
+  // source rounds (their heats' lineups). A source round with no heats yet (build-ahead) falls back
+  // to its eligible class members, and an empty union to the event's whole membership; undefined =
+  // nothing to bound against (leave the input uncapped rather than guess).
+  const seedTopNMax = $derived.by(() => {
+    const field = new Set<string>();
+    for (const id of seedSources) {
+      const hs = heatsByRound(id);
+      if (hs.length > 0) for (const h of hs) for (const ref of h.lineup) field.add(ref);
+      else for (const p of buildEligibleMembers(id)) field.add(p);
+    }
+    if (field.size > 0) return field.size;
+    const all = new Set<string>();
+    for (const m of session.currentEvent?.classes_membership ?? [])
+      for (const s of m.pilots) all.add(s.pilot);
+    return all.size > 0 ? all.size : undefined;
+  });
+
+  // Keep the cut within the real field as sources are toggled (or an edited round's saved top_n
+  // exceeds what its sources can rank today).
+  $effect(() => {
+    if (seedTopNMax !== undefined && seedTopN > seedTopNMax) seedTopN = seedTopNMax;
+  });
+
   // The chosen format's declared params (its schema), in display order — each surfaced inline as a
   // proper labeled field (Rounds form redesign item 4). Only the chosen format's params are shown.
   const formatParams = $derived<FormatParam[]>(
@@ -771,8 +795,12 @@
       // event (so the same selection always produces the same `source_rounds`, independent of click
       // order). The server aggregates best-per-pilot across them regardless of order.
       const ordered = rounds.filter((r) => seedSources.has(r.id)).map((r) => r.id);
+      const top = Math.min(
+        seedTopNMax ?? Number.POSITIVE_INFINITY,
+        Math.max(1, Math.round(seedTopN))
+      );
       return {
-        FromRanking: { source_rounds: ordered, top_n: Math.max(1, Math.round(seedTopN)) }
+        FromRanking: { source_rounds: ordered, top_n: top }
       };
     }
     return 'FromRoster';
@@ -1443,8 +1471,19 @@
                 </div>
               {/if}
             </Field>
-            <Field label="Top N advance">
-              <Input type="number" min="1" bind:value={seedTopN} aria-label="Top N" />
+            <Field
+              label="Take top"
+              hint={seedTopNMax !== undefined
+                ? `How many race in this round — of the ${seedTopNMax} pilots in the source ${seedSources.size > 1 ? 'rounds' : 'round'}.`
+                : 'How many pilots from the source ranking race in this round.'}
+            >
+              <Input
+                type="number"
+                min="1"
+                max={seedTopNMax}
+                bind:value={seedTopN}
+                aria-label="Top N"
+              />
             </Field>
           </div>
         {/if}
