@@ -241,6 +241,26 @@ describe('Results — phase-aware views (round / per-class selector)', () => {
     expect(within(table).getByText('Bolt')).toBeInTheDocument();
     expect(within(table).getByText('AceOne')).toBeInTheDocument();
   });
+
+  it('each ROUND-standings row offers an audit jump pre-filtered to that pilot', async () => {
+    // The per-pilot "audit" affordance (the defensible-results cross-link): clicking it hands the
+    // pilot's competitor ref to the auditFilter seam, which the shell wires to the Audit tab.
+    const onviewaudit = vi.fn();
+    const { session } = makeTestSession({
+      event: { ...EVENT, rounds: [QUAL] },
+      listClassesImpl: vi.fn(async () => [OPEN]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [QUAL_HEAT]),
+      roundRankingImpl: rankingImpl,
+      classStandingsImpl: vi.fn(async () => STANDINGS)
+    });
+    render(Results, { session, onviewaudit });
+
+    const table = (await screen.findByLabelText(/Qualifying standings/i)) as HTMLElement;
+    // The affordance is labelled by the resolved callsign — never the raw pilot id.
+    await fireEvent.click(within(table).getByRole('button', { name: 'View audit for Bolt' }));
+    expect(onviewaudit).toHaveBeenCalledWith({ pilot: 'p2' });
+  });
 });
 
 describe('Results — time-trial round standings (Best lap + win-condition metric)', () => {

@@ -42,6 +42,8 @@
   import LiveRaceControl from './screens/LiveRaceControl.svelte';
   import Marshaling from './screens/Marshaling.svelte';
   import Results from './screens/Results.svelte';
+  import EventAudit from './screens/EventAudit.svelte';
+  import { openAudit } from './lib/auditFilter.svelte.js';
   import {
     parseHash,
     formatHash,
@@ -134,7 +136,14 @@
     }
   });
 
-  type ScreenId = 'timers' | 'classes-roster' | 'rounds' | 'live' | 'marshaling' | 'results';
+  type ScreenId =
+    | 'timers'
+    | 'classes-roster'
+    | 'rounds'
+    | 'live'
+    | 'marshaling'
+    | 'results'
+    | 'audit';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
     {
       id: 'classes-roster',
@@ -151,6 +160,14 @@
     { id: 'live', label: 'Race control', key: '3', icon: 'M5 3l14 9-14 9V3z' },
     { id: 'marshaling', label: 'Marshaling', key: '4', icon: 'M9 11l3 3L22 4M21 12v7H3V5h12' },
     { id: 'results', label: 'Results', key: '5', icon: 'M4 19V10M10 19V4M16 19v-7M22 19H2' },
+    // The event-wide audit review page (a magnifier: search the ruling history). Sits with the
+    // review surfaces (after Results); key '7' — the unused digit — so Timers keeps its Alt+6.
+    {
+      id: 'audit',
+      label: 'Audit',
+      key: '7',
+      icon: 'M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM15.5 15.5L21 21'
+    },
     {
       id: 'timers',
       label: 'Timers',
@@ -367,10 +384,13 @@
         {:else if active === 'live'}
           <LiveRaceControl {session} />
         {:else if active === 'marshaling'}
-          <Marshaling {session} />
+          <!-- The audit jumps ride the auditFilter seam: deposit the prefilter, switch the tab;
+               EventAudit consumes it on mount. -->
+          <Marshaling {session} onviewaudit={(prefilter) => openAudit(setTab, prefilter)} />
         {:else if active === 'results'}
           <Results
             {session}
+            onviewaudit={(prefilter) => openAudit(setTab, prefilter)}
             heatResult={session.heatResult ??
               (session.protocolState?.body && 'HeatResult' in session.protocolState.body
                 ? session.protocolState.body.HeatResult
@@ -379,6 +399,8 @@
               ? session.protocolState.body.Ranking
               : undefined}
           />
+        {:else if active === 'audit'}
+          <EventAudit {session} />
         {/if}
       </main>
     </div>

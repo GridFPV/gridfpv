@@ -11,10 +11,14 @@
    *
    * Every correction *appends* a marshaling event; the projection re-folds and the corrected lap list,
    * the audit trail, AND the standings (the live stream) all refresh by the same append→re-fold→re-read
-   * path — nothing reconciled locally (architecture.html §3). The **audit panel** renders that history,
-   * reverse-chronological, derived purely from the event type — the "defensible results" theme made
-   * visible. Mutating controls are **role-gated**: a read-only-pilot session sees the laps + audit but
-   * every action is hidden (the Director enforces the boundary; this mirrors it).
+   * path — nothing reconciled locally (architecture.html §3). Marshaling is the **do the work** page:
+   * the full reverse-chronological audit history lives on the event-wide **Audit page** now; this
+   * screen keeps a compact **Recent rulings** strip (the marshaled heat's latest entries, same shared
+   * rendering) plus a "View full audit →" jump pre-filtered to the marshaled heat (the auditFilter
+   * seam). The heat-scoped audit read stays — the Reverse-ruling / Resolve-protest pickers and the
+   * open-protest Finalize gate all derive from it. Mutating controls are **role-gated**: a
+   * read-only-pilot session sees the laps + strip but every action is hidden (the Director enforces
+   * the boundary; this mirrors it).
    */
   import type {
     AuditEntry,
@@ -33,6 +37,15 @@
     SignalTraceView
   } from '@gridfpv/types';
   import { formatMicros, Select, toast } from '@gridfpv/components';
+  import type { AuditPrefilter } from '../lib/auditFilter.svelte.js';
+  import {
+    auditKindLabel,
+    auditSummaryLine,
+    auditTime,
+    rulingOptionLabel,
+    summaryTargetRef,
+    type AuditRenderInputs
+  } from '../lib/auditRender.js';
   import { channelLabel } from '../lib/channels.js';
   import { createCompetitorNameResolver } from '../lib/competitorName.js';
   import { heatNameById } from '../lib/heats.js';
@@ -67,7 +80,20 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte';
   import RssiGraph from '../lib/RssiGraph.svelte';
 
-  let { session, adapter = 'rh-1' }: { session: Session; adapter?: string } = $props();
+  let {
+    session,
+    adapter = 'rh-1',
+    onviewaudit = undefined
+  }: {
+    session: Session;
+    adapter?: string;
+    /**
+     * Jump to the event-wide Audit page pre-filtered (the "View full audit →" strip action).
+     * The shell wires this to the auditFilter seam (`openAudit(setTab, prefilter)`), the same way
+     * sibling screens receive navigation callbacks.
+     */
+    onviewaudit?: (prefilter: AuditPrefilter) => void;
+  } = $props();
 
   // Which heat to marshal. Defaults to — and tracks — Race Control's current heat, but the RD can
   // pin ANY heat to marshal it. Marshaling issues no `SetCurrentHeat`, so switching the marshaled
@@ -614,61 +640,11 @@
     }
   }
 
-  // ── Audit rendering helpers ──
-  function auditLabel(kind: AuditKind): string {
-    switch (kind) {
-      case 'Voided':
-        return 'Voided';
-      case 'Inserted':
-        return 'Inserted';
-      case 'Adjusted':
-        return 'Re-timed';
-      case 'Split':
-        return 'Split';
-      case 'PenaltyApplied':
-        return 'Penalty';
-      case 'LapThrownOut':
-        return 'Thrown out';
-      case 'ProtestFiled':
-        return 'Protest filed';
-      case 'ProtestResolved':
-        return 'Protest resolved';
-      case 'RulingReversed':
-        return 'Reversed';
-      case 'HeatVoided':
-        return 'Heat voided';
-      case 'Pass':
-        return 'Detection';
-      default:
-        return kind;
-    }
-  }
-
-  function auditTime(at: number | null): string {
-    if (at == null) return '';
-    // `at` is microseconds since the Unix epoch (server recorded_at).
-    return new Date(at / 1000).toLocaleTimeString();
-  }
-
-  // ── Recomposing the server-baked summaries (#337) ──
-  // The server interpolates raw LOG OFFSETS into some summaries ("Lap thrown out (ref 14)") because
-  // it can't resolve anything friendlier. The client can: a lap-addressed ruling targets a pass ref
-  // the lap list still carries, and a protest-resolution / reversal targets another audit entry
-  // (whose own `competitor` is structured). So the rendered line re-composes from the structured
-  // fields — resolved callsign first, the offset only as a trailing "· #N" detail — instead of
-  // printing the server's raw-ref string.
-
-  /** The target log offset a server summary interpolates ("(ref 42)"), if any. */
-  function summaryTargetRef(summary: string): number | undefined {
-    const m = /\(ref (\d+)\)/.exec(summary);
-    return m ? Number(m[1]) : undefined;
-  }
-  /** The summary with the raw "(ref N)" clause removed (the offset renders as a trailing detail). */
-  function stripRefClause(summary: string): string {
-    return summary.replace(/\s*\(ref \d+\)/, '');
-  }
-
-  const auditByRef = $derived(new Map<number, AuditEntry>((audit ?? []).map((e) => [e.at_ref, e])));
+  // ── Audit rendering (the SHARED #337 recomposition — `lib/auditRender.ts`) ──
+  // The line composition (resolved callsign first, the server-baked "(ref N)" stripped, the target
+  // offset only trailing) is shared with the event-wide Audit page so the two never drift. This
+  // screen supplies the one input only it has: the marshaled heat's LAP LIST, which resolves a
+  // lap-addressed ruling's pass ref to the competitor whose lap it bounds.
 
   /** The competitor whose lap a pass offset (a lap's start/end ref) bounds, from the lap list. */
   function competitorForPassRef(target: number): CompetitorRef | undefined {
@@ -678,43 +654,17 @@
     return undefined;
   }
 
-  /**
-   * The competitor an audit entry concerns: its own structured ref when the action named one, else
-   * chased through the entry's target — a `ProtestResolved` / `RulingReversed` targets another
-   * audit entry (follow the chain), a lap-addressed ruling targets a pass in the lap list.
-   * `undefined` when nothing resolves (a heat-void, or a voided pass no longer in the lap list) —
-   * the line then renders without a name rather than with a raw ref.
-   */
-  function auditCompetitor(entry: AuditEntry, depth = 0): CompetitorRef | undefined {
-    if (entry.competitor != null) return entry.competitor;
-    const target = summaryTargetRef(entry.summary);
-    if (target === undefined) return undefined;
-    const chained = auditByRef.get(target);
-    if (chained && depth < 4) return auditCompetitor(chained, depth + 1);
-    return competitorForPassRef(target);
-  }
+  const renderInputs = $derived<AuditRenderInputs>({
+    byRef: new Map<number, AuditEntry>((audit ?? []).map((e) => [e.at_ref, e])),
+    competitorName,
+    competitorForPassRef
+  });
 
-  // The displayed audit line: the **resolved callsign** (from the structured `competitor` ref, or
-  // chased through the entry's target) joined to the summary with any server-baked raw "(ref N)"
-  // stripped; the target offset renders only as a trailing "· #N" detail. A baked raw-id string
-  // couldn't be re-resolved, so the composition happens here, client-side.
-  function auditSummary(entry: AuditEntry): string {
-    const ref = auditCompetitor(entry);
-    const target = summaryTargetRef(entry.summary);
-    const text = stripRefClause(entry.summary);
-    const line = ref != null ? `${competitorName(ref)} · ${text}` : text;
-    return target !== undefined ? `${line} · #${target}` : line;
-  }
-
-  // A ruling/protest picker option: "‹what› — ‹callsign› · #‹offset›". The action + callsign is the
-  // primary label; the entry's own log offset (what the reverse/resolve command targets) is only a
-  // trailing detail, never the label itself (#337).
-  function rulingOptionLabel(entry: AuditEntry): string {
-    const ref = auditCompetitor(entry);
-    const text = stripRefClause(entry.summary);
-    const who = ref != null ? ` — ${competitorName(ref)}` : '';
-    return `${text}${who} · #${entry.at_ref}`;
-  }
+  // The Recent-rulings strip: the marshaled heat's latest few entries (the trail arrives newest
+  // first). The FULL history — searchable, event-wide — lives on the Audit page; the strip only
+  // answers "what just changed here?" at a glance.
+  const RECENT_RULINGS = 3;
+  const recentRulings = $derived((audit ?? []).slice(0, RECENT_RULINGS));
 </script>
 
 <section class="marshaling" aria-label="Marshaling">
@@ -1064,7 +1014,7 @@
               <select bind:value={reverseTargetRef} aria-label="Reverse ruling">
                 <option value="" disabled>—</option>
                 {#each reversibleRulings as p (p.at_ref)}
-                  <option value={p.at_ref}>{rulingOptionLabel(p)}</option>
+                  <option value={p.at_ref}>{rulingOptionLabel(p, renderInputs)}</option>
                 {/each}
               </select>
             </label>
@@ -1109,7 +1059,7 @@
               <select bind:value={resolveProtestRef} aria-label="Resolve protest">
                 <option value="" disabled>—</option>
                 {#each filedProtests as p (p.at_ref)}
-                  <option value={p.at_ref}>{rulingOptionLabel(p)}</option>
+                  <option value={p.at_ref}>{rulingOptionLabel(p, renderInputs)}</option>
                 {/each}
               </select>
             </label>
@@ -1170,15 +1120,17 @@
       {/if}
     </div>
 
-    <!-- Audit panel: reverse-chronological "what changed, when, what kind" -->
-    <aside class="audit" aria-label="Audit trail">
-      <h3>Audit trail</h3>
-      {#if audit && audit.length > 0}
+    <!-- Recent rulings: the marshaled heat's latest few audit entries, at a glance. The FULL
+         reverse-chronological history moved to the event-wide Audit page (searchable, filterable);
+         the button below jumps there pre-filtered to this heat via the auditFilter seam. -->
+    <aside class="audit" aria-label="Recent rulings">
+      <h3>Recent rulings</h3>
+      {#if recentRulings.length > 0}
         <ol class="audit-list">
-          {#each audit as entry (entry.at_ref)}
+          {#each recentRulings as entry (entry.at_ref)}
             <li class="audit-entry kind-{entry.kind}">
-              <span class="audit-kind">{auditLabel(entry.kind)}</span>
-              <span class="audit-summary">{auditSummary(entry)}</span>
+              <span class="audit-kind">{auditKindLabel(entry.kind)}</span>
+              <span class="audit-summary">{auditSummaryLine(entry, renderInputs)}</span>
               {#if entry.at != null}
                 <span class="audit-at">{auditTime(entry.at)}</span>
               {/if}
@@ -1188,6 +1140,14 @@
       {:else}
         <p class="empty">No corrections yet — the raw timer output stands.</p>
       {/if}
+      <button
+        type="button"
+        class="view-audit"
+        onclick={() => onviewaudit?.(heat ? { heat } : {})}
+        title="Open the event-wide audit trail, filtered to this heat"
+      >
+        View full audit →
+      </button>
     </aside>
   </div>
 </section>
@@ -1556,6 +1516,17 @@
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-2xs);
     font-family: var(--gf-font-mono);
+  }
+  /* The jump to the event-wide Audit page (pre-filtered to the marshaled heat). */
+  .view-audit {
+    margin-top: var(--gf-space-3);
+    width: 100%;
+    border-color: color-mix(in srgb, var(--gf-accent) 35%, var(--gf-border));
+  }
+  .view-audit:hover:not(:disabled) {
+    border-color: var(--gf-accent);
+    color: var(--gf-accent);
+    background: var(--gf-elevated);
   }
   @media (max-width: 70rem) {
     .layout {

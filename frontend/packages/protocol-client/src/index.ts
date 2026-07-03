@@ -46,6 +46,7 @@ export {
   updateRound,
   deleteRound,
   listHeats,
+  eventAudit,
   roundRanking,
   roundStandings,
   classStandings,

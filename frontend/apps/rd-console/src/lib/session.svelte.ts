@@ -70,6 +70,7 @@ import {
   updateRound,
   deleteRound,
   listHeats,
+  eventAudit,
   roundRanking,
   roundStandings,
   classStandings,
@@ -93,6 +94,7 @@ import type {
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
+  EventAuditEntry,
   EventMeta,
   FillMode,
   FormatSchema,
@@ -340,6 +342,7 @@ export class Session {
   #updateRoundImpl: typeof updateRound;
   #deleteRoundImpl: typeof deleteRound;
   #listHeatsImpl: typeof listHeats;
+  #eventAuditImpl: typeof eventAudit;
   #roundRankingImpl: typeof roundRanking;
   #roundStandingsImpl: typeof roundStandings;
   #classStandingsImpl: typeof classStandings;
@@ -379,6 +382,7 @@ export class Session {
     updateRoundImpl?: typeof updateRound;
     deleteRoundImpl?: typeof deleteRound;
     listHeatsImpl?: typeof listHeats;
+    eventAuditImpl?: typeof eventAudit;
     roundRankingImpl?: typeof roundRanking;
     roundStandingsImpl?: typeof roundStandings;
     classStandingsImpl?: typeof classStandings;
@@ -419,6 +423,7 @@ export class Session {
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
     this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
+    this.#eventAuditImpl = opts?.eventAuditImpl ?? eventAudit;
     this.#roundRankingImpl = opts?.roundRankingImpl ?? roundRanking;
     this.#roundStandingsImpl = opts?.roundStandingsImpl ?? roundStandings;
     this.#classStandingsImpl = opts?.classStandingsImpl ?? classStandings;
@@ -902,6 +907,21 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
     return this.#listHeatsImpl(this.baseUrl, event.id, { token: this.#token });
+  }
+
+  /**
+   * Read the current event's **event-wide audit trail** (`GET /events/{id}/audit`) — every heat's
+   * marshaling audit fold, heat-tagged ({@link EventAuditEntry}) and merged newest first. This is
+   * what the Audit page renders and filters; Marshaling's per-heat trail keeps reading the
+   * heat-scoped `?projection=audit` snapshot ({@link refreshMarshaling}), and both derive from the
+   * same server-side fold so they can never disagree. Open to read (no token, role-agnostic).
+   * No-op (resolves `[]`) when no event is selected; rejects on a transport/HTTP failure (the
+   * screen surfaces it — no silent empty list, #340).
+   */
+  eventAudit(): Promise<EventAuditEntry[]> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve([]);
+    return this.#eventAuditImpl(this.baseUrl, event.id, { token: this.#token });
   }
 
   // --- Rankings & standings (race redesign Slice 5/6a + 5/6b) -----------------------------------
