@@ -104,12 +104,18 @@
       <dt>Slice 5 — Provisional → official lifecycle</dt>
       <dd>Surface the <code>Unofficial</code> → <code>Final</code> commit as the explicit
       software lifecycle, with the <strong>optional, OFF-by-default protest-window timer</strong> that
-      can auto-finalize (§2). RD commits; <code>Revert</code> re-opens; pilots read-only.</dd>
+      can auto-finalize (§2). RD commits; <code>Revert</code> re-opens; pilots read-only.
+      <em>Realized note (2026-06-30): <strong>Finalize is now gated on open protests</strong> —
+      rejected, backend and UI, while a protest is open (#330).</em></dd>
       <dt>Slice 6 — Full adjudication</dt>
       <dd>The real adjudication framework: first-class <strong>DQ states</strong>, penalty
       <strong>time and points</strong>, lap <strong>throw-outs</strong>, and <strong>protests</strong> —
       richer than RotorHazard's <code>+time</code>/note model. The deepest slice, built last on top of
-      everything above.</dd>
+      everything above.
+      <em>Realized note (2026-06-30): adjudications (DQ / TimeAdded / lap edits / throw-out / void)
+      now reach round ranking, standings, and seeding via the shared <code>score_heat_window</code>
+      scorer (#329, closing <strong>#226</strong>), and DQ is <strong>excluded from ranking</strong>
+      (#331).</em></dd>
     </dl>
 
     <pre class="mermaid">

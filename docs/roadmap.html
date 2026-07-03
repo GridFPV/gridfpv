@@ -105,8 +105,11 @@ flowchart LR
         (race engine) are <strong>complete and merged</strong> — the SQLite append-only log,
         projection engine, Rust→TS generation, RotorHazard + Velocidrone adapters,
         recorded-session replay golden tests, live + emulated-signal dockerized-RH tests, the
-        heat-loop state machine, scoring/marshaling, and the six format generators are all in
-        the tree. As designed, v0.2 already ingests a live (dockerized) source — "shadow mode."
+        heat-loop state machine, scoring/marshaling, and the format generators are all in
+        the tree — since the primitives-first carve-out (2026-06-30, PR #327) the registry ships
+        <strong>three primitive generators</strong> (Practice / Time Trials / Head-to-Head); the
+        tournament structures are preserved on <code>tournaments-snapshot</code>, rebuilt post-v1.
+        As designed, v0.2 already ingests a live (dockerized) source — "shadow mode."
       </p>
       <p>
         The <strong>v0.4 foundation</strong> is also built: the embedded axum
@@ -196,7 +199,10 @@ flowchart LR
     </ul>
     <p>
       <strong>Deferred out of v0.4:</strong> ZippyQ <strong>shelved</strong> from the active format
-      set (<a href="decisions.html">D10</a>, #218) and PWA self-register; channel
+      set (<a href="decisions.html">D10</a>, #218) and PWA self-register; the <strong>tournament
+      structures</strong> (round-robin, single/double elim, multi-main, chase-the-ace, bracket
+      builders + viz) carved to <code>tournaments-snapshot</code> for the primitives-first release
+      (PR #327), rebuilt post-v1; channel
       management as a standalone feature (#117 is folded into the Timer registry instead);
       <strong>IMD-aware channel assignment</strong> — scoring a heat's channels by third-order intermod
       gap and auto-picking the cleanest set (#209), a race-quality refinement on top of the v0.4 channel

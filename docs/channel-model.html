@@ -129,11 +129,13 @@
       <dd>Each member has a <strong>fixed per-membership channel</strong> (a <code>MemberSlot</code>'s
       <code>channel</code>, validated against the primary timer's <code>available_channels</code>). Heats
       are <strong>channel-balanced</strong>: one pilot per distinct channel per heat, capped at
-      <code>node_count</code>. The default for <code>timed_qual</code> and <code>round_robin</code>.</dd>
+      <code>node_count</code>. The default for <code>timed_qual</code> (and <code>round_robin</code>,
+      since carved to <code>tournaments-snapshot</code>, PR #327).</dd>
       <dt>Per-heat — brackets <em>(default)</em></dt>
       <dd>Channels are assigned <strong>per heat</strong> from the timer's pool by
       <strong>first-fit</strong> in seed order (<code>assign_frequencies</code>), and the RD may
-      override. The default for the elimination / multi-main / ZippyQ bracket formats.</dd>
+      override. The default for <code>head_to_head</code> (and the elimination / multi-main / ZippyQ
+      bracket formats — carved to <code>tournaments-snapshot</code> / shelved).</dd>
     </dl>
     <p>
       Either way, <strong>open practice</strong> is the special case: its &ldquo;lineup&rdquo; <em>is</em>

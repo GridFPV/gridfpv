@@ -169,6 +169,15 @@
       The <code>rounds</code> param is now labeled <strong>"Heats per pilot"</strong> (default 3) in
       the schema, and <code>EventRounds.svelte</code> shows only the qualifying-applicable win
       conditions (First-to-N hidden) with no separate metric field.</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The <code>round_robin</code> half of this mapping was <strong>carved out</strong> with the
+      tournament structures (PR #327, preserved on <code>tournaments-snapshot</code>). Release
+      hardening also landed on the remaining path: <code>timed_qual</code> now <strong>chunks large
+      fields into heats of <code>heat_size</code></strong> (heat ids <code>tq-r{n}-h{m}</code>) and
+      <strong>excludes DQ'd placements from the ranking</strong> (#331); and adjudications (DQ /
+      TimeAdded / lap edits / throw-out / void) now reach round ranking, round standings, class
+      standings, and seeding via the shared <code>score_heat_window</code> scorer (#329, closing
+      <strong>#226</strong>).</dd>
     </dl>
 
     <h2>D7 · The grace window defaults to a bounded 30 seconds</h2>
@@ -206,6 +215,10 @@
       rule, not a new code path — the generator interface and advancement are unchanged. Making the
       generated bracket editable lets the RD fix seeds, byes, or a withdrawal before pilots fly, while
       everything stays a pure function of the log so the bracket recomputes deterministically.</dd>
+      <dt>Update (2026-07-03)</dt>
+      <dd>The <code>FromRanking</code> UI cut was renamed <strong>"Top N advance" → "Take top"</strong>
+      (PR #332), and the value is now <strong>bounded by the source rounds' real field</strong> — you
+      cannot take more pilots than the source ranking actually contains.</dd>
     </dl>
 
     <h2>D9 · The native desktop app embeds the Director, ships portable-only, stores data next to the exe — <em>implemented</em></h2>
@@ -299,6 +312,11 @@
       RD-facing round types (Practice / Time Trial / Head-to-Head); Round Robin, the elim brackets and
       Multi-Main become <em>tournament structures</em> over Head-to-Head, surfaced through builders
       rather than the Add-round picker (Multi-Main now shelved there alongside ZippyQ).</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The tournament structures were <strong>carved off <code>devel</code></strong> and preserved
+      on the <code>tournaments-snapshot</code> branch (PR #327); the primitives-first release ships the
+      three round types — <strong>Practice · Time Trials · Head-to-Head</strong> — and the structures
+      will be rebuilt on the hardened base later.</dd>
     </dl>
 
     <h2>D11 · "Qualifying" → "Time Trials": name the format, not the purpose</h2>
@@ -348,6 +366,10 @@
       path. The deterministic formats know their full shape up front, so one action should produce it;
       keeping incremental fill for Open Practice matches the one format whose heats genuinely can't be
       computed in advance. (Tracking: <strong>#216</strong>.)</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The tournament structures named here (Round Robin, Multi-Main, the bracket structure) were
+      carved to <code>tournaments-snapshot</code> (PR #327); the primitives-first release ships the
+      three round types, to which generate-heats applies as built.</dd>
     </dl>
 
     <h2>D13 · Brackets: one round per bracket <em>level</em> (supersedes one-round-per-bracket)</h2>
@@ -374,6 +396,10 @@
       named: double-elim's cross-bracket feed is the one place the seeding rule must genuinely grow, so
       it's called out as the design problem and deferred until that growth is designed rather than
       improvised. (Tracking: <strong>#217</strong>, which notes it supersedes one-round-per-bracket.)</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The bracket builders and level-per-round structures were carved to
+      <code>tournaments-snapshot</code> (PR #327); the primitives-first release ships the three round
+      types, and brackets will be rebuilt on this model post-v1.</dd>
     </dl>
 
     <h2>D14 · Double-elim and MultiGP Multi-Main are first-class next-iteration must-haves</h2>
@@ -395,6 +421,10 @@
       improvised under race-day pressure. Flagging them as next-iteration must-haves keeps them on the
       near plan with the design done up front. (Tracking: <strong>#219</strong> — Multi-Main as a
       first-class finals format.)</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>Both structures (with the rest of the tournament work) were carved to
+      <code>tournaments-snapshot</code> (PR #327); the primitives-first release ships the three round
+      types, and double-elim / multi-main are rebuilt as structures over Head-to-Head post-v1.</dd>
     </dl>
 
     <h2 id="d15">D15 · GridFPV native timer-server (post-v1.0.0): reuse RH firmware, strip the RMS <span class="tag optional">superseded</span></h2>
@@ -514,6 +544,43 @@
       Rolls out: bracket win-condition picker (shipped) → Head-to-Head building block → recompose
       round-robin → recompose the bracket → taxonomy collapse; the console keeps legacy names until
       each stage ships. Full spec: <a href="format-model.html">Format Model</a>.</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The rollout's structure stages (recompose round-robin, recompose the bracket, build
+      tournament) are <strong>deferred</strong>: the tournament structures were carved off
+      <code>devel</code> to the <code>tournaments-snapshot</code> branch (PR #327). The
+      <strong>primitives-first release</strong> ships the three round types —
+      <code>open_practice</code> (<em>Practice</em>, renamed in the UI from "Open Practice"),
+      <code>timed_qual</code> (<em>Time Trials</em>), <code>head_to_head</code>
+      (<em>Head-to-Head</em>) — and the structures are rebuilt on the hardened base later.</dd>
+    </dl>
+
+    <h2 id="d18">D18 · One grouping decision per round (extends D17)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>With Head-to-Head shipped as a primitive (D17), the question arose whether a round should be
+      able to <em>re-group</em> its pilots between heats — fly a pass, re-draw the groups, fly again.
+      That would smuggle seeding logic (a structure concern) into a round param, and would make a
+      round's heats no longer a single, reviewable draw.</dd>
+      <dt>Decision</dt>
+      <dd><strong>A Head-to-Head round makes one grouping decision, at fill</strong> (2026-07-03,
+      PR #332). The new <code>rotations</code> param (labeled <strong>"Heats per group"</strong>,
+      default&nbsp;1) re-runs the <strong>same</strong> groups back to back: with
+      <code>rotations = N</code>, each group races N consecutive heats. Scoring accumulates across
+      every heat flown — <strong>Points</strong> sums a pilot's points over all their heats;
+      <strong>Placement</strong> reads the best single result. <strong>Re-grouping between heats is
+      seeding work and belongs to tournament structures, never a round param.</strong> Multi-rotation
+      heat ids are <code>h2h-r{n}-h{m}</code>; single-pass rounds keep <code>h2h-h{n}</code>.
+      Alongside this, the <code>FromRanking</code> UI cut was renamed
+      <strong>"Top N advance" → "Take top"</strong> and is bounded by the source rounds' real
+      field.</dd>
+      <dt>Rationale</dt>
+      <dd>One grouping decision keeps a round a pure, reviewable draw — the RD sees the groups once
+      and knows exactly what will fly — and keeps the primitive atomic per the D17 tenet: anything
+      that re-draws groups between heats is <em>composition</em>, so it lives in the structures layer
+      (rebuilt post-v1), where seeding is explicit and auditable. <code>rotations</code> covers the
+      legitimate round-level need (more track time per group, points that reward consistency) without
+      opening the seeding door. Full round-type spec:
+      <a href="format-model.html">Format Model</a>.</dd>
     </dl>
 
     <footer class="doc-footer">

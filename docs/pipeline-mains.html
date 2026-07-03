@@ -21,6 +21,18 @@
 
     <div class="callout">
       <p>
+        <strong>Status (2026-06-30, PR #327) — this entire phase is deferred out of the
+        primitives-first release.</strong> The tournament structures (round-robin, single/double
+        elimination, multi-main, chase-the-ace, the bracket builders and viz) were carved off
+        <code>devel</code> and preserved on the <code>tournaments-snapshot</code> branch, to be
+        <strong>rebuilt over Head-to-Head rounds</strong> on the hardened base post-v1
+        (<a href="format-model.html">Format Model</a> §4, <a href="decisions.html#d17">D17</a>). The
+        doc below is the <strong>recorded design</strong> that rebuild starts from.
+      </p>
+    </div>
+
+    <div class="callout">
+      <p>
         This is a deep dive on one phase of the
         <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
         and surfaces the decisions and data each implies. It does not define the schema or
@@ -45,7 +57,8 @@
         <em>Single/Double Elimination</em>, <em>Multi-Main</em>, <em>Round Robin</em>),
         then dynamic per-format fields — a <strong>single-select class</strong> (a round targets one
         class), a <strong>win condition</strong>, a <strong>seeding</strong> rule (<em>From roster</em>
-        or <em>From ranking</em> with a source round + top-N), a <strong>channel mode</strong>
+        or <em>From ranking</em> with a source round + top-N — the cut is now labeled
+        <em>&ldquo;Take top&rdquo;</em> and bounded by the source rounds' real field, PR #332), a <strong>channel mode</strong>
         (Static / Per-heat), the format's declared params, and a Start&nbsp;&amp;&nbsp;Timing block
         (staging timer default <strong>5:00</strong>, randomized start delay entered in
         <strong>seconds</strong> default 2–5&nbsp;s, grace window default <strong>30&nbsp;s</strong>).
