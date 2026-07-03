@@ -70,6 +70,7 @@
 //! These are noted so #43/#44/#45 build on a stable addressing surface while the log-level
 //! filters are tightened later.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
@@ -80,7 +81,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use gridfpv_engine::format::{FormatRegistry, FormatSchema};
-use gridfpv_engine::scoring::{HeatResult, WinCondition, score_with_global_offsets};
+use gridfpv_engine::scoring::{HeatResult, WinCondition, score_corrected_with_global_offsets};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{
     LapList, lap_list_marshaled, marshaling_log, registrations, signal_trace,
@@ -1749,23 +1750,25 @@ fn now_micros() -> i64 {
         .unwrap_or(0)
 }
 
-/// The `at` of an event if it is a lap-gate pass, for deriving a heat's race start.
-pub(crate) fn first_pass_at(event: &Event) -> Option<SourceTime> {
-    match event {
-        Event::Pass(p) if p.gate.is_lap_gate() => Some(p.at),
-        _ => None,
-    }
-}
-
-/// Filter the log to a single heat's window, **preserving each event's global append offset**:
-/// that heat's scheduling / state-change events, plus all passes and marshaling adjudications
-/// that fall *while the heat is the active one*, each paired with its position in the full log.
+/// Filter the log to a single heat's window, **preserving each event's global append offset**.
 ///
-/// With one heat per log in the common case this is the whole log; with several heats it
-/// scopes passes to the span between this heat's first scheduling/transition and the next
-/// heat's. Passes carry no heat id (they are raw observations), so attribution is by
-/// position in the log relative to heat-loop events — the same ordering the engine uses to
-/// decide which heat consumes a pass (race-engine.html §2).
+/// Three routing rules, by what the event itself can say about where it belongs:
+///
+/// - **Heat-tagged marshaling events** (`PenaltyApplied` / `HeatVoided` / `ProtestFiled` /
+///   a tagged `LapInserted`) route **by their tag** — a ruling about a finished heat filed
+///   while a later heat is live must land in the marshaled heat's window and never leak into
+///   the live one. Positional attribution here was the mis-windowing bug: the ruling was
+///   silently a no-op on its target heat AND disqualified/penalized pilots in whichever heat
+///   happened to be active.
+/// - **Target-carrying rulings** (`DetectionVoided` / `LapAdjusted` / `LapSplit` /
+///   `LapThrownOut` / `ProtestResolved` / `RulingReversed`) belong to whichever heat their
+///   **target offset** is in. Targets always reference an earlier append offset, so one
+///   forward scan with an incrementally-built membership set resolves chains ("reverse the
+///   ruling that voided the pass…") without a fixpoint pass.
+/// - **Untagged events** (raw `Pass`es — wire observations that carry no heat id — plus a
+///   legacy untagged `LapInserted`, registrations, …) attribute **positionally**: they belong
+///   to whichever heat is active at that point in the log, the same ordering the engine uses
+///   to decide which heat consumes a pass (race-engine.html §2).
 ///
 /// The retained **global offset** is load-bearing for marshaling (#55): the lap projection and
 /// audit fold are keyed on it, and a `LogRef` correction command targets that global offset. An
@@ -1773,20 +1776,37 @@ pub(crate) fn first_pass_at(event: &Event) -> Option<SourceTime> {
 /// the *wrong* pass; folding with the real offsets fixes that.
 pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, Event)> {
     let mut window = Vec::new();
+    // The offsets already claimed by this window — a target-carrying ruling joins iff its
+    // target is one of them (targets always point backwards, so one forward scan suffices).
+    let mut claimed: BTreeSet<u64> = BTreeSet::new();
     // `active` tracks whether the cursor is currently inside this heat's span: it opens on
     // a heat-loop event for `heat` and closes on a heat-loop event for a *different* heat.
     let mut active = false;
     for (offset, event) in events.iter().enumerate() {
-        match event {
+        let offset = offset as u64;
+        let include = match event {
             Event::HeatScheduled { heat: h, .. } | Event::HeatStateChanged { heat: h, .. } => {
                 active = h == heat;
-                if active {
-                    window.push((offset as u64, event.clone()));
-                }
+                active
             }
-            // Passes and adjudications belong to whichever heat is currently active.
-            _ if active => window.push((offset as u64, event.clone())),
-            _ => {}
+            // Heat-tagged marshaling events: by tag, never by position.
+            Event::HeatVoided { heat: h }
+            | Event::PenaltyApplied { heat: h, .. }
+            | Event::ProtestFiled { heat: h, .. } => h == heat,
+            Event::LapInserted { heat: Some(h), .. } => h == heat,
+            // Target-carrying rulings: by their target's membership.
+            Event::DetectionVoided { target }
+            | Event::LapAdjusted { target, .. }
+            | Event::LapSplit { target, .. }
+            | Event::LapThrownOut { target }
+            | Event::ProtestResolved { target, .. }
+            | Event::RulingReversed { target } => claimed.contains(&target.0),
+            // Untagged (passes, legacy insertions, registrations): positional.
+            _ => active,
+        };
+        if include {
+            claimed.insert(offset);
+            window.push((offset, event.clone()));
         }
     }
     window
@@ -1817,7 +1837,7 @@ pub(crate) fn heat_window(events: &[Event], heat: &HeatId) -> Vec<Event> {
 /// offset** so a [`RulingReversed`](gridfpv_events::Event::RulingReversed) /
 /// [`LapThrownOut`](gridfpv_events::Event::LapThrownOut) resolves to its true `LogRef` target —
 /// a re-enumerated window would match the wrong offset (#55). The race clock is the window's
-/// earliest lap-gate pass. Scores via [`score_with_global_offsets`] under the round's win
+/// earliest lap-gate pass. Scores via [`score_corrected_with_global_offsets`] under the round's win
 /// condition, so penalties / throw-outs / voids / lap-edits all land.
 pub(crate) fn score_heat_window(
     events: &[Event],
@@ -1825,15 +1845,23 @@ pub(crate) fn score_heat_window(
     win_condition: WinCondition,
 ) -> HeatResult {
     let heat_offsets = heat_window_offsets(events, heat);
-    let race_start = heat_offsets
+    // Fold the marshaling lap corrections (void / insert / adjust / split) into the pass
+    // stream FIRST — scoring raw passes here was the residual #226 split-brain: the marshaling
+    // lap list showed the corrected laps while the result, rankings, standings, and seeding
+    // scored the uncorrected ones. The corrected stream keeps each surviving pass's global
+    // offset, so a throw-out targeting a lap's end pass still excludes the right lap.
+    let corrected = gridfpv_projection::corrected_passes(heat_offsets.iter().map(|(o, e)| (*o, e)));
+    let race_start = corrected
         .iter()
-        .filter_map(|(_, e)| first_pass_at(e))
+        .filter(|(_, p)| p.gate.is_lap_gate())
+        .map(|(_, p)| p.at)
         .min()
         .unwrap_or(SourceTime::from_micros(0));
-    score_with_global_offsets(
-        heat_offsets.iter().map(|(o, e)| (*o, e)),
+    score_corrected_with_global_offsets(
+        &corrected,
         win_condition,
         race_start,
+        heat_offsets.iter().map(|(o, e)| (*o, e)),
     )
 }
 

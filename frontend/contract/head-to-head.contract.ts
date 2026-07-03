@@ -103,28 +103,30 @@ describe('head_to_head rotations: the same groups race N times and points accumu
     );
 
     // FillRound(All): the generator lays out BOTH rotations up front — 2 groups × 2 rotations,
-    // rotation-scoped ids, and rotation 2 repeats rotation 1's lineups verbatim (the grouping
-    // is drawn once).
+    // rotation-scoped ids (round-scoped in the log: `{round}-h2h-r{n}-h{m}`, so two rounds of
+    // the same format in one event can never collide), and rotation 2 repeats rotation 1's
+    // lineups verbatim (the grouping is drawn once).
     expect(
       (await rdControl(director.baseUrl, TOKEN, { FillRound: { round: round.id, mode: 'All' } })).ok
     ).toBe(true);
     const heats = await roundHeats(round.id);
+    const hid = (gen) => `${round.id}-${gen}`;
     expect(heats.map((h) => h.heat).sort()).toEqual([
-      'h2h-r1-h0',
-      'h2h-r1-h1',
-      'h2h-r2-h0',
-      'h2h-r2-h1'
+      hid('h2h-r1-h0'),
+      hid('h2h-r1-h1'),
+      hid('h2h-r2-h0'),
+      hid('h2h-r2-h1')
     ]);
     const byId = new Map(heats.map((h) => [h.heat, h.lineup]));
-    expect(byId.get('h2h-r2-h0')).toEqual(byId.get('h2h-r1-h0'));
-    expect(byId.get('h2h-r2-h1')).toEqual(byId.get('h2h-r1-h1'));
+    expect(byId.get(hid('h2h-r2-h0'))).toEqual(byId.get(hid('h2h-r1-h0')));
+    expect(byId.get(hid('h2h-r2-h1'))).toEqual(byId.get(hid('h2h-r1-h1')));
     // Groups follow the roster draw: (alpha, bravo) and (charlie, delta).
-    expect(byId.get('h2h-r1-h0')).toEqual([ids[0], ids[1]]);
-    expect(byId.get('h2h-r1-h1')).toEqual([ids[2], ids[3]]);
+    expect(byId.get(hid('h2h-r1-h0'))).toEqual([ids[0], ids[1]]);
+    expect(byId.get(hid('h2h-r1-h1'))).toEqual([ids[2], ids[3]]);
 
     // Run every rotation's heats sequentially (finalize each before the next, so no dangling
     // Running heat absorbs the next heat's passes).
-    for (const heat of ['h2h-r1-h0', 'h2h-r1-h1', 'h2h-r2-h0', 'h2h-r2-h1']) {
+    for (const heat of ['h2h-r1-h0', 'h2h-r1-h1', 'h2h-r2-h0', 'h2h-r2-h1'].map(hid)) {
       await driveToRunning(director.baseUrl, TOKEN, heat);
       await waitForLaps(heat, 2);
       expect((await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat } })).ok).toBe(true);

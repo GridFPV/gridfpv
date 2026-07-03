@@ -148,6 +148,12 @@ impl TimedQualifying {
     /// The default pilots-per-heat when `heat_size` is not configured (a standard 4-up heat).
     pub const DEFAULT_HEAT_SIZE: usize = 4;
 
+    /// The most qualifying rotations a round accepts (`rounds = 0` stays the open-ended
+    /// sentinel). The static fill path materializes the round's full heat plan per fill, so an
+    /// unchecked param (`rounds=999999999` over the raw API) would allocate unbounded memory.
+    /// 100 heats per pilot is far beyond any real qualifying day; a request past it clamps.
+    pub const MAX_ROUNDS: usize = 100;
+
     /// Build over `field` for `rounds` rotations, ranked by `metric`, chunking each rotation into
     /// [`DEFAULT_HEAT_SIZE`](Self::DEFAULT_HEAT_SIZE) heats. The field is taken in the given order
     /// (apply any [`crate::format::SeedingOutcome`] before calling, as
@@ -167,7 +173,13 @@ impl TimedQualifying {
     ) -> Self {
         Self {
             field,
-            rounds,
+            // 0 = open-ended (generate the next heat on demand); a positive count clamps to
+            // MAX_ROUNDS so the materialized plan is bounded.
+            rounds: if rounds == 0 {
+                0
+            } else {
+                rounds.min(Self::MAX_ROUNDS)
+            },
             heat_size: heat_size.max(1),
             metric,
         }
@@ -523,6 +535,42 @@ mod tests {
                 best_lap_round(&[("A", Some(2_000_000))]),
             ));
         }
+    }
+
+    #[test]
+    fn rounds_clamp_to_max_rounds_but_zero_stays_open_ended() {
+        // An unchecked `rounds=999999` (raw API) clamps to MAX_ROUNDS: the round plans at most
+        // MAX_ROUNDS rotations, then completes — no unbounded materialized plan.
+        let mut g =
+            TimedQualifying::with_heat_size(field(&["A", "B"]), 999_999, 4, QualMetric::BestLap);
+        assert_eq!(g.rounds, TimedQualifying::MAX_ROUNDS);
+        let completed: Vec<CompletedHeat> = (1..=TimedQualifying::MAX_ROUNDS)
+            .map(|r| {
+                CompletedHeat::new(
+                    format!("tq-r{r}-h1"),
+                    best_lap_round(&[("A", Some(2_000_000))]),
+                )
+            })
+            .collect();
+        assert_eq!(
+            g.next(&completed),
+            GeneratorStep::Complete,
+            "the clamped round completes after MAX_ROUNDS rotations"
+        );
+
+        // `rounds = 0` stays the open-ended sentinel — NOT clamped into a finite plan: it
+        // keeps emitting the next rotation even past the cap.
+        let mut open =
+            TimedQualifying::with_heat_size(field(&["A", "B"]), 0, 4, QualMetric::BestLap);
+        assert_eq!(open.rounds, 0);
+        assert_eq!(
+            open.next(&completed),
+            GeneratorStep::Run(vec![HeatPlan::new(
+                format!("tq-r{}-h1", TimedQualifying::MAX_ROUNDS + 1),
+                field(&["A", "B"])
+            )]),
+            "rounds=0 keeps emitting past the clamp"
+        );
     }
 
     #[test]

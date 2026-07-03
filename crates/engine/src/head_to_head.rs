@@ -74,6 +74,12 @@ impl HeadToHead {
     /// The default rotations when unconfigured — the classic single pass (everyone races once).
     pub const DEFAULT_ROTATIONS: usize = 1;
 
+    /// The most rotations a round accepts. `lay_out` materializes every rotation's heats up
+    /// front, so an unchecked param (`rotations=999999999` over the raw API) would allocate
+    /// unbounded memory at fill. 50 back-to-back heats per group is far beyond any real race
+    /// day; a request past it clamps here.
+    pub const MAX_ROTATIONS: usize = 50;
+
     /// Build over a `field` in seed order with the given group size (clamped to ≥ 2), rotations
     /// (clamped to ≥ 1), and scoring.
     pub fn new(
@@ -85,7 +91,7 @@ impl HeadToHead {
         Self {
             field,
             group_size: group_size.max(2),
-            rotations: rotations.max(1),
+            rotations: rotations.clamp(1, Self::MAX_ROTATIONS),
             scoring,
         }
     }
@@ -172,6 +178,12 @@ impl Generator for HeadToHead {
                 for heat in completed {
                     let heat_size = heat.result.places.len();
                     for place in &heat.result.places {
+                        // A DISQUALIFIED placement earns nothing: the DQ voids the finish that
+                        // decided the position, so it must not pay points (mirrors timed_qual's
+                        // DQ exclusion, #331). The pilot's other, clean heats still score.
+                        if place.disqualified {
+                            continue;
+                        }
                         *totals
                             .entry(place.competitor.competitor.clone())
                             .or_insert(0) +=
@@ -190,6 +202,12 @@ impl Generator for HeadToHead {
                 let mut best: BTreeMap<CompetitorRef, (u32, i64)> = BTreeMap::new();
                 for heat in completed {
                     for place in &heat.result.places {
+                        // A DISQUALIFIED placement is no placement: it must not band the pilot
+                        // (a DQ'd "win" is not a win a bracket may advance). DQ'd in every heat
+                        // → no key → ranked last, the same place a no-show lands (#331).
+                        if place.disqualified {
+                            continue;
+                        }
                         let key = (place.position, -(place.laps as i64));
                         best.entry(place.competitor.competitor.clone())
                             .and_modify(|k| {
@@ -412,6 +430,59 @@ mod tests {
             CompletedHeat::new("h2h-r2-h0", result(&[("B", 1, 5), ("A", 2, 4)])),
         ];
         assert_eq!(names(&g.ranking(&done)), vec!["A", "B"]);
+    }
+
+    /// Mark `name` disqualified in a built result — the adjudicated-DQ fixture (#331).
+    fn with_dq(mut result: HeatResult, name: &str) -> HeatResult {
+        for place in &mut result.places {
+            if place.competitor.competitor.0 == name {
+                place.disqualified = true;
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn points_skip_a_disqualified_placement() {
+        // A "wins" the heat but is DQ'd: the voided finish earns NOTHING, so B's earned
+        // runner-up point outranks A. Without the skip A would bank the winner's points off a
+        // finish the adjudication voided.
+        let g = HeadToHead::new(field(&["A", "B"]), 2, 1, Scoring::Points(None));
+        let done = vec![CompletedHeat::new(
+            "h2h-h0",
+            with_dq(result(&[("A", 1, 5), ("B", 2, 4)]), "A"),
+        )];
+        let ranking = g.ranking(&done);
+        assert_eq!(names(&ranking), vec!["B", "A"]);
+        assert_eq!(ranking[0].position, 1);
+        // A holds 0 points — strictly below B's 1, not tied (a tie would share position 1).
+        assert_eq!(ranking[1].position, 2, "the DQ'd win earns zero points");
+    }
+
+    #[test]
+    fn placement_skips_a_disqualified_placement() {
+        // Placement: a DQ'd "win" is no win — A gets no band key and ranks last (the same
+        // place a no-show lands), so a bracket reading the ranking can never advance the
+        // DQ'd winner.
+        let g = HeadToHead::new(field(&["A", "B"]), 2, 1, Scoring::Placement);
+        let done = vec![CompletedHeat::new(
+            "h2h-h0",
+            with_dq(result(&[("A", 1, 5), ("B", 2, 4)]), "A"),
+        )];
+        assert_eq!(names(&g.ranking(&done)), vec!["B", "A"]);
+    }
+
+    #[test]
+    fn rotations_clamp_to_max_rotations() {
+        // An unchecked `rotations=999` (raw API) clamps to MAX_ROTATIONS: the laid-out
+        // schedule is groups × MAX_ROTATIONS heats, not 999 rotations of unbounded memory.
+        let mut g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 999, Scoring::Points(None));
+        assert_eq!(g.rotations, HeadToHead::MAX_ROTATIONS);
+        assert_eq!(
+            heat_ids(&g.next(&[])).len(),
+            2 * HeadToHead::MAX_ROTATIONS,
+            "2 groups × the clamped rotation cap"
+        );
     }
 
     #[test]

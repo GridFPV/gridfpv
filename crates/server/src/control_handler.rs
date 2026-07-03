@@ -790,11 +790,21 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             adapter,
             competitor,
             at,
-        } => Ok(Event::LapInserted {
-            adapter,
-            competitor,
-            at,
-        }),
+            heat,
+        } => {
+            // A tagged insertion must name a real heat (the tag is what routes it into that
+            // heat's scoring window even when a different heat is live); an untagged one is a
+            // legacy client and attributes positionally, as before.
+            if let Some(h) = &heat {
+                require_scheduled_heat(state, h)?;
+            }
+            Ok(Event::LapInserted {
+                adapter,
+                competitor,
+                at,
+                heat,
+            })
+        }
         Command::VoidHeat { heat } => {
             require_scheduled_heat(state, &heat)?;
             Ok(Event::HeatVoided { heat })
@@ -1752,6 +1762,7 @@ mod tests {
                 adapter: AdapterId("vd".into()),
                 competitor: CompetitorRef("A".into()),
                 at: SourceTime::from_micros(3_000_000),
+                heat: None,
             },
             None,
         )

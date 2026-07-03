@@ -381,6 +381,7 @@ mod tests {
                 adapter: AdapterId(ADAPTER.into()),
                 competitor: cref("A"),
                 at: SourceTime::from_micros(3_000_000),
+                heat: None,
             }, // offset 2
         ];
         let start = SourceTime::from_micros(0);
@@ -426,6 +427,7 @@ mod tests {
                 adapter: AdapterId(ADAPTER.into()),
                 competitor: cref("A"),
                 at: SourceTime::from_micros(3_000_000),
+                heat: None,
             }, // offset 2 — inserts a lap → A has 2 laps
             Event::LapThrownOut {
                 target: gridfpv_events::LogRef(2),

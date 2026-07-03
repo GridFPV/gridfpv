@@ -671,22 +671,42 @@ pub fn completed_heats(round: &RoundDef, events: &[Event]) -> Vec<CompletedHeat>
             // pass-only `score_marshaled` discarded every adjudication, leaving the raw on-track
             // score here while the heat page showed the corrected one — the split-brain this closes.
             let result = crate::app::score_heat_window(events, &heat, round.win_condition);
-            // The generator keys `next`/`ranking` on the heat ids it **emitted**. The kept formats
-            // log those ids verbatim, so `unscope_heat_id` is a pass-through (the bracket formats that
-            // round-scoped per-level ids were carved out for the primitives-first release).
+            // The generator keys `next`/`ranking` on the heat ids it **emitted**; the log carries
+            // the round-scoped id, so strip the scope back off before handing history to the
+            // generator (and to every ranking consumer keyed on generator ids).
             let generator_id = unscope_heat_id(round, &heat);
             CompletedHeat::new(generator_id, result)
         })
+        // A VOIDED heat's result counts for NOTHING downstream: the RD's "Void heat" (false
+        // start, timer glitch) must drop the heat from round ranking, standings, class points,
+        // heat winners, and any dependent round's seeding — exactly as if it had not been
+        // finalized. (The heat page still shows the voided result, flagged.) Because the void
+        // is folded from the adjudicated window, a RulingReversed on the void brings the heat
+        // back. Note the round then reads as incomplete until the heat is re-run or the void
+        // reversed — that is honest, not a bug.
+        .filter(|completed| !completed.result.voided)
         .collect()
+}
+
+/// A generator heat id scoped to its round — the id actually logged in `HeatScheduled`.
+///
+/// Generator ids are only unique within a round, so the log carries `{round}-{generator-id}`
+/// (deterministic: the same round + plan always yields the same logged id).
+fn scoped_heat_id(round_id: &RoundId, generator_id: &HeatId) -> HeatId {
+    HeatId(format!("{}-{}", round_id.0, generator_id.0))
 }
 
 /// Map a round's **logged** heat id back to the **generator's** id (the one the format emitted).
 ///
-/// The kept formats log the generator's id verbatim, so this is a pass-through. (The bracket
-/// formats that scoped per-level heat ids with the round id were carved out for the
-/// primitives-first release.)
-fn unscope_heat_id(_round: &RoundDef, heat: &HeatId) -> String {
-    heat.0.clone()
+/// Strips this round's `{round}-` scope prefix. A logged id without the prefix passes through
+/// verbatim — that covers events persisted before scoping (their in-flight rounds keep
+/// matching their generators' raw ids) and the manually-scheduled heats a round never
+/// generated.
+fn unscope_heat_id(round: &RoundDef, heat: &HeatId) -> String {
+    heat.0
+        .strip_prefix(&format!("{}-", round.id.0))
+        .map(str::to_owned)
+        .unwrap_or_else(|| heat.0.clone())
 }
 
 /// The **finalized** heats of a round, in first-scheduled order — the heat ids both
@@ -1266,23 +1286,38 @@ fn fill_round_per_heat(
             // plans at once (a bracket round) still advances one heat at a time: take the
             // first not-yet-scheduled plan. Dedup against already-tagged heats so a repeated
             // FillRound before the prior heat is scored does not double-schedule it.
-            // Open practice (issue #54): the format generator emits a fixed `"open-practice"` heat
-            // id, which collides when an event has two open-practice rounds — both would claim the
-            // same id, so the second round auto-creates no distinct heat. Scope the id to the round
-            // so each open-practice round gets its own heat; other formats keep the generator's id
-            // verbatim. Rewritten **before** the dedup so `already`/`scheduled_round_heats` (which
-            // read the round-scoped id from the log) match it and the auto-create stays idempotent
-            // per round.
+            // Scope every generator heat id to the round. A generator's ids are only unique
+            // WITHIN its own round (`h2h-h0`, `tq-r1-h0`, …): two rounds of the same format in
+            // one event would log colliding `HeatScheduled` ids, and every by-id fold (heat
+            // state, windows, live control) would then conflate two different heats — corrupted
+            // results. Scoping with the round id (`{round}-{generator-id}`) makes ids globally
+            // unique while staying deterministic; `unscope_heat_id` strips the prefix when
+            // history is handed back to the generator. (Open practice keeps its dedicated
+            // `{round}-heat` form, issue #54.) Rewritten **before** the dedup so
+            // `already`/`scheduled_round_heats` (which read the scoped id from the log) match
+            // it and the fill stays idempotent per round.
             let open_practice = is_open_practice(round);
-            let mut plans = plans;
-            if open_practice {
-                let scoped = open_practice_heat_id(round_id);
-                for plan in &mut plans {
-                    plan.heat = scoped.clone();
-                }
-            }
+            // Keep each plan's RAW generator id alongside the scoped rewrite: a round filled
+            // before scoping existed logged the raw ids, so the dedup below must recognize a
+            // plan as already-scheduled under EITHER form or an upgrade mid-round would
+            // double-schedule its remaining heats.
+            let plans: Vec<_> = plans
+                .into_iter()
+                .map(|mut plan| {
+                    let raw = plan.heat.clone();
+                    plan.heat = if open_practice {
+                        open_practice_heat_id(round_id)
+                    } else {
+                        scoped_heat_id(round_id, &plan.heat)
+                    };
+                    (raw, plan)
+                })
+                .collect();
             let already: Vec<HeatId> = scheduled_round_heats(events, round_id);
-            let next = plans.into_iter().find(|p| !already.contains(&p.heat));
+            let next = plans
+                .into_iter()
+                .find(|(raw, p)| !already.contains(&p.heat) && !already.contains(raw))
+                .map(|(_, p)| p);
             // Open practice (open-practice format): the heat carries **empty** frequencies — its
             // lineup is the active *channels* themselves (`node-{i}` seats), so there is nothing to
             // allocate. Force `Some(empty)` so the handler appends the logged `HeatScheduled` with no
@@ -1481,11 +1516,19 @@ fn static_round_count(round: &RoundDef) -> usize {
         "timed_qual" | "round_robin" => 3,
         _ => 1,
     };
-    round
+    let rounds: usize = round
         .params
         .get("rounds")
         .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+        .unwrap_or(default);
+    // 0 stays the explicit open-ended sentinel; a positive count clamps so the materialized
+    // full plan is bounded (an unchecked raw-API `rounds=999999999` would otherwise allocate
+    // unbounded memory at fill). Mirrors the generator-side clamp.
+    if rounds == 0 {
+        0
+    } else {
+        rounds.min(gridfpv_engine::timed_qual::TimedQualifying::MAX_ROUNDS)
+    }
 }
 
 /// Slugify a round id into a heat-id-safe stem (lowercase alnum, other runs → single `-`).
@@ -2342,9 +2385,11 @@ mod tests {
     }
 
     #[test]
-    fn heat_voided_is_handled_in_the_projections() {
-        // A voided heat: the projections still compute (no panic) and the heat result is flagged
-        // voided, so a downstream consumer can nullify it.
+    fn heat_voided_is_excluded_from_the_projections_until_reversed() {
+        // The RD's "Void heat" (false start / timer glitch) must count for NOTHING downstream:
+        // the voided heat drops out of completed_heats — and with it round ranking, standings,
+        // class points, and any dependent seeding — exactly as if it had never finalized. A
+        // RulingReversed on the void brings it back.
         let round = qual_round("q1", "open");
         let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
         let mut log = scored_heat(
@@ -2353,22 +2398,29 @@ mod tests {
             "open",
             &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
         );
+        let void_offset = log.len() as u64;
         log.push(Event::HeatVoided {
             heat: HeatId("q-1".into()),
         });
 
-        // completed_heats flags the void; the standings still resolve over the round.
-        let completed = completed_heats(&round, &log);
+        // Voided → the heat contributes nothing: no completed heats, no ranked metrics.
         assert!(
-            !completed.is_empty() && completed.iter().all(|h| h.result.voided),
-            "the heat is flagged voided"
+            completed_heats(&round, &log).is_empty(),
+            "a voided heat is excluded from the round's completed heats"
         );
         let standings = round_standings(&meta, &round, &log).unwrap();
-        assert_eq!(
-            standings.len(),
-            2,
-            "standings still computed over a voided heat"
+        assert!(
+            standings.iter().all(|s| s.best_lap_micros.is_none()),
+            "no metric survives from a voided heat"
         );
+
+        // Reversing the void restores the heat (and its results) in full.
+        log.push(Event::RulingReversed {
+            target: LogRef(void_offset),
+        });
+        let restored = completed_heats(&round, &log);
+        assert_eq!(restored.len(), 1, "reversal brings the heat back");
+        assert!(!restored[0].result.voided);
     }
 
     #[test]
@@ -2444,6 +2496,210 @@ mod tests {
             ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
             clean
         );
+    }
+
+    // --- Mis-windowing regressions: marshaling a NON-LATEST heat routes by tag/target -------
+    //
+    // `heat_window_offsets` used to attribute every marshaling event *positionally* — to
+    // whichever heat was active at that point in the log. Adjudicating a FINISHED heat while a
+    // later heat ran was therefore a silent no-op on its target heat AND leaked into the live
+    // one. These pin the tag/target routing (app.rs `heat_window_offsets`) and the
+    // corrected-pass fold in `score_heat_window`; each fails on the old positional path.
+
+    #[test]
+    fn adjudicating_a_non_latest_heat_lands_in_its_own_window() {
+        // Two finished heats of one round; the DQ on heat 1's winner is appended AFTER heat 2's
+        // whole span (marshaling a finished heat). It must land in heat 1's window — not in
+        // whichever heat happened to run last.
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 1 });
+        let meta = meta_with(
+            vec![round.clone()],
+            vec![member("open", &["A", "B", "C", "D"])],
+        );
+        let mut log = scored_heat(
+            "h2h-1",
+            "h2h",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        log.extend(scored_heat(
+            "h2h-2",
+            "h2h",
+            "open",
+            &[("C", &[0, 1_000_000]), ("D", &[0, 2_000_000])],
+        ));
+        log.push(penalty_applied(
+            "h2h-1",
+            "A",
+            Penalty::Disqualify { reason: None },
+        ));
+
+        // Heat 1's result carries the DQ...
+        let heat1 =
+            crate::app::score_heat_window(&log, &HeatId("h2h-1".into()), round.win_condition);
+        let dq: Vec<&str> = heat1
+            .places
+            .iter()
+            .filter(|p| p.disqualified)
+            .map(|p| p.competitor.competitor.0.as_str())
+            .collect();
+        assert_eq!(dq, vec!["A"], "the DQ lands in the heat it names");
+        // ...and heat 2 (the later, positionally-active heat) is untouched.
+        let heat2 =
+            crate::app::score_heat_window(&log, &HeatId("h2h-2".into()), round.win_condition);
+        assert!(
+            heat2.places.iter().all(|p| !p.disqualified),
+            "the DQ must not leak into the heat that happened to run last"
+        );
+        // And the round ranking reflects it: A (heat 1's on-track winner) ranks last.
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            vec!["B", "C", "D", "A"]
+        );
+    }
+
+    #[test]
+    fn marshaling_lap_corrections_reach_the_round_ranking() {
+        // timed_qual BestLap: on track B (2.0s) beats A (5.0s). Marshaling then inserts A's
+        // missed pass at 2.5s (A best lap → 2.5s) and voids B's only lap-end detection (B → no
+        // lap). Ranking and standings must score the CORRECTED pass stream — before the fix
+        // `score_heat_window` scored raw passes only, so InsertLap/VoidDetection never reached
+        // results.
+        let round = qual_round("q1", "open"); // BestLap
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[("A", &[0, 5_000_000]), ("B", &[0, 2_000_000])],
+        );
+        // Sanity: the raw passes rank B (2.0s) ahead of A (5.0s).
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            vec!["B", "A"]
+        );
+
+        let b_lap_end = pass_offset(&log, "B", 2_000_000);
+        log.push(Event::LapInserted {
+            adapter: AdapterId(ADAPTER.into()),
+            competitor: CompetitorRef("A".into()),
+            at: SourceTime::from_micros(2_500_000),
+            heat: Some(HeatId("q-1".into())),
+        });
+        log.push(Event::DetectionVoided {
+            target: LogRef(b_lap_end),
+        });
+
+        // The corrections land: A (2.5s best lap) now leads the lap-less B.
+        assert_eq!(
+            ranking_order(&round_ranking(&meta, &round, &log).unwrap()),
+            vec!["A", "B"]
+        );
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        assert_eq!(
+            standing(&standings, "A").best_lap_micros,
+            Some(2_500_000),
+            "the inserted lap sets A's best lap"
+        );
+        assert_eq!(
+            standing(&standings, "B").best_lap_micros,
+            None,
+            "voiding B's lap-end detection leaves B lap-less"
+        );
+    }
+
+    #[test]
+    fn protest_on_a_finished_heat_gates_that_heat_not_the_live_one() {
+        // Heat 1 is finished; heat 2 is mid-run when the protest against heat 1 is filed. The
+        // filing must join heat 1's window (where the audit/gating consumers read it) and stay
+        // out of the live heat 2's — positional attribution put it in heat 2's.
+        let mut log = scored_heat(
+            "h2h-1",
+            "h2h",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        log.push(scheduled("h2h-2", "h2h", "open", &["C", "D"]));
+        log.push(changed("h2h-2", HeatTransition::Staged));
+        log.push(changed("h2h-2", HeatTransition::Armed));
+        log.push(changed("h2h-2", HeatTransition::Running));
+        log.push(pass("C", 10_000_000, 8));
+        let protest_offset = log.len() as u64;
+        log.push(Event::ProtestFiled {
+            heat: HeatId("h2h-1".into()),
+            competitor: CompetitorRef("A".into()),
+            note: "blocking on lap 1".into(),
+        });
+        log.push(pass("D", 11_000_000, 9)); // heat 2 races on around the filing
+
+        let window1 = crate::app::heat_window_offsets(&log, &HeatId("h2h-1".into()));
+        assert!(
+            window1
+                .iter()
+                .any(|(offset, e)| *offset == protest_offset
+                    && matches!(e, Event::ProtestFiled { .. })),
+            "the protest gates the finished heat it names"
+        );
+        let window2 = crate::app::heat_window_offsets(&log, &HeatId("h2h-2".into()));
+        assert!(
+            window2
+                .iter()
+                .all(|(_, e)| !matches!(e, Event::ProtestFiled { .. })),
+            "the live heat is clear of the other heat's protest"
+        );
+    }
+
+    #[test]
+    fn two_rounds_of_the_same_format_never_collide_on_heat_ids() {
+        // Two head_to_head rounds over the same class: each generator emits h2h-h0/h2h-h1, so
+        // the LOGGED ids must be round-scoped (`{round}-{generator-id}`) — unscoped, the second
+        // round's heats would collide with the first's and every by-id fold (heat state,
+        // windows, live control) would conflate two different heats.
+        let mut ra = h2h_round("ra", "open", WinCondition::FirstToLaps { n: 1 });
+        ra.params.insert("group_size".into(), "2".into());
+        let mut rb = h2h_round("rb", "open", WinCondition::FirstToLaps { n: 1 });
+        rb.params.insert("group_size".into(), "2".into());
+        let meta = meta_with(vec![ra, rb], vec![member("open", &["A", "B", "C", "D"])]);
+
+        // Drive both rounds through every fill, appending the tagged schedule + scored run the
+        // way the real handler does (mirrors fill_round_sequence_is_deterministic_on_replay).
+        let mut log: Vec<Event> = Vec::new();
+        let mut ids: Vec<String> = Vec::new();
+        for round_id in ["ra", "rb"] {
+            for _ in 0..8 {
+                match fill_round(&meta, &no_timers(), &RoundId(round_id.into()), &log).unwrap() {
+                    FillOutcome::Scheduled { heat, lineup, .. } => {
+                        let names: Vec<&str> = lineup.iter().map(|c| c.0.as_str()).collect();
+                        log.push(scheduled(&heat.0, round_id, "open", &names));
+                        let mut passes = Vec::new();
+                        for (i, n) in names.iter().enumerate() {
+                            passes.push(pass(n, i as i64, 0));
+                            passes.push(pass(n, 1_000_000 + i as i64, 1));
+                        }
+                        log.extend(run_heat_events(&heat.0, passes));
+                        ids.push(heat.0);
+                    }
+                    FillOutcome::Complete => break,
+                    other => panic!("unexpected fill outcome {other:?}"),
+                }
+            }
+        }
+
+        // 4 pilots, 2-up, one rotation → two heats per round, all four ids distinct.
+        assert_eq!(ids.len(), 4, "two heats per round scheduled: {ids:?}");
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "heat ids are globally unique across the two rounds: {ids:?}"
+        );
+        // Each logged id carries its own round's scope prefix.
+        for id in &ids[..2] {
+            assert!(id.starts_with("ra-"), "round ra's heat is ra-scoped: {id}");
+        }
+        for id in &ids[2..] {
+            assert!(id.starts_with("rb-"), "round rb's heat is rb-scoped: {id}");
+        }
     }
 
     /// A `RankEntry` for a competitor at a 1-based position (aggregation test helper).
