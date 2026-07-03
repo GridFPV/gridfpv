@@ -18,8 +18,8 @@
 //! | [`Command::ScheduleHeat`] | the id is genuinely **new**, the lineup seats no competitor twice, and a `round`/`class` tag resolves against the event meta (round exists; class selected + round-eligible; pilot refs are eligible members) — #335 | [`Event::HeatScheduled`] |
 //! | [`Command::SetCurrentHeat`] | the heat exists in the log | [`Event::CurrentHeatSelected`] |
 //! | [`Command::Register`] | none (the binding is always recordable; last-registration-wins folds downstream) | [`Event::CompetitorRegistered`] |
-//! | [`Command::VoidDetection`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::DetectionVoided`] |
-//! | [`Command::AdjustLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::LapAdjusted`] |
+//! | [`Command::VoidDetection`] | the `target` offset exists and is a lap-gate pass (raw [`Pass`](gridfpv_events::Pass), or a synthetic `LapInserted`/`LapSplit`) | [`Event::DetectionVoided`] |
+//! | [`Command::AdjustLap`] | the `target` offset exists and is a lap-gate pass (raw or synthetic, as above) | [`Event::LapAdjusted`] |
 //! | [`Command::InsertLap`] | none (it adds a pass) | [`Event::LapInserted`] |
 //! | [`Command::SplitLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) (the lap's ending pass) | [`Event::LapSplit`] |
 //! | [`Command::VoidHeat`] | the heat exists in the log | [`Event::HeatVoided`] |
@@ -1145,14 +1145,20 @@ fn require_lap_end_target(state: &AppState, target: LogRef) -> Result<(), Protoc
     }
 }
 
-/// Require that `target` names a real [`Pass`](gridfpv_events::Pass) in the log — the cheap
-/// target check for the offset-addressed marshaling commands (`VoidDetection`,
-/// `AdjustLap`). An out-of-range or non-pass offset is [`ErrorCode::BadRequest`]; nothing
-/// is appended.
+/// Require that `target` names a **lap-gate pass** in the log — raw
+/// ([`Pass`](gridfpv_events::Pass)) or **synthetic** (a marshaling
+/// [`LapInserted`](Event::LapInserted) / [`LapSplit`](Event::LapSplit), which the corrected-pass
+/// fold treats as passes and supports voiding / re-timing — "void the void"). The cheap target
+/// check for the offset-addressed marshaling commands (`VoidDetection`, `AdjustLap`).
+///
+/// Raw-`Pass`-only here was a bug: the RotorHazard save-then-pull catch-up path records
+/// recovered laps as `LapInserted`, so those laps' boundary refs were un-voidable — a
+/// re-detection commit on such a heat bounced with "not a detected pass" (live 2026-07-03).
+/// An out-of-range or non-pass offset is [`ErrorCode::BadRequest`]; nothing is appended.
 fn require_pass_target(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
     let (events, _cursor) = state.read()?;
     match events.get(target.0 as usize) {
-        Some(Event::Pass(_)) => Ok(()),
+        Some(Event::Pass(_) | Event::LapInserted { .. } | Event::LapSplit { .. }) => Ok(()),
         Some(_) => Err(ProtocolError::new(
             ErrorCode::BadRequest,
             format!("log offset {} is not a detected pass", target.0),
@@ -1855,6 +1861,47 @@ mod tests {
             },
         );
         assert!(!ack.ok);
+    }
+
+    /// `VoidDetection` / `AdjustLap` accept **synthetic** passes too: the RH save-then-pull
+    /// catch-up path records recovered laps as `LapInserted`, and the corrected-pass fold fully
+    /// supports voiding / re-timing them ("void the void") — a raw-`Pass`-only validator made
+    /// those laps un-marshalable, bouncing re-detection commits with "not a detected pass".
+    #[test]
+    fn void_and_adjust_accept_synthetic_pass_targets() {
+        let mut log = InMemoryLog::default();
+        // offset 0: a marshaling-inserted lap pass (the RH catch-up shape — untagged).
+        EventLog::append(
+            &mut log,
+            Event::LapInserted {
+                adapter: AdapterId("rh-1".into()),
+                competitor: CompetitorRef("A".into()),
+                at: SourceTime::from_micros(5_000_000),
+                heat: None,
+            },
+            None,
+        )
+        .unwrap();
+        let state = AppState::new(log);
+
+        // Voiding the inserted lap succeeds and appends the ruling.
+        let ack = apply_command(&state, Command::VoidDetection { target: LogRef(0) });
+        assert!(ack.ok, "voiding a LapInserted must be accepted: {ack:?}");
+        // Re-timing it succeeds too.
+        let ack = apply_command(
+            &state,
+            Command::AdjustLap {
+                target: LogRef(0),
+                at: SourceTime::from_micros(5_200_000),
+            },
+        );
+        assert!(ack.ok, "adjusting a LapInserted must be accepted: {ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::DetectionVoided { target } if *target == LogRef(0)))
+        );
     }
 
     /// `SplitLap` validates the target is a real pass (the lap's ending pass), then appends
