@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import type { EventMeta, HeatSummary, LiveRaceState, RoundDef } from '@gridfpv/types';
 import ContextHeader from '../src/ContextHeader.svelte';
@@ -156,5 +156,31 @@ describe('ContextHeader heat name', () => {
     // The re-read fires on the `currentEvent` change alone and the friendly name resolves.
     await waitFor(() => expect(heatId()?.textContent).toBe('Qualifying R1 Heat 1'));
     expect(heatId()?.textContent).not.toContain('q1-heat');
+  });
+
+  // #340: a FAILED heats read used to swallow into an empty list, so the header silently rendered
+  // the raw heat id with no hint anything was wrong. It must show a visible error state (with an
+  // explicit retry) in place of the heat name instead.
+  it('shows an error state with retry — not the raw heat id — when the heats read fails (#340)', async () => {
+    let fail = true;
+    const { session } = makeTestSession({
+      event: EVENT,
+      live: live(),
+      listHeatsImpl: vi.fn(async () => {
+        if (fail) throw new Error('boom');
+        return [HEAT];
+      })
+    });
+    render(ContextHeader, { session, ongolive: () => {}, onswitchevent: () => {} });
+
+    // The error state renders in place of the heat name — the raw id never reaches the screen.
+    const retry = await screen.findByRole('button', { name: /Couldn.t load — retry/ });
+    expect(heatId()).toBeNull();
+
+    // Retry with the read healthy again: the friendly name resolves.
+    fail = false;
+    await fireEvent.click(retry);
+    await waitFor(() => expect(heatId()?.textContent).toBe('Qualifying R1 Heat 1'));
+    expect(screen.queryByRole('button', { name: /Couldn.t load — retry/ })).toBeNull();
   });
 });

@@ -985,6 +985,38 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
     expect(within(standing).queryByText('node-0')).not.toBeInTheDocument();
     expect(within(standing).queryByText('node-1')).not.toBeInTheDocument();
   });
+
+  // #340: a FAILED pilots/heats read used to swallow into empty arrays, so the raw refs rendered
+  // with no error state. It must surface a visible "Couldn't load — retry" state instead.
+  it('surfaces a visible retry state when the pilot/heat directory reads fail (#340)', async () => {
+    let fail = true;
+    const { session } = makeTestSession({
+      event: FN_EVENT,
+      live: fnLive,
+      listHeatsImpl: vi.fn(async () => {
+        if (fail) throw new Error('boom');
+        return [HEAT_1_FREQ, HEAT_2];
+      }),
+      listPilotsImpl: vi.fn(async () => {
+        if (fail) throw new Error('boom');
+        return PILOTS as unknown as never;
+      }),
+      listChannelsImpl: vi.fn(async () => FN_CATALOG),
+      listTimersImpl: vi.fn(async () => [FN_TIMER])
+    });
+    render(LiveRaceControl, { session });
+
+    // The failure is visible — no more silently-empty directory + raw refs.
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Couldn.t load the pilot\/heat directory/);
+
+    // Retry with the reads healthy again: the error clears and the names resolve.
+    fail = false;
+    await fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    const title = document.querySelector('.heat-id .value') as HTMLElement;
+    await waitFor(() => expect(title.textContent?.trim()).toBe('Qualifying R1 Heat 1'));
+  });
 });
 
 // ── Roster-seeded pilot callsigns resolve from the roster binding, BEFORE the heat runs ──────────

@@ -31,7 +31,7 @@
     PilotProgress,
     SignalTraceView
   } from '@gridfpv/types';
-  import { formatMicros, Select } from '@gridfpv/components';
+  import { formatMicros, Select, toast } from '@gridfpv/components';
   import { channelLabel } from '../lib/channels.js';
   import { createCompetitorNameResolver } from '../lib/competitorName.js';
   import { heatNameById } from '../lib/heats.js';
@@ -125,21 +125,45 @@
   let pilots = $state<Pilot[]>([]);
   let heats = $state<HeatSummary[]>([]);
   let catalog = $state<ChannelCatalogEntry[]>([]);
+  // A FAILED pilots/heats directory read must be visible (#340): swallowing it into an empty array
+  // left every ref rendering raw with no hint anything was wrong. Track a load-error flag per read
+  // (keeping the last good data rather than wiping it), surface a "Couldn't load — retry" state +
+  // a toast (the Results-screen pattern), and let the RD retry explicitly via the nonce.
+  let pilotsError = $state(false);
+  let heatsError = $state(false);
+  let directoryRetryNonce = $state(0);
+  const directoryError = $derived(pilotsError || heatsError);
+  function retryDirectory(): void {
+    directoryRetryNonce += 1;
+  }
+  /** Toast once on the transition INTO the error state (the effects re-run on every stream tick). */
+  function noteDirectoryError(alreadyFailing: boolean): void {
+    if (!alreadyFailing)
+      toast.error('Couldn’t load the pilot/heat directory — names may show as raw ids.');
+  }
   $effect(() => {
     void session.currentEvent;
     void session.protocolState;
+    void directoryRetryNonce;
     session
       .listPilots()
-      .then((p) => (pilots = p))
-      .catch(() => (pilots = []));
+      .then((p) => ((pilots = p), (pilotsError = false)))
+      .catch(() => {
+        noteDirectoryError(directoryError);
+        pilotsError = true;
+      });
   });
   $effect(() => {
     void session.currentEvent;
     void session.protocolState;
+    void directoryRetryNonce;
     session
       .listHeats()
-      .then((h) => (heats = h))
-      .catch(() => (heats = []));
+      .then((h) => ((heats = h), (heatsError = false)))
+      .catch(() => {
+        noteDirectoryError(directoryError);
+        heatsError = true;
+      });
   });
   $effect(() => {
     session
@@ -374,12 +398,33 @@
   }
   // Filed protests are resolvable by their log offset (the audit entry's `at_ref`).
   const filedProtests = $derived((audit ?? []).filter((e) => e.kind === 'ProtestFiled'));
-  const resolvedProtests = $derived((audit ?? []).filter((e) => e.kind === 'ProtestResolved'));
-  // Open (unresolved) protests = filed minus resolved (the audit carries no filed→resolved link, so
-  // this is a count). Finalizing while a protest is open would lock a result that's still under
-  // dispute, so the Finalize action is gated on this being zero (a result isn't "defensible" with an
-  // open protest). Clamped ≥ 0 defensively.
-  const openProtestCount = $derived(Math.max(0, filedProtests.length - resolvedProtests.length));
+  // Ruling offsets a later `RulingReversed` undid. The audit entry carries its target only inside
+  // the server-baked summary ("Ruling reversed (ref N)"), so it is parsed back out here.
+  const reversedRulingTargets = $derived.by(() => {
+    const targets = new Set<number>();
+    for (const e of audit ?? []) {
+      if (e.kind !== 'RulingReversed') continue;
+      const t = summaryTargetRef(e.summary);
+      if (t !== undefined) targets.add(t);
+    }
+    return targets;
+  });
+  // Open (unresolved) protests, matching the server's Finalize gate (`open_protest_count`,
+  // control_handler.rs — the source of truth): a filing is closed only by an EFFECTIVE resolution —
+  // a `ProtestResolved` targeting it that was NOT itself undone by a `RulingReversed`. The old
+  // filed-minus-resolved count diverged the moment a resolution was reversed: the server counted
+  // the protest as open again and rejected Finalize while the UI still offered it (#340).
+  // Finalizing while a protest is open would lock a result that's still under dispute, so the
+  // Finalize action is gated on this being zero.
+  const openProtestCount = $derived.by(() => {
+    const resolvedFilings = new Set<number>();
+    for (const e of audit ?? []) {
+      if (e.kind !== 'ProtestResolved' || reversedRulingTargets.has(e.at_ref)) continue;
+      const t = summaryTargetRef(e.summary);
+      if (t !== undefined) resolvedFilings.add(t);
+    }
+    return filedProtests.filter((e) => !resolvedFilings.has(e.at_ref)).length;
+  });
   let resolveProtestRef = $state<number | ''>('');
   let protestOutcome = $state<ProtestOutcome>('Upheld');
   async function doResolveProtest(): Promise<void> {
@@ -483,13 +528,70 @@
     return new Date(at / 1000).toLocaleTimeString();
   }
 
-  // The displayed audit line: the server-baked `summary` (which no longer carries the raw competitor
-  // ref) with the **resolved callsign** prepended when the entry names a competitor. This is the
-  // client-side composition the AuditEntry restructure enables — a baked raw-id string couldn't be
-  // re-resolved, so the structured `competitor` ref is resolved here and joined to the summary.
+  // ── Recomposing the server-baked summaries (#337) ──
+  // The server interpolates raw LOG OFFSETS into some summaries ("Lap thrown out (ref 14)") because
+  // it can't resolve anything friendlier. The client can: a lap-addressed ruling targets a pass ref
+  // the lap list still carries, and a protest-resolution / reversal targets another audit entry
+  // (whose own `competitor` is structured). So the rendered line re-composes from the structured
+  // fields — resolved callsign first, the offset only as a trailing "· #N" detail — instead of
+  // printing the server's raw-ref string.
+
+  /** The target log offset a server summary interpolates ("(ref 42)"), if any. */
+  function summaryTargetRef(summary: string): number | undefined {
+    const m = /\(ref (\d+)\)/.exec(summary);
+    return m ? Number(m[1]) : undefined;
+  }
+  /** The summary with the raw "(ref N)" clause removed (the offset renders as a trailing detail). */
+  function stripRefClause(summary: string): string {
+    return summary.replace(/\s*\(ref \d+\)/, '');
+  }
+
+  const auditByRef = $derived(new Map<number, AuditEntry>((audit ?? []).map((e) => [e.at_ref, e])));
+
+  /** The competitor whose lap a pass offset (a lap's start/end ref) bounds, from the lap list. */
+  function competitorForPassRef(target: number): CompetitorRef | undefined {
+    for (const cl of laps?.competitors ?? [])
+      for (const l of cl.laps)
+        if (l.end_ref === target || l.start_ref === target) return cl.competitor.competitor;
+    return undefined;
+  }
+
+  /**
+   * The competitor an audit entry concerns: its own structured ref when the action named one, else
+   * chased through the entry's target — a `ProtestResolved` / `RulingReversed` targets another
+   * audit entry (follow the chain), a lap-addressed ruling targets a pass in the lap list.
+   * `undefined` when nothing resolves (a heat-void, or a voided pass no longer in the lap list) —
+   * the line then renders without a name rather than with a raw ref.
+   */
+  function auditCompetitor(entry: AuditEntry, depth = 0): CompetitorRef | undefined {
+    if (entry.competitor != null) return entry.competitor;
+    const target = summaryTargetRef(entry.summary);
+    if (target === undefined) return undefined;
+    const chained = auditByRef.get(target);
+    if (chained && depth < 4) return auditCompetitor(chained, depth + 1);
+    return competitorForPassRef(target);
+  }
+
+  // The displayed audit line: the **resolved callsign** (from the structured `competitor` ref, or
+  // chased through the entry's target) joined to the summary with any server-baked raw "(ref N)"
+  // stripped; the target offset renders only as a trailing "· #N" detail. A baked raw-id string
+  // couldn't be re-resolved, so the composition happens here, client-side.
   function auditSummary(entry: AuditEntry): string {
-    if (entry.competitor == null) return entry.summary;
-    return `${competitorName(entry.competitor)} · ${entry.summary}`;
+    const ref = auditCompetitor(entry);
+    const target = summaryTargetRef(entry.summary);
+    const text = stripRefClause(entry.summary);
+    const line = ref != null ? `${competitorName(ref)} · ${text}` : text;
+    return target !== undefined ? `${line} · #${target}` : line;
+  }
+
+  // A ruling/protest picker option: "‹what› — ‹callsign› · #‹offset›". The action + callsign is the
+  // primary label; the entry's own log offset (what the reverse/resolve command targets) is only a
+  // trailing detail, never the label itself (#337).
+  function rulingOptionLabel(entry: AuditEntry): string {
+    const ref = auditCompetitor(entry);
+    const text = stripRefClause(entry.summary);
+    const who = ref != null ? ` — ${competitorName(ref)}` : '';
+    return `${text}${who} · #${entry.at_ref}`;
   }
 </script>
 
@@ -520,6 +622,15 @@
 
   {#if session.lastCommandError}
     <ErrorBanner error={session.lastCommandError} ondismiss={() => session.clearCommandError()} />
+  {/if}
+
+  {#if directoryError}
+    <!-- A failed pilots/heats directory read (#340): without it, names silently fall back to raw
+         refs with no hint anything went wrong. Visible error + explicit retry (Results pattern). -->
+    <div class="dir-error" role="alert">
+      <p>Couldn’t load the pilot/heat directory — names may show as raw ids.</p>
+      <button type="button" onclick={retryDirectory}>Try again</button>
+    </div>
   {/if}
 
   <div class="layout">
@@ -752,7 +863,7 @@
               <select bind:value={reverseTargetRef} aria-label="Reverse ruling">
                 <option value="" disabled>—</option>
                 {#each reversibleRulings as p (p.at_ref)}
-                  <option value={p.at_ref}>{auditSummary(p)}</option>
+                  <option value={p.at_ref}>{rulingOptionLabel(p)}</option>
                 {/each}
               </select>
             </label>
@@ -797,7 +908,7 @@
               <select bind:value={resolveProtestRef} aria-label="Resolve protest">
                 <option value="" disabled>—</option>
                 {#each filedProtests as p (p.at_ref)}
-                  <option value={p.at_ref}>{auditSummary(p)}</option>
+                  <option value={p.at_ref}>{rulingOptionLabel(p)}</option>
                 {/each}
               </select>
             </label>
@@ -921,6 +1032,22 @@
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
     margin: var(--gf-space-1) 0 0;
+  }
+  /* The directory-load error state (#340): visible, with an explicit retry. */
+  .dir-error {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-3) var(--gf-space-4);
+    border: 1px solid color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-danger-soft);
+  }
+  .dir-error p {
+    margin: 0;
+    color: var(--gf-text);
+    font-size: var(--gf-font-size-sm);
   }
   .layout {
     display: grid;

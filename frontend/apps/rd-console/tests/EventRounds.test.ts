@@ -1007,6 +1007,66 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     await fireEvent.input(raceTime, { target: { value: '90' } });
     expect(addBtn().disabled).toBe(false);
   });
+
+  it('blocks submit when a lap-target win condition has its Laps cleared (#340)', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), {
+      target: { value: 'Best of 3' }
+    });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    // Best-of-N reveals the "Laps" field (N), seeded valid (3).
+    await fireEvent.change(screen.getByLabelText('Win condition'), {
+      target: { value: 'BestOfN' }
+    });
+    const laps = await screen.findByLabelText('Laps');
+    const addBtn = () => screen.getByRole('button', { name: 'Add round' }) as HTMLButtonElement;
+    expect(addBtn().disabled).toBe(false);
+
+    // Clearing the Laps field blocks submit — it used to silently save n = 1 (#340).
+    await fireEvent.input(laps, { target: { value: '' } });
+    expect(addBtn().disabled).toBe(true);
+    await fireEvent.click(addBtn());
+    expect(createRoundImpl).not.toHaveBeenCalled();
+
+    // Restoring a valid lap count re-enables submit.
+    await fireEvent.input(laps, { target: { value: '3' } });
+    expect(addBtn().disabled).toBe(false);
+  });
+
+  it('blocks submit when the FromRanking "Take top" is cleared (#340)', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({ ...baseImpls(), createRoundImpl, event: EVENT });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Mains' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'single_elim' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.change(screen.getByLabelText('Seeding'), { target: { value: 'FromRanking' } });
+    await fireEvent.click(await screen.findByLabelText('Seed from Qualifying R1'));
+    const topN = screen.getByLabelText('Top N');
+    const addBtn = () => screen.getByRole('button', { name: 'Add round' }) as HTMLButtonElement;
+    expect(addBtn().disabled).toBe(false);
+
+    // Clearing "Take top" blocks submit — it used to silently save top_n = 1 (#340).
+    await fireEvent.input(topN, { target: { value: '' } });
+    expect(addBtn().disabled).toBe(true);
+    await fireEvent.click(addBtn());
+    expect(createRoundImpl).not.toHaveBeenCalled();
+
+    // Restoring a valid cut re-enables submit.
+    await fireEvent.input(topN, { target: { value: '2' } });
+    expect(addBtn().disabled).toBe(false);
+  });
 });
 
 describe('EventRounds (Heats — fill round, heats list, manual build)', () => {

@@ -293,7 +293,8 @@ describe('Marshaling (Slice 3)', () => {
       phase: 'Unofficial',
       lifecycle: { Provisional: {} }
     };
-    // A filed protest AND its resolution → no open protests.
+    // A filed protest AND its resolution (the server-baked summary carries the filing's offset,
+    // which the open-count derivation matches against) → no open protests.
     const audit: AuditEntry[] = [
       {
         kind: 'ProtestFiled',
@@ -306,8 +307,8 @@ describe('Marshaling (Slice 3)', () => {
         kind: 'ProtestResolved',
         at: 1_700_000_000_000_001,
         at_ref: 23,
-        competitor: 'BOB',
-        summary: 'Protest resolved: denied'
+        competitor: null,
+        summary: 'Protest denied (ref 22)'
       }
     ];
     const { session, sendSpy } = makeTestSession({ live, laps: lapList, audit });
@@ -317,6 +318,50 @@ describe('Marshaling (Slice 3)', () => {
     expect(finalize.disabled).toBe(false);
     await fireEvent.click(finalize);
     expect(sendSpy).toHaveBeenCalledWith({ Finalize: { heat: 'heat-1' } });
+  });
+
+  it('counts a protest as OPEN again when its resolution was reversed (#340, matches the server gate)', async () => {
+    const live: LiveRaceState = {
+      ...liveRunning,
+      phase: 'Unofficial',
+      lifecycle: { Provisional: {} }
+    };
+    // Filed (#22) → resolved (#23, targeting #22) → the RESOLUTION reversed (#24, targeting #23).
+    // The server's Finalize gate (`open_protest_count`, control_handler.rs) counts the protest as
+    // open again; the old filed-minus-resolved UI count offered Finalize and the server rejected it.
+    const audit: AuditEntry[] = [
+      {
+        kind: 'ProtestFiled',
+        at: 1_700_000_000_000_000,
+        at_ref: 22,
+        competitor: 'BOB',
+        summary: 'Protest filed: contact'
+      },
+      {
+        kind: 'ProtestResolved',
+        at: 1_700_000_000_000_001,
+        at_ref: 23,
+        competitor: null,
+        summary: 'Protest denied (ref 22)'
+      },
+      {
+        kind: 'RulingReversed',
+        at: 1_700_000_000_000_002,
+        at_ref: 24,
+        competitor: null,
+        summary: 'Ruling reversed (ref 23)'
+      }
+    ];
+    const { session, sendSpy } = makeTestSession({ live, laps: lapList, audit });
+    render(Marshaling, { session });
+
+    const finalize = screen.getByRole('button', { name: /Finalize/ }) as HTMLButtonElement;
+    expect(finalize.disabled).toBe(true);
+    expect(screen.getByText(/Resolve 1 open protest/)).toBeInTheDocument();
+    await fireEvent.click(finalize);
+    expect(
+      sendSpy.mock.calls.find(([c]) => typeof c === 'object' && c !== null && 'Finalize' in c)
+    ).toBeUndefined();
   });
 
   it('reverts a finalized marshaled heat (Final→Unofficial) after confirm', async () => {
@@ -341,7 +386,11 @@ describe('Marshaling (Slice 3)', () => {
     // Newest first: the DQ (at_ref 20) precedes the void (at_ref 18). The competitor name is composed
     // from the STRUCTURED ref (resolved to its callsign — here the bare ref, no directory seeded).
     expect(entries[0]).toHaveTextContent('CARMEN · DQ applied');
-    expect(entries[1]).toHaveTextContent('Detection voided (ref 12)');
+    // The void names no competitor structurally, but its target (ref 12) is ALICE's lap-1 end pass
+    // in the lap list — the line resolves her name and renders the raw "(ref 12)" only as the
+    // trailing "· #12" detail (#337).
+    expect(entries[1]).toHaveTextContent('ALICE · Detection voided · #12');
+    expect(entries[1]).not.toHaveTextContent('(ref 12)');
   });
 
   // ── Slice 4: the signal-as-evidence RSSI graph ────────────────────────────────────────
@@ -657,6 +706,113 @@ describe('Marshaling (Slice 3)', () => {
       expect(panel.getByText('Maverick · Protest filed: cut the course')).toBeInTheDocument();
       expect(panel.queryByText(/goose-yla6dp/)).not.toBeInTheDocument();
       expect(panel.queryByText(/maverick-4d9rp8/)).not.toBeInTheDocument();
+    });
+
+    // ── #337: the audit + "Reverse a ruling" picker leaked raw log offsets / unresolved refs ──────
+    //
+    // The server bakes "(ref N)" into some summaries and names no competitor structurally for the
+    // lap-/target-addressed rulings. The screen must re-compose the line from the structured fields:
+    // a lap-addressed target resolves through the lap list, a protest-resolution / reversal chases
+    // its target audit entry — so the picker reads "‹what› — ‹callsign› · #‹offset›", never "(ref N)".
+    it('labels the reverse-ruling picker "‹what› — ‹callsign›" with the offset only trailing (#337)', async () => {
+      const audit: AuditEntry[] = [
+        // Named structurally — resolves directly.
+        {
+          kind: 'PenaltyApplied',
+          at: 1_700_000_000_000_000,
+          at_ref: 20,
+          competitor: 'goose-yla6dp',
+          summary: 'DQ applied'
+        },
+        // Filed protest (the resolution below targets it).
+        {
+          kind: 'ProtestFiled',
+          at: 1_700_000_000_000_001,
+          at_ref: 21,
+          competitor: 'maverick-4d9rp8',
+          summary: 'Protest filed: contact'
+        },
+        // Lap-addressed: no structured competitor; ref 12 is Maverick's lap end pass in FN_LAPS.
+        {
+          kind: 'LapThrownOut',
+          at: 1_700_000_000_000_002,
+          at_ref: 30,
+          competitor: null,
+          summary: 'Lap thrown out (ref 12)'
+        },
+        // Target-addressed: resolves by chasing the filed entry at ref 21 (Maverick).
+        {
+          kind: 'ProtestResolved',
+          at: 1_700_000_000_000_003,
+          at_ref: 32,
+          competitor: null,
+          summary: 'Protest upheld (ref 21)'
+        }
+      ];
+      const { session } = renderFN(audit);
+      render(Marshaling, { session });
+
+      const reverse = screen.getByLabelText('Reverse ruling') as HTMLSelectElement;
+      await waitFor(() => {
+        const labels = Array.from(reverse.options).map((o) => o.textContent?.trim());
+        expect(labels).toContain('DQ applied — Goose · #20');
+        expect(labels).toContain('Lap thrown out — Maverick · #30');
+        expect(labels).toContain('Protest upheld — Maverick · #32');
+      });
+      // No option leaks a raw "(ref N)" or an unresolved pilot-id ref; values stay the offsets.
+      const labels = Array.from(reverse.options).map((o) => o.textContent ?? '');
+      expect(labels.some((l) => l.includes('(ref'))).toBe(false);
+      expect(labels.some((l) => l.includes('goose-yla6dp') || l.includes('maverick-4d9rp8'))).toBe(
+        false
+      );
+      const thrownOut = Array.from(reverse.options).find((o) =>
+        o.textContent?.includes('Lap thrown out')
+      )!;
+      expect(thrownOut.value).toBe('30');
+
+      // The resolve-protest picker composes the same way.
+      const resolve = screen.getByLabelText('Resolve protest') as HTMLSelectElement;
+      const resolveLabels = Array.from(resolve.options).map((o) => o.textContent?.trim());
+      expect(resolveLabels).toContain('Protest filed: contact — Maverick · #21');
+
+      // The audit lines resolve the same targets: callsign first, the offset only as "· #N".
+      const panel = within(screen.getByRole('complementary', { name: 'Audit trail' }));
+      expect(panel.getByText('Maverick · Lap thrown out · #12')).toBeInTheDocument();
+      expect(panel.getByText('Maverick · Protest upheld · #21')).toBeInTheDocument();
+      expect(panel.queryByText(/\(ref \d+\)/)).not.toBeInTheDocument();
+    });
+
+    // ── #340: a failed pilots/heats read must surface, not silently strand raw refs ──────────────
+    it('surfaces a visible retry state when the pilot/heat directory reads fail (#340)', async () => {
+      let fail = true;
+      const { session } = makeTestSession({
+        event: EVENT,
+        live: FN_LIVE,
+        laps: FN_LAPS,
+        audit: FN_AUDIT,
+        listHeatsImpl: vi.fn(async () => {
+          if (fail) throw new Error('boom');
+          return [FN_HEAT];
+        }),
+        listPilotsImpl: vi.fn(async () => {
+          if (fail) throw new Error('boom');
+          return PILOTS as unknown as never;
+        }),
+        listChannelsImpl: vi.fn(async () => [])
+      });
+      render(Marshaling, { session });
+
+      // The failure is visible — no more silently-empty directory + raw refs.
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent(/Couldn.t load the pilot\/heat directory/);
+
+      // Retry with the reads healthy again: the error clears and the names resolve.
+      fail = false;
+      await fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
+      await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
+      );
     });
 
     // ── The actual regression #236 left open: the context-load race ─────────────────────────────
