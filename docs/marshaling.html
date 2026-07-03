@@ -227,6 +227,13 @@ flowchart TB
       <dd>First-class DQ states, penalty time <em>and</em> points, lap throw-outs, and protests — richer
       than RotorHazard's <code>+time</code>/note model.</dd>
     </dl>
+    <p class="note">
+      <strong>Realized (2026-06-30):</strong> adjudications (DQ / TimeAdded / lap edits / throw-out /
+      void) now reach round ranking, round standings, class standings, and seeding via the shared
+      <code>score_heat_window</code> scorer (#329, closing <strong>#226</strong>); DQ is
+      <strong>excluded from ranking</strong> (#331); and <strong>Finalize is gated on open
+      protests</strong> — rejected, backend and UI, while a protest is open (#330).
+    </p>
 
     <h2>4. Architectural fit</h2>
     <p>

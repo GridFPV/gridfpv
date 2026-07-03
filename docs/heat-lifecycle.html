@@ -113,7 +113,10 @@ stateDiagram-v2
     </table>
     <p>
       Every <code>(state, command)</code> pair not in this table is rejected as an
-      <code>IllegalTransition</code>. The two <strong>middle forward steps</strong> —
+      <code>IllegalTransition</code>. One command carries an additional guard beyond the table:
+      <strong><code>Finalize</code> is rejected while a protest is open</strong> on the heat —
+      backend and UI (release hardening, #330) — so a result cannot be locked with an unresolved
+      protest. The two <strong>middle forward steps</strong> —
       <code>Armed → Running</code> and <code>Running → Unofficial</code> — have no everyday
       command: they are appended by the runtime clock (§4). The override commands
       <code>SkipCountdown</code> and <code>ForceEnd</code> record exactly the same transitions

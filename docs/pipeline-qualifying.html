@@ -45,15 +45,17 @@
         <strong>format is <code>timed_qual</code></strong> (friendly name <em>&ldquo;Time Trials&rdquo;</em>,
         renamed from &ldquo;Qualifying&rdquo; — <a href="decisions.html">D11</a>: the format is the
         time-trial scorer; <em>qualifying</em> is what you do with it)
-        or <code>round_robin</code>, created from the Rounds+Heats stage-page like any other round and
+        or <code>round_robin</code> <em>(since carved to <code>tournaments-snapshot</code> with the
+        tournament structures — 2026-06-30, PR #327)</em>, created from the Rounds+Heats stage-page like any other round and
         <strong>targeting one class</strong> (single-select). Within that one round each pilot flies
         <strong>multiple heats</strong> — the format's <strong>&ldquo;Heats per pilot&rdquo; param</strong>
         (key <code>rounds</code>, default&nbsp;<strong>3</strong>) sets how many — over the static,
         channel-balanced field, and
         the round's final ranking is the seeding the bracket consumes via the <code>FromRanking</code>
-        seed (top-N). Live is the path that shipped; <strong>import / skip and the rolling-queue
+        seed (top-N; the UI cut is now labeled <em>&ldquo;Take top&rdquo;</em>, bounded by the source
+        rounds' real field — PR #332). Live is the path that shipped; <strong>import / skip and the rolling-queue
         (ZippyQ) engine are not built</strong> in v0.4. (Engine: <code>round_engine.rs</code> static
-        path + <code>timed_qual</code>/<code>round_robin</code> generators; UI:
+        path + the <code>timed_qual</code> generator; UI:
         <a href="clients.html">Clients</a> §1 Rounds+Heats.)
       </p>
     </div>
@@ -62,8 +64,9 @@
 
     <h3>Three ways to get a ranking</h3>
     <ul>
-      <li><strong>Run it live <em>(built)</em></strong> — fly a <code>timed_qual</code> (Time Trials) /
-        <code>round_robin</code> qualifying round and score it.</li>
+      <li><strong>Run it live <em>(built)</em></strong> — fly a <code>timed_qual</code> (Time Trials)
+        qualifying round and score it (<code>round_robin</code> was carved to
+        <code>tournaments-snapshot</code>, PR #327).</li>
       <li><strong>Import it <em>(planned)</em></strong> — pull a ranking from outside. A Velocidrone
         leaderboard import is first-class (fixed sim tracks make this natural); MultiGP results are
         another source. The import maps directly to the qualifying ranking. <em>Not built in v0.4.</em></li>
@@ -92,8 +95,14 @@
         <em>Best lap</em>&nbsp;&rarr;&nbsp;<code>best-lap</code>,
         <em>Best N consecutive</em>&nbsp;&rarr;&nbsp;<code>best-consecutive</code>,
         <em>Timed — Most Laps</em>&nbsp;&rarr;&nbsp;<code>most-laps</code>. For
-        <code>round_robin</code>: <em>Timed</em>&nbsp;&rarr;&nbsp;<code>total-laps</code>, otherwise
+        <code>round_robin</code> <em>(carved to <code>tournaments-snapshot</code>, PR #327)</em>:
+        <em>Timed</em>&nbsp;&rarr;&nbsp;<code>total-laps</code>, otherwise
         a <code>points</code> standing. For <code>best-consecutive</code> the span N defaults to 3.</li>
+      <li><strong>Adjudications reach the ranking <em>(hardened 2026-06-30..07-01)</em></strong> —
+        marshaling adjudications (DQ / TimeAdded / lap edits / throw-out / void) fold into round
+        ranking, round standings, class standings, and seeding via the shared
+        <code>score_heat_window</code> scorer (#329, closed #226), and <strong>DQ'd placements are
+        excluded from the ranking</strong> (#331).</li>
     </ul>
 
     <h3>Organizing qualifying flights — multiple heats per pilot</h3>
@@ -105,6 +114,10 @@
         <strong>3</strong>) sets how many heats each pilot flies; the
         engine builds a deterministic, <strong>channel-balanced</strong> plan (one pilot per distinct
         channel per heat, capped by the timer's node count) across all of them.</li>
+      <li><strong>Chunking large fields <em>(#331)</em></strong> — when the class field exceeds
+        <code>heat_size</code>, <code>timed_qual</code> chunks each pass into multiple heats of
+        <code>heat_size</code> (heat ids <code>tq-r{n}-h{m}</code>), so every pilot still flies the
+        configured number of heats.</li>
       <li><strong>Static channel mode</strong> — qualifying uses fixed per-pilot channels (each
         member's channel from the roster), so heats are channel-balanced rather than per-heat allocated
         (see <a href="channel-model.html">Channel Model</a>).</li>
@@ -116,8 +129,9 @@
     <p>
       The qualifying round's final ranking (its generator's ranking, per the metric derived from the
       win condition) gives every member a qualifying position. A bracket round then seeds from it with the
-      <code>FromRanking</code> rule, taking the <strong>top-N</strong> — that is the seed input the
-      mains are generated from.
+      <code>FromRanking</code> rule, taking the <strong>top-N</strong> (the UI cut labeled
+      <em>&ldquo;Take top&rdquo;</em>, bounded by the source rounds' real field) — that is the seed
+      input the mains are generated from.
     </p>
 
     <h2>Sim vs IRL</h2>
@@ -132,7 +146,7 @@
     <h2>Entities &amp; data implied</h2>
     <p>What this phase needs to exist (conceptual — not a schema; the Architecture doc formalizes it):</p>
     <dl class="entities">
-      <dt>Qualifying round (per class) — <code>timed_qual</code> / <code>round_robin</code></dt>
+      <dt>Qualifying round (per class) — <code>timed_qual</code> (<code>round_robin</code> carved to <code>tournaments-snapshot</code>, PR #327)</dt>
       <dd><em>As built:</em> a round targeting one class; carries a heat <strong>win condition</strong>
       (which <em>is</em> the qualifying metric — derived, not stored separately) and a
       <code>rounds</code> param labeled <em>&ldquo;Heats per pilot&rdquo;</em> (default 3). Channel

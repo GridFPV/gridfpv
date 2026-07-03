@@ -30,6 +30,11 @@
         self-hosters) is a separate concern and will live in its own repository
         later. Keep that material out of this repo.
       </p>
+      <p>
+        <strong>Release state (2026-06-30):</strong> this is a <strong>primitives-first</strong> release —
+        three round types (Practice / Time Trials / Head-to-Head) ship; the tournament structures are
+        carved to the <code>tournaments-snapshot</code> branch (PR #327) for a post-v1 rebuild.
+      </p>
     </div>
 
     <div class="principle">
@@ -87,7 +92,7 @@
         <div class="doc-title"><a href="pipeline-mains.html">Brackets / Mains</a></div>
         <div class="doc-desc">
           The competition proper — seed, generate the bracket, run and advance; win conditions,
-          live marshaling, multi-class scheduling.
+          live marshaling, multi-class scheduling. (Deferred — <code>tournaments-snapshot</code>.)
         </div>
       </li>
       <li>
@@ -151,7 +156,7 @@
       <li>
         <div class="doc-title"><a href="race-engine.html">Race Engine</a></div>
         <div class="doc-desc">
-          The heat loop, the pluggable bracket / qualifying generator registry,
+          The heat loop, the pluggable format generator registry,
           advancement, and multi-class scheduling — the competition machinery that
           consumes canonical events.
         </div>
@@ -161,7 +166,7 @@
         <div class="doc-desc">
           The RD-facing taxonomy — three round types (Practice / Time Trial / Head-to-Head),
           win condition vs scoring, and round-robin / brackets as tournament structures over
-          Head-to-Head (decision D17).
+          Head-to-Head (decision D17) (structures deferred post-v1).
         </div>
       </li>
       <li>

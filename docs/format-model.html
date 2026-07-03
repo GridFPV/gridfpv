@@ -25,11 +25,19 @@
 
     <div class="callout">
       <p>
-        This is the <strong>target model</strong> (decision <a href="decisions.html">D15</a>). It
+        This is the <strong>target model</strong> (decision <a href="decisions.html#d17">D17</a>). It
         supersedes the per-format framing in the earlier heat-gen/formats decisions (D10/D11/D14): the
         engine still has generators per mechanic, but the <em>RD-facing</em> vocabulary is the three
         round types + scoring + structures. It rolls out in stages (see <a href="#rollout">Rollout</a>);
         until a stage ships, the console still exposes the legacy format names.
+      </p>
+      <p>
+        <strong>Release state (2026-06-30, PR #327) — this release is primitives-first.</strong> The
+        three round types shipped; the <strong>tournament structures</strong> (§4), the structure half
+        of the engine refactor (§5), and rollout items 3, 4, and 6 describe <strong>deferred work</strong>
+        carved off <code>devel</code> and preserved on the <code>tournaments-snapshot</code> branch, to
+        be rebuilt on the hardened base post-v1. In the UI, "Open Practice" was renamed
+        <strong>"Practice"</strong> (the wire key <code>open_practice</code> is unchanged).
       </p>
     </div>
 
@@ -43,6 +51,14 @@
         itself.</em> The engine is refactored to honour this — one racing generator (Head-to-Head),
         with structures driving it — rather than a silo generator per structure. This is a key tenet
         of how we build, not just a format menu.
+      </p>
+      <p>
+        <strong>Corollary — one grouping decision per round</strong> (decision
+        <a href="decisions.html#d18">D18</a>, 2026-07-03): a Head-to-Head round draws its groups
+        <strong>once</strong>, at fill. The <code>rotations</code> param ("Heats per group") re-runs the
+        <strong>same</strong> groups back to back, with scoring accumulating across the heats flown
+        (Points sums every heat; Placement reads the best single result). <strong>Re-grouping between
+        heats is seeding work</strong> — it belongs to tournament structures, never to a round param.
       </p>
     </div>
 
@@ -69,7 +85,7 @@
           <td><strong>Head-to-Head</strong></td>
           <td>Race other pilots directly, in heats.</td>
           <td>Points or Placement (§3)</td>
-          <td><strong>group size</strong> (2+); a per-heat <strong>win condition</strong>; a <strong>scoring system</strong></td>
+          <td><strong>group size</strong> (2+); a per-heat <strong>win condition</strong>; a <strong>scoring system</strong>; <strong>rotations</strong> ("Heats per group", default 1 — the <em>same</em> groups race N back-to-back heats)</td>
         </tr>
       </tbody>
     </table>
@@ -150,10 +166,10 @@
     <ol>
       <li><strong>Bracket win-condition picker</strong> — the "Advance to bracket" modal picks one win condition for all the bracket's heats (default First-to-N; option Most-laps). <em>Shipped.</em></li>
       <li><strong>Head-to-Head building-block generator</strong> — the atomic racing format: group size, per-heat win condition, scoring (Points with a custom table, or Placement). Built first, because the structures compose it.</li>
-      <li><strong>Recompose Round Robin</strong> over Head-to-Head (all-play-all + Points), retiring the bespoke <code>round_robin</code> generator.</li>
-      <li><strong>Recompose the Bracket</strong> over Head-to-Head (Placement + seeding + the existing FromHeatWinners chain), folding away <code>single_elim</code>.</li>
+      <li><strong>Recompose Round Robin</strong> over Head-to-Head (all-play-all + Points), retiring the bespoke <code>round_robin</code> generator. <em>Deferred — carved to <code>tournaments-snapshot</code> (PR #327); rebuilt post-v1.</em></li>
+      <li><strong>Recompose the Bracket</strong> over Head-to-Head (Placement + seeding + the existing FromHeatWinners chain), folding away <code>single_elim</code>. <em>Deferred — carved to <code>tournaments-snapshot</code> (PR #327); rebuilt post-v1.</em></li>
       <li><strong>Taxonomy collapse</strong> — Add-round becomes Practice / Time Trial / Head-to-Head (ordered Open Practice → Time Trials → Head-to-Head); Time Trial → Best-of-N (one metric, N=1 = best lap); Head-to-Head carries group size (a dropdown capped at the primary timer's node count), per-heat win condition (Timed / First-to-N only), and scoring (Placement, or Points with a per-position editor that follows the group size). Hand-built heats cap their lineup at the node count. <em>Shipped.</em></li>
-      <li><strong>Build tournament</strong> — one action that assembles a structure (single/double elim, round-robin, multi-main) from a seed source: <em>either</em> a prior round's ranking <em>or</em> the roster/pilot list (so you can bracket without qualifying). Its rounds + heats appear in the normal Rounds / Heats area. Double-elim's grand final is the normal final choice (single race / Chase-the-Ace), not a bracket reset.</li>
+      <li><strong>Build tournament</strong> — one action that assembles a structure (single/double elim, round-robin, multi-main) from a seed source: <em>either</em> a prior round's ranking <em>or</em> the roster/pilot list (so you can bracket without qualifying). Its rounds + heats appear in the normal Rounds / Heats area. Double-elim's grand final is the normal final choice (single race / Chase-the-Ace), not a bracket reset. <em>Deferred — carved to <code>tournaments-snapshot</code> (PR #327); rebuilt post-v1.</em></li>
     </ol>
     <p>
       User-facing docs (the guide's <em>Formats</em> page) track <em>shipped</em> behaviour, so they are
@@ -170,7 +186,7 @@
     </ul>
 
     <footer class="doc-footer">
-      <p>See also: <a href="race-engine.html">Race Engine</a> · <a href="decisions.html">Decisions</a> (D15) · <a href="heat-lifecycle.html">Heat Lifecycle</a></p>
+      <p>See also: <a href="race-engine.html">Race Engine</a> · <a href="decisions.html">Decisions</a> (D17, D18) · <a href="heat-lifecycle.html">Heat Lifecycle</a></p>
     </footer>
   </main>
 </body>
