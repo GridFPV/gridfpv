@@ -20,6 +20,7 @@
   import type { EventMeta } from '@gridfpv/types';
   import type { Session, CreateEventFields } from '../lib/session.svelte.js';
   import { PRACTICE_EVENT_ID } from '../lib/session.svelte.js';
+  import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
 
   let {
@@ -229,6 +230,9 @@
 
 <div class="picker">
   <div class="picker-inner">
+    <!-- The brand is the home root here too (#118): the directory pages carry the same
+         top-left GridFPV mark as the workspace sidebar, leaving for the hub. -->
+    <div class="brand-row"><Brand onclick={onhome} /></div>
     <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Events' }]} />
 
     <header class="head">
@@ -419,6 +423,10 @@
 </Dialog>
 
 <style>
+  .brand-row {
+    margin-bottom: var(--gf-space-4);
+  }
+
   .picker {
     display: grid;
     place-items: start center;

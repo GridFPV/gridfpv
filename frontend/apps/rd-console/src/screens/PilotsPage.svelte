@@ -10,6 +10,7 @@
    */
   import { Button, Card } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
+  import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import PilotManager from './PilotManager.svelte';
 
@@ -25,6 +26,9 @@
 
 <div class="page">
   <div class="page-inner">
+    <!-- The brand is the home root here too (#118): the directory pages carry the same
+         top-left GridFPV mark as the workspace sidebar, leaving for the hub. -->
+    <div class="brand-row"><Brand onclick={onhome} /></div>
     <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Pilots' }]} />
 
     <header class="page-head">
@@ -48,6 +52,10 @@
 </div>
 
 <style>
+  .brand-row {
+    margin-bottom: var(--gf-space-4);
+  }
+
   .page {
     min-height: 100vh;
     padding: var(--gf-space-6) var(--gf-space-8) var(--gf-space-8);

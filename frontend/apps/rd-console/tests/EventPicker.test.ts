@@ -55,6 +55,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('EventPicker — the brand home root (#118)', () => {
+  it('renders the GridFPV brand top-left and clicking it goes home', async () => {
+    const onhome = vi.fn();
+    const { session } = makeTestSession({
+      noEnter: true,
+      listEventsImpl: vi.fn(async () => [EVENT]),
+      getActiveEventImpl: vi.fn(async () => ({ event: null }))
+    });
+    render(EventPicker, { session, onhome });
+    // The button's accessible name comes from its wordmark content; the title is the tooltip.
+    const brand = await screen.findByTitle('Home — GridFPV hub');
+    await fireEvent.click(brand);
+    expect(onhome).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('EventPicker — selectable event-name box in the delete dialog', () => {
   it('renders the event name in a user-select:all box', async () => {
     const dialog = await openDeleteDialog();
