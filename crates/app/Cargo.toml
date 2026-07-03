@@ -14,9 +14,15 @@ path = "src/main.rs"
 # `live` compiles in the **real RotorHazard adapter** (the feature-gated Socket.IO transport)
 # so a selected `Rotorhazard { url }` timer actually connects and feeds its passes into the
 # event log (#65, #73). It pulls `gridfpv-adapters/live`, which pulls a TLS stack
-# (native-tls, OpenSSL-vendored on Linux). The **default build stays OpenSSL-free** — Mock/sim
-# only, no network/TLS in the dependency graph — so the stock Director carries no openssl. Build
-# the live variant with `cargo build -p gridfpv-app --features live`.
+# (native-tls, OpenSSL-vendored on Linux).
+#
+# `live` is a **DEFAULT feature**: the product's whole job is talking to real timers, and a
+# default-off transport shipped a Director that could never leave "Configured" — it silently
+# neutered both a dev deploy (2026-07-03, a lost test session) and the desktop release
+# artifact (src-tauri depends on gridfpv-app without naming `live`). The openssl-vendored
+# compile is a cache-warm one-time cost; correctness of the shipped binary wins. A slim,
+# OpenSSL-free Mock/sim-only build remains available with `--no-default-features`.
+default = ["live"]
 live = ["dep:gridfpv-adapters", "gridfpv-adapters/live"]
 
 # `embed-assets` bakes the built RD console SPA (`frontend/apps/rd-console/dist`) **into the
