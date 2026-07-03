@@ -6,7 +6,8 @@ import {
   detectPasses,
   diffPasses,
   officialPasses,
-  previewLaps
+  previewLaps,
+  previewRows
 } from '../src/lib/redetect.js';
 
 /** A uniform-grid trace: sample `i` at `i·period` (1s cadence by default). */
@@ -145,6 +146,61 @@ describe('previewLaps (consecutive-pass lap derivation)', () => {
   it('zero or one pass implies no laps', () => {
     expect(previewLaps([])).toEqual([]);
     expect(previewLaps([5 * S])).toEqual([]);
+  });
+});
+
+describe('previewRows (the unified re-detection preview)', () => {
+  // The canonical official chain: holeshot at 1s, gate passes at 41s + 81s (two 40s laps).
+  const current = [
+    { at: 1 * S, ref: 10 },
+    { at: 41 * S, ref: 12 },
+    { at: 81 * S, ref: 14 }
+  ];
+
+  it('classifies each preview lap by its CLOSING pass: matched official → kept, new → added', () => {
+    // The re-detection keeps the official chain and finds one NEW pass at 60s: the 41→60s lap
+    // closes on the new pass (added); the 1→41s and 60→81s laps close on matched passes (kept).
+    const rows = previewRows(current, [1 * S, 41 * S, 60 * S, 81 * S]);
+    expect(rows).toEqual([
+      { status: 'kept', number: 1, at: 41 * S, durationMicros: 40 * S },
+      { status: 'added', number: 2, at: 60 * S, durationMicros: 19 * S },
+      { status: 'kept', number: 3, at: 81 * S, durationMicros: 21 * S }
+    ]);
+  });
+
+  it('interleaves dropped official passes as `removed` rows in time order (no lap number)', () => {
+    // The re-detection no longer sees the 41s pass: one long 1→81s lap remains (closing on the
+    // matched 81s pass → kept), and the dropped 41s pass interleaves BEFORE it at its own time.
+    const rows = previewRows(current, [1 * S, 81 * S]);
+    expect(rows).toEqual([
+      { status: 'removed', at: 41 * S, ref: 12 },
+      { status: 'kept', number: 1, at: 81 * S, durationMicros: 80 * S }
+    ]);
+  });
+
+  it('a pure-kept diff yields all-kept rows (nothing added, nothing removed)', () => {
+    const rows = previewRows(current, [1 * S, 41 * S, 81 * S]);
+    expect(rows).toEqual([
+      { status: 'kept', number: 1, at: 41 * S, durationMicros: 40 * S },
+      { status: 'kept', number: 2, at: 81 * S, durationMicros: 40 * S }
+    ]);
+    expect(rows.every((r) => r.status === 'kept')).toBe(true);
+  });
+
+  it('matches within tolerance like diffPasses — a re-timed pass still reads as kept', () => {
+    // The 41s pass re-detects 300ms later (within the 500ms default tolerance): same pass, so
+    // the lap closing on it stays `kept` (durations follow the DETECTED times, like previewLaps).
+    const rows = previewRows(current, [1 * S, 41 * S + 300_000, 81 * S]);
+    expect(rows.map((r) => r.status)).toEqual(['kept', 'kept']);
+    expect(rows[0]).toMatchObject({ at: 41 * S + 300_000, durationMicros: 40 * S + 300_000 });
+  });
+
+  it('detecting nothing turns every official pass into a removed row (and no laps)', () => {
+    expect(previewRows(current, [])).toEqual([
+      { status: 'removed', at: 1 * S, ref: 10 },
+      { status: 'removed', at: 41 * S, ref: 12 },
+      { status: 'removed', at: 81 * S, ref: 14 }
+    ]);
   });
 });
 

@@ -156,6 +156,58 @@ export function previewLaps(passTimes: number[]): PreviewLap[] {
 }
 
 /**
+ * One row of the UNIFIED re-detection preview (see {@link previewRows}): a single chronological
+ * list that tells the whole story — the laps the tuned thresholds would produce (`kept` when the
+ * lap's closing pass matches a current official one, `added` when it's new), interleaved with the
+ * official passes the re-detection drops (`removed` — passes leaving the record, so they carry no
+ * lap number).
+ */
+export type PreviewRow =
+  | {
+      status: 'kept' | 'added';
+      /** 1-based lap number in the previewed (post-commit) lap list. */
+      number: number;
+      /** Source-clock time (µs) of the pass that closes this lap. */
+      at: number;
+      /** Lap duration (µs). */
+      durationMicros: number;
+    }
+  | {
+      status: 'removed';
+      /** Source-clock time (µs) of the official pass the re-detection drops. */
+      at: number;
+      /** The pass's log offset — the `VoidDetection` target a commit sends. */
+      ref: number;
+    };
+
+/**
+ * The unified re-detection preview: ONE chronological row list combining the surviving lap chain
+ * with the passes that would be removed. Laps derive from the detected passes exactly like
+ * {@link previewLaps}; each lap is `kept` when its CLOSING pass matched an official pass (within
+ * `toleranceMicros`, per {@link diffPasses}) and `added` otherwise. Every official pass the
+ * re-detection no longer sees interleaves as a `removed` row at its own time. Preview-only —
+ * nothing here sends commands.
+ */
+export function previewRows(
+  current: OfficialPass[],
+  detected: number[],
+  toleranceMicros: number = DEFAULT_MATCH_TOLERANCE_MICROS
+): PreviewRow[] {
+  const diff = diffPasses(current, detected, toleranceMicros);
+  const keptDetectedAt = new Set(diff.kept.map((k) => k.detectedAt));
+  const rows: PreviewRow[] = previewLaps(detected).map((lap) => ({
+    status: keptDetectedAt.has(lap.at) ? 'kept' : 'added',
+    number: lap.number,
+    at: lap.at,
+    durationMicros: lap.durationMicros
+  }));
+  for (const pass of diff.removed) rows.push({ status: 'removed', at: pass.at, ref: pass.ref });
+  // Chronological (stable, so same-instant rows keep lap-then-removed order).
+  rows.sort((a, b) => a.at - b.at);
+  return rows;
+}
+
+/**
  * A competitor's current OFFICIAL passes, reconstructed from their (marshaling-corrected) lap
  * list: lap 1's opening pass (`start_ref`, at `lap1.at − lap1.duration`) plus every lap's
  * closing pass (`end_ref` at `lap.at`). These are the refs a re-detection commit voids when the

@@ -56,14 +56,16 @@
     onselect: (competitor: CompetitorRef, lap: Lap) => void;
     /**
      * Add a brand-new lap for a competitor at a source-clock time (the cursor's race-relative
-     * instant). Wired to a click on the trace / the "Add lap here" affordance at the crosshair.
+     * instant). Wired ONLY to the explicit, labelled "Add lap here" button in the cursor readout
+     * below the plot — never to a bare click on the trace: stray clicks (and the click the browser
+     * synthesizes when a threshold drag ends inside the svg) must not plant phantom laps.
      * Optional: when absent (or when `canControl` is false) the graph is review-only.
      */
     onaddlap?: (competitor: CompetitorRef, at: number) => void;
     /**
      * Whether the session may mutate (the role gate — read-only pilots can't add laps). When false
-     * the add-lap affordance is hidden and a trace click does nothing, mirroring the parent's
-     * `canControl` boundary on every other correction.
+     * the "Add lap here" affordance is hidden, mirroring the parent's `canControl` boundary on
+     * every other correction.
      */
     canControl?: boolean;
     /**
@@ -316,18 +318,11 @@
     hover = null;
   }
 
-  /** Click on the trace → add a lap at the cursor's race-relative time (role-gated). */
-  function onTraceClick(
-    e: MouseEvent,
-    ct: CompetitorTrace,
-    span: { from: number; to: number }
-  ): void {
-    if (!canControl || !onaddlap) return;
-    const svg = e.currentTarget as SVGSVGElement;
-    const px = pointerX(e, svg);
-    const x = Math.min(PAD_L + plotW, Math.max(PAD_L, px));
-    onaddlap(ct.competitor.competitor, Math.round(timeAt(x, span)));
-  }
+  // There is deliberately NO click-on-the-trace add-lap path: a bare svg click is un-labelled and
+  // misfires — every threshold drag that ends inside the svg makes the browser synthesize a click
+  // on it, and stray clicks land there too, each planting a phantom "Lap inserted" ruling (live
+  // 2026-07-03). The ONLY add path is the explicit "Add lap here" button in the cursor readout
+  // below the plot.
 
   // ── Draggable enter/exit threshold handles (the RH-style live tuning) ─────────────────────────
   // Only wired when `onthresholds` is supplied. A pointer drag on a threshold handle maps the
@@ -432,21 +427,18 @@
         <p class="empty">No samples captured for this node.</p>
       {:else}
         {@const isHover = hover != null && hover.ref === ref}
-        <!-- The pointer handlers drive the hover crosshair + the click-to-add-lap convenience; the
-             accessible, keyboard-operable add path is the labelled "Add lap here" DOM button below
-             the plot, so the SVG itself stays a non-interactive `role="img"` figure. -->
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <!-- The pointer handlers drive the hover crosshair/readout ONLY — the svg itself carries no
+             click action (a bare click must never mutate; see the add-lap note in the script). The
+             accessible, deliberate add path is the labelled "Add lap here" DOM button below the
+             plot, so the SVG stays a non-interactive `role="img"` figure. -->
         <svg
           class="plot"
-          class:addable={canControl && onaddlap != null}
           viewBox={`0 0 ${W} ${H}`}
           preserveAspectRatio="none"
           role="img"
           aria-label={`RSSI trace for ${who} with ${compLaps.length} lap markers`}
           onmousemove={(e: MouseEvent) => onHover(e, ct, span)}
           onmouseleave={clearHover}
-          onclick={(e: MouseEvent) => onTraceClick(e, ct, span)}
         >
           <!-- Plot frame -->
           <rect class="frame" x={PAD_L} y={PAD_T} width={plotW} height={plotH} fill="none" />
@@ -488,11 +480,7 @@
               tabindex="0"
               aria-pressed={isSelected(ref, lap)}
               aria-label={`Lap ${lap.number} at ${formatMicros(lap.duration_micros)} — select`}
-              onclick={(e: MouseEvent) => {
-                // A marker click selects the lap; don't let it bubble to the SVG's add-lap handler.
-                e.stopPropagation();
-                onselect(ref, lap);
-              }}
+              onclick={() => onselect(ref, lap)}
               onkeydown={(e: KeyboardEvent) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
@@ -582,10 +570,10 @@
               <text class="readout-rssi" x="6" y="28">rssi {Math.round(hover.rssi)}</text>
             </g>
             {#if canControl && onaddlap}
-              <!-- The "Add lap here" affordance lives in the DOM readout below so it's a real,
-                   labelled, click-target button; this hint just cues that a click adds a lap. -->
+              <!-- The add affordance is the real, labelled "Add lap here" button in the readout
+                   BELOW the plot (clicking the trace itself never adds); this hint points at it. -->
               <text class="add-hint" x={flip ? hx - 6 : hx + 6} y={PAD_T + plotH - 6}
-                >click: add lap</text
+                >add lap ↓ below</text
               >
             {/if}
           {/if}
@@ -696,6 +684,9 @@
     display: block;
     width: 100%;
     height: 13rem;
+    /* The crosshair cues the position READOUT only — a click on the plot never acts (adding a lap
+       is the explicit, labelled button below the plot). */
+    cursor: crosshair;
   }
   .frame {
     stroke: rgba(255, 255, 255, 0.12);
@@ -829,9 +820,6 @@
   }
 
   /* Hover crosshair + readout (the "where exactly is this?" guide). */
-  .plot.addable {
-    cursor: crosshair;
-  }
   .crosshair {
     stroke: #ffd24a;
     stroke-width: 1;

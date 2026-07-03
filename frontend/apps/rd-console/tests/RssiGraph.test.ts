@@ -182,12 +182,14 @@ describe('RssiGraph hover readout', () => {
 });
 
 /**
- * Click-to-add-a-lap (gap 2): a click on a competitor's trace calls `onaddlap` with the cursor's
- * source-time (the px→source-time mapping), role-gated by `canControl`. The explicit "Add lap here"
- * button at the crosshair does the same for trackpad/keyboard users.
+ * Add-a-lap is EXPLICIT-ONLY: a bare click on the trace must never add a lap — the browser
+ * synthesizes a click on the svg when a threshold drag ends inside it, and stray clicks land there
+ * too; each used to plant a phantom "Lap inserted" ruling (live 2026-07-03). The only add path is
+ * the labelled "Add lap here" button in the cursor readout below the plot, role-gated by
+ * `canControl`.
  */
 describe('RssiGraph add-lap', () => {
-  it('clicking the trace at a known X calls onaddlap with the matching source-time', async () => {
+  it('a click on the trace sends NOTHING — the trace has no click-to-insert path', async () => {
     const onaddlap = vi.fn();
     render(RssiGraph, {
       trace: signalTrace,
@@ -200,17 +202,12 @@ describe('RssiGraph add-lap', () => {
     const svg = screen.getByLabelText(/RSSI trace for ALICE/);
     pinSvgBox(svg);
 
-    // Click at the X mapping to 30.0s.
+    // Click at the X mapping to 30.0s — the old click-to-insert misfire surface.
     await fireEvent.click(svg, { clientX: xForTime(30_000_000) });
-    expect(onaddlap).toHaveBeenCalledTimes(1);
-    const [ref, at] = onaddlap.mock.calls[0];
-    expect(ref).toBe('ALICE');
-    // The source-time is the cursor's race-relative instant (≈30.0s), within a rounding tolerance.
-    expect(at).toBeGreaterThan(29_900_000);
-    expect(at).toBeLessThan(30_100_000);
+    expect(onaddlap).not.toHaveBeenCalled();
   });
 
-  it('the "Add lap here" button adds at the cursor time', async () => {
+  it('the "Add lap here" button adds at the cursor time (the ONLY add path)', async () => {
     const onaddlap = vi.fn();
     render(RssiGraph, {
       trace: signalTrace,
@@ -231,7 +228,7 @@ describe('RssiGraph add-lap', () => {
     expect(onaddlap.mock.calls[0][1]).toBeLessThan(50_100_000);
   });
 
-  it('clicking a lap marker selects (not adds) — the add-lap handler does not fire', async () => {
+  it('clicking a lap marker still selects (not adds) — the add-lap handler does not fire', async () => {
     const onaddlap = vi.fn();
     const onselect = vi.fn();
     render(RssiGraph, {
@@ -257,7 +254,7 @@ describe('RssiGraph add-lap', () => {
     expect(svg.querySelector('.enter-line')).not.toBeNull();
   });
 
-  it('is review-only when canControl is false: a trace click does nothing', async () => {
+  it('is review-only when canControl is false: no "Add lap here" affordance is offered', async () => {
     const onaddlap = vi.fn();
     render(RssiGraph, {
       trace: signalTrace,
@@ -271,7 +268,7 @@ describe('RssiGraph add-lap', () => {
     pinSvgBox(svg);
     await fireEvent.click(svg, { clientX: xForTime(30_000_000) });
     expect(onaddlap).not.toHaveBeenCalled();
-    // …and no "Add lap here" affordance is offered.
+    // Hovering shows the readout but never the add button.
     await fireEvent.mouseMove(svg, { clientX: xForTime(30_000_000) });
     expect(screen.queryByRole('button', { name: /Add lap for/ })).toBeNull();
   });
@@ -347,6 +344,37 @@ describe('RssiGraph threshold tuning + preview', () => {
     await firePointer(handle, 'pointerdown', { clientY: yForValue(95) });
     await firePointer(handle, 'pointermove', { clientY: yForValue(85) });
     expect(onthresholds).toHaveBeenLastCalledWith('ALICE', 110, 85);
+  });
+
+  it('finishing a threshold DRAG never adds a lap (the browser-synthesized click is inert)', async () => {
+    // The live bug (2026-07-03): pointerdown→pointerup on a handle inside the svg makes the
+    // browser synthesize a CLICK on the svg — with the old click-to-insert path, EVERY threshold
+    // drag planted a phantom "Lap inserted". The synthesized click must send nothing.
+    const onaddlap = vi.fn();
+    const onthresholds = vi.fn();
+    render(RssiGraph, {
+      trace: signalTrace,
+      laps: lapList,
+      selected: null,
+      onselect: () => {},
+      onaddlap,
+      canControl: true,
+      onthresholds
+    });
+    const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+    pinSvgBox(svg);
+
+    // The full drag gesture on the enter handle…
+    const handle = screen.getByRole('slider', { name: 'Enter threshold for ALICE' });
+    await firePointer(handle, 'pointerdown', { clientY: yForValue(110) });
+    await firePointer(handle, 'pointermove', { clientY: yForValue(120) });
+    await firePointer(handle, 'pointerup', {});
+    // …then the click the browser synthesizes on the svg where the pointer was released.
+    await fireEvent.click(svg, { clientX: xForTime(45_000_000), clientY: yForValue(120) });
+
+    // The drag tuned the thresholds — but NOTHING was inserted.
+    expect(onthresholds).toHaveBeenLastCalledWith('ALICE', 120, 95);
+    expect(onaddlap).not.toHaveBeenCalled();
   });
 
   it('arrow keys nudge the focused handle ±1 (keyboard access)', async () => {

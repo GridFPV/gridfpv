@@ -484,7 +484,11 @@ describe('Marshaling (Slice 3)', () => {
       );
     });
 
-    it('clicking the trace adds a NEW lap at the cursor source-time (InsertLap)', async () => {
+    it('a trace click sends NOTHING — only the explicit "Add lap here" button inserts', async () => {
+      // No ruling may exist before an explicit action: the old click-to-insert path fired an
+      // immediate InsertLap on ANY svg click — including the click the browser synthesizes when
+      // a threshold drag ends inside the svg — planting phantom "Lap inserted" rulings
+      // (live 2026-07-03).
       const { session, sendSpy } = makeTestSession({
         live: liveRunning,
         laps: lapList,
@@ -507,11 +511,23 @@ describe('Marshaling (Slice 3)', () => {
         toJSON: () => ({})
       } as DOMRect);
 
-      // ALICE's trace spans 0..90s over plotW=984 from PAD_L=8 → click at X=500 ≈ 45.0s.
+      // A bare click on the trace (X=500 ≈ 45.0s) sends no command at all.
       await fireEvent.click(svg, { clientX: 500 });
+      expect(sendSpy).not.toHaveBeenCalled();
+
+      // The deliberate path still works: hover places the cursor, the labelled readout button
+      // inserts — the exact heat-tagged InsertLap at the cursor's source-time.
+      await fireEvent.mouseMove(svg, { clientX: 500 });
+      await fireEvent.click(
+        within(graph).getByRole('button', { name: /Add lap for ALICE at .* seconds/ })
+      );
       expect(sendSpy).toHaveBeenCalledTimes(1);
-      const cmd = sendSpy.mock.calls[0][0] as { InsertLap: { competitor: string; at: number } };
+      const cmd = sendSpy.mock.calls[0][0] as {
+        InsertLap: { adapter: string; competitor: string; at: number; heat: string };
+      };
+      expect(cmd.InsertLap.adapter).toBe('rh-1');
       expect(cmd.InsertLap.competitor).toBe('ALICE');
+      expect(cmd.InsertLap.heat).toBe('heat-1');
       // X=500 → ((500-8)/984)*90s = 45.0s in source micros.
       expect(cmd.InsertLap.at).toBeGreaterThan(44_500_000);
       expect(cmd.InsertLap.at).toBeLessThan(45_500_000);
@@ -1117,16 +1133,69 @@ describe('Marshaling (Slice 3)', () => {
       expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
         'Would be 3 laps (+1 added, −0 removed)'
       );
-      // The preview lap list renders the would-be laps (the 41→60s split: 19s + 21s).
-      const previewList = screen.getByLabelText(/Preview laps for ALICE/);
-      expect(previewList).toHaveTextContent('Lap 2');
-      expect(previewList).toHaveTextContent('19.000');
-      expect(previewList).toHaveTextContent('21.000');
+      // The UNIFIED preview list: one chronological story — the surviving laps with the new lap
+      // accent-marked. The 41→60s split makes lap 2 the ADDED one (19s), laps 1 + 3 kept.
+      const previewList = screen.getByLabelText(/Re-detection preview for ALICE/);
+      const rows = previewList.querySelectorAll('li');
+      expect(rows).toHaveLength(3);
+      expect(rows[0].classList.contains('kept')).toBe(true);
+      expect(rows[0]).toHaveTextContent('Lap 1');
+      expect(rows[0]).toHaveTextContent('40.000');
+      expect(rows[1].classList.contains('added')).toBe(true);
+      expect(rows[1]).toHaveTextContent('+ Lap 2');
+      expect(rows[1]).toHaveTextContent('19.000');
+      expect(rows[2].classList.contains('kept')).toBe(true);
+      expect(rows[2]).toHaveTextContent('Lap 3');
+      expect(rows[2]).toHaveTextContent('21.000');
       // NOTHING was sent while adjusting — commit is explicit.
       expect(sendSpy).not.toHaveBeenCalled();
       expect(
         (screen.getByRole('button', { name: 'Commit re-detection' }) as HTMLButtonElement).disabled
       ).toBe(false);
+    });
+
+    it('passes the new levels DROP interleave as struck "removed" rows in the one preview list', async () => {
+      const { session, sendSpy } = renderTune();
+      render(Marshaling, { session });
+
+      // Raise enter above every peak but the 132 one: only the 41s pass survives — the holeshot
+      // (1s) and the 81s gate pass leave the record. They render as removed rows, in time order,
+      // in the SAME list (no side-by-side preview-vs-official confusion).
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '131' }
+      });
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+        'Would be 0 laps (+0 added, −2 removed)'
+      );
+      const previewList = screen.getByLabelText(/Re-detection preview for ALICE/);
+      const rows = previewList.querySelectorAll('li');
+      expect(rows).toHaveLength(2);
+      expect(rows[0].classList.contains('removed')).toBe(true);
+      expect(rows[0]).toHaveTextContent('− pass at 1.000s — removed');
+      expect(rows[1].classList.contains('removed')).toBe(true);
+      expect(rows[1]).toHaveTextContent('− pass at 1:21.000s — removed');
+      // Still preview-only — nothing sent.
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+
+    it('finishing a threshold DRAG on the graph sends nothing (no phantom "Lap inserted")', async () => {
+      // The live bug (2026-07-03): releasing a threshold drag inside the svg makes the browser
+      // synthesize a click on it — the old click-to-insert path turned EVERY drag into an
+      // immediate InsertLap ruling, before any commit.
+      const { session, sendSpy } = renderTune();
+      render(Marshaling, { session });
+
+      const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+      const handle = screen.getByRole('slider', { name: 'Enter threshold for ALICE' });
+      // The full drag gesture (jsdom has no PointerEvent — a MouseEvent with the pointer type)…
+      fireEvent(handle, new MouseEvent('pointerdown', { bubbles: true, clientY: 40 }));
+      fireEvent(handle, new MouseEvent('pointermove', { bubbles: true, clientY: 30 }));
+      fireEvent(handle, new MouseEvent('pointerup', { bubbles: true }));
+      // …then the click the browser synthesizes on the svg where the pointer was released.
+      await fireEvent.click(svg, { clientX: 500, clientY: 30 });
+
+      // Rulings exist only after an explicit action — the drag+click sent NOTHING.
+      expect(sendSpy).not.toHaveBeenCalled();
     });
 
     it('flags equal/inverted thresholds instead of detecting', async () => {
