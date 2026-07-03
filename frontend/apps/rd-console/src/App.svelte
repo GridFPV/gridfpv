@@ -28,6 +28,7 @@
   import { Session } from './lib/session.svelte.js';
   import ContextHeader from './ContextHeader.svelte';
   import Breadcrumbs from './Breadcrumbs.svelte';
+  import Brand from './Brand.svelte';
   import HomeHub from './screens/HomeHub.svelte';
   import EventPicker from './screens/EventPicker.svelte';
   import TimersPage from './screens/TimersPage.svelte';
@@ -266,23 +267,9 @@
   <div class="gridfpv-root gridfpv-dense app">
     <aside class="sidebar">
       <!-- The brand is the home root from inside the workspace (#118): it leaves the event and
-           returns to the hub, mirroring the breadcrumb's "Home" crumb. -->
-      <button type="button" class="brand" onclick={goToHubFromWorkspace} title="Home — GridFPV hub">
-        <svg class="brand-mark" viewBox="20 20 60 60" role="img" aria-label="GridFPV">
-          <path
-            d="M71 33 H40 Q31 33 31 42 V58 Q31 67 40 67 H60 Q69 67 69 58 V51 H53"
-            fill="none"
-            stroke="var(--gf-brand-500)"
-            stroke-width="10"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-        <span class="wordmark">
-          <span class="name">Grid<span class="brand-fpv">FPV</span></span>
-          <span class="sub">RD Console</span>
-        </span>
-      </button>
+           returns to the hub, mirroring the breadcrumb's "Home" crumb. Shared with the
+           directory pages via Brand.svelte so home looks identical everywhere. -->
+      <Brand onclick={goToHubFromWorkspace} />
 
       <nav aria-label="Screens">
         {#each SCREENS as s (s.id)}
@@ -492,54 +479,6 @@
     top: 0;
     height: 100vh;
   }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-3);
-    padding: var(--gf-space-2);
-    margin: calc(-1 * var(--gf-space-2));
-    border: none;
-    background: transparent;
-    color: inherit;
-    font-family: inherit;
-    text-align: left;
-    cursor: pointer;
-    border-radius: var(--gf-radius-sm);
-    transition: background var(--gf-motion-fast) var(--gf-ease-out);
-  }
-  .brand:hover {
-    background: var(--gf-elevated);
-  }
-  .brand:focus-visible {
-    outline: none;
-    box-shadow: var(--gf-focus-ring);
-  }
-  .brand-mark {
-    display: block;
-    flex-shrink: 0;
-    width: 30px;
-    height: 30px;
-    /* The simplified inline monogram sits directly on the dark surface — no tile. */
-  }
-  .wordmark {
-    display: flex;
-    flex-direction: column;
-    line-height: 1.1;
-    font-weight: var(--gf-font-weight-bold);
-    font-size: var(--gf-font-size-md);
-    letter-spacing: var(--gf-tracking-tight);
-  }
-  .wordmark .brand-fpv {
-    color: var(--gf-brand-500);
-  }
-  .wordmark .sub {
-    font-size: var(--gf-font-size-2xs);
-    font-weight: var(--gf-font-weight-medium);
-    text-transform: uppercase;
-    letter-spacing: var(--gf-tracking-caps);
-    color: var(--gf-text-muted);
-  }
-
   nav {
     display: flex;
     flex-direction: column;
@@ -751,14 +690,10 @@
     .app {
       grid-template-columns: 4rem 1fr;
     }
-    .wordmark,
     .nav-label,
     kbd,
     .base {
       display: none;
-    }
-    .brand {
-      justify-content: center;
     }
     .nav-item {
       justify-content: center;
