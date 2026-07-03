@@ -2660,7 +2660,11 @@ mod tests {
             log.push(pass("A", *t, i as u64));
         }
         log.push(changed(heat, HeatTransition::Finished));
-        log.push(penalty_applied("h2h-1", "B", Penalty::Disqualify { reason: None }));
+        log.push(penalty_applied(
+            "h2h-1",
+            "B",
+            Penalty::Disqualify { reason: None },
+        ));
         // The RD abandons the run.
         log.push(changed(heat, HeatTransition::Restarted));
         // Run 2: both fly clean — one lap each, A first.
@@ -2674,25 +2678,35 @@ mod tests {
         log.push(changed(heat, HeatTransition::Finished));
         log.push(changed(heat, HeatTransition::Finalized));
 
-        let result =
-            crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition);
+        let result = crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition);
         // Only run 2 scores: one lap each (holeshot + one), NOT run 1's ghost pile.
         let by_ref: std::collections::BTreeMap<&str, u32> = result
             .places
             .iter()
             .map(|p| (p.competitor.competitor.0.as_str(), p.laps))
             .collect();
-        assert_eq!(by_ref.get("A"), Some(&1), "A scores run 2's single lap only");
-        assert_eq!(by_ref.get("B"), Some(&1), "B scores run 2's single lap only");
+        assert_eq!(
+            by_ref.get("A"),
+            Some(&1),
+            "A scores run 2's single lap only"
+        );
+        assert_eq!(
+            by_ref.get("B"),
+            Some(&1),
+            "B scores run 2's single lap only"
+        );
         // The abandoned run's DQ does not survive the restart (clean slate).
         assert!(
             result.places.iter().all(|p| !p.disqualified),
             "a pre-restart ruling belongs to the abandoned run"
         );
         // A post-restart ruling DOES apply.
-        log.push(penalty_applied("h2h-1", "B", Penalty::Disqualify { reason: None }));
-        let ruled =
-            crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition);
+        log.push(penalty_applied(
+            "h2h-1",
+            "B",
+            Penalty::Disqualify { reason: None },
+        ));
+        let ruled = crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition);
         assert!(
             ruled
                 .places
