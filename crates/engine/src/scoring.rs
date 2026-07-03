@@ -217,6 +217,27 @@ impl Run {
     /// supplies synthetic positional offsets, which is harmless because throw-outs only arrive via
     /// the offset-aware adjudicated paths.
     fn group(passes: &[(u64, Pass)]) -> Vec<Run> {
+        // Same ordering rule as `gridfpv_projection::lap_list`: sequenced
+        // passes first (ascending sequence), then unsequenced, `at` last.
+        Self::group_ordered_by(passes, |p| (p.sequence.is_none(), p.sequence, p.at))
+    }
+
+    /// [`group`](Self::group) for a **corrected** pass stream (the output of
+    /// [`gridfpv_projection::corrected_passes`]), ordering each competitor's passes
+    /// **chronologically** — the projection's `corrected_order_key` rule.
+    ///
+    /// A corrected view is a single coherent timeline: a marshaling-inserted (or split-derived)
+    /// pass carries no `sequence`, so the raw sequence-first rule would sort a mid-timeline
+    /// insertion *after* every raw pass and derive a bogus (negative) lap. Ordering by `at`
+    /// (sequence only tie-breaking equal instants) makes the scored laps exactly the ones the
+    /// marshaling lap list shows — the corrected scorers must never disagree with it.
+    fn group_corrected(passes: &[(u64, Pass)]) -> Vec<Run> {
+        Self::group_ordered_by(passes, |p| (p.at, p.sequence.is_none(), p.sequence))
+    }
+
+    /// Shared grouping body: split `passes` by `(adapter, competitor)`, order each group by
+    /// `key`, and derive the per-competitor laps.
+    fn group_ordered_by<K: Ord>(passes: &[(u64, Pass)], key: impl Fn(&Pass) -> K) -> Vec<Run> {
         use std::collections::BTreeMap;
 
         // BTreeMap keeps competitors in deterministic key order regardless of
@@ -237,9 +258,7 @@ impl Run {
         by_competitor
             .into_iter()
             .map(|(competitor, mut group)| {
-                // Same ordering rule as `gridfpv_projection::lap_list`: sequenced
-                // passes first (ascending sequence), then unsequenced, `at` last.
-                group.sort_by_key(|(_, p)| (p.sequence.is_none(), p.sequence, p.at));
+                group.sort_by_key(|(_, p)| key(p));
                 let laps = group
                     .windows(2)
                     .map(|pair| ScoredLap {
@@ -322,7 +341,7 @@ pub fn race_end_reached(passes: &[Pass], condition: WinCondition, race_start: So
 /// ranking** (see the module docs).
 pub fn score(passes: &[Pass], condition: WinCondition, race_start: SourceTime) -> HeatResult {
     score_inner(
-        &with_positional_offsets(passes),
+        Run::group(&with_positional_offsets(passes)),
         condition,
         race_start,
         &Adjudications::default(),
@@ -467,12 +486,11 @@ impl Adjudications {
 /// competitor below every non-disqualified one (flagging [`Placement::disqualified`]), and
 /// [`Event::HeatVoided`] flags the whole [`HeatResult`] voided.
 fn score_inner(
-    passes: &[(u64, Pass)],
+    runs: Vec<Run>,
     condition: WinCondition,
     race_start: SourceTime,
     adj: &Adjudications,
 ) -> HeatResult {
-    let runs = Run::group(passes);
     let mut result = match condition {
         WinCondition::Timed { window_micros } => score_timed(runs, race_start, window_micros, adj),
         WinCondition::FirstToLaps { n } => score_first_to_laps(runs, n, adj),
@@ -533,10 +551,39 @@ where
         })
         .collect();
     score_inner(
-        &passes,
+        Run::group(&passes),
         condition,
         race_start,
         &Adjudications::collect(events.iter().map(|(o, e)| (*o, *e))),
+    )
+}
+
+/// Score an already-corrected pass stream under `condition`, folding the adjudications carried
+/// by `(global offset, event)` pairs — the **offset-correct** sibling of
+/// [`apply_adjudications`], for callers holding a heat *window* whose events keep their global
+/// append offsets (a positional re-enumeration would make a [`Event::RulingReversed`] target
+/// the wrong ruling, #55).
+///
+/// This is the composed marshaled-and-adjudicated scorer a windowed caller wants: feed it
+/// [`gridfpv_projection::corrected_passes`] over the same pairs (void / insert / adjust /
+/// split folded into the pass stream) and it applies DQ / time / throw-out / heat-void on
+/// top — so lap corrections and adjudications BOTH land in the result.
+pub fn score_corrected_with_global_offsets<'a, I>(
+    passes: &[(u64, Pass)],
+    condition: WinCondition,
+    race_start: SourceTime,
+    events: I,
+) -> HeatResult
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    score_inner(
+        // Corrected-stream ordering: an inserted / re-timed pass slots in chronologically,
+        // exactly as the marshaling lap list orders it.
+        Run::group_corrected(passes),
+        condition,
+        race_start,
+        &Adjudications::collect(events),
     )
 }
 
@@ -557,7 +604,8 @@ pub(crate) fn apply_adjudications(
     // `passes` carry each corrected pass's addressable offset (its `end_ref`), so a `LapThrownOut`
     // targeting that offset excludes the matching lap from the count.
     score_inner(
-        passes,
+        // Corrected-stream ordering — see `score_corrected_with_global_offsets`.
+        Run::group_corrected(passes),
         condition,
         race_start,
         &Adjudications::collect(events.iter().enumerate().map(|(i, e)| (i as u64, e))),

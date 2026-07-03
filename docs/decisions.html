@@ -569,7 +569,9 @@
       every heat flown — <strong>Points</strong> sums a pilot's points over all their heats;
       <strong>Placement</strong> reads the best single result. <strong>Re-grouping between heats is
       seeding work and belongs to tournament structures, never a round param.</strong> Multi-rotation
-      heat ids are <code>h2h-r{n}-h{m}</code>; single-pass rounds keep <code>h2h-h{n}</code>.
+      heat ids are <code>h2h-r{n}-h{m}</code>; single-pass rounds keep <code>h2h-h{n}</code>. (In the
+      log every generator id is additionally <strong>round-scoped</strong> — <code>{round}-…</code> —
+      so two rounds of the same format in one event never collide on heat ids.)
       Alongside this, the <code>FromRanking</code> UI cut was renamed
       <strong>"Top N advance" → "Take top"</strong> and is bounded by the source rounds' real
       field.</dd>

@@ -215,6 +215,12 @@ pub enum Command {
         competitor: CompetitorRef,
         /// When the inserted crossing happened, on the source clock.
         at: SourceTime,
+        /// The heat the inserted lap belongs to, so the scorer routes it by tag even when a
+        /// different heat is live (marshaling a finished heat mid-event). `None` only from a
+        /// legacy client — that insertion attributes positionally, the old behavior.
+        #[serde(default)]
+        #[ts(optional)]
+        heat: Option<HeatId>,
     },
     /// Re-time a previously-detected pass (`Event::LapAdjusted`).
     AdjustLap {
@@ -461,6 +467,7 @@ mod tests {
                 adapter: AdapterId("vd".into()),
                 competitor: CompetitorRef("A".into()),
                 at: SourceTime::from_micros(5_000_000),
+                heat: Some(HeatId("main-a".into())),
             },
             Command::AdjustLap {
                 target: LogRef(43),

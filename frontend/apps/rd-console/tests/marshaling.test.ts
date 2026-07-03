@@ -23,9 +23,11 @@ describe('marshaling command builders', () => {
     expect(voidDetectionCommand(7)).toEqual({ VoidDetection: { target: 7 } });
   });
 
-  it('insertLapCommand carries adapter, competitor, and source time', () => {
-    expect(insertLapCommand('rh-1', 'ALICE', 1_000_000)).toEqual({
-      InsertLap: { adapter: 'rh-1', competitor: 'ALICE', at: 1_000_000 }
+  it('insertLapCommand carries adapter, competitor, source time, and the marshaled heat', () => {
+    // The heat tag routes the insertion into THAT heat's scoring window — marshaling a
+    // finished heat while a later heat is live must never attribute the lap to the live heat.
+    expect(insertLapCommand('rh-1', 'ALICE', 1_000_000, 'q-1')).toEqual({
+      InsertLap: { adapter: 'rh-1', competitor: 'ALICE', at: 1_000_000, heat: 'q-1' }
     });
   });
 

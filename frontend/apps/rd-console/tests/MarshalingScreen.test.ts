@@ -462,8 +462,10 @@ describe('Marshaling (Slice 3)', () => {
       });
       await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '12.5' } });
       await fireEvent.click(screen.getByRole('button', { name: 'Add lap' }));
+      // The command carries the marshaled heat so the server routes the insertion into THAT
+      // heat's scoring window even when a different heat is live.
       expect(sendSpy).toHaveBeenCalledWith({
-        InsertLap: { adapter: 'rh-1', competitor: 'ALICE', at: 12_500_000 }
+        InsertLap: { adapter: 'rh-1', competitor: 'ALICE', at: 12_500_000, heat: 'heat-1' }
       });
     });
 
@@ -491,7 +493,7 @@ describe('Marshaling (Slice 3)', () => {
       await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '8' } });
       await fireEvent.click(screen.getByRole('button', { name: 'Add lap' }));
       expect(sendSpy).toHaveBeenCalledWith({
-        InsertLap: { adapter: 'rh-1', competitor: 'CARMEN', at: 8_000_000 }
+        InsertLap: { adapter: 'rh-1', competitor: 'CARMEN', at: 8_000_000, heat: 'heat-1' }
       });
     });
 

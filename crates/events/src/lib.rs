@@ -692,6 +692,16 @@ pub enum Event {
         adapter: AdapterId,
         competitor: CompetitorRef,
         at: SourceTime,
+        /// The heat the inserted lap belongs to. Unlike a raw [`Pass`] (an untagged wire
+        /// observation attributed positionally), an insertion is an RD statement **about a
+        /// specific heat** — often a finished one being marshaled while a later heat runs —
+        /// so it carries the tag and the heat window routes it by tag, never by position.
+        /// `None` only on legacy logs / commands from before the tag existed (positional
+        /// attribution, the old behavior). Additive: serde defaults it, `#[ts(optional)]`
+        /// keeps the generated TS field `heat?:`.
+        #[serde(default)]
+        #[ts(optional)]
+        heat: Option<HeatId>,
     },
     /// Marshaling: re-time a previously-detected pass (referenced by log offset).
     ///
@@ -936,6 +946,7 @@ mod tests {
                 adapter: AdapterId("rh".into()),
                 competitor: CompetitorRef("node-0".into()),
                 at: SourceTime::from_micros(5_000_000),
+                heat: None,
             },
             Event::LapAdjusted {
                 target: LogRef(43),

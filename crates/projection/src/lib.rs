@@ -319,6 +319,9 @@ where
                 adapter,
                 competitor,
                 at,
+                // The heat tag routes the insertion into the right heat *window* upstream;
+                // by the time the fold sees it, it is just a synthetic pass.
+                heat: _,
             } => {
                 entries.insert(
                     offset,
@@ -1261,6 +1264,7 @@ mod marshaling_tests {
             adapter: AdapterId(adapter.into()),
             competitor: CompetitorRef(competitor.into()),
             at: SourceTime::from_micros(at),
+            heat: None,
         }
     }
 
@@ -1793,6 +1797,7 @@ mod marshaling_tests {
                     adapter: AdapterId("vd".into()),
                     competitor: CompetitorRef("A".into()),
                     at: SourceTime::from_micros(3_000_000),
+                    heat: None,
                 },
             ),
             (
@@ -1960,6 +1965,7 @@ mod marshaling_tests {
                     adapter: AdapterId("vd".into()),
                     competitor: CompetitorRef("A".into()),
                     at: SourceTime::from_micros(3_000_000),
+                    heat: None,
                 },
             ),
             (

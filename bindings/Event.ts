@@ -68,7 +68,17 @@ heat: HeatId,
  * Unix epoch) at which the runtime appends the auto `Finalize`. The countdown the console
  * shows is `at − now`.
  */
-at: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "LapSplit": { 
+at: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, 
+/**
+ * The heat the inserted lap belongs to. Unlike a raw [`Pass`] (an untagged wire
+ * observation attributed positionally), an insertion is an RD statement **about a
+ * specific heat** — often a finished one being marshaled while a later heat runs —
+ * so it carries the tag and the heat window routes it by tag, never by position.
+ * `None` only on legacy logs / commands from before the tag existed (positional
+ * attribution, the old behavior). Additive: serde defaults it, `#[ts(optional)]`
+ * keeps the generated TS field `heat?:`.
+ */
+heat?: HeatId, } } | { "LapAdjusted": { target: LogRef, at: SourceTime, } } | { "LapSplit": { 
 /**
  * The log offset of the pass that *ends* the over-long lap being split.
  */

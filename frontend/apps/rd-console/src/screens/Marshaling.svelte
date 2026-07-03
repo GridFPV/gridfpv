@@ -270,9 +270,9 @@
   }
 
   async function doInsertAfterSelected(): Promise<void> {
-    if (!selected) return;
+    if (!selected || !heat) return;
     const ack = await session.send(
-      insertLapCommand(adapter, selected.competitor, secondsToSourceTime(editSeconds))
+      insertLapCommand(adapter, selected.competitor, secondsToSourceTime(editSeconds), heat)
     );
     if (ack.ok) await afterCorrection();
   }
@@ -288,8 +288,8 @@
 
   /** Add a lap for a competitor at an exact source-clock time (µs) — the graph-click path. */
   async function insertLap(competitor: CompetitorRef, at: number): Promise<void> {
-    if (!canControl) return;
-    const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at)));
+    if (!canControl || !heat) return;
+    const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at), heat));
     if (ack.ok) await afterCorrection();
   }
 
@@ -322,6 +322,8 @@
   let dqReason = $state('');
   async function doPenalty(): Promise<void> {
     if (!heat || !penaltyTarget) return;
+    // A non-positive time "penalty" would credit time / log a no-op ruling — refuse to send.
+    if (penaltyKind === 'time' && !(penaltySeconds > 0)) return;
     let ack;
     if (penaltyKind === 'points') {
       // Points affect SEASON/EVENT standings, not the per-heat lap result.
@@ -708,7 +710,13 @@
               </select>
             </label>
             {#if penaltyKind === 'time'}
-              <label>Seconds <input type="number" step="0.1" bind:value={penaltySeconds} /></label>
+              <!-- A time penalty only worsens a result: a negative amount would silently CREDIT
+                   time (improving the competitor), so the input floors at 0.1s and the builder
+                   clamps non-positive amounts to a 0µs no-op as a backstop. -->
+              <label>
+                Seconds
+                <input type="number" step="0.1" min="0.1" bind:value={penaltySeconds} />
+              </label>
             {:else if penaltyKind === 'points'}
               <label
                 >Points

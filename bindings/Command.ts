@@ -156,7 +156,13 @@ competitor: CompetitorRef,
 /**
  * When the inserted crossing happened, on the source clock.
  */
-at: SourceTime, } } | { "AdjustLap": { 
+at: SourceTime, 
+/**
+ * The heat the inserted lap belongs to, so the scorer routes it by tag even when a
+ * different heat is live (marshaling a finished heat mid-event). `None` only from a
+ * legacy client — that insertion attributes positionally, the old behavior.
+ */
+heat?: HeatId, } } | { "AdjustLap": { 
 /**
  * The log offset of the pass to re-time.
  */

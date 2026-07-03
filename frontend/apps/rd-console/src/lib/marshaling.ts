@@ -30,13 +30,18 @@ export function voidDetectionCommand(target: LogRef): Command {
   return { VoidDetection: { target } };
 }
 
-/** Insert a missed crossing for a competitor at a source-clock time. */
+/**
+ * Insert a missed crossing for a competitor at a source-clock time. Carries the marshaled
+ * `heat` so the server routes the insertion into THAT heat's scoring window — marshaling a
+ * finished heat while a later heat is live must never attribute the lap to the live heat.
+ */
 export function insertLapCommand(
   adapter: AdapterId,
   competitor: CompetitorRef,
-  at: SourceTime
+  at: SourceTime,
+  heat: HeatId
 ): Command {
-  return { InsertLap: { adapter, competitor, at } };
+  return { InsertLap: { adapter, competitor, at, heat } };
 }
 
 /** Re-time an existing logged pass (identified by its log offset) to a new time. */
@@ -106,9 +111,14 @@ export function resolveProtestCommand(target: LogRef, outcome: ProtestOutcome): 
   return { ResolveProtest: { target, outcome } };
 }
 
-/** Build a `TimeAdded` penalty from a whole-second amount (the console's input unit). */
+/**
+ * Build a `TimeAdded` penalty from a whole-second amount (the console's input unit). A penalty
+ * only ever WORSENS a result: a non-positive amount clamps to 0µs (a no-op ruling) rather than
+ * crediting time — a negative "penalty" silently improving a competitor's result is exactly the
+ * kind of ruling defensible results must not allow.
+ */
 export function timeAddedPenalty(seconds: number): Penalty {
-  return { TimeAdded: { micros: Math.round(seconds * 1_000_000) } };
+  return { TimeAdded: { micros: Math.max(0, Math.round(seconds * 1_000_000)) } };
 }
 
 /** Build a `PointsDeducted` standings penalty (season/event points, not per-heat). */
