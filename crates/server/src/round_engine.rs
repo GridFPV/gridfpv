@@ -750,6 +750,13 @@ fn round_best_laps(round: &RoundDef, events: &[Event]) -> BTreeMap<CompetitorRef
     let mut best: BTreeMap<CompetitorRef, i64> = BTreeMap::new();
     for heat in completed_heats(round, events) {
         for place in &heat.result.places {
+            // A DISQUALIFIED placement contributes nothing: the DQ voids the heat's laps for
+            // that pilot, so a lap flown in it must not stand as their best (#339 — the ranking
+            // already excludes the DQ'd placement, #331; the displayed metrics must match).
+            // The pilot's other, clean heats still count.
+            if place.disqualified {
+                continue;
+            }
             if let Some(lap) = place.best_lap_micros {
                 best.entry(place.competitor.competitor.clone())
                     .and_modify(|existing| *existing = (*existing).min(lap))
@@ -895,6 +902,13 @@ pub fn round_standings(
     let mut best_consec: BTreeMap<CompetitorRef, i64> = BTreeMap::new();
     for heat in &completed {
         for place in &heat.result.places {
+            // A DISQUALIFIED placement contributes NO metric to the standings row (#339): the
+            // ranking already excludes it (#331), so the row must not keep surfacing the DQ'd
+            // heat's lap count / consecutive window next to a position that ignored them.
+            // The pilot's other, clean heats still aggregate.
+            if place.disqualified {
+                continue;
+            }
             let competitor = place.competitor.competitor.clone();
             most_laps
                 .entry(competitor.clone())
@@ -2457,6 +2471,80 @@ mod tests {
         let standings = round_standings(&meta, &round, &log).unwrap();
         let last = standings.iter().max_by_key(|s| s.position).unwrap();
         assert_eq!(last.competitor.0, "A");
+    }
+
+    #[test]
+    fn dq_heat_contributes_no_metric_or_best_lap_to_the_standings_row() {
+        // The #339 asymmetry closed: the ranking excludes a DQ'd placement (#331), so the
+        // standings row must not keep surfacing that heat's metric/best-lap next to the
+        // position that ignored them. A, DQ'd in their ONLY heat, ranks last AND their row
+        // carries no value — exactly like a no-show. B's clean row is untouched.
+        let round = qual_round("q1", "open"); // BestLap
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        log.push(penalty_applied(
+            "q-1",
+            "A",
+            Penalty::Disqualify { reason: None },
+        ));
+
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        let a = standing(&standings, "A");
+        assert_eq!(a.position, 2, "the DQ sinks A below B");
+        assert_eq!(
+            a.best_lap_micros, None,
+            "the DQ'd heat's lap is no best lap"
+        );
+        assert_eq!(a.laps, 0, "the DQ'd heat's laps do not count");
+        assert_eq!(a.metric, RoundMetric::BestLap { micros: None });
+        let b = standing(&standings, "B");
+        assert_eq!(b.position, 1);
+        assert_eq!(b.best_lap_micros, Some(2_000_000));
+    }
+
+    #[test]
+    fn dq_in_one_heat_keeps_the_pilots_clean_heats_in_the_standings() {
+        // Only the DQ'd heat is voided for the pilot: A's clean second heat still feeds the
+        // row, so their best lap is the CLEAN heat's 3.0s — not the DQ'd heat's faster 1.0s.
+        let round = qual_round("q1", "open"); // BestLap
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        let mut log = scored_heat(
+            "q-1",
+            "q1",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        log.extend(scored_heat(
+            "q-2",
+            "q1",
+            "open",
+            &[("A", &[0, 3_000_000]), ("B", &[0, 2_500_000])],
+        ));
+        log.push(penalty_applied(
+            "q-1",
+            "A",
+            Penalty::Disqualify { reason: None },
+        ));
+
+        let standings = round_standings(&meta, &round, &log).unwrap();
+        let a = standing(&standings, "A");
+        assert_eq!(
+            a.best_lap_micros,
+            Some(3_000_000),
+            "the clean heat counts; the DQ'd (faster) lap does not"
+        );
+        assert_eq!(a.laps, 1, "only the clean heat's lap is counted");
+        assert_eq!(
+            a.metric,
+            RoundMetric::BestLap {
+                micros: Some(3_000_000)
+            }
+        );
     }
 
     #[test]

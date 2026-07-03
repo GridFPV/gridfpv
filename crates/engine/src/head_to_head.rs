@@ -176,7 +176,13 @@ impl Generator for HeadToHead {
                 let mut totals: BTreeMap<CompetitorRef, i64> =
                     self.field.iter().map(|c| (c.clone(), 0)).collect();
                 for heat in completed {
-                    let heat_size = heat.result.places.len();
+                    // The linear fallback prices a finish against the round's GROUP size, not the
+                    // number of placements the heat happened to produce: a no-show shrinking the
+                    // result must not devalue every present pilot's finish (a win in a 4-up group
+                    // is worth 4 even if only 2 showed). An explicit table is unaffected (it looks
+                    // up by position). A short *trailing* group prices by the same group size, so
+                    // equal finishing positions earn equal points across a round's heats.
+                    let heat_size = self.group_size;
                     for place in &heat.result.places {
                         // A DISQUALIFIED placement earns nothing: the DQ voids the finish that
                         // decided the position, so it must not pay points (mirrors timed_qual's
@@ -496,6 +502,133 @@ mod tests {
         let mut g = registry.build(HeadToHead::NAME, &cfg).unwrap();
         // 2 groups × 3 rotations.
         assert_eq!(heat_ids(&g.next(&[])).len(), 6);
+    }
+
+    #[test]
+    fn points_linear_fallback_prices_by_group_size_not_result_size() {
+        // Two 4-up groups; heat 0's C and D no-show (only two placements land in the result).
+        // The linear fallback must price by the GROUP size: A's win earns 4 — the same as E's
+        // win in the full heat — not `places.len() − pos + 1 = 2`. Before the fix the shrunken
+        // result devalued heat 0 wholesale (E would outrank A off an identical win).
+        let g = HeadToHead::new(
+            field(&["A", "B", "C", "D", "E", "F", "G", "H"]),
+            4,
+            1,
+            Scoring::Points(None),
+        );
+        let done = vec![
+            CompletedHeat::new("h2h-h0", result(&[("A", 1, 5), ("B", 2, 4)])),
+            CompletedHeat::new(
+                "h2h-h1",
+                result(&[("E", 1, 5), ("F", 2, 4), ("G", 3, 3), ("H", 4, 2)]),
+            ),
+        ];
+        let ranking = g.ranking(&done);
+        // A and E both earned 4 points and share position 1 (tie → ref order A, E); B and F
+        // both earned 3 and share position 3; G (2) and H (1) raced and earned theirs; the
+        // no-shows C and D sit on their seeded 0 points, last.
+        assert_eq!(
+            names(&ranking),
+            vec!["A", "E", "B", "F", "G", "H", "C", "D"]
+        );
+        assert_eq!(ranking[0].position, 1, "A's 2-present win is a full win");
+        assert_eq!(ranking[1].position, 1, "E ties A — same finishing position");
+        assert_eq!(ranking[2].position, 3);
+        assert_eq!(ranking[3].position, 3);
+    }
+
+    #[test]
+    fn odd_field_lays_out_a_short_trailing_group() {
+        // 5 pilots, 2-up: chunks() yields [2, 2, 1] — the trailing group is a SINGLE pilot.
+        // This pins the current layout: the 1-pilot heat IS emitted (a solo time-trial-style
+        // pass for the odd pilot out), not silently dropped or merged.
+        let mut g = HeadToHead::new(field(&["A", "B", "C", "D", "E"]), 2, 1, Scoring::Placement);
+        let step = g.next(&[]);
+        assert_eq!(heat_ids(&step), vec!["h2h-h0", "h2h-h1", "h2h-h2"]);
+        let GeneratorStep::Run(heats) = step else {
+            panic!("expected Run")
+        };
+        assert_eq!(heats[0].lineup, field(&["A", "B"]));
+        assert_eq!(heats[1].lineup, field(&["C", "D"]));
+        assert_eq!(heats[2].lineup, field(&["E"]), "the odd pilot flies alone");
+    }
+
+    #[test]
+    fn odd_field_single_pilot_trailing_heat_ranks_under_both_scorings() {
+        // The [2, 2, 1] layout raced to completion: the solo pilot's unopposed "win" counts
+        // like any other heat win under BOTH scorings (pinning current behavior, not
+        // redesigning it — the RD who wants no solo heat picks a different group size).
+        let done = vec![
+            CompletedHeat::new("h2h-h0", result(&[("A", 1, 5), ("B", 2, 4)])),
+            CompletedHeat::new("h2h-h1", result(&[("C", 1, 6), ("D", 2, 3)])),
+            CompletedHeat::new("h2h-h2", result(&[("E", 1, 4)])),
+        ];
+        // Placement: E joins the winners band (position 1 in their heat), ordered within the
+        // band by laps — C (6) > A (5) > E (4) — then the runners-up B (4) > D (3).
+        let placement =
+            HeadToHead::new(field(&["A", "B", "C", "D", "E"]), 2, 1, Scoring::Placement);
+        assert_eq!(
+            names(&placement.ranking(&done)),
+            vec!["C", "A", "E", "B", "D"]
+        );
+        // Points (linear, group_size 2): every heat winner earns 2 — including E's solo win —
+        // so A, C, E tie on 2 points at position 1 (ref order), B and D on 1 point at 4.
+        let points = HeadToHead::new(
+            field(&["A", "B", "C", "D", "E"]),
+            2,
+            1,
+            Scoring::Points(None),
+        );
+        let ranking = points.ranking(&done);
+        assert_eq!(names(&ranking), vec!["A", "C", "E", "B", "D"]);
+        assert_eq!(ranking[0].position, 1);
+        assert_eq!(
+            ranking[2].position, 1,
+            "the solo win pays the same 2 points"
+        );
+        assert_eq!(ranking[3].position, 4);
+    }
+
+    #[test]
+    fn odd_field_short_trailing_group_scores_under_both_scorings() {
+        // 6 pilots, 4-up: chunks() yields [4, 2] — a short (but real) trailing group.
+        let done = vec![
+            CompletedHeat::new(
+                "h2h-h0",
+                result(&[("A", 1, 6), ("B", 2, 5), ("C", 3, 4), ("D", 4, 3)]),
+            ),
+            CompletedHeat::new("h2h-h1", result(&[("E", 1, 5), ("F", 2, 4)])),
+        ];
+        let laid_out =
+            |scoring| HeadToHead::new(field(&["A", "B", "C", "D", "E", "F"]), 4, 1, scoring);
+        let mut g = laid_out(Scoring::Placement);
+        let step = g.next(&[]);
+        assert_eq!(heat_ids(&step), vec!["h2h-h0", "h2h-h1"]);
+        let GeneratorStep::Run(heats) = step else {
+            panic!("expected Run")
+        };
+        assert_eq!(
+            heats[1].lineup,
+            field(&["E", "F"]),
+            "the trailing group is the leftover 2"
+        );
+        // Placement: winners band A (6 laps) > E (5), then the position-2 band B (5) > F (4),
+        // then C, D — the short group's finishes band exactly like the full group's.
+        assert_eq!(names(&g.ranking(&done)), vec!["A", "E", "B", "F", "C", "D"]);
+        // Points (linear, group_size 4): E's win in the short group earns the full 4 — equal
+        // finishing positions earn equal points across the round's heats — so A and E tie at
+        // position 1, B and F (3 points each) at 3, then C (2) and D (1).
+        let ranking = laid_out(Scoring::Points(None)).ranking(&done);
+        assert_eq!(names(&ranking), vec!["A", "E", "B", "F", "C", "D"]);
+        assert_eq!(ranking[0].position, 1);
+        assert_eq!(
+            ranking[1].position, 1,
+            "the short-group win pays the full group_size"
+        );
+        assert_eq!(ranking[2].position, 3);
+        assert_eq!(ranking[3].position, 3);
+        assert_eq!(ranking[4].position, 5);
+        assert_eq!(ranking[5].position, 6);
     }
 
     #[test]
