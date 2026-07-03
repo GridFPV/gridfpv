@@ -596,6 +596,23 @@ pub enum Event {
     SignalHistory(SignalHistory),
 
     // --- race-engine events (#28) ---
+    /// A round's **seeded field is drawn** — the one-time freeze of a carry seeding's
+    /// resolution (issue #334; decision D18's "one grouping decision" extended to the field).
+    ///
+    /// A round seeded **from another round's outcome** (`FromRanking` / `FromRankingRange` /
+    /// `FromHeatWinners` / `Combine`) records its resolved field here at **first fill**, and
+    /// every later read (fills, ranking, standings, dependent seeding) uses the recorded
+    /// draw. Without this, the seeding re-resolved live on every read — so adjudicating the
+    /// *source* round after this round had already raced silently rewrote who this round's
+    /// field "was", vanishing raced results from its ranking. Roster-derived seedings
+    /// (`FromRoster` / `AllChannels`) never record a draw: they stay live so late entrants
+    /// keep working.
+    RoundFieldDrawn {
+        /// The round whose field this freezes.
+        round: RoundId,
+        /// The resolved field, in seed order — the draw every later read replays.
+        field: Vec<CompetitorRef>,
+    },
     /// A heat is created with its lineup and enters the `Scheduled` state — the
     /// `[*] → Scheduled` entry of the heat loop (race-engine.html §2). Carries the
     /// competitors in the heat and, additively, the class/round it belongs to and the

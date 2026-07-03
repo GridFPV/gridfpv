@@ -28,7 +28,15 @@ import type { SourceTime } from "./SourceTime";
  * `{ "VariantName": { ..fields } }`, which maps cleanly to a discriminated union in
  * the generated TypeScript (#4).
  */
-export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "AdapterDisconnected": { adapter: AdapterId, } } | { "SessionStarted": { adapter: AdapterId, session: SessionId, } } | { "SessionEnded": { adapter: AdapterId, session: SessionId, } } | { "CompetitorSeen": { adapter: AdapterId, competitor: CompetitorRef, } } | { "CompetitorRegistered": { adapter: AdapterId, competitor: CompetitorRef, pilot: PilotId, } } | { "Pass": Pass } | { "SignalChunk": SignalChunk } | { "SignalThresholds": SignalThresholds } | { "SignalHistory": SignalHistory } | { "HeatScheduled": { heat: HeatId, lineup: Array<CompetitorRef>, 
+export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "AdapterDisconnected": { adapter: AdapterId, } } | { "SessionStarted": { adapter: AdapterId, session: SessionId, } } | { "SessionEnded": { adapter: AdapterId, session: SessionId, } } | { "CompetitorSeen": { adapter: AdapterId, competitor: CompetitorRef, } } | { "CompetitorRegistered": { adapter: AdapterId, competitor: CompetitorRef, pilot: PilotId, } } | { "Pass": Pass } | { "SignalChunk": SignalChunk } | { "SignalThresholds": SignalThresholds } | { "SignalHistory": SignalHistory } | { "RoundFieldDrawn": { 
+/**
+ * The round whose field this freezes.
+ */
+round: RoundId, 
+/**
+ * The resolved field, in seed order — the draw every later read replays.
+ */
+field: Array<CompetitorRef>, } } | { "HeatScheduled": { heat: HeatId, lineup: Array<CompetitorRef>, 
 /**
  * The class this heat runs in, where the scheduler tagged it.
  */
