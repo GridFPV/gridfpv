@@ -1278,6 +1278,7 @@ fn seats_of(state: &AppState, registry: &EventRegistry, heat: &HeatId) -> Vec<(u
 
 use gridfpv_engine::heat::{GraceWindow, ProtestWindow};
 use gridfpv_engine::scoring::race_end_reached;
+use gridfpv_server::control_handler::open_protest_count;
 use gridfpv_server::events::{RoundDef, StartProcedure};
 
 /// How often the completion driver re-evaluates the win condition over the running passes.
@@ -1592,7 +1593,18 @@ fn now_micros() -> i64 {
 ///      console can render a live "auto-official in M:SS" countdown and a replay reads the same
 ///      deadline (mirroring how the start driver logs `HeatStarting`);
 ///   2. holds `micros` of real time;
-///   3. appends the auto `HeatStateChanged { Finalized }` (the `Unofficial → Final` step).
+///   3. appends the auto `HeatStateChanged { Finalized }` (the `Unofficial → Final` step) —
+///      **unless the heat has an open protest** (issue #338, below).
+///
+/// **The open-protest gate (issue #338).** The manual `Finalize` command is gated on open protests
+/// (release-hardening P1-4): a filed, unresolved protest means the result is still contested. The
+/// auto-official append does not run through the command handler, so it checks the *same shared
+/// predicate* ([`open_protest_count`]) at window expiry. If protests are open when the window
+/// elapses, the driver **stands down**: it appends nothing and leaves the heat `Unofficial` for
+/// the RD. There is deliberately **no retry**: a protest pulls a human into the loop, and the RD's
+/// follow-up may be several rulings (resolve, then a penalty, then finalize) — an auto-finalize
+/// firing at the surprising instant the last protest resolves could race those. The RD's manual
+/// `Finalize` (one click, re-checked by the same gate on the command path) closes the heat.
 ///
 /// The returned task is cancelled by the bridge (`cancel_for`) the moment the heat leaves
 /// `Unofficial` — a manual early `Finalize`, a `Revert`, an abort/restart — so a superseded window
@@ -1628,6 +1640,39 @@ fn spawn_auto_official_driver(
             return;
         }
         tokio::time::sleep(hold).await;
+        // The expired window must not finalize over an **open protest** (issue #338): check the
+        // same predicate the manual `Finalize` command is gated on (P1-4). A protest filed during
+        // (or before) the window means the result is still contested — stand down and leave the
+        // heat `Unofficial` for the RD (see the doc comment for why there is no retry). A log read
+        // failure also stands down: fail closed, never finalize blind.
+        let open = state
+            .log()
+            .lock()
+            .ok()
+            .and_then(|g| g.read_all().ok())
+            .map(|stored| {
+                let events: Vec<Event> = stored.into_iter().map(|s| s.event).collect();
+                open_protest_count(&events, &heat)
+            });
+        match open {
+            Some(0) => {}
+            Some(n) => {
+                eprintln!(
+                    "gridfpv: auto-official window for heat {:?} expired with {n} open protest(s); \
+                     leaving it Unofficial for the RD to resolve and finalize",
+                    heat.0
+                );
+                return;
+            }
+            None => {
+                eprintln!(
+                    "gridfpv: auto-official driver could not read the log for heat {:?}; \
+                     leaving it Unofficial",
+                    heat.0
+                );
+                return;
+            }
+        }
         // Auto-finalize Unofficial → Final. If the heat already left Unofficial (a manual early
         // Finalize, a Revert, an abort), this task has been cancelled by the bridge and never reaches
         // here — so the auto-finalize never fights a manual action.
@@ -2442,6 +2487,223 @@ mod tests {
         );
         // No passes were ever logged for the open-practice heat (the time limit, not scoring, ended it).
         assert_eq!(count_passes(&events), 0);
+        bridge.abort();
+    }
+
+    // --- issue #338: the auto-official driver respects the open-protest gate ---------------------
+
+    /// Add a normal scored round (`timed_qual`) with an **armed protest window** to Practice and
+    /// return its `RoundId` — the config the auto-official driver reads (`ProtestWindow::After` ⇒
+    /// auto-finalize once the window elapses). Uses the registry's `add_round` so the bridge
+    /// resolves the round through `rounds_of` exactly as in production.
+    fn add_protest_window_round(registry: &EventRegistry, window_micros: i64) -> RoundId {
+        use gridfpv_engine::scoring::WinCondition;
+        use gridfpv_server::events::{NewRoundReq, SeedingRule};
+        use gridfpv_server::scope::EventId as ScopeEventId;
+        let req = NewRoundReq {
+            label: "Qualifying".into(),
+            classes: vec![],
+            format: "timed_qual".into(),
+            params: std::collections::BTreeMap::new(),
+            win_condition: Some(WinCondition::Timed {
+                window_micros: 120_000_000,
+            }),
+            time_limit_secs: None,
+            seeding: SeedingRule::FromRoster,
+            channel_mode: None,
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
+            protest_window: Some(ProtestWindow::After {
+                micros: window_micros,
+            }),
+        };
+        registry
+            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .expect("protest-window round added")
+            .id
+    }
+
+    /// Schedule a heat tagged with `round` and end its race directly (`Finished` lands it in
+    /// `Unofficial`) — the transition the bridge observes to arm the auto-official driver.
+    fn finish_round_heat(state: &AppState, round: &RoundId) -> HeatId {
+        let heat = HeatId("q-1".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: Some(round.clone()),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition: HeatTransition::Finished,
+                },
+                None,
+            )
+            .unwrap();
+        heat
+    }
+
+    /// Whether the log carries the auto (or manual) `Finalized` transition for `heat`.
+    fn finalized_in(events: &[Event], heat: &HeatId) -> bool {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                Event::HeatStateChanged {
+                    heat: h,
+                    transition: HeatTransition::Finalized,
+                } if h == heat
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn auto_official_finalizes_after_the_window_with_no_protests() {
+        // The happy path (marshaling Slice 5): a round with a protest window auto-finalizes its
+        // Unofficial heat once the window elapses — the driver logs the `HeatFinalizing` deadline,
+        // holds the window, and appends the `Finalized` transition, with no protest on file.
+        let registry = fast_registry(3, 1);
+        let round = add_protest_window_round(&registry, 200_000); // a 0.2 s window
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        let heat = finish_round_heat(&state, &round);
+
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(5),
+            wait_until(&state, Duration::from_secs(5), move |events| {
+                finalized_in(events, &target)
+            }),
+        )
+        .await
+        .expect("the auto-official driver should finalize once the window elapses");
+
+        let events = read_all_events(&state);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::HeatFinalizing { heat: h, .. } if *h == heat)),
+            "the driver logs the deadline fact before the hold"
+        );
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&events, &heat),
+            Some(gridfpv_engine::heat::HeatState::Final),
+            "the heat folds to Final after the auto-official append"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn auto_official_stands_down_on_an_open_protest_until_resolved() {
+        // Issue #338: the protest window expiring must NOT finalize over an OPEN protest — the
+        // same gate the manual `Finalize` command enforces (P1-4). The driver stands down and
+        // leaves the heat Unofficial; resolving the protest then lets the RD's manual `Finalize`
+        // (the chosen behavior — no auto-retry) close the heat.
+        use gridfpv_events::{LogRef, ProtestOutcome};
+        use gridfpv_server::control::Command;
+        use gridfpv_server::control_handler::apply_command;
+
+        let registry = fast_registry(3, 1);
+        let round = add_protest_window_round(&registry, 200_000); // a 0.2 s window
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        // File the protest BEFORE the race ends, so it is open for the whole window — no timing
+        // race between the filing and the driver's expiry check.
+        let heat = HeatId("q-1".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: Some(round.clone()),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        let filed = state
+            .append(
+                Event::ProtestFiled {
+                    heat: heat.clone(),
+                    competitor: CompetitorRef("A".into()),
+                    note: "contested line cut".into(),
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition: HeatTransition::Finished,
+                },
+                None,
+            )
+            .unwrap();
+
+        // The driver still arms (it logs the deadline — the console countdown runs as usual)...
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(5),
+            wait_until(&state, Duration::from_secs(5), move |events| {
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::HeatFinalizing { heat: h, .. } if *h == target))
+            }),
+        )
+        .await
+        .expect("the driver logs the deadline even with a protest on file");
+
+        // ...but well past the window (bridge poll + 0.2 s hold + slack) it has appended NO
+        // `Finalized`: the heat stays Unofficial for the RD.
+        sleep(Duration::from_millis(800)).await;
+        let events = read_all_events(&state);
+        assert!(
+            !finalized_in(&events, &heat),
+            "the expired window must not finalize over an open protest"
+        );
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&events, &heat),
+            Some(gridfpv_engine::heat::HeatState::Unofficial),
+            "the heat is left Unofficial for the RD"
+        );
+
+        // The manual path agrees while the protest is open (the shared predicate)...
+        let ack = apply_command(&state, Command::Finalize { heat: heat.clone() });
+        assert!(
+            !ack.ok,
+            "manual Finalize is blocked by the same open-protest gate"
+        );
+
+        // ...and resolving the protest unblocks the RD's manual Finalize (the chosen behavior:
+        // once a protest pulled a human into the loop, closing the heat is the RD's click).
+        state
+            .append(
+                Event::ProtestResolved {
+                    target: LogRef(filed),
+                    outcome: ProtestOutcome::Denied,
+                },
+                None,
+            )
+            .unwrap();
+        let ack = apply_command(&state, Command::Finalize { heat: heat.clone() });
+        assert!(ack.ok, "Finalize succeeds once the protest is resolved");
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&read_all_events(&state), &heat),
+            Some(gridfpv_engine::heat::HeatState::Final),
+            "the resolved-then-finalized heat folds to Final"
+        );
         bridge.abort();
     }
 
