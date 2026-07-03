@@ -509,6 +509,7 @@ impl RotorHazardConnection {
     ///   2. names it with the GridFPV callsign (`alter_pilot { callsign }`) so RH's own view + its
     ///      "Racing heat … pilots: …" log are right,
     ///   3. assigns it to the heat's slot at that node (`alter_heat { heat, slot_id, pilot }`).
+    ///
     /// Then it selects the heat as current (`set_current_heat`) so the seats take effect for the race.
     ///
     /// The heat is **freshly added** here (`add_heat`) and this is the heat the finish-time dense save

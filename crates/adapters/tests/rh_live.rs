@@ -53,6 +53,7 @@ fn event_kind(e: &Event) -> &'static str {
         Event::ProtestFiled { .. } => "ProtestFiled",
         Event::ProtestResolved { .. } => "ProtestResolved",
         Event::RulingReversed { .. } => "RulingReversed",
+        Event::RoundFieldDrawn { .. } => "RoundFieldDrawn",
     }
 }
 
