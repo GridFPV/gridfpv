@@ -2649,7 +2649,6 @@ mod tests {
         // out-ranked the real ones (hit live 2026-07-03: a re-raced qualifier scored 39 ghost
         // laps for one pilot AND held two positions at once).
         let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 5 });
-        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
         let heat = "h2h-1";
         let mut log = vec![scheduled(heat, "h2h", "open", &["A", "B"])];
         // Run 1: A banks a pile of laps; a DQ on B lands mid-marshaling — all abandoned below.
