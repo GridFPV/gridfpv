@@ -603,7 +603,10 @@ impl FormatRegistry {
     /// - `timed_qual`: `rounds` ("Heats per pilot", number, 3). The ranking metric is **derived
     ///   from the round's win condition** (the qualifying metric *is* the win condition), so it is
     ///   **not** a separate param here.
-    /// - `head_to_head`: `group_size` ("Group size", 2), `scoring` ("Scoring", placement/points).
+    /// - `head_to_head`: `group_size` ("Group size", 2), `rotations` ("Heats per group", 1 — the
+    ///   same groups run back to back N times, scoring accumulating; the grouping is drawn once,
+    ///   so re-grouping between heats stays a tournament-structure job), `scoring` ("Scoring",
+    ///   placement/points).
     /// - `open_practice`: no params (the active channels are the field, carried by the round's
     ///   `AllChannels` seeding).
     /// - `zippyq`: **not offered** — shelved (#218); still registered in
@@ -611,12 +614,14 @@ impl FormatRegistry {
     pub fn standard_schemas() -> Vec<FormatSchema> {
         vec![
             // Head-to-Head (D17): the atomic racing round type the Add-round picker offers. Group
-            // size + scoring (Placement, or Points — the per-position points table is authored by a
-            // dedicated editor in the round form, not a generic param field).
+            // size + rotations (heats per group — one grouping decision, run N times) + scoring
+            // (Placement, or Points — the per-position points table is authored by a dedicated
+            // editor in the round form, not a generic param field).
             FormatSchema {
                 name: "head_to_head".into(),
                 params: vec![
                     FormatParam::number("group_size", "Group size", "2"),
+                    FormatParam::number("rotations", "Heats per group", "1"),
                     FormatParam::enumerated(
                         "scoring",
                         "Scoring",
@@ -1399,14 +1404,15 @@ mod tests {
         let schemas = FormatRegistry::standard_schemas();
         let offered: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(offered, vec!["head_to_head", "open_practice", "timed_qual"]);
-        // Head-to-Head carries group size + scoring; the points table is authored by the form editor.
+        // Head-to-Head carries group size + rotations (heats per group) + scoring; the points table
+        // is authored by the form editor.
         let h2h = schemas.iter().find(|s| s.name == "head_to_head").unwrap();
         assert_eq!(
             h2h.params
                 .iter()
                 .map(|p| p.key.as_str())
                 .collect::<Vec<_>>(),
-            vec!["group_size", "scoring"]
+            vec!["group_size", "rotations", "scoring"]
         );
         assert!(
             !offered.contains(&"zippyq"),

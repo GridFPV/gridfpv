@@ -83,6 +83,7 @@ const SCHEMAS = FORMATS.map((name) => {
       name,
       params: [
         { key: 'group_size', label: 'Group size', kind: 'number' as const, default: '2' },
+        { key: 'rotations', label: 'Heats per group', kind: 'number' as const, default: '1' },
         {
           key: 'scoring',
           label: 'Scoring',
@@ -474,6 +475,36 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     // Only head_to_head's params (its schema defaults), not timed_qual's rounds/tiebreak.
     expect(createRoundImpl.mock.calls[0][2].params).toEqual({
       group_size: '2',
+      rotations: '1',
+      scoring: 'placement'
+    });
+  });
+
+  it('authors a multi-rotation Head-to-Head: the rotations param reaches the request', async () => {
+    // "Heats per group" (rotations) — the same groups race N times, points accumulating (ProSpec
+    // style). The knob is a plain schema param, so it serializes into `params` like the rest.
+    const impls = baseImpls();
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
+    const { session } = makeTestSession({
+      ...impls,
+      createRoundImpl,
+      event: { ...EVENT, rounds: [] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'ProSpec' } });
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.input(await screen.findByLabelText('Heats per group value'), {
+      target: { value: '3' }
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    expect(createRoundImpl.mock.calls[0][2].params).toEqual({
+      group_size: '2',
+      rotations: '3',
       scoring: 'placement'
     });
   });

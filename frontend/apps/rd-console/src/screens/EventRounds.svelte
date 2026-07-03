@@ -1519,7 +1519,9 @@
                   ? '0 = open-ended: generate the next heat on demand until you stop.'
                   : schema.key === 'group_size'
                     ? 'Pilots per heat — capped at the primary timer’s node count.'
-                    : undefined}
+                    : schema.key === 'rotations'
+                      ? 'Each group races this many heats back to back — scoring accumulates. 1 = everyone races once.'
+                      : undefined}
               >
                 {#if schema.key === 'group_size'}
                   <Select
@@ -1560,7 +1562,11 @@
                 {:else}
                   <Input
                     type="number"
-                    min={schema.key === 'rounds' ? '0' : undefined}
+                    min={schema.key === 'rounds'
+                      ? '0'
+                      : schema.key === 'rotations'
+                        ? '1'
+                        : undefined}
                     {value}
                     aria-label={`${schema.label} value`}
                     oninput={(e: Event) =>
