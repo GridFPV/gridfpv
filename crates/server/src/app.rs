@@ -1774,7 +1774,16 @@ fn now_micros() -> i64 {
 /// audit fold are keyed on it, and a `LogRef` correction command targets that global offset. An
 /// earlier bug re-enumerated the window `0,1,2,…`, so a UI-selected lap in a later heat targeted
 /// the *wrong* pass; folding with the real offsets fixes that.
+/// The window additionally folds from the heat's **current run**
+/// ([`current_run_start`](crate::live_state::current_run_start) — the latest `Running`, or one
+/// past the latest `Aborted`/`Restarted`): everything except the heat-loop events themselves
+/// must sit at/after that boundary. A reset abandons the prior run, so its passes — and any
+/// rulings made about them — are not part of this heat's result, the same rule the live
+/// standings already applied. Without it, a Restarted-and-re-raced heat scored BOTH runs'
+/// passes (the ghost run even out-ranked the real one). Heat-loop events stay un-filtered:
+/// they carry the lineup and the FSM lineage the folds need.
 pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, Event)> {
+    let run_start = crate::live_state::current_run_start(events, heat) as u64;
     let mut window = Vec::new();
     // The offsets already claimed by this window — a target-carrying ruling joins iff its
     // target is one of them (targets always point backwards, so one forward scan suffices).
@@ -1792,17 +1801,20 @@ pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, 
             // Heat-tagged marshaling events: by tag, never by position.
             Event::HeatVoided { heat: h }
             | Event::PenaltyApplied { heat: h, .. }
-            | Event::ProtestFiled { heat: h, .. } => h == heat,
-            Event::LapInserted { heat: Some(h), .. } => h == heat,
-            // Target-carrying rulings: by their target's membership.
+            | Event::ProtestFiled { heat: h, .. } => h == heat && offset >= run_start,
+            Event::LapInserted { heat: Some(h), .. } => h == heat && offset >= run_start,
+            // Target-carrying rulings: by their target's membership (a ruling targeting an
+            // abandoned run's pass drops out with its target).
             Event::DetectionVoided { target }
             | Event::LapAdjusted { target, .. }
             | Event::LapSplit { target, .. }
             | Event::LapThrownOut { target }
             | Event::ProtestResolved { target, .. }
-            | Event::RulingReversed { target } => claimed.contains(&target.0),
+            | Event::RulingReversed { target } => {
+                claimed.contains(&target.0) && offset >= run_start
+            }
             // Untagged (passes, legacy insertions, registrations): positional.
-            _ => active,
+            _ => active && offset >= run_start,
         };
         if include {
             claimed.insert(offset);

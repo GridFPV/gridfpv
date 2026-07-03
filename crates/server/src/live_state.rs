@@ -481,7 +481,11 @@ fn current_heat(events: &[Event]) -> Option<HeatId> {
 /// (`events.len()`) ⇒ zero live laps — never a prior-heat total.
 ///
 /// Pure and order-preserving: it is the *latest* such transition for `heat`.
-fn current_run_start(events: &[Event], heat: &HeatId) -> usize {
+///
+/// Shared with the heat **window** (`app::heat_window_offsets`): scoring, the marshaling lap
+/// list, and the audit fold all window from here too, so a Restarted heat's abandoned run
+/// never leaks into its result (the same rule this fold applies to the live standings).
+pub(crate) fn current_run_start(events: &[Event], heat: &HeatId) -> usize {
     // Default to past-the-end: a heat that has not run yet contributes no live laps (so selecting an
     // unraced heat as current shows zeros, not its pilots' totals from earlier heats).
     let mut start = events.len();

@@ -563,6 +563,40 @@ describe('Marshaling (Slice 3)', () => {
   // The Marshaling raw-id bug: the screen rendered raw refs (pilot ids / "node-2") for the heat name,
   // the lap-list headings, the ruling/protest dropdowns, and the audit lines. These assert the screen
   // resolves them all to friendly names through the shared resolver + heat-name helper.
+  describe('a competitor under two adapters (mid-heat failover / a re-raced heat)', () => {
+    // The SAME ref can hold two lap-list entries — one per adapter (a mid-heat source
+    // failover; historically also a re-raced heat before the current-run window fix). Bare-ref
+    // {#each} keys collided on it and CRASHED the whole screen (svelte each_key_duplicate) —
+    // the "can't slide anything anymore" report from live testing 2026-07-03.
+    const DUP_LAPS: LapList = {
+      competitors: [
+        {
+          competitor: { adapter: 'sim', competitor: 'ALICE' },
+          laps: [
+            { number: 1, duration_micros: 40_000_000, at: 41_000_000, start_ref: 2, end_ref: 4 }
+          ]
+        },
+        {
+          competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+          laps: [
+            { number: 1, duration_micros: 39_000_000, at: 40_000_000, start_ref: 10, end_ref: 12 }
+          ]
+        }
+      ]
+    };
+
+    it('renders without crashing and lists the pilot once in the pickers', () => {
+      const { session } = makeTestSession({ live: liveRunning, laps: DUP_LAPS });
+      render(Marshaling, { session });
+      // Both adapter entries' lap sections render (keyed by the full adapter/ref key)…
+      expect(screen.getAllByRole('button', { name: /Lap 1/ }).length).toBe(2);
+      // …and the marshal-pilot picker lists ALICE exactly once (deduped refs).
+      const picker = screen.getByLabelText('Marshal pilot') as HTMLSelectElement;
+      const values = Array.from(picker.options).map((o) => o.value);
+      expect(values.filter((v) => v === 'ALICE').length).toBe(1);
+    });
+  });
+
   describe('friendly names (the raw-id bug fix)', () => {
     // A roster-seeded heat: the competitor refs ARE the pilot ids (the common FromRoster case), so a
     // callsign must resolve from the directory with NO progress binding. node-2 is an unbound seat.
