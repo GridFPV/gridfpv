@@ -461,58 +461,17 @@
             <rect class="crossing" x={x1} y={PAD_T} width={Math.max(1, x2 - x1)} height={plotH} />
           {/each}
 
-          <!-- Threshold lines (horizontal). With `onthresholds` wired they carry draggable,
-               keyboard-nudgeable handles emitting the tuned levels; display-only otherwise. -->
+          <!-- Threshold lines (horizontal). Display-only strokes here; the draggable handles
+               render at the END of the svg (painted last = TOPMOST) so a dense heat's lap
+               markers can never sit over the grab bands and eat the pointer — dead handles on
+               lap-heavy pilots were exactly the bug (live 2026-07-03). -->
           {#if th.enter != null}
             {@const y = yOf(th.enter, range)}
             <line class="enter-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
-            {#if onthresholds}
-              <g
-                class="th-handle enter"
-                role="slider"
-                tabindex="0"
-                aria-label={`Enter threshold for ${who}`}
-                aria-orientation="vertical"
-                aria-valuenow={th.enter}
-                aria-valuemin={Math.floor(range.lo)}
-                aria-valuemax={Math.ceil(range.hi)}
-                onpointerdown={(e: PointerEvent) => startThresholdDrag(e, ct, 'enter')}
-                onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'enter', range)}
-                onpointerup={endThresholdDrag}
-                onpointercancel={endThresholdDrag}
-                onkeydown={(e: KeyboardEvent) => nudgeThreshold(e, ct, 'enter')}
-              >
-                <!-- Wide invisible grab band for the field (sunlit laptop, finger/trackpad). -->
-                <line class="grab" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
-                <rect class="knob" x={W - PAD_R - 30} y={y - 6} width="30" height="12" rx="3" />
-                <text class="knob-label" x={W - PAD_R - 26} y={y + 3.5}>EN</text>
-              </g>
-            {/if}
           {/if}
           {#if th.exit != null}
             {@const y = yOf(th.exit, range)}
             <line class="exit-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
-            {#if onthresholds}
-              <g
-                class="th-handle exit"
-                role="slider"
-                tabindex="0"
-                aria-label={`Exit threshold for ${who}`}
-                aria-orientation="vertical"
-                aria-valuenow={th.exit}
-                aria-valuemin={Math.floor(range.lo)}
-                aria-valuemax={Math.ceil(range.hi)}
-                onpointerdown={(e: PointerEvent) => startThresholdDrag(e, ct, 'exit')}
-                onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'exit', range)}
-                onpointerup={endThresholdDrag}
-                onpointercancel={endThresholdDrag}
-                onkeydown={(e: KeyboardEvent) => nudgeThreshold(e, ct, 'exit')}
-              >
-                <line class="grab" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
-                <rect class="knob" x={W - PAD_R - 30} y={y - 6} width="30" height="12" rx="3" />
-                <text class="knob-label" x={W - PAD_R - 26} y={y + 3.5}>EX</text>
-              </g>
-            {/if}
           {/if}
 
           <!-- The sample line -->
@@ -558,6 +517,54 @@
               <text class="label" x={x + 3} y={PAD_T + plotH - 4}>+</text>
             </g>
           {/each}
+
+          <!-- Draggable threshold handles — LAST in paint order (topmost), so nothing (signal
+               line, lap markers, preview markers) can intercept their pointer events. -->
+          {#if onthresholds && th.enter != null}
+            {@const y = yOf(th.enter, range)}
+            <g
+              class="th-handle enter"
+              role="slider"
+              tabindex="0"
+              aria-label={`Enter threshold for ${who}`}
+              aria-orientation="vertical"
+              aria-valuenow={th.enter}
+              aria-valuemin={Math.floor(range.lo)}
+              aria-valuemax={Math.ceil(range.hi)}
+              onpointerdown={(e: PointerEvent) => startThresholdDrag(e, ct, 'enter')}
+              onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'enter', range)}
+              onpointerup={endThresholdDrag}
+              onpointercancel={endThresholdDrag}
+              onkeydown={(e: KeyboardEvent) => nudgeThreshold(e, ct, 'enter')}
+            >
+              <!-- Wide invisible grab band for the field (sunlit laptop, finger/trackpad). -->
+              <line class="grab" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
+              <rect class="knob" x={W - PAD_R - 30} y={y - 6} width="30" height="12" rx="3" />
+              <text class="knob-label" x={W - PAD_R - 26} y={y + 3.5}>EN</text>
+            </g>
+          {/if}
+          {#if onthresholds && th.exit != null}
+            {@const y = yOf(th.exit, range)}
+            <g
+              class="th-handle exit"
+              role="slider"
+              tabindex="0"
+              aria-label={`Exit threshold for ${who}`}
+              aria-orientation="vertical"
+              aria-valuenow={th.exit}
+              aria-valuemin={Math.floor(range.lo)}
+              aria-valuemax={Math.ceil(range.hi)}
+              onpointerdown={(e: PointerEvent) => startThresholdDrag(e, ct, 'exit')}
+              onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'exit', range)}
+              onpointerup={endThresholdDrag}
+              onpointercancel={endThresholdDrag}
+              onkeydown={(e: KeyboardEvent) => nudgeThreshold(e, ct, 'exit')}
+            >
+              <line class="grab" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
+              <rect class="knob" x={W - PAD_R - 30} y={y - 6} width="30" height="12" rx="3" />
+              <text class="knob-label" x={W - PAD_R - 26} y={y + 3.5}>EX</text>
+            </g>
+          {/if}
 
           <!-- Hover crosshair + time/RSSI readout: a vertical guide at the cursor, with a small
                dark, high-contrast chip reading the exact race-relative time + RSSI there. -->

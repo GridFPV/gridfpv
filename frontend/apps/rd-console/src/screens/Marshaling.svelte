@@ -468,9 +468,12 @@
   }
 
   // Competitors that can be acted on: those in the lap list, else the live lineup.
+  // DE-DUPLICATED by ref: the same competitor can appear under TWO adapters in one heat
+  // (a mid-heat source failover — or historically a re-raced heat before the current-run
+  // window fix), and duplicate refs crashed every keyed {#each} over this list.
   const competitors = $derived<CompetitorRef[]>(
     laps && laps.competitors.length > 0
-      ? laps.competitors.map((c) => c.competitor.competitor)
+      ? [...new Set(laps.competitors.map((c) => c.competitor.competitor))]
       : (session.liveState?.active_pilots ?? [])
   );
 
@@ -550,7 +553,9 @@
   // The LIVE preview: re-detect at the tuned levels, diff against the current official passes
   // (lap 1's opening pass + every lap's closing pass, from the marshaling-corrected lap list).
   const tuneValid = $derived(tuneEnter > tuneExit);
-  const shownPilotLaps = $derived<Lap[]>(shownLaps?.competitors[0]?.laps ?? []);
+  // Flatten across entries: the shown pilot can hold several lap-list entries (one per
+  // adapter after a mid-heat failover) — the tune diff must see ALL their official passes.
+  const shownPilotLaps = $derived<Lap[]>((shownLaps?.competitors ?? []).flatMap((c) => c.laps));
   const detectedPassTimes = $derived<number[]>(
     tuneTrace && tuneValid && tuneFor === shownPilot
       ? detectPasses(tuneTrace, tuneEnter, tuneExit)
@@ -890,7 +895,9 @@
 
       {#if shownLaps && shownLaps.competitors.length > 0}
         <div class="laps">
-          {#each shownLaps.competitors as cl (cl.competitor.competitor)}
+          <!-- Keyed by the FULL competitor key: the same ref can appear under two adapters
+               (mid-heat failover), and a bare-ref key crashed the whole screen on it. -->
+          {#each shownLaps.competitors as cl (cl.competitor.adapter + '/' + cl.competitor.competitor)}
             <div class="comp">
               <h4>{competitorName(cl.competitor.competitor)}</h4>
               {#if cl.laps.length === 0}

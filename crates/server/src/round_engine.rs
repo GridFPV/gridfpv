@@ -2642,6 +2642,80 @@ mod tests {
     // corrected-pass fold in `score_heat_window`; each fails on the old positional path.
 
     #[test]
+    fn a_restarted_heat_scores_only_its_current_run() {
+        // A heat races (run 1), is RESTARTED, and re-races (run 2). The abandoned run's passes
+        // — and a ruling made about them before the restart — must not reach the result: before
+        // the current-run window rule the scorer folded BOTH runs, and the ghost run's laps
+        // out-ranked the real ones (hit live 2026-07-03: a re-raced qualifier scored 39 ghost
+        // laps for one pilot AND held two positions at once).
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 5 });
+        let heat = "h2h-1";
+        let mut log = vec![scheduled(heat, "h2h", "open", &["A", "B"])];
+        // Run 1: A banks a pile of laps; a DQ on B lands mid-marshaling — all abandoned below.
+        log.push(changed(heat, HeatTransition::Staged));
+        log.push(changed(heat, HeatTransition::Armed));
+        log.push(changed(heat, HeatTransition::Running));
+        for (i, t) in [0i64, 1_000_000, 2_000_000, 3_000_000].iter().enumerate() {
+            log.push(pass("A", *t, i as u64));
+        }
+        log.push(changed(heat, HeatTransition::Finished));
+        log.push(penalty_applied(
+            "h2h-1",
+            "B",
+            Penalty::Disqualify { reason: None },
+        ));
+        // The RD abandons the run.
+        log.push(changed(heat, HeatTransition::Restarted));
+        // Run 2: both fly clean — one lap each, A first.
+        log.push(changed(heat, HeatTransition::Staged));
+        log.push(changed(heat, HeatTransition::Armed));
+        log.push(changed(heat, HeatTransition::Running));
+        log.push(pass("A", 10_000_000, 10));
+        log.push(pass("A", 11_000_000, 11));
+        log.push(pass("B", 10_100_000, 12));
+        log.push(pass("B", 12_000_000, 13));
+        log.push(changed(heat, HeatTransition::Finished));
+        log.push(changed(heat, HeatTransition::Finalized));
+
+        let result = crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition);
+        // Only run 2 scores: one lap each (holeshot + one), NOT run 1's ghost pile.
+        let by_ref: std::collections::BTreeMap<&str, u32> = result
+            .places
+            .iter()
+            .map(|p| (p.competitor.competitor.0.as_str(), p.laps))
+            .collect();
+        assert_eq!(
+            by_ref.get("A"),
+            Some(&1),
+            "A scores run 2's single lap only"
+        );
+        assert_eq!(
+            by_ref.get("B"),
+            Some(&1),
+            "B scores run 2's single lap only"
+        );
+        // The abandoned run's DQ does not survive the restart (clean slate).
+        assert!(
+            result.places.iter().all(|p| !p.disqualified),
+            "a pre-restart ruling belongs to the abandoned run"
+        );
+        // A post-restart ruling DOES apply.
+        log.push(penalty_applied(
+            "h2h-1",
+            "B",
+            Penalty::Disqualify { reason: None },
+        ));
+        let ruled = crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition);
+        assert!(
+            ruled
+                .places
+                .iter()
+                .any(|p| p.competitor.competitor.0 == "B" && p.disqualified),
+            "a ruling on the CURRENT run applies"
+        );
+    }
+
+    #[test]
     fn adjudicating_a_non_latest_heat_lands_in_its_own_window() {
         // Two finished heats of one round; the DQ on heat 1's winner is appended AFTER heat 2's
         // whole span (marshaling a finished heat). It must land in heat 1's window — not in
