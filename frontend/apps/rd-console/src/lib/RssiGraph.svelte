@@ -3,9 +3,17 @@
    * RssiGraph (#55, Marshaling Slice 4) — the **signal-as-evidence** layer on top of the
    * lap-level Marshaling UI. For a RotorHazard heat that captured a trace, it renders the
    * per-competitor RSSI-vs-time graph the marshal reviews against, so they can see *why* the
-   * timer called (or missed) a lap (marshaling.html §3.2). Display only — there is **no
-   * re-detection** here: the RotorHazard-style "Recalculate" with draggable thresholds is
-   * explicitly deferred (marshaling.html §5). We draw, we do not re-derive.
+   * timer called (or missed) a lap (marshaling.html §3.2).
+   *
+   * The graph itself stays display-only by default. The RotorHazard-style "Recalculate with
+   * draggable thresholds" (marshaling.html §5) is now opt-in via the tuning props: when the
+   * parent supplies `onthresholds`, the enter/exit lines grow draggable (and keyboard-nudgeable)
+   * handles that emit the tuned levels back up; `tuned` overrides the drawn levels for one
+   * competitor while the marshal adjusts; and `preview` draws the re-detection diff — hollow
+   * dashed markers for passes the new levels would ADD, and a struck/dimmed restyle on official
+   * lap markers the new levels would REMOVE. The graph still re-derives nothing and commits
+   * nothing — the parent runs the detection (`redetect.ts`) and sends the commands on an
+   * explicit Commit. Without the new props the behavior is exactly the old display-only graph.
    *
    * What it draws, per competitor trace ([`CompetitorTrace`]):
    *   • the **sample line** — the streaming-cadence RSSI samples placed on the source clock
@@ -33,7 +41,10 @@
     onselect,
     onaddlap,
     canControl = false,
-    nameFor = (r) => r
+    nameFor = (r) => r,
+    onthresholds,
+    tuned,
+    preview
   }: {
     /** The captured trace for the heat — one entry per competitor that produced signal facts. */
     trace: { competitors: CompetitorTrace[] };
@@ -61,6 +72,24 @@
      * don't pass a resolver keep showing the ref unchanged.
      */
     nameFor?: (ref: CompetitorRef) => string;
+    /**
+     * Enables live threshold tuning (the RH-style "Recalculate"): when supplied, the enter/exit
+     * lines get draggable, keyboard-nudgeable handles that emit the adjusted levels. Emitted per
+     * competitor — the parent owns the tuned values and feeds them back via `tuned`.
+     */
+    onthresholds?: (competitor: CompetitorRef, enter: number, exit: number) => void;
+    /**
+     * The live tuned levels for ONE competitor (two-way with the parent's tuning inputs): while
+     * present, this competitor's threshold lines/handles draw at these levels instead of the
+     * trace's recorded ones. Other competitors keep their recorded levels.
+     */
+    tuned?: { competitor: CompetitorRef; enter: number; exit: number };
+    /**
+     * The re-detection preview diff for ONE competitor: `added` pass times (µs) draw as hollow
+     * dashed candidate markers; official lap markers whose closing pass ref is in `removedRefs`
+     * restyle struck/dimmed (they would be voided on commit). Preview only — nothing commits.
+     */
+    preview?: { competitor: CompetitorRef; added: number[]; removedRefs: number[] };
   } = $props();
 
   // Plot geometry. A fixed viewBox keeps the SVG crisp at any rendered size; strokes are in
@@ -112,15 +141,32 @@
     return { from, to };
   }
 
+  /**
+   * The enter/exit levels a trace is DRAWN (and its crossing windows shaded) against: the live
+   * `tuned` values while this competitor is being adjusted, else the trace's recorded thresholds.
+   */
+  function effectiveThresholds(t: CompetitorTrace): {
+    enter: number | undefined;
+    exit: number | undefined;
+  } {
+    if (tuned && tuned.competitor === t.competitor.competitor)
+      return { enter: tuned.enter, exit: tuned.exit };
+    return { enter: t.enter, exit: t.exit };
+  }
+
   /** RSSI value range for a trace, padded so the thresholds and peaks aren't flush to the edge. */
-  function valueRange(t: CompetitorTrace): { lo: number; hi: number } {
+  function valueRange(
+    t: CompetitorTrace,
+    enter: number | undefined = t.enter,
+    exit: number | undefined = t.exit
+  ): { lo: number; hi: number } {
     let lo = Infinity;
     let hi = -Infinity;
     for (const v of t.samples) {
       if (v < lo) lo = v;
       if (v > hi) hi = v;
     }
-    for (const th of [t.enter, t.exit]) {
+    for (const th of [t.enter, t.exit, enter, exit]) {
       if (th != null) {
         if (th < lo) lo = th;
         if (th > hi) hi = th;
@@ -174,11 +220,15 @@
    * enter→exit hysteresis over the captured samples: a window OPENS at the first sample that rises
    * to/above `enter` and CLOSES at the first subsequent sample that falls to/below `exit` (one window
    * per detected pass). A window still open at the trace end extends to the last sample. Empty unless
-   * both levels are present. Display-only — this visualises what the detector saw, it does not
-   * re-detect or change any lap.
+   * both levels are present. Display-only — this visualises what the detector saw (at the tuned
+   * levels while adjusting), it does not re-detect or change any lap.
    */
-  function crossingWindows(t: CompetitorTrace): { from: number; to: number }[] {
-    if (t.enter == null || t.exit == null) return [];
+  function crossingWindows(
+    t: CompetitorTrace,
+    enter: number | undefined = t.enter,
+    exit: number | undefined = t.exit
+  ): { from: number; to: number }[] {
+    if (enter == null || exit == null) return [];
     const n = t.samples.length;
     const out: { from: number; to: number }[] = [];
     let inCrossing = false;
@@ -187,11 +237,11 @@
       const v = t.samples[i];
       const time = sampleTimeOf(t, i);
       if (!inCrossing) {
-        if (v >= t.enter) {
+        if (v >= enter) {
           inCrossing = true;
           start = time;
         }
-      } else if (v <= t.exit) {
+      } else if (v <= exit) {
         out.push({ from: start, to: time });
         inCrossing = false;
       }
@@ -278,6 +328,72 @@
     const x = Math.min(PAD_L + plotW, Math.max(PAD_L, px));
     onaddlap(ct.competitor.competitor, Math.round(timeAt(x, span)));
   }
+
+  // ── Draggable enter/exit threshold handles (the RH-style live tuning) ─────────────────────────
+  // Only wired when `onthresholds` is supplied. A pointer drag on a threshold handle maps the
+  // pointer's Y back to an RSSI level and emits BOTH levels (the dragged one replaced) so the
+  // parent's tuning state stays a single (enter, exit) pair. Arrow keys nudge ±1 for keyboard
+  // access. All preview-only — the graph never re-detects or sends anything itself.
+  let dragging = $state<{ ref: CompetitorRef; which: 'enter' | 'exit' } | null>(null);
+
+  /** Invert {@link yOf}: a pointer event's Y back to an RSSI level (rounded — RSSI is integral). */
+  function valueFromPointer(e: PointerEvent, range: { lo: number; hi: number }): number {
+    const svg = (e.currentTarget as Element).closest('svg');
+    if (!svg) return range.lo;
+    const rect = svg.getBoundingClientRect();
+    const y = rect.height === 0 ? PAD_T : ((e.clientY - rect.top) / rect.height) * H;
+    const frac = Math.min(1, Math.max(0, (PAD_T + plotH - y) / plotH));
+    return Math.round(range.lo + frac * (range.hi - range.lo));
+  }
+
+  /** Emit the tuned pair with one level replaced by `value`. */
+  function emitThreshold(ct: CompetitorTrace, which: 'enter' | 'exit', value: number): void {
+    if (!onthresholds) return;
+    const { enter, exit } = effectiveThresholds(ct);
+    onthresholds(
+      ct.competitor.competitor,
+      which === 'enter' ? value : (enter ?? value),
+      which === 'exit' ? value : (exit ?? value)
+    );
+  }
+
+  function startThresholdDrag(e: PointerEvent, ct: CompetitorTrace, which: 'enter' | 'exit'): void {
+    if (!onthresholds) return;
+    dragging = { ref: ct.competitor.competitor, which };
+    // Keep receiving moves outside the handle while dragging (jsdom has no pointer capture).
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+  }
+
+  function moveThresholdDrag(
+    e: PointerEvent,
+    ct: CompetitorTrace,
+    which: 'enter' | 'exit',
+    range: { lo: number; hi: number }
+  ): void {
+    if (!dragging || dragging.ref !== ct.competitor.competitor || dragging.which !== which) return;
+    emitThreshold(ct, which, valueFromPointer(e, range));
+  }
+
+  function endThresholdDrag(): void {
+    dragging = null;
+  }
+
+  /** Keyboard access: Arrow Up/Down nudges the focused threshold ±1 RSSI count. */
+  function nudgeThreshold(e: KeyboardEvent, ct: CompetitorTrace, which: 'enter' | 'exit'): void {
+    if (!onthresholds) return;
+    const delta = e.key === 'ArrowUp' ? 1 : e.key === 'ArrowDown' ? -1 : 0;
+    if (delta === 0) return;
+    e.preventDefault();
+    const current = effectiveThresholds(ct)[which];
+    if (current == null) return;
+    emitThreshold(ct, which, current + delta);
+  }
+
+  /** The preview diff for a competitor (empty when the preview prop targets someone else). */
+  function previewFor(ref: CompetitorRef): { added: number[]; removedRefs: Set<number> } {
+    if (!preview || preview.competitor !== ref) return { added: [], removedRefs: new Set() };
+    return { added: preview.added, removedRefs: new Set(preview.removedRefs) };
+  }
 </script>
 
 <div class="rssi-graph" aria-label="RSSI signal graph">
@@ -287,6 +403,9 @@
     <span class="swatch exit"></span> Exit
     <span class="swatch band"></span> Detection window
     <span class="swatch marker"></span> Lap pass
+    {#if preview}
+      <span class="swatch preview"></span> Preview pass (uncommitted)
+    {/if}
     <span class="cadence-note"
       >Streaming-cadence trace — one sample per timer emit, not RotorHazard's dense marshal history.</span
     >
@@ -296,15 +415,17 @@
     {@const ref = ct.competitor.competitor}
     {@const compLaps = lapsFor(ref)}
     {@const span = spanOf(ct, compLaps)}
-    {@const range = valueRange(ct)}
+    {@const th = effectiveThresholds(ct)}
+    {@const range = valueRange(ct, th.enter, th.exit)}
     {@const who = nameFor(ref)}
+    {@const pv = previewFor(ref)}
     <figure class="trace" aria-label={`RSSI for ${who}`}>
       <figcaption>
         <span class="who">{who}</span>
         <span class="meta">
           {ct.samples.length} samples
-          {#if ct.enter != null}· enter {ct.enter}{/if}
-          {#if ct.exit != null}· exit {ct.exit}{/if}
+          {#if th.enter != null}· enter {th.enter}{/if}
+          {#if th.exit != null}· exit {th.exit}{/if}
         </span>
       </figcaption>
       {#if ct.samples.length === 0}
@@ -334,20 +455,64 @@
                sample that rises above `enter` to the one that falls below `exit` (the timer's
                hysteresis). Drawn behind the signal so the trace reads on top; lets the marshal see
                exactly what the lap-detection engine registered as a pass. -->
-          {#each crossingWindows(ct) as cw (cw.from)}
+          {#each crossingWindows(ct, th.enter, th.exit) as cw (cw.from)}
             {@const x1 = xOf(cw.from, span)}
             {@const x2 = xOf(cw.to, span)}
             <rect class="crossing" x={x1} y={PAD_T} width={Math.max(1, x2 - x1)} height={plotH} />
           {/each}
 
-          <!-- Threshold lines (horizontal) -->
-          {#if ct.enter != null}
-            {@const y = yOf(ct.enter, range)}
+          <!-- Threshold lines (horizontal). With `onthresholds` wired they carry draggable,
+               keyboard-nudgeable handles emitting the tuned levels; display-only otherwise. -->
+          {#if th.enter != null}
+            {@const y = yOf(th.enter, range)}
             <line class="enter-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
+            {#if onthresholds}
+              <g
+                class="th-handle enter"
+                role="slider"
+                tabindex="0"
+                aria-label={`Enter threshold for ${who}`}
+                aria-orientation="vertical"
+                aria-valuenow={th.enter}
+                aria-valuemin={Math.floor(range.lo)}
+                aria-valuemax={Math.ceil(range.hi)}
+                onpointerdown={(e: PointerEvent) => startThresholdDrag(e, ct, 'enter')}
+                onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'enter', range)}
+                onpointerup={endThresholdDrag}
+                onpointercancel={endThresholdDrag}
+                onkeydown={(e: KeyboardEvent) => nudgeThreshold(e, ct, 'enter')}
+              >
+                <!-- Wide invisible grab band for the field (sunlit laptop, finger/trackpad). -->
+                <line class="grab" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
+                <rect class="knob" x={W - PAD_R - 30} y={y - 6} width="30" height="12" rx="3" />
+                <text class="knob-label" x={W - PAD_R - 26} y={y + 3.5}>EN</text>
+              </g>
+            {/if}
           {/if}
-          {#if ct.exit != null}
-            {@const y = yOf(ct.exit, range)}
+          {#if th.exit != null}
+            {@const y = yOf(th.exit, range)}
             <line class="exit-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
+            {#if onthresholds}
+              <g
+                class="th-handle exit"
+                role="slider"
+                tabindex="0"
+                aria-label={`Exit threshold for ${who}`}
+                aria-orientation="vertical"
+                aria-valuenow={th.exit}
+                aria-valuemin={Math.floor(range.lo)}
+                aria-valuemax={Math.ceil(range.hi)}
+                onpointerdown={(e: PointerEvent) => startThresholdDrag(e, ct, 'exit')}
+                onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'exit', range)}
+                onpointerup={endThresholdDrag}
+                onpointercancel={endThresholdDrag}
+                onkeydown={(e: KeyboardEvent) => nudgeThreshold(e, ct, 'exit')}
+              >
+                <line class="grab" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
+                <rect class="knob" x={W - PAD_R - 30} y={y - 6} width="30" height="12" rx="3" />
+                <text class="knob-label" x={W - PAD_R - 26} y={y + 3.5}>EX</text>
+              </g>
+            {/if}
           {/if}
 
           <!-- The sample line -->
@@ -359,6 +524,7 @@
             <g
               class="marker"
               class:selected={isSelected(ref, lap)}
+              class:removed={pv.removedRefs.has(lap.end_ref)}
               role="button"
               tabindex="0"
               aria-pressed={isSelected(ref, lap)}
@@ -379,6 +545,17 @@
               <line class="hit" x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
               <line class="rule" x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
               <text class="label" x={x + 3} y={PAD_T + 10}>{lap.number}</text>
+            </g>
+          {/each}
+
+          <!-- PREVIEW pass markers: hollow/dashed candidates the tuned thresholds would ADD.
+               Distinct from the solid official lap markers; non-interactive (commit is explicit,
+               in the parent's tuning panel). -->
+          {#each pv.added as t (t)}
+            {@const x = xOf(t, span)}
+            <g class="preview-added" aria-hidden="true">
+              <line x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
+              <text class="label" x={x + 3} y={PAD_T + plotH - 4}>+</text>
             </g>
           {/each}
 
@@ -465,6 +642,10 @@
   }
   .swatch.marker {
     background: var(--gf-text-secondary);
+  }
+  .swatch.preview {
+    background: transparent;
+    border: 1px dashed #ffd24a;
   }
   .cadence-note {
     flex-basis: 100%;
@@ -575,6 +756,69 @@
   .marker:focus-visible .rule {
     stroke: var(--gf-accent);
     stroke-width: 2;
+  }
+  /* An official lap marker the tuned thresholds would REMOVE: dimmed + struck (a short dash),
+     so "this pass goes away on commit" reads at a glance without hiding the marker. */
+  .marker.removed .rule {
+    stroke: var(--gf-danger);
+    opacity: 0.55;
+    stroke-dasharray: 2 6;
+  }
+  .marker.removed .label {
+    fill: var(--gf-danger);
+    opacity: 0.7;
+    text-decoration: line-through;
+  }
+
+  /* Draggable threshold handles (live tuning). Big grab bands — field-usable on a trackpad. */
+  .th-handle {
+    cursor: ns-resize;
+  }
+  .th-handle .grab {
+    stroke: transparent;
+    stroke-width: 16;
+    vector-effect: non-scaling-stroke;
+  }
+  .th-handle .knob {
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+  .th-handle.enter .knob {
+    fill: color-mix(in srgb, var(--gf-success) 30%, #0c1118);
+    stroke: var(--gf-success);
+  }
+  .th-handle.exit .knob {
+    fill: color-mix(in srgb, var(--gf-danger) 30%, #0c1118);
+    stroke: var(--gf-danger);
+  }
+  .th-handle .knob-label {
+    font-family: var(--gf-font-mono);
+    font-size: 9px;
+    fill: #fff;
+    pointer-events: none;
+  }
+  .th-handle:focus-visible {
+    outline: none;
+  }
+  .th-handle:focus-visible .knob {
+    stroke-width: 2;
+    filter: drop-shadow(0 0 3px currentColor);
+  }
+
+  /* Preview pass candidates (would be ADDED on commit): hollow dashed verticals, visually
+     distinct from the solid official markers. */
+  .preview-added line {
+    stroke: #ffd24a;
+    stroke-width: 1.5;
+    stroke-dasharray: 5 4;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
+  .preview-added .label {
+    fill: #ffd24a;
+    font-family: var(--gf-font-mono);
+    font-size: 12px;
+    font-weight: 600;
   }
 
   /* Hover crosshair + readout (the "where exactly is this?" guide). */
