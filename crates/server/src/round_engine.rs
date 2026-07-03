@@ -2827,7 +2827,6 @@ mod tests {
                 );
             }
             FillOutcome::Complete | FillOutcome::AlreadyScheduled => {}
-            other => panic!("unexpected fill outcome {other:?}"),
         }
         // …while the NOT-yet-filled sibling resolves live and sees the adjudicated carry.
         assert_eq!(
