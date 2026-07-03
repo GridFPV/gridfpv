@@ -71,7 +71,7 @@
     detectPasses,
     diffPasses,
     officialPasses,
-    previewLaps
+    previewRows
   } from '../lib/redetect.js';
   import { commandForAction } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
@@ -338,13 +338,15 @@
   // ── Add a brand-new lap (not an edit of an existing one) ──
   // The `InsertLap` path adds a missed/never-detected crossing for a competitor at a source-clock
   // time — so it works even when the competitor has ZERO laps. Two entry points feed it the time:
-  //   • the graph: a click on a competitor's trace passes the cursor's race-relative source-time;
+  //   • the graph: the explicit "Add lap here" button in the cursor readout under the trace passes
+  //     the cursor's race-relative source-time (never a bare click on the trace — stray clicks and
+  //     drag-end synthesized clicks must not plant laps);
   //   • the per-competitor control: an "Add lap" button at a typed time (seconds), for sim heats
   //     with no trace/graph.
   // Role-gated by `canControl` like every other correction (the parent only renders these when the
   // session may control; the Director re-checks).
 
-  /** Add a lap for a competitor at an exact source-clock time (µs) — the graph-click path. */
+  /** Add a lap for a competitor at an exact source-clock time (µs) — the graph's button path. */
   async function insertLap(competitor: CompetitorRef, at: number): Promise<void> {
     if (!canControl || !heat) return;
     const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at), heat));
@@ -589,7 +591,11 @@
   );
   const redetectDiff = $derived(diffPasses(officialPasses(shownPilotLaps), detectedPassTimes));
   const redetectDirty = $derived(redetectDiff.added.length > 0 || redetectDiff.removed.length > 0);
-  const previewLapList = $derived(previewLaps(detectedPassTimes));
+  // The UNIFIED preview: one chronological row list — kept/added laps interleaved with the
+  // official passes the re-detection drops (redetect.ts `previewRows`), so the whole story reads
+  // top-down instead of a confusing side-by-side of preview vs official lists.
+  const previewRowList = $derived(previewRows(officialPasses(shownPilotLaps), detectedPassTimes));
+  const previewLapCount = $derived(previewRowList.filter((r) => r.status !== 'removed').length);
 
   function doResetThresholds(): void {
     if (!tuneTrace) return;
@@ -823,19 +829,33 @@
             </p>
           {:else}
             <p class="tune-summary" role="status" data-testid="redetect-summary">
-              Would be {previewLapList.length} lap{previewLapList.length === 1 ? '' : 's'}
+              Would be {previewLapCount} lap{previewLapCount === 1 ? '' : 's'}
               (+{redetectDiff.added.length} added, −{redetectDiff.removed.length} removed)
             </p>
             {#if redetectDirty}
+              <!-- The UNIFIED preview: one chronological list — the lap list the commit would
+                   produce, with each new lap accent-marked (+) and each official pass the new
+                   levels drop struck through (−) at its place in time. Replaces the old
+                   side-by-side preview-vs-official lists (confusing in the field). -->
               <ol
-                class="preview-laps"
-                aria-label={`Preview laps for ${competitorName(shownPilot)}`}
+                class="preview-rows"
+                aria-label={`Re-detection preview for ${competitorName(shownPilot)}`}
               >
-                {#each previewLapList as lap (lap.at)}
-                  <li>
-                    <span class="lap-num">Lap {lap.number}</span>
-                    <span class="lap-time">{formatMicros(lap.durationMicros)}</span>
-                  </li>
+                {#each previewRowList as row (row.status === 'removed' ? `x${row.ref}` : `l${row.at}`)}
+                  {#if row.status === 'removed'}
+                    <li class="removed">
+                      <span class="mark" aria-hidden="true">−</span>
+                      <span class="what">pass at {formatMicros(row.at)}s — removed</span>
+                    </li>
+                  {:else}
+                    <li class={row.status}>
+                      <span class="mark" aria-hidden="true"
+                        >{row.status === 'added' ? '+' : ''}</span
+                      >
+                      <span class="lap-num">Lap {row.number}</span>
+                      <span class="lap-time">{formatMicros(row.durationMicros)}</span>
+                    </li>
+                  {/if}
                 {/each}
               </ol>
             {/if}
@@ -1416,28 +1436,52 @@
     background: var(--gf-accent);
     color: #061018;
   }
-  .preview-laps {
+  /* The unified re-detection preview: one chronological list, big mono rows (sunlit-laptop
+     readable). Kept rows read plain; added rows carry the accent "+" chip styling; removed
+     rows read struck/dimmed danger — "this pass leaves the record on commit" at a glance. */
+  .preview-rows {
     margin: var(--gf-space-2) 0 0;
     padding: 0;
     list-style: none;
     display: flex;
-    flex-wrap: wrap;
-    gap: var(--gf-space-2);
+    flex-direction: column;
+    gap: var(--gf-space-1);
+    max-width: 26rem;
   }
-  .preview-laps li {
+  .preview-rows li {
     display: flex;
     align-items: baseline;
     gap: var(--gf-space-2);
     padding: var(--gf-space-1) var(--gf-space-3);
-    border: 1px dashed color-mix(in srgb, var(--gf-accent) 55%, var(--gf-border));
+    border: 1px solid transparent;
     border-radius: var(--gf-radius-sm);
-    background: var(--gf-surface-sunken);
     font-family: var(--gf-font-mono);
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-secondary);
   }
-  .preview-laps .lap-num {
+  .preview-rows .mark {
+    /* Fixed-width status column so the lap labels align across kept/added/removed rows. */
+    min-width: 1ch;
     font-weight: var(--gf-font-weight-semibold);
+  }
+  .preview-rows .lap-num {
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .preview-rows li.added {
+    border-color: color-mix(in srgb, var(--gf-accent) 55%, var(--gf-border));
+    border-style: dashed;
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text);
+  }
+  .preview-rows li.added .mark {
+    color: var(--gf-accent);
+  }
+  .preview-rows li.removed {
+    color: color-mix(in srgb, var(--gf-danger) 65%, var(--gf-text-muted));
+    opacity: 0.8;
+  }
+  .preview-rows li.removed .what {
+    text-decoration: line-through;
   }
   .result-actions {
     border-color: color-mix(in srgb, var(--gf-accent) 35%, var(--gf-border));
