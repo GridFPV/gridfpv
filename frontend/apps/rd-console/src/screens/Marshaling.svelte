@@ -21,6 +21,7 @@
     AuditKind,
     ChannelCatalogEntry,
     CompetitorRef,
+    CompetitorTrace,
     HeatId,
     HeatSummary,
     Lap,
@@ -52,6 +53,13 @@
     voidHeatCommand
   } from '../lib/marshaling.js';
   import type { ProtestOutcome } from '@gridfpv/types';
+  import {
+    defaultThresholds,
+    detectPasses,
+    diffPasses,
+    officialPasses,
+    previewLaps
+  } from '../lib/redetect.js';
   import { commandForAction } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
@@ -492,6 +500,115 @@
       : undefined
   );
 
+  // ── Tune detection (the RH-style threshold re-detection, marshaling.html §5) ──────────────────
+  // The RD moves the enter/exit levels live — number inputs here, two-way with the graph's drag
+  // handles — and the screen re-runs the timer's hysteresis over the CAPTURED trace (redetect.ts),
+  // previewing the resulting lap list + the diff against the current official passes. NOTHING is
+  // sent while adjusting: an explicit Commit turns the diff into the existing marshaling primitives
+  // (a `VoidDetection` per removed pass, a heat-tagged `InsertLap` per added one). The thresholds
+  // themselves are a UI/preview concern only — they are NEVER written back to the timer; pushing
+  // calibration to RotorHazard via the plugin is a separate future feature. Scoped to the shown
+  // pilot (the "Marshal pilot" picker already selects exactly one).
+  const tuneTrace = $derived<CompetitorTrace | undefined>(
+    signalTrace?.competitors.find((c) => c.competitor.competitor === shownPilot)
+  );
+  let tuneFor = $state<CompetitorRef | undefined>(undefined);
+  let tuneEnter = $state(0);
+  let tuneExit = $state(0);
+
+  /** The trace's recorded thresholds; an unset trace falls back to a percentile derivation. */
+  function recordedThresholds(t: CompetitorTrace): { enter: number; exit: number } {
+    const fallback = defaultThresholds(t);
+    return {
+      enter: t.enter ?? fallback?.enter ?? 0,
+      exit: t.exit ?? fallback?.exit ?? 0
+    };
+  }
+
+  // (Re-)seed the tuning levels whenever the tuned competitor changes (pilot picked / heat
+  // switched / trace arrives) — but never while the SAME competitor is being adjusted.
+  $effect(() => {
+    const t = tuneTrace;
+    if (!t) {
+      tuneFor = undefined;
+      return;
+    }
+    if (tuneFor === t.competitor.competitor) return;
+    tuneFor = t.competitor.competitor;
+    const rec = recordedThresholds(t);
+    tuneEnter = rec.enter;
+    tuneExit = rec.exit;
+  });
+
+  /** The graph's drag handles emit here — two-way with the number inputs. */
+  function onGraphThresholds(competitor: CompetitorRef, enter: number, exit: number): void {
+    if (competitor !== shownPilot) return;
+    tuneEnter = enter;
+    tuneExit = exit;
+  }
+
+  // The LIVE preview: re-detect at the tuned levels, diff against the current official passes
+  // (lap 1's opening pass + every lap's closing pass, from the marshaling-corrected lap list).
+  const tuneValid = $derived(tuneEnter > tuneExit);
+  const shownPilotLaps = $derived<Lap[]>(shownLaps?.competitors[0]?.laps ?? []);
+  const detectedPassTimes = $derived<number[]>(
+    tuneTrace && tuneValid && tuneFor === shownPilot
+      ? detectPasses(tuneTrace, tuneEnter, tuneExit)
+      : []
+  );
+  const redetectDiff = $derived(diffPasses(officialPasses(shownPilotLaps), detectedPassTimes));
+  const redetectDirty = $derived(redetectDiff.added.length > 0 || redetectDiff.removed.length > 0);
+  const previewLapList = $derived(previewLaps(detectedPassTimes));
+
+  function doResetThresholds(): void {
+    if (!tuneTrace) return;
+    const rec = recordedThresholds(tuneTrace);
+    tuneEnter = rec.enter;
+    tuneExit = rec.exit;
+  }
+
+  // Commit: turn the previewed diff into the marshaling command batch — voids first (the passes
+  // the tuned levels no longer see), then heat-tagged inserts (the newly detected ones) —
+  // sequentially, so the audit reads in a sane order and a mid-batch failure stops cleanly
+  // (the error banner shows; the refresh reflects whatever landed).
+  let committing = $state(false);
+  async function doCommitRedetect(): Promise<void> {
+    if (!canControl || !heat || !tuneTrace || !tuneValid || !redetectDirty || committing) return;
+    committing = true;
+    try {
+      const key = tuneTrace.competitor;
+      const { added, removed } = redetectDiff;
+      let ok = true;
+      for (const pass of removed) {
+        const ack = await session.send(voidDetectionCommand(pass.ref));
+        if (!ack.ok) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        for (const at of added) {
+          const ack = await session.send(
+            insertLapCommand(key.adapter, key.competitor, Math.round(at), heat)
+          );
+          if (!ack.ok) {
+            ok = false;
+            break;
+          }
+        }
+      }
+      await afterCorrection();
+      if (ok) {
+        const plus = added.length === 1 ? '+1 pass' : `+${added.length} passes`;
+        toast.success(
+          `Committed re-detection for ${competitorName(key.competitor)}: ${plus}, −${removed.length} removed`
+        );
+      }
+    } finally {
+      committing = false;
+    }
+  }
+
   // ── Audit rendering helpers ──
   function auditLabel(kind: AuditKind): string {
     switch (kind) {
@@ -679,10 +796,13 @@
       {/if}
 
       {#if hasShownTrace && shownTrace}
+        {@const tuning = canControl && tuneTrace != null && tuneFor === shownPilot}
         <!-- Signal-as-evidence (Slice 4): the RSSI graph for the selected pilot's captured trace. A
              marker click selects that lap in the action surface below; the lap-list selection
-             highlights the same marker (two-way — `selectLap` is the one shared selection). Display
-             only — no re-detection (marshaling.html §3.2/§5). Sim heats (no trace) skip this. -->
+             highlights the same marker (two-way — `selectLap` is the one shared selection). With
+             control, the graph also carries the LIVE tuning surface (marshaling.html §5): draggable
+             enter/exit handles two-way with the "Tune detection" inputs below, plus the preview
+             pass markers of the uncommitted re-detection diff. Sim heats (no trace) skip this. -->
         <RssiGraph
           trace={shownTrace}
           laps={shownLaps}
@@ -691,7 +811,81 @@
           onaddlap={insertLap}
           {canControl}
           nameFor={competitorName}
+          onthresholds={tuning ? onGraphThresholds : undefined}
+          tuned={tuning && shownPilot !== undefined
+            ? { competitor: shownPilot, enter: tuneEnter, exit: tuneExit }
+            : undefined}
+          preview={tuning && shownPilot !== undefined && tuneValid
+            ? {
+                competitor: shownPilot,
+                added: redetectDiff.added,
+                removedRefs: redetectDiff.removed.map((p) => p.ref)
+              }
+            : undefined}
         />
+      {/if}
+
+      {#if canControl && hasShownTrace && tuneTrace && shownPilot !== undefined}
+        <!-- Tune detection (RH-style re-detection): move the levels, watch the preview, COMMIT to
+             make it official. The levels are a preview concern only — never written to the timer
+             (pushing calibration to RotorHazard via the plugin is a separate future feature). -->
+        <fieldset class="tune-detection">
+          <legend>Tune detection — {competitorName(shownPilot)}</legend>
+          <p class="muted hint">
+            Drag the enter/exit handles on the graph or type levels here. Laps re-detect live as a
+            preview — nothing changes until you commit.
+          </p>
+          <div class="row">
+            <label
+              >Enter
+              <input
+                type="number"
+                step="1"
+                bind:value={tuneEnter}
+                aria-label="Enter threshold"
+              /></label
+            >
+            <label
+              >Exit
+              <input type="number" step="1" bind:value={tuneExit} aria-label="Exit threshold" />
+            </label>
+            <button type="button" onclick={doResetThresholds}>Reset</button>
+            <button
+              type="button"
+              class="commit"
+              onclick={doCommitRedetect}
+              disabled={!tuneValid || !redetectDirty || committing}
+              title={!tuneValid
+                ? 'Enter must be above exit'
+                : !redetectDirty
+                  ? 'No change to commit — the re-detection matches the official passes'
+                  : undefined}>Commit re-detection</button
+            >
+          </div>
+          {#if !tuneValid}
+            <p class="tune-invalid" role="status">
+              Enter must be above exit — these levels detect nothing.
+            </p>
+          {:else}
+            <p class="tune-summary" role="status" data-testid="redetect-summary">
+              Would be {previewLapList.length} lap{previewLapList.length === 1 ? '' : 's'}
+              (+{redetectDiff.added.length} added, −{redetectDiff.removed.length} removed)
+            </p>
+            {#if redetectDirty}
+              <ol
+                class="preview-laps"
+                aria-label={`Preview laps for ${competitorName(shownPilot)}`}
+              >
+                {#each previewLapList as lap (lap.at)}
+                  <li>
+                    <span class="lap-num">Lap {lap.number}</span>
+                    <span class="lap-time">{formatMicros(lap.durationMicros)}</span>
+                  </li>
+                {/each}
+              </ol>
+            {/if}
+          {/if}
+        </fieldset>
       {/if}
 
       {#if shownLaps && shownLaps.competitors.length > 0}
@@ -1223,6 +1417,60 @@
   .danger-zone {
     border-color: color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
     background: var(--gf-danger-soft);
+  }
+  /* Tune detection: the live re-detection panel. Big readable summary — the "+A / −R" is what
+     the marshal decides on, outdoors on a laptop (the field-readability bar). */
+  .tune-detection {
+    border-color: color-mix(in srgb, var(--gf-accent) 35%, var(--gf-border));
+  }
+  .tune-detection input[type='number'] {
+    width: 6rem;
+    font-size: var(--gf-font-size-md);
+    font-family: var(--gf-font-mono);
+  }
+  .tune-summary {
+    margin: var(--gf-space-3) 0 0;
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text);
+    font-variant-numeric: tabular-nums;
+  }
+  .tune-invalid {
+    margin: var(--gf-space-3) 0 0;
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    color: color-mix(in srgb, var(--gf-danger) 80%, var(--gf-text));
+  }
+  .commit {
+    border: 1px solid var(--gf-accent);
+    background: var(--gf-accent-soft);
+  }
+  .commit:hover:not(:disabled) {
+    background: var(--gf-accent);
+    color: #061018;
+  }
+  .preview-laps {
+    margin: var(--gf-space-2) 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+  }
+  .preview-laps li {
+    display: flex;
+    align-items: baseline;
+    gap: var(--gf-space-2);
+    padding: var(--gf-space-1) var(--gf-space-3);
+    border: 1px dashed color-mix(in srgb, var(--gf-accent) 55%, var(--gf-border));
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+  }
+  .preview-laps .lap-num {
+    font-weight: var(--gf-font-weight-semibold);
   }
   .result-actions {
     border-color: color-mix(in srgb, var(--gf-accent) 35%, var(--gf-border));

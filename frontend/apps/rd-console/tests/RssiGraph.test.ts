@@ -248,6 +248,15 @@ describe('RssiGraph add-lap', () => {
     expect(onaddlap).not.toHaveBeenCalled();
   });
 
+  it('drag + preview props absent → display-only: no handles, no preview markers', () => {
+    render(RssiGraph, { trace: signalTrace, laps: lapList, selected: null, onselect: () => {} });
+    const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+    expect(svg.querySelector('.th-handle')).toBeNull();
+    expect(svg.querySelector('.preview-added')).toBeNull();
+    // The threshold lines themselves still draw (the recorded levels).
+    expect(svg.querySelector('.enter-line')).not.toBeNull();
+  });
+
   it('is review-only when canControl is false: a trace click does nothing', async () => {
     const onaddlap = vi.fn();
     render(RssiGraph, {
@@ -265,5 +274,139 @@ describe('RssiGraph add-lap', () => {
     // …and no "Add lap here" affordance is offered.
     await fireEvent.mouseMove(svg, { clientX: xForTime(30_000_000) });
     expect(screen.queryByRole('button', { name: /Add lap for/ })).toBeNull();
+  });
+});
+
+/**
+ * Live threshold tuning (the RH-style "Recalculate", marshaling.html §5): with `onthresholds`
+ * supplied, the enter/exit lines carry draggable + keyboard-nudgeable handles emitting the tuned
+ * levels; `tuned` overrides the drawn levels; `preview` draws the uncommitted re-detection diff
+ * (hollow dashed added-pass candidates, struck/dimmed would-be-removed lap markers). All
+ * preview-only — the graph itself never re-detects or sends anything.
+ */
+describe('RssiGraph threshold tuning + preview', () => {
+  // The value↔Y mapping mirrors the component's: the fixture's range is min/max over samples AND
+  // the recorded thresholds, padded 8% on each side; Y spans PAD_T..PAD_T+plotH top-down.
+  const PAD_T = 10;
+  const PAD_B = 18;
+  const PLOT_H = 220 - PAD_T - PAD_B; // 192
+  const ct = signalTrace.competitors[0];
+  const rawLo = Math.min(...ct.samples, ct.enter!, ct.exit!);
+  const rawHi = Math.max(...ct.samples, ct.enter!, ct.exit!);
+  const PAD = (rawHi - rawLo) * 0.08;
+  const LO = rawLo - PAD;
+  const HI = rawHi + PAD;
+  /** The clientY (box pinned 1:1 to the viewBox) that maps back to the given RSSI value. */
+  function yForValue(v: number): number {
+    return PAD_T + PLOT_H - ((v - LO) / (HI - LO)) * PLOT_H;
+  }
+  /** jsdom has no PointerEvent — dispatch a MouseEvent with the pointer type (same fields). */
+  function firePointer(el: Element, type: string, init: MouseEventInit): boolean {
+    return fireEvent(el, new MouseEvent(type, { bubbles: true, ...init }));
+  }
+
+  it('dragging the enter handle emits onthresholds with the level at the pointer', async () => {
+    const onthresholds = vi.fn();
+    render(RssiGraph, {
+      trace: signalTrace,
+      laps: lapList,
+      selected: null,
+      onselect: () => {},
+      canControl: true,
+      onthresholds
+    });
+    const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+    pinSvgBox(svg);
+
+    const handle = screen.getByRole('slider', { name: 'Enter threshold for ALICE' });
+    await firePointer(handle, 'pointerdown', { clientY: yForValue(110) });
+    await firePointer(handle, 'pointermove', { clientY: yForValue(120) });
+    // The drag emits BOTH levels: the dragged enter at the pointer, the exit unchanged.
+    expect(onthresholds).toHaveBeenLastCalledWith('ALICE', 120, 95);
+    // After release, further moves emit nothing.
+    await firePointer(handle, 'pointerup', {});
+    onthresholds.mockClear();
+    await firePointer(handle, 'pointermove', { clientY: yForValue(80) });
+    expect(onthresholds).not.toHaveBeenCalled();
+  });
+
+  it('dragging the exit handle emits the tuned exit with the enter unchanged', async () => {
+    const onthresholds = vi.fn();
+    render(RssiGraph, {
+      trace: signalTrace,
+      laps: lapList,
+      selected: null,
+      onselect: () => {},
+      canControl: true,
+      onthresholds
+    });
+    const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+    pinSvgBox(svg);
+
+    const handle = screen.getByRole('slider', { name: 'Exit threshold for ALICE' });
+    await firePointer(handle, 'pointerdown', { clientY: yForValue(95) });
+    await firePointer(handle, 'pointermove', { clientY: yForValue(85) });
+    expect(onthresholds).toHaveBeenLastCalledWith('ALICE', 110, 85);
+  });
+
+  it('arrow keys nudge the focused handle ±1 (keyboard access)', async () => {
+    const onthresholds = vi.fn();
+    render(RssiGraph, {
+      trace: signalTrace,
+      laps: lapList,
+      selected: null,
+      onselect: () => {},
+      canControl: true,
+      onthresholds
+    });
+    const enter = screen.getByRole('slider', { name: 'Enter threshold for ALICE' });
+    await fireEvent.keyDown(enter, { key: 'ArrowUp' });
+    expect(onthresholds).toHaveBeenLastCalledWith('ALICE', 111, 95);
+    await fireEvent.keyDown(enter, { key: 'ArrowDown' });
+    expect(onthresholds).toHaveBeenLastCalledWith('ALICE', 109, 95);
+    const exit = screen.getByRole('slider', { name: 'Exit threshold for ALICE' });
+    await fireEvent.keyDown(exit, { key: 'ArrowDown' });
+    expect(onthresholds).toHaveBeenLastCalledWith('ALICE', 110, 94);
+  });
+
+  it('`tuned` overrides the drawn levels for the tuned competitor', () => {
+    render(RssiGraph, {
+      trace: signalTrace,
+      laps: lapList,
+      selected: null,
+      onselect: () => {},
+      canControl: true,
+      onthresholds: () => {},
+      tuned: { competitor: 'ALICE', enter: 120, exit: 80 }
+    });
+    // The handles report the TUNED values, not the recorded 110/95.
+    const enter = screen.getByRole('slider', { name: 'Enter threshold for ALICE' });
+    expect(enter).toHaveAttribute('aria-valuenow', '120');
+    const exit = screen.getByRole('slider', { name: 'Exit threshold for ALICE' });
+    expect(exit).toHaveAttribute('aria-valuenow', '80');
+    // The caption meta reflects the live levels too.
+    const graph = screen.getByLabelText('RSSI signal graph');
+    expect(within(graph).getByText(/enter 120/)).toBeInTheDocument();
+  });
+
+  it('renders preview markers for added passes and restyles would-be-removed lap markers', () => {
+    render(RssiGraph, {
+      trace: signalTrace,
+      laps: lapList,
+      selected: null,
+      onselect: () => {},
+      canControl: true,
+      preview: { competitor: 'ALICE', added: [30_000_000, 60_000_000], removedRefs: [14] }
+    });
+    const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+    // Two hollow/dashed candidate markers for the added passes.
+    expect(svg.querySelectorAll('.preview-added')).toHaveLength(2);
+    // ALICE's lap 2 (end_ref 14) is restyled as would-be-removed; lap 1 (end_ref 12) is not.
+    const markers = svg.querySelectorAll('.marker');
+    expect(markers[1].classList.contains('removed')).toBe(true);
+    expect(markers[0].classList.contains('removed')).toBe(false);
+    // The legend explains the preview style.
+    const graph = screen.getByLabelText('RSSI signal graph');
+    expect(within(graph).getByText(/Preview pass/)).toBeInTheDocument();
   });
 });

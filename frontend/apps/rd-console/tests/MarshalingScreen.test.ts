@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/svelte';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
 import type {
   AuditEntry,
@@ -966,6 +966,167 @@ describe('Marshaling (Slice 3)', () => {
         expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
       );
       expect(screen.queryByText('maverick-4d9rp8')).not.toBeInTheDocument();
+    });
+  });
+
+  // ── Tune detection (the RH-style threshold re-detection with manual commit) ──────────────────
+  describe('tune detection (threshold re-detection)', () => {
+    // A tuning-friendly fixture: ALICE's trace has clean 1-sample peaks at exactly her official
+    // passes (holeshot 1s, gates 41s + 81s) plus a SMALLER peak at 60s that only crosses when the
+    // enter level is lowered. Laps are timed so `officialPasses` reconstructs [1s, 41s, 81s].
+    const TUNE_LAPS: LapList = {
+      competitors: [
+        {
+          competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+          laps: [
+            { number: 1, duration_micros: 40_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 },
+            { number: 2, duration_micros: 40_000_000, at: 81_000_000, start_ref: 12, end_ref: 14 }
+          ]
+        }
+      ]
+    };
+    const TUNE_TRACE = {
+      competitors: [
+        {
+          competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+          from: 0,
+          period_micros: 1_000_000,
+          // Baseline 70; peaks: 130 @1s (holeshot), 132 @41s, 105 @60s (sub-threshold), 130 @81s.
+          samples: Array.from({ length: 91 }, (_, i) =>
+            i === 1 ? 130 : i === 41 ? 132 : i === 60 ? 105 : i === 81 ? 130 : 70
+          ),
+          enter: 110,
+          exit: 95
+        }
+      ]
+    };
+
+    function renderTune(role?: 'readonly') {
+      return makeTestSession({
+        live: liveRunning,
+        laps: TUNE_LAPS,
+        signal: TUNE_TRACE,
+        role
+      });
+    }
+
+    it('shows the panel (seeded from the recorded thresholds) when a trace + control are present', () => {
+      const { session } = renderTune();
+      render(Marshaling, { session });
+      expect(screen.getByText(/Tune detection/)).toBeInTheDocument();
+      // Inputs initialize from the trace's recorded enter/exit.
+      expect((screen.getByLabelText('Enter threshold') as HTMLInputElement).value).toBe('110');
+      expect((screen.getByLabelText('Exit threshold') as HTMLInputElement).value).toBe('95');
+      // At the recorded levels the re-detection matches the official passes: nothing to commit.
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+        'Would be 2 laps (+0 added, −0 removed)'
+      );
+      expect(
+        (screen.getByRole('button', { name: 'Commit re-detection' }) as HTMLButtonElement).disabled
+      ).toBe(true);
+    });
+
+    it('is hidden without a trace and for a read-only session', () => {
+      const noTrace = makeTestSession({
+        live: liveRunning,
+        laps: TUNE_LAPS,
+        signal: emptySignalTrace
+      });
+      render(Marshaling, { session: noTrace.session });
+      expect(screen.queryByText(/Tune detection/)).toBeNull();
+      cleanup();
+      const { session } = renderTune('readonly');
+      render(Marshaling, { session });
+      expect(screen.queryByText(/Tune detection/)).toBeNull();
+    });
+
+    it('adjusting a threshold updates the LIVE preview without sending anything', async () => {
+      const { session, sendSpy } = renderTune();
+      render(Marshaling, { session });
+
+      // Lower enter to 100: the 105-peak at 60s now crosses → one ADDED pass, a 3-lap preview.
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '100' }
+      });
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+        'Would be 3 laps (+1 added, −0 removed)'
+      );
+      // The preview lap list renders the would-be laps (the 41→60s split: 19s + 21s).
+      const previewList = screen.getByLabelText(/Preview laps for ALICE/);
+      expect(previewList).toHaveTextContent('Lap 2');
+      expect(previewList).toHaveTextContent('19.000');
+      expect(previewList).toHaveTextContent('21.000');
+      // NOTHING was sent while adjusting — commit is explicit.
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(
+        (screen.getByRole('button', { name: 'Commit re-detection' }) as HTMLButtonElement).disabled
+      ).toBe(false);
+    });
+
+    it('flags equal/inverted thresholds instead of detecting', async () => {
+      const { session } = renderTune();
+      render(Marshaling, { session });
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), { target: { value: '95' } });
+      expect(screen.getByText(/Enter must be above exit/)).toBeInTheDocument();
+      expect(
+        (screen.getByRole('button', { name: 'Commit re-detection' }) as HTMLButtonElement).disabled
+      ).toBe(true);
+    });
+
+    it('Commit sends a heat-tagged InsertLap per ADDED pass', async () => {
+      const { session, sendSpy } = renderTune();
+      render(Marshaling, { session });
+
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '100' }
+      });
+      await fireEvent.click(screen.getByRole('button', { name: 'Commit re-detection' }));
+      // Exactly one command: the added pass at the 60s peak, tagged with the marshaled heat and
+      // the adapter from the trace's CompetitorKey.
+      await waitFor(() =>
+        expect(sendSpy).toHaveBeenCalledWith({
+          InsertLap: { adapter: 'rh-1', competitor: 'ALICE', at: 60_000_000, heat: 'heat-1' }
+        })
+      );
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('Commit sends a VoidDetection per REMOVED pass (the exact boundary refs)', async () => {
+      const { session, sendSpy } = renderTune();
+      render(Marshaling, { session });
+
+      // Raise enter above every peak but the 132 one: only the 41s pass survives — the holeshot
+      // (ref 10) and the 81s gate pass (ref 14) are removed.
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '131' }
+      });
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+        'Would be 0 laps (+0 added, −2 removed)'
+      );
+      await fireEvent.click(screen.getByRole('button', { name: 'Commit re-detection' }));
+      await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(2));
+      expect(sendSpy).toHaveBeenNthCalledWith(1, { VoidDetection: { target: 10 } });
+      expect(sendSpy).toHaveBeenNthCalledWith(2, { VoidDetection: { target: 14 } });
+    });
+
+    it('Reset restores the recorded thresholds and clears the preview diff', async () => {
+      const { session, sendSpy } = renderTune();
+      render(Marshaling, { session });
+
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '100' }
+      });
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent('+1 added');
+      await fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
+      expect((screen.getByLabelText('Enter threshold') as HTMLInputElement).value).toBe('110');
+      expect((screen.getByLabelText('Exit threshold') as HTMLInputElement).value).toBe('95');
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+        'Would be 2 laps (+0 added, −0 removed)'
+      );
+      expect(
+        (screen.getByRole('button', { name: 'Commit re-detection' }) as HTMLButtonElement).disabled
+      ).toBe(true);
+      expect(sendSpy).not.toHaveBeenCalled();
     });
   });
 
