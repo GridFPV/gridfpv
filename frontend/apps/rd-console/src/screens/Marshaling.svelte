@@ -119,6 +119,13 @@
   );
   // The marshaled heat's loop phase — drives which result transition (Finalize / Revert) is offered.
   const marshalPhase = $derived(marshalLive?.phase);
+  // An OFFICIAL (Final) result is LOCKED: the Director rejects every result-changing marshaling
+  // command on it (`require_not_final`, control_handler.rs) — mirror that gate here so the screen
+  // never offers a correction the server will bounce. Revert (the sanctioned re-open) is surfaced
+  // prominently in the lock banner; PROTESTS stay available (filing/resolving changes no result,
+  // so the Director exempts them). Inspection (laps, audit, tune preview) stays live too —
+  // committing is what's locked.
+  const resultLocked = $derived(marshalPhase === 'Final');
   // The result lifecycle (marshaling Slice 5): Provisional (Unofficial) vs Official (Final), with the
   // auto-official countdown when the round armed a protest window. The Finalize/Revert transitions
   // below now act on it from here too (B) — targeting the marshaled heat, never Race Control's.
@@ -348,7 +355,7 @@
 
   /** Add a lap for a competitor at an exact source-clock time (µs) — the graph's button path. */
   async function insertLap(competitor: CompetitorRef, at: number): Promise<void> {
-    if (!canControl || !heat) return;
+    if (!canControl || resultLocked || !heat) return;
     const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at), heat));
     if (ack.ok) await afterCorrection();
   }
@@ -610,7 +617,16 @@
   // (the error banner shows; the refresh reflects whatever landed).
   let committing = $state(false);
   async function doCommitRedetect(): Promise<void> {
-    if (!canControl || !heat || !tuneTrace || !tuneValid || !redetectDirty || committing) return;
+    if (
+      !canControl ||
+      resultLocked ||
+      !heat ||
+      !tuneTrace ||
+      !tuneValid ||
+      !redetectDirty ||
+      committing
+    )
+      return;
     committing = true;
     try {
       const key = tuneTrace.competitor;
@@ -769,7 +785,7 @@
           laps={shownLaps}
           {selected}
           onselect={selectLap}
-          onaddlap={insertLap}
+          onaddlap={resultLocked ? undefined : insertLap}
           {canControl}
           nameFor={competitorName}
           onthresholds={tuning ? onGraphThresholds : undefined}
@@ -811,16 +827,20 @@
               <input type="number" step="1" bind:value={tuneExit} aria-label="Exit threshold" />
             </label>
             <button type="button" onclick={doResetThresholds}>Reset</button>
+            <!-- The lock disables COMMITTING only — the sliders + preview above stay live, so an
+                 official result can still be inspected at other levels without changing it. -->
             <button
               type="button"
               class="commit"
               onclick={doCommitRedetect}
-              disabled={!tuneValid || !redetectDirty || committing}
-              title={!tuneValid
-                ? 'Enter must be above exit'
-                : !redetectDirty
-                  ? 'No change to commit — the re-detection matches the official passes'
-                  : undefined}>Commit re-detection</button
+              disabled={resultLocked || !tuneValid || !redetectDirty || committing}
+              title={resultLocked
+                ? 'This result is official — Revert it to make corrections.'
+                : !tuneValid
+                  ? 'Enter must be above exit'
+                  : !redetectDirty
+                    ? 'No change to commit — the re-detection matches the official passes'
+                    : undefined}>Commit re-detection</button
             >
           </div>
           {#if !tuneValid}
@@ -898,156 +918,176 @@
       {/if}
 
       {#if canControl}
-        <!-- Inline corrections on the selected lap -->
-        <fieldset class="selection-actions" disabled={!selected}>
-          <legend>
-            {#if selected}
-              Selected: {competitorName(selected.competitor)} · Lap {selected.lap.number}
-            {:else}
-              Select a lap to correct
-            {/if}
-          </legend>
-          <div class="row">
-            <button type="button" onclick={doVoidSelected} disabled={!selected}
-              >Remove (void)</button
-            >
-            <label class="time"
-              >Time (s)
-              <input
-                type="number"
-                step="0.001"
-                bind:value={editSeconds}
-                aria-label="Correction time"
-              />
-            </label>
-            <button type="button" onclick={doSplitSelected} disabled={!selected}>Split</button>
-            <button type="button" onclick={doEditTimeSelected} disabled={!selected}
-              >Edit time</button
-            >
-            <button type="button" onclick={doInsertAfterSelected} disabled={!selected}
-              >Insert after</button
-            >
-            <button
-              type="button"
-              onclick={doThrowOutSelected}
-              disabled={!selected}
-              title="Exclude this valid lap from the scored count (the lap stays real)"
-              >Throw out lap</button
-            >
+        {#if resultLocked}
+          <!-- The official-result lock: the Director rejects every result-changing ruling on a
+               Final heat, so the correction surfaces below are withheld entirely and the ONE way
+               forward — Revert (the sanctioned re-open) — lives right here in the banner. Same
+               handler + confirm semantics as the result-lifecycle control. Protests stay open
+               below (filing/resolving changes no result; the server exempts them). -->
+          <div class="official-lock" role="status" aria-label="Official result lock">
+            <p>
+              This result is official — Revert it to make corrections. Protests may still be filed.
+            </p>
+            <ConfirmButton onconfirm={doRevert} disabled={!heat}>Revert → Unofficial</ConfirmButton>
           </div>
-        </fieldset>
-
-        <!-- Add a brand-new lap (works with zero existing laps). On the graph, click a competitor's
-             trace to add at the cursor's time; here, pick a competitor + a typed time so it also
-             works for sim heats with no graph. -->
-        <fieldset>
-          <legend>Add a lap</legend>
-          <p class="muted hint">
-            {#if hasTrace}
-              Click a competitor's trace on the graph to add a lap at that time, or add one at a
-              typed time here.
-            {:else}
-              Add a missed lap at a typed time (source clock) — works even with no laps yet.
-            {/if}
-          </p>
-          <div class="row">
-            <label
-              >Competitor
-              <select bind:value={addLapTarget} aria-label="Add-lap competitor">
-                <option value="" disabled>—</option>
-                {#each competitors as c (c)}<option value={c}>{competitorName(c)}</option>{/each}
-              </select>
-            </label>
-            <label class="time"
-              >Time (s)
-              <input
-                type="number"
-                step="0.001"
-                min="0"
-                bind:value={addLapSeconds}
-                aria-label="Add-lap time"
-              />
-            </label>
-            <button type="button" onclick={doAddLapAtTime} disabled={!addLapTarget}>Add lap</button>
-          </div>
-        </fieldset>
-
-        <!-- Per-competitor rulings -->
-        <fieldset>
-          <legend>Competitor ruling</legend>
-          <div class="row">
-            <label
-              >Competitor
-              <select bind:value={penaltyTarget} aria-label="Ruling competitor">
-                <option value="" disabled>—</option>
-                {#each competitors as c (c)}<option value={c}>{competitorName(c)}</option>{/each}
-              </select>
-            </label>
-            <label
-              >Kind
-              <select bind:value={penaltyKind} aria-label="Penalty kind">
-                <option value="dq">Disqualify</option>
-                <option value="time">Time added</option>
-                <option value="points">Points deducted</option>
-              </select>
-            </label>
-            {#if penaltyKind === 'time'}
-              <!-- A time penalty only worsens a result: a negative amount would silently CREDIT
-                   time (improving the competitor), so the input floors at 0.1s and the builder
-                   clamps non-positive amounts to a 0µs no-op as a backstop. -->
-              <label>
-                Seconds
-                <input type="number" step="0.1" min="0.1" bind:value={penaltySeconds} />
-              </label>
-            {:else if penaltyKind === 'points'}
-              <label
-                >Points
+        {:else}
+          <!-- Inline corrections on the selected lap -->
+          <fieldset class="selection-actions" disabled={!selected}>
+            <legend>
+              {#if selected}
+                Selected: {competitorName(selected.competitor)} · Lap {selected.lap.number}
+              {:else}
+                Select a lap to correct
+              {/if}
+            </legend>
+            <div class="row">
+              <button type="button" onclick={doVoidSelected} disabled={!selected}
+                >Remove (void)</button
+              >
+              <label class="time"
+                >Time (s)
                 <input
                   type="number"
-                  step="1"
-                  min="0"
-                  bind:value={penaltyPoints}
-                  aria-label="Points to deduct"
+                  step="0.001"
+                  bind:value={editSeconds}
+                  aria-label="Correction time"
                 />
               </label>
-            {:else}
-              <label
-                >Reason (optional)
-                <input
-                  type="text"
-                  bind:value={dqReason}
-                  placeholder="e.g. cut the course"
-                  aria-label="DQ reason"
-                />
-              </label>
-            {/if}
-            <button type="button" onclick={doPenalty} disabled={!penaltyTarget || !heat}
-              >Apply</button
-            >
-          </div>
-          {#if penaltyKind === 'points'}
-            <p class="muted hint">Points affect season / event standings, not this heat's laps.</p>
-          {/if}
-          <div class="row">
-            <label
-              >Reverse a ruling
-              <select bind:value={reverseTargetRef} aria-label="Reverse ruling">
-                <option value="" disabled>—</option>
-                {#each reversibleRulings as p (p.at_ref)}
-                  <option value={p.at_ref}>{rulingOptionLabel(p, renderInputs)}</option>
-                {/each}
-              </select>
-            </label>
-            <button
-              type="button"
-              onclick={doReverse}
-              disabled={reverseTargetRef === '' || reversibleRulings.length === 0}
-              >Reverse ruling</button
-            >
-          </div>
-        </fieldset>
+              <button type="button" onclick={doSplitSelected} disabled={!selected}>Split</button>
+              <button type="button" onclick={doEditTimeSelected} disabled={!selected}
+                >Edit time</button
+              >
+              <button type="button" onclick={doInsertAfterSelected} disabled={!selected}
+                >Insert after</button
+              >
+              <button
+                type="button"
+                onclick={doThrowOutSelected}
+                disabled={!selected}
+                title="Exclude this valid lap from the scored count (the lap stays real)"
+                >Throw out lap</button
+              >
+            </div>
+          </fieldset>
 
-        <!-- Protest sub-panel: file → resolve (append-only fact pair) -->
+          <!-- Add a brand-new lap (works with zero existing laps). On the graph, click a competitor's
+             trace to add at the cursor's time; here, pick a competitor + a typed time so it also
+             works for sim heats with no graph. -->
+          <fieldset>
+            <legend>Add a lap</legend>
+            <p class="muted hint">
+              {#if hasTrace}
+                Click a competitor's trace on the graph to add a lap at that time, or add one at a
+                typed time here.
+              {:else}
+                Add a missed lap at a typed time (source clock) — works even with no laps yet.
+              {/if}
+            </p>
+            <div class="row">
+              <label
+                >Competitor
+                <select bind:value={addLapTarget} aria-label="Add-lap competitor">
+                  <option value="" disabled>—</option>
+                  {#each competitors as c (c)}<option value={c}>{competitorName(c)}</option>{/each}
+                </select>
+              </label>
+              <label class="time"
+                >Time (s)
+                <input
+                  type="number"
+                  step="0.001"
+                  min="0"
+                  bind:value={addLapSeconds}
+                  aria-label="Add-lap time"
+                />
+              </label>
+              <button type="button" onclick={doAddLapAtTime} disabled={!addLapTarget}
+                >Add lap</button
+              >
+            </div>
+          </fieldset>
+
+          <!-- Per-competitor rulings -->
+          <fieldset>
+            <legend>Competitor ruling</legend>
+            <div class="row">
+              <label
+                >Competitor
+                <select bind:value={penaltyTarget} aria-label="Ruling competitor">
+                  <option value="" disabled>—</option>
+                  {#each competitors as c (c)}<option value={c}>{competitorName(c)}</option>{/each}
+                </select>
+              </label>
+              <label
+                >Kind
+                <select bind:value={penaltyKind} aria-label="Penalty kind">
+                  <option value="dq">Disqualify</option>
+                  <option value="time">Time added</option>
+                  <option value="points">Points deducted</option>
+                </select>
+              </label>
+              {#if penaltyKind === 'time'}
+                <!-- A time penalty only worsens a result: a negative amount would silently CREDIT
+                   time (improving the competitor), so the input floors at 0.1s and the builder
+                   clamps non-positive amounts to a 0µs no-op as a backstop. -->
+                <label>
+                  Seconds
+                  <input type="number" step="0.1" min="0.1" bind:value={penaltySeconds} />
+                </label>
+              {:else if penaltyKind === 'points'}
+                <label
+                  >Points
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    bind:value={penaltyPoints}
+                    aria-label="Points to deduct"
+                  />
+                </label>
+              {:else}
+                <label
+                  >Reason (optional)
+                  <input
+                    type="text"
+                    bind:value={dqReason}
+                    placeholder="e.g. cut the course"
+                    aria-label="DQ reason"
+                  />
+                </label>
+              {/if}
+              <button type="button" onclick={doPenalty} disabled={!penaltyTarget || !heat}
+                >Apply</button
+              >
+            </div>
+            {#if penaltyKind === 'points'}
+              <p class="muted hint">
+                Points affect season / event standings, not this heat's laps.
+              </p>
+            {/if}
+            <div class="row">
+              <label
+                >Reverse a ruling
+                <select bind:value={reverseTargetRef} aria-label="Reverse ruling">
+                  <option value="" disabled>—</option>
+                  {#each reversibleRulings as p (p.at_ref)}
+                    <option value={p.at_ref}>{rulingOptionLabel(p, renderInputs)}</option>
+                  {/each}
+                </select>
+              </label>
+              <button
+                type="button"
+                onclick={doReverse}
+                disabled={reverseTargetRef === '' || reversibleRulings.length === 0}
+                >Reverse ruling</button
+              >
+            </div>
+          </fieldset>
+        {/if}
+
+        <!-- Protest sub-panel: file → resolve (append-only fact pair). NOT inside the Final lock:
+             protests change no result, so they stay open on an official one (the Director allows
+             them; an upheld protest is then acted on via Revert). -->
         <fieldset>
           <legend>Protests</legend>
           <div class="row">
@@ -1120,8 +1160,9 @@
                 : undefined}>Finalize → Official</button
             >
           {:else if marshalPhase === 'Final'}
-            <p class="muted">Official — revert to re-open the result for correction.</p>
-            <ConfirmButton onconfirm={doRevert} disabled={!heat}>Revert → Unofficial</ConfirmButton>
+            <!-- The Revert control moved into the lock banner above (the one affordance, not two
+                 identical buttons) — this panel just states the lifecycle. -->
+            <p class="muted">Official — use Revert (in the banner above) to re-open the result.</p>
           {:else}
             <p class="muted">
               No result to finalize yet — this heat hasn’t finished (it’s {marshalPhase ??
@@ -1130,13 +1171,15 @@
           {/if}
         </fieldset>
 
-        <fieldset class="danger-zone">
-          <legend>Void the heat</legend>
-          <p class="muted">Throws out the whole heat — it will not count.</p>
-          <ConfirmButton onconfirm={doVoidHeat} variant="danger" disabled={!heat}>
-            Void heat
-          </ConfirmButton>
-        </fieldset>
+        {#if !resultLocked}
+          <fieldset class="danger-zone">
+            <legend>Void the heat</legend>
+            <p class="muted">Throws out the whole heat — it will not count.</p>
+            <ConfirmButton onconfirm={doVoidHeat} variant="danger" disabled={!heat}>
+              Void heat
+            </ConfirmButton>
+          </fieldset>
+        {/if}
       {/if}
     </div>
 
@@ -1229,6 +1272,26 @@
     margin: 0;
     color: var(--gf-text);
     font-size: var(--gf-font-size-sm);
+  }
+  /* The official-result lock banner: prominent (the field-readability bar), in the Official
+     violet so it reads as the same lifecycle the header badge shows, with the Revert affordance
+     right in it. */
+  .official-lock {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-3) var(--gf-space-4);
+    border: 1px solid color-mix(in srgb, var(--gf-phase-scored) 45%, var(--gf-border));
+    border-radius: var(--gf-radius-md);
+    background: color-mix(in srgb, var(--gf-phase-scored) 14%, var(--gf-elevated));
+  }
+  .official-lock p {
+    margin: 0;
+    color: var(--gf-text);
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
   }
   .layout {
     display: grid;

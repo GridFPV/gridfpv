@@ -374,6 +374,129 @@ describe('Marshaling (Slice 3)', () => {
     expect(sendSpy).toHaveBeenCalledWith({ Revert: { heat: 'heat-1' } });
   });
 
+  // ── The official-result lock: a Final heat rejects result-changing corrections ───────────────
+  //
+  // The Director now bounces every result-changing marshaling command on a Final heat
+  // (`require_not_final`, control_handler.rs) — the screen mirrors the gate: a prominent banner
+  // carrying the WORKING Revert affordance, every correction surface withheld, protests exempt
+  // (filing/resolving changes no result), and inspection (laps / audit / tune preview) still live.
+  describe('official (Final) result lock', () => {
+    const FINAL_LIVE: LiveRaceState = { ...liveRunning, phase: 'Final', lifecycle: 'Official' };
+
+    it('shows the lock banner and withholds every correction surface on a Final heat', async () => {
+      const { session, sendSpy } = makeTestSession({
+        live: FINAL_LIVE,
+        laps: lapList,
+        audit: marshalingAudit,
+        signal: signalTrace
+      });
+      render(Marshaling, { session });
+
+      // The banner, with the Revert affordance IN it.
+      const banner = screen.getByRole('status', { name: 'Official result lock' });
+      expect(banner).toHaveTextContent(
+        'This result is official — Revert it to make corrections. Protests may still be filed.'
+      );
+      expect(within(banner).getByRole('button', { name: /Revert/ })).toBeInTheDocument();
+
+      // Laps + audit still render (inspection is fine)…
+      expect(screen.getByRole('button', { name: /Lap 1\s*41\.000/ })).toBeInTheDocument();
+      expect(screen.getByText('CARMEN · DQ applied')).toBeInTheDocument();
+
+      // …but every result-changing surface is gone: the lap action buttons…
+      expect(screen.queryByRole('button', { name: 'Remove (void)' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Split' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Edit time' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Insert after' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Throw out lap' })).toBeNull();
+      // …the Add-lap control…
+      expect(screen.queryByRole('button', { name: 'Add lap' })).toBeNull();
+      expect(screen.queryByLabelText('Add-lap competitor')).toBeNull();
+      // …the penalty form + the reverse-ruling picker…
+      expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
+      expect(screen.queryByLabelText('Reverse ruling')).toBeNull();
+      // …and the heat-void danger zone.
+      expect(screen.queryByRole('button', { name: 'Void heat' })).toBeNull();
+
+      // The graph's add-lap path is unwired too: hovering the trace offers NO "Add lap" button
+      // (the parent stops passing `onaddlap` down while the result is locked).
+      const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+      vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({
+        left: 0,
+        top: 0,
+        right: 1000,
+        bottom: 220,
+        width: 1000,
+        height: 220,
+        x: 0,
+        y: 0,
+        toJSON: () => ({})
+      } as DOMRect);
+      await fireEvent.mouseMove(svg, { clientX: 500 });
+      expect(screen.queryByRole('button', { name: /Add lap for ALICE/ })).toBeNull();
+
+      // Nothing was sent by any of the above.
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+
+    it('the banner Revert WORKS — it sends the command, and the Unofficial flip re-enables everything', async () => {
+      const { session, sendSpy, pushLive } = makeTestSession({ live: FINAL_LIVE, laps: lapList });
+      render(Marshaling, { session });
+
+      // One click in the banner performs the Revert (same confirm semantics as the lifecycle
+      // control — it reuses the same handler).
+      const banner = screen.getByRole('status', { name: 'Official result lock' });
+      await fireEvent.click(within(banner).getByRole('button', { name: /Revert/ }));
+      expect(sendSpy).not.toHaveBeenCalled(); // confirm-first (destructive re-open)
+      await fireEvent.click(within(banner).getByRole('button', { name: 'Confirm' }));
+      expect(sendSpy).toHaveBeenCalledWith({ Revert: { heat: 'heat-1' } });
+
+      // The phase flips to Unofficial (the stream re-folds): the lock lifts — banner gone,
+      // correction surfaces back.
+      pushLive({ ...liveRunning, phase: 'Unofficial', lifecycle: { Provisional: {} } });
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Remove (void)' })).toBeInTheDocument()
+      );
+      expect(screen.queryByRole('status', { name: 'Official result lock' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Add lap' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Void heat' })).toBeInTheDocument();
+    });
+
+    it('protests stay ENABLED on a Final heat — file and resolve both send (the exemption)', async () => {
+      const audit: AuditEntry[] = [
+        {
+          kind: 'ProtestFiled',
+          at: 1_700_000_000_000_000,
+          at_ref: 22,
+          competitor: 'BOB',
+          summary: 'Protest filed: contact'
+        }
+      ];
+      const { session, sendSpy } = makeTestSession({ live: FINAL_LIVE, laps: lapList, audit });
+      render(Marshaling, { session });
+
+      // Filing against the official result needs no Revert.
+      await fireEvent.change(screen.getByLabelText('Protest competitor'), {
+        target: { value: 'BOB' }
+      });
+      await fireEvent.input(screen.getByLabelText('Protest note'), {
+        target: { value: 'contact on lap 2' }
+      });
+      await fireEvent.click(screen.getByRole('button', { name: 'File protest' }));
+      expect(sendSpy).toHaveBeenCalledWith({
+        FileProtest: { heat: 'heat-1', competitor: 'BOB', note: 'contact on lap 2' }
+      });
+
+      // Resolving (e.g. denying) one needs no Revert either.
+      await fireEvent.change(screen.getByLabelText('Resolve protest'), { target: { value: '22' } });
+      await fireEvent.change(screen.getByLabelText('Protest outcome'), {
+        target: { value: 'Denied' }
+      });
+      await fireEvent.click(screen.getByRole('button', { name: 'Resolve protest' }));
+      expect(sendSpy).toHaveBeenCalledWith({ ResolveProtest: { target: 22, outcome: 'Denied' } });
+    });
+  });
+
   // ── The Recent-rulings strip (the full trail moved to the event-wide Audit page) ─────────────
   it('the Recent-rulings strip renders the latest entries newest-first (composed lines)', () => {
     const { session } = makeTestSession({
@@ -1242,6 +1365,33 @@ describe('Marshaling (Slice 3)', () => {
       await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(2));
       expect(sendSpy).toHaveBeenNthCalledWith(1, { VoidDetection: { target: 10 } });
       expect(sendSpy).toHaveBeenNthCalledWith(2, { VoidDetection: { target: 14 } });
+    });
+
+    it('keeps the tune PREVIEW live on a Final heat but locks Commit with the explaining title', async () => {
+      // Inspection is fine on an official result — the sliders + preview stay live — but
+      // COMMITTING would re-score it, so the button is disabled with the revert-first title.
+      const { session, sendSpy } = makeTestSession({
+        live: { ...liveRunning, phase: 'Final', lifecycle: 'Official' },
+        laps: TUNE_LAPS,
+        signal: TUNE_TRACE
+      });
+      render(Marshaling, { session });
+
+      // The preview still re-detects live at the adjusted level (a dirty +1 diff)…
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '100' }
+      });
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+        'Would be 3 laps (+1 added, −0 removed)'
+      );
+      // …but Commit is locked, and the title says why.
+      const commit = screen.getByRole('button', {
+        name: 'Commit re-detection'
+      }) as HTMLButtonElement;
+      expect(commit.disabled).toBe(true);
+      expect(commit.title).toBe('This result is official — Revert it to make corrections.');
+      await fireEvent.click(commit);
+      expect(sendSpy).not.toHaveBeenCalled();
     });
 
     it('Reset restores the recorded thresholds and clears the preview diff', async () => {

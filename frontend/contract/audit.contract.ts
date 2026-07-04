@@ -2,8 +2,10 @@
  * Event-wide audit contract: `GET /events/{id}/audit` plus the real `eventAudit` client helper.
  *
  * Drives a real Director end-to-end: directory setup (class + pilots + round), schedule + run +
- * finalize a heat, then two marshaling rulings — a penalty (heat-tagged) and a detection void
- * (target-addressed, aimed at a real pass offset read back from the laps projection). The
+ * finalize a heat — where a ruling now BOUNCES (an official Final result is locked; the typed
+ * revert-first BadRequest is asserted) — then Revert and two marshaling rulings: a penalty
+ * (heat-tagged) and a detection void (target-addressed, aimed at a real pass offset read back
+ * from the laps projection), re-finalizing after. The
  * event-wide audit must then serve both rulings through the real `@gridfpv/protocol-client`,
  * each **tagged with the heat** it rules on and in **newest-first** order (descending global
  * append offset) — the same window-attributed entries Marshaling's per-heat `?projection=audit`
@@ -90,8 +92,23 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
     expect((await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: HEAT } })).ok).toBe(true);
     expect((await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
 
-    // Two rulings on the finalized heat: a heat-tagged penalty, then a target-addressed void
-    // aimed at a REAL pass offset (pilot A's first lap's end pass, read from the laps projection).
+    // The heat is now OFFICIAL (Final) — a ruling on it must be REJECTED with the revert-first
+    // gate (`require_not_final`, control_handler.rs): an official result never re-scores silently.
+    const locked = await rdControl(director.baseUrl, TOKEN, {
+      ApplyPenalty: {
+        heat: HEAT,
+        competitor: pilotB.id,
+        penalty: { Disqualify: { reason: 'contract: flew the wrong course' } }
+      }
+    });
+    expect(locked.ok).toBe(false);
+    expect(locked.error?.code).toBe('BadRequest');
+    expect(locked.error?.message).toContain('official (Final)');
+
+    // Revert (the sanctioned re-open), THEN the two rulings land: a heat-tagged penalty and a
+    // target-addressed void aimed at a REAL pass offset (pilot A's first lap's end pass, read
+    // from the laps projection). Re-finalize afterwards — the corrected result goes official.
+    expect((await rdControl(director.baseUrl, TOKEN, { Revert: { heat: HEAT } })).ok).toBe(true);
     expect(
       (
         await rdControl(director.baseUrl, TOKEN, {
@@ -107,6 +124,7 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
     expect(
       (await rdControl(director.baseUrl, TOKEN, { VoidDetection: { target: voidTarget } })).ok
     ).toBe(true);
+    expect((await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
 
     // The event-wide audit, through the real client helper.
     const trail = await eventAudit(director.baseUrl, PRACTICE_EVENT_ID);
