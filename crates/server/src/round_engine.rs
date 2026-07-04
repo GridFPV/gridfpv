@@ -3644,10 +3644,7 @@ mod tests {
         // finals heat ran.
         let raced = qual_round("q1", "open");
         let unraced = qual_round("q2", "open");
-        let meta = meta_with(
-            vec![raced, unraced],
-            vec![member("open", &["A", "B", "C"])],
-        );
+        let meta = meta_with(vec![raced, unraced], vec![member("open", &["A", "B", "C"])]);
         let log = scored_qual_heat("q1-1", "q1", "open", &["A", "B", "C"]);
         let standings = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
         for row in &standings.standings {
