@@ -2560,6 +2560,7 @@ mod tests {
             start_procedure: None,
             grace_window: None,
             protest_window: None,
+            min_lap_secs: None,
         };
         registry
             .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
@@ -2774,6 +2775,7 @@ mod tests {
             // Zero grace so the fallback deadline IS the window end.
             grace_window: Some(GraceWindow::Duration { micros: 0 }),
             protest_window: None,
+            min_lap_secs: None,
         };
         let round = registry
             .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
@@ -3010,6 +3012,7 @@ mod tests {
             protest_window: Some(ProtestWindow::After {
                 micros: window_micros,
             }),
+            min_lap_secs: None,
         };
         registry
             .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)

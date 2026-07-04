@@ -102,10 +102,14 @@ def initialize(rhapi):
                 val = int(round(baseline + (peak - baseline) * env))
                 n.history_values.append(val)
                 n.history_times.append(t0 + i * (sample_ms / 1000.0))
-            n.current_rssi = peak
             n.pass_peak_rssi = peak
             # Record the lap through RH's genuine pass pipeline (needs the race RACING).
             interface().intf_simulate_lap(node, 0)
+            # Land the live RSSI back at BASELINE, not the peak: a node parked at peak reads
+            # as "sitting on the gate" to RH's signal machinery at the NEXT race start, which
+            # fired an instant phantom crossing on every node — doubling the injected holeshot
+            # into a 4ms "lap 1" that shifted every real lap's number by one.
+            n.current_rssi = baseline
             ack("pass", node=node, peak=peak)
         except Exception as ex:  # noqa: BLE001
             nack("pass", ex)

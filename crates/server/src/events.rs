@@ -403,6 +403,16 @@ pub struct RoundDef {
     /// Additive (`#[serde(default)]`) so a round persisted before this field reads back as `Off`.
     #[serde(default)]
     pub protest_window: ProtestWindow,
+    /// The **minimum lap time** floor, in seconds (D26) — GridFPV-native, because timers are
+    /// dumb pass emitters and GridFPV owns lap semantics: a raw pass that would close a lap
+    /// shorter than this (a gate reflection, a double-detection) is AUTO-SUPPRESSED by the
+    /// corrected-passes fold — visible on the marshaling lap list as a struck removal-record
+    /// row with a Restore override (marshal-created passes — inserts, re-times — are exempt:
+    /// an explicit ruling always outranks the floor). `None`/`0` = off (rounds predating the
+    /// field keep their scored results bit-identical).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub min_lap_secs: Option<u32>,
     /// The **practice duration** for an open-practice round, in seconds (open-practice refinement).
     /// When set, the runtime clock **auto-ends the practice** (`Running → Unofficial`) once the
     /// heat's elapsed running time reaches this limit — independent of any win condition (the time is
@@ -840,6 +850,9 @@ pub struct NewRoundReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub protest_window: Option<ProtestWindow>,
+    /// Minimum lap time floor in seconds (D26); omitted/0 ⇒ off.
+    #[serde(default)]
+    pub min_lap_secs: Option<u32>,
 }
 
 /// The body of `PUT /events/{id}/rounds/{round}` — the editable fields of an existing round (race
@@ -895,6 +908,9 @@ pub struct UpdateRoundReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub protest_window: Option<ProtestWindow>,
+    /// Minimum lap time floor in seconds (D26); omitted/0 ⇒ off.
+    #[serde(default)]
+    pub min_lap_secs: Option<u32>,
 }
 
 impl EventMeta {
@@ -1414,6 +1430,7 @@ impl EventRegistry {
             None,
         )?;
         validate_round_params(&req.format, &req.params)?;
+        validate_min_lap(req.min_lap_secs)?;
 
         // Auto-generate a unique round id within this event: slug(label) + short suffix, retried on
         // the (astronomically unlikely) collision so the id is always fresh.
@@ -1443,6 +1460,7 @@ impl EventRegistry {
             // The protest window (marshaling Slice 5): omitted ⇒ `Off` (manual finalize only).
             protest_window: req.protest_window.unwrap_or_default(),
             // The optional open-practice duration (open-practice refinement): carried through as-is.
+            min_lap_secs: req.min_lap_secs.filter(|s| *s > 0),
             time_limit_secs: req.time_limit_secs,
         };
         event.meta.rounds.push(round.clone());
@@ -1538,6 +1556,7 @@ impl EventRegistry {
             Some(round_id),
         )?;
         validate_round_params(&req.format, &req.params)?;
+        validate_min_lap(req.min_lap_secs)?;
 
         // A RACED round's scoring-defining config is FROZEN (user-approved policy): scoring
         // re-derives from the round's current config, so editing these would silently re-score
@@ -1562,6 +1581,11 @@ impl EventRegistry {
             }
             if effective_channel_mode != existing.channel_mode {
                 frozen.push("channel mode");
+            }
+            // The min-lap floor suppresses passes from the scored chain — editing it would
+            // silently re-score raced heats, so it freezes with the win condition.
+            if req.min_lap_secs.filter(|s| *s > 0) != existing.min_lap_secs {
+                frozen.push("min lap time");
             }
             // Params: only `rounds` (heats per pilot) may change once raced.
             let differs_beyond_rounds = {
@@ -1602,6 +1626,8 @@ impl EventRegistry {
             grace_window: req.grace_window.unwrap_or_else(default_grace_window),
             // The protest window (marshaling Slice 5): omitted ⇒ `Off` (manual finalize only).
             protest_window: req.protest_window.unwrap_or_default(),
+            // The min-lap floor (D26): normalized so 0 and omitted are the same OFF.
+            min_lap_secs: req.min_lap_secs.filter(|s| *s > 0),
             // The optional open-practice duration (open-practice refinement): replaced wholesale.
             time_limit_secs: req.time_limit_secs,
         };
@@ -2339,6 +2365,19 @@ fn validate_round_fields(
 /// options, a bool must be true/false. Undeclared keys pass through untouched (e.g. the points
 /// table, which has its own editor). Called from add_round/update_round alongside
 /// [`validate_round_fields`].
+/// Validate the min-lap floor (D26): 0/omitted is OFF; anything above 10 minutes is a typo
+/// (no track has a 10-minute minimum lap), rejected before it can silently eat every lap.
+fn validate_min_lap(min_lap_secs: Option<u32>) -> Result<(), RoundError> {
+    if let Some(secs) = min_lap_secs {
+        if secs > 600 {
+            return Err(RoundError::Invalid(format!(
+                "min lap time {secs}s is out of range (0 = off, up to 600s)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_round_params(
     format: &str,
     params: &BTreeMap<String, String>,
@@ -3113,6 +3152,7 @@ mod tests {
             grace_window: None,
             protest_window: None,
         }
+        min_lap_secs: None,
     }
 
     #[test]
@@ -3177,6 +3217,7 @@ mod tests {
                     start_procedure: None,
                     grace_window: None,
                     protest_window: None,
+                    min_lap_secs: None,
                 },
             )
             .expect("an open-practice round with no win condition saves");
