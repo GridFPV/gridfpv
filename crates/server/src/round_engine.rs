@@ -1903,6 +1903,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -2328,6 +2329,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -3121,6 +3123,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -3281,6 +3284,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -3692,6 +3696,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -3863,6 +3868,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }

@@ -67,4 +67,8 @@ grace_window?: GraceWindow,
  * The new protest window (marshaling Slice 5). Optional — omit for the default
  * [`ProtestWindow::Off`] (manual finalize only).
  */
-protest_window?: ProtestWindow, };
+protest_window?: ProtestWindow, 
+/**
+ * Minimum lap time floor in seconds (D26); omitted/0 ⇒ off.
+ */
+min_lap_secs: number | null, };

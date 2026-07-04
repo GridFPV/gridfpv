@@ -77,4 +77,8 @@ grace_window?: GraceWindow,
  * [`ProtestWindow::Off`] (manual finalize only); supply [`ProtestWindow::After`] to arm the
  * auto-official timer.
  */
-protest_window?: ProtestWindow, };
+protest_window?: ProtestWindow, 
+/**
+ * Minimum lap time floor in seconds (D26); omitted/0 ⇒ off.
+ */
+min_lap_secs: number | null, };

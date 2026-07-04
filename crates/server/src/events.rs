@@ -3151,8 +3151,8 @@ mod tests {
             start_procedure: None,
             grace_window: None,
             protest_window: None,
+            min_lap_secs: None,
         }
-        min_lap_secs: None,
     }
 
     #[test]
@@ -3314,6 +3314,7 @@ mod tests {
             start_procedure: None,
             grace_window: None,
             protest_window: None,
+            min_lap_secs: None,
         };
 
         // Race-day knobs (label / staging / etc.) and the `rounds` param stay editable.
@@ -3372,6 +3373,7 @@ mod tests {
                     start_procedure: None,
                     grace_window: None,
                     protest_window: None,
+                    min_lap_secs: None,
                 },
             )
             .unwrap();
@@ -3489,6 +3491,7 @@ mod tests {
                 start_procedure: None,
                 grace_window: None,
                 protest_window: None,
+                min_lap_secs: None,
             },
         );
         assert!(matches!(self_ref, Err(RoundError::Invalid(_))));
@@ -3536,6 +3539,7 @@ mod tests {
                 start_procedure: None,
                 grace_window: None,
                 protest_window: None,
+                min_lap_secs: None,
             },
         );
         assert!(matches!(self_winners, Err(RoundError::Invalid(_))));
