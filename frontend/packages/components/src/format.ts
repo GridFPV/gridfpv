@@ -9,13 +9,18 @@
 
 import type { Metric } from '@gridfpv/types';
 
-/** Format a clock duration in **milliseconds** as `M:SS.mmm` (e.g. `1:23.456`). */
+/**
+ * Format a clock duration in **milliseconds** as `M:SS.mmm` (e.g. `1:23.456`). A negative value —
+ * a countdown past its zero (a timed heat inside its grace window) — renders sign-prefixed
+ * (`-0:03.250`).
+ */
 export function formatClock(ms: number): string {
-  const totalMs = Math.max(0, Math.floor(ms));
+  const totalMs = Math.floor(Math.abs(ms));
   const minutes = Math.floor(totalMs / 60000);
   const seconds = Math.floor((totalMs % 60000) / 1000);
   const millis = totalMs % 1000;
-  return `${minutes}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+  const sign = ms < 0 ? '-' : '';
+  return `${sign}${minutes}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
 }
 
 /**

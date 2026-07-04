@@ -9,6 +9,11 @@
    * authoritative time so the same component serves a live overlay and a static
    * results readout. Pass `remainingMs` instead of `elapsedMs` for a countdown;
    * if both are given, `remainingMs` wins.
+   *
+   * A countdown carries **urgency** styling (readable at a glance in sunlight):
+   * normal text color while comfortable, **warn** (yellow) inside the closing
+   * {@link CLOSING_MS} seconds, **danger** (red) once past zero — the negative,
+   * sign-prefixed readout of a timed heat running down its grace window.
    */
   let {
     elapsedMs = 0,
@@ -17,13 +22,26 @@
     label = 'Race time'
   }: { elapsedMs?: number; remainingMs?: number; label?: string } = $props();
 
+  /** A countdown turns warn-colored inside this window (matches the 5s end-tone pips' order of
+   * magnitude — the visual pre-warning starts a bit earlier than the audible one). */
+  const CLOSING_MS = 10_000;
+
   let ms = $derived(remainingMs ?? elapsedMs);
   let mode = $derived(remainingMs !== undefined ? 'remaining' : 'elapsed');
+  let urgency = $derived.by(() => {
+    if (remainingMs === undefined) return undefined;
+    if (remainingMs < 0) return 'over';
+    return remainingMs <= CLOSING_MS ? 'closing' : 'ok';
+  });
   let display = $derived(formatClock(ms));
 </script>
 
-<time class="gridfpv-race-clock" data-mode={mode} role="timer" aria-label={`${label}: ${display}`}
-  >{display}</time
+<time
+  class="gridfpv-race-clock"
+  data-mode={mode}
+  data-urgency={urgency}
+  role="timer"
+  aria-label={`${label}: ${display}`}>{display}</time
 >
 
 <style>
@@ -38,7 +56,10 @@
     line-height: 1;
     font-feature-settings: 'tnum' 1;
   }
-  .gridfpv-race-clock[data-mode='remaining'] {
+  .gridfpv-race-clock[data-urgency='closing'] {
     color: var(--gf-warn);
+  }
+  .gridfpv-race-clock[data-urgency='over'] {
+    color: var(--gf-danger);
   }
 </style>

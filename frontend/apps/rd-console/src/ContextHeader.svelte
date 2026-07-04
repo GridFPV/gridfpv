@@ -26,6 +26,7 @@
   import type { Session } from './lib/session.svelte.js';
   import { useRaceClock } from './lib/raceClock.svelte.js';
   import { heatNameById } from './lib/heats.js';
+  import { fixedEndWindowMicros } from './lib/raceWindow.js';
 
   let {
     session,
@@ -109,6 +110,20 @@
   // the race starts (Scheduled/Staged/Armed) the clock reads 0, so we keep it hidden to avoid a
   // misleading "0:00.000" — it appears the moment the race goes live and persists, frozen, after.
   const showClock = $derived(phase === 'Running' || phase === 'Unofficial' || phase === 'Final');
+
+  // A fixed-end heat (a Timed round's window; a Practice time limit) counts DOWN here too — the
+  // SAME shared derivation the live HUD and the end tones use (`raceWindow.ts`), so every clock on
+  // screen agrees. Past zero the readout runs negative through the grace window and the RaceClock
+  // styles it red (warn-yellow in the closing seconds). No fixed end ⇒ the classic count-up.
+  const currentRound = $derived.by(() => {
+    const summary = heats.find((h) => h.heat === heat);
+    if (!summary?.round) return undefined;
+    return (session.currentEvent?.rounds ?? []).find((r) => r.id === summary.round);
+  });
+  const windowMicros = $derived(fixedEndWindowMicros(currentRound));
+  const remainingMs = $derived(
+    windowMicros !== undefined ? windowMicros / 1000 - clock.elapsedMs : undefined
+  );
 </script>
 
 <div class="ctx-bar" aria-label="Event context">
@@ -144,7 +159,13 @@
         <span class="ctx-phase"><StatusPill {phase} size="sm" /></span>
       {/if}
       {#if showClock}
-        <span class="ctx-clock"><RaceClock elapsedMs={clock.elapsedMs} label="Heat time" /></span>
+        <span class="ctx-clock">
+          {#if remainingMs !== undefined}
+            <RaceClock {remainingMs} label="Time remaining" />
+          {:else}
+            <RaceClock elapsedMs={clock.elapsedMs} label="Heat time" />
+          {/if}
+        </span>
       {/if}
     {:else}
       <span class="ctx-sep" aria-hidden="true"></span>
