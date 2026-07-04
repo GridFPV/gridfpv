@@ -125,7 +125,94 @@
       shape, the SignalTrace projection, and the null-competitor audit row.</li>
     </ul>
 
-    <h2>4. Deferred — recorded, deliberately not built</h2>
+    <h2>4. Round 2 — the marshaling deep dive (2026-07-04, evening)</h2>
+    <p>
+      A second adversarial pass focused exclusively on marshaling, per the RD's field report
+      (a removed not-a-full-lap crossing kept being re-proposed by threshold re-detection):
+      two review agents over the fresh work plus a <strong>seeded combo fuzzer</strong> —
+      random-but-reproducible sequences of every marshaling command (void / restore / adjust /
+      split / insert / throw-out / penalties / protests / finalize / revert / restart /
+      discard), interleaved with hostile targets (other heats' refs, abandoned-run refs,
+      out-of-range offsets, degenerate times) and a mid-race phase marshaling finished heats
+      WHILE another raced — with projection invariants checked after every single op.
+    </p>
+    <h3>4.1 The shared removal record (the field report's root cause)</h3>
+    <ul>
+      <li>The lap list now carries each competitor's <strong>RD-voided passes</strong>
+      (<code>CompetitorLaps::voided</code> — raw instant + the pass's offset + the standing
+      void's offset), folded from the same corrected-passes fold that drops them from the laps.
+      Re-detection <strong>suppresses</strong> any unmatched crossing within tolerance of a
+      voided instant — never re-proposed, never inserted (see
+      <a href="decisions.html#d25">D25</a>).</li>
+      <li>Review caught the first cut applying suppression BEFORE diff matching — a voided
+      instant could steal a surviving pass's match and a commit would then void the lap the RD
+      kept, and a re-added lap fought the record forever. Suppression now runs strictly on
+      unmatched crossings.</li>
+      <li>Review also caught the record carrying a re-timed instant (the trace only knows raw
+      instants) and the projection's void-the-void resolution silently no-opping at chain depth
+      3 — both fixed (the chain now walks with parity, so remove/restore/re-remove behaves).</li>
+      <li><strong>Restore is a first-class path</strong>: the struck "removed pass" rows carry
+      a Restore button (void-the-void — previously unreachable through the command layer, so a
+      misclicked Remove was permanent), and the removal record re-opens on restore.</li>
+    </ul>
+    <h3>4.2 Command-layer hardening (the fuzz + sequence findings)</h3>
+    <ul>
+      <li><strong>Tag-aware Final lock</strong>: <code>heat_of_offset</code> resolved
+      bridge-stamped passes positionally while scoring routed them by tag — a ruling on a late
+      tagged pass could bypass (or spuriously hit) the official-result lock. It now resolves
+      by tag, agreeing with the window fold.</li>
+      <li><strong>Run-scoped rulings</strong>: a ruling targeting an abandoned run's pass (a
+      stale marshaling screen after Restart/Discard) was accepted, appended — and silently
+      inert in every view. Now rejected with "belongs to an ABANDONED run". Protests and
+      heat-voids additionally require the heat to HAVE a current run (a pre-run filing gated
+      Finalize while being invisible to every run-windowed view — an RD wedge).</li>
+      <li><strong>Effectively-once rulings extended</strong>: stacked duplicate throw-outs and
+      DQs made "reverse the ruling" a silent no-op (the copy kept applying) — both now follow
+      the single-effective-record rule VoidHeat/ResolveProtest already had. Voiding a pass
+      whose lap carries a standing throw-out is rejected (the dangling ruling would silently
+      re-count the merged lap).</li>
+      <li><strong>Degenerate instants rejected</strong>: an inserted/re-timed crossing must be
+      positive and within 24h of the source clock (a typo'd <code>at: 0</code> became the
+      heat's earliest pass and collapsed the whole Timed window — every pilot scored zero), and
+      must not collide exactly with an existing pass of the same competitor (fuzz-caught: a
+      same-instant adjust folded a physically impossible <strong>zero-duration lap</strong>
+      that would win best-lap).</li>
+      <li>Splits now resolve their source <strong>recursively</strong> — splitting a
+      split-synthetic pass used to ack ok, log an audit entry, and change nothing.</li>
+      <li><strong>Run-aware driver rechecks</strong>: the runtime clocks' fire-time recheck
+      verified the heat's STATE but not its RUN — a stale clock surviving a quick
+      ForceEnd + Restart could fire into the re-run. Each driver now captures a spawn
+      watermark (the heat's latest transition offset) and stands down if anything moved.</li>
+    </ul>
+    <h3>4.3 Console consolidation (the RD's requested redesign)</h3>
+    <ul>
+      <li>Tune detection is purely the enter/exit levels; the <strong>lap-times box is the
+      live detection readout</strong> while actively tuning — and only on explicit intent (a
+      drag or typed level; keyed per heat+pilot so a reused node seat can't carry stale intent
+      across heats).</li>
+      <li>Corrections live ON the lap rows: per-row Remove, an inline editor (Split / Edit
+      time / Insert after / Throw out) under the selected lap, inline Add-lap per competitor
+      (including pilots with zero laps), removal-record rows interleaved chronologically with
+      Restore. The separate correction and Add-a-lap panels are gone. Shared time inputs reset
+      on selection/pilot changes (a value typed for one lap can no longer pre-arm another's
+      editor).</li>
+      <li>The RSSI graph <strong>zooms</strong> (wheel at cursor, +/−/Fit, drag-to-pan) with
+      the downsampling budget following the visible window; pointer capture is deferred until
+      a real drag so lap-marker clicks keep working while zoomed.</li>
+    </ul>
+    <h3>4.4 Fuzz verdict</h3>
+    <p>
+      Multiple seeded runs of 230–300 ops each: every hostile op correctly rejected with a
+      typed error (never a 5xx, never a wedge), every projection parseable and internally
+      consistent after every op (ordered positive-duration laps, dense numbering, voided refs
+      never doubling as lap boundaries, deterministic refetch), and the mid-race phase —
+      dozens of marshaling ops against finished heats while a third heat raced — lost
+      <strong>zero laps</strong> on the live heat (the pass-tag attribution holding under
+      fire). One non-reproducible determinism flake led to the run-aware driver-recheck
+      hardening above.
+    </p>
+
+    <h2>5. Deferred — recorded, deliberately not built</h2>
     <ul>
       <li><strong>Failover completeness (dual-timer)</strong>: crossings that land between the
       primary's real death and the gate flip are dropped (a standby's passes are discarded, never

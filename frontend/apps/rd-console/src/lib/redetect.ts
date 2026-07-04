@@ -119,21 +119,16 @@ export function diffPasses(
   toleranceMicros: number = DEFAULT_MATCH_TOLERANCE_MICROS,
   voidedAt: number[] = []
 ): PassDiff {
-  // FIRST: suppress every detected crossing the RD explicitly voided (within tolerance).
-  // The trace still shows the crossing — that's exactly why the void must win here, or the
-  // tuner keeps offering a removed lap back as an add.
-  const suppressed: number[] = [];
-  const live: number[] = [];
-  for (const t of detected) {
-    if (voidedAt.some((v) => Math.abs(v - t) <= toleranceMicros)) suppressed.push(t);
-    else live.push(t);
-  }
-
-  // Every candidate pairing within tolerance, nearest first — the greedy order.
+  // Match FIRST, suppress SECOND. Suppression must only claim crossings that would otherwise
+  // become ADDS: running it before the match let a voided instant steal an official pass's
+  // nearest crossing (a double-detection the RD half-removed), flipping the SURVIVING lap
+  // into `removed` — a commit would then void the lap the RD kept. Matching first also means
+  // a lap the RD re-adds at a once-voided instant pairs with its crossing (kept) instead of
+  // fighting the stale removal record forever.
   const candidates: { ci: number; di: number; dist: number }[] = [];
   for (let ci = 0; ci < current.length; ci++) {
-    for (let di = 0; di < live.length; di++) {
-      const dist = Math.abs(live[di] - current[ci].at);
+    for (let di = 0; di < detected.length; di++) {
+      const dist = Math.abs(detected[di] - current[ci].at);
       if (dist <= toleranceMicros) candidates.push({ ci, di, dist });
     }
   }
@@ -146,13 +141,25 @@ export function diffPasses(
     if (matchedCurrent.has(ci) || matchedDetected.has(di)) continue;
     matchedCurrent.add(ci);
     matchedDetected.add(di);
-    kept.push({ at: current[ci].at, ref: current[ci].ref, detectedAt: live[di] });
+    kept.push({ at: current[ci].at, ref: current[ci].ref, detectedAt: detected[di] });
   }
   kept.sort((a, b) => a.at - b.at);
 
+  // THEN: of the unmatched crossings, suppress those the RD explicitly voided (within
+  // tolerance). The trace still shows the crossing — the void must win here, or the tuner
+  // keeps offering a removed lap back as an add.
+  const added: number[] = [];
+  const suppressed: number[] = [];
+  for (let di = 0; di < detected.length; di++) {
+    if (matchedDetected.has(di)) continue;
+    const t = detected[di];
+    if (voidedAt.some((v) => Math.abs(v - t) <= toleranceMicros)) suppressed.push(t);
+    else added.push(t);
+  }
+
   return {
     kept,
-    added: live.filter((_, di) => !matchedDetected.has(di)),
+    added,
     removed: current.filter((_, ci) => !matchedCurrent.has(ci)),
     suppressed
   };

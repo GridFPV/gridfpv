@@ -121,11 +121,14 @@ pub struct CompetitorLaps {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct VoidedPass {
-    /// Source-clock time (µs) the voided pass was recorded at (re-time applied, like a
-    /// surviving pass — the instant re-detection would re-find it at).
+    /// Source-clock time (µs) of the voided pass — its RAW instant (no re-time applied): the
+    /// removal record exists so re-detection can recognise the crossing on the trace, and the
+    /// trace knows nothing of a re-time.
     pub at: SourceTime,
     /// The voided pass's own global log offset (a stable row identity for the UI).
     pub pass_ref: LogRef,
+    /// The **standing void event's** offset — the target a RESTORE (void-the-void) addresses.
+    pub void_ref: LogRef,
 }
 
 impl CompetitorLaps {
@@ -312,10 +315,13 @@ where
     corrected_and_voided_passes(events).0
 }
 
+/// One RD-voided pass as the fold emits it: `(pass offset, standing void event's offset, pass)`.
+pub type VoidedEmit = (u64, u64, Pass);
+
 /// [`corrected_passes`] plus the passes the RD **voided** (and did not un-void), each resolved
 /// to its concrete pass (re-time applied) with its own offset — the shared removal record the
 /// lap list carries so re-detection never re-proposes an explicitly-removed crossing.
-pub fn corrected_and_voided_passes<'a, I>(events: I) -> (Vec<(u64, Pass)>, Vec<(u64, Pass)>)
+pub fn corrected_and_voided_passes<'a, I>(events: I) -> (Vec<(u64, Pass)>, Vec<VoidedEmit>)
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
@@ -405,7 +411,10 @@ where
     // (we process offsets ascending, so a later ruling overwrites an earlier one).
     let mut voided: BTreeMap<u64, bool> = BTreeMap::new();
     let mut retime: BTreeMap<u64, SourceTime> = BTreeMap::new();
-    for entry in entries.values() {
+    // Which VOID EVENT (its own offset) currently holds each base pass voided — the target a
+    // restore (void-the-void) addresses; carried onto the removal record for the UI.
+    let mut void_source: BTreeMap<u64, u64> = BTreeMap::new();
+    for (entry_offset, entry) in entries.iter() {
         match entry {
             // Passes (raw, inserted, or split) carry no ruling of their own; the split is
             // resolved to a concrete pass in the emit loop. A void/adjust *targeting* a split
@@ -415,12 +424,16 @@ where
                 // Re-time the target raw/inserted pass, and un-void it: an adjust is
                 // the newest ruling on that target, so it supersedes an earlier void.
                 voided.insert(*target, false);
+                void_source.remove(target);
                 retime.insert(*target, *at);
             }
             Entry::Voided { target } => {
                 // Void the target. If the target is itself a ruling, supersede it:
                 // voiding an adjust cancels its re-time (revert to the raw `at`);
-                // voiding a void un-voids *that* void's target.
+                // voiding a void un-voids *that* void's target — and the chain WALKS,
+                // so a depth-3 "void the un-void" re-voids the base pass (each link
+                // flips the parity; the old two-level special case silently no-opped
+                // at depth 3, breaking last-writer-wins).
                 match entries.get(target) {
                     Some(Entry::Adjusted {
                         target: inner_target,
@@ -431,15 +444,27 @@ where
                         // target present (the adjust, not the pass, was voided).
                         retime.remove(inner_target);
                     }
-                    Some(Entry::Voided {
-                        target: inner_target,
-                    }) => {
-                        // Void the void: resurrect the originally-voided target.
-                        voided.insert(*inner_target, false);
+                    Some(Entry::Voided { .. }) => {
+                        // Walk the void chain to the base (non-void) target, flipping
+                        // the intended state at each link: void(void(P)) restores P,
+                        // void(void(void(P))) re-voids it, and so on.
+                        let mut cursor = *target;
+                        let mut state = true; // what THIS event wants for the base
+                        while let Some(Entry::Voided { target: inner }) = entries.get(&cursor) {
+                            state = !state;
+                            cursor = *inner;
+                        }
+                        voided.insert(cursor, state);
+                        if state {
+                            void_source.insert(cursor, *entry_offset);
+                        } else {
+                            void_source.remove(&cursor);
+                        }
                     }
                     // Voiding a raw pass or an inserted pass simply drops it.
                     _ => {
                         voided.insert(*target, true);
+                        void_source.insert(*target, *entry_offset);
                     }
                 }
             }
@@ -451,22 +476,32 @@ where
     // surviving passes into `out`, RD-voided ones into `voided_out` (the shared removal
     // record); callers re-group and re-order them as needed.
     let mut out: Vec<(u64, Pass)> = Vec::new();
-    let mut voided_out: Vec<(u64, Pass)> = Vec::new();
+    let mut voided_out: Vec<VoidedEmit> = Vec::new();
+    let mut scratch: Vec<(u64, Pass)> = Vec::new();
     for (offset, entry) in entries.iter() {
         let is_voided = voided.get(offset).copied().unwrap_or(false);
-        let sink: &mut Vec<(u64, Pass)> = if is_voided { &mut voided_out } else { &mut out };
+        scratch.clear();
+        let sink: &mut Vec<(u64, Pass)> = if is_voided { &mut scratch } else { &mut out };
         match entry {
             Entry::RawPass(pass) => {
                 let mut p = (*pass).clone();
-                if let Some(at) = retime.get(offset) {
-                    p.at = *at;
+                // A VOIDED pass keeps its RAW instant: the removal record exists so
+                // re-detection can recognise the crossing on the trace, and the trace
+                // knows nothing of a re-time (an adjusted-then-voided pass would
+                // otherwise leave the suppression zone at the wrong instant).
+                if !is_voided {
+                    if let Some(at) = retime.get(offset) {
+                        p.at = *at;
+                    }
                 }
                 sink.push((*offset, p));
             }
             Entry::Inserted(pass) => {
                 let mut p = pass.clone();
-                if let Some(at) = retime.get(offset) {
-                    p.at = *at;
+                if !is_voided {
+                    if let Some(at) = retime.get(offset) {
+                        p.at = *at;
+                    }
                 }
                 sink.push((*offset, p));
             }
@@ -476,10 +511,18 @@ where
                 // split's offset re-times the synthetic pass; a void drops it. If the target
                 // pass is unknown (a dangling ref — the command layer rejects these), skip.
                 // The synthetic pass is addressable by *this* split's own offset.
-                let src = match entries.get(target) {
-                    Some(Entry::RawPass(p)) => Some((*p).clone()),
-                    Some(Entry::Inserted(p)) => Some(p.clone()),
-                    _ => None,
+                // Resolve the source pass RECURSIVELY: a split may target another split's
+                // synthetic pass (splitting the second half of a twice-missed stretch) —
+                // the old single-step lookup silently skipped it while the audit showed
+                // the split as landed.
+                let mut src_offset = *target;
+                let src = loop {
+                    match entries.get(&src_offset) {
+                        Some(Entry::RawPass(p)) => break Some((*p).clone()),
+                        Some(Entry::Inserted(p)) => break Some(p.clone()),
+                        Some(Entry::Split { target: inner, .. }) => src_offset = *inner,
+                        _ => break None,
+                    }
                 };
                 if let Some(src) = src {
                     sink.push((
@@ -497,6 +540,12 @@ where
                 }
             }
             Entry::Adjusted { .. } | Entry::Voided { .. } => {}
+        }
+        if is_voided {
+            let void_ref = void_source.get(offset).copied().unwrap_or(*offset);
+            for (o, p) in scratch.drain(..) {
+                voided_out.push((o, void_ref, p));
+            }
         }
     }
     (out, voided_out)
@@ -532,7 +581,7 @@ where
     // The RD-voided passes, grouped the same way — a competitor may have voids but no
     // surviving laps (every crossing removed), so they seed the map too.
     let mut voided_by_competitor: BTreeMap<CompetitorKey, Vec<VoidedPass>> = BTreeMap::new();
-    for (offset, pass) in voided {
+    for (offset, void_offset, pass) in voided {
         by_competitor
             .entry(CompetitorKey::from_pass(&pass))
             .or_default();
@@ -542,6 +591,7 @@ where
             .push(VoidedPass {
                 at: pass.at,
                 pass_ref: LogRef(offset),
+                void_ref: LogRef(void_offset),
             });
     }
 
@@ -1497,6 +1547,7 @@ mod marshaling_tests {
             vec![VoidedPass {
                 at: SourceTime::from_micros(4_000_000),
                 pass_ref: LogRef(1),
+                void_ref: LogRef(3),
             }]
         );
 
@@ -1511,6 +1562,90 @@ mod marshaling_tests {
             .unwrap();
         assert_eq!(cl.laps.len(), 2);
         assert!(cl.voided.is_empty());
+    }
+
+    #[test]
+    fn a_depth_three_void_chain_re_voids_the_base_pass() {
+        // void(void(void(P))) — the RD removed, restored, and re-removed: last writer wins,
+        // so P is voided again and back on the removal record. (The old two-level special
+        // case silently no-opped here, leaving P alive against the newest ruling.)
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 4_000_000, Some(2)), // offset 1
+            pass("vd", "A", 6_000_000, Some(3)), // offset 2
+            voided(1),                           // offset 3 — remove
+            voided(3),                           // offset 4 — restore
+            voided(4),                           // offset 5 — remove again
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 1, "0 -> 2 is the one surviving lap");
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(4_000_000),
+                pass_ref: LogRef(1),
+                void_ref: LogRef(5),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_retimed_then_voided_pass_records_its_raw_instant() {
+        // The removal record exists so RE-DETECTION recognises the crossing on the trace —
+        // and the trace knows nothing of a re-time. Adjust 4.0s -> 14.0s, then void: the
+        // record must say 4.0s (where the crossing physically is), not 14.0s.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 4_000_000, Some(2)), // offset 1
+            adjusted(1, 14_000_000),             // offset 2
+            voided(1),                           // offset 3
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(4_000_000),
+                pass_ref: LogRef(1),
+                void_ref: LogRef(3),
+            }]
+        );
+    }
+
+    #[test]
+    fn splitting_a_split_synthetic_pass_works_recursively() {
+        // One 12s lap missed TWO crossings: split at 4s, then split the still-too-long
+        // second half (the lap ending at the synthetic pass? no — ending at the raw pass)
+        // by targeting the SYNTHETIC pass's own lap. The second split targets the first
+        // split's offset and must resolve to a real source recursively (it used to vanish
+        // silently while the audit showed it landed).
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)),  // offset 0 — opens
+            pass("vd", "A", 13_000_000, Some(2)), // offset 1 — one 12s lap
+            split(1, 5_000_000),                  // offset 2 — synthetic at 5s
+            split(2, 9_000_000),                  // offset 3 — split the SYNTHETIC's chain
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        let durations: Vec<i64> = cl.laps.iter().map(|l| l.duration_micros).collect();
+        assert_eq!(
+            durations,
+            vec![4_000_000, 4_000_000, 4_000_000],
+            "three real laps: 1-5, 5-9, 9-13"
+        );
     }
 
     #[test]

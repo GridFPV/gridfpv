@@ -7,11 +7,16 @@ import type { SourceTime } from "./SourceTime";
  */
 export type VoidedPass = { 
 /**
- * Source-clock time (µs) the voided pass was recorded at (re-time applied, like a
- * surviving pass — the instant re-detection would re-find it at).
+ * Source-clock time (µs) of the voided pass — its RAW instant (no re-time applied): the
+ * removal record exists so re-detection can recognise the crossing on the trace, and the
+ * trace knows nothing of a re-time.
  */
 at: SourceTime, 
 /**
  * The voided pass's own global log offset (a stable row identity for the UI).
  */
-pass_ref: LogRef, };
+pass_ref: LogRef, 
+/**
+ * The **standing void event's** offset — the target a RESTORE (void-the-void) addresses.
+ */
+void_ref: LogRef, };

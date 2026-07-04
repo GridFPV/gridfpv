@@ -400,14 +400,16 @@
   }
 
   // Drag-to-pan while zoomed. Starts on the svg background (the threshold handles stop
-  // propagation so their drags stay theirs); only a real horizontal move pans, so marker
-  // clicks still land.
-  let panning = $state<{ ref: CompetitorRef; lastX: number } | null>(null);
+  // propagation so their drags stay theirs). Pointer capture is DEFERRED until the pointer
+  // actually moves a few units: capturing on pointerdown retargets the browser's
+  // compatibility `click` to the svg, which silently broke lap-MARKER clicks whenever
+  // zoomed — precisely when marshals click markers.
+  const PAN_START_UNITS = 4;
+  let panning = $state<{ ref: CompetitorRef; lastX: number; engaged: boolean } | null>(null);
 
   function startPan(e: PointerEvent, ref: CompetitorRef): void {
     if (!zoom || zoom.ref !== ref) return;
-    panning = { ref, lastX: pointerX(e, e.currentTarget as SVGSVGElement) };
-    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    panning = { ref, lastX: pointerX(e, e.currentTarget as SVGSVGElement), engaged: false };
   }
 
   function movePan(e: PointerEvent, full: { from: number; to: number }): void {
@@ -415,6 +417,13 @@
     const svg = e.currentTarget as SVGSVGElement;
     const x = pointerX(e, svg);
     const dx = x - panning.lastX;
+    if (!panning.engaged) {
+      if (Math.abs(dx) < PAN_START_UNITS) return; // a click in progress, not a pan
+      // A real drag: NOW capture (safe — any click this gesture could produce is a drag end).
+      svg.setPointerCapture?.(e.pointerId);
+      panning = { ...panning, engaged: true, lastX: x };
+      return;
+    }
     if (dx === 0) return;
     panning = { ...panning, lastX: x };
     const view = viewSpanOf(panning.ref, full);
@@ -573,7 +582,7 @@
              plot, so the SVG stays a non-interactive `role="img"` figure. -->
         <svg
           class="plot"
-          class:panning={panning?.ref === ref}
+          class:panning={panning?.ref === ref && panning?.engaged}
           viewBox={`0 0 ${W} ${H}`}
           preserveAspectRatio="none"
           role="img"

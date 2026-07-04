@@ -247,6 +247,17 @@ flowchart TB
       href="decisions.html#d23">D23</a> and the
       <a href="release-audit-2026-07.html">Release Audit</a>.
     </p>
+    <p class="note">
+      <strong>Deep-dived (2026-07-04, round 2):</strong> the marshal's removals and threshold
+      re-detection now share ONE record — the lap list carries the RD-voided passes, re-detection
+      never re-proposes them, and a <strong>Restore</strong> button undoes a mistaken removal
+      (void-the-void, now a sanctioned command). Rulings are <strong>run-scoped</strong> (targets
+      from abandoned runs are rejected; protests and heat-voids need a current run) and
+      <strong>effectively-once</strong> (throw-outs and DQs join VoidHeat/ResolveProtest), and
+      inserted/re-timed instants are validated (positive, bounded, no same-instant collisions —
+      a zero-duration lap can no longer be created). <a href="decisions.html#d25">D25</a> and the
+      <a href="release-audit-2026-07.html">Release Audit §4</a> carry the full story.
+    </p>
 
     <h2>4. Architectural fit</h2>
     <p>

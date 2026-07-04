@@ -993,13 +993,32 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         // --- Marshaling adjudications: validate targets where cheap, reject any result-changing
         // ruling on an OFFICIAL (Final) heat (Revert is the sanctioned re-open), then append. ---
         Command::VoidDetection { target } => {
-            require_pass_target(state, target)?;
+            // A void may target a pass — or a prior DetectionVoided (void-the-void, the
+            // sanctioned RESTORE of a mistakenly-removed pass; the fold walks the chain).
+            require_void_target(state, target)?;
             require_target_heat_not_final(state, target)?;
+            require_target_in_current_run(state, target)?;
+            // Voiding a pass whose lap carries an EFFECTIVE throw-out would leave the
+            // throw-out dangling while the neighbouring laps merge and COUNT — the ruling
+            // must be unwound first, in order.
+            require_no_effective_throw_out(state, target)?;
             Ok(Event::DetectionVoided { target })
         }
         Command::AdjustLap { target, at } => {
             require_pass_target(state, target)?;
             require_target_heat_not_final(state, target)?;
+            require_target_in_current_run(state, target)?;
+            require_sane_source_time(at)?;
+            {
+                let (events, _cursor) = state.read()?;
+                if let (Some(h), Some(c)) = (
+                    heat_of_offset(&events, target),
+                    competitor_of_pass_target(&events, target),
+                ) {
+                    // The re-timed pass itself is exempt (re-asserting its own instant is fine).
+                    require_no_instant_collision(state, &h, &c, at, Some(target))?;
+                }
+            }
             Ok(Event::LapAdjusted { target, at })
         }
         Command::SplitLap { target, at } => {
@@ -1007,6 +1026,17 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             // validated exactly like `VoidDetection`/`AdjustLap`.
             require_pass_target(state, target)?;
             require_target_heat_not_final(state, target)?;
+            require_target_in_current_run(state, target)?;
+            require_sane_source_time(at)?;
+            {
+                let (events, _cursor) = state.read()?;
+                if let (Some(h), Some(c)) = (
+                    heat_of_offset(&events, target),
+                    competitor_of_pass_target(&events, target),
+                ) {
+                    require_no_instant_collision(state, &h, &c, at, None)?;
+                }
+            }
             Ok(Event::LapSplit { target, at })
         }
         Command::InsertLap {
@@ -1020,10 +1050,12 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             // untagged one is a legacy client and attributes positionally, so the lock checks
             // the heat the insertion WOULD land in — the positionally-active heat at the log
             // tail.
+            require_sane_source_time(at)?;
             match &heat {
                 Some(h) => {
                     require_scheduled_heat(state, h)?;
                     require_not_final(state, h)?;
+                    require_no_instant_collision(state, h, &competitor, at, None)?;
                 }
                 None => {
                     let (events, _cursor) = state.read()?;
@@ -1046,8 +1078,12 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::VoidHeat { heat } => {
             require_scheduled_heat(state, &heat)?;
             require_not_final(state, &heat)?;
-            // One EFFECTIVE void per heat: a stacked second void made the first reversal a
-            // silent no-op (the heat stayed voided behind an ok-acked ReverseRuling).
+            // Voiding needs a run to void — a pre-run void was window-inert (it applied to
+            // nothing) yet blocked a real void later via the duplicate guard below.
+            require_heat_has_run(state, &heat)?;
+            // One EFFECTIVE void per heat *this run*: a stacked second void made the first
+            // reversal a silent no-op (the heat stayed voided behind an ok-acked
+            // ReverseRuling); a void from an ABANDONED run is inert and must not block.
             require_heat_not_voided(state, &heat)?;
             Ok(Event::HeatVoided { heat })
         }
@@ -1068,6 +1104,12 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
                         "a time penalty must add a positive number of microseconds",
                     ));
                 }
+            }
+            // ONE effective DQ per competitor per heat (time/points penalties stack by
+            // design; a status can't): a double-clicked duplicate made reversing "the" DQ a
+            // silent no-op — the stacked copy kept the pilot disqualified.
+            if matches!(&penalty, gridfpv_events::Penalty::Disqualify { .. }) {
+                require_not_already_disqualified(state, &heat, &competitor)?;
             }
             Ok(Event::PenaltyApplied {
                 heat,
@@ -1096,6 +1138,11 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::ThrowOutLap { target } => {
             require_lap_end_target(state, target)?;
             require_target_heat_not_final(state, target)?;
+            require_target_in_current_run(state, target)?;
+            // ONE effective throw-out per lap: a stacked duplicate made ReverseRuling a
+            // silent no-op (the other copy kept excluding the lap) — the same effectively-
+            // once rule VoidHeat and ResolveProtest already follow.
+            require_no_effective_throw_out(state, target)?;
             Ok(Event::LapThrownOut { target })
         }
         // File a protest against a heat result — the append-only filing fact. Deliberately NOT
@@ -1107,6 +1154,11 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             note,
         } => {
             require_scheduled_heat(state, &heat)?;
+            // A protest contests a RUN's result, so the heat must have one: filed before the
+            // heat ever ran (or in the gap after a reset), the filing counted for the
+            // Finalize gate but sat OUTSIDE every run-windowed audit view — an invisible
+            // blocker the RD couldn't resolve.
+            require_heat_has_run(state, &heat)?;
             Ok(Event::ProtestFiled {
                 heat,
                 competitor,
@@ -1281,6 +1333,11 @@ pub(crate) fn heat_of_offset(events: &[Event], target: LogRef) -> Option<HeatId>
             | Event::PenaltyApplied { heat, .. }
             | Event::ProtestFiled { heat, .. } => return Some(heat.clone()),
             Event::LapInserted { heat: Some(h), .. } => return Some(h.clone()),
+            // A bridge-stamped pass belongs to its TAG — the same rule `heat_window_offsets`
+            // scores by. Resolving it positionally let the Final lock consult the WRONG heat
+            // (a late tagged pass after another heat staged), accepting rulings that changed
+            // a Final result — or rejecting legal ones over an unrelated Final heat.
+            Event::Pass(p) if p.heat.is_some() => return p.heat.clone(),
             Event::DetectionVoided { target }
             | Event::LapAdjusted { target, .. }
             | Event::LapSplit { target, .. }
@@ -1348,6 +1405,200 @@ fn require_lap_end_target(state: &AppState, target: LogRef) -> Result<(), Protoc
 /// recovered laps as `LapInserted`, so those laps' boundary refs were un-voidable — a
 /// re-detection commit on such a heat bounced with "not a detected pass" (live 2026-07-03).
 /// An out-of-range or non-pass offset is [`ErrorCode::BadRequest`]; nothing is appended.
+/// Require that `target` is a valid [`Command::VoidDetection`] target: a lap-gate pass (raw or
+/// synthetic, like [`require_pass_target`]) — or a prior [`Event::DetectionVoided`], the
+/// **void-the-void RESTORE** path (the corrected-pass fold walks the chain). Restore used to be
+/// unreachable through the command layer entirely: a mistaken one-click removal was permanent.
+fn require_void_target(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    match events.get(target.0 as usize) {
+        Some(
+            Event::Pass(_)
+            | Event::LapInserted { .. }
+            | Event::LapSplit { .. }
+            | Event::DetectionVoided { .. },
+        ) => Ok(()),
+        Some(_) => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "log offset {} is not a detected pass or a prior removal",
+                target.0
+            ),
+        )),
+        None => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!("log offset {} is out of range", target.0),
+        )),
+    }
+}
+
+/// Require that `target` sits inside its owning heat's CURRENT run window. A ruling aimed at an
+/// abandoned run's pass (a stale marshaling screen after a Restart/Discard) used to be accepted
+/// and appended — then silently dropped by every window fold: an ack-ok correction with zero
+/// effect and no audit trace. Rejecting it tells the RD their screen is stale.
+fn require_target_in_current_run(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    let Some(heat) = heat_of_offset(&events, target) else {
+        return Ok(()); // unowned target — the type guards already vetted it
+    };
+    let run_start = crate::live_state::current_run_start(&events, &heat) as u64;
+    if target.0 < run_start {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "log offset {} belongs to an ABANDONED run of heat {:?} (it was reset since) — \
+                 refresh and correct the current run instead",
+                target.0, heat.0
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Require that no EFFECTIVE (non-reversed) [`Event::LapThrownOut`] targets `target` — shared by
+/// `ThrowOutLap` (one effective throw-out per lap) and `VoidDetection` (voiding a thrown-out
+/// lap's pass would leave the throw-out dangling while the merged neighbour lap COUNTS).
+fn require_no_effective_throw_out(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    let reversed: std::collections::HashSet<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::RulingReversed { target } => Some(target.0),
+            _ => None,
+        })
+        .collect();
+    let standing = events.iter().enumerate().any(|(offset, e)| {
+        matches!(e, Event::LapThrownOut { target: t } if t.0 == target.0)
+            && !reversed.contains(&(offset as u64))
+    });
+    if standing {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "the lap ending at offset {} carries a standing throw-out — reverse it first",
+                target.0
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Require that `competitor` carries no EFFECTIVE (non-reversed) disqualification in `heat` —
+/// one DQ status per pilot per heat (time/points penalties stack by design; a status cannot).
+fn require_not_already_disqualified(
+    state: &AppState,
+    heat: &HeatId,
+    competitor: &gridfpv_events::CompetitorRef,
+) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    let reversed: std::collections::HashSet<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::RulingReversed { target } => Some(target.0),
+            _ => None,
+        })
+        .collect();
+    let standing = events.iter().enumerate().any(|(offset, e)| {
+        matches!(
+            e,
+            Event::PenaltyApplied {
+                heat: h,
+                competitor: c,
+                penalty: gridfpv_events::Penalty::Disqualify { .. },
+            } if h == heat && c == competitor
+        ) && !reversed.contains(&(offset as u64))
+    });
+    if standing {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "competitor {:?} is already disqualified in heat {:?} — reverse that DQ first",
+                competitor.0, heat.0
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Require that `at` does not COLLIDE with an existing corrected pass instant of `competitor`
+/// in the target's heat: two same-instant passes fold into a ZERO-duration lap — a physically
+/// impossible 0.000s that then wins best-lap and corrupts every ranking it feeds. Fuzz-caught:
+/// an AdjustLap delta landing exactly on the neighbouring pass's instant.
+fn require_no_instant_collision(
+    state: &AppState,
+    heat: &HeatId,
+    competitor: &gridfpv_events::CompetitorRef,
+    at: gridfpv_events::SourceTime,
+    exempt: Option<LogRef>,
+) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    let window = crate::app::heat_window_offsets(&events, heat);
+    let (surviving, _voided) =
+        gridfpv_projection::corrected_and_voided_passes(window.iter().map(|(o, e)| (*o, e)));
+    let collides = surviving.iter().any(|(offset, pass)| {
+        pass.competitor == *competitor && pass.at == at && exempt.is_none_or(|x| x.0 != *offset)
+    });
+    if collides {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{:?} already has a pass at exactly {}µs — two same-instant passes would fold \
+                 into an impossible zero-duration lap",
+                competitor.0, at.micros
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The competitor a pass-target belongs to, from the raw log (for the collision guard).
+fn competitor_of_pass_target(
+    events: &[Event],
+    target: LogRef,
+) -> Option<gridfpv_events::CompetitorRef> {
+    match events.get(target.0 as usize)? {
+        Event::Pass(p) => Some(p.competitor.clone()),
+        Event::LapInserted { competitor, .. } => Some(competitor.clone()),
+        Event::LapSplit { target, .. } => competitor_of_pass_target(events, *target),
+        _ => None,
+    }
+}
+
+/// Require a **sane source-clock instant** for an inserted/re-timed crossing: positive, and
+/// within 24h of the source epoch. A typo'd/unit-confused `at` (0, negative, or absurd) was
+/// accepted and became the heat's earliest pass — hijacking `race_start` so a Timed window
+/// closed before every REAL lap, silently zeroing the whole heat's scored counts.
+fn require_sane_source_time(at: gridfpv_events::SourceTime) -> Result<(), ProtocolError> {
+    const MAX_SANE_MICROS: i64 = 24 * 60 * 60 * 1_000_000; // 24h of race-relative source clock
+    if at.micros < 1 || at.micros > MAX_SANE_MICROS {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "source time {}µs is out of range (must be positive and within 24h of the \
+                 source clock's start)",
+                at.micros
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Require that `heat` has a CURRENT run (a `Running` since its latest reset) — the shared
+/// precondition for run-scoped rulings that would otherwise be recorded yet apply to nothing.
+fn require_heat_has_run(state: &AppState, heat: &HeatId) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    if crate::live_state::current_run_start(&events, heat) >= events.len() {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "heat {:?} has no run yet — there is nothing to rule on",
+                heat.0
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn require_pass_target(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
     let (events, _cursor) = state.read()?;
     match events.get(target.0 as usize) {
@@ -1494,8 +1745,10 @@ fn require_heat_not_voided(state: &AppState, heat: &HeatId) -> Result<(), Protoc
             _ => None,
         })
         .collect();
+    let run_start = crate::live_state::current_run_start(&events, heat) as u64;
     let voided = events.iter().enumerate().any(|(offset, e)| {
         matches!(e, Event::HeatVoided { heat: h } if h == heat)
+            && offset as u64 >= run_start
             && !reversed.contains(&(offset as u64))
     });
     if voided {
@@ -2361,6 +2614,16 @@ mod tests {
     fn file_then_resolve_protest_appends_the_pair() {
         use gridfpv_events::ProtestOutcome;
         let state = scheduled_state(); // offset 0: HeatScheduled
+        // A protest contests a RUN's result — give the heat one (the run-scoped guard).
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat(),
+                    transition: HeatTransition::Running,
+                },
+                None,
+            )
+            .unwrap();
 
         let ack = apply_command(
             &state,
@@ -2378,11 +2641,11 @@ mod tests {
                 if *competitor == CompetitorRef("A".into()) && note == "cut the course"
         )));
 
-        // Resolve the protest at offset 1.
+        // Resolve the protest (offset 2 — after the schedule + the run).
         let ack = apply_command(
             &state,
             Command::ResolveProtest {
-                target: LogRef(1),
+                target: LogRef(2),
                 outcome: ProtestOutcome::Upheld,
             },
         );
@@ -2391,7 +2654,7 @@ mod tests {
         assert!(events.iter().any(|e| matches!(
             e,
             Event::ProtestResolved { target, outcome: ProtestOutcome::Upheld }
-                if *target == LogRef(1)
+                if *target == LogRef(2)
         )));
 
         // Resolving a non-protest (the HeatScheduled at offset 0) is rejected, nothing appended.
@@ -2509,6 +2772,159 @@ mod tests {
     }
 
     #[test]
+    fn deep_lap_guards_reject_the_footgun_sequences() {
+        use gridfpv_events::Penalty;
+        // One raced heat with two passes: 0 sched, then Stage/Start/Skip drive it Running.
+        let state = scheduled_state();
+        for cmd in [
+            Command::Stage { heat: heat() },
+            Command::Start { heat: heat() },
+            Command::SkipCountdown { heat: heat() },
+        ] {
+            assert!(apply_command(&state, cmd).ok);
+        }
+        let p1 = state.append(pass("A", 1_000_000, 1), None).unwrap();
+        let p2 = state.append(pass("A", 4_000_000, 2), None).unwrap();
+
+        // Degenerate source times are rejected (the race_start hijack).
+        for at in [0i64, -5, 90 * 60 * 60 * 1_000_000] {
+            let ack = apply_command(
+                &state,
+                Command::AdjustLap {
+                    target: LogRef(p2),
+                    at: SourceTime::from_micros(at),
+                },
+            );
+            assert!(!ack.ok, "at={at} must be rejected");
+        }
+
+        // ONE effective throw-out per lap; reversing it re-arms.
+        assert!(apply_command(&state, Command::ThrowOutLap { target: LogRef(p2) }).ok);
+        let dup = apply_command(&state, Command::ThrowOutLap { target: LogRef(p2) });
+        assert!(!dup.ok, "stacked throw-out must be rejected");
+        // Voiding the thrown-out lap's pass is rejected while the ruling stands.
+        let void_over_throw = apply_command(&state, Command::VoidDetection { target: LogRef(p2) });
+        assert!(
+            !void_over_throw.ok,
+            "void over a standing throw-out must be rejected"
+        );
+        let (events, _) = state.read().unwrap();
+        let throw_offset = events
+            .iter()
+            .enumerate()
+            .find_map(|(i, e)| matches!(e, Event::LapThrownOut { .. }).then_some(i as u64))
+            .unwrap();
+        assert!(
+            apply_command(
+                &state,
+                Command::ReverseRuling {
+                    target: LogRef(throw_offset)
+                }
+            )
+            .ok
+        );
+        assert!(
+            apply_command(&state, Command::ThrowOutLap { target: LogRef(p2) }).ok,
+            "after the reversal a fresh throw-out is legal again"
+        );
+
+        // ONE effective DQ per pilot per heat; time penalties still stack.
+        let dq = |state: &AppState| {
+            apply_command(
+                state,
+                Command::ApplyPenalty {
+                    heat: heat(),
+                    competitor: CompetitorRef("A".into()),
+                    penalty: Penalty::Disqualify { reason: None },
+                },
+            )
+        };
+        assert!(dq(&state).ok);
+        assert!(!dq(&state).ok, "stacked DQ must be rejected");
+        for _ in 0..2 {
+            assert!(
+                apply_command(
+                    &state,
+                    Command::ApplyPenalty {
+                        heat: heat(),
+                        competitor: CompetitorRef("A".into()),
+                        penalty: Penalty::TimeAdded { micros: 1_000_000 },
+                    }
+                )
+                .ok,
+                "time penalties stack by design"
+            );
+        }
+
+        // Restore (void-the-void) is a sanctioned command path now.
+        assert!(apply_command(&state, Command::VoidDetection { target: LogRef(p1) }).ok);
+        let (events, _) = state.read().unwrap();
+        let void_offset = events
+            .iter()
+            .enumerate()
+            .find_map(|(i, e)| matches!(e, Event::DetectionVoided { .. }).then_some(i as u64))
+            .unwrap();
+        assert!(
+            apply_command(
+                &state,
+                Command::VoidDetection {
+                    target: LogRef(void_offset)
+                }
+            )
+            .ok,
+            "void-the-void (restore) must be accepted"
+        );
+
+        // An adjust landing EXACTLY on another pass's instant is rejected (a zero-duration
+        // lap would fold — an impossible 0.000s best lap corrupting every ranking).
+        let collide = apply_command(
+            &state,
+            Command::AdjustLap {
+                target: LogRef(p2),
+                at: SourceTime::from_micros(1_000_000), // p1's exact instant
+            },
+        );
+        assert!(!collide.ok, "same-instant adjust must be rejected");
+        // Re-asserting the pass's OWN instant is fine (exempt).
+        assert!(
+            apply_command(
+                &state,
+                Command::AdjustLap {
+                    target: LogRef(p2),
+                    at: SourceTime::from_micros(4_000_000),
+                }
+            )
+            .ok
+        );
+
+        // A stale-run target is rejected after a Restart (the abandoned-run trap).
+        assert!(apply_command(&state, Command::ForceEnd { heat: heat() }).ok);
+        assert!(apply_command(&state, Command::Restart { heat: heat() }).ok);
+        let stale = apply_command(&state, Command::VoidDetection { target: LogRef(p2) });
+        assert!(
+            !stale.ok,
+            "a ruling on an abandoned run's pass must be rejected"
+        );
+        assert!(
+            stale.error.unwrap().message.contains("ABANDONED"),
+            "the rejection explains the staleness"
+        );
+
+        // Protests + heat-voids need a run: the reset heat (Scheduled again) rejects both.
+        let protest = apply_command(
+            &state,
+            Command::FileProtest {
+                heat: heat(),
+                competitor: CompetitorRef("A".into()),
+                note: "pre-run".into(),
+            },
+        );
+        assert!(!protest.ok, "a protest needs a run to contest");
+        let void_heat = apply_command(&state, Command::VoidHeat { heat: heat() });
+        assert!(!void_heat.ok, "a heat-void needs a run to void");
+    }
+
+    #[test]
     fn a_protest_dies_with_the_run_it_contests() {
         // Filed against run 1, then the heat is Restarted (it re-races anyway): the protest
         // must NOT keep gating Finalize — the old whole-log predicate deadlocked the RD
@@ -2549,9 +2965,8 @@ mod tests {
     #[test]
     fn reverse_ruling_accepts_any_ruling_target() {
         let mut log = InMemoryLog::default();
-        // offset 0: a pass (so a throw-out has a valid target)
-        EventLog::append(&mut log, pass("A", 1_000_000, 1), None).unwrap();
-        // offset 1: the heat
+        // offset 0: the heat; offset 1: its run; offset 2: a pass INSIDE the run (rulings
+        // are run-scoped now — a target before the run's start is rejected as stale).
         EventLog::append(
             &mut log,
             Event::HeatScheduled {
@@ -2565,19 +2980,28 @@ mod tests {
             None,
         )
         .unwrap();
+        EventLog::append(
+            &mut log,
+            Event::HeatStateChanged {
+                heat: heat(),
+                transition: HeatTransition::Running,
+            },
+            None,
+        )
+        .unwrap();
+        EventLog::append(&mut log, pass("A", 1_000_000, 1), None).unwrap();
         let state = AppState::new(log);
 
-        // Append a throw-out (offset 2), a heat-void (offset 3) — both reversible rulings.
-        assert!(apply_command(&state, Command::ThrowOutLap { target: LogRef(0) }).ok);
+        // Append a throw-out (offset 3), a heat-void (offset 4) — both reversible rulings.
+        assert!(apply_command(&state, Command::ThrowOutLap { target: LogRef(2) }).ok);
         assert!(apply_command(&state, Command::VoidHeat { heat: heat() }).ok);
 
-        // Reversing the throw-out (offset 2) and the heat-void (offset 3) both succeed.
-        for target in [LogRef(2), LogRef(3)] {
+        for target in [LogRef(3), LogRef(4)] {
             let ack = apply_command(&state, Command::ReverseRuling { target });
             assert!(ack.ok, "reversing ruling at {target:?} failed: {ack:?}");
         }
-        // But reversing the pass at offset 0 (not a ruling) is rejected.
-        let ack = apply_command(&state, Command::ReverseRuling { target: LogRef(0) });
+        // But reversing the pass at offset 2 (not a ruling) is rejected.
+        let ack = apply_command(&state, Command::ReverseRuling { target: LogRef(2) });
         assert!(!ack.ok);
         assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
     }

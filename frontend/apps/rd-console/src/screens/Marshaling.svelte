@@ -280,6 +280,9 @@
     if (selected && selected.competitor === competitor && selected.lap.end_ref === lap.end_ref) {
       selected = null; // toggle off
     } else {
+      // A fresh selection gets a fresh time input: a value typed for lap 2 must not sit
+      // pre-armed in lap 5's editor (one misread click would re-time it).
+      editSeconds = 0;
       selected = { competitor, lap };
     }
   }
@@ -405,6 +408,16 @@
     }
     await insertLap(competitor, secondsToSourceTime(addLapSeconds));
     addLapOpen = false;
+  }
+
+  /** RESTORE a removed pass: void-the-void, targeting the standing removal event. The
+   *  sanctioned undo for a mistaken one-click Remove (the fold walks the chain; the pass
+   *  returns to the laps and leaves the removal record, re-opening re-detection there). */
+  function doRestorePass(v: { void_ref: number }): Promise<void> {
+    return submitCorrection(async () => {
+      const ack = await session.send(voidDetectionCommand(v.void_ref));
+      if (ack.ok) await afterCorrection();
+    });
   }
 
   /** Remove (void) a lap straight from its row — the one-click removal on the lap list. */
@@ -603,6 +616,13 @@
   // below scope to just them. `shownPilot` is the chosen pilot if still in the field, else the first
   // competitor — so it self-heals when the heat changes without an extra effect.
   let selectedPilot = $state<CompetitorRef | undefined>(undefined);
+  // Pilot/heat moves close the add-lap row and clear its time (state is shared across boxes).
+  $effect(() => {
+    void shownPilot;
+    void heat;
+    addLapOpen = false;
+    addLapSeconds = 0;
+  });
   const shownPilot = $derived<CompetitorRef | undefined>(
     selectedPilot !== undefined && competitors.includes(selectedPilot)
       ? selectedPilot
@@ -637,7 +657,7 @@
   const tuneTrace = $derived<CompetitorTrace | undefined>(
     signalTrace?.competitors.find((c) => c.competitor.competitor === shownPilot)
   );
-  let tuneFor = $state<CompetitorRef | undefined>(undefined);
+  let tuneFor = $state<string | undefined>(undefined);
   let tuneEnter = $state(0);
   let tuneExit = $state(0);
   // Whether the RD has ACTIVELY moved the levels this session (a drag or a typed edit). The
@@ -663,8 +683,12 @@
       tuneFor = undefined;
       return;
     }
-    if (tuneFor === t.competitor.competitor) return;
-    tuneFor = t.competitor.competitor;
+    // Keyed by HEAT + competitor: node-seat refs (`node-0`) recur across heats, and a
+    // ref-only key carried the previous heat's levels AND tuning intent into the next one
+    // (instant phantom preview with Commit armed).
+    const key = `${heat ?? ''}::${t.competitor.competitor}`;
+    if (tuneFor === key) return;
+    tuneFor = key;
     tuneTouched = false;
     const rec = recordedThresholds(t);
     tuneEnter = rec.enter;
@@ -685,10 +709,11 @@
   // Flatten across entries: the shown pilot can hold several lap-list entries (one per
   // adapter after a mid-heat failover) — the tune diff must see ALL their official passes.
   const shownPilotLaps = $derived<Lap[]>((shownLaps?.competitors ?? []).flatMap((c) => c.laps));
+  const tuneKeyCurrent = $derived(
+    tuneTrace !== undefined && tuneFor === `${heat ?? ''}::${tuneTrace.competitor.competitor}`
+  );
   const detectedPassTimes = $derived<number[]>(
-    tuneTrace && tuneValid && tuneFor === shownPilot
-      ? detectPasses(tuneTrace, tuneEnter, tuneExit)
-      : []
+    tuneTrace && tuneValid && tuneKeyCurrent ? detectPasses(tuneTrace, tuneEnter, tuneExit) : []
   );
   // The RD's removal record (`CompetitorLaps.voided`) — the lap list and the tuner share this
   // data, so a crossing the marshal explicitly voided is SUPPRESSED from re-detection (the
@@ -722,12 +747,7 @@
   /** Whether the lap box is in live-preview mode: the RD actively moved the levels AND the
    *  re-detection differs from the official record. Never entered passively. */
   const tuningPreview = $derived(
-    canControl &&
-      tuneTouched &&
-      tuneTrace != null &&
-      tuneFor === shownPilot &&
-      tuneValid &&
-      redetectDirty
+    canControl && tuneTouched && tuneTrace != null && tuneKeyCurrent && tuneValid && redetectDirty
   );
 
   function doResetThresholds(): void {
@@ -901,7 +921,7 @@
       {/if}
 
       {#if hasShownTrace && shownTrace}
-        {@const tuning = canControl && tuneTrace != null && tuneFor === shownPilot}
+        {@const tuning = canControl && tuneTrace != null && tuneKeyCurrent}
         <!-- Signal-as-evidence (Slice 4): the RSSI graph for the selected pilot's captured trace. A
              marker click selects that lap in the action surface below; the lap-list selection
              highlights the same marker (two-way — `selectLap` is the one shared selection). With
@@ -1000,14 +1020,19 @@
         <div class="laps">
           <!-- Keyed by the FULL competitor key: the same ref can appear under two adapters
                (mid-heat failover), and a bare-ref key crashed the whole screen on it. -->
-          {#each shownLaps.competitors as cl (cl.competitor.adapter + '/' + cl.competitor.competitor)}
+          {#each shownLaps.competitors as cl, entryIndex (cl.competitor.adapter + '/' + cl.competitor.competitor)}
             {@const canCorrect = canControl && !resultLocked}
             <div class="comp">
               <h4>
                 {competitorName(cl.competitor.competitor)}
-                {#if tuningPreview}<span class="preview-badge">re-detection preview</span>{/if}
+                {#if tuningPreview && entryIndex === 0}<span class="preview-badge"
+                    >re-detection preview</span
+                  >{/if}
               </h4>
-              {#if tuningPreview}
+              {#if tuningPreview && entryIndex > 0}
+                <!-- The preview is PILOT-scoped (it already spans every adapter entry):
+                     render it once, under the first entry only. -->
+              {:else if tuningPreview}
                 <!-- LIVE detection readout: the lap list the tuned levels would produce — new
                      laps marked +, official passes the levels drop struck −, and crossings the
                      RD already voided flagged (they STAY removed; the tuner never re-adds
@@ -1044,8 +1069,28 @@
                 {#if cl.laps.length === 0 && (cl.voided ?? []).length === 0}
                   <p class="empty">No laps yet.</p>
                 {:else}
+                  {@const voidedSorted = [...(cl.voided ?? [])].sort((a, b) => a.at - b.at)}
                   <ol>
                     {#each cl.laps as lap (lap.end_ref)}
+                      {#each voidedSorted.filter((v) => v.at < lap.at && !cl.laps.some((o) => o.number < lap.number && o.at > v.at)) as v (v.pass_ref)}
+                        <li class="voided-row">
+                          <span class="mark" aria-hidden="true">∅</span>
+                          <span class="what"
+                            >removed pass at {formatMicros(v.at)}s — stays removed</span
+                          >
+                          {#if canCorrect}
+                            <button
+                              type="button"
+                              class="lap-restore"
+                              onclick={() => doRestorePass(v)}
+                              disabled={busy}
+                              title="Restore this removed pass (undo the removal)"
+                              aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
+                              >Restore</button
+                            >
+                          {/if}
+                        </li>
+                      {/each}
                       <li class="lap-row">
                         <button
                           type="button"
@@ -1113,7 +1158,7 @@
                         </li>
                       {/if}
                     {/each}
-                    {#each cl.voided ?? [] as v (v.pass_ref)}
+                    {#each voidedSorted.filter((v) => cl.laps.length === 0 || v.at >= cl.laps[cl.laps.length - 1].at) as v (v.pass_ref)}
                       <!-- The RD's removal record, kept visible where the lap was: the shared
                            data that also stops re-detection from re-proposing the crossing. -->
                       <li class="voided-row">
@@ -1121,6 +1166,17 @@
                         <span class="what"
                           >removed pass at {formatMicros(v.at)}s — stays removed</span
                         >
+                        {#if canCorrect}
+                          <button
+                            type="button"
+                            class="lap-restore"
+                            onclick={() => doRestorePass(v)}
+                            disabled={busy}
+                            title="Restore this removed pass (undo the removal)"
+                            aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
+                            >Restore</button
+                          >
+                        {/if}
                       </li>
                     {/each}
                   </ol>
@@ -1749,6 +1805,11 @@
     text-decoration: line-through;
     list-style: none;
     padding: var(--gf-space-1) 0;
+  }
+  .lap-restore {
+    flex: none;
+    font-size: var(--gf-font-size-sm);
+    text-decoration: none;
   }
   .add-lap-row {
     display: flex;

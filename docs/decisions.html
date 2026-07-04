@@ -730,6 +730,33 @@
       and loses only the edits that would silently rewrite history.</dd>
     </dl>
 
+    <h2 id="d25">D25 · The removal record: voids and re-detection share one truth; rulings are run-scoped</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Threshold re-detection reads the RSSI trace; a marshal's <code>DetectionVoided</code>
+      reads the log. The two never met: the RD removes a valid-crossing-but-not-a-lap detection,
+      and the tuner — seeing the crossing plain as day on the trace — keeps proposing it back as
+      "a lap to add" (field report, Audit Shakedown). The deep-dive fuzz then showed the wider
+      family: rulings accepted against abandoned runs, stacked duplicates that made reversal a
+      no-op, degenerate instants that hijacked the race clock, and no way to undo a void at all.</dd>
+      <dt>Decision</dt>
+      <dd>The lap list carries each competitor's <strong>voided passes</strong> (raw instant +
+      pass offset + the standing void's offset) as first-class projection data. Re-detection
+      SUPPRESSES unmatched crossings near a voided instant — matching runs first, so a void can
+      never claim a surviving pass's crossing. <strong>Restore</strong> (void-the-void) is a
+      sanctioned command path with a button on the removal record. And the command layer is
+      <strong>run-scoped and effectively-once</strong>: targets from abandoned runs are rejected,
+      protests/heat-voids need a current run, one standing throw-out per lap and one standing DQ
+      per pilot per heat, and inserted/re-timed instants must be sane (positive, bounded, never
+      colliding into a zero-duration lap).</dd>
+      <dt>Rationale</dt>
+      <dd>An adjudication is a statement about a specific observation in a specific run — every
+      surface that can see the observation must see the ruling too, and a ruling that applies to
+      nothing (stale run, duplicate, phantom instant) must be refused at the door rather than
+      recorded as an ack-ok lie. Extends D22/D23's serialization + effectively-once discipline to
+      the whole correction vocabulary.</dd>
+    </dl>
+
     <footer class="doc-footer">
       <p>
         Internal design documentation · <a href="index.html">&larr; back to docs index</a>

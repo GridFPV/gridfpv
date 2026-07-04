@@ -176,6 +176,38 @@ describe('void suppression (the removal record and the tuner share data)', () =>
     expect(d.suppressed).toEqual([]);
   });
 
+  it('a voided instant NEAR a surviving pass cannot steal its match (match first, suppress second)', () => {
+    // The double-detection case: the RD kept the 10.0s pass and voided the 10.3s duplicate.
+    // The tuned levels see one crossing at 10.2s. Suppress-first would claim it for the void
+    // and mark the KEPT pass removed — a commit would void the lap the RD kept.
+    const d = diffPasses([{ at: 10 * S, ref: 7 }], [10.2 * S], DEFAULT_MATCH_TOLERANCE_MICROS, [
+      10.3 * S
+    ]);
+    expect(d.kept.map((k) => k.ref)).toEqual([7]);
+    expect(d.removed).toEqual([]);
+    expect(d.suppressed).toEqual([]);
+    expect(d.added).toEqual([]);
+  });
+
+  it('a lap RE-ADDED at a once-voided instant matches its crossing instead of fighting the record', () => {
+    // RD removed the 41s lap by mistake, added it back: the official (inserted) pass at 41s
+    // must pair with the 41s crossing (kept) — the stale removal record must not force an
+    // eternal remove-and-re-add loop.
+    const d = diffPasses(
+      [
+        { at: 1 * S, ref: 10 },
+        { at: 41 * S, ref: 30 } // the re-added pass
+      ],
+      [1 * S, 41 * S],
+      DEFAULT_MATCH_TOLERANCE_MICROS,
+      [41 * S] // the old void, still on record
+    );
+    expect(d.kept.map((k) => k.ref)).toEqual([10, 30]);
+    expect(d.removed).toEqual([]);
+    expect(d.added).toEqual([]);
+    expect(d.suppressed).toEqual([]);
+  });
+
   it('previewRows carries the suppressed crossing as a voided row and drops it from the lap chain', () => {
     const rows = previewRows(
       [

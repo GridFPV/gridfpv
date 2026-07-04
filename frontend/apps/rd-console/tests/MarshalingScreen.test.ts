@@ -774,7 +774,7 @@ describe('Marshaling (Slice 3)', () => {
           laps: [
             { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
           ],
-          voided: [{ at: 81_500_000, pass_ref: 14 }]
+          voided: [{ at: 81_500_000, pass_ref: 14, void_ref: 21 }]
         }
       ]
     };
@@ -817,6 +817,15 @@ describe('Marshaling (Slice 3)', () => {
         ([c]) => typeof c === 'object' && c !== null && 'InsertLap' in c
       );
       expect(inserts).toEqual([]);
+    });
+
+    it('Restore on a removed pass sends void-the-void at the STANDING removal event', async () => {
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: voidedLapList });
+      render(Marshaling, { session });
+      await fireEvent.click(
+        screen.getByRole('button', { name: /Restore removed pass at 1:21\.500s/ })
+      );
+      expect(sendSpy).toHaveBeenCalledWith({ VoidDetection: { target: 21 } });
     });
 
     it('the lap box only switches to preview on EXPLICIT tuning intent', () => {
