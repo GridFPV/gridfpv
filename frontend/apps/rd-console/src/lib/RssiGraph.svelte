@@ -409,7 +409,9 @@
 
   function startPan(e: PointerEvent, ref: CompetitorRef): void {
     if (!zoom || zoom.ref !== ref) return;
-    panning = { ref, lastX: pointerX(e, e.currentTarget as SVGSVGElement), engaged: false };
+    const x = pointerX(e, e.currentTarget as SVGSVGElement);
+    if (!Number.isFinite(x)) return; // ditto — never seed a drag from a coordinate-less event
+    panning = { ref, lastX: x, engaged: false };
   }
 
   function movePan(e: PointerEvent, full: { from: number; to: number }): void {
@@ -417,6 +419,7 @@
     const svg = e.currentTarget as SVGSVGElement;
     const x = pointerX(e, svg);
     const dx = x - panning.lastX;
+    if (!Number.isFinite(dx)) return; // a coordinate-less synthetic event must not corrupt the view
     if (!panning.engaged) {
       if (Math.abs(dx) < PAN_START_UNITS) return; // a click in progress, not a pan
       // A real drag: NOW capture (safe — any click this gesture could produce is a drag end).

@@ -265,6 +265,7 @@ fn live_state_core(events: &[Event], window: &[(u64, &Event)]) -> LiveRaceState 
     // marshaling adjudication still addresses the right pass. A heat that never reset has no
     // boundary, so everything counts (a normally-finalized heat is unaffected).
     let run_start = current_run_start(events, &current_heat);
+    let pass_ceiling = current_run_pass_ceiling(events, &current_heat);
     let laps = lap_list_marshaled(
         window
             .iter()
@@ -276,9 +277,12 @@ fn live_state_core(events: &[Event], window: &[(u64, &Event)]) -> LiveRaceState 
                 // Tag-aware pass attribution: a pass stamped for ANOTHER heat never counts
                 // toward this one — selecting an older heat as current used to absorb every
                 // later heat's passes (they all sit after its run_start). An untagged
-                // (legacy) pass keeps the positional rule.
+                // (legacy) pass keeps the positional rule. Either way a pass landing AFTER
+                // the run went official is frozen out (the Final freeze).
                 match e {
-                    Event::Pass(p) => p.heat.as_ref().is_none_or(|h| h == &current_heat),
+                    Event::Pass(p) => {
+                        *i < pass_ceiling && p.heat.as_ref().is_none_or(|h| h == &current_heat)
+                    }
                     _ => true,
                 }
             })
@@ -602,6 +606,29 @@ pub(crate) fn current_run_start(events: &[Event], heat: &HeatId) -> usize {
         }
     }
     start
+}
+
+/// The log index where the current run's **official record closes**: the first `Finalized`
+/// transition for `heat` at/after [`current_run_start`], or `usize::MAX` while the run is not
+/// (yet) official. Passes at/after this offset NEVER join the heat's window — once a result is
+/// official it is frozen against late arrivals (a delayed RotorHazard catch-up pass tagged with
+/// the heat used to silently change a Final result with no command, no ruling, and no audit
+/// entry). A `Revert` re-opens marshaling (rulings are not passes and stay unaffected), but the
+/// late passes stay out: the race's observation record ended with its run.
+pub(crate) fn current_run_pass_ceiling(events: &[Event], heat: &HeatId) -> usize {
+    let run_start = current_run_start(events, heat);
+    events
+        .iter()
+        .enumerate()
+        .skip(run_start)
+        .find_map(|(i, e)| match e {
+            Event::HeatStateChanged {
+                heat: h,
+                transition: HeatTransition::Finalized,
+            } if h == heat => Some(i),
+            _ => None,
+        })
+        .unwrap_or(usize::MAX)
 }
 
 /// The lineup of a heat: the competitors from its most recent `HeatScheduled`.

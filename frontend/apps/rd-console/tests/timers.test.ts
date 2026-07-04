@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Timer, TimerStatus } from '@gridfpv/types';
-import { isTimerConnected } from '../src/lib/timers.js';
+import type { Timer, TimerKind, TimerStatus } from '@gridfpv/types';
+import { isTimerConnected, kindLabel, kindSummary, kindTag, kindTone } from '../src/lib/timers.js';
 
 /** Build a Timer with the given status (the only field `isTimerConnected` reads). */
 function timerWith(status: TimerStatus): Timer {
@@ -32,5 +32,20 @@ describe('isTimerConnected', () => {
     expect(isTimerConnected(timerWith('Connecting'))).toBe(false);
     expect(isTimerConnected(timerWith('Disconnected'))).toBe(false);
     expect(isTimerConnected(timerWith('Error'))).toBe(false);
+  });
+});
+
+describe('version skew: an unmodeled timer kind renders labeled, never crashes', () => {
+  // A NEWER Director may ship a kind this console build doesn't know (the RH-plugin pivot
+  // makes this likely). It must not mislabel as RotorHazard — and field access on
+  // `kind.Rotorhazard` must never throw.
+  const future = { RhPlugin: { url: 'http://rig:5055' } } as unknown as TimerKind;
+  it('tags, labels and tones it as unknown', () => {
+    expect(kindTag(future)).toBe('Unknown');
+    expect(kindLabel(future)).toBe('RhPlugin');
+    expect(kindTone(future)).toBe('neutral');
+  });
+  it('summarizes it with an update nudge instead of crashing', () => {
+    expect(kindSummary(future)).toContain('update the console');
   });
 });

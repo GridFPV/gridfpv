@@ -213,6 +213,14 @@
     </p>
 
     <h2>5. Deferred — recorded, deliberately not built</h2>
+    <p>
+      <strong>Closed by the release-polish batch (2026-07-04, late):</strong> the Final freeze
+      (a delayed catch-up pass can no longer shift an official result),
+      version-skew rendering (unknown timer kinds/metrics render labeled instead of a crash /
+      a DNF-reading dash), the start-<em>tone</em> round-trip (editing any round silently erased
+      it), orphan bridge/presence tasks (they exit when their event is deleted), and the
+      presence-batch duplicate bindings. What follows is what genuinely remains.
+    </p>
     <ul>
       <li><strong>Failover completeness (dual-timer)</strong>: crossings that land between the
       primary's real death and the gate flip are dropped (a standby's passes are discarded, never
@@ -220,17 +228,10 @@
       Real but rare (multi-timer setups), and buffering needs a design of its own — replay
       semantics, dedup against the primary's already-appended passes. The cheap status-stomp fix
       (§2) did land.</li>
-      <li><strong>Orphan bridge pruning</strong>: a deleted event's bridge task holds a strong log
-      handle for the process lifetime — a resource leak, no correctness impact.</li>
-      <li><strong>Presence-reconciler duplicate bindings</strong> within one poll batch — benign
-      (same key/value, last-wins fold).</li>
-      <li><strong>Version-skew rendering</strong>: an additive server enum variant renders as a
-      blank metric cell / mislabeled timer kind on a stale console build. Mitigated by the
-      both-halves deploy rule and the new contract pins; a graceful-unknown rendering pass is
-      future polish.</li>
-      <li><strong>StartProcedure form round-trip</strong>: the round form always writes
-      <code>randomized-delay</code> — lossless today (one mode exists), lossy the day a second
-      mode ships. The wire shape is now contract-pinned so that day is loud, not silent.</li>
+
+
+
+
     </ul>
 
     <footer class="doc-footer">

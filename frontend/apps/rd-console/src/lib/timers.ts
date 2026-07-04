@@ -8,8 +8,11 @@
  */
 import type { Timer, TimerKind } from '@gridfpv/types';
 
-/** The two selectable kinds in the add/edit dialog (the discriminant tag). */
-export type TimerKindTag = 'Mock' | 'Rotorhazard';
+/** The two selectable kinds in the add/edit dialog (the discriminant tag). `'Unknown'` is the
+ *  version-skew fallback: a NEWER Director may send a kind this console build doesn't model
+ *  yet, and it must render labeled (not mislabeled as RotorHazard, and never crash on a field
+ *  access) — the timer is still real and still selectable. */
+export type TimerKindTag = 'Mock' | 'Rotorhazard' | 'Unknown';
 
 /** Sensible defaults for a fresh **Mock** timer: a handful of laps at a one-minute-ish pace. */
 export const DEFAULT_MOCK_LAPS = 3;
@@ -17,17 +20,24 @@ export const DEFAULT_MOCK_LAP_MS = 30_000;
 
 /** The discriminant tag of a kind (`'Mock'` | `'Rotorhazard'`). */
 export function kindTag(kind: TimerKind): TimerKindTag {
-  return 'Mock' in kind ? 'Mock' : 'Rotorhazard';
+  if ('Mock' in kind) return 'Mock';
+  if ('Rotorhazard' in kind) return 'Rotorhazard';
+  return 'Unknown';
 }
 
 /** The short display label for the kind **badge** (RotorHazard is the brand spelling). */
 export function kindLabel(kind: TimerKind): string {
-  return 'Mock' in kind ? 'Mock' : 'RotorHazard';
+  if ('Mock' in kind) return 'Mock';
+  if ('Rotorhazard' in kind) return 'RotorHazard';
+  // A newer Director's kind: show its discriminant verbatim rather than a wrong brand.
+  return Object.keys(kind)[0] ?? 'Unknown';
 }
 
 /** The Badge `tone` for a kind: Mock is the brand accent; RotorHazard reads as informational. */
-export function kindTone(kind: TimerKind): 'accent' | 'info' {
-  return 'Mock' in kind ? 'accent' : 'info';
+export function kindTone(kind: TimerKind): 'accent' | 'info' | 'neutral' {
+  if ('Mock' in kind) return 'accent';
+  if ('Rotorhazard' in kind) return 'info';
+  return 'neutral';
 }
 
 /** A one-line summary of a kind's config for the timer row (the sim pace, or the RH url). */
@@ -37,7 +47,8 @@ export function kindSummary(kind: TimerKind): string {
     const lapName = laps === 1 ? 'lap' : 'laps';
     return `${laps} ${lapName} · ${(lap_ms / 1000).toFixed(1)}s pace`;
   }
-  return kind.Rotorhazard.url || 'No URL set';
+  if ('Rotorhazard' in kind) return kind.Rotorhazard.url || 'No URL set';
+  return 'Unsupported by this console build — update the console';
 }
 
 /** Whether a timer is the undeletable built-in Mock (its reserved id). */

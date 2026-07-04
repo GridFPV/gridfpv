@@ -438,3 +438,90 @@ describe('RssiGraph threshold tuning + preview', () => {
     expect(within(graph).getByText(/Preview pass/)).toBeInTheDocument();
   });
 });
+
+/**
+ * Zoom & pan (the marshaling deep-dive batch): wheel-at-cursor narrows the drawn span, the
+ * caption's Fit resets it, and — the regression that matters — pointer capture is DEFERRED
+ * until a real drag, so a plain click on a lap MARKER still selects the lap while zoomed
+ * (capturing on pointerdown retargeted the browser's synthesized click to the svg).
+ */
+describe('zoom & pan', () => {
+  function renderGraph(onselect = () => {}) {
+    render(RssiGraph, {
+      trace: signalTrace,
+      laps: lapList,
+      selected: null,
+      onselect
+    });
+    const svg = screen.getByLabelText(/RSSI trace for ALICE/);
+    pinSvgBox(svg);
+    return svg;
+  }
+
+  it('wheel-in narrows the view (zoom note + Fit appear) and Fit restores the full span', async () => {
+    const svg = renderGraph();
+    // No zoom yet: Fit and zoom-out are disabled, no zoom note.
+    expect(screen.getByRole('button', { name: 'Reset zoom' })).toBeDisabled();
+    expect(screen.queryByText(/drag to pan/)).toBeNull();
+
+    // One wheel notch IN at mid-plot (45s).
+    await fireEvent.wheel(svg, { deltaY: -120, clientX: xForTime(45_000_000) });
+    expect(screen.getByText(/drag to pan/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reset zoom' })).toBeEnabled();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset zoom' }));
+    expect(screen.queryByText(/drag to pan/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Reset zoom' })).toBeDisabled();
+  });
+
+  it('the caption +/− buttons zoom without a wheel', async () => {
+    renderGraph();
+    await fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(screen.getByText(/drag to pan/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
+    // One notch out from one notch in: back to the full span.
+    expect(screen.queryByText(/drag to pan/)).toBeNull();
+  });
+
+  it('a plain CLICK on a lap marker still selects the lap while zoomed (deferred capture)', async () => {
+    const onselect = vi.fn();
+    const svg = renderGraph(onselect);
+    await fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    // A full click gesture on a marker: pointerdown lands on the svg (startPan) but must NOT
+    // capture — the click on the marker then selects the lap as normal.
+    const marker = screen.getByRole('button', { name: /Lap 2 at .* — select/ });
+    const capture = vi.fn();
+    (svg as unknown as SVGSVGElement).setPointerCapture = capture;
+    await fireEvent(
+      svg,
+      new MouseEvent('pointerdown', { bubbles: true, clientX: xForTime(80_000_000) })
+    );
+    await fireEvent(svg, new MouseEvent('pointerup', { bubbles: true }));
+    await fireEvent.click(marker);
+    expect(capture).not.toHaveBeenCalled();
+    expect(onselect).toHaveBeenCalledTimes(1);
+  });
+
+  it('a real horizontal drag pans (captures) instead of clicking', async () => {
+    const svg = renderGraph();
+    await fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    const noteBefore = screen.getByText(/drag to pan/).textContent;
+
+    const capture = vi.fn();
+    (svg as unknown as SVGSVGElement).setPointerCapture = capture;
+    const at = (x: number) => new MouseEvent('pointermove', { bubbles: true, clientX: x });
+    await fireEvent(
+      svg,
+      new MouseEvent('pointerdown', { bubbles: true, clientX: xForTime(45_000_000) })
+    );
+    // Move well past the engage threshold, then further to pan.
+    await fireEvent(svg, at(xForTime(45_000_000) + 40));
+    await fireEvent(svg, at(xForTime(45_000_000) + 140));
+    await fireEvent(svg, new MouseEvent('pointerup', { bubbles: true }));
+
+    expect(capture).toHaveBeenCalled();
+    const noteAfter = screen.getByText(/drag to pan/).textContent;
+    expect(noteAfter).not.toBe(noteBefore); // the window actually moved
+  });
+});

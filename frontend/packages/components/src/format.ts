@@ -51,7 +51,10 @@ export function formatMetric(metric: Metric): string {
   if ('BestConsecutiveMicros' in metric) return formatMicros(metric.BestConsecutiveMicros);
   if ('LastLapAt' in metric) return metric.LastLapAt === null ? '—' : 'banked';
   if ('ReachedAt' in metric) return metric.ReachedAt === null ? '—' : 'reached';
-  return '—';
+  // Version skew: a NEWER Director may score under a metric variant this console build
+  // doesn't model. The pilot HAS a value — an em dash would read as DNF/no-time, so label
+  // the gap instead.
+  return 'unsupported';
 }
 
 /** The medal token name for a 1-based finishing position, or `null` past 3rd. */

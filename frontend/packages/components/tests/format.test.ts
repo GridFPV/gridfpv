@@ -37,6 +37,11 @@ describe('formatMetric', () => {
     expect(formatMetric({ LastLapAt: 5 } as Metric)).toBe('banked');
     expect(formatMetric({ ReachedAt: null } as Metric)).toBe('—');
   });
+  it('labels a metric variant this build does not model (version skew), not a DNF dash', () => {
+    expect(formatMetric({ FastestThreeMicros: 99_000_000 } as unknown as Metric)).toBe(
+      'unsupported'
+    );
+  });
 });
 
 describe('medalFor', () => {
