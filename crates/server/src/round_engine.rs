@@ -708,7 +708,12 @@ pub fn completed_heats(round: &RoundDef, events: &[Event]) -> Vec<CompletedHeat>
             // an adjudication that moves the heat page moves the standings too (#226). The previous
             // pass-only `score_marshaled` discarded every adjudication, leaving the raw on-track
             // score here while the heat page showed the corrected one — the split-brain this closes.
-            let result = crate::app::score_heat_window(events, &heat, round.win_condition);
+            let result = crate::app::score_heat_window(
+                events,
+                &heat,
+                round.win_condition,
+                crate::app::min_lap_micros_of(Some(round)),
+            );
             // The generator keys `next`/`ranking` on the heat ids it **emitted**; the log carries
             // the round-scoped id, so strip the scope back off before handing history to the
             // generator (and to every ranking consumer keyed on generator ids).
@@ -1898,6 +1903,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -2323,6 +2329,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -2519,7 +2526,7 @@ mod tests {
 
         // The per-heat result the heat page shows, via the exact shared helper app.rs uses.
         let heat_result =
-            crate::app::score_heat_window(&log, &HeatId("h2h-1".into()), round.win_condition);
+            crate::app::score_heat_window(&log, &HeatId("h2h-1".into()), round.win_condition, None);
         let dq_pilot = heat_result
             .places
             .iter()
@@ -2691,7 +2698,8 @@ mod tests {
         log.push(changed(heat, HeatTransition::Finished));
         log.push(changed(heat, HeatTransition::Finalized));
 
-        let result = crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition);
+        let result =
+            crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition, None);
         // Only run 2 scores: one lap each (holeshot + one), NOT run 1's ghost pile.
         let by_ref: std::collections::BTreeMap<&str, u32> = result
             .places
@@ -2719,7 +2727,8 @@ mod tests {
             "B",
             Penalty::Disqualify { reason: None },
         ));
-        let ruled = crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition);
+        let ruled =
+            crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition, None);
         assert!(
             ruled
                 .places
@@ -2759,7 +2768,7 @@ mod tests {
 
         // Heat 1's result carries the DQ...
         let heat1 =
-            crate::app::score_heat_window(&log, &HeatId("h2h-1".into()), round.win_condition);
+            crate::app::score_heat_window(&log, &HeatId("h2h-1".into()), round.win_condition, None);
         let dq: Vec<&str> = heat1
             .places
             .iter()
@@ -2769,7 +2778,7 @@ mod tests {
         assert_eq!(dq, vec!["A"], "the DQ lands in the heat it names");
         // ...and heat 2 (the later, positionally-active heat) is untouched.
         let heat2 =
-            crate::app::score_heat_window(&log, &HeatId("h2h-2".into()), round.win_condition);
+            crate::app::score_heat_window(&log, &HeatId("h2h-2".into()), round.win_condition, None);
         assert!(
             heat2.places.iter().all(|p| !p.disqualified),
             "the DQ must not leak into the heat that happened to run last"
@@ -3116,6 +3125,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -3276,6 +3286,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -3687,6 +3698,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }
@@ -3858,6 +3870,7 @@ mod tests {
             start_procedure: StartProcedure::default(),
             grace_window: default_grace_window(),
             protest_window: gridfpv_engine::heat::ProtestWindow::Off,
+            min_lap_secs: None,
             time_limit_secs: None,
         }
     }

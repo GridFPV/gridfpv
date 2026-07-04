@@ -451,6 +451,26 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(req.grace_window).toEqual({ Duration: { micros: 5_000_000 } });
   });
 
+  it('min lap time round-trips: seeds from the round, 0 = off, and rides the request (D26)', async () => {
+    const impls = baseImpls();
+    const floored: RoundDef = { ...QUAL, min_lap_secs: 8 };
+    const updateRoundImpl = vi.fn(async (_b, _e, _id, req) => ({ ...floored, ...req }));
+    const { session } = makeTestSession({
+      ...impls,
+      updateRoundImpl,
+      event: { ...EVENT, rounds: [floored] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect((screen.getByLabelText('Min lap seconds') as HTMLInputElement).value).toBe('8');
+    await fireEvent.input(screen.getByLabelText('Min lap seconds'), { target: { value: '0' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save round' }));
+    await waitFor(() => expect(updateRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , , req] = updateRoundImpl.mock.calls[0];
+    expect(req.min_lap_secs).toBe(0); // 0 = off, normalized server-side to None
+  });
+
   it('a configured start TONE survives an edit the form never touched (verbatim round-trip)', async () => {
     // The form models only the min/max delay; the server replaces the round WHOLESALE on
     // update — so rebuilding start_procedure from the two inputs silently ERASED a stored

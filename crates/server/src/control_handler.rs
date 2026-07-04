@@ -3435,6 +3435,7 @@ mod tests {
                     start_procedure: None,
                     grace_window: None,
                     protest_window: None,
+                    min_lap_secs: None,
                 },
             )
             .unwrap();
@@ -3578,6 +3579,7 @@ mod tests {
                     start_procedure: None,
                     grace_window: None,
                     protest_window: None,
+                    min_lap_secs: None,
                 },
             )
             .unwrap();
@@ -3987,6 +3989,7 @@ mod tests {
                     start_procedure: None,
                     grace_window: None,
                     protest_window: None,
+                    min_lap_secs: None,
                 },
             )
             .unwrap();
@@ -4165,6 +4168,7 @@ mod tests {
                     start_procedure: None,
                     grace_window: None,
                     protest_window: None,
+                    min_lap_secs: None,
                 },
             )
             .unwrap();
@@ -4233,6 +4237,7 @@ mod tests {
                     start_procedure: None,
                     grace_window: None,
                     protest_window: None,
+                    min_lap_secs: None,
                 },
             )
             .unwrap();

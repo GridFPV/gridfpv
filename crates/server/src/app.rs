@@ -84,7 +84,8 @@ use gridfpv_engine::format::{FormatRegistry, FormatSchema};
 use gridfpv_engine::scoring::{HeatResult, WinCondition, score_corrected_with_global_offsets};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{
-    AuditEntry, LapList, lap_list_marshaled, marshaling_log, registrations, signal_trace,
+    AuditEntry, LapList, lap_list_marshaled, lap_list_marshaled_with_floor, marshaling_log,
+    registrations, signal_trace,
 };
 use gridfpv_storage::{EventLog, Offset, Result as StorageResult, StoredEvent};
 use serde::Deserialize;
@@ -104,7 +105,8 @@ use crate::events::{
     SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{
-    HeatSummary, heat_summaries, live_state, live_state_over, with_heat_timing,
+    HeatSummary, heat_summaries, live_state, live_state_over, live_state_over_with_floor,
+    with_heat_timing,
 };
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::round_engine;
@@ -1761,20 +1763,41 @@ async fn snapshot_heat(
     let heat_offsets = heat_window_offsets(&events, &heat);
     let heat_events: Vec<Event> = heat_offsets.iter().map(|(_, e)| e.clone()).collect();
 
+    // The heat's ROUND config, resolved once for every projection that scores or folds laps:
+    // the win condition (#45) and the min-lap floor (D26 — the floor must reach the laps,
+    // live, and result folds identically, or the lap list and the score disagree about a
+    // suppressed pass). A heat with no round (ad-hoc) keeps the neutral defaults.
+    let round_def = events
+        .iter()
+        .find_map(|e| match e {
+            Event::HeatScheduled {
+                heat: h,
+                round: Some(round),
+                ..
+            } if *h == heat => Some(round.clone()),
+            _ => None,
+        })
+        .and_then(|round_id| {
+            registry
+                .meta_of(&event_id)
+                .and_then(|meta| meta.rounds.iter().find(|r| r.id == round_id).cloned())
+        });
+    let min_lap_micros = min_lap_micros_of(round_def.as_ref());
+
     let body = match query.projection {
         HeatProjection::Live => {
             // Open-practice overlay (open-practice format, Slice 1): fold the heat's real log window
             // for a truthful phase/clock, then — when this *is* the active open-practice heat — splice
             // its in-memory (NOT logged) per-channel laps on top. `merge_into` guards on the heat
             // matching the accumulator's, so a non-op heat folds its log window unchanged.
-            ProjectionBody::LiveRaceState(
-                state
-                    .open_practice()
-                    .merge_into(with_heat_timing(live_state_over(&heat_offsets), &stored)),
-            )
+            ProjectionBody::LiveRaceState(state.open_practice().merge_into(with_heat_timing(
+                live_state_over_with_floor(&heat_offsets, min_lap_micros),
+                &stored,
+            )))
         }
-        HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled(
+        HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled_with_floor(
             heat_offsets.iter().map(|(o, e)| (*o, e)),
+            min_lap_micros,
         )),
         HeatProjection::Audit => {
             // The defensible-results audit panel: fold the heat's rulings into a reverse-chrono
@@ -1792,31 +1815,21 @@ async fn snapshot_heat(
             // `HeatScheduled` tag, then look its `RoundDef::win_condition` up in the event
             // meta. A heat with no associated round (an ad-hoc / open-practice heat) falls
             // back to a neutral best-lap qualifying rule, so an un-tagged heat is unchanged.
-            let win_condition = events
-                .iter()
-                .find_map(|e| match e {
-                    Event::HeatScheduled {
-                        heat: h,
-                        round: Some(round),
-                        ..
-                    } if *h == heat => Some(round.clone()),
-                    _ => None,
-                })
-                .and_then(|round_id| {
-                    registry.meta_of(&event_id).and_then(|meta| {
-                        meta.rounds
-                            .iter()
-                            .find(|r| r.id == round_id)
-                            .map(|r| r.win_condition)
-                    })
-                })
+            let win_condition = round_def
+                .as_ref()
+                .map(|r| r.win_condition)
                 .unwrap_or(WinCondition::BestLap);
             // Score over the heat's FULL adjudicated window via the one shared helper the
             // round/class standings also use ([`round_engine::completed_heats`] →
             // [`score_heat_window`]), so the per-heat result and the standings can never
             // disagree on an adjudicated heat (#226). The helper preserves the window's global
             // offsets so a `RulingReversed` / `LapThrownOut` resolves to its true `LogRef` (#55).
-            ProjectionBody::HeatResult(score_heat_window(&events, &heat, win_condition))
+            ProjectionBody::HeatResult(score_heat_window(
+                &events,
+                &heat,
+                win_condition,
+                min_lap_micros,
+            ))
         }
         HeatProjection::Signal => {
             // The signal-as-evidence trace (marshaling Slice 1): fold the heat window's
@@ -1854,6 +1867,10 @@ async fn snapshot_pilot(
         .collect();
     let fallback_ref = CompetitorRef(pilot.0.clone());
 
+    // The pilot view folds the WHOLE log (every heat, every round) — rounds carry different
+    // min-lap floors, so no single floor applies here; the per-heat views are the floored,
+    // authoritative surfaces (D26). A pilot may therefore see a raw echo here that the RD's
+    // heat view suppresses — read-only, never scored.
     let full = lap_list_marshaled(events.iter().enumerate().map(|(i, e)| (i as u64, e)));
     let competitors: Vec<_> = full
         .competitors
@@ -2000,14 +2017,19 @@ pub(crate) fn score_heat_window(
     events: &[Event],
     heat: &HeatId,
     win_condition: WinCondition,
+    min_lap_micros: Option<i64>,
 ) -> HeatResult {
     let heat_offsets = heat_window_offsets(events, heat);
     // Fold the marshaling lap corrections (void / insert / adjust / split) into the pass
     // stream FIRST — scoring raw passes here was the residual #226 split-brain: the marshaling
     // lap list showed the corrected laps while the result, rankings, standings, and seeding
     // scored the uncorrected ones. The corrected stream keeps each surviving pass's global
-    // offset, so a throw-out targeting a lap's end pass still excludes the right lap.
-    let corrected = gridfpv_projection::corrected_passes(heat_offsets.iter().map(|(o, e)| (*o, e)));
+    // offset, so a throw-out targeting a lap's end pass still excludes the right lap. The
+    // round's min-lap floor (D26) applies here too — the score and the lap list must agree.
+    let corrected = gridfpv_projection::corrected_passes_with_floor(
+        heat_offsets.iter().map(|(o, e)| (*o, e)),
+        min_lap_micros,
+    );
     let race_start = corrected
         .iter()
         .filter(|(_, p)| p.gate.is_lap_gate())
@@ -2020,6 +2042,15 @@ pub(crate) fn score_heat_window(
         race_start,
         heat_offsets.iter().map(|(o, e)| (*o, e)),
     )
+}
+
+/// A round's min-lap floor in MICROSECONDS (D26), `None` when unset/zero — the single
+/// conversion every fold call site shares.
+pub(crate) fn min_lap_micros_of(round: Option<&crate::events::RoundDef>) -> Option<i64> {
+    round
+        .and_then(|r| r.min_lap_secs)
+        .filter(|s| *s > 0)
+        .map(|s| s as i64 * 1_000_000)
 }
 
 /// Render a [`ProtocolError`] as an HTTP error response (protocol.html §9.8): the JSON
@@ -2107,6 +2138,55 @@ mod tests {
         ]
     }
 
+    /// D26: the min-lap floor reaches SCORING through `score_heat_window` — an echo pass
+    /// that closes an under-floor lap is suppressed from the scored chain, so the result and
+    /// the (floored) lap list agree: the 0.004s phantom can never be anyone's best lap.
+    #[test]
+    fn score_heat_window_applies_the_min_lap_floor() {
+        let mut events = recorded_heat(); // A: passes at 1.0s / 4.0s / 6.5s (laps 3.0s, 2.5s)
+        // A double-detection echo 4ms after A's second pass — inserted DURING the run
+        // (appending it after `Finalized` would hit the Final freeze instead, which this
+        // test's own control run would then be measuring).
+        let finished_at = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    Event::HeatStateChanged {
+                        transition: HeatTransition::Finished,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        events.insert(finished_at, pass("A", 4_004_000, 9));
+        let heat = HeatId("q-1".into());
+
+        let unfloored = score_heat_window(&events, &heat, WinCondition::BestLap, None);
+        let a = unfloored
+            .places
+            .iter()
+            .find(|p| p.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            a.metric,
+            gridfpv_engine::scoring::Metric::BestLapMicros(Some(4_000)),
+            "without the floor the echo IS the (phantom) best lap"
+        );
+
+        let floored = score_heat_window(&events, &heat, WinCondition::BestLap, Some(1_000_000));
+        let a = floored
+            .places
+            .iter()
+            .find(|p| p.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            a.metric,
+            gridfpv_engine::scoring::Metric::BestLapMicros(Some(2_500_000)),
+            "the floor suppresses the echo; the real 2.5s lap wins"
+        );
+    }
+
     /// The FINAL FREEZE: a pass landing AFTER a heat's run went official never joins its
     /// window — a delayed RotorHazard catch-up pass (tagged or untagged) used to silently
     /// change a Final result with no command, no ruling, and no audit entry.
@@ -2185,6 +2265,7 @@ mod tests {
                     start_procedure: None,
                     grace_window: None,
                     protest_window: None,
+                    min_lap_secs: None,
                 },
             )
             .expect("round adds (empty classes validate)");

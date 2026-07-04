@@ -552,6 +552,10 @@
   let startMinSeconds = $state(2); // randomized start hold: shortest, in seconds (→ min_delay_ms)
   let startMaxSeconds = $state(5); // randomized start hold: longest, in seconds (→ max_delay_ms)
   let graceSeconds = $state(30); // grace window after the win condition, in seconds
+  // Min lap time (D26): raw crossings that would close a shorter lap are auto-removed (a gate
+  // reflection / double-detection), marshal-restorable. 0 = off; NEW rounds seed the
+  // field-standard 5s so a double-fire never fabricates a 0.004s best lap out of the box.
+  let minLapSeconds = $state(5);
   // ── Protest window (marshaling Slice 5) ──────────────────────────────────────
   // The **auto-official timer**, in seconds. 0 (the default) = OFF: the result stays provisional
   // (Unofficial) until the RD finalizes manually — today's behaviour. A positive value arms the
@@ -716,6 +720,7 @@
     startMinSeconds = 2;
     startMaxSeconds = 5;
     graceSeconds = 30;
+    minLapSeconds = 5;
     protestSeconds = 0; // off by default — manual finalize only
     timeLimitMinutes = ''; // blank = no limit
   }
@@ -796,6 +801,7 @@
     const grace = round.grace_window;
     graceSeconds =
       grace && typeof grace !== 'string' ? Math.round(grace.Duration.micros / 1_000_000) : 30;
+    minLapSeconds = round.min_lap_secs ?? 0;
 
     // Protest window (marshaling Slice 5): reflect an `After { micros }` back as seconds; `Off` (or a
     // round that predates the field) reads back as 0 (the timer disabled — manual finalize only).
@@ -1035,6 +1041,7 @@
       channel_mode: channelMode,
       staging_timer_secs: buildStagingSecs(),
       start_procedure: buildStartProcedure(),
+      min_lap_secs: Math.max(0, Math.round(Number(minLapSeconds) || 0)),
       grace_window: buildGraceWindow(),
       protest_window: buildProtestWindow()
     };
@@ -1736,6 +1743,12 @@
               bind:value={graceSeconds}
               aria-label="Grace window seconds"
             />
+          </Field>
+          <Field
+            label="Min lap time (seconds)"
+            hint="Crossings closing a shorter lap are auto-removed (marshal-restorable). 0 = off."
+          >
+            <Input type="number" min="0" bind:value={minLapSeconds} aria-label="Min lap seconds" />
           </Field>
           <Field
             label="Protest window (seconds)"

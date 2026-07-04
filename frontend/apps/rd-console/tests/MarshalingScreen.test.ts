@@ -774,7 +774,7 @@ describe('Marshaling (Slice 3)', () => {
           laps: [
             { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
           ],
-          voided: [{ at: 81_500_000, pass_ref: 14, void_ref: 21 }]
+          voided: [{ at: 81_500_000, pass_ref: 14, void_ref: 21, reason: 'Marshal' as const }]
         }
       ]
     };
@@ -817,6 +817,32 @@ describe('Marshaling (Slice 3)', () => {
         ([c]) => typeof c === 'object' && c !== null && 'InsertLap' in c
       );
       expect(inserts).toEqual([]);
+    });
+
+    it('an UnderMinLap auto-removed crossing renders labeled and restores via a self re-time', async () => {
+      // The floor (D26) suppressed an echo; the marshal disagrees (a genuine 2s whoop lap).
+      // Restore must NOT be void-the-void (there is no void event) — it re-asserts the raw
+      // instant via AdjustLap, the explicit ruling that exempts the pass from the floor.
+      const floored: LapList = {
+        competitors: [
+          {
+            competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+            laps: [
+              { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
+            ],
+            voided: [{ at: 43_000_000, pass_ref: 13, void_ref: 13, reason: 'UnderMinLap' as const }]
+          }
+        ]
+      };
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: floored });
+      render(Marshaling, { session });
+      expect(
+        screen.getByText(/crossing at 43\.000s — under min lap, auto-removed/)
+      ).toBeInTheDocument();
+      await fireEvent.click(
+        screen.getByRole('button', { name: /Restore removed pass at 43\.000s/ })
+      );
+      expect(sendSpy).toHaveBeenCalledWith({ AdjustLap: { target: 13, at: 43_000_000 } });
     });
 
     it('Restore on a removed pass sends void-the-void at the STANDING removal event', async () => {

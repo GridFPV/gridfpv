@@ -32,7 +32,7 @@
 
 pub mod recalc;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gridfpv_events::{
     AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SignalHistory, SourceTime,
@@ -128,7 +128,28 @@ pub struct VoidedPass {
     /// The voided pass's own global log offset (a stable row identity for the UI).
     pub pass_ref: LogRef,
     /// The **standing void event's** offset — the target a RESTORE (void-the-void) addresses.
+    /// For an AUTO-suppressed pass (see [`VoidReason::UnderMinLap`]) this is the pass's own
+    /// offset: there is no void event, and the restore path is a marshal ruling on the pass
+    /// itself (an [`Event::LapAdjusted`] re-asserting its raw instant — an explicit ruling
+    /// always outranks the floor).
     pub void_ref: LogRef,
+    /// WHY the pass is off the lap chain — the console labels the row (and picks the restore
+    /// command) by this.
+    #[serde(default)]
+    pub reason: VoidReason,
+}
+
+/// Why a pass sits on the removal record instead of the lap chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum VoidReason {
+    /// A marshal explicitly removed it ([`Event::DetectionVoided`]).
+    #[default]
+    Marshal,
+    /// The corrected fold suppressed it: it would close a lap under the round's minimum lap
+    /// time (D26 — a gate reflection / double-detection; timers are dumb emitters, GridFPV
+    /// owns lap semantics).
+    UnderMinLap,
 }
 
 impl CompetitorLaps {
@@ -315,8 +336,22 @@ where
     corrected_and_voided_passes(events).0
 }
 
-/// One RD-voided pass as the fold emits it: `(pass offset, standing void event's offset, pass)`.
-pub type VoidedEmit = (u64, u64, Pass);
+/// [`corrected_passes`] under a round's **minimum-lap floor** (D26) — the scoring-path
+/// sibling of [`lap_list_marshaled_with_floor`], so results and the lap list can never
+/// disagree about a suppressed pass.
+pub fn corrected_passes_with_floor<'a, I>(
+    events: I,
+    min_lap_micros: Option<i64>,
+) -> Vec<(u64, Pass)>
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    corrected_and_voided_passes_with_floor(events, min_lap_micros).0
+}
+
+/// One removed pass as the fold emits it:
+/// `(pass offset, restore-target offset, pass, why)`.
+pub type VoidedEmit = (u64, u64, Pass, VoidReason);
 
 /// [`corrected_passes`] plus the passes the RD **voided** (and did not un-void), each resolved
 /// to its concrete pass (re-time applied) with its own offset — the shared removal record the
@@ -544,11 +579,85 @@ where
         if is_voided {
             let void_ref = void_source.get(offset).copied().unwrap_or(*offset);
             for (o, p) in scratch.drain(..) {
-                voided_out.push((o, void_ref, p));
+                voided_out.push((o, void_ref, p, VoidReason::Marshal));
             }
         }
     }
     (out, voided_out)
+}
+
+/// [`corrected_and_voided_passes`] with the round's **minimum-lap floor** applied (D26).
+///
+/// After the marshaling corrections fold, each competitor's surviving chain is walked
+/// chronologically: a **raw, unruled** pass that would close a lap shorter than
+/// `min_lap_micros` is AUTO-SUPPRESSED — moved onto the removal record with
+/// [`VoidReason::UnderMinLap`] (its restore target is itself; a marshal re-time exempts it).
+/// Marshal-created passes (inserted, split-synthetic) and re-timed passes are NEVER
+/// suppressed: an explicit ruling outranks the floor. `None`/`0` floor ⇒ identical to the
+/// plain fold, so rounds predating the setting keep their results bit-identical.
+pub fn corrected_and_voided_passes_with_floor<'a, I>(
+    events: I,
+    min_lap_micros: Option<i64>,
+) -> (Vec<(u64, Pass)>, Vec<VoidedEmit>)
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    // The plain fold needs to tell us which surviving passes are raw-and-unruled; re-derive
+    // that from the events here so the core fold stays untouched. Collect first (two passes
+    // over the data, but windows are per-heat and small).
+    let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
+    let (surviving, mut voided) = corrected_and_voided_passes(pairs.iter().copied());
+    let Some(floor) = min_lap_micros.filter(|f| *f > 0) else {
+        return (surviving, voided);
+    };
+
+    // A pass is EXEMPT from the floor when a marshal shaped it: inserted or split-synthetic
+    // by construction, or re-timed by a standing (un-voided) adjust.
+    let mut exempt: BTreeSet<u64> = BTreeSet::new();
+    for (offset, event) in &pairs {
+        match event {
+            Event::LapInserted { .. } | Event::LapSplit { .. } => {
+                exempt.insert(*offset);
+            }
+            Event::LapAdjusted { target, .. } => {
+                exempt.insert(target.0);
+            }
+            _ => {}
+        }
+    }
+
+    // Walk each competitor's chain in time order, keep-first: a too-close successor that is
+    // not marshal-blessed drops to the removal record.
+    let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
+    for (offset, pass) in surviving {
+        by_competitor
+            .entry(CompetitorKey::from_pass(&pass))
+            .or_default()
+            .push((offset, pass));
+    }
+    let mut out: Vec<(u64, Pass)> = Vec::new();
+    for (_, mut chain) in by_competitor {
+        chain.sort_by_key(|(offset, p)| (p.at, *offset));
+        let mut last_kept: Option<SourceTime> = None;
+        for (offset, pass) in chain {
+            let too_close =
+                last_kept.is_some_and(|prev| pass.at.micros.saturating_sub(prev.micros) < floor);
+            if too_close && !exempt.contains(&offset) {
+                voided.push((offset, offset, pass, VoidReason::UnderMinLap));
+            } else {
+                last_kept = Some(pass.at);
+                out.push((offset, pass));
+            }
+        }
+    }
+    out.sort_by_key(|(offset, _)| *offset);
+    (out, voided_out_sorted(voided))
+}
+
+/// Stable ordering for the removal record (offset order, like the surviving stream).
+fn voided_out_sorted(mut voided: Vec<VoidedEmit>) -> Vec<VoidedEmit> {
+    voided.sort_by_key(|(offset, _, _, _)| *offset);
+    voided
 }
 
 /// Fold a sequence of `(offset, event)` pairs into the lap-list read model,
@@ -566,11 +675,20 @@ pub fn lap_list_marshaled<'a, I>(events: I) -> LapList
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
+    lap_list_marshaled_with_floor(events, None)
+}
+
+/// [`lap_list_marshaled`] under a round's **minimum-lap floor** (D26): auto-suppressed passes
+/// land on each competitor's removal record with [`VoidReason::UnderMinLap`].
+pub fn lap_list_marshaled_with_floor<'a, I>(events: I, min_lap_micros: Option<i64>) -> LapList
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
     // Group the corrected pass stream by competitor and derive laps. The fold itself
     // lives in `corrected_passes`; here we only project it into the lap-list view. Each
     // pass keeps the global offset that addresses it, so the derived laps carry their
     // `start_ref`/`end_ref` command targets.
-    let (surviving, voided) = corrected_and_voided_passes(events);
+    let (surviving, voided) = corrected_and_voided_passes_with_floor(events, min_lap_micros);
     let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
     for (offset, pass) in surviving {
         by_competitor
@@ -581,7 +699,7 @@ where
     // The RD-voided passes, grouped the same way — a competitor may have voids but no
     // surviving laps (every crossing removed), so they seed the map too.
     let mut voided_by_competitor: BTreeMap<CompetitorKey, Vec<VoidedPass>> = BTreeMap::new();
-    for (offset, void_offset, pass) in voided {
+    for (offset, void_offset, pass, reason) in voided {
         by_competitor
             .entry(CompetitorKey::from_pass(&pass))
             .or_default();
@@ -592,6 +710,7 @@ where
                 at: pass.at,
                 pass_ref: LogRef(offset),
                 void_ref: LogRef(void_offset),
+                reason,
             });
     }
 
@@ -1548,6 +1667,7 @@ mod marshaling_tests {
                 at: SourceTime::from_micros(4_000_000),
                 pass_ref: LogRef(1),
                 void_ref: LogRef(3),
+                reason: VoidReason::Marshal,
             }]
         );
 
@@ -1562,6 +1682,142 @@ mod marshaling_tests {
             .unwrap();
         assert_eq!(cl.laps.len(), 2);
         assert!(cl.voided.is_empty());
+    }
+
+    #[test]
+    fn min_lap_floor_suppresses_the_phantom_double_detection() {
+        // The live bug (Audit Shakedown): every pilot got TWO passes 4ms apart at race start —
+        // the second closed a phantom 0.004s "lap 1" and shifted every real lap's number.
+        // Under a 5s floor the echo drops to the removal record; the chain reads holeshot →
+        // real laps, exactly as if the timer had never double-fired.
+        let events = vec![
+            pass("vd", "A", 651_000, Some(1)), // offset 0 — holeshot (kept: first)
+            pass("vd", "A", 655_000, Some(2)), // offset 1 — the 4ms echo (suppressed)
+            pass("vd", "A", 7_208_000, Some(3)), // offset 2 — real lap 1
+            pass("vd", "A", 13_500_000, Some(4)), // offset 3 — real lap 2
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        let durations: Vec<i64> = cl.laps.iter().map(|l| l.duration_micros).collect();
+        assert_eq!(
+            durations,
+            vec![6_557_000, 6_292_000],
+            "holeshot opens the chain; the echo never closes a lap"
+        );
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(655_000),
+                pass_ref: LogRef(1),
+                void_ref: LogRef(1), // restore target = the pass itself (a marshal re-time)
+                reason: VoidReason::UnderMinLap,
+            }]
+        );
+        // No floor ⇒ bit-identical to the plain fold (rounds predating the setting).
+        let unfloored = lap_list_marshaled_with_floor(tagged(&events), None);
+        let plain = lap_list_marshaled(tagged(&events));
+        assert_eq!(unfloored, plain);
+        assert_eq!(plain.competitors[0].laps.len(), 3);
+    }
+
+    #[test]
+    fn a_marshal_re_time_exempts_a_pass_from_the_floor() {
+        // The RESTORE path: the floor suppressed a pass the marshal believes is real. An
+        // AdjustLap re-asserting its raw instant is an explicit ruling — it outranks the
+        // floor and the pass returns to the chain (whiff of a whoop track's 2s laps).
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 3_000_000, Some(2)), // offset 1 — 2s lap, under a 5s floor
+            pass("vd", "A", 9_000_000, Some(3)), // offset 2
+            adjusted(1, 3_000_000),              // offset 3 — marshal: "that 2s lap is real"
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            cl.laps
+                .iter()
+                .map(|l| l.duration_micros)
+                .collect::<Vec<_>>(),
+            vec![2_000_000, 6_000_000],
+            "the blessed pass closes its lap despite the floor"
+        );
+        assert!(cl.voided.is_empty());
+    }
+
+    #[test]
+    fn marshal_created_passes_are_never_floor_suppressed() {
+        // An inserted pass is a ruling by construction — even one that closes a short lap
+        // stands (the marshal typed the time; the floor guards raw detections only).
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)),  // offset 0
+            pass("vd", "A", 10_000_000, Some(2)), // offset 1
+            inserted("vd", "A", 2_500_000),       // offset 2 — a 1.5s lap, by ruling
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 2, "the inserted pass closes its lap");
+        assert!(cl.voided.is_empty());
+    }
+
+    #[test]
+    fn a_burst_of_rapid_echoes_all_suppress_against_the_last_kept_pass() {
+        // Three reflections inside the floor window: each compares against the last KEPT
+        // pass, so the whole burst drops — not every-other one.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // kept (first)
+            pass("vd", "A", 1_004_000, Some(2)), // echo — suppressed
+            pass("vd", "A", 1_009_000, Some(3)), // echo — suppressed
+            pass("vd", "A", 1_030_000, Some(4)), // echo — suppressed
+            pass("vd", "A", 8_000_000, Some(5)), // real — kept (7s from last kept)
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 1);
+        assert_eq!(cl.laps[0].duration_micros, 7_000_000);
+        assert_eq!(cl.voided.len(), 3);
+        assert!(
+            cl.voided
+                .iter()
+                .all(|v| v.reason == VoidReason::UnderMinLap)
+        );
+    }
+
+    #[test]
+    fn floor_suppression_composes_with_marshal_voids() {
+        // A marshal void recomputes the chain BEFORE the floor: voiding the first pass makes
+        // the echo the new chain opener (kept — nothing precedes it), and both removal
+        // reasons render side by side.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0 — marshal-voided below
+            pass("vd", "A", 1_004_000, Some(2)), // offset 1 — becomes the opener
+            pass("vd", "A", 8_000_000, Some(3)), // offset 2 — real lap
+            voided(0),                           // offset 3
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 1, "opener (echo) -> real pass = one lap");
+        assert_eq!(cl.voided.len(), 1);
+        assert_eq!(cl.voided[0].reason, VoidReason::Marshal);
     }
 
     #[test]
@@ -1590,6 +1846,7 @@ mod marshaling_tests {
                 at: SourceTime::from_micros(4_000_000),
                 pass_ref: LogRef(1),
                 void_ref: LogRef(5),
+                reason: VoidReason::Marshal,
             }]
         );
     }
@@ -1617,6 +1874,7 @@ mod marshaling_tests {
                 at: SourceTime::from_micros(4_000_000),
                 pass_ref: LogRef(1),
                 void_ref: LogRef(3),
+                reason: VoidReason::Marshal,
             }]
         );
     }

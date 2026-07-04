@@ -339,6 +339,7 @@ async fn round_driven_mock_race_flow_e2e() {
             start_procedure: None,
             grace_window: None,
             protest_window: None,
+            min_lap_secs: None,
         },
     )
     .await;
@@ -444,6 +445,7 @@ async fn round_driven_mock_race_flow_e2e() {
             start_procedure: None,
             grace_window: None,
             protest_window: None,
+            min_lap_secs: None,
         },
     )
     .await;
@@ -647,6 +649,7 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
             start_procedure: None,
             grace_window: None,
             protest_window: None,
+            min_lap_secs: None,
         },
     )
     .await;
@@ -787,6 +790,7 @@ async fn static_channel_balanced_qual_flow_e2e() {
             start_procedure: None,
             grace_window: None,
             protest_window: None,
+            min_lap_secs: None,
         },
     )
     .await;
@@ -1026,6 +1030,7 @@ async fn fast_auto_event(
             // A short bounded grace so the auto Running→Unofficial fires promptly after the win.
             grace_window: Some(GraceWindow::Duration { micros: 5_000 }),
             protest_window: None,
+            min_lap_secs: None,
         },
     )
     .await;
@@ -1257,6 +1262,7 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         }),
         grace_window: None,
         protest_window: None,
+        min_lap_secs: None,
     };
     let round: RoundDef = add_round(&app, &event, &token, open_req()).await;
     let state = registry.resolve(&event).unwrap();
@@ -1470,6 +1476,7 @@ async fn two_open_practice_rounds_in_one_event_get_distinct_heats_e2e() {
         start_procedure: None,
         grace_window: None,
         protest_window: None,
+        min_lap_secs: None,
     };
 
     let round_a: RoundDef = add_round(&app, &event, &token, open_req("Open A")).await;

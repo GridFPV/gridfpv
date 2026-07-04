@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 
 use gridfpv_engine::heat::{HeatState, heat_state};
 use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, HeatTransition, PilotId, RoundId};
-use gridfpv_projection::{CompetitorKey, lap_list_marshaled, registrations};
+use gridfpv_projection::{CompetitorKey, lap_list_marshaled_with_floor, registrations};
 use gridfpv_storage::StoredEvent;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -222,7 +222,7 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
         .enumerate()
         .map(|(i, e)| (i as u64, e))
         .collect();
-    live_state_core(events, &window)
+    live_state_core(events, &window, None)
 }
 
 /// Fold a **windowed** log slice with its PRESERVED global offsets — the heat/class-scope
@@ -232,17 +232,31 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
 /// `0,1,2,…`, so a correction to a heat deep in the log silently missed (or, on coincidence,
 /// hit the wrong pass) in every heat-scoped live view. `window` must be in log order.
 pub fn live_state_over(window: &[(u64, Event)]) -> LiveRaceState {
+    live_state_over_with_floor(window, None)
+}
+
+/// [`live_state_over`] under the current heat's **min-lap floor** (D26): the live lap fold
+/// suppresses under-floor raw passes exactly like the laps/result projections, so the race
+/// screen's lap counts and the marshaling list can never disagree about an echo.
+pub fn live_state_over_with_floor(
+    window: &[(u64, Event)],
+    min_lap_micros: Option<i64>,
+) -> LiveRaceState {
     // The positional helpers (current heat, phase, lineup, run boundary) read a bare event
     // slice; the offsets matter only to the marshaling-aware lap fold below.
     let events: Vec<Event> = window.iter().map(|(_, e)| e.clone()).collect();
     let pairs: Vec<(u64, &Event)> = window.iter().map(|(o, e)| (*o, e)).collect();
-    live_state_core(&events, &pairs)
+    live_state_core(&events, &pairs, min_lap_micros)
 }
 
 /// The shared fold behind [`live_state`] (full log, positional offsets) and
 /// [`live_state_over`] (a window with preserved global offsets). `window` is the SAME
 /// sequence as `events`, paired with each event's global append offset.
-fn live_state_core(events: &[Event], window: &[(u64, &Event)]) -> LiveRaceState {
+fn live_state_core(
+    events: &[Event],
+    window: &[(u64, &Event)],
+    min_lap_micros: Option<i64>,
+) -> LiveRaceState {
     let Some(current_heat) = current_heat(events) else {
         return LiveRaceState::default();
     };
@@ -266,7 +280,7 @@ fn live_state_core(events: &[Event], window: &[(u64, &Event)]) -> LiveRaceState 
     // boundary, so everything counts (a normally-finalized heat is unaffected).
     let run_start = current_run_start(events, &current_heat);
     let pass_ceiling = current_run_pass_ceiling(events, &current_heat);
-    let laps = lap_list_marshaled(
+    let laps = lap_list_marshaled_with_floor(
         window
             .iter()
             .enumerate()
@@ -287,6 +301,7 @@ fn live_state_core(events: &[Event], window: &[(u64, &Event)]) -> LiveRaceState 
                 }
             })
             .map(|(_, (offset, e))| (*offset, *e)),
+        min_lap_micros,
     );
     // Per ref: lap count, the last lap's DURATION (the wire's `last_lap_micros` display value),
     // and the last lap's COMPLETION time (`at`) — the running-order tie-break. The scorer ranks

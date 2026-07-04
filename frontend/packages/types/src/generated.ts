@@ -73,6 +73,7 @@ export type * from '@bindings/Hello';
 export type * from '@bindings/JoinTokenResponse';
 export type * from '@bindings/Lap';
 export type * from '@bindings/LapList';
+export type * from '@bindings/VoidReason';
 export type * from '@bindings/LifecycleState';
 export type * from '@bindings/LiveRaceState';
 export type * from '@bindings/LogRef';

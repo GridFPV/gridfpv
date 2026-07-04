@@ -117,6 +117,16 @@ grace_window: GraceWindow,
  */
 protest_window: ProtestWindow, 
 /**
+ * The **minimum lap time** floor, in seconds (D26) — GridFPV-native, because timers are
+ * dumb pass emitters and GridFPV owns lap semantics: a raw pass that would close a lap
+ * shorter than this (a gate reflection, a double-detection) is AUTO-SUPPRESSED by the
+ * corrected-passes fold — visible on the marshaling lap list as a struck removal-record
+ * row with a Restore override (marshal-created passes — inserts, re-times — are exempt:
+ * an explicit ruling always outranks the floor). `None`/`0` = off (rounds predating the
+ * field keep their scored results bit-identical).
+ */
+min_lap_secs?: number, 
+/**
  * The **practice duration** for an open-practice round, in seconds (open-practice refinement).
  * When set, the runtime clock **auto-ends the practice** (`Running → Unofficial`) once the
  * heat's elapsed running time reaches this limit — independent of any win condition (the time is
