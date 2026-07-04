@@ -232,7 +232,6 @@
 
 <style>
   .event-timers {
-    max-width: 44rem;
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-4);
