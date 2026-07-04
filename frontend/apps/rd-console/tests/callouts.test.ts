@@ -13,6 +13,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CalloutQueue,
+  UTTERANCE_WATCHDOG_MS,
   formatLapSeconds,
   lapCalloutText,
   type CalloutSpeech,
@@ -159,5 +160,38 @@ describe('lapCalloutText / formatLapSeconds', () => {
 
   it('skips the time when no lap time is carried', () => {
     expect(lapCalloutText('Goose', 1, undefined)).toBe('Goose, lap 1');
+  });
+});
+
+describe('the dead-utterance watchdog', () => {
+  it('advances the queue when the engine never calls back (the ~13s field stall)', () => {
+    vi.useFakeTimers();
+    const { speech, spoken, pending, finish, cancelSpy } = makeFakeSpeech();
+    const q = new CalloutQueue(speech);
+    q.enqueue({ text: 'first', key: 'a' }); // the engine swallows this one silently
+    q.enqueue({ text: 'second', key: 'b' });
+    expect(spoken).toEqual(['first']);
+    // No onend/onerror ever fires; the watchdog declares it dead, unsticks the engine
+    // (cancel), and pumps the next entry.
+    vi.advanceTimersByTime(UTTERANCE_WATCHDOG_MS + 1);
+    expect(spoken).toEqual(['first', 'second']);
+    expect(cancelSpy).toHaveBeenCalled();
+    // The healthy utterance completes normally and needs no watchdog help.
+    pending.shift(); // drop the dead one; finish() then completes 'second'
+    finish();
+    q.enqueue({ text: 'third', key: 'c' });
+    expect(spoken).toEqual(['first', 'second', 'third']);
+    vi.useRealTimers();
+  });
+
+  it('warmUp speaks one silent utterance and never blocks the queue', () => {
+    const { speech, spoken, pending } = makeFakeSpeech();
+    const q = new CalloutQueue(speech);
+    q.warmUp();
+    expect(spoken).toEqual([' ']);
+    expect((pending[0] as { volume?: number }).volume).toBe(0);
+    // A real callout is unaffected (warm-up holds no serialization token).
+    q.enqueue({ text: 'real', key: 'a' });
+    expect(spoken).toEqual([' ', 'real']);
   });
 });
