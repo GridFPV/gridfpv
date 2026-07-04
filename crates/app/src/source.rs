@@ -559,13 +559,43 @@ pub(crate) async fn run_bridge(
     adapter: AdapterId,
     #[cfg(feature = "live")] connections: RhConnections,
 ) {
-    let mut cursor: Offset = 0;
     // The in-flight heat task, if a heat is currently emitting. At most one at a time.
     let mut active: Option<ActiveHeat> = None;
-    // The runtime-clock drivers (heat-lifecycle Slice 2): the start countdown for a heat in `Armed`
-    // and the completion clock for a heat in `Running`. Each is `(heat, task)` so the bridge can
-    // cancel a superseded one (the heat left the relevant state) before it appends a stale auto.
+    // The runtime-clock drivers (heat-lifecycle Slice 2), keyed per heat (see `HeatClock`).
     let mut clock = HeatClock::default();
+    // START FROM THE CURRENT STATE, THEN FOLLOW THE TAIL — never replay history. A persistent
+    // event's log holds every past heat's transitions; replaying them re-fired start drivers
+    // (spurious `HeatStarting` facts, stale `Running` races) and re-spawned sim sources whose
+    // synchronous holeshots corrupted an already-scored heat's window on every Director
+    // restart. Instead: one read snapshots the log — the cursor starts at its tail, and any
+    // heat CURRENTLY in a runtime-driven state (Armed / Running / Unofficial) is handed to the
+    // normal transition handler once, as if its state had just been observed. A mid-race
+    // Director restart therefore re-arms the heat's sources and completion clock (fresh clocks
+    // over current state — the old process's timers died with it) and the race still auto-ends;
+    // finished history stays untouched.
+    let mut cursor: Offset = match read_tail(&state, 0) {
+        Ok(batch) => {
+            let tail = batch.last().map(|(offset, _)| offset + 1).unwrap_or(0);
+            let events: Vec<Event> = batch.into_iter().map(|(_, e)| e).collect();
+            for (heat, synthetic) in in_flight_heats(&events) {
+                handle_transition(
+                    &state,
+                    &registry,
+                    &timers,
+                    &event_id,
+                    &adapter,
+                    &mut active,
+                    &mut clock,
+                    #[cfg(feature = "live")]
+                    &connections,
+                    heat,
+                    synthetic,
+                );
+            }
+            tail
+        }
+        Err(_) => return,
+    };
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
 
     loop {
@@ -604,8 +634,15 @@ pub(crate) async fn run_bridge(
 
         let new_events = match read_tail(&state, cursor) {
             Ok(batch) => batch,
-            // A poisoned lock (or a dropped log at shutdown) ends the bridge cleanly.
-            Err(_) => return,
+            // A transient read error (an I/O blip on the SQLite log) must NOT end the event's
+            // runtime — that silently killed every start/completion/auto-official clock until
+            // the next Director restart, sticking heats in Armed forever. Warn and retry on the
+            // next tick; a genuinely dropped log at shutdown just keeps idling until the process
+            // exits (the bridge holds a strong state handle either way).
+            Err(e) => {
+                eprintln!("gridfpv: bridge could not read the event log (will retry): {e:?}");
+                continue;
+            }
         };
         if new_events.is_empty() {
             continue;
@@ -976,10 +1013,11 @@ fn handle_transition(
             // Spawn the completion clock (heat-lifecycle Slice 2): it watches the running passes and
             // auto-appends `Finished` once the win condition + grace are met. Independent of whether
             // any source emits — a real RH heat with no Mock source still needs auto-completion.
-            clock.completion = Some((
+            HeatClock::install(
+                &mut clock.completion,
                 heat.clone(),
                 spawn_completion_driver(state, registry, event_id, heat.clone()),
-            ));
+            );
 
             if handles.is_empty() && nothing_armed {
                 return;
@@ -1043,10 +1081,11 @@ fn handle_transition(
                 transition,
                 HeatTransition::Finished | HeatTransition::Reverted
             ) {
-                clock.protest = Some((
+                HeatClock::install(
+                    &mut clock.protest,
                     heat.clone(),
                     spawn_auto_official_driver(state, registry, event_id, heat.clone()),
-                ));
+                );
             }
         }
         // Staged is pre-Running: the heat isn't emitting yet, but it is the moment to **tune** the
@@ -1090,28 +1129,31 @@ fn handle_transition(
         // `Armed → Running`. A manual `SkipCountdown` (or an abort) cancels this via `cancel_for`
         // before it fires — see the top of this fn.
         HeatTransition::Armed => {
-            clock.start = Some((
+            HeatClock::install(
+                &mut clock.start,
                 heat.clone(),
                 spawn_start_driver(state, registry, event_id, heat),
-            ));
+            );
         }
     }
 }
 
-/// The runtime-clock drivers in flight for the bridge (heat-lifecycle Slice 2): the `start`
-/// countdown for the heat currently in `Armed` and the `completion` clock for the heat currently in
-/// `Running`. Each is `(heat, task)` so a transition can cancel exactly the driver belonging to the
-/// heat that moved. At most one of each at a time (the bridge drives one heat at a time).
+/// The runtime-clock drivers in flight for the bridge (heat-lifecycle Slice 2), **keyed per
+/// heat**: the `start` countdown for each heat in `Armed`, the `completion` clock for each in
+/// `Running`, and the `protest` auto-official timer for each in `Unofficial`. Per-heat maps —
+/// NOT single slots — because the windows genuinely overlap in normal operation (heat 2
+/// finishes while heat 1's protest window is still open): a single slot silently DETACHED the
+/// older heat's task on overwrite, `cancel_for` could never find it again, and its orphaned
+/// timer later force-finalized a heat the RD had already discarded or reverted.
 #[derive(Default)]
 struct HeatClock {
-    /// The start countdown for a heat in `Armed` (appends `HeatStarting` then auto `Running`).
-    start: Option<(HeatId, JoinHandle<()>)>,
-    /// The completion clock for a heat in `Running` (appends auto `Finished` on win + grace).
-    completion: Option<(HeatId, JoinHandle<()>)>,
-    /// The **auto-official timer** for a heat in `Unofficial` (marshaling Slice 5): when the round
-    /// armed a protest window, it logs the deadline (`HeatFinalizing`) then appends the auto
-    /// `Finalized` once the window elapses. Absent for a round with no protest window (the default).
-    protest: Option<(HeatId, JoinHandle<()>)>,
+    /// Start countdowns, per heat in `Armed` (appends `HeatStarting` then auto `Running`).
+    start: std::collections::HashMap<HeatId, JoinHandle<()>>,
+    /// Completion clocks, per heat in `Running` (appends auto `Finished` on win + grace).
+    completion: std::collections::HashMap<HeatId, JoinHandle<()>>,
+    /// Auto-official timers, per heat in `Unofficial` (marshaling Slice 5): when the round armed
+    /// a protest window, logs the deadline (`HeatFinalizing`) then appends the auto `Finalized`.
+    protest: std::collections::HashMap<HeatId, JoinHandle<()>>,
 }
 
 impl HeatClock {
@@ -1119,23 +1161,26 @@ impl HeatClock {
     /// state, so a pending auto-transition for the *old* state must not land). Drivers for other
     /// heats are left running. Aborting a finished task is a harmless no-op.
     fn cancel_for(&mut self, heat: &HeatId) {
-        if let Some((h, task)) = &self.start {
-            if h == heat {
-                task.abort();
-                self.start = None;
-            }
+        if let Some(task) = self.start.remove(heat) {
+            task.abort();
         }
-        if let Some((h, task)) = &self.completion {
-            if h == heat {
-                task.abort();
-                self.completion = None;
-            }
+        if let Some(task) = self.completion.remove(heat) {
+            task.abort();
         }
-        if let Some((h, task)) = &self.protest {
-            if h == heat {
-                task.abort();
-                self.protest = None;
-            }
+        if let Some(task) = self.protest.remove(heat) {
+            task.abort();
+        }
+    }
+
+    /// Install `task` as `heat`'s driver in `slot`, aborting any previous task for the SAME heat
+    /// (a re-arm replaces; other heats' drivers are untouched — the single-slot detach bug).
+    fn install(
+        slot: &mut std::collections::HashMap<HeatId, JoinHandle<()>>,
+        heat: HeatId,
+        task: JoinHandle<()>,
+    ) {
+        if let Some(previous) = slot.insert(heat, task) {
+            previous.abort();
         }
     }
 }
@@ -1184,6 +1229,34 @@ impl ActiveHeat {
 
 /// Read the log tail from `cursor`, returning `(offset, event)` pairs. A thin wrapper over
 /// the shared log handle so the bridge can poll without reaching into the server internals.
+/// The heats caught MID-FLIGHT by a Director restart, each paired with the SYNTHETIC
+/// transition that re-enters the normal `handle_transition` path for its current state:
+/// `Armed` → the start countdown re-arms; `Running` → sources + the completion clock re-arm
+/// (the race still auto-ends); `Unofficial` → the protest auto-official timer re-arms.
+/// Everything else (Scheduled / Staged / Final / …) needs no runtime driver.
+fn in_flight_heats(events: &[Event]) -> Vec<(HeatId, HeatTransition)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut in_flight = Vec::new();
+    for event in events {
+        let heat = match event {
+            Event::HeatScheduled { heat, .. } | Event::HeatStateChanged { heat, .. } => heat,
+            _ => continue,
+        };
+        if !seen.insert(heat.clone()) {
+            continue;
+        }
+        use gridfpv_engine::heat::HeatState;
+        let synthetic = match gridfpv_engine::heat::heat_state(events, heat) {
+            Some(HeatState::Armed) => HeatTransition::Armed,
+            Some(HeatState::Running) => HeatTransition::Running,
+            Some(HeatState::Unofficial) => HeatTransition::Finished,
+            _ => continue,
+        };
+        in_flight.push((heat.clone(), synthetic));
+    }
+    in_flight
+}
+
 fn read_tail(state: &AppState, cursor: Offset) -> Result<Vec<(Offset, Event)>, SourceError> {
     let log = state
         .log()
@@ -1505,16 +1578,27 @@ fn spawn_start_driver(
             return;
         }
         tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
-        // Auto-advance Armed → Running. If the heat already left Armed (a manual SkipCountdown / an
-        // abort), this task has been cancelled by the bridge and never reaches here.
-        if let Err(e) = state.append(
+        // Auto-advance Armed → Running — but RE-CHECK the heat is still Armed at fire time,
+        // under the command serialization lock. The bridge's cancel is poll-paced (~150ms), so
+        // a manual SkipCountdown/Abort landing just before this fired used to race a duplicate
+        // (or stale) `Running` into the log.
+        let still_armed = {
+            let h = heat.clone();
+            move |events: &[Event]| {
+                gridfpv_engine::heat::heat_state(events, &h)
+                    == Some(gridfpv_engine::heat::HeatState::Armed)
+            }
+        };
+        match state.append_checked(
             Event::HeatStateChanged {
                 heat,
                 transition: HeatTransition::Running,
             },
             None,
+            still_armed,
         ) {
-            eprintln!("gridfpv: start driver could not append Running: {e:?}");
+            Ok(_) => {}
+            Err(e) => eprintln!("gridfpv: start driver could not append Running: {e:?}"),
         }
     })
 }
@@ -1528,6 +1612,12 @@ fn spawn_start_driver(
 /// `Running` first (an abort / restart / a manual `ForceEnd`), so a superseded heat never appends a
 /// stale `Finished`. A round whose win condition has no intrinsic end (a bare qual — see
 /// [`race_end_reached`]) simply never fires here; the RD ends it with `ForceEnd`.
+///
+/// **Timed-window fallback:** a [`Timed`](gridfpv_engine::scoring::WinCondition::Timed) round's
+/// pass-based criterion needs a crossing at/after the cutoff to fire — if every pilot lands at the
+/// buzzer, no such pass ever arrives. The driver therefore also closes a Timed heat on the wall
+/// clock once the window plus the grace hold has elapsed (anchored to the first observed pass, or
+/// to race-go when nobody ever crossed), so a timed heat always ends on its own.
 ///
 /// **Open-practice time limit (open-practice refinement):** when the round carries a
 /// [`time_limit_secs`](gridfpv_server::events::RoundDef::time_limit_secs), the driver auto-ends the
@@ -1544,6 +1634,17 @@ fn spawn_completion_driver(
     heat: HeatId,
 ) -> JoinHandle<()> {
     let config = heat_clock_config(state, registry, event_id, &heat);
+    // The Timed window, for the wall-clock fallback below. Open practice is EXCLUDED: its round
+    // stores an inert default win condition that must never be consulted — its `time_limit_secs`
+    // is the only end condition (the branch above).
+    let timed_window = match config.win_condition {
+        gridfpv_engine::scoring::WinCondition::Timed { window_micros }
+            if !is_open_practice_heat(state, registry, event_id, &heat) =>
+        {
+            Some(Duration::from_micros(window_micros.max(0) as u64))
+        }
+        _ => None,
+    };
     let state = state.clone();
     // The running clock origin: the moment the heat entered `Running` (this spawn). The time-limit
     // deadline, when set, is measured from here — a deterministic wall-clock span (a test drives it
@@ -1554,6 +1655,10 @@ fn spawn_completion_driver(
         .map(|secs| Duration::from_secs(secs as u64));
     let mut ticker = tokio::time::interval(COMPLETION_POLL);
     tokio::spawn(async move {
+        // The wall-clock instant this driver first OBSERVED a running pass — the fallback's
+        // race-clock anchor. Observation lags the true crossing by up to a poll tick (+ transport),
+        // so a deadline anchored here is never *early* relative to the pass-anchored cutoff.
+        let mut first_pass_seen: Option<tokio::time::Instant> = None;
         loop {
             ticker.tick().await;
             // Time-limit auto-end (open-practice refinement): once the elapsed running time reaches
@@ -1562,13 +1667,7 @@ fn spawn_completion_driver(
             // win-condition branch below never fires for it). Logged like the other autos.
             if let Some(limit) = time_limit {
                 if running_since.elapsed() >= limit {
-                    if let Err(e) = state.append(
-                        Event::HeatStateChanged {
-                            heat,
-                            transition: HeatTransition::Finished,
-                        },
-                        None,
-                    ) {
+                    if let Err(e) = append_finished_if_running(&state, &heat) {
                         eprintln!(
                             "gridfpv: completion driver could not append time-limit Finished: {e:?}"
                         );
@@ -1577,6 +1676,28 @@ fn spawn_completion_driver(
                 }
             }
             let passes = heat_running_passes(&state, &heat);
+            if first_pass_seen.is_none() && !passes.is_empty() {
+                first_pass_seen = Some(tokio::time::Instant::now());
+            }
+            // Timed-window wall-clock fallback: `race_end_reached` for a Timed round only fires
+            // when a lap-gate pass lands AT/AFTER the cutoff — if nobody crosses again after the
+            // window ends (pilots land at the buzzer; a short time trial), the pass-based path
+            // never triggers and the heat would stay `Running` forever. Once the window PLUS the
+            // grace hold has elapsed on the wall clock — measured from the race-clock origin (the
+            // first observed pass; race-go when nobody ever crossed) — close the heat. Grace-window
+            // crossings before this deadline still land in the log and score normally; a
+            // post-cutoff crossing still ends the heat earlier via the pass-based path below.
+            if let Some(window) = timed_window {
+                let anchor = first_pass_seen.unwrap_or(running_since);
+                if anchor.elapsed() >= window + grace_hold(config.grace_window) {
+                    if let Err(e) = append_finished_if_running(&state, &heat) {
+                        eprintln!(
+                            "gridfpv: completion driver could not append timed-window Finished: {e:?}"
+                        );
+                    }
+                    return;
+                }
+            }
             let Some(race_start) = race_start_of(&passes) else {
                 continue; // no crossing yet — the race clock hasn't opened
             };
@@ -1584,19 +1705,37 @@ fn spawn_completion_driver(
                 // The race-end criterion is met: hold the grace window for late crossings, then
                 // close the race. The hold is wall-clock; the *decision* was pure.
                 tokio::time::sleep(grace_hold(config.grace_window)).await;
-                if let Err(e) = state.append(
-                    Event::HeatStateChanged {
-                        heat,
-                        transition: HeatTransition::Finished,
-                    },
-                    None,
-                ) {
+                if let Err(e) = append_finished_if_running(&state, &heat) {
                     eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
                 }
                 return;
             }
         }
     })
+}
+
+/// Append `Finished` for `heat` iff it is STILL `Running` at fire time — the completion
+/// driver's checked append (under the command serialization lock). The bridge's cancel is
+/// poll-paced, so a ForceEnd/Abort landing just before an expiring clock used to race a
+/// duplicate/stale `Finished` into the log.
+fn append_finished_if_running(
+    state: &AppState,
+    heat: &HeatId,
+) -> Result<(), gridfpv_server::error::ProtocolError> {
+    let h = heat.clone();
+    state
+        .append_checked(
+            Event::HeatStateChanged {
+                heat: heat.clone(),
+                transition: HeatTransition::Finished,
+            },
+            None,
+            move |events| {
+                gridfpv_engine::heat::heat_state(events, &h)
+                    == Some(gridfpv_engine::heat::HeatState::Running)
+            },
+        )
+        .map(|_| ())
 }
 
 /// Server wall-clock time in **microseconds** since the Unix epoch — the basis for the auto-official
@@ -1700,17 +1839,27 @@ fn spawn_auto_official_driver(
                 return;
             }
         }
-        // Auto-finalize Unofficial → Final. If the heat already left Unofficial (a manual early
-        // Finalize, a Revert, an abort), this task has been cancelled by the bridge and never reaches
-        // here — so the auto-finalize never fights a manual action.
-        if let Err(e) = state.append(
+        // Auto-finalize Unofficial → Final — RE-CHECKED at fire time under the command
+        // serialization lock: the heat must STILL be Unofficial with no open protest at the
+        // instant of the append. The bridge's cancel is poll-paced, so a Revert (or a fresh
+        // protest) landing just before the window expired used to race a stale `Finalized` in
+        // — instantly re-finalizing the heat the RD had just re-opened.
+        let h = heat.clone();
+        let gate = move |events: &[Event]| {
+            gridfpv_engine::heat::heat_state(events, &h)
+                == Some(gridfpv_engine::heat::HeatState::Unofficial)
+                && open_protest_count(events, &h) == 0
+        };
+        match state.append_checked(
             Event::HeatStateChanged {
                 heat,
                 transition: HeatTransition::Finalized,
             },
             None,
+            gate,
         ) {
-            eprintln!("gridfpv: auto-official driver could not append Finalized: {e:?}");
+            Ok(_) => {}
+            Err(e) => eprintln!("gridfpv: auto-official driver could not append Finalized: {e:?}"),
         }
     })
 }
@@ -2521,6 +2670,244 @@ mod tests {
         );
         // No passes were ever logged for the open-practice heat (the time limit, not scoring, ended it).
         assert_eq!(count_passes(&events), 0);
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn timed_heat_auto_ends_when_no_pass_lands_after_the_window() {
+        // The timed-window wall-clock fallback: a Timed round's pass-based end criterion
+        // (`race_end_reached`) needs a lap-gate pass AT/AFTER the cutoff — here every pass lands
+        // well BEFORE it (the sim finishes its laps in a few ms; the pilots "landed at the
+        // buzzer"), so without the fallback the heat would stay `Running` forever. The completion
+        // driver must close it on the wall clock once window + grace elapses.
+        use gridfpv_engine::scoring::WinCondition;
+        use gridfpv_server::events::{NewRoundReq, SeedingRule};
+        use gridfpv_server::scope::EventId as ScopeEventId;
+
+        let registry = fast_registry(2, 1); // holeshot + 2 laps per pilot, all inside ~10ms
+        let req = NewRoundReq {
+            label: "Short Time".into(),
+            classes: vec![],
+            format: "timed_qual".into(),
+            params: std::collections::BTreeMap::new(),
+            // A 1s window: long enough to assert no premature Finished, short enough for a test.
+            win_condition: Some(WinCondition::Timed {
+                window_micros: 1_000_000,
+            }),
+            time_limit_secs: None,
+            seeding: SeedingRule::FromRoster,
+            channel_mode: None,
+            staging_timer_secs: None,
+            start_procedure: None,
+            // Zero grace so the fallback deadline IS the window end.
+            grace_window: Some(GraceWindow::Duration { micros: 0 }),
+            protest_window: None,
+        };
+        let round = registry
+            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .expect("timed round added")
+            .id;
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        let heat = HeatId("q-1".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: Some(round),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition: HeatTransition::Running,
+                },
+                None,
+            )
+            .unwrap();
+
+        // All passes land within a few ms — long before the 1s cutoff — and the heat must still be
+        // Running mid-window (no premature close).
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&read_all_events(&state), &heat),
+            Some(gridfpv_engine::heat::HeatState::Running),
+            "the timed heat must keep running until its window elapses"
+        );
+
+        // Once the window (anchored at the first pass) elapses, the fallback appends Finished even
+        // though no pass ever landed at/after the cutoff.
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(4),
+            wait_until(&state, Duration::from_secs(4), move |events| {
+                gridfpv_engine::heat::heat_state(events, &target)
+                    == Some(gridfpv_engine::heat::HeatState::Unofficial)
+            }),
+        )
+        .await
+        .expect("the timed window should auto-end the heat with no post-cutoff pass");
+
+        let events = read_all_events(&state);
+        let finished = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::HeatStateChanged {
+                        heat: h,
+                        transition: HeatTransition::Finished,
+                    } if *h == heat
+                )
+            })
+            .count();
+        assert_eq!(finished, 1, "exactly one auto Finished");
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn bridge_startup_replays_nothing_over_a_finished_log() {
+        // The restart-replay bug: a fresh bridge over a log holding a fully-raced heat used to
+        // re-fire the historical transitions (a spurious HeatStarting, re-spawned sim sources
+        // whose passes corrupted the scored window). Startup must append NOTHING for history.
+        let registry = fast_registry(2, 1);
+        let state = registry.resolve(&practice()).unwrap();
+        let heat = HeatId("q-old".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: heat.clone(),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        for (at, seq) in [(1_000_000, 1), (2_000_000, 2)] {
+            state
+                .append(
+                    Event::Pass(Pass {
+                        adapter: AdapterId(SIM_ADAPTER.to_string()),
+                        competitor: CompetitorRef("A".into()),
+                        at: SourceTime::from_micros(at),
+                        sequence: Some(seq),
+                        gate: GateIndex::LAP,
+                        signal: None,
+                        heat: Some(heat.clone()),
+                    }),
+                    None,
+                )
+                .unwrap();
+        }
+        for transition in [HeatTransition::Finished, HeatTransition::Finalized] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: heat.clone(),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let before = read_all_events(&state).len();
+
+        // A fresh bridge over that log (the Director restart): give it a moment to (not) act.
+        let (bridge, state) = spawn_bridge_for(&registry);
+        sleep(Duration::from_millis(600)).await;
+        let after = read_all_events(&state).len();
+        assert_eq!(
+            before, after,
+            "startup must not replay history (no spurious HeatStarting/Running/passes)"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn overlapping_protest_windows_do_not_orphan_the_older_heats_timer() {
+        // The single-slot detach bug: heat 1 finishes (protest window armed), heat 2 finishes
+        //
+        // while heat 1's window is still open — installing heat 2's timer used to DETACH heat
+        // 1's, so discarding heat 1 could not cancel it and the orphan later force-finalized
+        // the discarded heat. With per-heat timers + the fire-time recheck, heat 1 must stay
+        // Scheduled after its discard, no matter what the old timer thought.
+        let registry = fast_registry(2, 1);
+        let round = add_protest_window_round(&registry, 700_000); // 0.7s windows
+        let (bridge, state) = spawn_bridge_for(&registry);
+
+        let schedule = |id: &str| Event::HeatScheduled {
+            heat: HeatId(id.into()),
+            lineup: vec![CompetitorRef("A".into())],
+            class: None,
+            round: Some(round.clone()),
+            frequencies: vec![],
+            label: None,
+        };
+        let changed = |id: &str, t: HeatTransition| Event::HeatStateChanged {
+            heat: HeatId(id.into()),
+            transition: t,
+        };
+        // Heat 1 finishes -> its 0.7s auto-official window arms.
+        state.append(schedule("q-1"), None).unwrap();
+        state
+            .append(changed("q-1", HeatTransition::Finished), None)
+            .unwrap();
+        // Heat 2 finishes inside heat 1's window -> a SECOND live protest timer.
+        sleep(Duration::from_millis(200)).await;
+        state.append(schedule("q-2"), None).unwrap();
+        state
+            .append(changed("q-2", HeatTransition::Finished), None)
+            .unwrap();
+        // The RD discards heat 1 while its window is still open.
+        sleep(Duration::from_millis(100)).await;
+        state
+            .append(changed("q-1", HeatTransition::Discarded), None)
+            .unwrap();
+
+        // Well past both windows: heat 1 must still be Scheduled (the discard stands); heat 2
+        // auto-finalized normally.
+        let target1 = HeatId("q-1".into());
+        let target2 = HeatId("q-2".into());
+        timeout(
+            Duration::from_secs(4),
+            wait_until(&state, Duration::from_secs(4), move |events| {
+                gridfpv_engine::heat::heat_state(events, &target2)
+                    == Some(gridfpv_engine::heat::HeatState::Final)
+            }),
+        )
+        .await
+        .expect("heat 2's window should auto-finalize it");
+        sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&read_all_events(&state), &target1),
+            Some(gridfpv_engine::heat::HeatState::Scheduled),
+            "the discarded heat must never be finalized by an orphaned timer"
+        );
         bridge.abort();
     }
 

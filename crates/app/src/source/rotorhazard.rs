@@ -180,6 +180,11 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 pub struct RhConnection {
     /// The cancel flag the driver polls; flipped on [`cancel`](Self::cancel) / drop.
     cancel: Arc<AtomicBool>,
+    /// Set when this connection is being SUPERSEDED by a new one for the same timer (an
+    /// active-event switch): the exiting driver must then leave the shared timer status alone —
+    /// its async teardown used to stomp `Disconnected` over the successor's `Connecting`/
+    /// `Connected`, and the failover logic read the healthy new primary as down.
+    yield_status: Arc<AtomicBool>,
     /// The armed-heat slot: `Some` while a heat is racing on this connection, else `None`.
     armed: Arc<Mutex<Option<ArmedHeat>>>,
     /// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
@@ -211,22 +216,35 @@ impl RhConnection {
     /// a heat is [armed](Self::arm_heat) onto it.
     pub fn open(timer_id: TimerId, url: String, timers: TimerRegistry) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
+        let yield_status = Arc::new(AtomicBool::new(false));
         let armed: Arc<Mutex<Option<ArmedHeat>>> = Arc::new(Mutex::new(None));
         let tune: TuneSlot = Arc::new(Mutex::new(None));
         let prepare: PrepareSlot = Arc::new(AtomicBool::new(false));
         let seat: SeatSlot = Arc::new(Mutex::new(None));
         let driver = {
             let cancel = cancel.clone();
+            let yield_status = yield_status.clone();
             let armed = armed.clone();
             let tune = tune.clone();
             let prepare = prepare.clone();
             let seat = seat.clone();
             tokio::task::spawn_blocking(move || {
-                drive(url, timer_id, timers, cancel, armed, tune, prepare, seat);
+                drive(
+                    url,
+                    timer_id,
+                    timers,
+                    cancel,
+                    yield_status,
+                    armed,
+                    tune,
+                    prepare,
+                    seat,
+                );
             })
         };
         Self {
             cancel,
+            yield_status,
             armed,
             tune,
             prepare,
@@ -300,6 +318,14 @@ impl RhConnection {
     /// Tear the connection down: stop any race, disconnect, leave the timer `Disconnected`. Called
     /// when the timer is deselected, the active event changes, or the Director shuts down.
     pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Cancel this connection because a NEW connection for the same timer is replacing it (an
+    /// active-event switch): the exiting driver yields the shared timer status to its successor
+    /// (see [`yield_status`](Self::yield_status)).
+    pub fn cancel_superseded(&self) {
+        self.yield_status.store(true, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -398,6 +424,7 @@ fn drive(
     timer_id: TimerId,
     timers: TimerRegistry,
     cancel: Arc<AtomicBool>,
+    yield_status: Arc<AtomicBool>,
     armed: Arc<Mutex<Option<ArmedHeat>>>,
     tune: TuneSlot,
     prepare: PrepareSlot,
@@ -493,8 +520,13 @@ fn drive(
             backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
         }
     }
-    // Cancelled: leave the timer Disconnected (deselected / event changed / shutdown).
-    timers.set_status(&timer_id, TimerStatus::Disconnected);
+    // Cancelled: leave the timer Disconnected (deselected / shutdown) — UNLESS a successor
+    // connection for this same timer already owns the status (an active-event switch): this
+    // teardown runs async on the driver thread and used to land AFTER the successor's
+    // `Connecting`/`Connected`, mislabeling a healthy timer and tripping failover.
+    if !yield_status.load(Ordering::Relaxed) {
+        timers.set_status(&timer_id, TimerStatus::Disconnected);
+    }
 }
 
 /// Classify the GridFPV-plugin handshake result (D16, S1) into the [`PluginPresence`] the timer

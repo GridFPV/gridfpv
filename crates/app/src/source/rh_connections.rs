@@ -143,10 +143,19 @@ impl RhConnections {
             .filter(|key| !keep.contains(*key))
             .cloned()
             .collect();
+        // Timer ids that stay wanted (under ANY event) — their stale connection is being
+        // REPLACED, so its exiting driver must yield the shared status to the successor.
+        let wanted_timers: std::collections::HashSet<&TimerId> =
+            wanted.iter().map(|(_, t, _)| t).collect();
         for key in stale {
             if let Some(conn) = map.remove(&key) {
-                // Tear down on the driver thread (stop race + disconnect + leave Disconnected).
-                conn.cancel();
+                if wanted_timers.contains(&key.1) {
+                    // Tear down, yielding the status cell to the successor connection.
+                    conn.cancel_superseded();
+                } else {
+                    // Tear down on the driver thread (stop race + disconnect + leave Disconnected).
+                    conn.cancel();
+                }
             }
         }
 

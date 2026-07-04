@@ -369,6 +369,9 @@ fn apply_schedule_heat(
 ) -> CommandAck {
     use crate::round_engine;
 
+    // Validate→append under the command serialization lock (see `apply_command`): two
+    // concurrent ScheduleHeats with one id must not both pass the fresh-id check.
+    let _guard = state.command_guard();
     let Some(meta) = registry.meta_of(event_id) else {
         return CommandAck::failed(ProtocolError::new(
             ErrorCode::UnknownScope,
@@ -700,6 +703,10 @@ pub fn apply_fill_round(
     round: gridfpv_events::RoundId,
     mode: FillMode,
 ) -> CommandAck {
+    // The whole read-draw-append loop runs under the command serialization lock (see
+    // `apply_command`): a concurrent fill/schedule must not interleave with the duplicate-id
+    // and round-state reads this fill bases its draws on.
+    let _guard = state.command_guard();
     let Some(meta) = registry.meta_of(event_id) else {
         return CommandAck::failed(ProtocolError::new(
             ErrorCode::UnknownScope,
@@ -773,6 +780,9 @@ fn apply_advance(
     state: &AppState,
     heat: HeatId,
 ) -> CommandAck {
+    // The multi-step advance (transition + generator draw + selection) runs under the command
+    // serialization lock, like every other validated write.
+    let _guard = state.command_guard();
     // 1. Record the `Final → Advanced` transition (engine legality + event shape reused). A
     //    non-`Final` or unknown heat is rejected verbatim here, appending nothing.
     let advanced = match heat_transition(state, heat.clone(), HeatCommand::Advance) {
@@ -858,6 +868,11 @@ fn select_next_heat(state: &AppState, next: HeatId) -> CommandAck {
 /// [`CommandAck::failed`] carrying the shared [`ProtocolError`] — and appends **nothing**
 /// — on any rejection.
 pub fn apply_command(state: &AppState, command: Command) -> CommandAck {
+    // The whole validate→append runs under the command serialization lock: without it, a
+    // concurrent appender (the auto-official driver, another console) could change the very
+    // state the validation just read — a ruling landing on a heat that went Final in the
+    // window, Finalize slipping past a fresh protest, duplicate heat ids both passing.
+    let _guard = state.command_guard();
     match command_to_event(state, command) {
         Ok(event) => match state.append(event, None) {
             Ok(_offset) => CommandAck::ok(),
