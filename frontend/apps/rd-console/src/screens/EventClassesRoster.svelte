@@ -723,7 +723,6 @@
 
 <style>
   .classes-roster {
-    max-width: 48rem;
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-5);
