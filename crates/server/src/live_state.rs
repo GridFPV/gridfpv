@@ -513,7 +513,7 @@ fn heat_staged_at(stored: &[StoredEvent], heat: &HeatId) -> Option<i64> {
             } if h == heat => entry.recorded_at,
             _ => None,
         })
-        .last()
+        .next_back()
 }
 
 /// Map a folded [`HeatState`] to the projected [`HeatPhase`] the live view reports.
