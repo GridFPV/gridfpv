@@ -154,6 +154,11 @@ pub struct PassSink {
     /// wakes `/stream` to push the fresh per-channel live state — so an open-practice session's
     /// passes are *never* appended to the durable log (only its `HeatScheduled` + start/stop are).
     open_practice: Option<HeatId>,
+    /// The heat this sink feeds — **stamped onto every appended pass** (`Pass::heat`), so pass
+    /// attribution is by tag, not log position (a heat-span event landing mid-race can no longer
+    /// steal the running heat's laps). The bridge sets it when it builds a Running heat's sinks;
+    /// `None` (a bare test/demo sink) appends untagged, positional-legacy passes.
+    heat: Option<HeatId>,
 }
 
 impl PassSink {
@@ -166,6 +171,7 @@ impl PassSink {
             gate: None,
             timer: None,
             open_practice: None,
+            heat: None,
         }
     }
 
@@ -183,6 +189,7 @@ impl PassSink {
             gate: Some(gate),
             timer: Some(timer),
             open_practice: None,
+            heat: None,
         }
     }
 
@@ -192,6 +199,14 @@ impl PassSink {
     /// open-practice heat so its laps are tracked live but never logged.
     pub fn for_open_practice(mut self, heat: HeatId) -> Self {
         self.open_practice = Some(heat);
+        self
+    }
+
+    /// Bind this sink to the heat it feeds: every appended pass is stamped `Pass::heat` so the
+    /// folds attribute it by TAG (robust against heat-span events landing mid-race), never by
+    /// log position alone. Builder style, applied when the bridge builds a Running heat's sinks.
+    pub fn for_heat(mut self, heat: HeatId) -> Self {
+        self.heat = Some(heat);
         self
     }
 
@@ -225,6 +240,7 @@ impl PassSink {
             sequence: Some(sequence),
             gate: GateIndex::LAP,
             signal: None,
+            heat: self.heat.clone(),
         };
         // Open practice (open-practice format, Slice 1): route the pass into the in-memory
         // per-channel accumulator and wake `/stream` — it is **never** appended to the log.
@@ -262,6 +278,15 @@ impl PassSink {
                 return Ok(());
             }
         }
+        // Stamp the sink's heat onto the pass (tag attribution — see `for_heat`): the adapter
+        // built the pass without one; the sink is the component that knows which heat it feeds.
+        let event = match event {
+            Event::Pass(mut pass) if self.heat.is_some() => {
+                pass.heat = self.heat.clone();
+                Event::Pass(pass)
+            }
+            other => other,
+        };
         self.state
             .append(event, None)
             .map_err(|e| SourceError(format!("{e:?}")))?;
@@ -904,7 +929,8 @@ fn handle_transition(
             let mut handles = Vec::with_capacity(sources.len());
             for (timer_id, source) in sources {
                 let mut sink =
-                    PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id);
+                    PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id)
+                        .for_heat(heat.clone());
                 if open_practice {
                     sink = sink.for_open_practice(heat.clone());
                 }
@@ -932,7 +958,8 @@ fn handle_transition(
                         adapter.clone(),
                         gate.clone(),
                         timer_id.clone(),
-                    );
+                    )
+                    .for_heat(heat.clone());
                     if open_practice {
                         sink = sink.for_open_practice(heat.clone());
                     }
@@ -1712,7 +1739,14 @@ fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
                 }
                 _ => running = false,
             },
-            Event::Pass(p) if running && p.gate.is_lap_gate() => passes.push(p),
+            // A tagged pass belongs to its stamped heat regardless of the positional cursor
+            // (same rule as the server's window folds); an untagged (legacy) pass keeps the
+            // positional rule. Either way only while this heat's run window is open.
+            Event::Pass(p) if running && p.gate.is_lap_gate() => {
+                if p.heat.as_ref().is_none_or(|h| h == heat) {
+                    passes.push(p);
+                }
+            }
             _ => {}
         }
     }

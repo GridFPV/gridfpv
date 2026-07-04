@@ -81,10 +81,10 @@ use gridfpv_events::{CompetitorRef, Event};
 use gridfpv_projection::{LapList, lap_list_marshaled};
 use gridfpv_storage::StoredEvent;
 
-use crate::app::{AppState, heat_window, resolve_event};
+use crate::app::{AppState, resolve_event};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::EventRegistry;
-use crate::live_state::{live_state, with_heat_timing};
+use crate::live_state::{live_state, live_state_over, with_heat_timing};
 use crate::scope::{EventId, Scope};
 use crate::snapshot::{ProjectionBody, ProjectionKind};
 use crate::stream::{Change, ChangeEnvelope, Cursor, StreamMessage};
@@ -190,11 +190,23 @@ impl ScopeProjection {
         let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
         let events = events.as_slice();
         match scope {
-            Scope::Event { .. } | Scope::Class { .. } => {
+            Scope::Event { .. } => {
                 // Phase/clock are the log's; the open-practice accumulator only splices its
                 // non-logged per-channel laps onto that base (a no-op when no op heat is active).
                 // `with_heat_timing` anchors the clock to the current heat's race-go (#62 follow-up).
                 let mut live = with_heat_timing(live_state(events), stored);
+                if let Some(op) = overlay {
+                    live = op.merge_into(live);
+                }
+                Some(ProjectionBody::LiveRaceState(live))
+            }
+            Scope::Class { class, .. } => {
+                // The class's REAL filtered window, with preserved global offsets — the same
+                // fold as `snapshot_class`, so snapshot and stream converge (they used to
+                // diverge: the stream folded the whole event). Offsets matter so marshaling
+                // adjudications (global LogRef targets) resolve inside the filtered view.
+                let window = crate::app::class_window_offsets(events, class);
+                let mut live = with_heat_timing(live_state_over(&window), stored);
                 if let Some(op) = overlay {
                     live = op.merge_into(live);
                 }
@@ -212,8 +224,8 @@ impl ScopeProjection {
                 // The heat's phase/clock are its real log window; the race-go timing folds from the
                 // full stored log. Splice the open-practice laps on when this Heat scope addresses
                 // the active open-practice heat.
-                let window = heat_window(events, heat);
-                let mut live = with_heat_timing(live_state(&window), stored);
+                let window = crate::app::heat_window_offsets(events, heat);
+                let mut live = with_heat_timing(live_state_over(&window), stored);
                 if let Some(op) = overlay {
                     if op.active_heat().as_ref() == Some(heat) {
                         live = op.merge_into(live);

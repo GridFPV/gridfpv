@@ -817,6 +817,8 @@ impl RotorHazardAdapter {
                     // RotorHazard reports the lap gate only (single start/finish gate).
                     gate: GateIndex::LAP,
                     signal,
+                    // The adapter doesn't know the heat; the bridge sink stamps it at append.
+                    heat: None,
                 };
 
                 // A re-sent snapshot replays every lap; only accept genuinely new ones.
@@ -1240,6 +1242,8 @@ impl RotorHazardAdapter {
             sequence: Some(p.lap_number),
             gate: GateIndex::LAP,
             signal,
+            // The adapter doesn't know the heat; the bridge sink stamps it at append.
+            heat: None,
         };
         if !self.dedup.observe(&pass) {
             return;
@@ -1389,6 +1393,7 @@ mod tests {
                 signal: Some(SignalContext {
                     rssi_peak: Some(0.0),
                 }),
+                heat: None,
             }),
             // node-1 holeshot (lap 0): ts 5416.201... ms -> 5_416_202 µs.
             Event::CompetitorSeen {
@@ -1404,6 +1409,7 @@ mod tests {
                 signal: Some(SignalContext {
                     rssi_peak: Some(0.0),
                 }),
+                heat: None,
             }),
             // node-0 lap 1: ts 7416.519... ms -> 7_416_519 µs (re-sent snapshot adds it).
             Event::Pass(Pass {
@@ -1415,6 +1421,7 @@ mod tests {
                 signal: Some(SignalContext {
                     rssi_peak: Some(0.0),
                 }),
+                heat: None,
             }),
             // node-0 lap 2: ts 10017.685... ms -> 10_017_685 µs.
             Event::Pass(Pass {
@@ -1426,6 +1433,7 @@ mod tests {
                 signal: Some(SignalContext {
                     rssi_peak: Some(0.0),
                 }),
+                heat: None,
             }),
             // DONE (2) ends the session.
             Event::SessionEnded {

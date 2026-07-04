@@ -146,6 +146,32 @@ impl HeadToHead {
 }
 
 impl Generator for HeadToHead {
+    /// The **advancing set** a bracket carry (`FromHeatWinners`) reads: each completed heat's
+    /// **winner(s)** — in-heat position 1, ties included, a DQ never advances — in heat order,
+    /// de-duplicated across rotations (the same groups race again; one advancing slot per pilot).
+    ///
+    /// This OVERRIDES the default `ranking_advancers` ("everyone strictly better than the worst
+    /// ranking position"), which is wrong for a head-to-head level: the Placement ranking breaks
+    /// the losers' band by laps, giving losers of different heats *distinct* overall positions —
+    /// so the default advanced every loser but the single worst one (a losing semifinalist was
+    /// carried into the final). Winners-per-heat is the semantics the seeding doc promises
+    /// ("the source round's heat winners, in heat order").
+    fn advancers(&self, completed: &[CompletedHeat]) -> Vec<CompetitorRef> {
+        let mut seen: BTreeSet<CompetitorRef> = BTreeSet::new();
+        let mut advancing = Vec::new();
+        for heat in completed {
+            for place in &heat.result.places {
+                if place.position == 1 && !place.disqualified {
+                    let competitor = place.competitor.competitor.clone();
+                    if seen.insert(competitor.clone()) {
+                        advancing.push(competitor);
+                    }
+                }
+            }
+        }
+        advancing
+    }
+
     fn next(&mut self, completed: &[CompletedHeat]) -> GeneratorStep {
         // A lone (or empty) field has nothing to race. Otherwise emit every rotation's heats up
         // front (the grouping is fixed, so the whole schedule is known at fill — points racing
@@ -629,6 +655,39 @@ mod tests {
         assert_eq!(ranking[3].position, 3);
         assert_eq!(ranking[4].position, 5);
         assert_eq!(ranking[5].position, 6);
+    }
+
+    #[test]
+    fn advancers_carries_only_each_heats_winner_never_a_loser() {
+        // The verified bracket-carry bug: a 4-pilot 2-up level — A beats B (5 v 4 laps),
+        // C beats D (6 v 3). The Placement ranking breaks the losers' band by laps (B 3rd,
+        // D 4th), so the default position-<worst rule advanced [C, A, B] — the losing
+        // semifinalist B was seeded into the final. The override must carry exactly the
+        // heat winners, in heat order: [A, C].
+        let g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 1, Scoring::Placement);
+        let completed = vec![
+            CompletedHeat::new("h2h-r1-h1", result(&[("A", 1, 5), ("B", 2, 4)])),
+            CompletedHeat::new("h2h-r1-h2", result(&[("C", 1, 6), ("D", 2, 3)])),
+        ];
+        assert_eq!(g.advancers(&completed), field(&["A", "C"]));
+    }
+
+    #[test]
+    fn advancers_dedupes_across_rotations_and_skips_a_dq_winner() {
+        // Two rotations of the same group: A wins both — one advancing slot, not two. A
+        // heat whose position-1 row is disqualified advances nobody from that heat.
+        let g = HeadToHead::new(field(&["A", "B", "C", "D"]), 2, 2, Scoring::Placement);
+        let dq = |rows: &[(&str, u32, u32)]| {
+            let mut r = result(rows);
+            r.places[0].disqualified = true;
+            r
+        };
+        let completed = vec![
+            CompletedHeat::new("h2h-r1-h1", result(&[("A", 1, 5), ("B", 2, 4)])),
+            CompletedHeat::new("h2h-r1-h2", dq(&[("C", 1, 6), ("D", 2, 3)])),
+            CompletedHeat::new("h2h-r2-h1", result(&[("A", 1, 5), ("B", 2, 4)])),
+        ];
+        assert_eq!(g.advancers(&completed), field(&["A"]));
     }
 
     #[test]

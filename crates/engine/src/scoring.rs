@@ -911,6 +911,7 @@ mod tests {
             sequence: Some(seq),
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         }
     }
 

@@ -74,6 +74,7 @@ fn make_pass(adapter: &AdapterId, competitor: &CompetitorRef, at: i64, sequence:
         sequence: Some(sequence),
         gate: GateIndex::LAP,
         signal: None,
+        heat: None, // the offline demo has no heat construct
     })
 }
 

@@ -354,6 +354,8 @@ impl VelocidroneAdapter {
             sequence: None,
             gate: map_gate(data.gate),
             signal: None,
+            // The adapter doesn't know the heat; the bridge sink stamps it at append.
+            heat: None,
         }));
     }
 }
@@ -530,6 +532,7 @@ mod tests {
                     sequence: None,
                     gate: GateIndex::LAP,
                     signal: None,
+                    heat: None,
                 }),
             ]
         );
@@ -655,6 +658,7 @@ mod tests {
                 sequence: None,
                 gate,
                 signal: None,
+                heat: None,
             })
         };
         let seen = |competitor: &str| Event::CompetitorSeen {

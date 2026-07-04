@@ -320,8 +320,8 @@ where
                 competitor,
                 at,
                 // The heat tag routes the insertion into the right heat *window* upstream;
-                // by the time the fold sees it, it is just a synthetic pass.
-                heat: _,
+                // the synthetic pass carries it through so tag-aware folds agree.
+                heat,
             } => {
                 entries.insert(
                     offset,
@@ -333,6 +333,7 @@ where
                         sequence: None,
                         gate: gridfpv_events::GateIndex::LAP,
                         signal: None,
+                        heat: heat.clone(),
                     }),
                 );
             }
@@ -460,6 +461,7 @@ where
                             sequence: None,
                             gate: gridfpv_events::GateIndex::LAP,
                             signal: None,
+                            heat: src.heat,
                         },
                     ));
                 }
@@ -974,6 +976,7 @@ mod tests {
             sequence,
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         })
     }
 
@@ -986,6 +989,7 @@ mod tests {
             sequence: None,
             gate: GateIndex(gate),
             signal: Some(SignalContext { rssi_peak: None }),
+            heat: None,
         })
     }
 
@@ -1250,6 +1254,7 @@ mod marshaling_tests {
             sequence,
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         })
     }
 
