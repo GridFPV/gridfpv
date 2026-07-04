@@ -312,10 +312,6 @@
           </button>
         {/each}
       </nav>
-
-      <div class="sidebar-foot">
-        <code class="base">{session.baseUrl}</code>
-      </div>
     </aside>
 
     <div class="main-col">
@@ -571,20 +567,6 @@
     color: var(--gf-text-faint);
   }
 
-  .sidebar-foot {
-    margin-top: auto;
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-3);
-    padding: var(--gf-space-3) var(--gf-space-2) 0;
-    border-top: 1px solid var(--gf-border-subtle);
-  }
-  .base {
-    font-size: var(--gf-font-size-2xs);
-    color: var(--gf-text-faint);
-    word-break: break-all;
-  }
-
   /* ── Main column (topbar + content) ──────────────────────────────────────── */
   .main-col {
     display: flex;
@@ -713,8 +695,7 @@
       grid-template-columns: 4rem 1fr;
     }
     .nav-label,
-    kbd,
-    .base {
+    kbd {
       display: none;
     }
     .nav-item {
