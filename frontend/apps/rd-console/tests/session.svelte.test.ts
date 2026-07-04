@@ -12,7 +12,7 @@ import type {
 } from '@gridfpv/types';
 import { Session } from '../src/lib/session.svelte.js';
 import type { ControlClient, createControlClient } from '../src/lib/control.js';
-import { liveRunning, okAck, failAck } from './fixtures.js';
+import { heatResult, liveRunning, okAck, failAck } from './fixtures.js';
 
 /**
  * Per-test overrides for the `Session` constructor's injected impls. Derived from the
@@ -1064,6 +1064,164 @@ describe('Session', () => {
       expect(listHeatsImpl).toHaveBeenCalledWith('http://d.local', 'practice', {
         token: undefined
       });
+    });
+  });
+
+  // ── Auth-failure detection matches the real HTTP status, never digits inside a message ──────
+  describe('auth-failure status matching', () => {
+    it('does NOT prompt on a 500 whose message merely contains "401" (an event id)', async () => {
+      // The status is 500 — "401" appears only inside the event id. The old whole-message
+      // \b(401|403)\b scan matched it and opened the token dialog on a plain server error.
+      const deleteEventImpl = vi.fn(async () => {
+        throw new Error('DELETE /events/evt-401 failed: HTTP 500');
+      });
+      const tokenProvider = vi.fn(async () => 'lazy-tok');
+      const session = new Session({ deleteEventImpl, autoRestore: false });
+      session.setTokenProvider(tokenProvider);
+
+      await expect(session.deleteEvent('evt-401')).rejects.toThrow(/500/);
+      expect(tokenProvider).not.toHaveBeenCalled();
+      expect(deleteEventImpl).toHaveBeenCalledOnce();
+    });
+
+    it('prompts + retries on an error carrying the HTTP status STRUCTURALLY (status: 403)', async () => {
+      let calls = 0;
+      const deleteEventImpl = vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw Object.assign(new Error('Forbidden'), { status: 403 });
+        return undefined as unknown as void;
+      });
+      const tokenProvider = vi.fn(async () => 'lazy-tok');
+      const session = new Session({ deleteEventImpl, autoRestore: false });
+      session.setTokenProvider(tokenProvider);
+
+      const ok = await session.deleteEvent('evt-a');
+      expect(tokenProvider).toHaveBeenCalledOnce();
+      expect(deleteEventImpl).toHaveBeenCalledTimes(2);
+      expect(ok).toBe(true);
+    });
+  });
+
+  // ── heatResult lifecycle: a scored result must never outlive the heat it describes ──────────
+  describe('heatResult staleness (clear on heat change / Revert)', () => {
+    /** Serve `?projection=result` with the fixture result; everything else fails (inert). */
+    function stubResultFetch() {
+      return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = String(input);
+        if (/\/snapshot\/heat\/[^/?]+\?projection=result$/.test(url)) {
+          return {
+            ok: true,
+            json: async () => ({ body: { HeatResult: heatResult } })
+          } as unknown as Response;
+        }
+        return { ok: false, json: async () => ({}) } as unknown as Response;
+      });
+    }
+
+    function resultSession() {
+      const { connect, push } = mockConnect(connecting);
+      const control = { baseUrl: 'http://d.local', sendCommand: vi.fn(async () => okAck) };
+      const session = new Session({
+        connectImpl: connect,
+        controlFactory: () => control,
+        autoRestore: false
+      });
+      session.selectEvent(PRACTICE);
+      return { session, push };
+    }
+
+    it('clears heatResult once the live current heat moves on (stale-export fix)', async () => {
+      const { session, push } = resultSession();
+      const fetchSpy = stubResultFetch();
+      await session.fetchHeatResult('heat-1');
+      expect(session.heatResult).toBeDefined();
+
+      // The same heat still current → the result stands.
+      push({
+        body: { LiveRaceState: { ...liveRunning, current_heat: 'heat-1' } },
+        cursor: 2,
+        status: 'live',
+        error: undefined
+      });
+      expect(session.heatResult).toBeDefined();
+
+      // The current heat moves to the NEXT heat → the stored result no longer describes it;
+      // leaving it set embedded the previous heat's result in the Results JSON export.
+      push({
+        body: { LiveRaceState: { ...liveRunning, current_heat: 'heat-2' } },
+        cursor: 3,
+        status: 'live',
+        error: undefined
+      });
+      expect(session.heatResult).toBeUndefined();
+      fetchSpy.mockRestore();
+    });
+
+    it('clears heatResult when ITS heat is Reverted — not on a Revert of another heat', async () => {
+      const { session } = resultSession();
+      const fetchSpy = stubResultFetch();
+      await session.fetchHeatResult('heat-1');
+      expect(session.heatResult).toBeDefined();
+
+      // Reverting a DIFFERENT heat leaves this result standing…
+      await session.send({ Revert: { heat: 'heat-9' } });
+      expect(session.heatResult).toBeDefined();
+      // …but Reverting the result's own heat re-opens it: no scored result stands.
+      await session.send({ Revert: { heat: 'heat-1' } });
+      expect(session.heatResult).toBeUndefined();
+      fetchSpy.mockRestore();
+    });
+  });
+
+  // ── Durable per-heat bindings (the Results/Audit friendly-name source) ───────────────────────
+  describe('ensureHeatBindings (durable per-heat registration bindings)', () => {
+    it('fetches each heat-window fold once, caches the ref→pilot map, and retries failures', async () => {
+      const { connect } = mockConnect(connecting);
+      const control = { baseUrl: 'http://d.local', sendCommand: vi.fn(async () => okAck) };
+      const session = new Session({
+        connectImpl: connect,
+        controlFactory: () => control,
+        baseUrl: 'http://d.local',
+        autoRestore: false
+      });
+      session.selectEvent(PRACTICE);
+
+      // h1's heat-window fold carries the durable `node-0 → p1` bind; h2's read fails.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = String(input);
+        const m = /\/snapshot\/heat\/([^/?]+)\?projection=live$/.exec(url);
+        if (m && m[1] === 'h1') {
+          const live = {
+            current_heat: 'h1',
+            phase: 'Unofficial',
+            progress: [{ competitor: 'node-0', pilot: 'p1', laps_completed: 2 }]
+          };
+          return {
+            ok: true,
+            json: async () => ({ body: { LiveRaceState: live } })
+          } as unknown as Response;
+        }
+        return { ok: false, json: async () => ({}) } as unknown as Response;
+      });
+      const liveFetchUrls = () =>
+        fetchSpy.mock.calls.map(([u]) => String(u)).filter((u) => u.includes('projection=live'));
+
+      await session.ensureHeatBindings(['h1', 'h2']);
+      expect(session.heatBindings.get('h1')?.get('node-0')).toBe('p1');
+      // h2's read failed → stays uncached (the resolver just falls back for its refs).
+      expect(session.heatBindings.has('h2')).toBe(false);
+
+      // A second ensure re-fetches ONLY the still-missing heat — h1 is served from the cache.
+      const before = liveFetchUrls().length;
+      await session.ensureHeatBindings(['h1', 'h2']);
+      const fresh = liveFetchUrls().slice(before);
+      expect(fresh.some((u) => u.includes('/h1?'))).toBe(false);
+      expect(fresh.some((u) => u.includes('/h2?'))).toBe(true);
+
+      // The cache is event-scoped: leaving the event drops it.
+      session.leaveEvent();
+      expect(session.heatBindings.size).toBe(0);
+      fetchSpy.mockRestore();
     });
   });
 });

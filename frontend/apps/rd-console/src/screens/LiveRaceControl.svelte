@@ -380,7 +380,11 @@
   // auto-advance; it goes negative (over-time) past zero so the RD sees a field that isn't ready.
   const staging = useStagingClock(
     () => phase,
-    () => stagingSecs
+    () => stagingSecs,
+    // Server-anchored (#62 family): every console counts the SAME staging window, from the
+    // server's Staged instant — not each console's own mount time.
+    () => live?.staged_at,
+    () => session.serverNowMs()
   );
 
   // ── Auto-official countdown (marshaling Slice 5) ─────────────────────────────────────────────

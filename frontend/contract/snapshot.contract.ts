@@ -105,6 +105,22 @@ describe('seam 1: snapshot routes are path-scoped', () => {
     expect(Array.isArray((body as { MarshalingAudit: unknown }).MarshalingAudit)).toBe(true);
   });
 
+  it('GET /snapshot/heat/{id}?projection=signal → 200 SignalTrace (marshaling Slice 1)', async () => {
+    const { status, json } = await getSnapshot(
+      `/events/practice/snapshot/heat/${HEAT}?projection=signal`
+    );
+    expect(status).toBe(200);
+    const body = (json as { body: object }).body;
+    expect(Object.keys(body)).toEqual(['SignalTrace']);
+    // The SignalTraceView top-level shape: `{ competitors: CompetitorTrace[] }`. The sim
+    // adapter emits no RSSI facts, so the trace is present-but-empty — a 200 with an
+    // empty competitors array, never an error or a missing field (the signal-as-evidence
+    // panel renders "no trace captured" off exactly this shape).
+    const view = (body as { SignalTrace: Record<string, unknown> }).SignalTrace;
+    expect(Object.keys(view)).toEqual(['competitors']);
+    expect(Array.isArray(view.competitors)).toBe(true);
+  });
+
   it('GET /snapshot/class/{event}/{class} → 200 LiveRaceState', async () => {
     const { status, json } = await getSnapshot('/events/practice/snapshot/class/spring-cup/open');
     expect(status).toBe(200);

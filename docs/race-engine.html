@@ -97,7 +97,12 @@ stateDiagram-v2
     <p>
       Passes are consumed only while a heat is <em>Running</em> (and during a grace window
       after it goes <em>Unofficial</em> — late crossings still count; the window is
-      configurable). The phases: <em>Stage</em> begins the (informational) staging countdown
+      configurable). Each consumed pass is <strong>stamped with the heat it was recorded
+      for</strong> by the Director's bridge at append time, and every fold attributes it by
+      that tag — never by log position alone — so a heat-span event landing mid-race (filling
+      the next round, marshaling a finished heat) cannot steal the running heat's laps; an
+      untagged pass from a legacy log keeps the old positional rule
+      (<a href="decisions.html#d20">D20</a>). The phases: <em>Stage</em> begins the (informational) staging countdown
       and, for IRL, assigns frequencies; <em>Start</em> arms the heat and <strong>runs the
       start procedure</strong> (announce → randomized hold → tone), after which the runtime
       auto-advances <code>Armed → Running</code>; the heat closes itself when the win

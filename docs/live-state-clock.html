@@ -83,6 +83,13 @@
       <dd>The server-authoritative race-go and race-end instants (§2). These are <em>not</em> in the
       plain <code>&amp;[Event]</code> fold — they are stamped on the stored log and folded in by a
       finishing pass (§2).</dd>
+      <dt><code>staged_at</code></dt>
+      <dd>The server-authoritative <code>Scheduled → Staged</code> instant, present only while the
+      heat is <code>Staged</code> — the anchor for the console's staging countdown (release audit,
+      2026-07-04). Before this, each console anchored the countdown to its own mount time, so two
+      consoles (or a reload) read different windows; anchoring to the server instant against
+      <code>serverNowMs()</code> makes every console read the SAME window, the standing clock-skew
+      rule.</dd>
     </dl>
     <div class="principle">
       <p><span class="name">One fold, two callers.</span> The plain

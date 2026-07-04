@@ -229,7 +229,10 @@
     const add = (progress: readonly PilotProgress[] | undefined): void => {
       for (const p of progress ?? []) if (p.pilot != null) map.set(p.competitor, p.pilot);
     };
-    add(session.liveState?.progress); // fallback: the global stream (only when it IS this heat)
+    // Fallback: the global stream — but ONLY when its current heat IS the marshaled heat. Node-seat
+    // refs (`node-0`) are reused across heats, so merging the live heat's bindings while marshaling
+    // a DIFFERENT heat captioned this heat's laps with the other heat's pilots (worse than raw).
+    if (session.liveState?.current_heat === heat) add(session.liveState?.progress);
     // Authoritative: the marshaled heat's durable binding — but only once the heat-scope fold is for
     // THIS heat (a stale fold from a just-deselected heat could re-bind a reused `node-0` ref wrong).
     if (session.heatLiveState?.current_heat === heat) add(session.heatLiveState?.progress);
@@ -298,8 +301,38 @@
   });
 
   // ── Inline corrections on the SELECTED lap ──
-  // Edit-time / split / insert-after take a time input (seconds, source clock).
-  let editSeconds = $state(0);
+  // Edit-time / split / insert-after take a time input (seconds, source clock). The entered value
+  // must be a POSITIVE number: an empty/zeroed input reads as 0, and sending it (`AdjustLap at: 0`)
+  // re-times the pass to the race start and wrecks the whole lap chain. The buttons disable on an
+  // invalid value (with the explaining title) and the handlers refuse with a toast as a backstop —
+  // never a silent send of 0. (An emptied number input binds `null`, hence the typeof check.)
+  let editSeconds = $state<number | null>(0);
+  const editSecondsValid = $derived(typeof editSeconds === 'number' && editSeconds > 0);
+  const editSecondsTitle = 'Enter a positive time (s) first';
+  /** The validated time input (µs), or `undefined` — toasting the refusal (visible feedback). */
+  function editTimeMicros(): number | undefined {
+    const seconds = editSeconds;
+    if (typeof seconds !== 'number' || !(seconds > 0)) {
+      toast.error('Enter a positive time (seconds) first.');
+      return undefined;
+    }
+    return secondsToSourceTime(seconds);
+  }
+
+  // One shared in-flight guard for the correction / ruling / lifecycle submits (the `committing`
+  // pattern): every correction APPENDS a ruling, so a double-clicked Apply lands the penalty
+  // TWICE. Each handler runs under this — a click while a previous send is still in flight
+  // no-ops — and the buttons disable on it so the double-submit can't even be attempted.
+  let busy = $state(false);
+  async function submitCorrection(run: () => Promise<void>): Promise<void> {
+    if (busy) return;
+    busy = true;
+    try {
+      await run();
+    } finally {
+      busy = false;
+    }
+  }
 
   async function afterCorrection(): Promise<void> {
     // The send already recorded any error; on success the stream cursor advances and the
@@ -308,38 +341,46 @@
     if (heat) await session.refreshMarshaling(heat);
   }
 
-  async function doVoidSelected(): Promise<void> {
-    if (!selected) return;
-    const target: LogRef = selected.lap.end_ref;
-    const ack = await session.send(voidDetectionCommand(target));
-    if (ack.ok) {
-      selected = null;
-      await afterCorrection();
-    }
+  function doVoidSelected(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!selected) return;
+      const target: LogRef = selected.lap.end_ref;
+      const ack = await session.send(voidDetectionCommand(target));
+      if (ack.ok) {
+        selected = null;
+        await afterCorrection();
+      }
+    });
   }
 
-  async function doSplitSelected(): Promise<void> {
-    if (!selected) return;
-    const ack = await session.send(
-      splitLapCommand(selected.lap.end_ref, secondsToSourceTime(editSeconds))
-    );
-    if (ack.ok) await afterCorrection();
+  function doSplitSelected(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!selected) return;
+      const at = editTimeMicros();
+      if (at === undefined) return;
+      const ack = await session.send(splitLapCommand(selected.lap.end_ref, at));
+      if (ack.ok) await afterCorrection();
+    });
   }
 
-  async function doEditTimeSelected(): Promise<void> {
-    if (!selected) return;
-    const ack = await session.send(
-      adjustLapCommand(selected.lap.end_ref, secondsToSourceTime(editSeconds))
-    );
-    if (ack.ok) await afterCorrection();
+  function doEditTimeSelected(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!selected) return;
+      const at = editTimeMicros();
+      if (at === undefined) return;
+      const ack = await session.send(adjustLapCommand(selected.lap.end_ref, at));
+      if (ack.ok) await afterCorrection();
+    });
   }
 
-  async function doInsertAfterSelected(): Promise<void> {
-    if (!selected || !heat) return;
-    const ack = await session.send(
-      insertLapCommand(adapter, selected.competitor, secondsToSourceTime(editSeconds), heat)
-    );
-    if (ack.ok) await afterCorrection();
+  function doInsertAfterSelected(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!selected || !heat) return;
+      const at = editTimeMicros();
+      if (at === undefined) return;
+      const ack = await session.send(insertLapCommand(adapter, selected.competitor, at, heat));
+      if (ack.ok) await afterCorrection();
+    });
   }
 
   // ── Add a brand-new lap (not an edit of an existing one) ──
@@ -354,56 +395,75 @@
   // session may control; the Director re-checks).
 
   /** Add a lap for a competitor at an exact source-clock time (µs) — the graph's button path. */
-  async function insertLap(competitor: CompetitorRef, at: number): Promise<void> {
-    if (!canControl || resultLocked || !heat) return;
-    const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at), heat));
-    if (ack.ok) await afterCorrection();
+  function insertLap(competitor: CompetitorRef, at: number): Promise<void> {
+    return submitCorrection(async () => {
+      if (!canControl || resultLocked || !heat) return;
+      const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at), heat));
+      if (ack.ok) await afterCorrection();
+    });
   }
 
   // The explicit per-competitor "Add lap" control: a typed time in seconds (source clock), so an RD
   // running a sim heat (no graph) can still add a lap, including to a competitor with no laps yet.
   let addLapTarget = $state<CompetitorRef | ''>('');
-  let addLapSeconds = $state(0);
+  let addLapSeconds = $state<number | null>(0);
   async function doAddLapAtTime(): Promise<void> {
-    if (!canControl || !addLapTarget) return;
+    if (!canControl || !addLapTarget || typeof addLapSeconds !== 'number') return;
     await insertLap(addLapTarget, secondsToSourceTime(addLapSeconds));
   }
 
   // Throw out the selected lap from the SCORED count — distinct from "Remove (void)": the lap stays
   // a real lap, it just no longer counts (marshaling.html §3.3). Targets the lap's end pass.
-  async function doThrowOutSelected(): Promise<void> {
-    if (!selected) return;
-    const ack = await session.send(throwOutLapCommand(selected.lap.end_ref));
-    if (ack.ok) {
-      selected = null;
-      await afterCorrection();
-    }
+  function doThrowOutSelected(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!selected) return;
+      const ack = await session.send(throwOutLapCommand(selected.lap.end_ref));
+      if (ack.ok) {
+        selected = null;
+        await afterCorrection();
+      }
+    });
   }
 
   // ── Per-competitor rulings ──
   let penaltyTarget = $state<CompetitorRef | ''>('');
   // 'dq' = disqualify (status), 'time' = added time (per-heat), 'points' = standings deduction.
   let penaltyKind = $state<'dq' | 'time' | 'points'>('dq');
-  let penaltySeconds = $state(2);
-  let penaltyPoints = $state(1);
+  // The amount inputs bind `null` when emptied, so they're validated (positive) before any send.
+  let penaltySeconds = $state<number | null>(2);
+  let penaltyPoints = $state<number | null>(1);
   let dqReason = $state('');
-  async function doPenalty(): Promise<void> {
-    if (!heat || !penaltyTarget) return;
-    // A non-positive time "penalty" would credit time / log a no-op ruling — refuse to send.
-    if (penaltyKind === 'time' && !(penaltySeconds > 0)) return;
-    let ack;
-    if (penaltyKind === 'points') {
-      // Points affect SEASON/EVENT standings, not the per-heat lap result.
-      ack = await session.send(deductPointsCommand(heat, penaltyTarget, penaltyPoints));
-    } else {
-      const penalty =
-        penaltyKind === 'dq' ? disqualifyPenalty(dqReason) : timeAddedPenalty(penaltySeconds);
-      ack = await session.send(applyPenaltyCommand(heat, penaltyTarget, penalty));
-    }
-    if (ack.ok) {
-      dqReason = '';
-      await afterCorrection();
-    }
+  function doPenalty(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!heat || !penaltyTarget) return;
+      // An invalid amount is REFUSED with visible feedback — never a silent no-op (the old early
+      // return read as "it worked"): a non-positive time "penalty" would credit time, and a
+      // 0-point DeductPoints would append a no-op ruling to the record.
+      const target = penaltyTarget;
+      let ack;
+      if (penaltyKind === 'points') {
+        const points = typeof penaltyPoints === 'number' ? Math.round(penaltyPoints) : NaN;
+        if (!(points > 0)) {
+          toast.error('Enter a positive whole number of points to deduct.');
+          return;
+        }
+        // Points affect SEASON/EVENT standings, not the per-heat lap result.
+        ack = await session.send(deductPointsCommand(heat, target, points));
+      } else if (penaltyKind === 'time') {
+        const seconds = penaltySeconds;
+        if (typeof seconds !== 'number' || !(seconds > 0)) {
+          toast.error('Enter a positive number of seconds for a time penalty.');
+          return;
+        }
+        ack = await session.send(applyPenaltyCommand(heat, target, timeAddedPenalty(seconds)));
+      } else {
+        ack = await session.send(applyPenaltyCommand(heat, target, disqualifyPenalty(dqReason)));
+      }
+      if (ack.ok) {
+        dqReason = '';
+        await afterCorrection();
+      }
+    });
   }
 
   // Reverse any prior reversible ruling — a penalty, a lap throw-out, a protest resolution, or a
@@ -414,30 +474,38 @@
     'ProtestResolved',
     'HeatVoided'
   ];
+  // Already-reversed rulings are excluded — offering them again invited a double
+  // ReverseRuling on the same target (a confusing rejection at best).
   const reversibleRulings = $derived(
-    (audit ?? []).filter((e) => REVERSIBLE_KINDS.includes(e.kind))
+    (audit ?? []).filter(
+      (e) => REVERSIBLE_KINDS.includes(e.kind) && !reversedRulingTargets.has(e.at_ref)
+    )
   );
   let reverseTargetRef = $state<number | ''>('');
-  async function doReverse(): Promise<void> {
-    if (reverseTargetRef === '') return;
-    const ack = await session.send(reverseRulingCommand(reverseTargetRef as LogRef));
-    if (ack.ok) {
-      reverseTargetRef = '';
-      await afterCorrection();
-    }
+  function doReverse(): Promise<void> {
+    return submitCorrection(async () => {
+      if (reverseTargetRef === '') return;
+      const ack = await session.send(reverseRulingCommand(reverseTargetRef as LogRef));
+      if (ack.ok) {
+        reverseTargetRef = '';
+        await afterCorrection();
+      }
+    });
   }
 
   // ── Protests (file → resolve) ──
   let protestTarget = $state<CompetitorRef | ''>('');
   let protestNote = $state('');
-  async function doFileProtest(): Promise<void> {
-    if (!heat || !protestTarget || protestNote.trim() === '') return;
-    const ack = await session.send(fileProtestCommand(heat, protestTarget, protestNote.trim()));
-    if (ack.ok) {
-      protestNote = '';
-      protestTarget = '';
-      await afterCorrection();
-    }
+  function doFileProtest(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!heat || !protestTarget || protestNote.trim() === '') return;
+      const ack = await session.send(fileProtestCommand(heat, protestTarget, protestNote.trim()));
+      if (ack.ok) {
+        protestNote = '';
+        protestTarget = '';
+        await afterCorrection();
+      }
+    });
   }
   // Filed protests are resolvable by their log offset (the audit entry's `at_ref`).
   const filedProtests = $derived((audit ?? []).filter((e) => e.kind === 'ProtestFiled'));
@@ -470,46 +538,58 @@
   });
   let resolveProtestRef = $state<number | ''>('');
   let protestOutcome = $state<ProtestOutcome>('Upheld');
-  async function doResolveProtest(): Promise<void> {
-    if (resolveProtestRef === '') return;
-    const ack = await session.send(
-      resolveProtestCommand(resolveProtestRef as LogRef, protestOutcome)
-    );
-    if (ack.ok) {
-      resolveProtestRef = '';
-      await afterCorrection();
-    }
+  function doResolveProtest(): Promise<void> {
+    return submitCorrection(async () => {
+      if (resolveProtestRef === '') return;
+      const ack = await session.send(
+        resolveProtestCommand(resolveProtestRef as LogRef, protestOutcome)
+      );
+      if (ack.ok) {
+        resolveProtestRef = '';
+        await afterCorrection();
+      }
+    });
   }
 
-  async function doVoidHeat(): Promise<void> {
-    if (!heat) return;
-    const ack = await session.send(voidHeatCommand(heat));
-    if (ack.ok) await afterCorrection();
+  function doVoidHeat(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!heat) return;
+      const ack = await session.send(voidHeatCommand(heat));
+      if (ack.ok) await afterCorrection();
+    });
   }
 
   // Result-lifecycle transitions on the MARSHALED heat (B). These act on `heat` (the picker's heat),
   // never Race Control's current heat — marshaling issues no SetCurrentHeat. Same append→re-fold path
   // as every correction, so the badge + buttons update via afterCorrection.
-  async function doFinalize(): Promise<void> {
-    if (!heat || openProtestCount > 0) return;
-    const ack = await session.send(commandForAction('Finalize', heat));
-    if (ack.ok) await afterCorrection();
+  function doFinalize(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!heat || openProtestCount > 0) return;
+      const ack = await session.send(commandForAction('Finalize', heat));
+      if (ack.ok) await afterCorrection();
+    });
   }
 
-  async function doRevert(): Promise<void> {
-    if (!heat) return;
-    const ack = await session.send(commandForAction('Revert', heat));
-    if (ack.ok) await afterCorrection();
+  function doRevert(): Promise<void> {
+    return submitCorrection(async () => {
+      if (!heat) return;
+      const ack = await session.send(commandForAction('Revert', heat));
+      if (ack.ok) await afterCorrection();
+    });
   }
 
-  // Competitors that can be acted on: those in the lap list, else the live lineup.
+  // Competitors that can be acted on: those in the lap list, else THE MARSHALED HEAT's own
+  // scheduled lineup (the heats directory). Never the global live stream's `active_pilots` —
+  // that is whichever heat happens to be running NOW, and marshaling frequently pins a
+  // different heat: the old fallback offered the live heat's pilots in the ruling/protest/
+  // add-lap dropdowns, letting the RD record a DQ against a pilot who never flew this heat.
   // DE-DUPLICATED by ref: the same competitor can appear under TWO adapters in one heat
   // (a mid-heat source failover — or historically a re-raced heat before the current-run
   // window fix), and duplicate refs crashed every keyed {#each} over this list.
   const competitors = $derived<CompetitorRef[]>(
     laps && laps.competitors.length > 0
       ? [...new Set(laps.competitors.map((c) => c.competitor.competitor))]
-      : (session.liveState?.active_pilots ?? [])
+      : (heats.find((h) => h.heat === heat)?.lineup ?? [])
   );
 
   // Marshal one pilot at a time (declutter): a dropdown picks the pilot, and the graph + lap list
@@ -928,7 +1008,9 @@
             <p>
               This result is official — Revert it to make corrections. Protests may still be filed.
             </p>
-            <ConfirmButton onconfirm={doRevert} disabled={!heat}>Revert → Unofficial</ConfirmButton>
+            <ConfirmButton onconfirm={doRevert} disabled={!heat || busy}
+              >Revert → Unofficial</ConfirmButton
+            >
           </div>
         {:else}
           <!-- Inline corrections on the selected lap -->
@@ -941,7 +1023,7 @@
               {/if}
             </legend>
             <div class="row">
-              <button type="button" onclick={doVoidSelected} disabled={!selected}
+              <button type="button" onclick={doVoidSelected} disabled={!selected || busy}
                 >Remove (void)</button
               >
               <label class="time"
@@ -949,21 +1031,36 @@
                 <input
                   type="number"
                   step="0.001"
+                  min="0.001"
                   bind:value={editSeconds}
                   aria-label="Correction time"
                 />
               </label>
-              <button type="button" onclick={doSplitSelected} disabled={!selected}>Split</button>
-              <button type="button" onclick={doEditTimeSelected} disabled={!selected}
-                >Edit time</button
+              <!-- The time-input corrections require a POSITIVE entered time: sending the
+                   empty/zeroed input (at: 0) re-times the pass to race start and wrecks the
+                   lap chain, so the buttons disable with the explaining title instead. -->
+              <button
+                type="button"
+                onclick={doSplitSelected}
+                disabled={!selected || busy || !editSecondsValid}
+                title={!editSecondsValid ? editSecondsTitle : undefined}>Split</button
               >
-              <button type="button" onclick={doInsertAfterSelected} disabled={!selected}
-                >Insert after</button
+              <button
+                type="button"
+                onclick={doEditTimeSelected}
+                disabled={!selected || busy || !editSecondsValid}
+                title={!editSecondsValid ? editSecondsTitle : undefined}>Edit time</button
+              >
+              <button
+                type="button"
+                onclick={doInsertAfterSelected}
+                disabled={!selected || busy || !editSecondsValid}
+                title={!editSecondsValid ? editSecondsTitle : undefined}>Insert after</button
               >
               <button
                 type="button"
                 onclick={doThrowOutSelected}
-                disabled={!selected}
+                disabled={!selected || busy}
                 title="Exclude this valid lap from the scored count (the lap stays real)"
                 >Throw out lap</button
               >
@@ -1001,7 +1098,7 @@
                   aria-label="Add-lap time"
                 />
               </label>
-              <button type="button" onclick={doAddLapAtTime} disabled={!addLapTarget}
+              <button type="button" onclick={doAddLapAtTime} disabled={!addLapTarget || busy}
                 >Add lap</button
               >
             </div>
@@ -1028,8 +1125,9 @@
               </label>
               {#if penaltyKind === 'time'}
                 <!-- A time penalty only worsens a result: a negative amount would silently CREDIT
-                   time (improving the competitor), so the input floors at 0.1s and the builder
-                   clamps non-positive amounts to a 0µs no-op as a backstop. -->
+                   time (improving the competitor), so the input floors at 0.1s and doPenalty
+                   REFUSES a non-positive/empty amount with a visible toast (never a silent
+                   no-op send). -->
                 <label>
                   Seconds
                   <input type="number" step="0.1" min="0.1" bind:value={penaltySeconds} />
@@ -1056,7 +1154,7 @@
                   />
                 </label>
               {/if}
-              <button type="button" onclick={doPenalty} disabled={!penaltyTarget || !heat}
+              <button type="button" onclick={doPenalty} disabled={!penaltyTarget || !heat || busy}
                 >Apply</button
               >
             </div>
@@ -1078,7 +1176,7 @@
               <button
                 type="button"
                 onclick={doReverse}
-                disabled={reverseTargetRef === '' || reversibleRulings.length === 0}
+                disabled={reverseTargetRef === '' || reversibleRulings.length === 0 || busy}
                 >Reverse ruling</button
               >
             </div>
@@ -1110,7 +1208,8 @@
             <button
               type="button"
               onclick={doFileProtest}
-              disabled={!protestTarget || protestNote.trim() === '' || !heat}>File protest</button
+              disabled={!protestTarget || protestNote.trim() === '' || !heat || busy}
+              >File protest</button
             >
           </div>
           <div class="row">
@@ -1134,7 +1233,7 @@
             <button
               type="button"
               onclick={doResolveProtest}
-              disabled={resolveProtestRef === '' || filedProtests.length === 0}
+              disabled={resolveProtestRef === '' || filedProtests.length === 0 || busy}
               >Resolve protest</button
             >
           </div>
@@ -1154,7 +1253,7 @@
               type="button"
               class="finalize"
               onclick={doFinalize}
-              disabled={!heat || openProtestCount > 0}
+              disabled={!heat || openProtestCount > 0 || busy}
               title={openProtestCount > 0
                 ? `Resolve ${openProtestCount} open protest(s) first`
                 : undefined}>Finalize → Official</button
@@ -1175,7 +1274,7 @@
           <fieldset class="danger-zone">
             <legend>Void the heat</legend>
             <p class="muted">Throws out the whole heat — it will not count.</p>
-            <ConfirmButton onconfirm={doVoidHeat} variant="danger" disabled={!heat}>
+            <ConfirmButton onconfirm={doVoidHeat} variant="danger" disabled={!heat || busy}>
               Void heat
             </ConfirmButton>
           </fieldset>

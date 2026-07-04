@@ -48,6 +48,8 @@ import type {
   Command,
   CommandAck,
   EventMeta,
+  HeatId,
+  HeatResult,
   LapList,
   LiveRaceState,
   SignalTraceView
@@ -152,6 +154,24 @@ export function makeTestSession(
     heatLive?: LiveRaceState;
     /** The session role (#80). Defaults to `'rd'`; pass `'readonly'` to assert gating. */
     role?: SessionRole;
+    /**
+     * Serve heat-scope snapshot reads (`/snapshot/heat/{heat}?projection=…`) from the stubbed
+     * `fetch`, keyed heat → projection seed. By default every fetch fails (inert — the seeded
+     * `laps`/`audit`/… values above stand); a test that exercises the session's real heat-scope
+     * fetch path (e.g. `ensureHeatBindings`' durable per-heat bindings, `fetchHeatResult`) seeds
+     * the heats it needs here and the stub answers with the wire envelope
+     * (`{ body: { LiveRaceState: … } }`). Any un-seeded heat/projection still fails.
+     */
+    heatFetches?: Record<
+      HeatId,
+      {
+        live?: LiveRaceState;
+        result?: HeatResult;
+        laps?: LapList;
+        audit?: AuditEntry[];
+        signal?: SignalTraceView;
+      }
+    >;
   } & TimerImpls
 ): TestSession {
   const ack: CommandAck = opts?.ack ?? { ok: true };
@@ -248,9 +268,36 @@ export function makeTestSession(
   if (opts?.audit) session.marshalingAudit = opts.audit;
   if (opts?.signal) session.signalTrace = opts.signal;
   if (opts?.heatLive) session.heatLiveState = opts.heatLive;
+  // The wire body key per heat-scope projection (mirrors the session's #fetchHeatProjection).
+  const bodyKeyOf = (projection: string): string | undefined =>
+    (
+      ({
+        live: 'LiveRaceState',
+        result: 'HeatResult',
+        laps: 'LapList',
+        audit: 'MarshalingAudit',
+        signal: 'SignalTrace'
+      }) as Record<string, string>
+    )[projection];
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => ({ ok: false, json: async () => ({}) }) as unknown as Response)
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const m = /\/snapshot\/heat\/([^/?]+)\?projection=(\w+)/.exec(url);
+      if (m && opts?.heatFetches) {
+        const heat = decodeURIComponent(m[1]);
+        const projection = m[2] as 'live' | 'result' | 'laps' | 'audit' | 'signal';
+        const seeded = opts.heatFetches[heat]?.[projection];
+        const bodyKey = bodyKeyOf(projection);
+        if (seeded !== undefined && bodyKey !== undefined) {
+          return {
+            ok: true,
+            json: async () => ({ body: { [bodyKey]: seeded } })
+          } as unknown as Response;
+        }
+      }
+      return { ok: false, json: async () => ({}) } as unknown as Response;
+    })
   );
 
   const pushLive = (state: LiveRaceState) =>

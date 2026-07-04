@@ -25,8 +25,7 @@
     HeatId,
     HeatSummary,
     Pilot,
-    PilotId,
-    PilotProgress
+    PilotId
   } from '@gridfpv/types';
   import { toast } from '@gridfpv/components';
   import {
@@ -115,16 +114,26 @@
 
   // ── Friendly names (the shared resolvers) ───────────────────────────────────────────────────
   // Event-wide, so the channel map is the UNION of every heat's frequency assignment and the
-  // explicit bindings come from the live stream's current heat (the Results pattern) — the bulk
-  // of refs are roster-seeded pilot ids, which resolve from the directory alone.
+  // explicit bindings are the union of every heat's DURABLE heat-window bindings
+  // (`session.heatBindings` — the same durable source Marshaling resolves from). The global live
+  // stream only carries the CURRENT heat's progress, so a FINISHED node-seeded heat's audit rows
+  // rendered raw `node-0` (the Results pattern, friendly-names rule). The live current heat's
+  // progress merges on top so a just-made Register resolves before its heat snapshot lands.
   const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  const explicitPilotByRef = $derived(
-    new Map<CompetitorRef, PilotId>(
-      (session.liveState?.progress ?? [])
-        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
-        .map((p) => [p.competitor, p.pilot])
-    )
-  );
+  $effect(() => {
+    const ids = heats.map((h) => h.heat);
+    if (ids.length > 0) void session.ensureHeatBindings(ids);
+  });
+  const explicitPilotByRef = $derived.by(() => {
+    const map = new Map<CompetitorRef, PilotId>();
+    for (const h of heats) {
+      const bound = session.heatBindings.get(h.heat);
+      if (bound) for (const [ref, pid] of bound) map.set(ref, pid);
+    }
+    for (const p of session.liveState?.progress ?? [])
+      if (p.pilot != null) map.set(p.competitor, p.pilot);
+    return map;
+  });
   const channelByRef = $derived.by(() => {
     const map = new Map<CompetitorRef, string>();
     for (const h of heats)

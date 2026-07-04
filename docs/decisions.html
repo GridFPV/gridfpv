@@ -595,6 +595,141 @@
       <a href="format-model.html">Format Model</a>.</dd>
     </dl>
 
+    <h2 id="d19">D19 · A timed heat always ends on the wall clock (fallback beside the pass-based criterion)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The completion clock ended a <code>Timed</code> heat via the pure predicate
+      <code>race_end_reached</code>, which needs a counted crossing <em>at or after</em> the window
+      close — the observable, source-clock signal that the window elapsed. But when every pilot
+      lands at the buzzer, no such crossing ever arrives, and the heat ran forever (caught live:
+      a 30-second time trial still "Running" hours later). The same audit found the degenerate
+      configs that inverted the problem — a zero window, First-to-0, a zero time limit — ended
+      heats at the start signal.</dd>
+      <dt>Decision</dt>
+      <dd>The completion driver also holds a <strong>wall-clock deadline</strong>: window +
+      grace, anchored to the first <em>observed</em> pass (race-go when nobody ever crossed).
+      Whichever fires first — the pass-based criterion or the deadline — appends the same
+      <code>Finished</code>. Degenerate end-condition values are rejected at round
+      create/update. Alongside this, <code>Discarded</code> joined <code>Aborted</code>/<code>
+      Restarted</code> as a run-reset boundary, so a discarded run's laps stop rendering (and
+      re-scoring) the moment the RD discards.</dd>
+      <dt>Rationale</dt>
+      <dd>The pass-based criterion stays primary (it is pure and replayable — the deadline is
+      runtime-only, like every clock decision per §6 of the Race Engine); the fallback anchors to
+      the first <em>observed</em> pass so it can fire late but never early. A race that cannot end
+      is a race-day stopper; a heat that ends at the start signal is worse. Both now impossible.</dd>
+    </dl>
+
+    <h2 id="d20">D20 · Passes carry a heat tag; attribution is by tag, position is legacy</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Raw passes carried no heat id: every fold attributed them <em>positionally</em> — a pass
+      belongs to whichever heat's span is open at that log offset. The release audit traced the
+      failure family that follows: scheduling or filling another round <em>mid-race</em> closes the
+      running heat's span, silently dropping every later lap from its live view and its result;
+      marshaling a finished heat mid-race could steal the cursor the same way; selecting an old
+      heat as current absorbed every later heat's passes.</dd>
+      <dt>Decision</dt>
+      <dd><code>Pass</code> gains an optional <code>heat</code> tag, stamped by the Director's
+      <strong>bridge sink</strong> at append time (the adapter doesn't know the heat; the bridge
+      routes passes only while a heat is Running, so it does). Every fold — heat window, class
+      window, live state, the completion clock — attributes a tagged pass <strong>by its
+      tag</strong>; an untagged pass (a legacy log) keeps the positional rule, so old logs replay
+      unchanged.</dd>
+      <dt>Rationale</dt>
+      <dd>The tag is recorded where the knowledge lives (the router, not the adapter), keeps the
+      fold pure, and removes the whole "heat-span event mid-race" bug class instead of gating the
+      commands that could trigger it — the RD may now fill the next round while a heat races,
+      which is exactly what a busy race day wants.</dd>
+    </dl>
+
+    <h2 id="d21">D21 · Runtime clocks are per-heat, never replayed, and re-check state at fire time</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The runtime clock tracked ONE start, ONE completion, and ONE protest driver — but the
+      windows genuinely overlap in normal operation (heat 2 finishes while heat 1's protest window
+      is open). Installing the newer driver silently <em>detached</em> the older task: cancellation
+      could never find it again, and the orphan later force-finalized a heat the RD had discarded.
+      Separately, the bridge replayed the whole log on startup — re-firing historical drivers and
+      sim sources on every Director restart — and its cancel-by-poll left a ~200ms window where an
+      expiring driver's stale transition landed after a manual command.</dd>
+      <dt>Decision</dt>
+      <dd>Drivers are keyed <strong>per heat</strong> (a map, not a slot). The bridge starts from
+      the <strong>log tail</strong> — history is never replayed — and any heat currently
+      <code>Armed</code>/<code>Running</code>/<code>Unofficial</code> is handed once to the normal
+      transition handler, so a mid-race Director restart mints fresh clocks over current state
+      (the race still auto-ends; the RD gets new race clocks, per the user-approved policy). Every
+      driver <strong>re-checks the heat's folded state at fire time</strong> (under D22's lock)
+      before appending; a transient log read error retries instead of ending the event's runtime.</dd>
+      <dt>Rationale</dt>
+      <dd>The engine fold deliberately accepts any recorded transition ("legality is apply's
+      job"), so the runtime must never leak a stale append — belt (cancellation that can actually
+      find its task), braces (fire-time recheck), and no replays to leak from in the first
+      place.</dd>
+    </dl>
+
+    <h2 id="d22">D22 · Validated writes are serialized: validate→append is one atomic step</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Command validation read the log, then appended — two separate lock acquisitions.
+      Concurrent appenders exist by design (the runtime drivers, a second console), so every gate
+      had a TOCTOU window: a ruling could land on a heat that went Final in between (the
+      auto-official racing the RD), <code>Finalize</code> could slip past a fresh protest, two
+      <code>ScheduleHeat</code>s could both pass the fresh-id check.</dd>
+      <dt>Decision</dt>
+      <dd>A per-event <strong>command serialization lock</strong> spans the whole
+      validate→append sequence for every control command (including the multi-step fill /
+      advance / schedule paths) and for every runtime driver's checked append
+      (<code>AppState::append_checked</code>). Raw pass appends bypass it — they validate
+      nothing. Lock ordering is fixed: command lock before log lock, never the reverse.</dd>
+      <dt>Rationale</dt>
+      <dd>Human-scale command traffic doesn't need finer concurrency; it needs the invariants the
+      gates promise to actually hold. One coarse lock is obviously correct and unnoticeable at
+      race-day rates (the user's explicit trade: correct over clever).</dd>
+    </dl>
+
+    <h2 id="d23">D23 · A protest dies with the run it contests; rulings apply effectively once</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The open-protest predicate (which gates <code>Finalize</code>, manual and auto) counted
+      filings over the whole log, but the audit/lap views window per run — so a protest filed
+      before a <code>Restart</code> blocked finalization forever while no view could show it: an
+      RD deadlock. Separately, a filing accepted a second resolution (possibly contradictory), and
+      a heat accepted a second void — after which reversing "the" ruling silently didn't take.</dd>
+      <dt>Decision</dt>
+      <dd>A protest contests a specific run's result: filings before the heat's latest
+      <strong>reset</strong> (Abort / Restart / Discard) no longer count — the field re-races
+      anyway (user-confirmed semantics). A filing takes ONE effective resolution (reverse it to
+      re-decide); a heat takes ONE effective void (reverse it to re-void).</dd>
+      <dt>Rationale</dt>
+      <dd>The predicate and the views now window by the same boundary, so what gates Finalize is
+      always visible; idempotent rulings keep the reversal chain meaningful (undoing a ruling must
+      actually undo it).</dd>
+    </dl>
+
+    <h2 id="d24">D24 · A raced round's scoring config is frozen (the heats-per-pilot count stays open)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Scoring re-derives from a round's <em>current</em> config on every read — by design
+      (pure folds). But <code>update_round</code> replaced the round wholesale with no look at the
+      log, so editing a raced round's win condition retroactively re-scored already-official heats
+      (a config-side bypass of the Final lock), re-seeding could rewrite a bracket chain, and
+      deleting a round stranded its heats. The console's Edit form compounded it by collapsing
+      any seeding it couldn't model to <code>FromRoster</code> on save.</dd>
+      <dt>Decision</dt>
+      <dd>Once a round has a heat beyond <code>Scheduled</code>, its <strong>format, classes, win
+      condition, seeding, channel mode, and format params are frozen</strong> — except the
+      <code>rounds</code> (heats-per-pilot) count, which only extends future fills
+      (user-specified carve-out). Label, staging timer, start procedure, grace, protest window,
+      and race time stay editable. A round with any heats cannot be removed. The form preserves
+      unmodeled seedings verbatim. Declared format params are validated at create/update, so
+      garbage fails at the form, not at fill time.</dd>
+      <dt>Rationale</dt>
+      <dd>Pure re-derivation is only trustworthy if the inputs an official result derived from
+      can't drift underneath it. Freezing beats re-scoring guards: the RD keeps the race-day knobs
+      and loses only the edits that would silently rewrite history.</dd>
+    </dl>
+
     <footer class="doc-footer">
       <p>
         Internal design documentation · <a href="index.html">&larr; back to docs index</a>

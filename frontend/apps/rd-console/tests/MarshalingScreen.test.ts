@@ -3,12 +3,14 @@ import { cleanup, render, screen, waitFor, within } from '@testing-library/svelt
 import { fireEvent } from '@testing-library/dom';
 import type {
   AuditEntry,
+  CommandAck,
   EventMeta,
   HeatSummary,
   LapList,
   LiveRaceState,
   RoundDef
 } from '@gridfpv/types';
+import { toasts } from '@gridfpv/components';
 import Marshaling from '../src/screens/Marshaling.svelte';
 import { makeTestSession } from './support.js';
 import {
@@ -487,13 +489,105 @@ describe('Marshaling (Slice 3)', () => {
         FileProtest: { heat: 'heat-1', competitor: 'BOB', note: 'contact on lap 2' }
       });
 
-      // Resolving (e.g. denying) one needs no Revert either.
+      // Resolving (e.g. denying) one needs no Revert either. (Wait for the file-protest submit to
+      // settle first — the double-submit guard holds every correction button while one is in
+      // flight, so the resolve click would otherwise be a legitimate no-op.)
       await fireEvent.change(screen.getByLabelText('Resolve protest'), { target: { value: '22' } });
       await fireEvent.change(screen.getByLabelText('Protest outcome'), {
         target: { value: 'Denied' }
       });
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Resolve protest' })).toBeEnabled()
+      );
       await fireEvent.click(screen.getByRole('button', { name: 'Resolve protest' }));
-      expect(sendSpy).toHaveBeenCalledWith({ ResolveProtest: { target: 22, outcome: 'Denied' } });
+      await waitFor(() =>
+        expect(sendSpy).toHaveBeenCalledWith({ ResolveProtest: { target: 22, outcome: 'Denied' } })
+      );
+    });
+  });
+
+  // ── Correction hardening: double-submit guard + amount validation (visible refusals) ─────────
+  describe('correction hardening (double-submit + invalid amounts)', () => {
+    it('a double-clicked Apply lands the penalty ONCE (the double-submit guard)', async () => {
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
+      // A slow Director: the first send hangs until released — the window a double-click hits.
+      let release!: (ack: CommandAck) => void;
+      sendSpy.mockImplementationOnce(() => new Promise<CommandAck>((res) => (release = res)));
+      render(Marshaling, { session });
+
+      await fireEvent.change(screen.getByLabelText('Ruling competitor'), {
+        target: { value: 'BOB' }
+      });
+      const apply = screen.getByRole('button', { name: 'Apply' });
+      await fireEvent.click(apply);
+      // While the first send is in flight the button disables AND the handler no-ops — the
+      // second click of a double-click must not stack a second penalty.
+      expect(apply).toBeDisabled();
+      await fireEvent.click(apply);
+
+      release({ ok: true });
+      await waitFor(() => expect(apply).toBeEnabled());
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('requires a positive time for Split / Edit time / Insert after (never sends at=0)', async () => {
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
+      render(Marshaling, { session });
+
+      // Select a lap with the time input still at its 0 default: the time-based corrections stay
+      // DISABLED (with the explaining title) — an `AdjustLap at: 0` wrecks the whole lap chain.
+      await fireEvent.click(screen.getByRole('button', { name: /Lap 1\s*41\.000/ }));
+      for (const name of ['Split', 'Edit time', 'Insert after']) {
+        const button = screen.getByRole('button', { name });
+        expect(button).toBeDisabled();
+        expect(button).toHaveAttribute('title', 'Enter a positive time (s) first');
+      }
+      await fireEvent.click(screen.getByRole('button', { name: 'Edit time' }));
+      expect(sendSpy).not.toHaveBeenCalled();
+
+      // An EMPTIED input (binds null) is refused the same way.
+      await fireEvent.input(screen.getByLabelText('Correction time'), { target: { value: '' } });
+      expect(screen.getByRole('button', { name: 'Edit time' })).toBeDisabled();
+
+      // A positive time enables them and the command carries it.
+      await fireEvent.input(screen.getByLabelText('Correction time'), { target: { value: '40' } });
+      expect(screen.getByRole('button', { name: 'Edit time' })).toBeEnabled();
+      await fireEvent.click(screen.getByRole('button', { name: 'Edit time' }));
+      expect(sendSpy).toHaveBeenCalledWith({ AdjustLap: { target: 12, at: 40_000_000 } });
+    });
+
+    it('refuses an empty/zero penalty amount with a visible toast — never a silent no-op', async () => {
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
+      toasts.clear();
+      render(Marshaling, { session });
+      await fireEvent.change(screen.getByLabelText('Ruling competitor'), {
+        target: { value: 'BOB' }
+      });
+
+      // A time penalty with a CLEARED amount: refused + explained; nothing sent.
+      await fireEvent.change(screen.getByLabelText('Penalty kind'), { target: { value: 'time' } });
+      await fireEvent.input(screen.getByLabelText('Seconds'), { target: { value: '' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(toasts.items.some((t) => /positive number of seconds/.test(t.message))).toBe(true);
+
+      // A ZERO points deduction: a 0-point DeductPoints is a no-op ruling — refused + explained.
+      await fireEvent.change(screen.getByLabelText('Penalty kind'), {
+        target: { value: 'points' }
+      });
+      await fireEvent.input(screen.getByLabelText('Points to deduct'), { target: { value: '0' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(toasts.items.some((t) => /whole number of points/.test(t.message))).toBe(true);
+
+      // A valid amount still goes through.
+      await fireEvent.input(screen.getByLabelText('Points to deduct'), { target: { value: '4' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+      await waitFor(() =>
+        expect(sendSpy).toHaveBeenCalledWith({
+          DeductPoints: { heat: 'heat-1', competitor: 'BOB', points: 4 }
+        })
+      );
     });
   });
 

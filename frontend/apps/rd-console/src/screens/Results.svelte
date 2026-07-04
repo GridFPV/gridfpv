@@ -27,7 +27,6 @@
     HeatSummary,
     Pilot,
     PilotId,
-    PilotProgress,
     RankEntry,
     RoundDef,
     RoundId,
@@ -102,16 +101,28 @@
   // A ref resolves to: (1) an explicit Register binding's callsign, (2) the ref-as-pilot-id callsign
   // (the common roster-seeded heat), (3) an open-practice `node-{i}` seat's channel label, else (4)
   // the bare handle. Results aggregates across heats, so the channel map is the UNION of every heat's
-  // frequency assignment, and the explicit bindings come from the live stream's current heat
-  // (best-effort — the bulk of refs are roster-seeded or node seats, which resolve without it).
+  // frequency assignment, and the explicit bindings are the union of every heat's DURABLE
+  // heat-window bindings (`session.heatBindings`, the Marshaling source) — the global live stream
+  // only carries the CURRENT heat's progress, so a FINISHED node-seeded heat's seats rendered raw
+  // `node-0` in the placements + JSON export. The live current heat's progress merges on top so a
+  // just-made Register resolves before its heat-window snapshot lands.
   const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  const explicitPilotByRef = $derived(
-    new Map<CompetitorRef, PilotId>(
-      (session?.liveState?.progress ?? [])
-        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
-        .map((p) => [p.competitor, p.pilot])
-    )
-  );
+  $effect(() => {
+    if (!session) return;
+    const ids = heats.map((h) => h.heat);
+    if (ids.length > 0) void session.ensureHeatBindings(ids);
+  });
+  const explicitPilotByRef = $derived.by(() => {
+    const map = new Map<CompetitorRef, PilotId>();
+    if (!session) return map;
+    for (const h of heats) {
+      const bound = session.heatBindings.get(h.heat);
+      if (bound) for (const [ref, pid] of bound) map.set(ref, pid);
+    }
+    for (const p of session.liveState?.progress ?? [])
+      if (p.pilot != null) map.set(p.competitor, p.pilot);
+    return map;
+  });
   const channelByRef = $derived.by(() => {
     const map = new Map<CompetitorRef, string>();
     for (const h of heats)
@@ -147,20 +158,28 @@
     reloadNonce += 1;
   }
 
+  // A heats-load FAILURE must be visible (#340): the old swallow-into-`[]` silently blanked the
+  // phase default + the channel-label map with no hint anything was wrong. Keep the last good
+  // list, toast once on the transition into the error state, and offer the explicit retry.
+  let heatsError = $state(false);
   async function refreshHeats() {
     if (!session) return;
     try {
       heats = await session.listHeats();
+      heatsError = false;
     } catch {
-      heats = [];
+      if (!heatsError) toast.error('Couldn’t load the heats list — showing the last good data.');
+      heatsError = true;
     } finally {
       heatsLoaded = true;
     }
   }
   $effect(() => {
     if (!session) return;
-    // Touch the protocol state so a freshly scheduled/scored heat re-reads the list.
+    // Touch the protocol state so a freshly scheduled/scored heat re-reads the list, and the
+    // retry nonce so "Try again" re-runs a failed read.
     void session.protocolState;
+    void reloadNonce;
     void refreshHeats();
   });
 
@@ -223,11 +242,16 @@
   // A load FAILURE is distinct from a genuinely-empty round: track it so the view can show a
   // "Couldn't load — retry" state instead of the misleading "nothing scored yet" empty state (P1-5).
   let rankingError = $state(false);
+  // Latest-wins guard (non-reactive): flipping the view selector re-runs the effect, but a SLOWER
+  // earlier response could land after the newer one and leave the wrong table rendered until the
+  // next stream tick. Only the newest fetch (matching sequence stamp) may assign.
+  let rankingSeq = 0;
   $effect(() => {
     if (!session) return;
     const rid = rankingRoundId;
     void session.liveState;
     void reloadNonce;
+    const seq = ++rankingSeq;
     if (!rid) {
       rankingRows = [];
       return;
@@ -236,9 +260,19 @@
     rankingError = false;
     session
       .roundRanking(rid)
-      .then((rows) => ((rankingRows = rows), (rankingError = false)))
-      .catch(() => ((rankingRows = []), (rankingError = true)))
-      .finally(() => (rankingLoading = false));
+      .then((rows) => {
+        if (seq !== rankingSeq) return;
+        rankingRows = rows;
+        rankingError = false;
+      })
+      .catch(() => {
+        if (seq !== rankingSeq) return;
+        rankingRows = [];
+        rankingError = true;
+      })
+      .finally(() => {
+        if (seq === rankingSeq) rankingLoading = false;
+      });
   });
 
   // --- Time-trial round standings (Best lap + the win-condition metric) -------------------------
@@ -252,11 +286,14 @@
   let roundStandingRows = $state<RoundStanding[]>([]);
   let roundStandingsLoading = $state(false);
   let roundStandingsError = $state(false);
+  // Latest-wins guard — see `rankingSeq`.
+  let roundStandingsSeq = 0;
   $effect(() => {
     if (!session) return;
     const rid = timedQualRoundId;
     void session.liveState;
     void reloadNonce;
+    const seq = ++roundStandingsSeq;
     if (!rid) {
       roundStandingRows = [];
       return;
@@ -265,9 +302,19 @@
     roundStandingsError = false;
     session
       .roundStandings(rid)
-      .then((rows) => ((roundStandingRows = rows), (roundStandingsError = false)))
-      .catch(() => ((roundStandingRows = []), (roundStandingsError = true)))
-      .finally(() => (roundStandingsLoading = false));
+      .then((rows) => {
+        if (seq !== roundStandingsSeq) return;
+        roundStandingRows = rows;
+        roundStandingsError = false;
+      })
+      .catch(() => {
+        if (seq !== roundStandingsSeq) return;
+        roundStandingRows = [];
+        roundStandingsError = true;
+      })
+      .finally(() => {
+        if (seq === roundStandingsSeq) roundStandingsLoading = false;
+      });
   });
 
   // The win-condition metric column for the time-trial table: its header (or `undefined` when the
@@ -296,11 +343,14 @@
   let classRows = $state<ClassStanding[]>([]);
   let classLoading = $state(false);
   let classError = $state(false);
+  // Latest-wins guard — see `rankingSeq`.
+  let classSeq = 0;
   $effect(() => {
     if (!session) return;
     const cls = selectedClassId;
     void session.liveState;
     void reloadNonce;
+    const seq = ++classSeq;
     if (cls === '') {
       classRows = [];
       return;
@@ -309,9 +359,19 @@
     classError = false;
     session
       .classStandings(cls)
-      .then((s) => ((classRows = s.standings), (classError = false)))
-      .catch(() => ((classRows = []), (classError = true)))
-      .finally(() => (classLoading = false));
+      .then((s) => {
+        if (seq !== classSeq) return;
+        classRows = s.standings;
+        classError = false;
+      })
+      .catch(() => {
+        if (seq !== classSeq) return;
+        classRows = [];
+        classError = true;
+      })
+      .finally(() => {
+        if (seq === classSeq) classLoading = false;
+      });
   });
 
   const roundLabelFor = (id: RoundId): string => rounds.find((r) => r.id === id)?.label ?? '—';
@@ -341,6 +401,14 @@
   </header>
 
   {#if session}
+    {#if heatsError}
+      <!-- A failed heats read (#340): the last good list is kept (the phase default + channel
+           labels keep working off it) — but the failure must be visible, with an explicit retry. -->
+      <div class="load-error" role="alert">
+        <p>Couldn't load the heats list — showing the last good data.</p>
+        <Button variant="secondary" size="sm" onclick={retry}>Try again</Button>
+      </div>
+    {/if}
     <Card
       title={currentView?.kind === 'round' ? `${currentView.label} standings` : 'Standings'}
       subtitle={currentView?.kind === 'class'

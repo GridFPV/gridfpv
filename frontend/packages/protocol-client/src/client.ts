@@ -1155,8 +1155,11 @@ export function connect(options: ConnectOptions): ProtocolClient {
 
   // ── Mutable connection state ───────────────────────────────────────────────
   let body: ProjectionBody | undefined;
-  // The snapshot `cursor` is a log offset (protocol.html §2) used ONLY as the `from:`
-  // resume point — it is not the stream's ordering counter.
+  // The resume cursor: a log offset (protocol.html §2/§3 "as built") used ONLY as the
+  // `from:` resume point — it is not the stream's ordering counter. Seeded by each
+  // snapshot and ADVANCED by one per applied envelope (see `applyEnvelope`), so a
+  // reconnect resumes from the last-applied position instead of replaying the whole
+  // backlog from the snapshot's original offset.
   let cursor: Cursor | undefined;
   // The per-stream `sequence` axis (protocol.html §3/§9.5): starts at 1 on each
   // subscription, distinct from `cursor`. Reset to 0 on every (re)subscribe so the
@@ -1228,9 +1231,11 @@ export function connect(options: ConnectOptions): ProtocolClient {
 
   // ── Apply one ordered change envelope (protocol.html §3) ────────────────────
   //
-  // Returns 'applied', 'duplicate' (already seen — idempotent no-op), or 'gap'
-  // (missed envelopes → caller must re-snapshot).
-  function applyEnvelope(env: ChangeEnvelope): 'applied' | 'duplicate' | 'gap' {
+  // Returns 'applied', 'duplicate' (already seen — idempotent no-op), 'gap'
+  // (missed envelopes → caller must re-snapshot), or 'unsupported' (a delta this
+  // client cannot fold → caller must re-snapshot, the same fail-safe as a
+  // StaleCursor).
+  function applyEnvelope(env: ChangeEnvelope): 'applied' | 'duplicate' | 'gap' | 'unsupported' {
     const seq = env.sequence;
     // Order + dedup against the per-stream `sequence` axis — NOT the snapshot
     // `cursor` (a log offset). The two are distinct monotonic counters
@@ -1244,17 +1249,27 @@ export function connect(options: ConnectOptions): ProtocolClient {
       if (seq !== streamSeq + 1) return 'gap';
     }
     const change = env.change;
-    if ('FreshValue' in change) {
-      body = change.FreshValue;
-    } else {
+    if (!('FreshValue' in change)) {
       // Delta. The per-projection delta encodings are deferred (#43): the wire
-      // type carries an opaque payload today. We advance the sequence so ordering
-      // and gap-detection stay correct; once #43 pins the typed deltas, fold them
-      // into `body` here per ProjectionKind. Until then a delta cannot mutate
-      // `body`, and a re-snapshot (always correct, §3) reconciles any drift.
-      void change.Delta;
+      // type carries an opaque payload this client cannot fold into `body`.
+      // Advancing the sequence without the mutation would silently FREEZE the
+      // view while `status` still reads 'live' — so an unhandled delta fails
+      // safe instead: report it so the caller re-snapshots (always correct, §3),
+      // exactly the path a StaleCursor takes. Once #43 pins the typed deltas,
+      // fold them into `body` here per ProjectionKind and return 'applied'.
+      return 'unsupported';
     }
+    body = change.FreshValue;
     streamSeq = seq;
+    // Advance the RESUME cursor alongside the stream. The resume `from` is a log
+    // offset the wire does not echo per envelope, but every applied envelope
+    // corresponds to at least one log append past the current cursor, so a +1
+    // advance is a conservative (at-or-behind the true offset) tracker. Without
+    // it a reconnect re-presented the ORIGINAL snapshot's offset and replayed the
+    // entire backlog through onState — or fell out of the retained window
+    // (StaleCursor). Any short remainder behind the true offset replays as
+    // idempotent fresh values, and the re-snapshot path reconciles any drift.
+    cursor = (cursor ?? 0) + 1;
     return 'applied';
   }
 
@@ -1312,8 +1327,9 @@ export function connect(options: ConnectOptions): ProtocolClient {
     // `StreamMessage::Change(envelope)` — the common case: unwrap + apply.
     if (isStreamChange(parsed)) {
       const result = applyEnvelope(parsed.Change);
-      if (result === 'gap') {
-        // Missed envelopes the stream can't replay → re-snapshot and re-subscribe.
+      if (result === 'gap' || result === 'unsupported') {
+        // Missed envelopes the stream can't replay, or a delta this client can't
+        // fold (#43) → re-snapshot and re-subscribe (always correct, §3).
         await resnapshot(gen);
         return;
       }
