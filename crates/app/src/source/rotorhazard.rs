@@ -419,7 +419,6 @@ fn claim_finish_flags(finishing: bool, done: &mut bool, settle_pending: bool) ->
 /// The persistent driver: connect → `Connected` → maintain/monitor → reconnect on drop, until
 /// cancelled, then disconnect and leave `Disconnected` (#105). Runs on a dedicated blocking thread.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn drive(
     url: String,
     timer_id: TimerId,
