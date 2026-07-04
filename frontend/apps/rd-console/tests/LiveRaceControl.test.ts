@@ -906,8 +906,7 @@ describe('LiveRaceControl', () => {
       // Two clocks in countdown mode: the big remaining readout + the small companion elapsed.
       const remainingText = () =>
         screen.getByRole('timer', { name: /^Time remaining/ }).textContent?.trim();
-      const elapsedText = () =>
-        screen.getByRole('timer', { name: /^Elapsed/ }).textContent?.trim();
+      const elapsedText = () => screen.getByRole('timer', { name: /^Elapsed/ }).textContent?.trim();
 
       // 1.25s in: remaining = 120s − 1.25s counting DOWN, while the companion counts UP from 0
       // (lap times are elapsed-from-zero quantities — the RD reads them off this one).

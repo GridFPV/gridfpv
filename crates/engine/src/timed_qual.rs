@@ -107,7 +107,12 @@ impl QualMetric {
     /// condition (e.g. FirstToLaps carrying `Metric::ReachedAt`) yielded `None` for
     /// every pilot — the whole field tied at 1 and "ranked" alphabetically, and any
     /// `FromRanking` bracket seeded from that order.
-    fn round_key(self, placement_metric: Metric, laps: u32, best_lap_micros: Option<i64>) -> Option<i64> {
+    fn round_key(
+        self,
+        placement_metric: Metric,
+        laps: u32,
+        best_lap_micros: Option<i64>,
+    ) -> Option<i64> {
         match (self, placement_metric) {
             // Best-lap qualifying: the matched metric when the round was scored under
             // BestLap; otherwise the condition-independent `Placement.best_lap_micros`
@@ -633,7 +638,7 @@ mod tests {
                     name,
                     (i as u32) + 1,
                     3,
-                    Metric::ReachedAt(Some(gridfpv_events::SourceTime { micros: 9_000_000 }))
+                    Metric::ReachedAt(Some(gridfpv_events::SourceTime { micros: 9_000_000 })),
                 )
             })
             .collect();

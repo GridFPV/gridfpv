@@ -1485,8 +1485,7 @@ impl EventRegistry {
                 if r == round_id {
                     has_heats = true;
                     let heat_state = gridfpv_engine::heat::heat_state(&events, heat);
-                    if heat_state.is_some_and(|s| s != gridfpv_engine::heat::HeatState::Scheduled)
-                    {
+                    if heat_state.is_some_and(|s| s != gridfpv_engine::heat::HeatState::Scheduled) {
                         raced = true;
                         break;
                     }
@@ -1511,7 +1510,13 @@ impl EventRegistry {
             .get_mut(id)
             .ok_or_else(|| RoundError::EventNotFound(id.0.clone()))?;
 
-        let Some(existing) = event.meta.rounds.iter().find(|r| &r.id == round_id).cloned() else {
+        let Some(existing) = event
+            .meta
+            .rounds
+            .iter()
+            .find(|r| &r.id == round_id)
+            .cloned()
+        else {
             return Err(RoundError::RoundNotFound(round_id.0.clone()));
         };
         let win_condition = req.win_condition.unwrap_or_else(default_win_condition);
@@ -3272,9 +3277,7 @@ mod tests {
 
         // Race-day knobs (label / staging / etc.) and the `rounds` param stay editable.
         let mut ok_req = base("Qualifying (renamed)");
-        ok_req
-            .params
-            .insert("rounds".to_string(), "4".to_string());
+        ok_req.params.insert("rounds".to_string(), "4".to_string());
         let updated = reg.update_round(&event.id, &round.id, ok_req).unwrap();
         assert_eq!(updated.label, "Qualifying (renamed)");
         assert_eq!(updated.params.get("rounds"), Some(&"4".to_string()));

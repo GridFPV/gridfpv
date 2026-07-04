@@ -103,7 +103,9 @@ use crate::events::{
     RegistryErrorKind, RoundDef, RoundError, SetActiveEventRequest, SetClassMembershipRequest,
     SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
-use crate::live_state::{HeatSummary, heat_summaries, live_state, live_state_over, with_heat_timing};
+use crate::live_state::{
+    HeatSummary, heat_summaries, live_state, live_state_over, with_heat_timing,
+};
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::round_engine;
 use crate::scope::{ClassId, EventId, PilotId};
