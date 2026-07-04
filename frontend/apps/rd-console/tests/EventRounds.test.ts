@@ -451,6 +451,45 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(req.grace_window).toEqual({ Duration: { micros: 5_000_000 } });
   });
 
+  it('a configured start TONE survives an edit the form never touched (verbatim round-trip)', async () => {
+    // The form models only the min/max delay; the server replaces the round WHOLESALE on
+    // update — so rebuilding start_procedure from the two inputs silently ERASED a stored
+    // tone. The stored procedure must round-trip under the form's fields.
+    const impls = baseImpls();
+    const toned: RoundDef = {
+      ...QUAL,
+      start_procedure: {
+        mode: 'randomized-delay',
+        min_delay_ms: 2000,
+        max_delay_ms: 5000,
+        tone: { pattern: 'triple-beep', volume: 0.8 }
+      } as RoundDef['start_procedure']
+    };
+    const updateRoundImpl = vi.fn(async (_b, _e, _id, req) => ({ ...toned, ...req }));
+    const { session } = makeTestSession({
+      ...impls,
+      updateRoundImpl,
+      event: { ...EVENT, rounds: [toned] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    // Touch something unrelated (a grace tweak — the exact trap that destroyed seedings).
+    await fireEvent.input(screen.getByLabelText('Grace window seconds'), {
+      target: { value: '10' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save round' }));
+
+    await waitFor(() => expect(updateRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , , req] = updateRoundImpl.mock.calls[0];
+    expect(req.start_procedure).toEqual({
+      mode: 'randomized-delay',
+      min_delay_ms: 2000,
+      max_delay_ms: 5000,
+      tone: { pattern: 'triple-beep', volume: 0.8 }
+    });
+  });
+
   it('surfaces the chosen format’s params inline as labeled fields, seeded from their defaults', async () => {
     const impls = baseImpls();
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));

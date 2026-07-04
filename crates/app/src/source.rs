@@ -511,6 +511,11 @@ pub fn spawn_registry_bridge(
         let mut attached: HashSet<EventId> = HashSet::new();
         let mut ticker = tokio::time::interval(REGISTRY_POLL_INTERVAL);
         loop {
+            // Prune ids that left the registry: their per-event tasks exit on their own (they
+            // watch for the event's disappearance), and dropping them here keeps this set from
+            // growing forever across create/delete cycles.
+            let live: HashSet<EventId> = registry.list().into_iter().map(|m| m.id).collect();
+            attached.retain(|id| live.contains(id));
             for meta in registry.list() {
                 if attached.contains(&meta.id) {
                     continue;
@@ -600,6 +605,12 @@ pub(crate) async fn run_bridge(
 
     loop {
         ticker.tick().await;
+
+        // A DELETED event ends its bridge: the AppState Arc outlives the registry entry, so
+        // without this check the orphaned task would poll a dead log forever.
+        if registry.resolve(&event_id).is_none() {
+            return;
+        }
 
         // Reap a finished/cancelled source task so a heat that ran to the end clears the
         // slot (without it, a re-Start of the same heat would be ignored). A heat with an armed
@@ -699,6 +710,8 @@ pub fn spawn_presence_reconciler(registry: EventRegistry) -> JoinHandle<()> {
         let mut attached: HashSet<EventId> = HashSet::new();
         let mut ticker = tokio::time::interval(REGISTRY_POLL_INTERVAL);
         loop {
+            let live: HashSet<EventId> = registry.list().into_iter().map(|m| m.id).collect();
+            attached.retain(|id| live.contains(id));
             for meta in registry.list() {
                 if attached.contains(&meta.id) {
                     continue;
@@ -734,6 +747,10 @@ pub(crate) async fn run_presence_reconciler(
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     loop {
         ticker.tick().await;
+        // A DELETED event ends its reconciler (the log Arc alone would keep it alive forever).
+        if registry.resolve(&event_id).is_none() {
+            return;
+        }
         let new_events = match read_tail(&state, cursor) {
             Ok(batch) => batch,
             // A poisoned lock (or a dropped log at shutdown) ends the reconciler cleanly.
@@ -748,6 +765,10 @@ pub(crate) async fn run_presence_reconciler(
             Ok(events) => registrations(events.iter()),
             Err(_) => continue,
         };
+        // Dedup WITHIN the batch: `bindings` was folded once before the loop, so two
+        // CompetitorSeen for the same key in one poll batch both read "unbound" and appended
+        // twice (benign — same key/value, last-wins fold — but noise in the log).
+        let mut seen_this_batch: HashSet<(AdapterId, CompetitorRef)> = HashSet::new();
         for (offset, event) in new_events {
             cursor = offset + 1;
             if let Event::CompetitorSeen {
@@ -755,6 +776,9 @@ pub(crate) async fn run_presence_reconciler(
                 competitor,
             } = event
             {
+                if !seen_this_batch.insert((adapter.clone(), competitor.clone())) {
+                    continue;
+                }
                 reconcile_seen(
                     &state, &registry, &pilots, &event_id, &bindings, adapter, competitor,
                 );

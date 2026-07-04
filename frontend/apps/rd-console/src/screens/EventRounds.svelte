@@ -523,6 +523,12 @@
   // bracket level's "winners of Semifinal" seeding to FromRoster — a grace-window tweak destroyed
   // the bracket chain. When set, the seeding controls lock and submit round-trips it unchanged.
   let editPreservedSeeding = $state<SeedingRule | undefined>(undefined);
+  // The edited round's stored start procedure, verbatim — same wholesale-replace trap as the
+  // seeding above: the form models only min/max delay, so rebuilding the procedure from the
+  // two inputs silently ERASED a configured start `tone` (and would flatten any future
+  // non-randomized mode back to randomized-delay). Submit spreads this under the form's
+  // fields, so everything the form doesn't model survives the round trip.
+  let editPreservedStart = $state<StartProcedure | undefined>(undefined);
   // The chosen format's params, as a `key → value` map (Rounds form redesign item 4): every param
   // the format declares is shown inline as a proper labeled field, seeded from its schema default
   // (or the edited round's stored value). On a format switch the map is re-seeded to the new
@@ -698,6 +704,7 @@
     seedSources = new Set();
     seedTopN = 8;
     editPreservedSeeding = undefined;
+    editPreservedStart = undefined;
     selectedNodes = new Set();
     paramValues = {};
     pointsTable = [...DEFAULT_POINTS_TABLE];
@@ -783,6 +790,7 @@
     const stagingTotal = round.staging_timer_secs ?? 300;
     stagingMinutes = Math.floor(stagingTotal / 60);
     stagingSeconds = stagingTotal % 60;
+    editPreservedStart = round.start_procedure ?? undefined;
     startMinSeconds = msToSeconds(round.start_procedure?.min_delay_ms ?? 2000);
     startMaxSeconds = msToSeconds(round.start_procedure?.max_delay_ms ?? 5000);
     const grace = round.grace_window;
@@ -926,9 +934,24 @@
    * applies).
    */
   function buildStartProcedure(): StartProcedure {
+    // A mode this form can't model (a future fixed-countdown / external trigger): round-trip
+    // it VERBATIM — the delay inputs simply don't apply to it.
+    if (
+      editPreservedStart &&
+      (editPreservedStart as { mode: string }).mode !== 'randomized-delay'
+    ) {
+      return editPreservedStart;
+    }
     const min = secondsToMs(startMinSeconds);
     const max = Math.max(min, secondsToMs(startMaxSeconds));
-    return { mode: 'randomized-delay', min_delay_ms: min, max_delay_ms: max };
+    // Spread the stored procedure UNDER the form's fields: the `tone` (and any additive future
+    // field) survives; only what the form actually edits is rewritten.
+    return {
+      ...editPreservedStart,
+      mode: 'randomized-delay',
+      min_delay_ms: min,
+      max_delay_ms: max
+    };
   }
 
   /** The completion grace window as a bounded `Duration` (seconds → micros). */

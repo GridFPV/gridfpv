@@ -1710,9 +1710,14 @@ pub(crate) fn class_window_offsets(events: &[Event], class: &ClassId) -> Vec<(u6
                 }
             }
             // A tagged pass belongs to its stamped heat — in or out by class membership,
-            // independent of the positional cursor (same rule as `heat_window_offsets`).
+            // independent of the positional cursor (same rule as `heat_window_offsets`),
+            // and frozen out once that heat's run is official (the Final freeze).
             Event::Pass(p) if p.heat.is_some() => {
-                if p.heat.as_ref().is_some_and(|h| class_heats.contains(h)) {
+                if p.heat.as_ref().is_some_and(|h| {
+                    class_heats.contains(h)
+                        && offset
+                            < crate::live_state::current_run_pass_ceiling(events, h) as u64
+                }) {
                     window.push((offset, event.clone()));
                 }
             }
@@ -1921,6 +1926,7 @@ fn now_micros() -> i64 {
 /// they carry the lineup and the FSM lineage the folds need.
 pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, Event)> {
     let run_start = crate::live_state::current_run_start(events, heat) as u64;
+    let pass_ceiling = crate::live_state::current_run_pass_ceiling(events, heat) as u64;
     let mut window = Vec::new();
     // The offsets already claimed by this window — a target-carrying ruling joins iff its
     // target is one of them (targets always point backwards, so one forward scan suffices).
@@ -1952,11 +1958,17 @@ pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, 
             }
             // Passes: by their bridge-stamped heat TAG when present (robust against a
             // heat-span event closing the positional span mid-race — the scheduling-eats-laps
-            // bug); an untagged (legacy) pass keeps the positional rule.
-            Event::Pass(p) => match &p.heat {
-                Some(h) => h == heat && offset >= run_start,
-                None => active && offset >= run_start,
-            },
+            // bug); an untagged (legacy) pass keeps the positional rule. Either way, a pass
+            // landing at/after the run's `Finalized` is FROZEN OUT: once a result is official
+            // it cannot shift under a delayed catch-up pass with no command and no audit
+            // entry (rulings are unaffected — a Revert re-opens marshaling, not the record).
+            Event::Pass(p) => {
+                let before_official = offset < pass_ceiling;
+                match &p.heat {
+                    Some(h) => h == heat && offset >= run_start && before_official,
+                    None => active && offset >= run_start && before_official,
+                }
+            }
             // Untagged (legacy insertions, registrations, …): positional.
             _ => active && offset >= run_start,
         };
@@ -2094,6 +2106,58 @@ mod tests {
                 transition: HeatTransition::Finalized,
             },
         ]
+    }
+
+    /// The FINAL FREEZE: a pass landing AFTER a heat's run went official never joins its
+    /// window — a delayed RotorHazard catch-up pass (tagged or untagged) used to silently
+    /// change a Final result with no command, no ruling, and no audit entry.
+    #[test]
+    fn a_pass_landing_after_finalized_never_joins_the_official_record() {
+        let heat = HeatId("q-1".into());
+        let mut events = recorded_heat();
+        let window_before = heat_window_offsets(&events, &heat);
+        let passes_before = window_before
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Pass(_)))
+            .count();
+        assert_eq!(passes_before, 5, "the run's real passes all count");
+
+        // A late catch-up pass TAGGED with the (now Final) heat…
+        let mut late = Pass {
+            adapter: AdapterId("vd".into()),
+            competitor: CompetitorRef("A".into()),
+            at: SourceTime::from_micros(9_000_000),
+            sequence: Some(9),
+            gate: GateIndex::LAP,
+            signal: None,
+            heat: Some(heat.clone()),
+        };
+        events.push(Event::Pass(late.clone()));
+        // …and an UNTAGGED one (legacy positional attribution would claim it too).
+        late.heat = None;
+        late.sequence = Some(10);
+        events.push(Event::Pass(late));
+
+        let window_after = heat_window_offsets(&events, &heat);
+        let passes_after = window_after
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Pass(_)))
+            .count();
+        assert_eq!(
+            passes_after, passes_before,
+            "the official record is frozen — late passes stay out"
+        );
+
+        // Rulings are NOT frozen (Revert re-opens marshaling): a void targeting a real run
+        // pass still joins the window.
+        events.push(Event::DetectionVoided { target: LogRef(6) });
+        let with_ruling = heat_window_offsets(&events, &heat);
+        assert!(
+            with_ruling
+                .iter()
+                .any(|(_, e)| matches!(e, Event::DetectionVoided { .. })),
+            "rulings keep flowing into the window"
+        );
     }
 
     /// A registry whose Practice event carries a round with `win_condition` and a heat `q-1`
