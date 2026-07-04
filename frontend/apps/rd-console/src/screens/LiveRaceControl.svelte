@@ -38,8 +38,8 @@
     actionDescription,
     commandForAction,
     isActionLegal,
+    actionLabel,
     isDestructive,
-    isOverride,
     primaryAction,
     type HeatAction
   } from '../lib/transitions.js';
@@ -796,10 +796,7 @@
             variant={action === primary ? 'primary' : isDestructive(action) ? 'danger' : 'default'}
             title={actionDescription(action)}
           >
-            <span class="action-btn" class:override={isOverride(action)}>
-              {#if isOverride(action)}<span class="override-tag" aria-hidden="true">override</span
-                >{/if}{action}
-            </span>
+            <span class="action-btn">{actionLabel(action)}</span>
           </ConfirmButton>
         {/each}
       </div>
@@ -1107,20 +1104,6 @@
     align-items: center;
     gap: var(--gf-space-2);
   }
-  /* Override actions (SkipCountdown/ForceEnd): a clear, smaller "override" tag prefixes the label
-     so they read as secondary escape hatches, not the obvious forward step. */
-  .override-tag {
-    font-size: var(--gf-font-size-2xs);
-    font-weight: var(--gf-font-weight-bold);
-    text-transform: uppercase;
-    letter-spacing: var(--gf-tracking-caps);
-    padding: 0.05rem var(--gf-space-2);
-    border-radius: var(--gf-radius-pill);
-    background: color-mix(in srgb, var(--gf-warning, #d08700) 22%, transparent);
-    color: var(--gf-warning, #d08700);
-    border: 1px solid color-mix(in srgb, var(--gf-warning, #d08700) 45%, transparent);
-  }
-
   /* ── Staging countdown ───────────────────────────────────────────────────── */
   .staging {
     --_stage: var(--gf-phase-staged);

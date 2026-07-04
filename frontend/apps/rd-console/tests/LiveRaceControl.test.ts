@@ -138,26 +138,27 @@ describe('LiveRaceControl', () => {
     render(LiveRaceControl, { session });
 
     const btn = (label: string) => screen.getByRole('button', { name: label }) as HTMLButtonElement;
-    // The runtime-clock override + off-ramps legal in Running (the manual Finish is gone — the
-    // clock auto-completes; ForceEnd is the override).
-    expect(btn('ForceEnd').disabled).toBe(false);
+    // Stop (the ForceEnd command) + off-ramps legal in Running (the manual Finish is gone —
+    // the clock auto-completes; Stop is the plain manual end).
+    expect(btn('Stop').disabled).toBe(false);
     expect(btn('Abort').disabled).toBe(false);
     expect(btn('Restart').disabled).toBe(false);
     // Illegal in Running.
     expect(btn('Stage').disabled).toBe(true);
     expect(btn('Start').disabled).toBe(true);
-    expect(btn('SkipCountdown').disabled).toBe(true);
     expect(btn('Finalize').disabled).toBe(true);
     expect(btn('Advance').disabled).toBe(true);
     expect(btn('Revert').disabled).toBe(true);
     expect(btn('Discard').disabled).toBe(true);
+    // SkipCountdown is retired from the console entirely — no button renders for it.
+    expect(screen.queryByRole('button', { name: /Skip/ })).toBeNull();
   });
 
-  it('fires the matching Command for the runtime-clock override', async () => {
+  it('Stop fires the ForceEnd command (the wire name is unchanged)', async () => {
     const { session, sendSpy } = makeTestSession({ live: liveRunning });
     render(LiveRaceControl, { session });
 
-    await fireEvent.click(screen.getByRole('button', { name: 'ForceEnd' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(sendSpy).toHaveBeenCalledWith({ ForceEnd: { heat: 'heat-1' } });
   });
 
@@ -178,7 +179,7 @@ describe('LiveRaceControl', () => {
     const { session } = makeTestSession({ live: liveRunning, ack: failAck });
     render(LiveRaceControl, { session });
 
-    await fireEvent.click(screen.getByRole('button', { name: 'ForceEnd' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('illegal transition');
   });
 
@@ -189,27 +190,20 @@ describe('LiveRaceControl', () => {
     expect(screen.getAllByText('ALICE').length).toBeGreaterThan(0);
   });
 
-  it('styles the runtime-clock overrides as secondary "override" buttons (legality intact)', () => {
-    // In Armed the legal actions are the override SkipCountdown + the off-ramps Abort/Restart.
+  it('Armed exposes only the off-ramps — the countdown runs itself, no Skip, no override tag', () => {
     const { session } = makeTestSession({ live: liveAt('Armed') });
     render(LiveRaceControl, { session });
     const btn = (label: string) => screen.getByRole('button', { name: label }) as HTMLButtonElement;
-    expect(btn('SkipCountdown').disabled).toBe(false);
     expect(btn('Abort').disabled).toBe(false);
     expect(btn('Restart').disabled).toBe(false);
     // Forward steps are illegal in Armed (the runtime clock drives Armed → Running).
     expect(btn('Stage').disabled).toBe(true);
     expect(btn('Start').disabled).toBe(true);
-    expect(btn('ForceEnd').disabled).toBe(true);
+    expect(btn('Stop').disabled).toBe(true);
     expect(btn('Finalize').disabled).toBe(true);
-    // Both clock overrides (SkipCountdown + ForceEnd) carry the "override" tag that distinguishes
-    // them from forward/off-ramp buttons; the forward/off-ramp buttons do not.
-    const tags = screen.getAllByText('override');
-    const taggedButtons = tags.map((t) => t.closest('button'));
-    expect(taggedButtons).toContain(btn('SkipCountdown'));
-    expect(taggedButtons).toContain(btn('ForceEnd'));
-    expect(taggedButtons).not.toContain(btn('Abort'));
-    expect(taggedButtons).not.toContain(btn('Start'));
+    // The whole override concept is retired: no Skip button, no "override" tag anywhere.
+    expect(screen.queryByRole('button', { name: /Skip/ })).toBeNull();
+    expect(screen.queryByText('override')).toBeNull();
   });
 
   describe('heat picker (manual current-heat selection)', () => {

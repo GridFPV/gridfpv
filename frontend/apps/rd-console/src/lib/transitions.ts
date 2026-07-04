@@ -57,11 +57,6 @@ export const DESTRUCTIVE_ACTIONS: ReadonlySet<HeatAction> = new Set<HeatAction>(
  * *secondary* to the forward path — the RD waits for the clock by default — so the console styles
  * them as clearly-labelled "override" buttons, not the obvious next step.
  */
-export const OVERRIDE_ACTIONS: ReadonlySet<HeatAction> = new Set<HeatAction>([
-  'SkipCountdown',
-  'ForceEnd'
-]);
-
 /**
  * The forward "primary" action for each phase (the obvious next step), if any.
  *
@@ -100,8 +95,10 @@ const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
 const LEGAL_BY_PHASE: Record<HeatPhase, ReadonlySet<HeatAction>> = {
   Scheduled: new Set<HeatAction>(['Stage']),
   Staged: new Set<HeatAction>(['Start', 'Abort']),
-  // Armed/Running auto-advance via the runtime clock; the overrides are the manual escape hatches.
-  Armed: new Set<HeatAction>(['SkipCountdown', 'Abort', 'Restart']),
+  // Armed/Running auto-advance via the runtime clock. Armed exposes only the off-ramps: the
+  // countdown is seconds long and racing it with a Skip button was never used in the field —
+  // "I usually just hit start anyway". Running keeps one plain Stop (the ForceEnd command).
+  Armed: new Set<HeatAction>(['Abort', 'Restart']),
   Running: new Set<HeatAction>(['ForceEnd', 'Abort', 'Restart']),
   Unofficial: new Set<HeatAction>(['Finalize', 'Restart', 'Discard']),
   Final: new Set<HeatAction>(['Advance', 'Revert', 'Discard'])
@@ -111,7 +108,6 @@ const LEGAL_BY_PHASE: Record<HeatPhase, ReadonlySet<HeatAction>> = {
 export const ACTION_ORDER: readonly HeatAction[] = [
   'Stage',
   'Start',
-  'SkipCountdown',
   'ForceEnd',
   'Finalize',
   'Advance',
@@ -139,11 +135,6 @@ export function primaryAction(phase: HeatPhase): HeatAction | null {
 /** Does this action need a confirm before firing (clients.html §5)? */
 export function isDestructive(action: HeatAction): boolean {
   return DESTRUCTIVE_ACTIONS.has(action);
-}
-
-/** Is this action a **runtime-clock override** (the console styles it as a secondary "override")? */
-export function isOverride(action: HeatAction): boolean {
-  return OVERRIDE_ACTIONS.has(action);
 }
 
 /**
@@ -178,7 +169,15 @@ export function commandForAction(action: HeatAction, heat: HeatId): Command {
 
 /** A short human label for an action button. */
 export function actionLabel(action: HeatAction): string {
-  return action;
+  switch (action) {
+    // The command stays ForceEnd on the wire; to the RD it is simply the race's Stop button.
+    case 'ForceEnd':
+      return 'Stop';
+    case 'SkipCountdown':
+      return 'Skip countdown';
+    default:
+      return action;
+  }
 }
 
 /** A one-line description of what an action does, for tooltips / confirms. */
@@ -191,7 +190,7 @@ export function actionDescription(action: HeatAction): string {
     case 'SkipCountdown':
       return 'Skip the countdown — start the race now.';
     case 'ForceEnd':
-      return 'End the race window now. Pilots land.';
+      return 'Stop the race now. Pilots land.';
     case 'Finalize':
       return 'Finalize the heat and lock in the result.';
     case 'Advance':
