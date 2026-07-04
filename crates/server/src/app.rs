@@ -1677,16 +1677,9 @@ async fn snapshot_class(
 /// The class's heats are first collected from the `HeatScheduled` tags; then the log is replayed
 /// once, opening the window on any heat-loop event for one of those heats and closing it on a
 /// heat-loop event for a heat *not* in the class — the same position-based pass attribution
-/// [`heat_window`] uses to scope a single heat, generalized to a set of heats. So a class's live
-/// state folds only its own heats and passes, with no other class's racing bleeding in.
-pub(crate) fn class_window(events: &[Event], class: &ClassId) -> Vec<Event> {
-    class_window_offsets(events, class)
-        .into_iter()
-        .map(|(_, e)| e)
-        .collect()
-}
-
-/// [`class_window`] carrying each event's GLOBAL append offset — the class-scope live fold
+/// [`heat_window_offsets`] uses to scope a single heat, generalized to a set of heats. So a
+/// class's live state folds only its own heats and passes, with no other class's racing bleeding
+/// in. Carries each event's GLOBAL append offset — the class-scope live fold
 /// feeds these to [`live_state_over`] so marshaling adjudications (global `LogRef` targets)
 /// resolve inside the filtered view (the same #55 rule as `heat_window_offsets`).
 pub(crate) fn class_window_offsets(events: &[Event], class: &ClassId) -> Vec<(u64, Event)> {
@@ -1973,16 +1966,6 @@ pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, 
         }
     }
     window
-}
-
-/// The heat window as a bare `Vec<Event>` — the offset-agnostic view used where global offsets
-/// are not needed (live state, results scoring). The marshaling lap/audit folds use
-/// [`heat_window_offsets`] instead, so they target the correct global `LogRef`.
-pub(crate) fn heat_window(events: &[Event], heat: &HeatId) -> Vec<Event> {
-    heat_window_offsets(events, heat)
-        .into_iter()
-        .map(|(_, e)| e)
-        .collect()
 }
 
 /// Score a single heat over its **full adjudicated event window** under `win_condition` — the

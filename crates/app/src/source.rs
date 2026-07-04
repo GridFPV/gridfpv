@@ -1891,10 +1891,10 @@ fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
             // A tagged pass belongs to its stamped heat regardless of the positional cursor
             // (same rule as the server's window folds); an untagged (legacy) pass keeps the
             // positional rule. Either way only while this heat's run window is open.
-            Event::Pass(p) if running && p.gate.is_lap_gate() => {
-                if p.heat.as_ref().is_none_or(|h| h == heat) {
-                    passes.push(p);
-                }
+            Event::Pass(p)
+                if running && p.gate.is_lap_gate() && p.heat.as_ref().is_none_or(|h| h == heat) =>
+            {
+                passes.push(p)
             }
             _ => {}
         }
