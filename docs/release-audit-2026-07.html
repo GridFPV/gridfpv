@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Release Audit (July 2026)</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Release Audit — July 2026</h1>
+      <p class="doc-kind">Internal design doc · the pre-release deep review: method, findings → fixes, and what was deferred</p>
+    </header>
+
+    <p class="lead">
+      Ahead of the primitives-first release, the whole system was put through a two-part audit
+      (2026-07-04): a <strong>seven-track deep code review</strong> (engine scoring/FSM, control
+      handler, projections/round engine, timer bridge &amp; adapters, marshaling UI, console
+      screens/libs, wire contracts) and a <strong>live soak</strong> — a 24-pilot event driven
+      end-to-end over the HTTP API against a throwaway Director, including a 26-assertion
+      marshaling gauntlet, a semis→final bracket flow, and adversarial probes (an intruder heat
+      scheduled mid-race, config edits against raced rounds, garbage params). Every confirmed
+      finding was fixed in the same pass; the design calls each fix rests on are recorded as
+      <a href="decisions.html#d19">D19–D24</a>. This doc is the ledger.
+    </p>
+
+    <div class="callout">
+      <p>
+        Everything below shipped with regression tests, and the headline items were re-verified
+        <em>live</em> (the soak re-run finished 0-for-0 after the fixes). The soak driver scripts
+        are throwaway session tooling, but the pattern is durable: create an event, roster, and
+        rounds over plain HTTP; <code>FillRound(All)</code>; drive heats
+        <code>Stage → Start</code> and let the runtime clock end them; marshal via the command
+        vocabulary; assert against the heat snapshots
+        (<code>?projection=laps|result|audit|live</code>) and the ranking/standings reads.
+      </p>
+    </div>
+
+    <h2>1. Results-integrity fixes (the score would have been wrong)</h2>
+    <ul>
+      <li><strong>Timed heats could never auto-end</strong> when nobody crossed after the buzzer;
+      degenerate configs (zero window / First-to-0 / zero time limit) ended heats at the start
+      signal. Wall-clock fallback + validation — <a href="decisions.html#d19">D19</a>.</li>
+      <li><strong>Discard left the dead run scoreable</strong>: a discarded heat kept showing (and
+      re-scoring) the thrown-away run's laps until re-run. <code>Discarded</code> is now a
+      run-reset boundary — <a href="decisions.html#d19">D19</a>. <em>Predicted independently by
+      two review tracks, then confirmed live in the gauntlet before the fix.</em></li>
+      <li><strong>Scheduling mid-race silently dropped the running heat's laps</strong> (the
+      positional pass-attribution family, incl. marshaling a finished heat mid-race and selecting
+      an old heat absorbing later passes). Passes now carry a bridge-stamped heat tag —
+      <a href="decisions.html#d20">D20</a>. <em>Live-verified with an intruder heat scheduled
+      mid-race: zero laps lost.</em></li>
+      <li><strong>Brackets advanced losers</strong>: the <code>FromHeatWinners</code> carry used a
+      ranking heuristic that seeds a losing semifinalist into the final whenever losers' lap
+      counts differ. <code>HeadToHead</code> now advances each heat's winner(s), deduped, DQ never
+      advances. <em>Verified by execution in review, then live: the final's lineup was exactly the
+      semi winners.</em></li>
+      <li><strong>Qualifying ranking collapse</strong>: a best-lap qualifier over a round scored
+      under a different win condition ranked the whole field tied-at-1 <em>alphabetically</em> —
+      and seeded brackets from that order. Falls back to the condition-independent
+      <code>Placement.best_lap_micros</code>.</li>
+      <li><strong>Standings counted rounds that never ran</strong> (defining finals up front
+      shifted standings after qualifying) and <strong>counted a DQ'd pilot's laps</strong> in
+      <code>total_laps</code> (the #339 asymmetry). Unraced rounds now contribute nothing; DQ'd
+      placements bank no laps.</li>
+      <li><strong>Marshaling corrections missed in heat-scoped live views</strong>: filtered folds
+      re-enumerated offsets from 0, so a throw-out targeting a global <code>LogRef</code> was
+      ignored (or hit the wrong pass). <code>live_state_over</code> +
+      <code>class_window_offsets</code> preserve global offsets; the class snapshot and stream now
+      also fold the same window (they used to diverge).</li>
+      <li><strong>Live running order contradicted the scored result</strong> on equal laps: ties
+      broke on last-lap <em>duration</em> live but last-lap <em>completion time</em> in the
+      scorer. The live fold now uses the scorer's rule.</li>
+      <li><strong>Negative time "penalties" improved the penalized pilot</strong>; zero/negative
+      amounts are rejected, as are empty heat lineups.</li>
+    </ul>
+
+    <h2>2. Runtime-integrity fixes (the race day would have wedged or lied)</h2>
+    <ul>
+      <li><strong>Orphaned runtime clocks</strong> (the single-slot detach), <strong>full-log
+      replay on Director restart</strong>, the <strong>cancel-vs-expiry race</strong>, and
+      <strong>one transient log error killing an event's runtime</strong> — the per-heat /
+      tail-start / fire-time-recheck / retry model, <a href="decisions.html#d21">D21</a>.</li>
+      <li><strong>Validate→append TOCTOU</strong> on every command gate — the command
+      serialization lock, <a href="decisions.html#d22">D22</a>.</li>
+      <li><strong>Protest deadlock after Restart</strong> + double-resolve / double-void
+      acceptance — run-scoped protests, effectively-once rulings,
+      <a href="decisions.html#d23">D23</a>.</li>
+      <li><strong>Raced-round config drift</strong> (editing a round re-scored Final results;
+      the Edit form destroyed bracket seedings; garbage params surfaced at fill time; a capped
+      1000-heat runaway fill acked ok) — the raced-round freeze + param validation +
+      failed-ack, <a href="decisions.html#d24">D24</a>.</li>
+      <li><strong>Timer-status stomp on event switch</strong>: a superseded RH connection's async
+      teardown marked the healthy successor Disconnected, tripping failover. The exiting driver
+      now yields the status cell when it is being replaced.</li>
+    </ul>
+
+    <h2>3. Console fixes (what the RD saw could mislead)</h2>
+    <ul>
+      <li><strong>Marshaling wrong-heat hazards</strong>: the ruling/protest/add-lap pilot list
+      fell back to the <em>live</em> heat's pilots (a DQ against a pilot who never flew the
+      marshaled heat); node-seat laps could be captioned with the other heat's pilot; projections
+      went stale (or crossed heats) on pin switches and failed fetches. All heat-keyed now, with
+      double-submit guards, positive-time input gates, and visible penalty validation.</li>
+      <li><strong>Friendly-name leaks</strong> (the standing rule): Event Rounds lineups, Audit
+      rows, Results placements, and the JSON export could render raw <code>node-{i}</code> seats
+      for finished heats — all resolve through the shared resolver from the durable heat-window
+      bindings now.</li>
+      <li><strong>Stale/racing reads</strong>: an event switch leaked the previous event's RSSI
+      trace ("evidence" under the wrong heat); Results view-switches let a slower older fetch
+      overwrite a newer one; a heats-read failure blanked the list silently; a stale
+      <code>heatResult</code> leaked into the JSON export; a 500 whose message contained "401"
+      opened the token dialog.</li>
+      <li><strong>Server-anchored staging countdown</strong>: the staging clock anchored to each
+      console's mount instant (two consoles read different windows; late-resolving config
+      re-anchored it mid-count). The live state now carries <code>staged_at</code> and the
+      countdown anchors there — see <a href="live-state-clock.html">Live State &amp; the Race
+      Clock</a>.</li>
+      <li><strong>Protocol client</strong>: the resume cursor never advanced (a reconnect replayed
+      the entire backlog through the UI); an unhandled Delta envelope would have frozen the view
+      silently — both now converge via the re-snapshot path. Contract pins added for
+      <code>GET /time</code> (the clock-skew keystone), <code>StartProcedure</code>'s tagged
+      shape, the SignalTrace projection, and the null-competitor audit row.</li>
+    </ul>
+
+    <h2>4. Deferred — recorded, deliberately not built</h2>
+    <ul>
+      <li><strong>Failover completeness (dual-timer)</strong>: crossings that land between the
+      primary's real death and the gate flip are dropped (a standby's passes are discarded, never
+      buffered/replayed), and a hung-but-open socket defers detection until the ~5s idle probe.
+      Real but rare (multi-timer setups), and buffering needs a design of its own — replay
+      semantics, dedup against the primary's already-appended passes. The cheap status-stomp fix
+      (§2) did land.</li>
+      <li><strong>Orphan bridge pruning</strong>: a deleted event's bridge task holds a strong log
+      handle for the process lifetime — a resource leak, no correctness impact.</li>
+      <li><strong>Presence-reconciler duplicate bindings</strong> within one poll batch — benign
+      (same key/value, last-wins fold).</li>
+      <li><strong>Version-skew rendering</strong>: an additive server enum variant renders as a
+      blank metric cell / mislabeled timer kind on a stale console build. Mitigated by the
+      both-halves deploy rule and the new contract pins; a graceful-unknown rendering pass is
+      future polish.</li>
+      <li><strong>StartProcedure form round-trip</strong>: the round form always writes
+      <code>randomized-delay</code> — lossless today (one mode exists), lossy the day a second
+      mode ships. The wire shape is now contract-pinned so that day is loud, not silent.</li>
+    </ul>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+</body>
+</html>

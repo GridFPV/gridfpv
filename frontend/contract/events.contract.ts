@@ -28,6 +28,7 @@ import type {
   FormatSchema,
   Pilot,
   RoundDef,
+  StartProcedure,
   Timer
 } from '@gridfpv/types';
 
@@ -1293,6 +1294,83 @@ describe('race Slice 2a: rounds', () => {
     const gone = await mutateRound(event.id, round.id, 'DELETE');
     expect(gone.status).toBe(404);
     expect((gone.body as { code?: string }).code).toBe('UnknownScope');
+  });
+
+  it('POST /rounds round-trips the start procedure — internally tagged on `mode` (heat-lifecycle Slice 2)', async () => {
+    const event = (await createEvent('Rounds Start Procedure', TOKEN)).body as EventMeta;
+    await selectOpen(event.id);
+
+    // Omitted on create → the server defaults a randomized-delay procedure. The wire shape
+    // is INTERNALLY tagged on `mode` (`{ "mode": "randomized-delay", min_delay_ms, … }`) —
+    // not externally tagged like SeedingRule/WinCondition — so the tag is pinned explicitly.
+    const defaulted = (
+      await addRound(
+        event.id,
+        {
+          label: 'Defaulted Start',
+          classes: ['mgp-open'],
+          format: 'timed_qual',
+          params: {},
+          win_condition: 'BestLap',
+          time_limit_secs: 60
+        },
+        TOKEN
+      )
+    ).body as RoundDef;
+    expect(defaulted.start_procedure.mode).toBe('randomized-delay');
+    expect(typeof defaulted.start_procedure.min_delay_ms).toBe('number');
+    expect(typeof defaulted.start_procedure.max_delay_ms).toBe('number');
+    expect(defaulted.start_procedure.min_delay_ms).toBeLessThanOrEqual(
+      defaulted.start_procedure.max_delay_ms
+    );
+
+    // Explicit: the full randomized-delay variant — window bounds plus the optional start
+    // tone — round-trips through create byte-for-byte.
+    const procedure: StartProcedure = {
+      mode: 'randomized-delay',
+      min_delay_ms: 1200,
+      max_delay_ms: 3400,
+      tone: { hz: 880, ms: 400 }
+    };
+    const created = await addRound(
+      event.id,
+      {
+        label: 'Custom Start',
+        classes: ['mgp-open'],
+        format: 'timed_qual',
+        params: {},
+        win_condition: 'BestLap',
+        time_limit_secs: 60,
+        start_procedure: procedure
+      },
+      TOKEN
+    );
+    expect(created.status).toBe(200);
+    const round = created.body as RoundDef;
+    expect(round.start_procedure).toEqual(procedure);
+
+    // …and survives the persist: the event meta reads the same procedure back.
+    const meta = (await listEvents()).find((e) => e.id === event.id)!;
+    const stored = (meta.rounds ?? []).find((r) => r.id === round.id)!;
+    expect(stored.start_procedure).toEqual(procedure);
+
+    // PUT replaces it wholesale too (the round-editor path).
+    const replaced: StartProcedure = {
+      mode: 'randomized-delay',
+      min_delay_ms: 500,
+      max_delay_ms: 500
+    };
+    const updated = await mutateRound(event.id, round.id, 'PUT', {
+      label: 'Custom Start',
+      classes: ['mgp-open'],
+      format: 'timed_qual',
+      params: {},
+      win_condition: 'BestLap',
+      time_limit_secs: 60,
+      start_procedure: replaced
+    });
+    expect(updated.status).toBe(200);
+    expect((updated.body as RoundDef).start_procedure).toEqual(replaced);
   });
 
   it('POST /rounds accepts an open_practice round seeded AllChannels (open-practice format)', async () => {

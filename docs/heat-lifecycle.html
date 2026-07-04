@@ -207,7 +207,10 @@ stateDiagram-v2
     <ul>
       <li><strong>Timed</strong> — met once a counted crossing lands at or after the window
       close (<code>race_start + window_micros</code>): the observable signal that the window has
-      elapsed on the source clock.</li>
+      elapsed on the source clock. Because that crossing may never come (every pilot lands at
+      the buzzer), the driver also holds a <strong>wall-clock fallback</strong> — window +
+      grace, anchored to the first <em>observed</em> pass (race-go if nobody crossed) — so a
+      timed heat always ends on its own (<a href="decisions.html#d19">D19</a>).</li>
       <li><strong>FirstToLaps</strong> — met once any competitor (the leader) completes
       <code>n</code> laps.</li>
       <li><strong>BestLap / BestConsecutive</strong> (qualifying) — no intrinsic lap/leader
@@ -220,6 +223,17 @@ stateDiagram-v2
       the round's <strong>grace window</strong> — so a trailing pilot's final lap still counts —
       and only then appends <code>Running → Unofficial</code>. The <code>ForceEnd</code> override
       forces the same step now when the completion clock must be bypassed.</p>
+    </div>
+
+    <div class="principle">
+      <p><span class="name">Clock robustness: per-heat, never replayed, re-checked at fire time.</span>
+      Drivers are tracked <strong>per heat</strong> (protest/grace windows legitimately overlap
+      across heats); the bridge starts from the <strong>log tail</strong> — a Director restart
+      replays no history, and a heat caught mid-flight (<code>Armed</code>/<code>Running</code>/
+      <code>Unofficial</code>) simply gets fresh clocks over its current state; and every driver
+      <strong>re-checks the heat's folded state at the instant it appends</strong>, under the
+      command serialization lock — so a manual command landing just before a clock expires always
+      wins (<a href="decisions.html#d21">D21</a>, <a href="decisions.html#d22">D22</a>).</p>
     </div>
 
     <h3>4.3 The grace window</h3>

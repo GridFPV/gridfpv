@@ -13,12 +13,21 @@
  *                                    negative past zero (over-time), never auto-advances.
  *   • anything else / no heat      → reset to `secs` (idle; the next Staged re-arms it).
  *
- * Like the race clock this is the v1 *approximate* timer: on a late join (already Staged when this
- * mounts) it counts from "now", not the real stage time. Sharing the phase-effect shape keeps the
- * eventual server-authoritative fix (#62 follow-up) in one family.
+ * **Server-anchored** (#62 family): the countdown anchors to the live state's `staged_at` — the
+ * server's `Scheduled → Staged` instant — read against `nowMs()` (the offset-corrected
+ * `session.serverNowMs()`), so every console (and a reload / late join) reads the SAME window.
+ * The old per-mount `Date.now()` anchor made each console count its own staging window (the RD
+ * read overtime while a fresh console read 5:00), and a late-resolving round config silently
+ * re-anchored a running countdown. Before the server anchor lands (a tick-old stream) it falls
+ * back to the mount-time anchor, converging on the next push.
  *
  * Usage (inside a component, so the `$effect` has an owner):
- *   const staging = useStagingClock(() => phase, () => round?.staging_timer_secs ?? 300);
+ *   const staging = useStagingClock(
+ *     () => phase,
+ *     () => round?.staging_timer_secs ?? 300,
+ *     () => live?.staged_at,
+ *     () => session.serverNowMs()
+ *   );
  *   {staging.remainingMs}  // ms left; negative once over-time
  */
 
@@ -41,7 +50,9 @@ const TICK_MS = 250;
  */
 export function useStagingClock(
   getPhase: () => string | undefined,
-  getSecs: () => number
+  getSecs: () => number,
+  getStagedAtMicros: () => number | null | undefined = () => undefined,
+  nowMs: () => number = () => Date.now()
 ): StagingClockState {
   let remainingMs = $state(0);
 
@@ -49,11 +60,15 @@ export function useStagingClock(
     const phase = getPhase();
     const totalMs = Math.max(0, Math.round(getSecs() * 1000));
     if (phase === 'Staged') {
-      const startedAt = Date.now();
+      // Anchor to the SERVER's staging instant when the stream carries it (µs → ms); fall back
+      // to the observation instant only until it lands. Both are read against the SAME clock
+      // (`nowMs()` — offset-corrected server time), the standing skew rule.
+      const stagedAtMicros = getStagedAtMicros();
+      const anchorMs = stagedAtMicros != null ? stagedAtMicros / 1000 : nowMs();
       const advance = () => {
         // Count DOWN from the full window; allow it to pass below zero (over-time) so the RD
         // sees a field that has overstayed its staging slot.
-        remainingMs = totalMs - (Date.now() - startedAt);
+        remainingMs = totalMs - (nowMs() - anchorMs);
       };
       advance();
       const id = setInterval(advance, TICK_MS);

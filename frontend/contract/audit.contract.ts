@@ -141,6 +141,11 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
     expect(trail[1].competitor).toBe(pilotB.id);
     expect(trail[1].summary).toContain('DQ applied');
     expect(trail[0].summary).toContain(`(ref ${voidTarget})`);
+    // The target-addressed void names no competitor: `AuditEntry.competitor` is an EXPLICIT
+    // `null` on the wire (`CompetitorRef | null`, not an omitted field) — the shape the
+    // Audit/Marshaling name-resolvers branch on to skip the callsign prefix.
+    expect('competitor' in trail[0]).toBe(true);
+    expect(trail[0].competitor).toBeNull();
   });
 });
 

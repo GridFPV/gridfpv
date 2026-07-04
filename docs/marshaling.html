@@ -234,6 +234,19 @@ flowchart TB
       <strong>excluded from ranking</strong> (#331); and <strong>Finalize is gated on open
       protests</strong> — rejected, backend and UI, while a protest is open (#330).
     </p>
+    <p class="note">
+      <strong>Hardened (2026-07-04, the release audit):</strong> a protest <strong>dies with the
+      run it contests</strong> — filings before the heat's latest reset (Abort / Restart /
+      Discard) no longer gate <code>Finalize</code>, since the field re-races anyway (this closed
+      an RD deadlock where a pre-Restart protest blocked finalization while no run-windowed view
+      could show it). Rulings apply <strong>effectively once</strong>: a filing takes one
+      resolution and a heat takes one void — reverse the standing ruling to re-decide. Every
+      correction command validates and appends <strong>atomically</strong> (the command
+      serialization lock), so a ruling can no longer land on a heat that went <code>Final</code>
+      in the same instant. See <a href="decisions.html#d22">D22</a>/<a
+      href="decisions.html#d23">D23</a> and the
+      <a href="release-audit-2026-07.html">Release Audit</a>.
+    </p>
 
     <h2>4. Architectural fit</h2>
     <p>

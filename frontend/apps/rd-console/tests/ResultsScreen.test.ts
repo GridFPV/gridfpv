@@ -366,6 +366,133 @@ describe('Results — time-trial round standings (Best lap + win-condition metri
   });
 });
 
+describe('Results — durable per-heat name resolution (the raw node-0 fix)', () => {
+  it('resolves a FINISHED node-seeded heat’s seats from the heat-window bindings, never raw', async () => {
+    // A node-seeded heat: the ranking rows carry the raw `node-0` seat ref, the heat is FINISHED,
+    // and the global live stream is on a DIFFERENT heat (so its progress can't resolve it — the
+    // regression). The durable bind (`node-0 → p1`) lives in the heat's own `?projection=live`
+    // fold, which `session.ensureHeatBindings` pulls + caches for the screen's resolver.
+    const NODE_HEAT: HeatSummary = {
+      heat: 'r1-h1',
+      lineup: ['node-0'],
+      round: 'r1',
+      class: 'c1',
+      frequencies: [],
+      phase: 'Final',
+      is_current: false
+    };
+    const { session } = makeTestSession({
+      event: { ...EVENT, rounds: [QUAL] },
+      live: { current_heat: 'other-heat', phase: 'Running' },
+      listClassesImpl: vi.fn(async () => [OPEN]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [NODE_HEAT]),
+      roundRankingImpl: vi.fn(async () => [{ competitor: 'node-0', position: 1 }]),
+      classStandingsImpl: vi.fn(async () => STANDINGS),
+      heatFetches: {
+        'r1-h1': {
+          live: {
+            current_heat: 'r1-h1',
+            phase: 'Final',
+            progress: [{ competitor: 'node-0', pilot: 'p1', laps_completed: 3 }]
+          }
+        }
+      }
+    });
+    render(Results, { session });
+
+    const table = (await screen.findByLabelText(/Qualifying standings/i)) as HTMLElement;
+    // The seat resolves to the bound pilot's callsign — never the raw `node-0` (CLAUDE.md).
+    await waitFor(() => expect(within(table).getByText('AceOne')).toBeInTheDocument());
+    expect(within(table).queryByText('node-0')).not.toBeInTheDocument();
+    expect(within(table).queryByText('Node 1')).not.toBeInTheDocument();
+  });
+});
+
+describe('Results — fetch races + heats-read failure (#340)', () => {
+  it('latest wins: a SLOWER earlier round fetch cannot overwrite the newer view', async () => {
+    // r1's ranking read hangs (resolved manually below); b1's resolves immediately. Start on r1,
+    // flip to b1, then let r1's stale response land — the b1 table must stand.
+    let resolveQual!: (rows: RankEntry[]) => void;
+    const racingRankingImpl = vi.fn(
+      (_b: string, _e: string, roundId: string): Promise<RankEntry[]> =>
+        roundId === 'r1'
+          ? new Promise<RankEntry[]>((res) => (resolveQual = res))
+          : Promise.resolve([
+              { competitor: 'p1', position: 1 },
+              { competitor: 'p2', position: 2 }
+            ])
+    );
+    const { session } = makeTestSession({
+      event: { ...EVENT, rounds: [QUAL, BRACKET_FINAL] },
+      listClassesImpl: vi.fn(async () => [OPEN]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      // Only r1 has scored → the default view is round:r1 (its fetch is the slow one).
+      listHeatsImpl: vi.fn(async () => [QUAL_HEAT, { ...FINAL_HEAT, phase: 'Scheduled' as const }]),
+      roundRankingImpl: racingRankingImpl,
+      classStandingsImpl: vi.fn(async () => STANDINGS)
+    });
+    render(Results, { session });
+
+    const select = (await screen.findByLabelText('Results view')) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('round:r1'));
+    // Flip to the bracket final while r1's read is still in flight.
+    await fireEvent.change(select, { target: { value: 'round:b1' } });
+    const table = (await screen.findByLabelText(/Pro — Final standings/i)) as HTMLElement;
+    await waitFor(() => expect(within(table).getByText('AceOne')).toBeInTheDocument());
+
+    // The STALE r1 response lands late (Bolt first) — without the latest-wins guard it replaced
+    // the rendered rows, leaving Qualifying's order under the "Pro — Final" header.
+    resolveQual([
+      { competitor: 'p2', position: 1 },
+      { competitor: 'p1', position: 2 }
+    ]);
+    await waitFor(() => {
+      const rows = within(screen.getByLabelText(/Pro — Final standings/i))
+        .getAllByRole('row')
+        .slice(1);
+      expect(within(rows[0]).getByText('AceOne')).toBeInTheDocument();
+      expect(within(rows[1]).getByText('Bolt')).toBeInTheDocument();
+    });
+  });
+
+  it('keeps the last good heats list on a failed re-read, with a visible retry (#340)', async () => {
+    // First read succeeds; every later read fails until `heal` flips. The old code swallowed the
+    // failure into `heats = []`, silently blanking the phase default + channel labels.
+    let heal = false;
+    let calls = 0;
+    const listHeatsImpl = vi.fn(async () => {
+      calls += 1;
+      if (calls > 1 && !heal) throw new Error('GET /events/e1/heats failed: HTTP 500');
+      return [QUAL_HEAT];
+    });
+    const { session, pushLive } = makeTestSession({
+      event: { ...EVENT, rounds: [QUAL] },
+      listClassesImpl: vi.fn(async () => [OPEN]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl,
+      roundRankingImpl: rankingImpl,
+      classStandingsImpl: vi.fn(async () => STANDINGS)
+    });
+    render(Results, { session });
+    const select = (await screen.findByLabelText('Results view')) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('round:r1'));
+
+    // A stream tick re-reads the heats list — this read FAILS.
+    pushLive({ current_heat: 'r1-h1', phase: 'Unofficial' });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Couldn't load the heats list/);
+    // The last good list stands: the round view (derived off the heats) keeps rendering.
+    expect(select.value).toBe('round:r1');
+    expect(screen.getByLabelText(/Qualifying standings/i)).toBeInTheDocument();
+
+    // Retry with the read healthy → the error state clears.
+    heal = true;
+    await fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+});
+
 describe('Results — event-level projections (kept from #56)', () => {
   it('renders a ranking from typed fixtures', () => {
     render(Results, { heatResult, standings });

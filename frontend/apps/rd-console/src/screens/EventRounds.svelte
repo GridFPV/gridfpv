@@ -53,6 +53,7 @@
     WinCondition
   } from '@gridfpv/types';
   import { channelLabel, nodeChannelLabel } from '../lib/channels.js';
+  import { createCompetitorNameResolver } from '../lib/competitorName.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
   import {
     fieldsForFormat,
@@ -99,6 +100,10 @@
   // `GET /formats`). Both are open reads, loaded once. The schema backs both the format dropdown and
   // the guided params editor (which offers only the chosen format's params, each typed by its kind).
   let classes = $state<Class[]>([]);
+  // Loaded-flag so a not-yet-resolved class name renders a neutral placeholder ("—") instead of
+  // the raw id while the directory read is in flight or after it failed (the flash-the-raw-id
+  // bug — the Results-screen pattern; CLAUDE.md: never print the raw id to the screen).
+  let classesLoaded = $state(false);
   let formatSchemas = $state<FormatSchema[]>([]);
   const formats = $derived(formatSchemas.map((s) => s.name));
   // The standard channel catalog (race redesign Slice 4b): resolves a heat's assigned raw-MHz
@@ -150,13 +155,16 @@
     eventClassIds.map((id) => classes.find((c) => c.id === id)).filter((c): c is Class => !!c)
   );
 
-  const className = (id: ClassId): string => classes.find((c) => c.id === id)?.name ?? id;
-  const roundLabel = (id: RoundId): string => rounds.find((r) => r.id === id)?.label ?? id;
+  // A class/round id → its friendly name; never the raw id. A neutral placeholder shows while the
+  // class directory loads (or after a failed read), and for an unknown id (CLAUDE.md).
+  const className = (id: ClassId): string =>
+    classesLoaded ? (classes.find((c) => c.id === id)?.name ?? '—') : '—';
+  const roundLabel = (id: RoundId): string => rounds.find((r) => r.id === id)?.label ?? '—';
 
   $effect(() => {
     session
       .listClasses()
-      .then((list) => (classes = list))
+      .then((list) => ((classes = list), (classesLoaded = true)))
       .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
     session
       .listFormatSchemas()
@@ -209,10 +217,23 @@
     void refreshHeats();
   });
 
-  // A pilot id maps straight to a `CompetitorRef` of the same string (round_engine.rs); resolve a
-  // ref to its directory callsign, falling back to the bare ref for an unregistered/free-text one.
+  // A pilot id maps straight to a `CompetitorRef` of the same string (round_engine.rs). Resolve
+  // through the SHARED competitor-name resolver (friendly-names rule — never re-derive inline):
+  // directory callsign first; a `node-{i}` seat falls back to its channel label where a heat's
+  // channel map is in hand (`heatCallsign`), never the raw seat.
   const pilotByRef = $derived(new Map(pilots.map((p) => [p.id, p] as const)));
-  const callsign = (ref: CompetitorRef): string => pilotByRef.get(ref)?.callsign ?? ref;
+  const callsign = $derived.by<(ref: CompetitorRef) => string>(() =>
+    createCompetitorNameResolver({ pilotById: pilotByRef, explicitPilotByRef: new Map() })
+  );
+  /** The heat-scoped resolver: same rule plus the heat's channel map, so an open-practice
+   * lineup's `node-{i}` seats read as their channel label ("Raceband R1 · 5658"). */
+  function heatCallsign(channels: Map<CompetitorRef, string>): (ref: CompetitorRef) => string {
+    return createCompetitorNameResolver({
+      pilotById: pilotByRef,
+      explicitPilotByRef: new Map(),
+      channelByRef: channels
+    });
+  }
 
   const heatsByRound = (id: RoundId): HeatSummary[] => heats.filter((h) => h.round === id);
 
@@ -290,14 +311,19 @@
   // Each round can show a compact ordered ranking (`session.roundRanking`) — the cross-round seeding
   // source a later round draws `FromRanking` from.
 
-  // The expanded-standings round, its loaded ranking, and the in-flight load. Toggling reloads, so a
-  // freshly-scored heat re-aggregates the ranking.
+  // The expanded-standings round, its loaded ranking, and the in-flight load. The ranking is
+  // (re-)fetched by the effect below whenever the expanded round changes OR the stream advances —
+  // the old fetch-once-on-expand went stale the moment another heat finalized (a correction, a
+  // finalize from Marshaling) while the panel stayed open.
   let standingsRound = $state<RoundId | undefined>(undefined);
   let standingsRows = $state<RankEntry[]>([]);
   let standingsLoading = $state(false);
   let standingsError = $state<string | undefined>(undefined);
+  // Latest-wins guard (non-reactive): a slower earlier response must not overwrite a newer one
+  // (round flipped, or a fresher stream-tick re-fetch already landed).
+  let standingsSeq = 0;
 
-  async function toggleStandings(round: RoundDef) {
+  function toggleStandings(round: RoundDef) {
     if (standingsRound === round.id) {
       standingsRound = undefined;
       return;
@@ -305,16 +331,33 @@
     standingsRound = round.id;
     standingsRows = [];
     standingsError = undefined;
-    standingsLoading = true;
-    try {
-      standingsRows = await session.roundRanking(round.id);
-    } catch (e) {
-      // An unscored / unscorable round 400s — surface it inline rather than as a row list.
-      standingsError = e instanceof Error ? e.message : String(e);
-    } finally {
-      standingsLoading = false;
-    }
   }
+
+  // Fetch while a round's standings are expanded, re-keyed off the stream cursor so a fresh
+  // finalize/correction re-aggregates the ranking live. Keeps the last good rows on a re-fetch
+  // (the loading state only shows for an EMPTY panel, so the open list never flashes away).
+  $effect(() => {
+    const rid = standingsRound;
+    void session.protocolState;
+    const seq = ++standingsSeq;
+    if (!rid) return;
+    standingsLoading = true;
+    session
+      .roundRanking(rid)
+      .then((rows) => {
+        if (seq !== standingsSeq) return;
+        standingsRows = rows;
+        standingsError = undefined;
+      })
+      .catch((e) => {
+        // An unscored / unscorable round 400s — surface it inline rather than as a row list.
+        if (seq !== standingsSeq) return;
+        standingsError = e instanceof Error ? e.message : String(e);
+      })
+      .finally(() => {
+        if (seq === standingsSeq) standingsLoading = false;
+      });
+  });
 
   // --- Manual heat build (replaces the retired NewHeat free-text form) ---------------------------
   // Pick a round, then select from that round's **eligible class members** (real roster pilots, no
@@ -474,6 +517,12 @@
   // single selection (the common bracket-from-one-qual case) is just a one-element set.
   let seedSources = $state<Set<RoundId>>(new Set());
   let seedTopN = $state(8);
+  // A seeding this form can't model (`FromHeatWinners` bracket advancement, `FromRankingRange`,
+  // `Combine`), captured verbatim when editing such a round. The server replaces the round
+  // WHOLESALE on update, so sending the form's roster/ranking approximation silently rewrote a
+  // bracket level's "winners of Semifinal" seeding to FromRoster — a grace-window tweak destroyed
+  // the bracket chain. When set, the seeding controls lock and submit round-trips it unchanged.
+  let editPreservedSeeding = $state<SeedingRule | undefined>(undefined);
   // The chosen format's params, as a `key → value` map (Rounds form redesign item 4): every param
   // the format declares is shown inline as a proper labeled field, seeded from its schema default
   // (or the edited round's stored value). On a format switch the map is re-seeded to the new
@@ -648,6 +697,7 @@
     seedKind = 'FromRoster';
     seedSources = new Set();
     seedTopN = 8;
+    editPreservedSeeding = undefined;
     selectedNodes = new Set();
     paramValues = {};
     pointsTable = [...DEFAULT_POINTS_TABLE];
@@ -719,9 +769,12 @@
       seedKind = 'FromRoster';
       selectedNodes = new Set(seed.AllChannels.channels);
     } else {
-      // FromHeatWinners (bracket-level advancement, #217) — generated by advancing a bracket, not
-      // manually edited in this form; show as roster-like (the bracket flow drives its seeding).
+      // FromHeatWinners (bracket-level advancement, #217) / FromRankingRange / Combine — seedings
+      // this form doesn't model. Preserve the ORIGINAL verbatim and lock the seeding controls:
+      // `update_round` replaces the round wholesale, so sending the form's approximation would
+      // silently rewrite a bracket level's advancement chain to FromRoster.
       seedKind = 'FromRoster';
+      editPreservedSeeding = seed;
     }
 
     // Heat-lifecycle config (Slice 3): staging timer (split mm:ss), the randomized start window
@@ -790,6 +843,9 @@
   }
 
   function buildSeeding(): SeedingRule {
+    // Editing a round whose seeding this form can't model: round-trip the original verbatim
+    // (the seeding controls are locked in that state) so the update never rewrites it.
+    if (editPreservedSeeding !== undefined) return editPreservedSeeding;
     if (seedKind === 'FromRanking' && seedSources.size > 0) {
       // Serialize the multi-select in a stable order: the order the source rounds are defined on the
       // event (so the same selection always produces the same `source_rounds`, independent of click
@@ -1182,7 +1238,7 @@
                     standingsRows.every((r) => r.position === standingsRows[0].position)}
                   <div class="round-standings" aria-label={`Standings for ${round.label}`}>
                     <h4 class="standings-title">Standings</h4>
-                    {#if standingsLoading}
+                    {#if standingsLoading && standingsRows.length === 0}
                       <p class="empty small" role="status">Loading standings…</p>
                     {:else if standingsError}
                       <p class="empty small" role="status">
@@ -1252,6 +1308,7 @@
                   <ol class="heat-list">
                     {#each heatsByRound(round.id) as h (h.heat)}
                       {@const channels = channelByRef(h)}
+                      {@const lineupName = heatCallsign(channels)}
                       <li class="heat-row" class:current={h.is_current}>
                         <div class="heat-main">
                           <div class="heat-head">
@@ -1265,7 +1322,7 @@
                             {#each h.lineup as ref, i (ref)}
                               <span class="lineup-pilot">
                                 <span class="lineup-num" aria-hidden="true">{i + 1}</span>
-                                <span class="lineup-call">{callsign(ref)}</span>
+                                <span class="lineup-call">{lineupName(ref)}</span>
                                 <span class="lineup-chan" class:none={!channels.get(ref)}>
                                   {channels.get(ref) ?? '—'}
                                 </span>
@@ -1441,19 +1498,31 @@
              ranking. The FromRanking source-rounds multi-select + top-N reveals for the ranking case;
              several source rounds are aggregated best-per-pilot (issue #51). -->
       {#if fields.seeding}
-        <Field
-          label="Seeding"
-          hint={seedKind === 'FromRanking'
-            ? 'Draw this round from one or more prior rounds’ rankings.'
-            : 'Draw straight from the eligible class’ roster membership.'}
-        >
-          <Select bind:value={seedKind} aria-label="Seeding">
-            <option value="FromRoster">From roster</option>
-            <option value="FromRanking">From ranking</option>
-          </Select>
-        </Field>
+        {#if editPreservedSeeding !== undefined}
+          <!-- A seeding this form doesn't model (bracket advancement / ranking range / combine):
+               locked — saving keeps it exactly as-is, so an unrelated edit (grace, staging, …)
+               can never rewrite the bracket chain. -->
+          <Field label="Seeding" hint="Kept as-is when you save.">
+            <p class="inline-note">
+              This round's seeding (bracket advancement) isn't editable here — it will be preserved
+              unchanged.
+            </p>
+          </Field>
+        {:else}
+          <Field
+            label="Seeding"
+            hint={seedKind === 'FromRanking'
+              ? 'Draw this round from one or more prior rounds’ rankings.'
+              : 'Draw straight from the eligible class’ roster membership.'}
+          >
+            <Select bind:value={seedKind} aria-label="Seeding">
+              <option value="FromRoster">From roster</option>
+              <option value="FromRanking">From ranking</option>
+            </Select>
+          </Field>
+        {/if}
 
-        {#if seedKind === 'FromRanking'}
+        {#if editPreservedSeeding === undefined && seedKind === 'FromRanking'}
           <div class="form-grid">
             <Field
               label="Source rounds"

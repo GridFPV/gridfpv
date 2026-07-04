@@ -145,13 +145,36 @@ function isAuthAck(ack: CommandAck): boolean {
 }
 
 /**
- * Whether a thrown error from `createEvent` is an HTTP **401/403** — i.e. the Director is
- * gating event creation. `createEvent` rejects with an `Error` whose message carries the HTTP
- * status (`POST /events failed: HTTP 401`), so we match on that.
+ * The HTTP status a thrown request error carries, if any: a structural `status` field when the
+ * error provides one, else the trailing `… failed: HTTP <status>` every protocol-client request
+ * rejection ends with. Anything else — a transport error, or a message that merely *contains*
+ * "401" somewhere (an event id like `evt-401`, a 500 body echoing a token) — resolves
+ * `undefined`, so it can never masquerade as an auth status. (The old whole-message
+ * `\b(401|403)\b` scan opened the token dialog on exactly those.)
+ */
+function httpStatusOf(e: unknown): number | undefined {
+  if (
+    e &&
+    typeof e === 'object' &&
+    'status' in e &&
+    typeof (e as { status: unknown }).status === 'number'
+  ) {
+    return (e as { status: number }).status;
+  }
+  const msg = e instanceof Error ? e.message : String(e);
+  const m = /\bfailed: HTTP (\d{3})$/.exec(msg);
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * Whether a thrown error from `createEvent` (and the other gated writes) is an HTTP **401/403**
+ * — i.e. the Director is gating the action. Matched on the error's HTTP *status* (structural, or
+ * the protocol client's anchored `failed: HTTP <status>` suffix — see {@link httpStatusOf}),
+ * never on digits appearing anywhere in the message.
  */
 function isAuthFailure(e: unknown): boolean {
-  const msg = e instanceof Error ? e.message : String(e);
-  return /\b(401|403)\b/.test(msg);
+  const status = httpStatusOf(e);
+  return status === 401 || status === 403;
 }
 
 /**
@@ -241,6 +264,16 @@ export class Session {
    * tighter heat-scope read (`?projection=result`), so the Results screen reads this.
    */
   heatResult = $state.raw<HeatResult | undefined>(undefined);
+  /**
+   * The **durable per-heat registration bindings** (competitor ref → pilot id), one map per heat,
+   * read off each heat's own live-state fold (`?projection=live` over that heat's log window — the
+   * same durable source Marshaling's `heatLiveState` uses) and cached for the life of the event.
+   * The event-wide surfaces (Results, Audit) resolve competitor names from THIS, never just the
+   * global live stream — whose `progress` only carries the *current* heat, so a finished
+   * node-seeded heat's `node-0` seats rendered raw (the friendly-names rule, CLAUDE.md).
+   * Populated on demand via {@link ensureHeatBindings}; `$state.raw`: replaced wholesale per pull.
+   */
+  heatBindings = $state.raw<ReadonlyMap<HeatId, ReadonlyMap<CompetitorRef, PilotId>>>(new Map());
   /** The last control-path error surfaced to the RD (cleared on the next send). */
   lastCommandError = $state<CommandAck['error']>(undefined);
   /**
@@ -303,6 +336,10 @@ export class Session {
   #client: ProtocolClient | undefined;
   #control: ControlClient | undefined;
   #unsub: (() => void) | undefined;
+  /** The heat {@link heatResult} was fetched for — so a heat change / Revert can drop it. */
+  #heatResultHeat: HeatId | undefined;
+  /** Heats whose {@link heatBindings} read is in flight (dedupes concurrent `ensure` calls). */
+  #heatBindingsInFlight = new Set<HeatId>();
   /** The shell's lazy token prompt (a `Dialog`); set via {@link setTokenProvider}. */
   #tokenProvider: TokenProvider | undefined;
   /** The live-status poll interval while inside an event; cleared on leave/teardown. */
@@ -1134,6 +1171,7 @@ export class Session {
       this.protocolState = state;
       this.connectionStatus = state.status;
       this.liveState = liveStateOf(state.body);
+      this.#dropStaleHeatResult();
     });
 
     // Begin polling the timer registry's live status for the header pills (#73, Slice 2b).
@@ -1263,6 +1301,7 @@ export class Session {
       this.protocolState = state;
       this.connectionStatus = state.status;
       this.liveState = liveStateOf(state.body);
+      this.#dropStaleHeatResult();
     });
   }
 
@@ -1285,9 +1324,18 @@ export class Session {
     this.protocolState = undefined;
     this.liveState = undefined;
     this.heatResult = undefined;
+    this.#heatResultHeat = undefined;
+    // The per-heat binding cache is event-scoped (heat ids and node-seat binds from one event
+    // must never resolve names under the next).
+    this.heatBindings = new Map();
+    this.#heatBindingsInFlight.clear();
     this.lapList = undefined;
     this.marshalingAudit = undefined;
     this.heatLiveState = undefined;
+    // The signal trace too — leaving it set rendered the PREVIOUS event's RSSI evidence under
+    // the next event's heat when its own trace read failed or lagged (fabricated evidence on
+    // the defensible-results surface).
+    this.signalTrace = undefined;
     this.lastCommandError = undefined;
     this.timers = [];
   }
@@ -1374,6 +1422,12 @@ export class Session {
       // setToken rebuilt #control with the token; resend on the new client.
       ack = (await this.#control?.sendCommand(command)) ?? ack;
     }
+    // A successful Revert re-opens the heat's result — a stored scored {@link heatResult} for
+    // that heat no longer stands, so drop it (the Results export must not embed it).
+    if (ack.ok && 'Revert' in command && command.Revert.heat === this.#heatResultHeat) {
+      this.heatResult = undefined;
+      this.#heatResultHeat = undefined;
+    }
     this.lastCommandError = ack.ok ? undefined : ack.error;
     return ack;
   }
@@ -1413,12 +1467,64 @@ export class Session {
         'HeatResult' in snap.body
       ) {
         this.heatResult = (snap.body as { HeatResult: HeatResult }).HeatResult;
+        this.#heatResultHeat = heat;
         return this.heatResult;
       }
     } catch {
       /* leave heatResult unchanged */
     }
     return undefined;
+  }
+
+  /**
+   * Drop {@link heatResult} once it no longer describes the heat it was fetched for: it is set on
+   * Finalize and was previously never cleared, so after moving on to the next heat the Results
+   * JSON export embedded the PREVIOUS heat's result. Called on every live-stream state — clears
+   * when the current heat moves off {@link #heatResultHeat}; {@link send} additionally clears it
+   * when that heat's result is **Reverted** (re-opened, so no scored result stands).
+   */
+  #dropStaleHeatResult(): void {
+    if (this.heatResult === undefined) return;
+    const current = this.liveState?.current_heat;
+    if (current != null && current !== this.#heatResultHeat) {
+      this.heatResult = undefined;
+      this.#heatResultHeat = undefined;
+    }
+  }
+
+  /**
+   * Ensure {@link heatBindings} holds the **durable registration bindings** for each of `heats`,
+   * fetching any missing heat's own live-state fold (`?projection=live` — the heat-window fold
+   * whose `progress[].pilot` carries the heat's `CompetitorRegistered` binds; see
+   * {@link refreshMarshaling}'s note) and caching the extracted ref → pilot map. Already-cached
+   * and in-flight heats are skipped, so the event-wide screens can call this freely per render
+   * tick. A failed read leaves the heat uncached (a later call retries); the resolver then simply
+   * falls back for that heat's refs rather than erroring (#340 doesn't apply — these enrich
+   * names, the primary reads surface their own failures).
+   */
+  async ensureHeatBindings(heats: HeatId[]): Promise<void> {
+    const missing = heats.filter(
+      (h) => !this.heatBindings.has(h) && !this.#heatBindingsInFlight.has(h)
+    );
+    if (missing.length === 0) return;
+    for (const h of missing) this.#heatBindingsInFlight.add(h);
+    try {
+      const folds = await Promise.all(
+        missing.map((h) => this.#fetchHeatProjection<LiveRaceState>(h, 'live', 'LiveRaceState'))
+      );
+      const next = new Map(this.heatBindings);
+      let changed = false;
+      folds.forEach((live, i) => {
+        if (!live) return; // failed read — stay uncached so the next ensure retries
+        const bound = new Map<CompetitorRef, PilotId>();
+        for (const p of live.progress ?? []) if (p.pilot != null) bound.set(p.competitor, p.pilot);
+        next.set(missing[i], bound);
+        changed = true;
+      });
+      if (changed) this.heatBindings = next;
+    } finally {
+      for (const h of missing) this.#heatBindingsInFlight.delete(h);
+    }
   }
 
   /**

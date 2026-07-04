@@ -130,6 +130,45 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(within(roundsCard).getByText('1')).toBeInTheDocument();
   });
 
+  it('shows a neutral placeholder — never the raw class id — while the class directory loads', async () => {
+    // The directory read HANGS (resolved manually below): the round's class chip must read '—'
+    // while it is in flight, not flash the raw 'c1' (the Results-screen pattern; CLAUDE.md).
+    let resolveClasses!: (list: Class[]) => void;
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      listClassesImpl: vi.fn(() => new Promise<Class[]>((res) => (resolveClasses = res))),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
+    await within(roundsCard).findByText('Qualifying R1');
+    expect(within(roundsCard).queryByText('c1')).toBeNull();
+    expect(within(roundsCard).getAllByText('—').length).toBeGreaterThan(0);
+
+    // The directory lands → the friendly name replaces the placeholder.
+    resolveClasses([OPEN, SPEC]);
+    await within(roundsCard).findByText('Open');
+    expect(within(roundsCard).queryByText('c1')).toBeNull();
+  });
+
+  it('sticks to the placeholder — never the raw class id — after a failed directory read', async () => {
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      listClassesImpl: vi.fn(async () => {
+        throw new Error('GET /classes failed: HTTP 500');
+      }),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
+    await within(roundsCard).findByText('Qualifying R1');
+    // The read failed (the toast surfaces it) — the chip stays neutral rather than raw.
+    await waitFor(() => expect(within(roundsCard).queryByText('c1')).toBeNull());
+    expect(within(roundsCard).getAllByText('—').length).toBeGreaterThan(0);
+  });
+
   it('adds a round via createRound and reflects it immediately', async () => {
     const impls = baseImpls();
     const created: RoundDef = {
@@ -1500,6 +1539,43 @@ describe('EventRounds (per-round standings — Slice 5/6b)', () => {
     expect(within(panel).getByText(/Ranking appears as you finalize/i)).toBeInTheDocument();
     // The misleading all-tied list is NOT rendered.
     expect(within(panel).queryByText('AceOne')).toBeNull();
+  });
+
+  it("re-fetches an EXPANDED round's standings when the stream advances (no stale panel)", async () => {
+    // The old fetch-once-on-expand went stale the moment another heat finalized while the panel
+    // stayed open; the fetch is now keyed off the stream cursor too.
+    let rows = [
+      { competitor: 'p1', position: 1 },
+      { competitor: 'p2', position: 2 }
+    ];
+    const roundRankingImpl = vi.fn(async () => rows);
+    const { session, pushLive } = makeTestSession({
+      ...baseHeatsImpls(),
+      roundRankingImpl,
+      event: EVENT_WITH_MEMBERS
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Standings' }));
+    const panel = (await screen.findByLabelText(/Standings for Qualifying R1/i)) as HTMLElement;
+    await waitFor(() => expect(within(panel).getAllByRole('listitem')[0]).toHaveTextContent('AceOne'));
+    const callsBefore = roundRankingImpl.mock.calls.length;
+
+    // A heat finalizes elsewhere → a stream envelope lands; the OPEN panel must re-aggregate.
+    rows = [
+      { competitor: 'p2', position: 1 },
+      { competitor: 'p1', position: 2 }
+    ];
+    pushLive({ current_heat: 'r1-h9', phase: 'Unofficial' });
+    await waitFor(() => expect(roundRankingImpl.mock.calls.length).toBeGreaterThan(callsBefore));
+    // The fresh order renders (Bolt leads now) — the last good rows stood in while it loaded
+    // (no "Loading standings…" flash over an already-open list).
+    await waitFor(() => {
+      const items = within(
+        screen.getByLabelText(/Standings for Qualifying R1/i) as HTMLElement
+      ).getAllByRole('listitem');
+      expect(items[0]).toHaveTextContent('Bolt');
+    });
   });
 
   it('surfaces an inline note when a round has no ranking yet (unscored 400s)', async () => {

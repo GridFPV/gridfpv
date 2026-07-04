@@ -238,6 +238,43 @@ describe('EventAudit — the event-wide audit page', () => {
     await waitFor(() => expect(rows()).toHaveLength(4));
   });
 
+  it('resolves a FINISHED node-seeded heat’s rows from the durable heat-window binding', async () => {
+    // A node-seeded heat: the entry's competitor is the raw `node-0` seat, the heat is FINISHED,
+    // and the global live stream is on a DIFFERENT heat — so its progress can't resolve the seat
+    // (the regression: the row rendered raw "node-0"). The durable `node-0 → Maverick` bind lives
+    // in the heat's own `?projection=live` fold, pulled + cached via `session.ensureHeatBindings`.
+    const NODE_ENTRY: EventAuditEntry[] = [
+      {
+        heat: 'q1-heat',
+        kind: 'PenaltyApplied',
+        at: 1_700_000_200_000_000,
+        at_ref: 20,
+        competitor: 'node-0',
+        summary: 'DQ applied'
+      }
+    ];
+    renderAudit({
+      eventAuditImpl: vi.fn(async () => NODE_ENTRY),
+      live: { current_heat: 'q2-heat', phase: 'Running' },
+      heatFetches: {
+        'q1-heat': {
+          live: {
+            current_heat: 'q1-heat',
+            phase: 'Final',
+            progress: [{ competitor: 'node-0', pilot: 'maverick-4d9rp8', laps_completed: 3 }]
+          }
+        }
+      }
+    });
+
+    await waitFor(() => expect(rows()).toHaveLength(1));
+    // The pilot chip resolves to the bound callsign — never the raw seat (CLAUDE.md).
+    await waitFor(() =>
+      expect(within(rows()[0]).getByRole('button', { name: 'Maverick' })).toBeInTheDocument()
+    );
+    expect(screen.queryByText(/node-0/)).not.toBeInTheDocument();
+  });
+
   it('is a pure read — renders identically for a read-only session (no gated controls)', async () => {
     renderAudit({ role: 'readonly' });
     await waitFor(() => expect(rows()).toHaveLength(4));

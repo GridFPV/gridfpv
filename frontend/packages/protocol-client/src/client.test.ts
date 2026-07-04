@@ -129,6 +129,19 @@ const envelope = (sequence: number, phase: HeatPhase): ChangeEnvelope => ({
  */
 const change = (sequence: number, phase: HeatPhase) => ({ Change: envelope(sequence, phase) });
 
+/**
+ * A `Delta` change envelope, wrapped as the wire `StreamMessage`. The per-projection
+ * delta encodings are deferred (#43), so the client cannot fold one into `body` —
+ * an in-order delta must fail safe (re-snapshot), never freeze the view silently.
+ */
+const deltaChange = (sequence: number) => ({
+  Change: {
+    sequence,
+    projection: 'LiveRaceState',
+    change: { Delta: { appended: 'lap' } }
+  }
+});
+
 // Let queued microtasks (the async snapshot fetch) settle.
 const flush = async (): Promise<void> => {
   await Promise.resolve();
@@ -188,10 +201,12 @@ describe('ProtocolClient', () => {
     sockets[0].emit(change(2, 'Armed'));
     sockets[0].emit(change(3, 'Running'));
 
-    // Every envelope applied → body converged. The resume cursor stays the snapshot
-    // offset (the stream sequence is not a log offset).
+    // Every envelope applied → body converged. The resume cursor ADVANCES by one per
+    // applied envelope (5 → 8) — it tracks the last-applied position (each envelope is
+    // ≥ 1 log append), so a reconnect resumes there rather than replaying from the
+    // snapshot offset. It is still NOT the stream sequence (a different axis).
     expect(phaseOf(client.getState().body)).toBe('Running');
-    expect(client.getState().cursor).toBe(5);
+    expect(client.getState().cursor).toBe(8);
 
     client.close();
   });
@@ -243,11 +258,11 @@ describe('ProtocolClient', () => {
     expect(req.from).toBe(5);
 
     // The fresh subscription restarts the per-stream sequence, so its first envelope
-    // is accepted and the body converges. The resume cursor stays the re-snapshot
-    // offset (5).
+    // is accepted and the body converges. The resume cursor advances past the
+    // re-snapshot offset with the applied envelope (5 → 6).
     sockets[1].emit(change(6, 'Unofficial'));
     expect(phaseOf(client.getState().body)).toBe('Unofficial');
-    expect(client.getState().cursor).toBe(5);
+    expect(client.getState().cursor).toBe(6);
 
     client.close();
   });
@@ -262,10 +277,16 @@ describe('ProtocolClient', () => {
     await flush();
     sockets[0].open();
 
+    // An applied envelope advances the resume cursor off the snapshot offset (100 → 101)…
+    sockets[0].emit(change(1, 'Armed'));
+    expect(client.getState().cursor).toBe(101);
+
     const staleErr: ProtocolError = { code: 'StaleCursor', message: 'cursor too old to replay' };
     sockets[0].emit({ ReSnapshotRequired: staleErr });
     await flush();
 
+    // …and the stale-cursor fallback re-seeds it wholesale from the fresh snapshot (200):
+    // re-snapshot remains the authority, whatever the advanced cursor said.
     expect(calls).toHaveLength(2);
     expect(client.getState().cursor).toBe(200);
     expect(sockets).toHaveLength(2);
@@ -304,16 +325,72 @@ describe('ProtocolClient', () => {
 
     sockets[1].open();
     const req = JSON.parse(sockets[1].sent[0]);
-    // Resume from the snapshot's log offset (0) — NOT the stream sequence (which is a
-    // different axis). The server replays from there and fresh-value envelopes
-    // re-converge. (A future enhancement: carry the log offset on envelopes so the
-    // resume point can advance; until then resume re-replays from the snapshot.)
-    expect(req.from).toBe(0);
+    // Resume from the LAST-APPLIED position: the resume cursor advanced by one per
+    // applied envelope (snapshot offset 0 + 2 applied = 2), so the re-subscribe does
+    // NOT re-present the original snapshot offset and replay the whole backlog
+    // through onState (the stale-state flashes), and it cannot age out of the
+    // retained window (StaleCursor) while envelopes keep applying.
+    expect(req.from).toBe(2);
     expect(client.getState().status).toBe('live');
 
     // The resumed subscription restarts the sequence; its first envelope converges.
     sockets[1].emit(change(1, 'Running'));
     expect(phaseOf(client.getState().body)).toBe('Running');
+
+    client.close();
+  });
+
+  it('fails safe on an unhandled Delta envelope: re-snapshot, never a silent freeze', async () => {
+    // The per-projection delta encodings are deferred (#43): the client cannot fold a
+    // `Delta` into `body`. Advancing the sequence without the mutation would freeze
+    // the view while `status` reads 'live' — so an in-order delta must take the same
+    // re-snapshot path a StaleCursor does.
+    const { fetch, calls } = mockFetch([
+      { cursor: 3, body: liveState('Scheduled') }, // initial snapshot
+      { cursor: 9, body: liveState('Running') } // re-snapshot forced by the delta
+    ]);
+    const { factory, sockets } = mockWsFactory();
+    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    await flush();
+    sockets[0].open();
+
+    sockets[0].emit(deltaChange(1));
+    await flush();
+
+    // The delta triggered a re-snapshot: a second fetch, the old socket torn down,
+    // and the state is the FRESH snapshot's (current), not a frozen 'Scheduled'.
+    expect(calls).toHaveLength(2);
+    expect(sockets[0].closed).toBe(true);
+    expect(phaseOf(client.getState().body)).toBe('Running');
+    expect(client.getState().cursor).toBe(9);
+
+    // A fresh socket re-subscribes from the re-snapshot cursor.
+    expect(sockets).toHaveLength(2);
+    sockets[1].open();
+    expect(JSON.parse(sockets[1].sent[0]).from).toBe(9);
+    expect(client.getState().status).toBe('live');
+
+    client.close();
+  });
+
+  it('a re-delivered Delta at/below the applied sequence is a duplicate no-op (no re-snapshot)', async () => {
+    const { fetch, calls } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
+    const { factory, sockets } = mockWsFactory();
+    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    await flush();
+    sockets[0].open();
+
+    sockets[0].emit(change(1, 'Staged'));
+    sockets[0].emit(change(2, 'Armed'));
+    // At-least-once redelivery of an already-applied sequence as a Delta: it is deduped
+    // by sequence BEFORE the unsupported-delta check, so no re-snapshot fires.
+    sockets[0].emit(deltaChange(2));
+    await flush();
+
+    expect(calls).toHaveLength(1); // no extra snapshot fetch
+    expect(sockets).toHaveLength(1); // the socket stayed up
+    expect(phaseOf(client.getState().body)).toBe('Armed');
+    expect(client.getState().cursor).toBe(2); // 0 + the two applied envelopes
 
     client.close();
   });
