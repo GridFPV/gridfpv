@@ -1715,8 +1715,7 @@ pub(crate) fn class_window_offsets(events: &[Event], class: &ClassId) -> Vec<(u6
             Event::Pass(p) if p.heat.is_some() => {
                 if p.heat.as_ref().is_some_and(|h| {
                     class_heats.contains(h)
-                        && offset
-                            < crate::live_state::current_run_pass_ceiling(events, h) as u64
+                        && offset < crate::live_state::current_run_pass_ceiling(events, h) as u64
                 }) {
                     window.push((offset, event.clone()));
                 }
