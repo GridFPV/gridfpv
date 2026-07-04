@@ -107,7 +107,7 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::{Router, routing::MethodRouter};
 use gridfpv_engine::heat::{self, HeatCommand};
-use gridfpv_events::{Event, HeatId, LogRef};
+use gridfpv_events::{Event, HeatId, HeatTransition, LogRef};
 
 use crate::app::{AppState, resolve_event};
 use crate::control::{Command, CommandAck, FillMode};
@@ -456,6 +456,13 @@ fn require_new_heat_id(state: &AppState, heat: &HeatId) -> Result<(), ProtocolEr
 /// Reject a lineup that seats the **same competitor twice** (#335): a lineup ref is the handle
 /// passes/channels key on, so a duplicate would merge two seats into one pilot's lap stream.
 fn require_distinct_lineup(lineup: &[gridfpv_events::CompetitorRef]) -> Result<(), ProtocolError> {
+    // An empty lineup is a heat nobody can fly — stageable but unraceable (raw-API guard).
+    if lineup.is_empty() {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            "a heat needs at least one competitor in its lineup",
+        ));
+    }
     let mut seen = std::collections::BTreeSet::new();
     for competitor in lineup {
         if !seen.insert(competitor.0.as_str()) {
@@ -751,8 +758,15 @@ pub fn apply_fill_round(
                  this indicates a generator bug, not a {MAX_FILL_ALL_HEATS}-heat round.",
                 round.0,
             );
-            // We still appended up to the cap; ack ok so the RD sees the heats that were drawn.
-            CommandAck::ok()
+            // A capped fill is a FAILURE the RD must see, not an ok with a thousand junk heats
+            // quietly in the append-only log — the heats it did draw are visible either way.
+            CommandAck::failed(ProtocolError::new(
+                ErrorCode::Internal,
+                format!(
+                    "the round's generator never reported complete after {MAX_FILL_ALL_HEATS} \
+                     heats — stopping the fill; check the round's format configuration"
+                ),
+            ))
         }
     }
 }
@@ -1032,6 +1046,9 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::VoidHeat { heat } => {
             require_scheduled_heat(state, &heat)?;
             require_not_final(state, &heat)?;
+            // One EFFECTIVE void per heat: a stacked second void made the first reversal a
+            // silent no-op (the heat stayed voided behind an ok-acked ReverseRuling).
+            require_heat_not_voided(state, &heat)?;
             Ok(Event::HeatVoided { heat })
         }
         Command::ApplyPenalty {
@@ -1041,6 +1058,17 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         } => {
             require_scheduled_heat(state, &heat)?;
             require_not_final(state, &heat)?;
+            // A time penalty must WORSEN the target's result: a zero/negative `micros` (a
+            // typo'd sign, a buggy client) would silently *improve* the penalized pilot's
+            // deciding time while the audit trail reads as a penalty.
+            if let gridfpv_events::Penalty::TimeAdded { micros } = &penalty {
+                if *micros <= 0 {
+                    return Err(ProtocolError::new(
+                        ErrorCode::BadRequest,
+                        "a time penalty must add a positive number of microseconds",
+                    ));
+                }
+            }
             Ok(Event::PenaltyApplied {
                 heat,
                 competitor,
@@ -1091,6 +1119,12 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         // Finalize gate composes correctly.
         Command::ResolveProtest { target, outcome } => {
             require_protest_target(state, target)?;
+            // One EFFECTIVE resolution per filing: a second (double-click, a second console)
+            // used to be recorded too — possibly with a contradictory outcome — and then
+            // reversing "the" resolution silently failed to re-open the protest (the other
+            // resolution still closed it). Reversing the standing resolution is the sanctioned
+            // way to re-decide.
+            require_protest_unresolved(state, target)?;
             Ok(Event::ProtestResolved { target, outcome })
         }
         Command::ReverseRuling { target } => {
@@ -1391,15 +1425,89 @@ pub fn open_protest_count(events: &[Event], heat: &HeatId) -> usize {
             _ => None,
         })
         .collect();
-    // Filed protests for this heat with no effective resolution are still open.
+    // A protest contests a specific run's result: one filed before a RESET (Abort / Restart /
+    // Discard — the heat re-races anyway) dies with the abandoned run. Without this boundary,
+    // a pre-Restart protest blocked Finalize forever while the run-windowed audit view showed
+    // no protest at all — an RD deadlock. The boundary is the latest reset (not the run start):
+    // a protest filed before the re-run's `Running` still counts against the new result.
+    let reset_boundary = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Event::HeatStateChanged {
+                heat: h,
+                transition:
+                    HeatTransition::Aborted | HeatTransition::Restarted | HeatTransition::Discarded,
+            } if h == heat => Some(i as u64 + 1),
+            _ => None,
+        })
+        .last()
+        .unwrap_or(0);
+    // Filed protests for this heat since the latest reset, with no effective resolution.
     events
         .iter()
         .enumerate()
         .filter(|(offset, e)| {
             matches!(e, Event::ProtestFiled { heat: h, .. } if h == heat)
+                && *offset as u64 >= reset_boundary
                 && !resolved.contains(&(*offset as u64))
         })
         .count()
+}
+
+/// Require that the `ProtestFiled` at `target` has **no effective (non-reversed) resolution**
+/// yet — the double-resolve guard for [`Command::ResolveProtest`]. A filing whose resolution was
+/// reversed counts as unresolved again (re-deciding it is exactly the reversal's purpose).
+fn require_protest_unresolved(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    let reversed: std::collections::HashSet<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::RulingReversed { target } => Some(target.0),
+            _ => None,
+        })
+        .collect();
+    let already = events.iter().enumerate().any(|(offset, e)| {
+        matches!(e, Event::ProtestResolved { target: t, .. } if t.0 == target.0)
+            && !reversed.contains(&(offset as u64))
+    });
+    if already {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "protest at offset {} is already resolved — reverse that resolution to re-decide it",
+                target.0
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Require that `heat` is not already **effectively voided** (a [`Event::HeatVoided`] with no
+/// [`Event::RulingReversed`] undoing it) — the double-void guard for [`Command::VoidHeat`].
+fn require_heat_not_voided(state: &AppState, heat: &HeatId) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    let reversed: std::collections::HashSet<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::RulingReversed { target } => Some(target.0),
+            _ => None,
+        })
+        .collect();
+    let voided = events.iter().enumerate().any(|(offset, e)| {
+        matches!(e, Event::HeatVoided { heat: h } if h == heat)
+            && !reversed.contains(&(offset as u64))
+    });
+    if voided {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "heat {:?} is already voided — reverse the existing void first",
+                heat.0
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Require that `target` names a real [`Event::ProtestFiled`] in the log — the cheap target check
@@ -2368,28 +2476,72 @@ mod tests {
     fn open_protest_count_tracks_resolution_and_reversal() {
         use gridfpv_events::ProtestOutcome;
         let h = heat();
+        // A protest contests a RUN's result, so the fixture gives the heat a run first
+        // (offset 0: Running) — the predicate windows from the current run.
+        let running = Event::HeatStateChanged {
+            heat: h.clone(),
+            transition: HeatTransition::Running,
+        };
         let filed = Event::ProtestFiled {
             heat: h.clone(),
             competitor: CompetitorRef("A".into()),
             note: "x".into(),
         };
-        // Just a filing → open.
-        assert_eq!(open_protest_count(std::slice::from_ref(&filed), &h), 1);
+        // A filing against the run → open.
+        let base = vec![running.clone(), filed.clone()];
+        assert_eq!(open_protest_count(&base, &h), 1);
         // Filing + resolution → closed.
         let resolved = vec![
+            running.clone(),
             filed.clone(),
             Event::ProtestResolved {
-                target: LogRef(0),
+                target: LogRef(1),
                 outcome: ProtestOutcome::Denied,
             },
         ];
         assert_eq!(open_protest_count(&resolved, &h), 0);
-        // Reversing the resolution (at offset 1) re-opens the protest.
+        // Reversing the resolution (at offset 2) re-opens the protest.
         let mut reversed = resolved.clone();
-        reversed.push(Event::RulingReversed { target: LogRef(1) });
+        reversed.push(Event::RulingReversed { target: LogRef(2) });
         assert_eq!(open_protest_count(&reversed, &h), 1);
         // A protest for a DIFFERENT heat doesn't count.
-        assert_eq!(open_protest_count(&[filed], &HeatId("other".into())), 0);
+        assert_eq!(open_protest_count(&base, &HeatId("other".into())), 0);
+    }
+
+    #[test]
+    fn a_protest_dies_with_the_run_it_contests() {
+        // Filed against run 1, then the heat is Restarted (it re-races anyway): the protest
+        // must NOT keep gating Finalize — the old whole-log predicate deadlocked the RD
+        // (Finalize rejected over a protest no run-windowed view could even show).
+        let h = heat();
+        let running = |t| Event::HeatStateChanged {
+            heat: h.clone(),
+            transition: t,
+        };
+        let events = vec![
+            running(HeatTransition::Running),
+            Event::ProtestFiled {
+                heat: h.clone(),
+                competitor: CompetitorRef("A".into()),
+                note: "run-1 grievance".into(),
+            },
+            running(HeatTransition::Finished),
+            running(HeatTransition::Restarted),
+            running(HeatTransition::Running), // the re-run
+        ];
+        assert_eq!(
+            open_protest_count(&events, &h),
+            0,
+            "a pre-restart protest must not block the re-run's Finalize"
+        );
+        // A protest filed against the RE-RUN is open as usual.
+        let mut with_new = events.clone();
+        with_new.push(Event::ProtestFiled {
+            heat: h.clone(),
+            competitor: CompetitorRef("A".into()),
+            note: "run-2 grievance".into(),
+        });
+        assert_eq!(open_protest_count(&with_new, &h), 1);
     }
 
     /// The **generalized** `ReverseRuling` (Slice 6) accepts a throw-out, a protest resolution, and

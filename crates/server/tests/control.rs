@@ -293,7 +293,7 @@ async fn control_ws_survives_a_malformed_frame() {
         &mut control,
         &Command::ScheduleHeat {
             heat: heat(),
-            lineup: vec![],
+            lineup: vec![CompetitorRef("A".into())],
             class: None,
             round: None,
             frequencies: vec![],
@@ -313,7 +313,7 @@ async fn control_post_requires_a_valid_rd_token() {
     let (addr, rd, _server) = serve(registry.clone()).await;
     let cmd = Command::ScheduleHeat {
         heat: heat(),
-        lineup: vec![],
+        lineup: vec![CompetitorRef("A".into())],
         class: None,
         round: None,
         frequencies: vec![],
@@ -373,7 +373,7 @@ async fn control_ws_upgrade_requires_a_valid_rd_token() {
         &mut control,
         &Command::ScheduleHeat {
             heat: heat(),
-            lineup: vec![],
+            lineup: vec![CompetitorRef("A".into())],
             class: None,
             round: None,
             frequencies: vec![],
@@ -442,7 +442,7 @@ async fn out_of_band_contract_version_is_told_to_refresh() {
         &addr,
         &Command::ScheduleHeat {
             heat: heat(),
-            lineup: vec![],
+            lineup: vec![CompetitorRef("A".into())],
             class: None,
             round: None,
             frequencies: vec![],
