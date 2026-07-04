@@ -258,6 +258,13 @@ flowchart TB
       a zero-duration lap can no longer be created). <a href="decisions.html#d25">D25</a> and the
       <a href="release-audit-2026-07.html">Release Audit §4</a> carry the full story.
     </p>
+    <p class="note">
+      <strong>Min-lap floor (<a href="decisions.html#d26">D26</a>):</strong> a raw pass that
+      would close a lap under the round's <em>minimum lap time</em> is auto-removed by the same
+      fold that applies marshal voids — shown on the lap list as "under min lap, auto-removed"
+      with a Restore override (Restore is an explicit re-time ruling, which always outranks the
+      floor). Timers are dumb emitters; GridFPV owns lap semantics.
+    </p>
 
     <h2>4. Architectural fit</h2>
     <p>

@@ -2698,7 +2698,8 @@ mod tests {
         log.push(changed(heat, HeatTransition::Finished));
         log.push(changed(heat, HeatTransition::Finalized));
 
-        let result = crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition, None);
+        let result =
+            crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition, None);
         // Only run 2 scores: one lap each (holeshot + one), NOT run 1's ghost pile.
         let by_ref: std::collections::BTreeMap<&str, u32> = result
             .places
@@ -2726,7 +2727,8 @@ mod tests {
             "B",
             Penalty::Disqualify { reason: None },
         ));
-        let ruled = crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition, None);
+        let ruled =
+            crate::app::score_heat_window(&log, &HeatId(heat.into()), round.win_condition, None);
         assert!(
             ruled
                 .places

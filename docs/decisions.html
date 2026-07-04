@@ -757,6 +757,34 @@
       the whole correction vocabulary.</dd>
     </dl>
 
+    <h2 id="d26">D26 · Timers are dumb emitters: lap semantics — including the minimum-lap floor — live in GridFPV</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>A start-line double-detection gave every pilot a phantom 0.004s "lap 1" (Audit
+      Shakedown). RotorHazard HAD <code>MinLapSec=10</code> configured — but its default
+      behavior is highlight-don't-discard, so the sub-min lap was recorded and forwarded with
+      no invalid marker. Any timer, any config drift, same hole: relying on the timer to
+      enforce lap semantics means the results depend on someone else's settings screen.</dd>
+      <dt>Decision</dt>
+      <dd>Timers emit <em>observations</em> (passes, signal); GridFPV owns <em>lap
+      semantics</em>. Each round carries an optional <code>min_lap_secs</code> floor (the
+      form seeds 5s for new rounds; 0/absent = off, so pre-existing rounds keep bit-identical
+      results). The corrected-passes fold AUTO-SUPPRESSES a raw pass that would close an
+      under-floor lap — applied identically in the lap list, the live view, and every scoring
+      path, and surfaced on the marshaling removal record as "under min lap, auto-removed"
+      with a <strong>Restore</strong> override. Marshal-created passes (inserts,
+      split-synthetics) and re-timed passes are EXEMPT: an explicit ruling always outranks
+      the floor — and Restore is exactly that ruling (an <code>AdjustLap</code> re-asserting
+      the pass's raw instant). The floor freezes once the round has raced (D24: it re-scores
+      official heats). The log keeps every raw pass — suppression is a view-fold rule, never
+      data destruction.</dd>
+      <dt>Rationale</dt>
+      <dd>Defensible results require the enforcement point to be the system of record, not an
+      upstream device. Folding the floor once, beneath every projection, keeps the lap list
+      and the score incapable of disagreeing; recording everything keeps the evidence; the
+      marshal override keeps a whoop track's genuine 2-second laps scoreable.</dd>
+    </dl>
+
     <footer class="doc-footer">
       <p>
         Internal design documentation · <a href="index.html">&larr; back to docs index</a>

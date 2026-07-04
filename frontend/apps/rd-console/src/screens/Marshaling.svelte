@@ -34,7 +34,8 @@
     Pilot,
     PilotId,
     PilotProgress,
-    SignalTraceView
+    SignalTraceView,
+    VoidReason
   } from '@gridfpv/types';
   import { formatMicros, Select, toast } from '@gridfpv/components';
   import type { AuditPrefilter } from '../lib/auditFilter.svelte.js';
@@ -410,12 +411,22 @@
     addLapOpen = false;
   }
 
-  /** RESTORE a removed pass: void-the-void, targeting the standing removal event. The
-   *  sanctioned undo for a mistaken one-click Remove (the fold walks the chain; the pass
-   *  returns to the laps and leaves the removal record, re-opening re-detection there). */
-  function doRestorePass(v: { void_ref: number }): Promise<void> {
+  /** RESTORE a removed pass. A marshal-voided pass is undone by void-the-void (targeting the
+   *  standing removal event); a floor-suppressed pass (UnderMinLap, D26) is BLESSED by an
+   *  AdjustLap re-asserting its own raw instant — an explicit ruling outranks the floor, so
+   *  the fold exempts it and the pass returns to the chain. */
+  function doRestorePass(v: {
+    void_ref: number;
+    pass_ref: number;
+    at: number;
+    reason: VoidReason;
+  }): Promise<void> {
     return submitCorrection(async () => {
-      const ack = await session.send(voidDetectionCommand(v.void_ref));
+      const ack = await session.send(
+        v.reason === 'UnderMinLap'
+          ? adjustLapCommand(v.pass_ref, v.at)
+          : voidDetectionCommand(v.void_ref)
+      );
       if (ack.ok) await afterCorrection();
     });
   }
@@ -1076,7 +1087,9 @@
                         <li class="voided-row">
                           <span class="mark" aria-hidden="true">∅</span>
                           <span class="what"
-                            >removed pass at {formatMicros(v.at)}s — stays removed</span
+                            >{v.reason === 'UnderMinLap'
+                              ? `crossing at ${formatMicros(v.at)}s — under min lap, auto-removed`
+                              : `removed pass at ${formatMicros(v.at)}s — stays removed`}</span
                           >
                           {#if canCorrect}
                             <button
@@ -1164,7 +1177,9 @@
                       <li class="voided-row">
                         <span class="mark" aria-hidden="true">∅</span>
                         <span class="what"
-                          >removed pass at {formatMicros(v.at)}s — stays removed</span
+                          >{v.reason === 'UnderMinLap'
+                            ? `crossing at ${formatMicros(v.at)}s — under min lap, auto-removed`
+                            : `removed pass at ${formatMicros(v.at)}s — stays removed`}</span
                         >
                         {#if canCorrect}
                           <button

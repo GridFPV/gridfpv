@@ -2138,6 +2138,55 @@ mod tests {
         ]
     }
 
+    /// D26: the min-lap floor reaches SCORING through `score_heat_window` — an echo pass
+    /// that closes an under-floor lap is suppressed from the scored chain, so the result and
+    /// the (floored) lap list agree: the 0.004s phantom can never be anyone's best lap.
+    #[test]
+    fn score_heat_window_applies_the_min_lap_floor() {
+        let mut events = recorded_heat(); // A: passes at 1.0s / 4.0s / 6.5s (laps 3.0s, 2.5s)
+        // A double-detection echo 4ms after A's second pass — inserted DURING the run
+        // (appending it after `Finalized` would hit the Final freeze instead, which this
+        // test's own control run would then be measuring).
+        let finished_at = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    Event::HeatStateChanged {
+                        transition: HeatTransition::Finished,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        events.insert(finished_at, pass("A", 4_004_000, 9));
+        let heat = HeatId("q-1".into());
+
+        let unfloored = score_heat_window(&events, &heat, WinCondition::BestLap, None);
+        let a = unfloored
+            .places
+            .iter()
+            .find(|p| p.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            a.metric,
+            gridfpv_engine::scoring::Metric::BestLapMicros(Some(4_000)),
+            "without the floor the echo IS the (phantom) best lap"
+        );
+
+        let floored = score_heat_window(&events, &heat, WinCondition::BestLap, Some(1_000_000));
+        let a = floored
+            .places
+            .iter()
+            .find(|p| p.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            a.metric,
+            gridfpv_engine::scoring::Metric::BestLapMicros(Some(2_500_000)),
+            "the floor suppresses the echo; the real 2.5s lap wins"
+        );
+    }
+
     /// The FINAL FREEZE: a pass landing AFTER a heat's run went official never joins its
     /// window — a delayed RotorHazard catch-up pass (tagged or untagged) used to silently
     /// change a Final result with no command, no ruling, and no audit entry.

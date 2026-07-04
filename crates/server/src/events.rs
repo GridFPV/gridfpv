@@ -852,6 +852,7 @@ pub struct NewRoundReq {
     pub protest_window: Option<ProtestWindow>,
     /// Minimum lap time floor in seconds (D26); omitted/0 ⇒ off.
     #[serde(default)]
+    #[ts(optional)]
     pub min_lap_secs: Option<u32>,
 }
 
@@ -910,6 +911,7 @@ pub struct UpdateRoundReq {
     pub protest_window: Option<ProtestWindow>,
     /// Minimum lap time floor in seconds (D26); omitted/0 ⇒ off.
     #[serde(default)]
+    #[ts(optional)]
     pub min_lap_secs: Option<u32>,
 }
 
@@ -3153,6 +3155,79 @@ mod tests {
             protest_window: None,
             min_lap_secs: None,
         }
+    }
+
+    #[test]
+    fn min_lap_is_normalized_validated_and_frozen_once_raced() {
+        use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition};
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Floor Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+
+        // 0 normalizes to OFF (None) — omitted and zero mean the same on the wire.
+        let mut zero = round_req("Zeroed", vec![open.clone()]);
+        zero.min_lap_secs = Some(0);
+        let round = reg.add_round(&event.id, zero).unwrap();
+        assert_eq!(round.min_lap_secs, None);
+
+        // Out-of-range is rejected (a >10-minute floor eats every lap — a typo).
+        let mut typo = round_req("Typo", vec![open.clone()]);
+        typo.min_lap_secs = Some(601);
+        assert!(reg.add_round(&event.id, typo).is_err());
+
+        // A real floor sticks…
+        let mut real = round_req("Floored", vec![open.clone()]);
+        real.min_lap_secs = Some(5);
+        let round = reg.add_round(&event.id, real).unwrap();
+        assert_eq!(round.min_lap_secs, Some(5));
+
+        // …and FREEZES once the round has raced (editing it re-scores official heats).
+        let state = reg.resolve(&event.id).unwrap();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("q-1".into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: Some(open.clone()),
+                    round: Some(round.id.clone()),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: HeatId("q-1".into()),
+                    transition: HeatTransition::Running,
+                },
+                None,
+            )
+            .unwrap();
+        let frozen_req = UpdateRoundReq {
+            label: round.label.clone(),
+            classes: round.classes.clone(),
+            format: round.format.clone(),
+            params: round.params.clone(),
+            win_condition: Some(round.win_condition),
+            seeding: round.seeding.clone(),
+            time_limit_secs: round.time_limit_secs,
+            channel_mode: Some(round.channel_mode),
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
+            protest_window: None,
+            min_lap_secs: Some(10), // was 5 — a scoring change on a raced round
+        };
+        let err = reg
+            .update_round(&event.id, &round.id, frozen_req)
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("min lap time"),
+            "expected the min-lap freeze, got {err:?}"
+        );
     }
 
     #[test]

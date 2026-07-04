@@ -339,7 +339,10 @@ where
 /// [`corrected_passes`] under a round's **minimum-lap floor** (D26) — the scoring-path
 /// sibling of [`lap_list_marshaled_with_floor`], so results and the lap list can never
 /// disagree about a suppressed pass.
-pub fn corrected_passes_with_floor<'a, I>(events: I, min_lap_micros: Option<i64>) -> Vec<(u64, Pass)>
+pub fn corrected_passes_with_floor<'a, I>(
+    events: I,
+    min_lap_micros: Option<i64>,
+) -> Vec<(u64, Pass)>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
@@ -637,8 +640,8 @@ where
         chain.sort_by_key(|(offset, p)| (p.at, *offset));
         let mut last_kept: Option<SourceTime> = None;
         for (offset, pass) in chain {
-            let too_close = last_kept
-                .is_some_and(|prev| pass.at.micros.saturating_sub(prev.micros) < floor);
+            let too_close =
+                last_kept.is_some_and(|prev| pass.at.micros.saturating_sub(prev.micros) < floor);
             if too_close && !exempt.contains(&offset) {
                 voided.push((offset, offset, pass, VoidReason::UnderMinLap));
             } else {
@@ -1688,9 +1691,9 @@ mod marshaling_tests {
         // Under a 5s floor the echo drops to the removal record; the chain reads holeshot →
         // real laps, exactly as if the timer had never double-fired.
         let events = vec![
-            pass("vd", "A", 651_000, Some(1)),    // offset 0 — holeshot (kept: first)
-            pass("vd", "A", 655_000, Some(2)),    // offset 1 — the 4ms echo (suppressed)
-            pass("vd", "A", 7_208_000, Some(3)),  // offset 2 — real lap 1
+            pass("vd", "A", 651_000, Some(1)), // offset 0 — holeshot (kept: first)
+            pass("vd", "A", 655_000, Some(2)), // offset 1 — the 4ms echo (suppressed)
+            pass("vd", "A", 7_208_000, Some(3)), // offset 2 — real lap 1
             pass("vd", "A", 13_500_000, Some(4)), // offset 3 — real lap 2
         ];
         let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
@@ -1739,7 +1742,10 @@ mod marshaling_tests {
             .find(|c| c.competitor.competitor.0 == "A")
             .unwrap();
         assert_eq!(
-            cl.laps.iter().map(|l| l.duration_micros).collect::<Vec<_>>(),
+            cl.laps
+                .iter()
+                .map(|l| l.duration_micros)
+                .collect::<Vec<_>>(),
             vec![2_000_000, 6_000_000],
             "the blessed pass closes its lap despite the floor"
         );

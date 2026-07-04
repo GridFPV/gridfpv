@@ -71,4 +71,4 @@ protest_window?: ProtestWindow,
 /**
  * Minimum lap time floor in seconds (D26); omitted/0 ⇒ off.
  */
-min_lap_secs: number | null, };
+min_lap_secs?: number, };
