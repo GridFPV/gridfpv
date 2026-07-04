@@ -39,6 +39,13 @@ export interface PassDiff {
   added: number[];
   /** Official passes the re-detection no longer sees — each becomes a `VoidDetection`. */
   removed: OfficialPass[];
+  /**
+   * Re-detected crossings SUPPRESSED because the RD explicitly voided a pass there
+   * (within tolerance). The RSSI trace genuinely shows the crossing, but the marshal already
+   * ruled it out — so re-detection must never re-propose it as "a lap to add" (the removal
+   * record and the tuner share the lap list's `voided` data). Never inserted by a commit.
+   */
+  suppressed: number[];
 }
 
 /** A preview lap derived from consecutive re-detected passes (see {@link previewLaps}). */
@@ -109,13 +116,24 @@ export function detectPasses(trace: CompetitorTrace, enter: number, exit: number
 export function diffPasses(
   current: OfficialPass[],
   detected: number[],
-  toleranceMicros: number = DEFAULT_MATCH_TOLERANCE_MICROS
+  toleranceMicros: number = DEFAULT_MATCH_TOLERANCE_MICROS,
+  voidedAt: number[] = []
 ): PassDiff {
+  // FIRST: suppress every detected crossing the RD explicitly voided (within tolerance).
+  // The trace still shows the crossing — that's exactly why the void must win here, or the
+  // tuner keeps offering a removed lap back as an add.
+  const suppressed: number[] = [];
+  const live: number[] = [];
+  for (const t of detected) {
+    if (voidedAt.some((v) => Math.abs(v - t) <= toleranceMicros)) suppressed.push(t);
+    else live.push(t);
+  }
+
   // Every candidate pairing within tolerance, nearest first — the greedy order.
   const candidates: { ci: number; di: number; dist: number }[] = [];
   for (let ci = 0; ci < current.length; ci++) {
-    for (let di = 0; di < detected.length; di++) {
-      const dist = Math.abs(detected[di] - current[ci].at);
+    for (let di = 0; di < live.length; di++) {
+      const dist = Math.abs(live[di] - current[ci].at);
       if (dist <= toleranceMicros) candidates.push({ ci, di, dist });
     }
   }
@@ -128,14 +146,15 @@ export function diffPasses(
     if (matchedCurrent.has(ci) || matchedDetected.has(di)) continue;
     matchedCurrent.add(ci);
     matchedDetected.add(di);
-    kept.push({ at: current[ci].at, ref: current[ci].ref, detectedAt: detected[di] });
+    kept.push({ at: current[ci].at, ref: current[ci].ref, detectedAt: live[di] });
   }
   kept.sort((a, b) => a.at - b.at);
 
   return {
     kept,
-    added: detected.filter((_, di) => !matchedDetected.has(di)),
-    removed: current.filter((_, ci) => !matchedCurrent.has(ci))
+    added: live.filter((_, di) => !matchedDetected.has(di)),
+    removed: current.filter((_, ci) => !matchedCurrent.has(ci)),
+    suppressed
   };
 }
 
@@ -178,6 +197,12 @@ export type PreviewRow =
       at: number;
       /** The pass's log offset — the `VoidDetection` target a commit sends. */
       ref: number;
+    }
+  | {
+      status: 'voided';
+      /** Source-clock time (µs) of a detected crossing the RD already voided — shown so the
+       *  story is honest ("the trace sees it; you removed it"), never inserted by a commit. */
+      at: number;
     };
 
 /**
@@ -191,17 +216,23 @@ export type PreviewRow =
 export function previewRows(
   current: OfficialPass[],
   detected: number[],
-  toleranceMicros: number = DEFAULT_MATCH_TOLERANCE_MICROS
+  toleranceMicros: number = DEFAULT_MATCH_TOLERANCE_MICROS,
+  voidedAt: number[] = []
 ): PreviewRow[] {
-  const diff = diffPasses(current, detected, toleranceMicros);
+  const diff = diffPasses(current, detected, toleranceMicros, voidedAt);
   const keptDetectedAt = new Set(diff.kept.map((k) => k.detectedAt));
-  const rows: PreviewRow[] = previewLaps(detected).map((lap) => ({
+  // The lap chain derives from the detected passes MINUS the RD-suppressed crossings — the
+  // post-commit record will not contain them, so the previewed laps must not either.
+  const suppressed = new Set(diff.suppressed);
+  const chain = detected.filter((t) => !suppressed.has(t));
+  const rows: PreviewRow[] = previewLaps(chain).map((lap) => ({
     status: keptDetectedAt.has(lap.at) ? 'kept' : 'added',
     number: lap.number,
     at: lap.at,
     durationMicros: lap.durationMicros
   }));
   for (const pass of diff.removed) rows.push({ status: 'removed', at: pass.at, ref: pass.ref });
+  for (const at of diff.suppressed) rows.push({ status: 'voided', at });
   // Chronological (stable, so same-instant rows keep lap-then-removed order).
   rows.sort((a, b) => a.at - b.at);
   return rows;

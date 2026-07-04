@@ -149,6 +149,52 @@ describe('previewLaps (consecutive-pass lap derivation)', () => {
   });
 });
 
+describe('void suppression (the removal record and the tuner share data)', () => {
+  it('a detected crossing at an RD-voided time is SUPPRESSED, never added', () => {
+    // Blaze's repro: a real crossing that was not a full lap — the RD voided it, but the
+    // trace still shows it, so re-detection kept proposing it back as "a lap to add".
+    const current: { at: number; ref: number }[] = [
+      { at: 1 * S, ref: 10 },
+      { at: 81 * S, ref: 12 }
+    ];
+    const detected = [1 * S, 41 * S, 81 * S]; // the trace still sees the voided crossing at 41s
+    const d = diffPasses(current, detected, DEFAULT_MATCH_TOLERANCE_MICROS, [41 * S + 100_000]);
+    expect(d.added).toEqual([]); // NOT re-proposed
+    expect(d.suppressed).toEqual([41 * S]);
+    expect(d.kept.map((k) => k.ref)).toEqual([10, 12]);
+    expect(d.removed).toEqual([]);
+  });
+
+  it('a genuinely new crossing away from any void is still added', () => {
+    const d = diffPasses(
+      [{ at: 1 * S, ref: 10 }],
+      [1 * S, 60 * S],
+      DEFAULT_MATCH_TOLERANCE_MICROS,
+      [41 * S]
+    );
+    expect(d.added).toEqual([60 * S]);
+    expect(d.suppressed).toEqual([]);
+  });
+
+  it('previewRows carries the suppressed crossing as a voided row and drops it from the lap chain', () => {
+    const rows = previewRows(
+      [
+        { at: 1 * S, ref: 10 },
+        { at: 81 * S, ref: 12 }
+      ],
+      [1 * S, 41 * S, 81 * S],
+      DEFAULT_MATCH_TOLERANCE_MICROS,
+      [41 * S]
+    );
+    // ONE kept lap spanning 1s -> 81s (the suppressed crossing is not in the chain), plus the
+    // voided marker row at its instant.
+    expect(rows).toEqual([
+      { status: 'voided', at: 41 * S },
+      { status: 'kept', number: 1, at: 81 * S, durationMicros: 80 * S }
+    ]);
+  });
+});
+
 describe('previewRows (the unified re-detection preview)', () => {
   // The canonical official chain: holeshot at 1s, gate passes at 41s + 81s (two 40s laps).
   const current = [

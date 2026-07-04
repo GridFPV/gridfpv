@@ -34,9 +34,8 @@ describe('Marshaling (Slice 3)', () => {
     const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
     render(Marshaling, { session });
 
-    // Select ALICE's lap 2 (end_ref 14) and void it — the target must be 14, NOT a window offset.
-    await fireEvent.click(screen.getByRole('button', { name: /Lap 2\s*40\.500/ }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Remove (void)' }));
+    // One click on the row's Remove: the target must be lap 2's end_ref 14, NOT a window offset.
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove lap 2' }));
     expect(sendSpy).toHaveBeenCalledWith({ VoidDetection: { target: 14 } });
   });
 
@@ -137,7 +136,7 @@ describe('Marshaling (Slice 3)', () => {
     render(Marshaling, { session });
     // Select ALICE's lap 2 (end_ref 14) and throw it out — keeps the lap but drops it from scoring.
     await fireEvent.click(screen.getByRole('button', { name: /Lap 2\s*40\.500/ }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Throw out lap' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Throw out' }));
     expect(sendSpy).toHaveBeenCalledWith({ ThrowOutLap: { target: 14 } });
   });
 
@@ -405,15 +404,14 @@ describe('Marshaling (Slice 3)', () => {
       expect(screen.getByRole('button', { name: /Lap 1\s*41\.000/ })).toBeInTheDocument();
       expect(screen.getByText('CARMEN · DQ applied')).toBeInTheDocument();
 
-      // …but every result-changing surface is gone: the lap action buttons…
-      expect(screen.queryByRole('button', { name: 'Remove (void)' })).toBeNull();
+      // …but every result-changing surface is gone: the per-row Remove + the inline editor…
+      expect(screen.queryByRole('button', { name: /Remove lap/ })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Split' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Edit time' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Insert after' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Throw out lap' })).toBeNull();
-      // …the Add-lap control…
-      expect(screen.queryByRole('button', { name: 'Add lap' })).toBeNull();
-      expect(screen.queryByLabelText('Add-lap competitor')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Throw out' })).toBeNull();
+      // …and the inline Add-lap control.
+      expect(screen.queryByRole('button', { name: '+ Add lap' })).toBeNull();
       // …the penalty form + the reverse-ruling picker…
       expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
       expect(screen.queryByLabelText('Reverse ruling')).toBeNull();
@@ -457,10 +455,10 @@ describe('Marshaling (Slice 3)', () => {
       // correction surfaces back.
       pushLive({ ...liveRunning, phase: 'Unofficial', lifecycle: { Provisional: {} } });
       await waitFor(() =>
-        expect(screen.getByRole('button', { name: 'Remove (void)' })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Remove lap 1' })).toBeInTheDocument()
       );
       expect(screen.queryByRole('status', { name: 'Official result lock' })).toBeNull();
-      expect(screen.getByRole('button', { name: 'Add lap' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '+ Add lap' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Void heat' })).toBeInTheDocument();
     });
 
@@ -676,7 +674,8 @@ describe('Marshaling (Slice 3)', () => {
       const graph = screen.getByLabelText('RSSI signal graph');
       // Click ALICE's lap-2 marker; the selection legend reflects exactly that lap.
       await fireEvent.click(within(graph).getByRole('button', { name: /Lap 2 at .* — select/ }));
-      expect(screen.getByText(/Selected: ALICE · Lap 2/)).toBeInTheDocument();
+      // The selection opens the lap's INLINE editor in the lap list (the action surface).
+      expect(screen.getByLabelText('Edit lap 2')).toBeInTheDocument();
       // The marker is now pressed (the two-way highlight).
       expect(within(graph).getByRole('button', { name: /Lap 2 at .* — select/ })).toHaveAttribute(
         'aria-pressed',
@@ -764,17 +763,86 @@ describe('Marshaling (Slice 3)', () => {
     });
   });
 
+  // ── Voided passes: the shared removal record (void ↔ re-detection) ──────────────────────────
+  describe('voided passes stay removed (the shared removal record)', () => {
+    // ALICE's lap list with lap 2's closing pass VOIDED by the RD: one surviving lap plus the
+    // removal record at 81.5s — the projection's `voided` field.
+    const voidedLapList: LapList = {
+      competitors: [
+        {
+          competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+          laps: [
+            { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
+          ],
+          voided: [{ at: 81_500_000, pass_ref: 14 }]
+        }
+      ]
+    };
+
+    it('renders the RD-voided pass struck-through in the lap list', () => {
+      const { session } = makeTestSession({ live: liveRunning, laps: voidedLapList });
+      render(Marshaling, { session });
+      expect(screen.getByText(/removed pass at 1:21\.500s — stays removed/)).toBeInTheDocument();
+    });
+
+    it('re-detection SUPPRESSES a crossing the RD voided — never re-proposed as an add', async () => {
+      // The trace still shows the 81.5s crossing (that's the whole bug): tuning must not
+      // offer it back. Touch the levels to enter preview mode, then assert the crossing shows
+      // as voided-stays-removed and the commit batch would not insert it.
+      const { session, sendSpy } = makeTestSession({
+        live: liveRunning,
+        laps: voidedLapList,
+        signal: signalTrace
+      });
+      render(Marshaling, { session });
+
+      // Nudge the ENTER level (explicit intent) to values that detect BOTH peaks.
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '111' }
+      });
+      // The summary counts the suppressed crossing separately — never as an add.
+      const summary = await screen.findByTestId('redetect-summary');
+      expect(summary.textContent).toContain('voided by you stay removed');
+      expect(summary.textContent).toContain('+0 added');
+      // The lap box (in preview mode — the re-detection also drops the phantom 0s opening
+      // pass) marks the suppressed crossing at its DETECTED instant, clearly non-addable.
+      expect(
+        screen.getByText(/crossing at 1:21\.000s — voided by you, stays removed/)
+      ).toBeInTheDocument();
+      // Committing sends ONLY the legitimate removal — and, crucially, NO InsertLap for the
+      // suppressed crossing (the whole bug: the tuner used to re-add the voided lap).
+      await fireEvent.click(screen.getByRole('button', { name: 'Commit re-detection' }));
+      await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+      const inserts = sendSpy.mock.calls.filter(
+        ([c]) => typeof c === 'object' && c !== null && 'InsertLap' in c
+      );
+      expect(inserts).toEqual([]);
+    });
+
+    it('the lap box only switches to preview on EXPLICIT tuning intent', () => {
+      // A trace whose recorded thresholds disagree with the official laps must not hijack the
+      // interactive lap list on its own (no drag/edit yet → the normal rows + actions render).
+      const { session } = makeTestSession({
+        live: liveRunning,
+        laps: voidedLapList,
+        signal: signalTrace
+      });
+      render(Marshaling, { session });
+      expect(screen.queryByText(/re-detection preview/)).toBeNull();
+      expect(screen.getByRole('button', { name: 'Remove lap 1' })).toBeInTheDocument();
+    });
+  });
+
   // ── Add a brand-new lap (the explicit per-competitor control) ───────────────────────────────
   describe('add a new lap (explicit control)', () => {
     it('adds a lap at a typed time via InsertLap', async () => {
       const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
       render(Marshaling, { session });
 
-      await fireEvent.change(screen.getByLabelText('Add-lap competitor'), {
-        target: { value: 'ALICE' }
-      });
+      // ALICE is the shown pilot; her lap box carries the inline Add control.
+      await fireEvent.click(screen.getByRole('button', { name: '+ Add lap' }));
       await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '12.5' } });
-      await fireEvent.click(screen.getByRole('button', { name: 'Add lap' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
       // The command carries the marshaled heat so the server routes the insertion into THAT
       // heat's scoring window even when a different heat is live.
       expect(sendSpy).toHaveBeenCalledWith({
@@ -798,13 +866,14 @@ describe('Marshaling (Slice 3)', () => {
       const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: zeroLaps });
       render(Marshaling, { session });
 
-      // The empty competitor still renders + is selectable in the add-lap dropdown.
-      expect(screen.getByText('No laps yet.')).toBeInTheDocument();
-      await fireEvent.change(screen.getByLabelText('Add-lap competitor'), {
+      // Show CARMEN (zero laps): her box renders empty WITH the inline Add control.
+      await fireEvent.change(screen.getByLabelText('Pilot to marshal'), {
         target: { value: 'CARMEN' }
       });
+      expect(screen.getByText('No laps yet.')).toBeInTheDocument();
+      await fireEvent.click(screen.getByRole('button', { name: '+ Add lap' }));
       await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '8' } });
-      await fireEvent.click(screen.getByRole('button', { name: 'Add lap' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
       expect(sendSpy).toHaveBeenCalledWith({
         InsertLap: { adapter: 'rh-1', competitor: 'CARMEN', at: 8_000_000, heat: 'heat-1' }
       });

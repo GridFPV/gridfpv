@@ -107,6 +107,25 @@ pub struct CompetitorLaps {
     pub competitor: CompetitorKey,
     /// Completed laps, ordered by lap number (1-based, ascending).
     pub laps: Vec<Lap>,
+    /// Gate passes the RD **voided** (`DetectionVoided`, not undone), chronologically. The
+    /// record of removals travels WITH the lap list so every consumer shares it: the console
+    /// renders them struck-through in place, and threshold re-detection must NOT re-propose a
+    /// crossing the RD explicitly removed — the RSSI trace still shows the crossing, so without
+    /// this the tuner kept offering a voided lap back as "a lap to add". Additive: absent on
+    /// the wire when empty, so older payloads round-trip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voided: Vec<VoidedPass>,
+}
+
+/// One RD-voided gate pass, as the lap list records it (see [`CompetitorLaps::voided`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct VoidedPass {
+    /// Source-clock time (µs) the voided pass was recorded at (re-time applied, like a
+    /// surviving pass — the instant re-detection would re-find it at).
+    pub at: SourceTime,
+    /// The voided pass's own global log offset (a stable row identity for the UI).
+    pub pass_ref: LogRef,
 }
 
 impl CompetitorLaps {
@@ -290,6 +309,16 @@ pub fn corrected_passes<'a, I>(events: I) -> Vec<(u64, Pass)>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
+    corrected_and_voided_passes(events).0
+}
+
+/// [`corrected_passes`] plus the passes the RD **voided** (and did not un-void), each resolved
+/// to its concrete pass (re-time applied) with its own offset — the shared removal record the
+/// lap list carries so re-detection never re-proposes an explicitly-removed crossing.
+pub fn corrected_and_voided_passes<'a, I>(events: I) -> (Vec<(u64, Pass)>, Vec<(u64, Pass)>)
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
     // First pass: record, by offset, every entry a later ruling could target —
     // raw lap-gate passes and the adjudications themselves — plus the rulings to
     // apply. We resolve targets against this map so "void the void" (a ruling whose
@@ -417,28 +446,29 @@ where
         }
     }
 
-    // Emit the surviving passes (raw + inserted) with any re-time applied, in offset
-    // order, each paired with the global offset that addresses it for a future correction;
-    // callers re-group and re-order them as needed.
+    // Emit the passes (raw + inserted + split-synthetic) with any re-time applied, in offset
+    // order, each paired with the global offset that addresses it for a future correction —
+    // surviving passes into `out`, RD-voided ones into `voided_out` (the shared removal
+    // record); callers re-group and re-order them as needed.
     let mut out: Vec<(u64, Pass)> = Vec::new();
+    let mut voided_out: Vec<(u64, Pass)> = Vec::new();
     for (offset, entry) in entries.iter() {
-        if voided.get(offset).copied().unwrap_or(false) {
-            continue;
-        }
+        let is_voided = voided.get(offset).copied().unwrap_or(false);
+        let sink: &mut Vec<(u64, Pass)> = if is_voided { &mut voided_out } else { &mut out };
         match entry {
             Entry::RawPass(pass) => {
                 let mut p = (*pass).clone();
                 if let Some(at) = retime.get(offset) {
                     p.at = *at;
                 }
-                out.push((*offset, p));
+                sink.push((*offset, p));
             }
             Entry::Inserted(pass) => {
                 let mut p = pass.clone();
                 if let Some(at) = retime.get(offset) {
                     p.at = *at;
                 }
-                out.push((*offset, p));
+                sink.push((*offset, p));
             }
             Entry::Split { target, at } => {
                 // Attribute the synthetic mid-lap pass to the competitor whose lap ends at
@@ -452,7 +482,7 @@ where
                     _ => None,
                 };
                 if let Some(src) = src {
-                    out.push((
+                    sink.push((
                         *offset,
                         Pass {
                             adapter: src.adapter,
@@ -469,7 +499,7 @@ where
             Entry::Adjusted { .. } | Entry::Voided { .. } => {}
         }
     }
-    out
+    (out, voided_out)
 }
 
 /// Fold a sequence of `(offset, event)` pairs into the lap-list read model,
@@ -491,21 +521,40 @@ where
     // lives in `corrected_passes`; here we only project it into the lap-list view. Each
     // pass keeps the global offset that addresses it, so the derived laps carry their
     // `start_ref`/`end_ref` command targets.
+    let (surviving, voided) = corrected_and_voided_passes(events);
     let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
-    for (offset, pass) in corrected_passes(events) {
+    for (offset, pass) in surviving {
         by_competitor
             .entry(CompetitorKey::from_pass(&pass))
             .or_default()
             .push((offset, pass));
+    }
+    // The RD-voided passes, grouped the same way — a competitor may have voids but no
+    // surviving laps (every crossing removed), so they seed the map too.
+    let mut voided_by_competitor: BTreeMap<CompetitorKey, Vec<VoidedPass>> = BTreeMap::new();
+    for (offset, pass) in voided {
+        by_competitor
+            .entry(CompetitorKey::from_pass(&pass))
+            .or_default();
+        voided_by_competitor
+            .entry(CompetitorKey::from_pass(&pass))
+            .or_default()
+            .push(VoidedPass {
+                at: pass.at,
+                pass_ref: LogRef(offset),
+            });
     }
 
     let competitors = by_competitor
         .into_iter()
         .map(|(competitor, mut passes)| {
             passes.sort_by_key(|(_, p)| corrected_order_key(p));
+            let mut voided = voided_by_competitor.remove(&competitor).unwrap_or_default();
+            voided.sort_by_key(|v| v.at);
             CompetitorLaps {
                 competitor,
                 laps: laps_from_corrected(&passes),
+                voided,
             }
         })
         .collect();
@@ -1420,6 +1469,48 @@ mod marshaling_tests {
             laps_of(&result, "vd", "A"),
             vec![ld(1, 3_000_000), ld(2, 2_000_000),]
         );
+    }
+
+    #[test]
+    fn a_voided_pass_is_recorded_on_the_lap_list_and_unvoiding_clears_it() {
+        // The removal record travels WITH the lap list (the void/re-detection shared-data
+        // rule): an RD-voided crossing shows up in `CompetitorLaps::voided` at its recorded
+        // instant with its own offset — so the console can render it struck-through and the
+        // threshold re-detection can refuse to re-propose it. Un-voiding (void the void)
+        // returns the pass to the laps and clears the record.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 4_000_000, Some(2)), // offset 1 — the not-a-full-lap crossing
+            pass("vd", "A", 6_000_000, Some(3)), // offset 2
+            voided(1),                           // offset 3 — the RD removes it
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        // One surviving lap (0 → 2); the voided crossing is recorded, not forgotten.
+        assert_eq!(cl.laps.len(), 1);
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(4_000_000),
+                pass_ref: LogRef(1),
+            }]
+        );
+
+        // Void the void: the pass returns to the laps and leaves the removal record.
+        let mut events = events;
+        events.push(voided(3)); // offset 4
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 2);
+        assert!(cl.voided.is_empty());
     }
 
     #[test]
