@@ -48,7 +48,10 @@
   import { useStagingClock, formatStaging } from '../lib/stagingClock.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
   import { useArmingClock, formatArming } from '../lib/armingClock.svelte.js';
-  import { StartTonePlayer } from '../lib/startTone.js';
+  import { RaceAudioPlayer } from '../lib/raceAudio.js';
+  import { CalloutQueue, lapCalloutTexts } from '../lib/callouts.js';
+  import { useEndOfRaceTones } from '../lib/endTones.svelte.js';
+  import { useLapCallouts } from '../lib/lapCallouts.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
 
@@ -400,8 +403,29 @@
     () => session.serverNowMs()
   );
 
+  // ── Race-day audio (procedure tones + informational callouts) ─────────────────────────────────
+  // One RaceAudioPlayer (Web-Audio tones) + one CalloutQueue (spoken lap callouts) per console.
+  // PROCEDURE tones — start tone, end-of-race countdown, race-end buzzer — are ALWAYS ON (the old
+  // "Tone on/off" toggle is gone; it was a testing convenience). The INFORMATIONAL layer — crossing
+  // pips + spoken callouts — is what the "Callouts" toggle mutes.
+  const audio = new RaceAudioPlayer();
+  const callouts = new CalloutQueue();
+  $effect(() => () => {
+    callouts.cancel();
+    audio.dispose();
+  });
+
+  // Autoplay unlock: with no tone toggle to click first, the RD's FIRST gesture anywhere on the
+  // page resumes the AudioContext (in addition to the Stage/Start handlers below), so the always-on
+  // procedure tones are never blocked by the browser autoplay policy.
+  $effect(() => {
+    const unlock = () => void audio.resume();
+    document.addEventListener('pointerdown', unlock, { once: true });
+    return () => document.removeEventListener('pointerdown', unlock);
+  });
+
   // ── Start tone synced to race-go (heat-lifecycle Slice 3; robustness + late-join fix) ──────────
-  // A short Web-Audio beep the moment a heat goes live (race-go). The runtime logs
+  // A Web-Audio burst the moment a heat goes live (race-go). The runtime logs
   // `HeatStarting { delay_ms }` then auto-appends the Running transition after the (hidden) random
   // hold; the console plays the tone when the *live phase* turns Running.
   //
@@ -418,8 +442,6 @@
   // Per heat we track two things, both reset on a heat change: whether a pre-Running phase was seen
   // (`tonePreRunningForHeat`), and whether the tone already fired (`toneFiredForHeat`, so repeated
   // Running snapshots / progress updates don't re-fire). The next heat resets and fires its own.
-  const tone = new StartTonePlayer();
-  $effect(() => () => tone.dispose());
   let toneFiredForHeat = $state<HeatId | undefined>(undefined);
   let tonePreRunningForHeat = $state<HeatId | undefined>(undefined);
   $effect(() => {
@@ -440,15 +462,82 @@
     // load onto an in-progress heat).
     if (toneFiredForHeat !== h && tonePreRunningForHeat === h) {
       toneFiredForHeat = h;
-      tone.play(toneCue);
+      audio.playStartTone(toneCue);
     }
   });
-  let muted = $state(tone.muted);
+
+  // ── The known fixed race end (end-of-race tones) ───────────────────────────────────────────────
+  // Only a heat whose end instant the clock already knows gets a countdown: a Timed win-condition
+  // round (window measured from race-go), or a Practice run with a time limit. First-to-N / BestLap
+  // rounds have no fixed end → no countdown. NOTE an open-practice round stores an inert *default*
+  // win condition that is never consulted (see RoundDef) — only its `time_limit_secs` bounds the
+  // run, so a limitless practice gets no countdown either.
+  const fixedEndWindowMicros = $derived.by<number | undefined>(() => {
+    const round = currentRound;
+    if (!round) return undefined;
+    if (round.format === OPEN_PRACTICE) {
+      return round.time_limit_secs != null ? round.time_limit_secs * 1_000_000 : undefined;
+    }
+    const wc = round.win_condition;
+    if (typeof wc === 'object' && wc !== null && 'Timed' in wc) return wc.Timed.window_micros;
+    return undefined;
+  });
+
+  // ── End-of-race countdown + buzzer (procedure tones — always on) ───────────────────────────────
+  // At remaining 5…1s a short pip each second; at 0 the lower, longer race-end buzzer. The schedule
+  // derives from the SAME server-anchored clock the heat-time readout uses (`serverNowMs` against
+  // `race_started_at`) and fires each mark once per heat run — see endTones.svelte.ts. The buzzer
+  // marks the WINDOW end; grace-window laps still count after it (scoring untouched).
+  useEndOfRaceTones(
+    () => phase,
+    () => heat,
+    () => live?.race_started_at,
+    () => fixedEndWindowMicros,
+    () => session.serverNowMs(),
+    {
+      onCountdown: () => audio.playCountdownBeep(),
+      onRaceEnd: () => audio.playRaceEndTone()
+    }
+  );
+
+  // ── Lap callouts (informational layer — the "Callouts" toggle mutes these) ─────────────────────
+  // Each NEW lap on the current Running heat: an immediate crossing pip, then a queued spoken
+  // "<callsign>, lap N, M.S". Detection (once per count-increase per run, no ghost callouts from
+  // late joins / corrections / non-current heats) lives in lapCallouts.svelte.ts; the callsign
+  // resolves through the shared competitor-name resolver (friendly-names rule) — when even the
+  // resolver falls back to the raw ref, the callout skips the name rather than speaking an id.
+  useLapCallouts(
+    () => phase,
+    () => heat,
+    () => live?.race_started_at,
+    () => live?.progress,
+    (crossing) => {
+      if (audio.muted) return; // the informational layer is mute-scoped
+      audio.playCrossingBeep();
+      const name = competitorName(crossing.ref);
+      callouts.enqueue(
+        lapCalloutTexts(
+          name === crossing.ref ? undefined : name,
+          crossing.lap,
+          crossing.lastLapMicros
+        )
+      );
+    }
+  );
+  // When the heat run ends (any non-Running fold: finished, aborted, discarded), drop whatever is
+  // still queued — narrating a race that's over is noise on top of the next heat's staging.
+  $effect(() => {
+    if (phase !== 'Running') callouts.cancel();
+  });
+
+  let muted = $state(audio.muted);
   function toggleMute() {
     // The toggle is itself a user gesture — unlock the audio context here too so an RD who only
-    // ever touches the mute button (never a transition) still gets an audible race-go tone.
-    void tone.resume();
-    muted = tone.toggleMuted();
+    // ever touches this button (never a transition) still gets audible tones.
+    void audio.resume();
+    muted = audio.toggleMuted();
+    // Muting mid-race also drops the queued speech — silence means silence, immediately.
+    if (muted) callouts.cancel();
   }
 
   // A live, provisional leaderboard from the running order + per-pilot progress, so the
@@ -483,7 +572,7 @@
     if (!heat) return;
     // Unlock the audio context on this user gesture (autoplay policy) so the later race-go tone is
     // audible — every transition click counts, well before the heat reaches Running.
-    void tone.resume();
+    void audio.resume();
     const ack = await session.send(commandForAction(action, heat));
     // Finalizing locks in the heat result; pull it so the Results screen has it to show. The
     // live stream only carries `LiveRaceState`, so the scored `HeatResult` is a separate
@@ -554,16 +643,21 @@
       </div>
     {/if}
 
+    <!-- The "Callouts" toggle mutes ONLY the informational layer (crossing pips + spoken lap
+         callouts). The procedure tones — start tone, end-of-race countdown, race-end buzzer — are
+         always on and have no toggle (the old "Tone on/off" switch is gone). -->
     <div class="audio-tools">
       <button
         type="button"
         class="mute-toggle"
         onclick={toggleMute}
         aria-pressed={muted}
-        title={muted ? 'Start tone muted — click to unmute' : 'Start tone on — click to mute'}
+        title={muted
+          ? 'Lap callouts muted — click to unmute. Race tones (start / countdown / end) always sound.'
+          : 'Lap callouts on — click to mute. Race tones (start / countdown / end) always sound.'}
       >
         <span class="mute-icon" aria-hidden="true">{muted ? '🔇' : '🔊'}</span>
-        <span class="mute-text">{muted ? 'Tone off' : 'Tone on'}</span>
+        <span class="mute-text">{muted ? 'Callouts off' : 'Callouts on'}</span>
       </button>
     </div>
   </header>

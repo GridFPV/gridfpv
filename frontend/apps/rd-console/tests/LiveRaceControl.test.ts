@@ -52,6 +52,86 @@ const HEAT_IN_ROUND: HeatSummary = {
 const liveAt = (phase: LiveRaceState['phase'], heat: string | undefined = 'heat-1') =>
   ({ current_heat: heat, phase }) as LiveRaceState;
 
+// A stub platform AudioContext the screen's RaceAudioPlayer picks up, recording each started
+// oscillator's FREQUENCY (so a test can tell the start tone 880 / countdown pip 880 / race-end
+// buzzer 440 / crossing pip 1760 apart) plus resume()/createOscillator counts — no real audio.
+// `calloutsMuted` seeds the persisted callouts-mute pref (the informational-layer toggle).
+function installAudioStub(state = 'running', opts?: { calloutsMuted?: boolean }) {
+  const started: number[] = [];
+  let resumes = 0;
+  let oscillators = 0;
+  class MockAudioContext {
+    currentTime = 0;
+    state = state;
+    destination = {};
+    createOscillator() {
+      oscillators++;
+      let freq = 0;
+      return {
+        type: 'square',
+        frequency: {
+          setValueAtTime(value: number) {
+            freq = value;
+          }
+        },
+        connect() {},
+        start() {
+          started.push(freq);
+        },
+        stop() {}
+      };
+    }
+    createGain() {
+      return {
+        gain: { setValueAtTime() {}, linearRampToValueAtTime() {} },
+        connect() {}
+      };
+    }
+    async resume() {
+      resumes++;
+      this.state = 'running';
+    }
+    async close() {}
+  }
+  vi.stubGlobal('AudioContext', MockAudioContext);
+  // Seed the callouts-mute pref: unmuted by default; 'true' asserts the mute SCOPE (informational
+  // layer only — the procedure tones must ignore it).
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) =>
+      key === 'gridfpv.callouts.muted' && opts?.calloutsMuted ? 'true' : null,
+    setItem: () => {},
+    removeItem: () => {},
+    clear: () => {},
+    key: () => null,
+    length: 0
+  } as unknown as Storage);
+  return {
+    started,
+    calls: () => ({ resumes, oscillators })
+  };
+}
+
+// A stub Web Speech API (jsdom has neither speechSynthesis nor SpeechSynthesisUtterance): records
+// every spoken utterance so the callout texts + the cancel-on-heat-end path are observable.
+function installSpeechStub() {
+  const utterances: Array<{ text: string; onend: (() => void) | null }> = [];
+  const cancelSpy = vi.fn();
+  vi.stubGlobal('speechSynthesis', {
+    speak: (u: { text: string; onend: (() => void) | null }) => utterances.push(u),
+    cancel: cancelSpy
+  });
+  class MockUtterance {
+    text: string;
+    onend: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(text: string) {
+      this.text = text;
+    }
+  }
+  vi.stubGlobal('SpeechSynthesisUtterance', MockUtterance);
+  return { utterances, cancelSpy };
+}
+
 describe('LiveRaceControl', () => {
   it('enables only the phase-legal transitions (Running → ForceEnd/Abort/Restart)', () => {
     const { session } = makeTestSession({ live: liveRunning });
@@ -353,56 +433,6 @@ describe('LiveRaceControl', () => {
       expect(arming).not.toHaveTextContent(/Tone in/);
     });
 
-    // A stub platform AudioContext the screen's StartTonePlayer picks up, recording oscillator
-    // starts + resume()/createOscillator calls so we can assert the tone path with no real audio.
-    function installAudioStub(state = 'running') {
-      const started: number[] = [];
-      let resumes = 0;
-      let oscillators = 0;
-      class MockAudioContext {
-        currentTime = 0;
-        state = state;
-        destination = {};
-        createOscillator() {
-          oscillators++;
-          return {
-            type: 'square',
-            frequency: { setValueAtTime() {} },
-            connect() {},
-            start() {
-              started.push(1);
-            },
-            stop() {}
-          };
-        }
-        createGain() {
-          return {
-            gain: { setValueAtTime() {}, linearRampToValueAtTime() {} },
-            connect() {}
-          };
-        }
-        async resume() {
-          resumes++;
-          this.state = 'running';
-        }
-        async close() {}
-      }
-      vi.stubGlobal('AudioContext', MockAudioContext);
-      // Ensure the mute pref reads unmuted regardless of any leaked storage.
-      vi.stubGlobal('localStorage', {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-        key: () => null,
-        length: 0
-      } as unknown as Storage);
-      return {
-        started,
-        calls: () => ({ resumes, oscillators })
-      };
-    }
-
     it('plays the start tone when the heat enters Running (from Armed)', async () => {
       const { started } = installAudioStub('running');
 
@@ -520,18 +550,231 @@ describe('LiveRaceControl', () => {
       vi.unstubAllGlobals();
     });
 
-    it('does not render an inline Enable/Test-tone button (removed)', async () => {
+    it('the old Tone toggle is GONE; the audio toolbar holds only the renamed Callouts toggle', async () => {
       installAudioStub('suspended');
 
       const { session } = makeTestSession({ live: liveAt('Staged') });
       render(LiveRaceControl, { session });
       await tick();
-      // The test-tone affordance is gone; only the mute toggle remains in the audio toolbar.
+      // The test-tone affordance and the procedure-tone mute are gone; the one remaining audio
+      // control is the informational-layer "Callouts" toggle.
       expect(screen.queryByRole('button', { name: /Enable sound/ })).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: /Test tone/ })).not.toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /Tone on|Tone off/ })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Tone on|Tone off/ })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Callouts on/ })).toBeInTheDocument();
 
       vi.unstubAllGlobals();
+    });
+
+    it('plays the start tone EVEN WHILE the callouts are muted (procedure tones are always-on)', async () => {
+      const { started } = installAudioStub('running', { calloutsMuted: true });
+
+      const { session, pushLive } = makeTestSession({ live: liveAt('Staged') });
+      render(LiveRaceControl, { session });
+      await tick();
+      // The toggle reads muted — and the race-go tone still fires.
+      expect(screen.getByRole('button', { name: /Callouts off/ })).toBeInTheDocument();
+      pushLive(liveAt('Running'));
+      await tick();
+      expect(started).toEqual([880]);
+
+      vi.unstubAllGlobals();
+    });
+  });
+
+  describe('end-of-race countdown + buzzer (Timed heats only)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    // A Running live state carrying the server race-go anchor (µs). The ROUND above is Timed with
+    // a 120s window, so the fixed end is race_started_at + 120s.
+    const runningAt = (startedAtMicros: number): LiveRaceState =>
+      ({ ...liveAt('Running'), race_started_at: startedAtMicros }) as LiveRaceState;
+
+    it('pips at remaining 5..1s and fires the LOWER race-end buzzer at 0 — once each', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const { started } = installAudioStub('running');
+      const { session, pushLive } = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: liveAt('Staged'),
+        listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND])
+      });
+      render(LiveRaceControl, { session });
+      // Let the heats/round directory settle so the Timed window resolves.
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+
+      // Race-go at t=0 (server anchor 0µs): the start tone fires; the countdown is far off.
+      pushLive(runningAt(0));
+      await tick();
+      expect(started).toEqual([880]);
+
+      // …114s in (remaining 6s): still quiet.
+      await vi.advanceTimersByTimeAsync(114_000);
+      expect(started).toEqual([880]);
+
+      // Remaining 5s → the first pip (start-tone pitch family).
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(started).toEqual([880, 880]);
+
+      // 4,3,2,1 land each second on the way to remaining 1s.
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(started).toEqual([880, 880, 880, 880, 880, 880]);
+
+      // Remaining 0 → the race-end buzzer: LOWER (440), fired once.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(started).toEqual([880, 880, 880, 880, 880, 880, 440]);
+
+      // The grace window keeps the heat Running past the buzzer — nothing replays.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(started).toEqual([880, 880, 880, 880, 880, 880, 440]);
+    });
+
+    it('no countdown for a First-to-N heat (no known fixed end)', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const { started } = installAudioStub('running');
+      const lapsRound: RoundDef = {
+        ...ROUND,
+        win_condition: { FirstToLaps: { n: 3 } }
+      };
+      const { session, pushLive } = makeTestSession({
+        event: { ...EVENT_WITH_ROUND, rounds: [lapsRound] },
+        live: liveAt('Staged'),
+        listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND])
+      });
+      render(LiveRaceControl, { session });
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+
+      pushLive(runningAt(0));
+      await tick();
+      // A long while later: only the start tone ever sounded — no pips, no buzzer.
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(started).toEqual([880]);
+    });
+
+    it('the countdown pips are NOT silenced by the callouts mute (procedure tones)', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const { started } = installAudioStub('running', { calloutsMuted: true });
+      const { session, pushLive } = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: liveAt('Staged'),
+        listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND])
+      });
+      render(LiveRaceControl, { session });
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+
+      pushLive(runningAt(0));
+      await tick();
+      await vi.advanceTimersByTimeAsync(120_000);
+      // Muted callouts — yet start tone + all five pips + the buzzer all sounded.
+      expect(started).toEqual([880, 880, 880, 880, 880, 880, 440]);
+    });
+  });
+
+  describe('lap callouts (informational layer — crossing pip + spoken callout)', () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    // A roster-seeded lineup so the callsign resolves through the shared resolver: the competitor
+    // ref IS the pilot id, looked up in the pilots directory.
+    const CO_PILOTS = [{ id: 'maverick-4d9rp8', callsign: 'Maverick', vtx_types: [] }];
+    const coLive = (laps: number, lastLapMicros?: number, phase = 'Running'): LiveRaceState =>
+      ({
+        current_heat: 'heat-1',
+        phase,
+        race_started_at: 1_000,
+        active_pilots: ['maverick-4d9rp8'],
+        progress: [
+          {
+            competitor: 'maverick-4d9rp8',
+            laps_completed: laps,
+            ...(lastLapMicros != null ? { last_lap_micros: lastLapMicros } : {})
+          }
+        ],
+        running_order: ['maverick-4d9rp8']
+      }) as LiveRaceState;
+
+    function renderCallouts(opts?: { calloutsMuted?: boolean }) {
+      const audioStub = installAudioStub('running', opts);
+      const speech = installSpeechStub();
+      const madeSession = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: coLive(0),
+        listHeatsImpl: vi.fn(async () => [{ ...HEAT_IN_ROUND, lineup: ['maverick-4d9rp8'] }]),
+        listPilotsImpl: vi.fn(async () => CO_PILOTS as unknown as never)
+      });
+      render(LiveRaceControl, { session: madeSession.session });
+      return { ...madeSession, ...audioStub, ...speech };
+    }
+
+    it('a new lap fires the crossing pip + speaks "<callsign>, lap N, M.S" (resolved name)', async () => {
+      const { pushLive, started, utterances } = renderCallouts();
+      // Let the pilots directory settle so the callsign resolves before the crossing.
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      pushLive(coLive(1, 21_400_000));
+      await tick();
+      // The crossing pip is the distinct high/short voice (1760), not a procedure tone.
+      expect(started).toEqual([1760]);
+      expect(utterances.map((u) => u.text)).toEqual(['Maverick, lap 1, 21.4']);
+    });
+
+    it('the callouts mute silences BOTH the crossing pip and the speech', async () => {
+      const { pushLive, started, utterances } = renderCallouts({ calloutsMuted: true });
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      pushLive(coLive(1, 21_400_000));
+      await tick();
+      expect(started).toEqual([]);
+      expect(utterances).toEqual([]);
+    });
+
+    it('no ghost callouts from a non-Running fold (corrections on a finished heat)', async () => {
+      const { pushLive, started, utterances } = renderCallouts();
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      // The heat finishes; a marshaling-style fold bumps the count on the finished heat.
+      pushLive(coLive(0, undefined, 'Unofficial'));
+      await tick();
+      pushLive(coLive(1, 20_000_000, 'Unofficial'));
+      await tick();
+      expect(started).toEqual([]);
+      expect(utterances).toEqual([]);
+    });
+
+    it('cancels the queued speech when the heat ends', async () => {
+      const { pushLive, cancelSpy } = renderCallouts();
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      pushLive(coLive(1, 21_400_000));
+      await tick();
+      pushLive(coLive(0, undefined, 'Unofficial'));
+      await tick();
+      expect(cancelSpy).toHaveBeenCalled();
+    });
+
+    it('muting mid-race cancels the queued speech immediately', async () => {
+      const { pushLive, cancelSpy, utterances } = renderCallouts();
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      pushLive(coLive(1, 21_400_000));
+      await tick();
+      expect(utterances).toHaveLength(1);
+
+      await fireEvent.click(screen.getByRole('button', { name: /Callouts on/ }));
+      expect(cancelSpy).toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: /Callouts off/ })).toBeInTheDocument();
+
+      // Further crossings while muted stay silent.
+      pushLive(coLive(2, 20_000_000));
+      await tick();
+      expect(utterances).toHaveLength(1);
     });
   });
 
