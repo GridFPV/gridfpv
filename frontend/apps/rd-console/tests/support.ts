@@ -271,13 +271,13 @@ export function makeTestSession(
   // The wire body key per heat-scope projection (mirrors the session's #fetchHeatProjection).
   const bodyKeyOf = (projection: string): string | undefined =>
     (
-      {
+      ({
         live: 'LiveRaceState',
         result: 'HeatResult',
         laps: 'LapList',
         audit: 'MarshalingAudit',
         signal: 'SignalTrace'
-      } as Record<string, string>
+      }) as Record<string, string>
     )[projection];
   vi.stubGlobal(
     'fetch',

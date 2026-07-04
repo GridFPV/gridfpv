@@ -1558,7 +1558,9 @@ describe('EventRounds (per-round standings — Slice 5/6b)', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Standings' }));
     const panel = (await screen.findByLabelText(/Standings for Qualifying R1/i)) as HTMLElement;
-    await waitFor(() => expect(within(panel).getAllByRole('listitem')[0]).toHaveTextContent('AceOne'));
+    await waitFor(() =>
+      expect(within(panel).getAllByRole('listitem')[0]).toHaveTextContent('AceOne')
+    );
     const callsBefore = roundRankingImpl.mock.calls.length;
 
     // A heat finalizes elsewhere → a stream envelope lands; the OPEN panel must re-aggregate.

@@ -640,9 +640,7 @@ pub(crate) async fn run_bridge(
             // next tick; a genuinely dropped log at shutdown just keeps idling until the process
             // exits (the bridge holds a strong state handle either way).
             Err(e) => {
-                eprintln!(
-                    "gridfpv: bridge could not read the event log (will retry): {e:?}"
-                );
+                eprintln!("gridfpv: bridge could not read the event log (will retry): {e:?}");
                 continue;
             }
         };
@@ -2853,7 +2851,7 @@ mod tests {
     #[tokio::test]
     async fn overlapping_protest_windows_do_not_orphan_the_older_heats_timer() {
         // The single-slot detach bug: heat 1 finishes (protest window armed), heat 2 finishes
-        // 
+        //
         // while heat 1's window is still open — installing heat 2's timer used to DETACH heat
         // 1's, so discarding heat 1 could not cancel it and the orphan later force-finalized
         // the discarded heat. With per-heat timers + the fire-time recheck, heat 1 must stay
