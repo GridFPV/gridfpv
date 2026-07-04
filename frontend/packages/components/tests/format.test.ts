@@ -8,8 +8,10 @@ describe('formatClock', () => {
     expect(formatClock(83_456)).toBe('1:23.456');
     expect(formatClock(605_007)).toBe('10:05.007');
   });
-  it('clamps negatives to zero', () => {
-    expect(formatClock(-100)).toBe('0:00.000');
+  it('renders negatives sign-prefixed (a countdown inside its grace window)', () => {
+    expect(formatClock(-100)).toBe('-0:00.100');
+    expect(formatClock(-3_250)).toBe('-0:03.250');
+    expect(formatClock(-83_456)).toBe('-1:23.456');
   });
 });
 

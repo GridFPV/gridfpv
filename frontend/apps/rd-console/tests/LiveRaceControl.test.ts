@@ -713,16 +713,17 @@ describe('LiveRaceControl', () => {
       return { ...madeSession, ...audioStub, ...speech };
     }
 
-    it('a new lap fires the crossing pip + speaks "<callsign>, lap N, M.S" (resolved name)', async () => {
+    it('a new lap fires the crossing pip + speaks "<callsign>, lap N, M.SS" (resolved name)', async () => {
       const { pushLive, started, utterances } = renderCallouts();
       // Let the pilots directory settle so the callsign resolves before the crossing.
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_400_000));
+      pushLive(coLive(1, 21_470_000));
       await tick();
       // The crossing pip is the distinct high/short voice (1760), not a procedure tone.
       expect(started).toEqual([1760]);
-      expect(utterances.map((u) => u.text)).toEqual(['Maverick, lap 1, 21.4']);
+      // The lap time is spoken to the hundredth.
+      expect(utterances.map((u) => u.text)).toEqual(['Maverick, lap 1, 21.47']);
     });
 
     it('the callouts mute silences BOTH the crossing pip and the speech', async () => {
@@ -748,13 +749,20 @@ describe('LiveRaceControl', () => {
       expect(utterances).toEqual([]);
     });
 
-    it('cancels the queued speech when the heat ends', async () => {
+    it('lets the speech DRAIN at race end; cancels when the next run stages', async () => {
       const { pushLive, cancelSpy } = renderCallouts();
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
       pushLive(coLive(1, 21_400_000));
       await tick();
+      // A natural finish (Running → Unofficial) must NOT cancel — the final laps' times are what
+      // everyone is waiting to hear (cancelling here chopped the last callout mid-word).
       pushLive(coLive(0, undefined, 'Unofficial'));
+      await tick();
+      expect(cancelSpy).not.toHaveBeenCalled();
+
+      // A new run taking the stage (a pre-run phase) drops the stale backlog.
+      pushLive(coLive(0, undefined, 'Staged'));
       await tick();
       expect(cancelSpy).toHaveBeenCalled();
     });
@@ -880,6 +888,44 @@ describe('LiveRaceControl', () => {
       await tick();
       await vi.advanceTimersByTimeAsync(4_000);
       expect(clockText()).toBe('0:03.000');
+    });
+
+    it('counts DOWN for a Timed round, running negative (danger) through the grace window', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      // The heat's round is Timed with a 120s window → the HUD clock counts down from 2:00.
+      const { session, pushLive } = makeTestSession({
+        event: EVENT_WITH_ROUND,
+        live: liveAt('Running', { startedAtMs: 0 }),
+        listHeatsImpl: vi.fn(async () => [{ ...HEAT_IN_ROUND, phase: 'Running' as const }])
+      });
+      const { container } = render(LiveRaceControl, { session });
+      // Let the heats/round directory settle so the Timed window resolves.
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+      // Two clocks in countdown mode: the big remaining readout + the small companion elapsed.
+      const remainingText = () =>
+        screen.getByRole('timer', { name: /^Time remaining/ }).textContent?.trim();
+      const elapsedText = () => screen.getByRole('timer', { name: /^Elapsed/ }).textContent?.trim();
+
+      // 1.25s in: remaining = 120s − 1.25s counting DOWN, while the companion counts UP from 0
+      // (lap times are elapsed-from-zero quantities — the RD reads them off this one).
+      await vi.advanceTimersByTimeAsync(1_250);
+      expect(remainingText()).toBe('1:58.750');
+      expect(elapsedText()).toBe('0:01.250');
+
+      // Past the window end (inside the grace period): NEGATIVE, danger-styled — late crossings
+      // still score, but the readout shows the heat running down its grace.
+      await vi.advanceTimersByTimeAsync(120_000); // t = 121.25s → remaining −1.25s
+      expect(remainingText()).toBe('-0:01.250');
+      expect(elapsedText()).toBe('2:01.250');
+      expect(container.querySelector('[data-urgency="over"]')).not.toBeNull();
+
+      // The race-end freeze keeps both frames: window − exact duration, and the exact duration.
+      pushLive(liveAt('Unofficial', { startedAtMs: 0, endedAtMs: 123_000 }));
+      await tick();
+      expect(remainingText()).toBe('-0:03.000');
+      expect(elapsedText()).toBe('2:03.000');
     });
 
     it('resets the clock to zero when the heat goes back to Scheduled (e.g. after an abort)', async () => {

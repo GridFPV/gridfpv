@@ -45,11 +45,12 @@
   } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
   import { useRaceClock } from '../lib/raceClock.svelte.js';
+  import { fixedEndWindowMicros } from '../lib/raceWindow.js';
   import { useStagingClock, formatStaging } from '../lib/stagingClock.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
   import { useArmingClock, formatArming } from '../lib/armingClock.svelte.js';
   import { RaceAudioPlayer } from '../lib/raceAudio.js';
-  import { CalloutQueue, lapCalloutTexts } from '../lib/callouts.js';
+  import { CalloutQueue, lapCalloutText } from '../lib/callouts.js';
   import { useEndOfRaceTones } from '../lib/endTones.svelte.js';
   import { useLapCallouts } from '../lib/lapCallouts.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
@@ -466,22 +467,19 @@
     }
   });
 
-  // ── The known fixed race end (end-of-race tones) ───────────────────────────────────────────────
+  // ── The known fixed race end (end-of-race tones + the countdown clock) ────────────────────────
   // Only a heat whose end instant the clock already knows gets a countdown: a Timed win-condition
   // round (window measured from race-go), or a Practice run with a time limit. First-to-N / BestLap
-  // rounds have no fixed end → no countdown. NOTE an open-practice round stores an inert *default*
-  // win condition that is never consulted (see RoundDef) — only its `time_limit_secs` bounds the
-  // run, so a limitless practice gets no countdown either.
-  const fixedEndWindowMicros = $derived.by<number | undefined>(() => {
-    const round = currentRound;
-    if (!round) return undefined;
-    if (round.format === OPEN_PRACTICE) {
-      return round.time_limit_secs != null ? round.time_limit_secs * 1_000_000 : undefined;
-    }
-    const wc = round.win_condition;
-    if (typeof wc === 'object' && wc !== null && 'Timed' in wc) return wc.Timed.window_micros;
-    return undefined;
-  });
+  // rounds have no fixed end. The derivation is shared (`raceWindow.ts`) so the tones, this HUD's
+  // clock, and the header's clock all agree.
+  const windowMicros = $derived(fixedEndWindowMicros(currentRound));
+
+  // The HUD clock: a fixed-end heat counts DOWN from the window — past zero it runs negative
+  // (the grace window: late crossings still score) and the RaceClock styles it red, with a
+  // warn-yellow closing stretch before the buzzer. No fixed end ⇒ the classic count-up.
+  const remainingMs = $derived(
+    windowMicros !== undefined ? windowMicros / 1000 - elapsedMs : undefined
+  );
 
   // ── End-of-race countdown + buzzer (procedure tones — always on) ───────────────────────────────
   // At remaining 5…1s a short pip each second; at 0 the lower, longer race-end buzzer. The schedule
@@ -492,7 +490,7 @@
     () => phase,
     () => heat,
     () => live?.race_started_at,
-    () => fixedEndWindowMicros,
+    () => windowMicros,
     () => session.serverNowMs(),
     {
       onCountdown: () => audio.playCountdownBeep(),
@@ -502,10 +500,13 @@
 
   // ── Lap callouts (informational layer — the "Callouts" toggle mutes these) ─────────────────────
   // Each NEW lap on the current Running heat: an immediate crossing pip, then a queued spoken
-  // "<callsign>, lap N, M.S". Detection (once per count-increase per run, no ghost callouts from
+  // "<callsign>, lap N, M.SS". Detection (once per count-increase per run, no ghost callouts from
   // late joins / corrections / non-current heats) lives in lapCallouts.svelte.ts; the callsign
   // resolves through the shared competitor-name resolver (friendly-names rule) — when even the
   // resolver falls back to the raw ref, the callout skips the name rather than speaking an id.
+  // The ref keys the queue's per-pilot supersede: a pilot's next crossing replaces their still-
+  // waiting previous callout, so a pack burst never backs the voice up into narrating history
+  // (and the lap TIME is always spoken — see callouts.ts).
   useLapCallouts(
     () => phase,
     () => heat,
@@ -515,19 +516,23 @@
       if (audio.muted) return; // the informational layer is mute-scoped
       audio.playCrossingBeep();
       const name = competitorName(crossing.ref);
-      callouts.enqueue(
-        lapCalloutTexts(
+      callouts.enqueue({
+        text: lapCalloutText(
           name === crossing.ref ? undefined : name,
           crossing.lap,
           crossing.lastLapMicros
-        )
-      );
+        ),
+        key: crossing.ref
+      });
     }
   );
-  // When the heat run ends (any non-Running fold: finished, aborted, discarded), drop whatever is
-  // still queued — narrating a race that's over is noise on top of the next heat's staging.
+  // A natural race end (Running → Unofficial → Final) lets the queue DRAIN — the final laps'
+  // times are exactly what the RD and pilots are waiting to hear, and cancelling here used to
+  // chop the last callout mid-word at the buzzer. Only a *new run taking the stage* (the pre-run
+  // phases: the next heat scheduled/staged/armed, or this one restarted) drops the backlog —
+  // narrating a stale race over the next staging is noise.
   $effect(() => {
-    if (phase !== 'Running') callouts.cancel();
+    if (phase === 'Scheduled' || phase === 'Staged' || phase === 'Armed') callouts.cancel();
   });
 
   let muted = $state(audio.muted);
@@ -630,9 +635,20 @@
     </div>
 
     <div class="hud-clock">
-      <span class="label">Heat time</span>
+      <span class="label">{remainingMs !== undefined ? 'Remaining' : 'Heat time'}</span>
       <div class="clock">
-        <RaceClock {elapsedMs} label="Heat time" />
+        {#if remainingMs !== undefined}
+          <RaceClock {remainingMs} label="Time remaining" />
+          <!-- The companion ELAPSED readout: lap times are elapsed-from-zero quantities, so a
+               countdown alone makes "was that a 21 or a 24?" mental math — the small count-up
+               keeps lap arithmetic one glance away. -->
+          <div class="clock-elapsed" data-testid="elapsed-subclock">
+            <span class="clock-elapsed-label">Elapsed</span>
+            <RaceClock {elapsedMs} label="Elapsed" />
+          </div>
+        {:else}
+          <RaceClock {elapsedMs} label="Heat time" />
+        {/if}
       </div>
     </div>
 
@@ -941,6 +957,26 @@
     font-size: var(--gf-font-size-md);
     font-weight: var(--gf-font-weight-medium);
     color: var(--gf-text-faint);
+  }
+
+  /* The countdown's companion elapsed readout: same tabular clock, a size down and muted, with
+     its own tiny caps label — clearly subordinate to the big remaining time above it. */
+  .clock-elapsed {
+    display: flex;
+    align-items: baseline;
+    gap: var(--gf-space-2);
+    margin-top: var(--gf-space-1);
+  }
+  .clock-elapsed-label {
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .clock-elapsed :global(.gridfpv-race-clock) {
+    font-size: var(--gf-font-size-lg);
+    color: var(--gf-text-muted);
   }
 
   /* ── Heat picker ─────────────────────────────────────────────────────────── */

@@ -3,16 +3,18 @@
  * `speechSynthesis`/`SpeechSynthesisUtterance`, so a **fake speech seam** is injected; the tests
  * drive its `onend` to walk the queue and assert:
  *   • serialization — one utterance at a time, FIFO;
- *   • coalescing — a backlog deeper than 3 falls back to the short ("<callsign>, lap N") form;
+ *   • per-pilot supersede — a pilot's newer crossing replaces their still-waiting entry (the lap
+ *     time is never stripped to "catch up"; other pilots' entries are untouched);
  *   • cancel — drops the backlog, stops the synth, and a stale in-flight `onend` cannot restart
  *     a second speaking chain;
- *   • the spoken texts — resolved callsign + lap + seconds, name-skipped when unresolved.
+ *   • the spoken text — resolved callsign + lap + hundredth-second time, name-skipped when
+ *     unresolved.
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
   CalloutQueue,
   formatLapSeconds,
-  lapCalloutTexts,
+  lapCalloutText,
   type CalloutSpeech,
   type SpeechUtteranceLike
 } from '../src/lib/callouts.js';
@@ -42,46 +44,56 @@ describe('CalloutQueue', () => {
     const { speech, spoken, finish } = makeFakeSpeech();
     const q = new CalloutQueue(speech);
 
-    q.enqueue({ full: 'Maverick, lap 1, 21.4', short: 'Maverick, lap 1' });
-    q.enqueue({ full: 'Goose, lap 1, 22.0', short: 'Goose, lap 1' });
+    q.enqueue({ text: 'Maverick, lap 1, 21.40', key: 'mav' });
+    q.enqueue({ text: 'Goose, lap 1, 22.05', key: 'goose' });
 
     // Only the first has been handed to the synth; the second waits its turn.
-    expect(spoken).toEqual(['Maverick, lap 1, 21.4']);
+    expect(spoken).toEqual(['Maverick, lap 1, 21.40']);
     finish();
-    expect(spoken).toEqual(['Maverick, lap 1, 21.4', 'Goose, lap 1, 22.0']);
+    expect(spoken).toEqual(['Maverick, lap 1, 21.40', 'Goose, lap 1, 22.05']);
     finish();
     expect(spoken).toHaveLength(2);
   });
 
-  it('coalesces to the short form once the backlog runs deeper than 3 (pack finish)', () => {
+  it('a newer same-key crossing supersedes the waiting entry (never the speaking one)', () => {
     const { speech, spoken, finish } = makeFakeSpeech();
     const q = new CalloutQueue(speech);
 
-    // Six crossings land in a burst: #1 starts speaking immediately, #2..#6 queue up (depth 5).
-    for (let n = 1; n <= 6; n++) {
-      q.enqueue({ full: `pilot ${n} full`, short: `pilot ${n} short` });
-    }
-    for (let i = 0; i < 6; i++) finish();
+    // Maverick lap 1 starts speaking immediately; lap 2 queues behind Goose.
+    q.enqueue({ text: 'Maverick, lap 1, 21.40', key: 'mav' });
+    q.enqueue({ text: 'Goose, lap 1, 22.05', key: 'goose' });
+    q.enqueue({ text: 'Maverick, lap 2, 20.90', key: 'mav' });
+    // Maverick crosses AGAIN while lap 2 is still waiting: lap 2 is history — replaced by lap 3
+    // at the back (crossing order), Goose untouched, the in-flight lap 1 not interrupted.
+    q.enqueue({ text: 'Maverick, lap 3, 20.10', key: 'mav' });
+    expect(q.depth).toBe(2);
 
-    // #1 spoke full (nothing queued yet); #2/#3 dequeue over a >3 backlog → short (catch up);
-    // by #4 the backlog is back to 3 → full again.
+    for (let i = 0; i < 4; i++) finish();
     expect(spoken).toEqual([
-      'pilot 1 full',
-      'pilot 2 short',
-      'pilot 3 short',
-      'pilot 4 full',
-      'pilot 5 full',
-      'pilot 6 full'
+      'Maverick, lap 1, 21.40',
+      'Goose, lap 1, 22.05',
+      'Maverick, lap 3, 20.10'
     ]);
+  });
+
+  it('an unkeyed callout is never superseded', () => {
+    const { speech, spoken, finish } = makeFakeSpeech();
+    const q = new CalloutQueue(speech);
+
+    q.enqueue({ text: 'first' });
+    q.enqueue({ text: 'second' });
+    q.enqueue({ text: 'third' });
+    for (let i = 0; i < 3; i++) finish();
+    expect(spoken).toEqual(['first', 'second', 'third']);
   });
 
   it('cancel drops the backlog and stops the synth', () => {
     const { speech, spoken, finish, cancelSpy } = makeFakeSpeech();
     const q = new CalloutQueue(speech);
 
-    q.enqueue({ full: 'a full', short: 'a' });
-    q.enqueue({ full: 'b full', short: 'b' });
-    q.enqueue({ full: 'c full', short: 'c' });
+    q.enqueue({ text: 'a full', key: 'a' });
+    q.enqueue({ text: 'b full', key: 'b' });
+    q.enqueue({ text: 'c full', key: 'c' });
     expect(spoken).toEqual(['a full']);
 
     q.cancel();
@@ -97,11 +109,11 @@ describe('CalloutQueue', () => {
     const { speech, spoken, finish } = makeFakeSpeech();
     const q = new CalloutQueue(speech);
 
-    q.enqueue({ full: 'old full', short: 'old' });
+    q.enqueue({ text: 'old full', key: 'old' });
     q.cancel();
     // A fresh callout starts a new chain after the cancel…
-    q.enqueue({ full: 'new full', short: 'new' });
-    q.enqueue({ full: 'newer full', short: 'newer' });
+    q.enqueue({ text: 'new full', key: 'new' });
+    q.enqueue({ text: 'newer full', key: 'newer' });
     expect(spoken).toEqual(['old full', 'new full']);
 
     // …then the OLD utterance's onend finally fires (real synths do this on cancel). It must be
@@ -115,8 +127,8 @@ describe('CalloutQueue', () => {
   it('pumps past an utterance error (onerror) rather than wedging the queue', () => {
     const { speech, spoken, pending } = makeFakeSpeech();
     const q = new CalloutQueue(speech);
-    q.enqueue({ full: 'a full', short: 'a' });
-    q.enqueue({ full: 'b full', short: 'b' });
+    q.enqueue({ text: 'a full', key: 'a' });
+    q.enqueue({ text: 'b full', key: 'b' });
 
     pending.shift()?.onerror?.(); // 'a' errors mid-speech
     expect(spoken).toEqual(['a full', 'b full']);
@@ -125,36 +137,27 @@ describe('CalloutQueue', () => {
   it('is a silent no-op where the Web Speech API is unavailable', () => {
     const q = new CalloutQueue(undefined);
     expect(q.available).toBe(false);
-    expect(() => q.enqueue({ full: 'x', short: 'x' })).not.toThrow();
+    expect(() => q.enqueue({ text: 'x', key: 'x' })).not.toThrow();
     expect(() => q.cancel()).not.toThrow();
   });
 });
 
-describe('lapCalloutTexts / formatLapSeconds', () => {
-  it('speaks the formatted seconds to one decimal ("21.4")', () => {
-    expect(formatLapSeconds(21_400_000)).toBe('21.4');
-    expect(formatLapSeconds(21_449_000)).toBe('21.4');
-    expect(formatLapSeconds(9_960_000)).toBe('10.0');
+describe('lapCalloutText / formatLapSeconds', () => {
+  it('speaks the formatted seconds to the hundredth ("21.47")', () => {
+    expect(formatLapSeconds(21_470_000)).toBe('21.47');
+    expect(formatLapSeconds(21_474_900)).toBe('21.47');
+    expect(formatLapSeconds(9_996_000)).toBe('10.00');
   });
 
-  it('builds "<callsign>, lap N, M.S" with the short "<callsign>, lap N" fallback', () => {
-    expect(lapCalloutTexts('Maverick', 3, 21_400_000)).toEqual({
-      full: 'Maverick, lap 3, 21.4',
-      short: 'Maverick, lap 3'
-    });
+  it('builds "<callsign>, lap N, M.SS"', () => {
+    expect(lapCalloutText('Maverick', 3, 21_470_000)).toBe('Maverick, lap 3, 21.47');
   });
 
   it('skips the name when the resolver fell back (never speaks a raw ref)', () => {
-    expect(lapCalloutTexts(undefined, 2, 30_000_000)).toEqual({
-      full: 'lap 2, 30.0',
-      short: 'lap 2'
-    });
+    expect(lapCalloutText(undefined, 2, 30_000_000)).toBe('lap 2, 30.00');
   });
 
-  it('degrades to the short form when no lap time is carried', () => {
-    expect(lapCalloutTexts('Goose', 1, undefined)).toEqual({
-      full: 'Goose, lap 1',
-      short: 'Goose, lap 1'
-    });
+  it('skips the time when no lap time is carried', () => {
+    expect(lapCalloutText('Goose', 1, undefined)).toBe('Goose, lap 1');
   });
 });
