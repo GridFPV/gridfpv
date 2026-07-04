@@ -139,7 +139,7 @@ describe('seam 5: control command shape + headers', () => {
   it('a missing Content-Type → a JSON ProtocolError(BadRequest), not a bare-text 4xx', async () => {
     const { status, body } = await postControl(
       director.baseUrl,
-      { ScheduleHeat: { heat: 'h-noct', lineup: [] } },
+      { ScheduleHeat: { heat: 'h-noct', lineup: ['PILOT-A'] } },
       { token: TOKEN, contentType: false }
     );
     // The control endpoint now answers the uniform `ProtocolError` JSON shape every other API
@@ -231,7 +231,7 @@ describe('seam 5: control command shape + headers', () => {
 describe('seam 6: auth gates control, reads stay open', () => {
   it('control with NO token → 401 ProtocolError(Unauthorized)', async () => {
     const { status, body } = await postControl(director.baseUrl, {
-      ScheduleHeat: { heat: 'h-noauth', lineup: [] }
+      ScheduleHeat: { heat: 'h-noauth', lineup: ['PILOT-A'] }
     });
     expect(status).toBe(401);
     expect((body as { code?: string }).code).toBe('Unauthorized');
@@ -240,7 +240,7 @@ describe('seam 6: auth gates control, reads stay open', () => {
   it('control with an UNKNOWN/revoked token → 401', async () => {
     const { status } = await postControl(
       director.baseUrl,
-      { ScheduleHeat: { heat: 'h-badtok', lineup: [] } },
+      { ScheduleHeat: { heat: 'h-badtok', lineup: ['PILOT-A'] } },
       { token: 'not-a-real-token' }
     );
     expect(status).toBe(401);
@@ -248,7 +248,7 @@ describe('seam 6: auth gates control, reads stay open', () => {
 
   it('control with the valid RD token → accepted', async () => {
     const ack = await rdControl(director.baseUrl, TOKEN, {
-      ScheduleHeat: { heat: 'h-goodtok', lineup: [] }
+      ScheduleHeat: { heat: 'h-goodtok', lineup: ['PILOT-A'] }
     });
     expect(ack.ok).toBe(true);
   });
@@ -306,7 +306,7 @@ describe('seam 6: auth gates control, reads stay open', () => {
     // …but it is REJECTED on CONTROL — a spectator can watch, never run the race.
     const { status, body } = await postControl(
       director.baseUrl,
-      { ScheduleHeat: { heat: 'h-join-rejected', lineup: [] } },
+      { ScheduleHeat: { heat: 'h-join-rejected', lineup: ['PILOT-A'] } },
       { token: join }
     );
     expect(status).toBe(401);

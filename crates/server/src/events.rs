@@ -1413,6 +1413,7 @@ impl EventRegistry {
             req.time_limit_secs,
             None,
         )?;
+        validate_round_params(&req.format, &req.params)?;
 
         // Auto-generate a unique round id within this event: slug(label) + short suffix, retried on
         // the (astronomically unlikely) collision so the id is always fresh.
@@ -1460,12 +1461,48 @@ impl EventRegistry {
     /// bad class / format / dangling seeding source → [`RoundError::Invalid`] (400). A
     /// [`SeedingRule::FromRanking`] may not name **this** round as its own source. Written through to
     /// disk (issue #115).
+    /// The **freeze probe** for round config (release-hardening): fold the event's log and
+    /// report `(has_heats, raced)` for `round_id` — whether ANY heat is tagged with it, and
+    /// whether any such heat has left `Scheduled` (staged / raced / scored). Scoring re-derives
+    /// from the round's CURRENT config on every read, so editing a raced round's scoring fields
+    /// would silently rewrite already-official results — the callers below reject that.
+    fn round_heat_facts(&self, id: &EventId, round_id: &RoundId) -> (bool, bool) {
+        let Some(state) = self.resolve(id) else {
+            return (false, false);
+        };
+        let Ok((events, _cursor)) = state.read() else {
+            return (false, false);
+        };
+        let mut has_heats = false;
+        let mut raced = false;
+        for event in &events {
+            if let gridfpv_events::Event::HeatScheduled {
+                heat,
+                round: Some(r),
+                ..
+            } = event
+            {
+                if r == round_id {
+                    has_heats = true;
+                    let heat_state = gridfpv_engine::heat::heat_state(&events, heat);
+                    if heat_state.is_some_and(|s| s != gridfpv_engine::heat::HeatState::Scheduled) {
+                        raced = true;
+                        break;
+                    }
+                }
+            }
+        }
+        (has_heats, raced)
+    }
+
     pub fn update_round(
         &self,
         id: &EventId,
         round_id: &RoundId,
         req: UpdateRoundReq,
     ) -> Result<RoundDef, RoundError> {
+        // Probe the log BEFORE taking the registry write lock (the log has its own mutex).
+        let (_has_heats, raced) = self.round_heat_facts(id, round_id);
         let mut reg = self.write();
         let directory = reg.classes.clone();
         let event = reg
@@ -1473,9 +1510,15 @@ impl EventRegistry {
             .get_mut(id)
             .ok_or_else(|| RoundError::EventNotFound(id.0.clone()))?;
 
-        if !event.meta.rounds.iter().any(|r| &r.id == round_id) {
+        let Some(existing) = event
+            .meta
+            .rounds
+            .iter()
+            .find(|r| &r.id == round_id)
+            .cloned()
+        else {
             return Err(RoundError::RoundNotFound(round_id.0.clone()));
-        }
+        };
         let win_condition = req.win_condition.unwrap_or_else(default_win_condition);
         // As with add: an omitted channel mode defaults by the (new) format; an explicit value
         // overrides. The round is replaced wholesale, so the mode is re-derived each update.
@@ -1494,6 +1537,52 @@ impl EventRegistry {
             req.time_limit_secs,
             Some(round_id),
         )?;
+        validate_round_params(&req.format, &req.params)?;
+
+        // A RACED round's scoring-defining config is FROZEN (user-approved policy): scoring
+        // re-derives from the round's current config, so editing these would silently re-score
+        // already-official heats (a config-side bypass of the Final lock), and re-seeding would
+        // rewrite a bracket chain. Still editable on a raced round: label, staging timer, start
+        // procedure, grace window, protest window, time limit — and the `rounds` param (heats
+        // per pilot), which only extends future fills.
+        if raced {
+            let effective_channel_mode = channel_mode;
+            let mut frozen: Vec<&str> = Vec::new();
+            if req.format != existing.format {
+                frozen.push("format");
+            }
+            if req.classes != existing.classes {
+                frozen.push("classes");
+            }
+            if win_condition != existing.win_condition {
+                frozen.push("win condition");
+            }
+            if req.seeding != existing.seeding {
+                frozen.push("seeding");
+            }
+            if effective_channel_mode != existing.channel_mode {
+                frozen.push("channel mode");
+            }
+            // Params: only `rounds` (heats per pilot) may change once raced.
+            let differs_beyond_rounds = {
+                let mut a = req.params.clone();
+                let mut b = existing.params.clone();
+                a.remove("rounds");
+                b.remove("rounds");
+                a != b
+            };
+            if differs_beyond_rounds {
+                frozen.push("format params (other than rounds)");
+            }
+            if !frozen.is_empty() {
+                return Err(RoundError::Invalid(format!(
+                    "this round has raced heats — its {} can no longer change (label, staging, \
+                     start procedure, grace, protest window, race time, and the rounds count \
+                     stay editable)",
+                    frozen.join(", ")
+                )));
+            }
+        }
 
         let round = RoundDef {
             id: round_id.clone(),
@@ -1533,6 +1622,18 @@ impl EventRegistry {
     /// ([`SeedingRule::FromRanking`]) are **left as-is** (a dangling source is caught the next time
     /// that round is edited); pruning is a later-slice concern. Written through to disk (issue #115).
     pub fn remove_round(&self, id: &EventId, round_id: &RoundId) -> Result<EventMeta, RoundError> {
+        // A round with heats in the log cannot be removed: its heats would strand (they resolve
+        // their name, win condition, and scoring through the round), and a raced round's results
+        // would lose their scoring config entirely. The log is append-only, so there is nothing
+        // safe to "cascade" — the RD abandons a misconfigured round by just not filling it.
+        let (has_heats, _raced) = self.round_heat_facts(id, round_id);
+        if has_heats {
+            return Err(RoundError::Invalid(
+                "this round has scheduled heats — it can no longer be removed (leave it \
+                 unfilled, or discard its heats and re-use it)"
+                    .to_string(),
+            ));
+        }
         let mut reg = self.write();
         let event = reg
             .events
@@ -2168,7 +2269,26 @@ fn validate_round_fields(
             ));
         }
     }
-
+    // Degenerate end-condition values (raw-API guards; the form clamps these). A zero/negative
+    // Timed window or a First-to-0 would end every heat the instant it starts (the completion
+    // clock fires before any pass); a zero time limit likewise.
+    if let WinCondition::Timed { window_micros } = win_condition {
+        if *window_micros <= 0 {
+            return Err(RoundError::Invalid(
+                "a Timed round's race window must be positive".to_string(),
+            ));
+        }
+    }
+    if let WinCondition::FirstToLaps { n: 0 } = win_condition {
+        return Err(RoundError::Invalid(
+            "a First-to-N round must require at least 1 lap".to_string(),
+        ));
+    }
+    if time_limit_secs == Some(0) {
+        return Err(RoundError::Invalid(
+            "the race time (time_limit_secs) must be at least 1 second".to_string(),
+        ));
+    }
     for class in classes {
         if !directory.exists(class) {
             return Err(RoundError::Invalid(format!(
@@ -2210,6 +2330,59 @@ fn validate_round_fields(
         }
     }
 
+    Ok(())
+}
+
+/// Validate a round's `params` against `format`'s DECLARED schema (release-hardening): params
+/// are stored verbatim, so garbage used to surface only at FILL time — mid-event, at the worst
+/// moment. A declared number must parse as a positive whole number, an enum must be one of its
+/// options, a bool must be true/false. Undeclared keys pass through untouched (e.g. the points
+/// table, which has its own editor). Called from add_round/update_round alongside
+/// [`validate_round_fields`].
+fn validate_round_params(
+    format: &str,
+    params: &BTreeMap<String, String>,
+) -> Result<(), RoundError> {
+    use gridfpv_engine::format::{FormatRegistry, ParamKind};
+    let Some(schema) = FormatRegistry::standard_schemas()
+        .into_iter()
+        .find(|s| s.name == format)
+    else {
+        return Ok(()); // an unoffered/legacy format validates nothing new
+    };
+    for declared in &schema.params {
+        let Some(value) = params.get(&declared.key) else {
+            continue; // absent falls back to the default
+        };
+        match declared.kind {
+            ParamKind::Number => {
+                // Zero is meaningful for some knobs (an open-ended `rounds: 0`), so the guard
+                // is "a whole number", not "positive" — the generators clamp semantics.
+                if value.trim().parse::<u64>().is_err() {
+                    return Err(RoundError::Invalid(format!(
+                        "{} ({}) must be a whole number, got {value:?}",
+                        declared.label, declared.key
+                    )));
+                }
+            }
+            ParamKind::Enum => {
+                if !declared.options.iter().any(|o| o == value) {
+                    return Err(RoundError::Invalid(format!(
+                        "{} ({}) must be one of {:?}, got {value:?}",
+                        declared.label, declared.key, declared.options
+                    )));
+                }
+            }
+            ParamKind::Bool => {
+                if value != "true" && value != "false" {
+                    return Err(RoundError::Invalid(format!(
+                        "{} ({}) must be true or false, got {value:?}",
+                        declared.label, declared.key
+                    )));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3049,6 +3222,82 @@ mod tests {
         req.channel_mode = Some(ChannelMode::PerHeat);
         let round = reg.add_round(&event.id, req).unwrap();
         assert_eq!(round.channel_mode, ChannelMode::PerHeat);
+    }
+
+    #[test]
+    fn a_raced_round_freezes_its_scoring_config_but_not_the_race_day_knobs() {
+        use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition};
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Freeze Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        let round = reg
+            .add_round(&event.id, round_req("Qual", vec![open.clone()]))
+            .unwrap();
+
+        // Race a heat under the round (Scheduled -> Running in the event's log).
+        let state = reg.resolve(&event.id).unwrap();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("q-1".into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: Some(open.clone()),
+                    round: Some(round.id.clone()),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: HeatId("q-1".into()),
+                    transition: HeatTransition::Running,
+                },
+                None,
+            )
+            .unwrap();
+
+        let base = |label: &str| UpdateRoundReq {
+            label: label.to_string(),
+            classes: round.classes.clone(),
+            format: round.format.clone(),
+            params: round.params.clone(),
+            win_condition: Some(round.win_condition),
+            seeding: round.seeding.clone(),
+            time_limit_secs: round.time_limit_secs,
+            channel_mode: Some(round.channel_mode),
+            staging_timer_secs: Some(45),
+            start_procedure: None,
+            grace_window: None,
+            protest_window: None,
+        };
+
+        // Race-day knobs (label / staging / etc.) and the `rounds` param stay editable.
+        let mut ok_req = base("Qualifying (renamed)");
+        ok_req.params.insert("rounds".to_string(), "4".to_string());
+        let updated = reg.update_round(&event.id, &round.id, ok_req).unwrap();
+        assert_eq!(updated.label, "Qualifying (renamed)");
+        assert_eq!(updated.params.get("rounds"), Some(&"4".to_string()));
+
+        // The scoring-defining fields are FROZEN: a changed win condition is rejected.
+        let mut frozen_req = base("Qual");
+        frozen_req.win_condition = Some(WinCondition::Timed {
+            window_micros: 5_000_000,
+        });
+        let err = reg
+            .update_round(&event.id, &round.id, frozen_req)
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("raced"),
+            "expected the raced-round freeze, got {err:?}"
+        );
+
+        // ...and a raced round can no longer be removed.
+        let err = reg.remove_round(&event.id, &round.id).unwrap_err();
+        assert!(format!("{err:?}").contains("heats"), "got {err:?}");
     }
 
     #[test]
