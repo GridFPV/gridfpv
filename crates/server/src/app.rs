@@ -198,6 +198,14 @@ pub struct AppState {
     /// drive the live view. `None` when no open-practice heat is active. Shared per the `AppState`'s
     /// `Arc`s, so the bridge and the stream see the one cell.
     open_practice: crate::open_practice::OpenPracticeLive,
+    /// The **command serialization lock** (release-hardening): every validated write — a control
+    /// command's validate→append, and each runtime driver's checked auto-append — holds this for
+    /// the whole read-check-append sequence, so a ruling can never land on a heat that went Final
+    /// between its validation and its append (the auto-official racing the RD), Finalize can't
+    /// slip past a concurrent FileProtest, and two ScheduleHeats can't both pass the duplicate-id
+    /// check. Ordering: this lock is ALWAYS taken before the log mutex, never while holding it.
+    /// Raw pass appends (the source bridge) bypass it — they validate nothing.
+    commands: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -210,7 +218,35 @@ impl AppState {
             appended: Arc::new(Notify::new()),
             tokens: TokenStore::new(),
             open_practice: crate::open_practice::OpenPracticeLive::new(),
+            commands: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Hold the command serialization lock for a validate→append sequence (see the field doc).
+    /// Callers MUST NOT already hold the log mutex. A poisoned lock is recovered — the guard
+    /// protects ordering, not data.
+    pub fn command_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Append `event` iff `check` still passes over the current log, all under the command
+    /// serialization lock — the runtime drivers' fire-time recheck (a cancelled-but-in-flight
+    /// driver's stale transition must not land after a manual command changed the heat's state).
+    /// Returns `Ok(None)` when the check rejected (nothing appended).
+    pub fn append_checked(
+        &self,
+        event: Event,
+        recorded_at: Option<i64>,
+        check: impl FnOnce(&[Event]) -> bool,
+    ) -> Result<Option<Offset>, ProtocolError> {
+        let _guard = self.command_guard();
+        let (events, _cursor) = self.read()?;
+        if !check(&events) {
+            return Ok(None);
+        }
+        self.append(event, recorded_at).map(Some)
     }
 
     /// Build the state from an already-shared log handle — for when the WS stream (#43)
@@ -221,6 +257,7 @@ impl AppState {
             appended: Arc::new(Notify::new()),
             tokens: TokenStore::new(),
             open_practice: crate::open_practice::OpenPracticeLive::new(),
+            commands: Arc::new(Mutex::new(())),
         }
     }
 
@@ -235,6 +272,7 @@ impl AppState {
             appended: Arc::new(Notify::new()),
             tokens,
             open_practice: crate::open_practice::OpenPracticeLive::new(),
+            commands: Arc::new(Mutex::new(())),
         }
     }
 
