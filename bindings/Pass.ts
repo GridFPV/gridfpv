@@ -2,6 +2,7 @@
 import type { AdapterId } from "./AdapterId";
 import type { CompetitorRef } from "./CompetitorRef";
 import type { GateIndex } from "./GateIndex";
+import type { HeatId } from "./HeatId";
 import type { SignalContext } from "./SignalContext";
 import type { SourceTime } from "./SourceTime";
 
@@ -34,4 +35,13 @@ gate?: GateIndex,
 /**
  * Optional signal context (hardware only).
  */
-signal?: SignalContext, };
+signal?: SignalContext, 
+/**
+ * The heat this pass was recorded **for** — stamped by the Director's bridge at append
+ * time (the adapter doesn't know the heat; the bridge does, since it only routes passes
+ * while a heat is Running). `None` on a legacy log (pre-tagging), which attributes
+ * positionally as before. The tag makes attribution robust against heat-span events
+ * landing mid-race: scheduling/filling another heat used to close the running heat's
+ * positional span and silently drop its remaining laps from the result.
+ */
+heat?: HeatId, };

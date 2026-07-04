@@ -528,10 +528,11 @@ fn heat_winners(
     depth: usize,
 ) -> Result<Vec<CompetitorRef>, FillError> {
     // The carry is the source format's **advancing set** — `Generator::advancers`, not a
-    // ranking-position heuristic. Single-elim overrides it to return each heat's top `advance`
-    // finishers, which is correct for a 4-up level too (a position-`< worst` filter would wrongly
-    // keep a 4-up heat's 3rd-place losers, since the eliminated do not share one worst band). Built
-    // from the same field + log as `round_ranking_at`, one depth deeper (the seeding-cycle guard).
+    // ranking-position heuristic. `HeadToHead` overrides it to return each heat's winner(s) in
+    // heat order (the default position-`< worst` filter wrongly kept the better-placed losers,
+    // since a level's eliminated pilots do not share one worst band — the losing-semifinalist
+    // bug). Built from the same field + log as `round_ranking_at`, one depth deeper (the
+    // seeding-cycle guard).
     let field = round_field_at(meta, source, events, depth + 1)?;
     let registry = FormatRegistry::standard();
     let generator = registry
@@ -1165,6 +1166,10 @@ fn placement_laps(result: &HeatResult, competitor: &CompetitorRef) -> u32 {
         .places
         .iter()
         .find(|p| &p.competitor.competitor == competitor)
+        // A DISQUALIFIED placement banks no laps — the DQ voided the result those laps
+        // decided (#339; `round_standings` and `round_best_laps` already skip them, and the
+        // class total must agree with the round rows it aggregates).
+        .filter(|p| !p.disqualified)
         .map(|p| p.laps)
         .unwrap_or(0)
 }
@@ -1200,11 +1205,19 @@ pub fn class_standings(
     let mut acc: BTreeMap<CompetitorRef, StandingAcc> = BTreeMap::new();
 
     for round in rounds_for_class(meta, class) {
-        let ranking = round_ranking(meta, round, events)?;
-        let field_size = ranking.len() as u32;
         // The round's scored heats — the same view `round_ranking` ranked over — so the laps a
         // standing reports come from exactly the heats that decided the round position.
         let completed = completed_heats(round, events);
+        // An UNRACED round contributes nothing (user-approved policy): with zero completed
+        // heats its "ranking" seeds the whole field tied at 1, so folding it handed every
+        // member `field_size` free points and a phantom rounds_entered — defining the finals
+        // rounds up front visibly shifted the standings after qualifying alone (and unevenly,
+        // for rounds whose seeded field differs).
+        if completed.is_empty() {
+            continue;
+        }
+        let ranking = round_ranking(meta, round, events)?;
+        let field_size = ranking.len() as u32;
         // Best (fastest) lap per competitor, folded from the *same* finalized heats via the lap-list
         // projection — independent of the win condition, so a Timed / FirstToLaps race reports a
         // best lap from its real per-lap durations rather than the null its placement metric carries.
@@ -1915,6 +1928,7 @@ mod tests {
             sequence: Some(seq),
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         })
     }
 
@@ -3620,6 +3634,28 @@ mod tests {
         let once = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
         let twice = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn class_standings_ignore_a_defined_but_unraced_round() {
+        // Two rounds are defined up front (qual + finals); only qual has raced. The unraced
+        // finals round used to seed the whole field tied at 1 and hand everyone field_size
+        // free points + a phantom rounds_entered — shifting the standings before a single
+        // finals heat ran.
+        let raced = qual_round("q1", "open");
+        let unraced = qual_round("q2", "open");
+        let meta = meta_with(vec![raced, unraced], vec![member("open", &["A", "B", "C"])]);
+        let log = scored_qual_heat("q1-1", "q1", "open", &["A", "B", "C"]);
+        let standings = class_standings(&meta, &ClassId("open".into()), &log).unwrap();
+        for row in &standings.standings {
+            assert_eq!(
+                row.rounds_entered, 1,
+                "{:?} must count only the RACED round",
+                row.competitor
+            );
+        }
+        // Winner points come from the one raced round only (field of 3 -> 3 points, not 6).
+        assert_eq!(standings.standings[0].points, 3);
     }
 
     #[test]

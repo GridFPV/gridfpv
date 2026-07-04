@@ -107,6 +107,15 @@ pub struct LiveRaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub race_ended_at: Option<i64>,
+    /// The **server-authoritative staging-start instant** of the current heat while it is
+    /// `Staged`: the `recorded_at` (microseconds, server wall clock) of its latest
+    /// `Scheduled → Staged` transition. The staging countdown anchors here — a per-client
+    /// wall-clock anchor made every console (and every reload) count its own window, so the
+    /// RD's console could read overtime while a fresh one read the full window. `None` in
+    /// every non-Staged phase. Renders as a plain TS `number` (microseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub staged_at: Option<i64>,
     /// The **server-authoritative start-tone instant** of the current heat while it is `Armed`:
     /// the absolute wall-clock instant (microseconds since the Unix epoch) the start tone fires
     /// and the heat auto-advances `Armed → Running`. Derived from the `recorded_at` of the heat's
@@ -168,6 +177,7 @@ impl Default for LiveRaceState {
             on_deck: None,
             race_started_at: None,
             race_ended_at: None,
+            staged_at: None,
             tone_at: None,
             lifecycle: None,
         }
@@ -207,6 +217,32 @@ pub struct PilotProgress {
 /// (marshaling-aware) lap projection, ranks them into a running order, and finds the
 /// on-deck heat. Replaying the same log twice yields the same state.
 pub fn live_state(events: &[Event]) -> LiveRaceState {
+    let window: Vec<(u64, &Event)> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i as u64, e))
+        .collect();
+    live_state_core(events, &window)
+}
+
+/// Fold a **windowed** log slice with its PRESERVED global offsets — the heat/class-scope
+/// entry point (`heat_window_offsets` / `class_window_offsets` output). The marshaling
+/// adjudications inside the window (`DetectionVoided`/`LapThrownOut`/…) target global
+/// [`LogRef`]s; folding a filtered slice through the plain [`live_state`] re-enumerated it
+/// `0,1,2,…`, so a correction to a heat deep in the log silently missed (or, on coincidence,
+/// hit the wrong pass) in every heat-scoped live view. `window` must be in log order.
+pub fn live_state_over(window: &[(u64, Event)]) -> LiveRaceState {
+    // The positional helpers (current heat, phase, lineup, run boundary) read a bare event
+    // slice; the offsets matter only to the marshaling-aware lap fold below.
+    let events: Vec<Event> = window.iter().map(|(_, e)| e.clone()).collect();
+    let pairs: Vec<(u64, &Event)> = window.iter().map(|(o, e)| (*o, e)).collect();
+    live_state_core(&events, &pairs)
+}
+
+/// The shared fold behind [`live_state`] (full log, positional offsets) and
+/// [`live_state_over`] (a window with preserved global offsets). `window` is the SAME
+/// sequence as `events`, paired with each event's global append offset.
+fn live_state_core(events: &[Event], window: &[(u64, &Event)]) -> LiveRaceState {
     let Some(current_heat) = current_heat(events) else {
         return LiveRaceState::default();
     };
@@ -230,18 +266,41 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
     // boundary, so everything counts (a normally-finalized heat is unaffected).
     let run_start = current_run_start(events, &current_heat);
     let laps = lap_list_marshaled(
-        events
+        window
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i >= run_start)
-            .map(|(i, e)| (i as u64, e)),
+            .filter(|(i, (_, e))| {
+                if *i < run_start {
+                    return false;
+                }
+                // Tag-aware pass attribution: a pass stamped for ANOTHER heat never counts
+                // toward this one — selecting an older heat as current used to absorb every
+                // later heat's passes (they all sit after its run_start). An untagged
+                // (legacy) pass keeps the positional rule.
+                match e {
+                    Event::Pass(p) => p.heat.as_ref().is_none_or(|h| h == &current_heat),
+                    _ => true,
+                }
+            })
+            .map(|(_, (offset, e))| (*offset, *e)),
     );
-    let mut by_ref: BTreeMap<&CompetitorRef, (u32, Option<i64>)> = BTreeMap::new();
+    // Per ref: lap count, the last lap's DURATION (the wire's `last_lap_micros` display value),
+    // and the last lap's COMPLETION time (`at`) — the running-order tie-break. The scorer ranks
+    // equal-lap pilots by earlier last-lap completion; ordering on duration here made the live
+    // overlay contradict the scored Timed result (a slower-but-ahead pilot showed behind).
+    let mut by_ref: BTreeMap<&CompetitorRef, (u32, Option<i64>, Option<i64>)> = BTreeMap::new();
     for cl in &laps.competitors {
         let CompetitorKey { competitor, .. } = &cl.competitor;
-        let entry = by_ref.entry(competitor).or_insert((0, None));
+        let entry = by_ref.entry(competitor).or_insert((0, None, None));
         entry.0 += cl.lap_count() as u32;
-        entry.1 = cl.laps.last().map(|l| l.duration_micros).or(entry.1);
+        if let Some(last) = cl.laps.last() {
+            // Across adapters, keep the TEMPORALLY latest lap (not whichever adapter
+            // iterates later).
+            if entry.2.is_none_or(|prev| last.at.micros >= prev) {
+                entry.1 = Some(last.duration_micros);
+                entry.2 = Some(last.at.micros);
+            }
+        }
     }
 
     // Fold the registration bindings and index them by competitor ref. The lineup carries
@@ -258,8 +317,8 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
     let progress: Vec<PilotProgress> = active_pilots
         .iter()
         .map(|competitor| {
-            let (laps_completed, last_lap_micros) =
-                by_ref.get(competitor).copied().unwrap_or((0, None));
+            let (laps_completed, last_lap_micros, _) =
+                by_ref.get(competitor).copied().unwrap_or((0, None, None));
             PilotProgress {
                 competitor: competitor.clone(),
                 pilot: pilot_by_ref.get(competitor).map(|p| (*p).clone()),
@@ -269,7 +328,13 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
         })
         .collect();
 
-    let running_order = running_order(&progress);
+    // Rank by lap count, ties by EARLIER last-lap completion (the scorer's rule — see
+    // `score_timed`), never by lap duration: physically ahead means crossed sooner.
+    let last_completion: BTreeMap<&CompetitorRef, i64> = by_ref
+        .iter()
+        .filter_map(|(competitor, (_, _, at))| at.map(|at| (*competitor, at)))
+        .collect();
+    let running_order = running_order_by_completion(&progress, &last_completion);
 
     LiveRaceState {
         current_heat: Some(current_heat.clone()),
@@ -283,6 +348,7 @@ pub fn live_state(events: &[Event]) -> LiveRaceState {
         // `&[Event]` — the open-practice synthetic path and the unit tests — leaves it `None`.
         race_started_at: None,
         race_ended_at: None,
+        staged_at: None,
         // Likewise set by [`with_heat_timing`]: the start-tone instant needs the `HeatStarting`
         // event's `recorded_at`, which the bare-event fold cannot see.
         tone_at: None,
@@ -405,6 +471,12 @@ pub fn with_heat_timing(mut live: LiveRaceState, stored: &[StoredEvent]) -> Live
         let (started, ended) = heat_timing(stored, &heat);
         live.race_started_at = started;
         live.race_ended_at = ended;
+        // The staging countdown anchor — present only while the heat is `Staged` (phase-gated
+        // like `tone_at`, so a re-run's stale Staged instant never leaks into another phase).
+        live.staged_at = match live.phase {
+            HeatPhase::Staged => heat_staged_at(stored, &heat),
+            _ => None,
+        };
         // The start-tone countdown anchor — present only while the heat is `Armed` (the tone has
         // not fired yet). `heat_tone_at` already clears it on `Running`; gating on the phase keeps
         // it absent in every non-Armed phase even if the fold order ever changed. RD-console-only:
@@ -425,6 +497,23 @@ pub fn with_heat_timing(mut live: LiveRaceState, stored: &[StoredEvent]) -> Live
         };
     }
     live
+}
+
+/// The `recorded_at` of `heat`'s **latest `Staged` transition** — the staging-countdown anchor
+/// (`LiveRaceState::staged_at`). Last-wins so a re-staged heat (after an abort) anchors its new
+/// staging window, not the abandoned one. `None` when the heat never staged or the entry
+/// carries no timestamp.
+fn heat_staged_at(stored: &[StoredEvent], heat: &HeatId) -> Option<i64> {
+    stored
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            Event::HeatStateChanged {
+                heat: h,
+                transition: HeatTransition::Staged,
+            } if h == heat => entry.recorded_at,
+            _ => None,
+        })
+        .next_back()
 }
 
 /// Map a folded [`HeatState`] to the projected [`HeatPhase`] the live view reports.
@@ -470,7 +559,7 @@ fn current_heat(events: &[Event]) -> Option<HeatId> {
 ///
 /// - its most recent `Running` transition (the run started here — passes only arrive while Running),
 ///   **or**
-/// - one past its most recent reset (`Aborted` / `Restarted`).
+/// - one past its most recent reset (`Aborted` / `Restarted` / `Discarded`).
 ///
 /// This scopes the window two ways at once. **Across heats:** a heat's `Running` is logged after every
 /// earlier heat finished, so folding from it excludes those earlier heats' passes — a pilot who flew
@@ -501,7 +590,12 @@ pub(crate) fn current_run_start(events: &[Event], heat: &HeatId) -> usize {
                     // every earlier heat and any abandoned earlier run of this one.
                     HeatTransition::Running => start = i,
                     // A reset with no re-run yet: window past it so the abandoned passes drop out.
-                    HeatTransition::Aborted | HeatTransition::Restarted => start = i + 1,
+                    // `Discarded` is a reset too (Unofficial/Final → Scheduled, the result thrown
+                    // away) — without it here a discarded heat kept showing, and re-scoring, the
+                    // dead run's laps until its re-run (caught live in the overnight soak).
+                    HeatTransition::Aborted
+                    | HeatTransition::Restarted
+                    | HeatTransition::Discarded => start = i + 1,
                     _ => {}
                 }
             }
@@ -569,9 +663,39 @@ pub(crate) fn round_of_heat(events: &[Event], heat: &HeatId) -> Option<RoundId> 
     latest_schedule(events, heat).2
 }
 
-/// Rank active pilots into the provisional running order: most laps first, ties broken
-/// by the shorter last-lap time (a proxy for who is pacing ahead), then by competitor
-/// ref for a total, deterministic order.
+/// Rank active pilots into the provisional running order with the SCORER's tie-break:
+/// most laps first, ties broken by the **earlier last-lap completion time** (physically
+/// ahead = crossed sooner — matching `score_timed`, so the live overlay agrees with the
+/// eventual scored order), then by competitor ref for a total, deterministic order.
+/// `last_completion` carries each ref's latest lap-closing pass instant (source µs);
+/// a ref with laps but no completion entry sorts after those with one.
+fn running_order_by_completion(
+    progress: &[PilotProgress],
+    last_completion: &BTreeMap<&CompetitorRef, i64>,
+) -> Vec<CompetitorRef> {
+    let mut order: Vec<&PilotProgress> = progress.iter().collect();
+    order.sort_by(|a, b| {
+        b.laps_completed
+            .cmp(&a.laps_completed)
+            .then_with(|| {
+                match (
+                    last_completion.get(&a.competitor),
+                    last_completion.get(&b.competitor),
+                ) {
+                    (Some(x), Some(y)) => x.cmp(y),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            })
+            .then_with(|| a.competitor.cmp(&b.competitor))
+    });
+    order.into_iter().map(|p| p.competitor.clone()).collect()
+}
+
+/// Rank by lap count with the last-lap **duration** tie-break — the legacy proxy, kept for
+/// the open-practice per-channel board (whose in-memory laps carry durations, not global
+/// completion instants). The real heat overlay uses [`running_order_by_completion`].
 pub(crate) fn running_order(progress: &[PilotProgress]) -> Vec<CompetitorRef> {
     let mut order: Vec<&PilotProgress> = progress.iter().collect();
     order.sort_by(|a, b| {
@@ -748,6 +872,20 @@ mod tests {
             sequence: Some(seq),
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
+        })
+    }
+
+    /// A pass STAMPED for `heat` (the bridge's tag-attribution path).
+    fn tagged_pass(heat: &str, competitor: &str, at: i64, seq: u64) -> Event {
+        Event::Pass(Pass {
+            adapter: AdapterId("vd".into()),
+            competitor: CompetitorRef(competitor.into()),
+            at: SourceTime::from_micros(at),
+            sequence: Some(seq),
+            gate: GateIndex::LAP,
+            signal: None,
+            heat: Some(HeatId(heat.into())),
         })
     }
 
@@ -1097,6 +1235,114 @@ mod tests {
         assert!(
             s.progress.iter().all(|p| p.last_lap_micros.is_none()),
             "the stale last-lap also clears after Abort"
+        );
+    }
+
+    #[test]
+    fn discard_resets_live_lap_count_to_zero() {
+        // Discard is a reset like Abort/Restart (Unofficial/Final → Scheduled, result thrown
+        // away): the discarded run's passes stay in the log, but the live count must be 0 — the
+        // overnight soak caught a discarded heat still showing the dead run's laps.
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 1_000_000, 1),
+            pass("A", 4_000_000, 2), // A: 1 lap before the discard
+            pass("B", 1_500_000, 1),
+            changed("q-1", HeatTransition::Finished),
+            changed("q-1", HeatTransition::Discarded),
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.phase, HeatPhase::Scheduled);
+        assert!(
+            s.progress.iter().all(|p| p.laps_completed == 0),
+            "every pilot's live lap count resets to 0 after Discard"
+        );
+        assert!(
+            s.progress.iter().all(|p| p.last_lap_micros.is_none()),
+            "the stale last-lap also clears after Discard"
+        );
+    }
+
+    #[test]
+    fn tagged_passes_survive_a_mid_race_heat_schedule() {
+        // The scheduling-eats-laps bug: a HeatScheduled for ANOTHER heat lands mid-race
+        // (an RD filling the next round), which closes the running heat's positional span.
+        // Tagged passes attribute by their stamp, so the laps after it still count.
+        let events = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Running),
+            tagged_pass("q-1", "A", 1_000_000, 1),
+            tagged_pass("q-1", "A", 3_000_000, 2), // lap 1 banked
+            scheduled("q-2", &["B"]),              // mid-race schedule (span closer)
+            tagged_pass("q-1", "A", 5_000_000, 3), // lap 2 — used to vanish
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.current_heat, Some(HeatId("q-1".into())));
+        let a = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .unwrap();
+        assert_eq!(
+            a.laps_completed, 2,
+            "the post-schedule lap must still count for the running heat"
+        );
+    }
+
+    #[test]
+    fn tagged_passes_do_not_leak_into_an_older_selected_heat() {
+        // Heats race back to back; the RD selects the FINISHED first heat as current.
+        // Its live view must show ITS laps only — the later heat's tagged passes all sit
+        // after q-1's run_start, so the positional rule alone absorbed them.
+        let events = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Running),
+            tagged_pass("q-1", "A", 1_000_000, 1),
+            tagged_pass("q-1", "A", 3_000_000, 2), // q-1: 1 lap
+            changed("q-1", HeatTransition::Finished),
+            scheduled("q-2", &["A"]),
+            changed("q-2", HeatTransition::Running),
+            tagged_pass("q-2", "A", 11_000_000, 3),
+            tagged_pass("q-2", "A", 13_000_000, 4),
+            tagged_pass("q-2", "A", 15_000_000, 5), // q-2: 2 laps
+            changed("q-2", HeatTransition::Finished),
+            Event::CurrentHeatSelected {
+                heat: HeatId("q-1".into()),
+            },
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.current_heat, Some(HeatId("q-1".into())));
+        let a = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .unwrap();
+        assert_eq!(a.laps_completed, 1, "only q-1's own lap counts");
+    }
+
+    #[test]
+    fn running_order_ties_break_on_last_lap_completion_not_duration() {
+        // A completes lap 2 at t=20s (a slow 10s lap); B completes lap 2 at t=33s (a fast
+        // 8s lap). A is physically ahead — the scorer ranks by earlier completion, and the
+        // live order must agree (it used to rank B first on the shorter duration).
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 0, 1),
+            pass("B", 5_000_000, 1),
+            pass("A", 10_000_000, 2), // A lap 1 @10s
+            pass("B", 25_000_000, 2), // B lap 1 @25s (20s lap)
+            pass("A", 20_000_000, 3), // A lap 2 @20s (10s lap)
+            pass("B", 33_000_000, 3), // B lap 2 @33s (8s lap)
+        ];
+        let s = live_state(&events);
+        assert_eq!(
+            s.running_order,
+            vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+            "equal laps: the EARLIER last completion leads"
         );
     }
 

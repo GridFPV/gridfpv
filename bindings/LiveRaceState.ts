@@ -66,6 +66,15 @@ race_started_at?: number,
  */
 race_ended_at?: number, 
 /**
+ * The **server-authoritative staging-start instant** of the current heat while it is
+ * `Staged`: the `recorded_at` (microseconds, server wall clock) of its latest
+ * `Scheduled → Staged` transition. The staging countdown anchors here — a per-client
+ * wall-clock anchor made every console (and every reload) count its own window, so the
+ * RD's console could read overtime while a fresh one read the full window. `None` in
+ * every non-Staged phase. Renders as a plain TS `number` (microseconds).
+ */
+staged_at?: number, 
+/**
  * The **server-authoritative start-tone instant** of the current heat while it is `Armed`:
  * the absolute wall-clock instant (microseconds since the Unix epoch) the start tone fires
  * and the heat auto-advances `Armed → Running`. Derived from the `recorded_at` of the heat's

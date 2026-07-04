@@ -100,15 +100,32 @@ impl QualMetric {
     ///
     /// Lap-time metrics map straight through (µs, smaller better); most-laps negates the
     /// count so "more laps" becomes "smaller key" under the same min-is-best rule.
-    fn round_key(self, placement_metric: Metric, laps: u32) -> Option<i64> {
+    ///
+    /// `best_lap_micros` is the placement's **condition-independent** best lap: the
+    /// [`BestLap`](QualMetric::BestLap) qualifier ranks on it regardless of which win
+    /// condition scored the heat. Before this, a round scored under a non-BestLap
+    /// condition (e.g. FirstToLaps carrying `Metric::ReachedAt`) yielded `None` for
+    /// every pilot — the whole field tied at 1 and "ranked" alphabetically, and any
+    /// `FromRanking` bracket seeded from that order.
+    fn round_key(
+        self,
+        placement_metric: Metric,
+        laps: u32,
+        best_lap_micros: Option<i64>,
+    ) -> Option<i64> {
         match (self, placement_metric) {
-            (QualMetric::BestLap, Metric::BestLapMicros(micros)) => micros,
+            // Best-lap qualifying: the matched metric when the round was scored under
+            // BestLap; otherwise the condition-independent `Placement.best_lap_micros`
+            // (which exists precisely so cross-heat rankings survive the mismatch).
+            (QualMetric::BestLap, Metric::BestLapMicros(micros)) => micros.or(best_lap_micros),
+            (QualMetric::BestLap, _) => best_lap_micros,
             (QualMetric::BestConsecutive, Metric::BestConsecutiveMicros(sum)) => sum,
             // Most-laps: ignore the placement metric, rank on the counted laps.
             (QualMetric::MostLaps, _) => Some(-(laps as i64)),
-            // Metric/condition mismatch (a round scored under a different condition than
-            // the configured qualifying metric): treat as "no qualifying value", so the
-            // pilot ranks last for that round rather than corrupting the aggregate.
+            // Metric/condition mismatch with no condition-independent equivalent (a
+            // best-consecutive qualifier over a round scored under another condition):
+            // "no qualifying value" — the pilot ranks in the no-value band rather than
+            // corrupting the aggregate.
             _ => None,
         }
     }
@@ -274,7 +291,8 @@ impl Generator for TimedQualifying {
                 let key = if place.disqualified {
                     None
                 } else {
-                    self.metric.round_key(place.metric, place.laps)
+                    self.metric
+                        .round_key(place.metric, place.laps, place.best_lap_micros)
                 };
                 let slot = best
                     .entry(place.competitor.competitor.clone())
@@ -601,6 +619,42 @@ mod tests {
         assert_eq!(names(&ranking), vec!["A", "B"]);
         assert_eq!(ranking[0].position, 1);
         assert_eq!(ranking[1].position, 2);
+    }
+
+    #[test]
+    fn ranking_best_lap_survives_a_win_condition_mismatch_via_placement_best_lap() {
+        // A best-lap qualifier over a round scored under a DIFFERENT win condition (e.g.
+        // FirstToLaps → Metric::ReachedAt): the metric field carries no best lap, but the
+        // placement's condition-independent `best_lap_micros` does. Before the fallback the
+        // whole field yielded `None` → everyone tied at 1, ordered alphabetically — and any
+        // FromRanking bracket seeded from that order.
+        let g = TimedQualifying::new(field(&["A", "B", "C"]), 1, QualMetric::BestLap);
+        let places = [("B", 1_400_000), ("C", 1_600_000), ("A", 1_900_000)]
+            .iter()
+            .enumerate()
+            .map(|(i, (name, best))| Placement {
+                best_lap_micros: Some(*best),
+                ..placement(
+                    name,
+                    (i as u32) + 1,
+                    3,
+                    Metric::ReachedAt(Some(gridfpv_events::SourceTime { micros: 9_000_000 })),
+                )
+            })
+            .collect();
+        let ranking = g.ranking(&[CompletedHeat::new(
+            "round-1",
+            HeatResult {
+                places,
+                ..Default::default()
+            },
+        )]);
+        // Ranked by best lap — B, C, A — with distinct positions, not an alphabetical tie.
+        assert_eq!(names(&ranking), vec!["B", "C", "A"]);
+        assert_eq!(
+            ranking.iter().map(|r| r.position).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]

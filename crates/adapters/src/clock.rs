@@ -186,6 +186,7 @@ mod tests {
             sequence,
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         }
     }
 

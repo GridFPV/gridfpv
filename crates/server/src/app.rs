@@ -103,7 +103,9 @@ use crate::events::{
     RegistryErrorKind, RoundDef, RoundError, SetActiveEventRequest, SetClassMembershipRequest,
     SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
-use crate::live_state::{HeatSummary, heat_summaries, live_state, with_heat_timing};
+use crate::live_state::{
+    HeatSummary, heat_summaries, live_state, live_state_over, with_heat_timing,
+};
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::round_engine;
 use crate::scope::{ClassId, EventId, PilotId};
@@ -1618,12 +1620,15 @@ async fn snapshot_class(
     let state = resolve_event(&registry, &event_id)?;
     let (stored, cursor) = state.read_stored()?;
     let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
-    let class_events = class_window(&events, &class);
+    let class_offsets = class_window_offsets(&events, &class);
     // The window's `current_heat` resolves which heat is on the timer; its timing is folded
     // from the *full* stored log (the heat's transition instants live there with `recorded_at`).
     Ok(Json(Snapshot {
         cursor,
-        body: ProjectionBody::LiveRaceState(with_heat_timing(live_state(&class_events), &stored)),
+        body: ProjectionBody::LiveRaceState(with_heat_timing(
+            live_state_over(&class_offsets),
+            &stored,
+        )),
     }))
 }
 
@@ -1634,9 +1639,12 @@ async fn snapshot_class(
 /// The class's heats are first collected from the `HeatScheduled` tags; then the log is replayed
 /// once, opening the window on any heat-loop event for one of those heats and closing it on a
 /// heat-loop event for a heat *not* in the class — the same position-based pass attribution
-/// [`heat_window`] uses to scope a single heat, generalized to a set of heats. So a class's live
-/// state folds only its own heats and passes, with no other class's racing bleeding in.
-pub(crate) fn class_window(events: &[Event], class: &ClassId) -> Vec<Event> {
+/// [`heat_window_offsets`] uses to scope a single heat, generalized to a set of heats. So a
+/// class's live state folds only its own heats and passes, with no other class's racing bleeding
+/// in. Carries each event's GLOBAL append offset — the class-scope live fold
+/// feeds these to [`live_state_over`] so marshaling adjudications (global `LogRef` targets)
+/// resolve inside the filtered view (the same #55 rule as `heat_window_offsets`).
+pub(crate) fn class_window_offsets(events: &[Event], class: &ClassId) -> Vec<(u64, Event)> {
     // The heat ids tagged with this class (a `HeatScheduled` whose `class` equals `class`).
     let class_heats: std::collections::HashSet<&HeatId> = events
         .iter()
@@ -1654,16 +1662,24 @@ pub(crate) fn class_window(events: &[Event], class: &ClassId) -> Vec<Event> {
     // `active` tracks whether the cursor is currently inside one of the class's heats: it opens on
     // a heat-loop event for a class heat and closes on a heat-loop event for any non-class heat.
     let mut active = false;
-    for event in events {
+    for (offset, event) in events.iter().enumerate() {
+        let offset = offset as u64;
         match event {
             Event::HeatScheduled { heat, .. } | Event::HeatStateChanged { heat, .. } => {
                 active = class_heats.contains(heat);
                 if active {
-                    window.push(event.clone());
+                    window.push((offset, event.clone()));
                 }
             }
-            // Passes and adjudications belong to whichever heat is currently active.
-            _ if active => window.push(event.clone()),
+            // A tagged pass belongs to its stamped heat — in or out by class membership,
+            // independent of the positional cursor (same rule as `heat_window_offsets`).
+            Event::Pass(p) if p.heat.is_some() => {
+                if p.heat.as_ref().is_some_and(|h| class_heats.contains(h)) {
+                    window.push((offset, event.clone()));
+                }
+            }
+            // Untagged passes and adjudications belong to whichever heat is currently active.
+            _ if active => window.push((offset, event.clone())),
             _ => {}
         }
     }
@@ -1712,7 +1728,7 @@ async fn snapshot_heat(
             ProjectionBody::LiveRaceState(
                 state
                     .open_practice()
-                    .merge_into(with_heat_timing(live_state(&heat_events), &stored)),
+                    .merge_into(with_heat_timing(live_state_over(&heat_offsets), &stored)),
             )
         }
         HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled(
@@ -1896,7 +1912,14 @@ pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, 
             | Event::RulingReversed { target } => {
                 claimed.contains(&target.0) && offset >= run_start
             }
-            // Untagged (passes, legacy insertions, registrations): positional.
+            // Passes: by their bridge-stamped heat TAG when present (robust against a
+            // heat-span event closing the positional span mid-race — the scheduling-eats-laps
+            // bug); an untagged (legacy) pass keeps the positional rule.
+            Event::Pass(p) => match &p.heat {
+                Some(h) => h == heat && offset >= run_start,
+                None => active && offset >= run_start,
+            },
+            // Untagged (legacy insertions, registrations, …): positional.
             _ => active && offset >= run_start,
         };
         if include {
@@ -1905,16 +1928,6 @@ pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, 
         }
     }
     window
-}
-
-/// The heat window as a bare `Vec<Event>` — the offset-agnostic view used where global offsets
-/// are not needed (live state, results scoring). The marshaling lap/audit folds use
-/// [`heat_window_offsets`] instead, so they target the correct global `LogRef`.
-pub(crate) fn heat_window(events: &[Event], heat: &HeatId) -> Vec<Event> {
-    heat_window_offsets(events, heat)
-        .into_iter()
-        .map(|(_, e)| e)
-        .collect()
 }
 
 /// Score a single heat over its **full adjudicated event window** under `win_condition` — the
@@ -2002,6 +2015,7 @@ mod tests {
             sequence: Some(seq),
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         })
     }
 

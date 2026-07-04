@@ -253,6 +253,15 @@ pub struct Pass {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub signal: Option<SignalContext>,
+    /// The heat this pass was recorded **for** — stamped by the Director's bridge at append
+    /// time (the adapter doesn't know the heat; the bridge does, since it only routes passes
+    /// while a heat is Running). `None` on a legacy log (pre-tagging), which attributes
+    /// positionally as before. The tag makes attribution robust against heat-span events
+    /// landing mid-race: scheduling/filling another heat used to close the running heat's
+    /// positional span and silently drop its remaining laps from the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub heat: Option<HeatId>,
 }
 
 // --- Race-engine vocabulary (#28) -------------------------------------------
@@ -844,6 +853,7 @@ mod tests {
             sequence: Some(3),
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         }
     }
 
@@ -1318,6 +1328,7 @@ mod tests {
                 sequence: None,
                 gate: GateIndex::LAP,
                 signal: None,
+                heat: None,
             })
         );
         // And the new facts themselves deserialize from their on-the-wire shape.
