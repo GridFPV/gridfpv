@@ -1441,7 +1441,7 @@ pub fn open_protest_count(events: &[Event], heat: &HeatId) -> usize {
             } if h == heat => Some(i as u64 + 1),
             _ => None,
         })
-        .last()
+        .next_back()
         .unwrap_or(0);
     // Filed protests for this heat since the latest reset, with no effective resolution.
     events
