@@ -12,6 +12,7 @@ import type {
 } from '@gridfpv/types';
 import LiveRaceControl from '../src/screens/LiveRaceControl.svelte';
 import { makeTestSession } from './support.js';
+import AudioHost from './AudioHost.svelte';
 import { liveRunning, failAck } from './fixtures.js';
 
 // A round with a short staging window so the over-time path is reachable in a fake-timer test, and
@@ -431,7 +432,8 @@ describe('LiveRaceControl', () => {
       const { started } = installAudioStub('running');
 
       const { session, pushLive } = makeTestSession({ live: liveAt('Armed') });
-      const { container } = render(LiveRaceControl, { session });
+      const { container } = render(AudioHost, { session });
+      render(LiveRaceControl, { session });
       await tick();
       expect(started).toHaveLength(0); // nothing plays while merely Armed
 
@@ -452,6 +454,7 @@ describe('LiveRaceControl', () => {
       const { started } = installAudioStub('running');
 
       const { session, pushLive } = makeTestSession({ live: liveAt('Running') });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       await tick();
       expect(started).toHaveLength(0);
@@ -468,6 +471,7 @@ describe('LiveRaceControl', () => {
       const { started } = installAudioStub('running');
 
       const { session, pushLive } = makeTestSession({ live: liveAt('Staged') });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       await tick();
       expect(started).toHaveLength(0);
@@ -485,6 +489,7 @@ describe('LiveRaceControl', () => {
 
       // Start Staged (a pre-Running phase observed first) so the genuine race-go arms + fires once.
       const { session, pushLive } = makeTestSession({ live: liveAt('Staged') });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       await tick();
       pushLive(liveAt('Running'));
@@ -506,6 +511,7 @@ describe('LiveRaceControl', () => {
 
       // heat-1 is watched through a genuine race-go (Staged → Running): its tone fires once.
       const { session, pushLive } = makeTestSession({ live: liveAt('Staged', 'heat-1') });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       await tick();
       pushLive(liveAt('Running', 'heat-1'));
@@ -530,6 +536,7 @@ describe('LiveRaceControl', () => {
 
       // heat-1 watched Staged → Running (fires once).
       const { session, pushLive } = makeTestSession({ live: liveAt('Staged', 'heat-1') });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       await tick();
       pushLive(liveAt('Running', 'heat-1'));
@@ -564,6 +571,7 @@ describe('LiveRaceControl', () => {
       const { started } = installAudioStub('running', { calloutsMuted: true });
 
       const { session, pushLive } = makeTestSession({ live: liveAt('Staged') });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       await tick();
       // The toggle reads muted — and the race-go tone still fires.
@@ -596,6 +604,7 @@ describe('LiveRaceControl', () => {
         live: liveAt('Staged'),
         listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND])
       });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       // Let the heats/round directory settle so the Timed window resolves.
       await vi.advanceTimersByTimeAsync(0);
@@ -640,6 +649,7 @@ describe('LiveRaceControl', () => {
         live: liveAt('Staged'),
         listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND])
       });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       await vi.advanceTimersByTimeAsync(0);
       await tick();
@@ -660,6 +670,7 @@ describe('LiveRaceControl', () => {
         live: liveAt('Staged'),
         listHeatsImpl: vi.fn(async () => [HEAT_IN_ROUND])
       });
+      render(AudioHost, { session });
       render(LiveRaceControl, { session });
       await vi.advanceTimersByTimeAsync(0);
       await tick();
@@ -703,6 +714,7 @@ describe('LiveRaceControl', () => {
         listHeatsImpl: vi.fn(async () => [{ ...HEAT_IN_ROUND, lineup: ['maverick-4d9rp8'] }]),
         listPilotsImpl: vi.fn(async () => CO_PILOTS as unknown as never)
       });
+      render(AudioHost, { session: madeSession.session });
       render(LiveRaceControl, { session: madeSession.session });
       return { ...madeSession, ...audioStub, ...speech };
     }

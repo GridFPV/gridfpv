@@ -49,10 +49,7 @@
   import { useStagingClock, formatStaging } from '../lib/stagingClock.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
   import { useArmingClock, formatArming } from '../lib/armingClock.svelte.js';
-  import { RaceAudioPlayer } from '../lib/raceAudio.js';
-  import { CalloutQueue, lapCalloutText } from '../lib/callouts.js';
-  import { useEndOfRaceTones } from '../lib/endTones.svelte.js';
-  import { useLapCallouts } from '../lib/lapCallouts.svelte.js';
+  import { raceDayAudio } from '../lib/raceDayAudio.svelte.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
 
@@ -280,8 +277,6 @@
   });
   // The round's staging window in seconds (default 5:00) — the staging countdown counts down from it.
   const stagingSecs = $derived(currentRound?.staging_timer_secs ?? 300);
-  // The round's start-tone cue (pitch/length), when configured; else the player's default tone.
-  const toneCue = $derived(currentRound?.start_procedure?.tone);
 
   // ── Open-practice per-channel board (open-practice Slice 2) ───────────────────────────────────
   // The casual **open-practice** format runs one open heat over the active **channels**: its live
@@ -408,68 +403,10 @@
     () => session.serverNowMs()
   );
 
-  // ── Race-day audio (procedure tones + informational callouts) ─────────────────────────────────
-  // One RaceAudioPlayer (Web-Audio tones) + one CalloutQueue (spoken lap callouts) per console.
-  // PROCEDURE tones — start tone, end-of-race countdown, race-end buzzer — are ALWAYS ON (the old
-  // "Tone on/off" toggle is gone; it was a testing convenience). The INFORMATIONAL layer — crossing
-  // pips + spoken callouts — is what the "Callouts" toggle mutes.
-  const audio = new RaceAudioPlayer();
-  const callouts = new CalloutQueue();
-  $effect(() => () => {
-    callouts.cancel();
-    audio.dispose();
-  });
-
-  // Autoplay unlock: with no tone toggle to click first, the RD's FIRST gesture anywhere on the
-  // page resumes the AudioContext (in addition to the Stage/Start handlers below), so the always-on
-  // procedure tones are never blocked by the browser autoplay policy.
-  $effect(() => {
-    const unlock = () => void audio.resume();
-    document.addEventListener('pointerdown', unlock, { once: true });
-    return () => document.removeEventListener('pointerdown', unlock);
-  });
-
-  // ── Start tone synced to race-go (heat-lifecycle Slice 3; robustness + late-join fix) ──────────
-  // A Web-Audio burst the moment a heat goes live (race-go). The runtime logs
-  // `HeatStarting { delay_ms }` then auto-appends the Running transition after the (hidden) random
-  // hold; the console plays the tone when the *live phase* turns Running.
-  //
-  // ── Fire on an OBSERVED transition into Running — not on a late join ──────────────────────────
-  // The tone is a race-go cue for the RD *watching* the heat go live. It must fire when the heat
-  // crosses **into** `Running` from a pre-Running phase the console actually saw this mount — i.e.
-  // a genuine race-go (Stage → Start → … → Running) or a fast/batched Armed → Running (we'd still
-  // have seen Staged/Armed first). It must **not** fire when the RD merely **navigates to the Live
-  // page of an already-running heat** (a late join): there the first phase the console observes for
-  // that heat *is* `Running`, with no prior pre-Running phase seen — an unwanted buzz on every
-  // navigation. So we only fire on `Running` if a pre-Running phase (`Scheduled`/`Staged`/`Armed`)
-  // was observed for this heat first; a heat seen Running as its first phase is suppressed.
-  //
-  // Per heat we track two things, both reset on a heat change: whether a pre-Running phase was seen
-  // (`tonePreRunningForHeat`), and whether the tone already fired (`toneFiredForHeat`, so repeated
-  // Running snapshots / progress updates don't re-fire). The next heat resets and fires its own.
-  let toneFiredForHeat = $state<HeatId | undefined>(undefined);
-  let tonePreRunningForHeat = $state<HeatId | undefined>(undefined);
-  $effect(() => {
-    const p = phase;
-    const h = heat;
-    if (h === undefined) return;
-    if (p !== 'Running') {
-      // A pre-Running phase for this heat (or a fold back out of Running): remember that we observed
-      // a non-Running phase first, and (on a heat change) clear the fired flag so the next heat that
-      // enters Running fires its own tone. We only *arm* on an actual pre-Running phase so a heat
-      // that started Running then folded back to Unofficial/Final doesn't arm a spurious tone.
-      if (p === 'Scheduled' || p === 'Staged' || p === 'Armed') tonePreRunningForHeat = h;
-      if (toneFiredForHeat !== h) toneFiredForHeat = undefined;
-      return;
-    }
-    // p === 'Running'. Fire once — but only if a pre-Running phase for THIS heat was observed first
-    // (a genuine race-go we watched), not when Running is the first phase seen (a late join / page
-    // load onto an in-progress heat).
-    if (toneFiredForHeat !== h && tonePreRunningForHeat === h) {
-      toneFiredForHeat = h;
-      audio.playStartTone(toneCue);
-    }
-  });
+  // ── Race-day audio — APP-WIDE (see lib/raceDayAudio.svelte.ts) ────────────────────────────────
+  // The tones + callouts controller is mounted once in App.svelte and follows the live stream on
+  // every page; this screen only exposes the Callouts toggle and unlocks audio on control clicks.
+  const audio = raceDayAudio();
 
   // ── The known fixed race end (end-of-race tones + the countdown clock) ────────────────────────
   // Only a heat whose end instant the clock already knows gets a countdown: a Timed win-condition
@@ -485,68 +422,10 @@
     windowMicros !== undefined ? windowMicros / 1000 - elapsedMs : undefined
   );
 
-  // ── End-of-race countdown + buzzer (procedure tones — always on) ───────────────────────────────
-  // At remaining 5…1s a short pip each second; at 0 the lower, longer race-end buzzer. The schedule
-  // derives from the SAME server-anchored clock the heat-time readout uses (`serverNowMs` against
-  // `race_started_at`) and fires each mark once per heat run — see endTones.svelte.ts. The buzzer
-  // marks the WINDOW end; grace-window laps still count after it (scoring untouched).
-  useEndOfRaceTones(
-    () => phase,
-    () => heat,
-    () => live?.race_started_at,
-    () => windowMicros,
-    () => session.serverNowMs(),
-    {
-      onCountdown: () => audio.playCountdownBeep(),
-      onRaceEnd: () => audio.playRaceEndTone()
-    }
-  );
-
-  // ── Lap callouts (informational layer — the "Callouts" toggle mutes these) ─────────────────────
-  // Each NEW lap on the current Running heat: an immediate crossing pip, then a queued spoken
-  // "<callsign>, lap N, M.SS". Detection (once per count-increase per run, no ghost callouts from
-  // late joins / corrections / non-current heats) lives in lapCallouts.svelte.ts; the callsign
-  // resolves through the shared competitor-name resolver (friendly-names rule) — when even the
-  // resolver falls back to the raw ref, the callout skips the name rather than speaking an id.
-  // The ref keys the queue's per-pilot supersede: a pilot's next crossing replaces their still-
-  // waiting previous callout, so a pack burst never backs the voice up into narrating history
-  // (and the lap TIME is always spoken — see callouts.ts).
-  useLapCallouts(
-    () => phase,
-    () => heat,
-    () => live?.race_started_at,
-    () => live?.progress,
-    (crossing) => {
-      if (audio.muted) return; // the informational layer is mute-scoped
-      audio.playCrossingBeep();
-      const name = competitorName(crossing.ref);
-      callouts.enqueue({
-        text: lapCalloutText(
-          name === crossing.ref ? undefined : name,
-          crossing.lap,
-          crossing.lastLapMicros
-        ),
-        key: crossing.ref
-      });
-    }
-  );
-  // A natural race end (Running → Unofficial → Final) lets the queue DRAIN — the final laps'
-  // times are exactly what the RD and pilots are waiting to hear, and cancelling here used to
-  // chop the last callout mid-word at the buzzer. Only a *new run taking the stage* (the pre-run
-  // phases: the next heat scheduled/staged/armed, or this one restarted) drops the backlog —
-  // narrating a stale race over the next staging is noise.
-  $effect(() => {
-    if (phase === 'Scheduled' || phase === 'Staged' || phase === 'Armed') callouts.cancel();
-  });
-
   let muted = $state(audio.muted);
   function toggleMute() {
-    // The toggle is itself a user gesture — unlock the audio context here too so an RD who only
-    // ever touches this button (never a transition) still gets audible tones.
-    void audio.resume();
+    // The toggle is itself a user gesture — the controller unlocks + warms the engine too.
     muted = audio.toggleMuted();
-    // Muting mid-race also drops the queued speech — silence means silence, immediately.
-    if (muted) callouts.cancel();
   }
 
   // A live, provisional leaderboard from the running order + per-pilot progress, so the
@@ -581,7 +460,7 @@
     if (!heat) return;
     // Unlock the audio context on this user gesture (autoplay policy) so the later race-go tone is
     // audible — every transition click counts, well before the heat reaches Running.
-    void audio.resume();
+    audio.resume();
     const ack = await session.send(commandForAction(action, heat));
     // Finalizing locks in the heat result; pull it so the Results screen has it to show. The
     // live stream only carries `LiveRaceState`, so the scored `HeatResult` is a separate

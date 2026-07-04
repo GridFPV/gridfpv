@@ -26,6 +26,7 @@
   import '@gridfpv/components/tokens.css';
   import { ToastHost, Dialog, Button, Field, Input, toast } from '@gridfpv/components';
   import { Session } from './lib/session.svelte.js';
+  import { mountRaceDayAudio } from './lib/raceDayAudio.svelte.js';
   import ContextHeader from './ContextHeader.svelte';
   import Breadcrumbs from './Breadcrumbs.svelte';
   import Brand from './Brand.svelte';
@@ -55,6 +56,9 @@
   } from './lib/route.js';
 
   const session = new Session();
+  // App-wide race-day audio: tones + lap callouts follow the live stream on EVERY page (the
+  // race must be audible while the RD is on rounds/marshaling/results, not just Live control).
+  mountRaceDayAudio(session);
 
   // Role seam (#55/#80): a `?role=readonly` query selects the read-only-pilot tier, which hides
   // every mutating control (the Marshaling actions, etc.). The Director is the enforced boundary;

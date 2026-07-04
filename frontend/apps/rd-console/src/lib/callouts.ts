@@ -42,6 +42,16 @@ export interface CalloutSpeech {
   makeUtterance(text: string): SpeechUtteranceLike;
 }
 
+/**
+ * The per-utterance WATCHDOG: if neither `onend` nor `onerror` fires within this window the
+ * utterance is declared dead and the queue advances. Chrome's speech engine is known to
+ * swallow an utterance silently — worst on its very first use after page load, while the TTS
+ * backend spins up — and with a serialized queue one dead utterance used to dam every
+ * subsequent callout (observed in the field as ~13s of race with no voice). A real lap
+ * callout speaks in 1–2s; 6s is comfortably past any legitimate utterance.
+ */
+export const UTTERANCE_WATCHDOG_MS = 6_000;
+
 /** One queued callout: the spoken text plus an optional supersede key (see {@link CalloutQueue}). */
 export interface Callout {
   text: string;
@@ -77,6 +87,8 @@ export class CalloutQueue {
   /** The utterance currently being spoken — the serialization token (also guards a stale `onend`
    * from a cancelled utterance pumping a second, concurrent chain). */
   #current: SpeechUtteranceLike | undefined;
+  /** The current utterance's dead-engine watchdog timer (see {@link UTTERANCE_WATCHDOG_MS}). */
+  #watchdog: ReturnType<typeof setTimeout> | undefined;
 
   constructor(speech?: CalloutSpeech) {
     this.#speech = speech ?? platformSpeech();
@@ -114,6 +126,8 @@ export class CalloutQueue {
   cancel(): void {
     this.#queue = [];
     this.#current = undefined;
+    if (this.#watchdog !== undefined) clearTimeout(this.#watchdog);
+    this.#watchdog = undefined;
     try {
       this.#speech?.synth.cancel();
     } catch {
@@ -132,16 +146,49 @@ export class CalloutQueue {
         // A cancel() (or a newer utterance) may have superseded this one — a stale onend must not
         // pump a second, concurrent chain.
         if (this.#current !== utterance) return;
+        if (this.#watchdog !== undefined) clearTimeout(this.#watchdog);
+        this.#watchdog = undefined;
         this.#current = undefined;
         this.#pump();
       };
       utterance.onend = done;
       utterance.onerror = done;
       this.#current = utterance;
+      // The watchdog: a cold/buggy TTS engine can swallow an utterance without EVER calling
+      // back — declare it dead after the window, cancel the engine (unsticks Chrome), advance.
+      if (this.#watchdog !== undefined) clearTimeout(this.#watchdog);
+      this.#watchdog = setTimeout(() => {
+        if (this.#current !== utterance) return;
+        this.#watchdog = undefined;
+        this.#current = undefined;
+        try {
+          this.#speech?.synth.cancel();
+        } catch {
+          /* unsticking a dead engine must never throw */
+        }
+        this.#pump();
+      }, UTTERANCE_WATCHDOG_MS);
       this.#speech.synth.speak(utterance);
     } catch {
       // The utterance never started — clear the token so the queue isn't wedged.
       this.#current = undefined;
+    }
+  }
+
+  /**
+   * WARM UP the speech engine: speak a single space at volume 0 so the TTS backend loads its
+   * voices and spins up BEFORE the first real callout (the engine's first-ever utterance can
+   * take seconds — or die silently — while it initializes; see the watchdog). Called from the
+   * console's one-time audio-unlock gesture. A no-op where speech is unavailable; never throws.
+   */
+  warmUp(): void {
+    if (!this.#speech || this.#current) return;
+    try {
+      const u = this.#speech.makeUtterance(' ');
+      (u as { volume?: number }).volume = 0;
+      this.#speech.synth.speak(u);
+    } catch {
+      /* warm-up is best-effort */
     }
   }
 }
