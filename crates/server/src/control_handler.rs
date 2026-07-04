@@ -18,17 +18,31 @@
 //! | [`Command::ScheduleHeat`] | the id is genuinely **new**, the lineup seats no competitor twice, and a `round`/`class` tag resolves against the event meta (round exists; class selected + round-eligible; pilot refs are eligible members) — #335 | [`Event::HeatScheduled`] |
 //! | [`Command::SetCurrentHeat`] | the heat exists in the log | [`Event::CurrentHeatSelected`] |
 //! | [`Command::Register`] | none (the binding is always recordable; last-registration-wins folds downstream) | [`Event::CompetitorRegistered`] |
-//! | [`Command::VoidDetection`] | the `target` offset exists and is a lap-gate pass (raw [`Pass`](gridfpv_events::Pass), or a synthetic `LapInserted`/`LapSplit`) | [`Event::DetectionVoided`] |
-//! | [`Command::AdjustLap`] | the `target` offset exists and is a lap-gate pass (raw or synthetic, as above) | [`Event::LapAdjusted`] |
-//! | [`Command::InsertLap`] | none (it adds a pass) | [`Event::LapInserted`] |
-//! | [`Command::SplitLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) (the lap's ending pass) | [`Event::LapSplit`] |
-//! | [`Command::VoidHeat`] | the heat exists in the log | [`Event::HeatVoided`] |
-//! | [`Command::ApplyPenalty`] | the heat exists in the log | [`Event::PenaltyApplied`] |
-//! | [`Command::DeductPoints`] | the heat exists in the log | [`Event::PenaltyApplied`] (`PointsDeducted`) |
-//! | [`Command::ThrowOutLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) | [`Event::LapThrownOut`] |
-//! | [`Command::FileProtest`] | the heat exists in the log | [`Event::ProtestFiled`] |
-//! | [`Command::ResolveProtest`] | the `target` offset exists and is a [`Event::ProtestFiled`] | [`Event::ProtestResolved`] |
-//! | [`Command::ReverseRuling`] | the `target` offset exists and is a reversible ruling (penalty / throw-out / protest resolution / heat-void) | [`Event::RulingReversed`] |
+//! | [`Command::VoidDetection`] | the `target` offset exists and is a lap-gate pass (raw [`Pass`](gridfpv_events::Pass), or a synthetic `LapInserted`/`LapSplit`); the target's owning heat is not **Final** | [`Event::DetectionVoided`] |
+//! | [`Command::AdjustLap`] | the `target` offset exists and is a lap-gate pass (raw or synthetic, as above); the target's owning heat is not **Final** | [`Event::LapAdjusted`] |
+//! | [`Command::InsertLap`] | a tagged insert names a scheduled heat that is not **Final**; an untagged (legacy) one requires the positionally-active heat at the log tail to not be **Final** | [`Event::LapInserted`] |
+//! | [`Command::SplitLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass) (the lap's ending pass); the target's owning heat is not **Final** | [`Event::LapSplit`] |
+//! | [`Command::VoidHeat`] | the heat exists in the log and is not **Final** | [`Event::HeatVoided`] |
+//! | [`Command::ApplyPenalty`] | the heat exists in the log and is not **Final** | [`Event::PenaltyApplied`] |
+//! | [`Command::DeductPoints`] | the heat exists in the log and is not **Final** | [`Event::PenaltyApplied`] (`PointsDeducted`) |
+//! | [`Command::ThrowOutLap`] | the `target` offset exists and is a [`Pass`](gridfpv_events::Pass); the target's owning heat is not **Final** | [`Event::LapThrownOut`] |
+//! | [`Command::FileProtest`] | the heat exists in the log (**allowed on a Final heat** — filing changes no result) | [`Event::ProtestFiled`] |
+//! | [`Command::ResolveProtest`] | the `target` offset exists and is a [`Event::ProtestFiled`] (**allowed on a Final heat** — resolving changes no result) | [`Event::ProtestResolved`] |
+//! | [`Command::ReverseRuling`] | the `target` offset exists and is a reversible ruling (penalty / throw-out / protest resolution / heat-void); the target's owning heat is not **Final** | [`Event::RulingReversed`] |
+//!
+//! ## An official (Final) result is locked — Revert to marshal
+//!
+//! Every **result-changing** marshaling command above is additionally gated on the marshaled
+//! heat's folded state ([`heat::heat_state`], the same fold the FSM checks use) not being
+//! [`Final`](gridfpv_engine::heat::HeatState::Final): an official result must not silently
+//! re-score under a ruling — the RD `Revert`s it first (the sanctioned re-open), marshals, and
+//! re-finalizes. Heat-addressed commands check their own heat ([`require_not_final`]);
+//! target-addressed ones resolve the target's **owning heat** first ([`heat_of_offset`] —
+//! by tag, by ruling-chain recursion, or positionally) and check that. The heat-loop
+//! transitions themselves (`Revert`/`Discard`/`Restart`, …) are untouched. **Protests are
+//! exempt**: filing and resolving a protest changes no result, so both stay legal on a Final
+//! heat (an upheld protest is then acted on via Revert, where the open-protest Finalize gate
+//! composes correctly).
 //!
 //! ## Legality lives in the engine (reused, not re-implemented)
 //!
@@ -947,19 +961,23 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             pilot,
         }),
 
-        // --- Marshaling adjudications: validate targets where cheap, then append. ---
+        // --- Marshaling adjudications: validate targets where cheap, reject any result-changing
+        // ruling on an OFFICIAL (Final) heat (Revert is the sanctioned re-open), then append. ---
         Command::VoidDetection { target } => {
             require_pass_target(state, target)?;
+            require_target_heat_not_final(state, target)?;
             Ok(Event::DetectionVoided { target })
         }
         Command::AdjustLap { target, at } => {
             require_pass_target(state, target)?;
+            require_target_heat_not_final(state, target)?;
             Ok(Event::LapAdjusted { target, at })
         }
         Command::SplitLap { target, at } => {
             // The split's target is the pass that *ends* the over-long lap — a real Pass,
             // validated exactly like `VoidDetection`/`AdjustLap`.
             require_pass_target(state, target)?;
+            require_target_heat_not_final(state, target)?;
             Ok(Event::LapSplit { target, at })
         }
         Command::InsertLap {
@@ -969,10 +987,25 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             heat,
         } => {
             // A tagged insertion must name a real heat (the tag is what routes it into that
-            // heat's scoring window even when a different heat is live); an untagged one is a
-            // legacy client and attributes positionally, as before.
-            if let Some(h) = &heat {
-                require_scheduled_heat(state, h)?;
+            // heat's scoring window even when a different heat is live) that is not Final; an
+            // untagged one is a legacy client and attributes positionally, so the lock checks
+            // the heat the insertion WOULD land in — the positionally-active heat at the log
+            // tail.
+            match &heat {
+                Some(h) => {
+                    require_scheduled_heat(state, h)?;
+                    require_not_final(state, h)?;
+                }
+                None => {
+                    let (events, _cursor) = state.read()?;
+                    if let Some(active) = events
+                        .len()
+                        .checked_sub(1)
+                        .and_then(|tail| positional_heat_at(&events, tail))
+                    {
+                        require_not_final_in(&events, &active)?;
+                    }
+                }
             }
             Ok(Event::LapInserted {
                 adapter,
@@ -983,6 +1016,7 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         }
         Command::VoidHeat { heat } => {
             require_scheduled_heat(state, &heat)?;
+            require_not_final(state, &heat)?;
             Ok(Event::HeatVoided { heat })
         }
         Command::ApplyPenalty {
@@ -991,6 +1025,7 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             penalty,
         } => {
             require_scheduled_heat(state, &heat)?;
+            require_not_final(state, &heat)?;
             Ok(Event::PenaltyApplied {
                 heat,
                 competitor,
@@ -1004,6 +1039,7 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
             points,
         } => {
             require_scheduled_heat(state, &heat)?;
+            require_not_final(state, &heat)?;
             Ok(Event::PenaltyApplied {
                 heat,
                 competitor,
@@ -1016,9 +1052,12 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         // any lap-end-producing event, not only a raw `Pass`.
         Command::ThrowOutLap { target } => {
             require_lap_end_target(state, target)?;
+            require_target_heat_not_final(state, target)?;
             Ok(Event::LapThrownOut { target })
         }
-        // File a protest against a heat result — the append-only filing fact.
+        // File a protest against a heat result — the append-only filing fact. Deliberately NOT
+        // gated on Final: a protest changes no result, and disputing an already-official one is
+        // exactly what protests are for (the RD Reverts only if the protest is upheld).
         Command::FileProtest {
             heat,
             competitor,
@@ -1031,7 +1070,10 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
                 note,
             })
         }
-        // Resolve a filed protest — the target must be a real `ProtestFiled`.
+        // Resolve a filed protest — the target must be a real `ProtestFiled`. Also NOT gated on
+        // Final: a protest filed against an official result must be resolvable (e.g. denied)
+        // without re-opening it; an upheld one is acted on via Revert, where the open-protest
+        // Finalize gate composes correctly.
         Command::ResolveProtest { target, outcome } => {
             require_protest_target(state, target)?;
             Ok(Event::ProtestResolved { target, outcome })
@@ -1039,8 +1081,11 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::ReverseRuling { target } => {
             // Generalized reversal (Slice 6): the target must be a real *ruling* — a penalty, a
             // throw-out, a protest resolution, or a heat-void. Validated so an out-of-range or
-            // non-ruling offset is a typed BadRequest (nothing appended).
+            // non-ruling offset is a typed BadRequest (nothing appended). Reversal DOES change
+            // the result, so it is uniformly locked on a Final heat (even when its target is a
+            // protest resolution — revert-first keeps the official record honest).
             require_ruling_target(state, target)?;
+            require_target_heat_not_final(state, target)?;
             Ok(Event::RulingReversed { target })
         }
     }
@@ -1119,6 +1164,105 @@ fn require_scheduled_heat(state: &AppState, heat: &HeatId) -> Result<(), Protoco
             format!("no heat scheduled with id {:?}", heat.0),
         ))
     }
+}
+
+/// Reject a result-changing marshaling command on a heat whose folded state is **`Final`** —
+/// an official result is locked; `Revert` (Final → Unofficial) is the sanctioned re-open.
+///
+/// Folds with the same [`heat::heat_state`] the FSM legality checks use, so "official" here is
+/// exactly the state the heat-loop (and the live view's phase badge) sees. Any other state —
+/// including "never scheduled" (`None`, which the existence checks reject separately) — passes.
+/// A locked heat maps to a typed [`ErrorCode::BadRequest`]; nothing is appended.
+fn require_not_final(state: &AppState, heat: &HeatId) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    require_not_final_in(&events, heat)
+}
+
+/// [`require_not_final`] over an already-read log slice (the shared core, so a caller that has
+/// the events in hand — e.g. the target-addressed path — doesn't re-read the log).
+fn require_not_final_in(events: &[Event], heat: &HeatId) -> Result<(), ProtocolError> {
+    if heat::heat_state(events, heat) == Some(gridfpv_engine::heat::HeatState::Final) {
+        Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "heat {:?} result is official (Final) — Revert it to marshal",
+                heat.0
+            ),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// The Final-lock check for the **target-addressed** marshaling commands (`VoidDetection` /
+/// `AdjustLap` / `SplitLap` / `ThrowOutLap` / `ReverseRuling`): resolve the target's owning
+/// heat ([`heat_of_offset`]) and require it not be `Final`. A target whose owning heat cannot
+/// be resolved passes — there is nothing official to protect.
+fn require_target_heat_not_final(state: &AppState, target: LogRef) -> Result<(), ProtocolError> {
+    let (events, _cursor) = state.read()?;
+    match heat_of_offset(&events, target) {
+        Some(heat) => require_not_final_in(&events, &heat),
+        None => Ok(()),
+    }
+}
+
+/// Resolve the heat that **owns** the event at log offset `target` — the heat a ruling aimed at
+/// that offset would re-score. `None` when no owning heat resolves (an out-of-range offset, or
+/// an event before any heat ran).
+///
+/// The routing rules mirror [`crate::app::heat_window_offsets`] (the one window fold results
+/// and audits are keyed on), by what the event itself can say about where it belongs:
+///
+/// - **Heat-tagged** events (heat-loop, `HeatVoided`/`PenaltyApplied`/`ProtestFiled`, a tagged
+///   `LapInserted`) own their heat outright — the tag, never the position.
+/// - **Offset-addressed rulings** (`DetectionVoided`/`LapAdjusted`/`LapSplit`/`LapThrownOut`/
+///   `ProtestResolved`/`RulingReversed`) belong to whichever heat *their* target is in —
+///   recurse down the chain ("reverse the ruling that voided the pass…"). Targets always point
+///   backwards, so the walk terminates; a malformed forward/self target resolves to `None`.
+/// - **Untagged** events (raw `Pass`es, a legacy untagged `LapInserted`) attribute
+///   **positionally** ([`positional_heat_at`]) — the heat whose heat-loop span contains the
+///   offset, the same `active`-cursor rule `heat_window_offsets` applies.
+pub(crate) fn heat_of_offset(events: &[Event], target: LogRef) -> Option<HeatId> {
+    let mut offset = target.0 as usize;
+    loop {
+        match events.get(offset)? {
+            Event::HeatScheduled { heat, .. }
+            | Event::HeatStateChanged { heat, .. }
+            | Event::HeatVoided { heat }
+            | Event::PenaltyApplied { heat, .. }
+            | Event::ProtestFiled { heat, .. } => return Some(heat.clone()),
+            Event::LapInserted { heat: Some(h), .. } => return Some(h.clone()),
+            Event::DetectionVoided { target }
+            | Event::LapAdjusted { target, .. }
+            | Event::LapSplit { target, .. }
+            | Event::LapThrownOut { target }
+            | Event::ProtestResolved { target, .. }
+            | Event::RulingReversed { target } => {
+                let next = target.0 as usize;
+                if next >= offset {
+                    return None; // malformed chain (targets must point backwards) — bail, don't loop
+                }
+                offset = next;
+            }
+            _ => return positional_heat_at(events, offset),
+        }
+    }
+}
+
+/// The heat **positionally active** at log offset `offset`: the heat of the latest heat-loop
+/// event (`HeatScheduled` / `HeatStateChanged`) at or before it. This is the same `active`
+/// cursor [`crate::app::heat_window_offsets`] walks to attribute untagged events (raw passes,
+/// legacy insertions) to a heat — kept a small faithful re-walk here because the window fold
+/// interleaves it with tag/target routing and run-start trimming that don't apply to a single
+/// offset lookup. `None` before any heat has appeared in the log.
+fn positional_heat_at(events: &[Event], offset: usize) -> Option<HeatId> {
+    let mut active: Option<&HeatId> = None;
+    for event in events.iter().take(offset.saturating_add(1)) {
+        if let Event::HeatScheduled { heat, .. } | Event::HeatStateChanged { heat, .. } = event {
+            active = Some(heat);
+        }
+    }
+    active.cloned()
 }
 
 /// Require that `target` names a real lap **end** in the log — a raw [`Pass`](gridfpv_events::Pass)
@@ -2268,6 +2412,333 @@ mod tests {
         let ack = apply_command(&state, Command::ReverseRuling { target: LogRef(0) });
         assert!(!ack.ok);
         assert_eq!(ack.error.unwrap().code, ErrorCode::BadRequest);
+    }
+
+    // ── The official-result lock: no result-changing ruling on a Final heat ──────────────────
+
+    /// The exact rejection every locked command answers on a Final heat.
+    fn final_lock_message() -> String {
+        "heat \"q-1\" result is official (Final) — Revert it to marshal".to_string()
+    }
+
+    /// Drive `q-1` (already scheduled) to **Final** on the bare `apply_command` path, banking one
+    /// real pass while Running. Returns the state and the pass's global offset (a valid target
+    /// for the offset-addressed commands).
+    fn final_state_with_pass() -> (AppState, u64) {
+        let state = scheduled_state();
+        for cmd in [
+            Command::Stage { heat: heat() },
+            Command::Start { heat: heat() },
+            Command::SkipCountdown { heat: heat() },
+        ] {
+            let ack = apply_command(&state, cmd.clone());
+            assert!(ack.ok, "driving q-1 to Running via {cmd:?}: {ack:?}");
+        }
+        let pass_offset = state.append(pass("A", 1_000_000, 1), None).unwrap();
+        for cmd in [
+            Command::ForceEnd { heat: heat() },
+            Command::Finalize { heat: heat() },
+        ] {
+            let ack = apply_command(&state, cmd.clone());
+            assert!(ack.ok, "driving q-1 to Final via {cmd:?}: {ack:?}");
+        }
+        (state, pass_offset)
+    }
+
+    /// Every result-changing marshaling command is rejected on a **Final** heat with the exact
+    /// "official — Revert it to marshal" BadRequest (appending nothing), and the SAME command is
+    /// accepted after `Revert` re-opens the result to Unofficial.
+    #[test]
+    fn result_changing_commands_are_locked_on_a_final_heat_until_revert() {
+        let (state, pass_offset) = final_state_with_pass();
+        let commands = [
+            Command::VoidHeat { heat: heat() },
+            Command::ApplyPenalty {
+                heat: heat(),
+                competitor: CompetitorRef("A".into()),
+                penalty: Penalty::TimeAdded { micros: 2_000_000 },
+            },
+            Command::DeductPoints {
+                heat: heat(),
+                competitor: CompetitorRef("A".into()),
+                points: 1,
+            },
+            // A heat-TAGGED insert names the Final heat directly.
+            Command::InsertLap {
+                adapter: AdapterId("vd".into()),
+                competitor: CompetitorRef("A".into()),
+                at: SourceTime::from_micros(2_000_000),
+                heat: Some(heat()),
+            },
+            // The offset-addressed commands resolve the pass's OWNING heat (positional → q-1).
+            Command::VoidDetection {
+                target: LogRef(pass_offset),
+            },
+            Command::AdjustLap {
+                target: LogRef(pass_offset),
+                at: SourceTime::from_micros(1_500_000),
+            },
+            Command::SplitLap {
+                target: LogRef(pass_offset),
+                at: SourceTime::from_micros(500_000),
+            },
+            Command::ThrowOutLap {
+                target: LogRef(pass_offset),
+            },
+        ];
+
+        // On the Final heat: every command bounces with the exact message, appending nothing.
+        for cmd in &commands {
+            let (before, _) = state.read().unwrap();
+            let ack = apply_command(&state, cmd.clone());
+            assert!(!ack.ok, "{cmd:?} must be rejected on a Final heat");
+            let err = ack.error.expect("a failed ack carries the error");
+            assert_eq!(err.code, ErrorCode::BadRequest, "{cmd:?}");
+            assert_eq!(err.message, final_lock_message(), "{cmd:?}");
+            let (after, _) = state.read().unwrap();
+            assert_eq!(
+                before.len(),
+                after.len(),
+                "{cmd:?} appended on a Final heat"
+            );
+        }
+
+        // Revert (Final → Unofficial) is the sanctioned re-open…
+        let ack = apply_command(&state, Command::Revert { heat: heat() });
+        assert!(ack.ok, "Revert re-opens the result: {ack:?}");
+        // …after which the very same commands are accepted.
+        for cmd in &commands {
+            let ack = apply_command(&state, cmd.clone());
+            assert!(ack.ok, "{cmd:?} must be accepted after Revert: {ack:?}");
+        }
+    }
+
+    /// The target-addressed resolution end to end: voiding a pass that belongs to a Final heat
+    /// via its offset is rejected; the SAME offset is voidable after Revert.
+    #[test]
+    fn void_by_offset_is_locked_while_the_owning_heat_is_final() {
+        let (state, pass_offset) = final_state_with_pass();
+
+        let ack = apply_command(
+            &state,
+            Command::VoidDetection {
+                target: LogRef(pass_offset),
+            },
+        );
+        assert!(!ack.ok, "voiding a Final heat's pass must be rejected");
+        assert_eq!(ack.error.unwrap().message, final_lock_message());
+
+        assert!(apply_command(&state, Command::Revert { heat: heat() }).ok);
+        let ack = apply_command(
+            &state,
+            Command::VoidDetection {
+                target: LogRef(pass_offset),
+            },
+        );
+        assert!(ack.ok, "the same offset voids after Revert: {ack:?}");
+    }
+
+    /// `ReverseRuling` is locked on a Final heat too — its owning heat resolves through the
+    /// ruling chain (the reversal targets a penalty whose TAG names the Final heat).
+    #[test]
+    fn reverse_ruling_is_locked_via_the_ruling_chain_owning_heat() {
+        // Bank a penalty while the heat is still Unofficial (legal), then finalize.
+        let state = scheduled_state();
+        for cmd in [
+            Command::Stage { heat: heat() },
+            Command::Start { heat: heat() },
+            Command::SkipCountdown { heat: heat() },
+            Command::ForceEnd { heat: heat() },
+        ] {
+            assert!(apply_command(&state, cmd).ok);
+        }
+        assert!(
+            apply_command(
+                &state,
+                Command::ApplyPenalty {
+                    heat: heat(),
+                    competitor: CompetitorRef("A".into()),
+                    penalty: Penalty::TimeAdded { micros: 1_000_000 },
+                },
+            )
+            .ok
+        );
+        let (events, _) = state.read().unwrap();
+        let penalty_offset = (events.len() - 1) as u64;
+        assert!(matches!(events.last(), Some(Event::PenaltyApplied { .. })));
+        assert!(apply_command(&state, Command::Finalize { heat: heat() }).ok);
+
+        // Reversing the penalty would change the OFFICIAL result — rejected.
+        let ack = apply_command(
+            &state,
+            Command::ReverseRuling {
+                target: LogRef(penalty_offset),
+            },
+        );
+        assert!(!ack.ok);
+        assert_eq!(ack.error.unwrap().message, final_lock_message());
+
+        // Revert, then the reversal lands.
+        assert!(apply_command(&state, Command::Revert { heat: heat() }).ok);
+        let ack = apply_command(
+            &state,
+            Command::ReverseRuling {
+                target: LogRef(penalty_offset),
+            },
+        );
+        assert!(ack.ok, "reversal after Revert: {ack:?}");
+    }
+
+    /// An UNTAGGED (legacy) `InsertLap` attributes positionally, so the lock checks the
+    /// positionally-active heat at the log tail — Final rejects, post-Revert accepts, and an
+    /// empty log (no heat to protect) always accepts.
+    #[test]
+    fn untagged_insert_lap_checks_the_positionally_active_heat_at_the_tail() {
+        let insert = || Command::InsertLap {
+            adapter: AdapterId("vd".into()),
+            competitor: CompetitorRef("A".into()),
+            at: SourceTime::from_micros(3_000_000),
+            heat: None,
+        };
+
+        // The log tail sits inside q-1's span and q-1 is Final → the insertion would attribute
+        // to the official result: rejected.
+        let (state, _) = final_state_with_pass();
+        let ack = apply_command(&state, insert());
+        assert!(!ack.ok, "untagged insert on a Final tail must be rejected");
+        assert_eq!(ack.error.unwrap().message, final_lock_message());
+
+        // After Revert the same insertion lands.
+        assert!(apply_command(&state, Command::Revert { heat: heat() }).ok);
+        assert!(apply_command(&state, insert()).ok);
+
+        // With no heat in the log at all there is nothing official to protect — allowed.
+        let empty = AppState::new(InMemoryLog::default());
+        assert!(apply_command(&empty, insert()).ok);
+    }
+
+    /// Protests are EXEMPT from the lock: filing and resolving change no result, so both stay
+    /// legal on a Final heat (disputing an official result is what protests are for) — and the
+    /// heat remains Final throughout.
+    #[test]
+    fn file_and_resolve_protest_are_allowed_on_a_final_heat() {
+        use gridfpv_engine::heat::{HeatState, heat_state};
+        use gridfpv_events::ProtestOutcome;
+
+        let (state, _) = final_state_with_pass();
+
+        let ack = apply_command(
+            &state,
+            Command::FileProtest {
+                heat: heat(),
+                competitor: CompetitorRef("A".into()),
+                note: "protesting the official result".into(),
+            },
+        );
+        assert!(ack.ok, "FileProtest on a Final heat: {ack:?}");
+        let (events, _) = state.read().unwrap();
+        let filed_offset = (events.len() - 1) as u64;
+        assert!(matches!(events.last(), Some(Event::ProtestFiled { .. })));
+
+        // Resolving it (here: denied) needs no Revert either.
+        let ack = apply_command(
+            &state,
+            Command::ResolveProtest {
+                target: LogRef(filed_offset),
+                outcome: ProtestOutcome::Denied,
+            },
+        );
+        assert!(ack.ok, "ResolveProtest on a Final heat: {ack:?}");
+
+        // The result stayed official the whole time.
+        let (events, _) = state.read().unwrap();
+        assert_eq!(heat_state(&events, &heat()), Some(HeatState::Final));
+    }
+
+    /// `heat_of_offset` resolves an offset's owning heat by tag, by ruling-chain recursion, and
+    /// positionally — mirroring `app::heat_window_offsets`' routing rules.
+    #[test]
+    fn heat_of_offset_resolves_tags_chains_and_positional_attribution() {
+        use gridfpv_events::ProtestOutcome;
+
+        let h1 = HeatId("h-1".into());
+        let h2 = HeatId("h-2".into());
+        let schedule = |h: &HeatId| Event::HeatScheduled {
+            heat: h.clone(),
+            lineup: vec![],
+            class: None,
+            round: None,
+            frequencies: vec![],
+            label: None,
+        };
+        let events = vec![
+            pass("X", 500_000, 1),   // 0: a pass before ANY heat — unattributable
+            schedule(&h1),           // 1: h1 opens
+            pass("A", 1_000_000, 2), // 2: positional → h1
+            Event::LapInserted {
+                // 3: UNTAGGED legacy insert — positional → h1
+                adapter: AdapterId("vd".into()),
+                competitor: CompetitorRef("A".into()),
+                at: SourceTime::from_micros(1_500_000),
+                heat: None,
+            },
+            schedule(&h2),           // 4: h2 opens (closes h1's span)
+            pass("B", 2_000_000, 3), // 5: positional → h2
+            Event::PenaltyApplied {
+                // 6: TAGGED for h1 while h2 is active — tag beats position
+                heat: h1.clone(),
+                competitor: CompetitorRef("A".into()),
+                penalty: Penalty::TimeAdded { micros: 1_000_000 },
+            },
+            Event::DetectionVoided { target: LogRef(2) }, // 7: chain → pass@2 → h1
+            Event::ProtestFiled {
+                // 8: tagged h1
+                heat: h1.clone(),
+                competitor: CompetitorRef("A".into()),
+                note: "contact".into(),
+            },
+            Event::ProtestResolved {
+                // 9: chain → filed@8 → h1
+                target: LogRef(8),
+                outcome: ProtestOutcome::Denied,
+            },
+            Event::RulingReversed { target: LogRef(9) }, // 10: chain, two hops → h1
+            Event::LapInserted {
+                // 11: TAGGED insert for h2
+                adapter: AdapterId("vd".into()),
+                competitor: CompetitorRef("B".into()),
+                at: SourceTime::from_micros(2_500_000),
+                heat: Some(h2.clone()),
+            },
+            Event::RulingReversed { target: LogRef(12) }, // 12: malformed SELF-target — bails
+        ];
+
+        assert_eq!(heat_of_offset(&events, LogRef(0)), None, "pre-heat pass");
+        assert_eq!(heat_of_offset(&events, LogRef(2)), Some(h1.clone()));
+        assert_eq!(
+            heat_of_offset(&events, LogRef(3)),
+            Some(h1.clone()),
+            "untagged insert attributes positionally"
+        );
+        assert_eq!(heat_of_offset(&events, LogRef(5)), Some(h2.clone()));
+        assert_eq!(
+            heat_of_offset(&events, LogRef(6)),
+            Some(h1.clone()),
+            "the tag wins over the active span"
+        );
+        assert_eq!(heat_of_offset(&events, LogRef(7)), Some(h1.clone()));
+        assert_eq!(
+            heat_of_offset(&events, LogRef(10)),
+            Some(h1.clone()),
+            "ruling-chain recursion (reversal → resolution → filing)"
+        );
+        assert_eq!(heat_of_offset(&events, LogRef(11)), Some(h2.clone()));
+        assert_eq!(heat_of_offset(&events, LogRef(99)), None, "out of range");
+        assert_eq!(
+            heat_of_offset(&events, LogRef(12)),
+            None,
+            "a malformed self-target bails instead of looping"
+        );
     }
 
     /// `Register` acks ok and appends the `CompetitorRegistered` binding (#60).
