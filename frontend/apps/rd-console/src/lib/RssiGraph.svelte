@@ -203,16 +203,24 @@
   ): string {
     const n = t.samples.length;
     if (n === 0) return '';
-    const stride = n > MAX_POINTS ? Math.ceil(n / MAX_POINTS) : 1;
+    // Only the samples inside the (possibly zoomed) span, plus one neighbor each side so the
+    // line enters/exits the frame — this is what makes zooming reveal detail: the downsampling
+    // budget is spent on the visible window, not the whole capture.
+    let lo = 0;
+    while (lo < n - 1 && sampleTimeOf(t, lo + 1) < span.from) lo++;
+    let hi = n - 1;
+    while (hi > 0 && sampleTimeOf(t, hi - 1) > span.to) hi--;
+    const visible = hi - lo + 1;
+    const stride = visible > MAX_POINTS ? Math.ceil(visible / MAX_POINTS) : 1;
     const pts: string[] = [];
-    for (let i = 0; i < n; i += stride) {
+    for (let i = lo; i <= hi; i += stride) {
       pts.push(
         `${xOf(sampleTimeOf(t, i), span).toFixed(1)},${yOf(t.samples[i], range).toFixed(1)}`
       );
     }
-    // Always include the last sample so the line reaches the end of the span.
+    // Always include the last visible sample so the line reaches the end of the span.
     pts.push(
-      `${xOf(sampleTimeOf(t, n - 1), span).toFixed(1)},${yOf(t.samples[n - 1], range).toFixed(1)}`
+      `${xOf(sampleTimeOf(t, hi), span).toFixed(1)},${yOf(t.samples[hi], range).toFixed(1)}`
     );
     return pts.join(' ');
   }
@@ -318,6 +326,115 @@
     hover = null;
   }
 
+  // ── Time-axis zoom & pan ──────────────────────────────────────────────────────────────────────
+  // Wheel over a trace zooms around the cursor's instant; when zoomed, dragging the plot pans and
+  // the −/+/reset buttons in the caption do the same without a wheel. Pure VIEW state — zooming
+  // narrows the span every projection already takes, so markers, windows, thresholds, hover and
+  // the add-lap readout all follow for free. One trace zooms at a time (keyed by competitor).
+  const MIN_ZOOM_WINDOW_MICROS = 250_000; // never tighter than 0.25s — samples stay meaningful
+  const WHEEL_ZOOM_FACTOR = 0.8; // one notch in → 80% of the window
+  let zoom = $state<{ ref: CompetitorRef; from: number; to: number } | null>(null);
+
+  /** The span a trace is DRAWN against: the zoom window (clamped inside the full span), else all. */
+  function viewSpanOf(
+    ref: CompetitorRef,
+    full: { from: number; to: number }
+  ): { from: number; to: number } {
+    if (!zoom || zoom.ref !== ref) return full;
+    const fullW = full.to - full.from || 1;
+    const w = Math.min(zoom.to - zoom.from, fullW);
+    let from = Math.max(full.from, zoom.from);
+    if (from + w > full.to) from = full.to - w;
+    return { from, to: from + w };
+  }
+
+  /** Set (or clear) the zoom window: a window at/above the full span resets to unzoomed. */
+  function setZoom(
+    ref: CompetitorRef,
+    full: { from: number; to: number },
+    from: number,
+    width: number
+  ): void {
+    const fullW = full.to - full.from || 1;
+    if (width >= fullW) {
+      zoom = null;
+      return;
+    }
+    const w = Math.max(Math.min(MIN_ZOOM_WINDOW_MICROS, fullW), width);
+    let f = Math.max(full.from, Math.min(from, full.to - w));
+    zoom = { ref, from: f, to: f + w };
+  }
+
+  /** Zoom by `factor` keeping `focusTime` at the same on-screen fraction (wheel-at-cursor). */
+  function zoomAt(
+    ref: CompetitorRef,
+    full: { from: number; to: number },
+    focusTime: number,
+    factor: number
+  ): void {
+    const view = viewSpanOf(ref, full);
+    const curW = view.to - view.from || 1;
+    const width = curW * factor;
+    const frac = Math.min(1, Math.max(0, (focusTime - view.from) / curW));
+    setZoom(ref, full, focusTime - frac * width, width);
+  }
+
+  /** The caption buttons: zoom in/out around the current view's center. */
+  function zoomStep(ref: CompetitorRef, full: { from: number; to: number }, factor: number): void {
+    const view = viewSpanOf(ref, full);
+    zoomAt(ref, full, (view.from + view.to) / 2, factor);
+  }
+
+  function onWheel(e: WheelEvent, ct: CompetitorTrace, full: { from: number; to: number }): void {
+    e.preventDefault();
+    const svg = e.currentTarget as SVGSVGElement;
+    const view = viewSpanOf(ct.competitor.competitor, full);
+    const x = Math.min(PAD_L + plotW, Math.max(PAD_L, pointerX(e, svg)));
+    const focus = timeAt(x, view);
+    zoomAt(
+      ct.competitor.competitor,
+      full,
+      focus,
+      e.deltaY > 0 ? 1 / WHEEL_ZOOM_FACTOR : WHEEL_ZOOM_FACTOR
+    );
+  }
+
+  // Drag-to-pan while zoomed. Starts on the svg background (the threshold handles stop
+  // propagation so their drags stay theirs). Pointer capture is DEFERRED until the pointer
+  // actually moves a few units: capturing on pointerdown retargets the browser's
+  // compatibility `click` to the svg, which silently broke lap-MARKER clicks whenever
+  // zoomed — precisely when marshals click markers.
+  const PAN_START_UNITS = 4;
+  let panning = $state<{ ref: CompetitorRef; lastX: number; engaged: boolean } | null>(null);
+
+  function startPan(e: PointerEvent, ref: CompetitorRef): void {
+    if (!zoom || zoom.ref !== ref) return;
+    panning = { ref, lastX: pointerX(e, e.currentTarget as SVGSVGElement), engaged: false };
+  }
+
+  function movePan(e: PointerEvent, full: { from: number; to: number }): void {
+    if (!panning || !zoom || zoom.ref !== panning.ref) return;
+    const svg = e.currentTarget as SVGSVGElement;
+    const x = pointerX(e, svg);
+    const dx = x - panning.lastX;
+    if (!panning.engaged) {
+      if (Math.abs(dx) < PAN_START_UNITS) return; // a click in progress, not a pan
+      // A real drag: NOW capture (safe — any click this gesture could produce is a drag end).
+      svg.setPointerCapture?.(e.pointerId);
+      panning = { ...panning, engaged: true, lastX: x };
+      return;
+    }
+    if (dx === 0) return;
+    panning = { ...panning, lastX: x };
+    const view = viewSpanOf(panning.ref, full);
+    const dt = (dx / plotW) * (view.to - view.from);
+    setZoom(panning.ref, full, view.from - dt, view.to - view.from);
+  }
+
+  function endPan(): void {
+    panning = null;
+  }
+
   // There is deliberately NO click-on-the-trace add-lap path: a bare svg click is un-labelled and
   // misfires — every threshold drag that ends inside the svg makes the browser synthesize a click
   // on it, and stray clicks land there too, each planting a phantom "Lap inserted" ruling (live
@@ -354,6 +471,7 @@
 
   function startThresholdDrag(e: PointerEvent, ct: CompetitorTrace, which: 'enter' | 'exit'): void {
     if (!onthresholds) return;
+    e.stopPropagation(); // a handle drag must not also start a zoom pan on the svg beneath
     dragging = { ref: ct.competitor.competitor, which };
     // Keep receiving moves outside the handle while dragging (jsdom has no pointer capture).
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
@@ -406,10 +524,12 @@
     >
   </div>
 
-  {#each trace.competitors as ct (ct.competitor.adapter + '/' + ct.competitor.competitor)}
+  {#each trace.competitors as ct, traceIndex (ct.competitor.adapter + '/' + ct.competitor.competitor)}
     {@const ref = ct.competitor.competitor}
     {@const compLaps = lapsFor(ref)}
-    {@const span = spanOf(ct, compLaps)}
+    {@const fullSpan = spanOf(ct, compLaps)}
+    {@const span = viewSpanOf(ref, fullSpan)}
+    {@const zoomed = span.from > fullSpan.from || span.to < fullSpan.to}
     {@const th = effectiveThresholds(ct)}
     {@const range = valueRange(ct, th.enter, th.exit)}
     {@const who = nameFor(ref)}
@@ -422,6 +542,35 @@
           {#if th.enter != null}· enter {th.enter}{/if}
           {#if th.exit != null}· exit {th.exit}{/if}
         </span>
+        {#if ct.samples.length > 0}
+          <span class="zoom-controls" role="group" aria-label={`Zoom for ${who}`}>
+            <button
+              type="button"
+              onclick={() => zoomStep(ref, fullSpan, WHEEL_ZOOM_FACTOR)}
+              title="Zoom in (or scroll on the plot)"
+              aria-label="Zoom in">+</button
+            >
+            <button
+              type="button"
+              onclick={() => zoomStep(ref, fullSpan, 1 / WHEEL_ZOOM_FACTOR)}
+              disabled={!zoomed}
+              title="Zoom out"
+              aria-label="Zoom out">−</button
+            >
+            <button
+              type="button"
+              onclick={() => (zoom = null)}
+              disabled={!zoomed}
+              title="Show the whole trace"
+              aria-label="Reset zoom">Fit</button
+            >
+            {#if zoomed}
+              <span class="zoom-note"
+                >{formatTime(span.from)}–{formatTime(span.to)}s · drag to pan</span
+              >
+            {/if}
+          </span>
+        {/if}
       </figcaption>
       {#if ct.samples.length === 0}
         <p class="empty">No samples captured for this node.</p>
@@ -433,78 +582,92 @@
              plot, so the SVG stays a non-interactive `role="img"` figure. -->
         <svg
           class="plot"
+          class:panning={panning?.ref === ref && panning?.engaged}
           viewBox={`0 0 ${W} ${H}`}
           preserveAspectRatio="none"
           role="img"
           aria-label={`RSSI trace for ${who} with ${compLaps.length} lap markers`}
           onmousemove={(e: MouseEvent) => onHover(e, ct, span)}
           onmouseleave={clearHover}
+          onwheel={(e: WheelEvent) => onWheel(e, ct, fullSpan)}
+          onpointerdown={(e: PointerEvent) => startPan(e, ref)}
+          onpointermove={(e: PointerEvent) => movePan(e, fullSpan)}
+          onpointerup={endPan}
+          onpointercancel={endPan}
         >
+          <defs>
+            <!-- Clip the zoomed content to the plot area (markers/windows outside the view
+                 must not bleed over the axes). Keyed per trace — ids are document-global. -->
+            <clipPath id={`rssi-plot-clip-${traceIndex}`}>
+              <rect x={PAD_L} y={PAD_T} width={plotW} height={plotH} />
+            </clipPath>
+          </defs>
           <!-- Plot frame -->
           <rect class="frame" x={PAD_L} y={PAD_T} width={plotW} height={plotH} fill="none" />
-
-          <!-- Detection windows: one shaded vertical region per crossing the engine sees — from the
+          <g clip-path={`url(#rssi-plot-clip-${traceIndex})`}>
+            <!-- Detection windows: one shaded vertical region per crossing the engine sees — from the
                sample that rises above `enter` to the one that falls below `exit` (the timer's
                hysteresis). Drawn behind the signal so the trace reads on top; lets the marshal see
                exactly what the lap-detection engine registered as a pass. -->
-          {#each crossingWindows(ct, th.enter, th.exit) as cw (cw.from)}
-            {@const x1 = xOf(cw.from, span)}
-            {@const x2 = xOf(cw.to, span)}
-            <rect class="crossing" x={x1} y={PAD_T} width={Math.max(1, x2 - x1)} height={plotH} />
-          {/each}
+            {#each crossingWindows(ct, th.enter, th.exit) as cw (cw.from)}
+              {@const x1 = xOf(cw.from, span)}
+              {@const x2 = xOf(cw.to, span)}
+              <rect class="crossing" x={x1} y={PAD_T} width={Math.max(1, x2 - x1)} height={plotH} />
+            {/each}
 
-          <!-- Threshold lines (horizontal). Display-only strokes here; the draggable handles
+            <!-- Threshold lines (horizontal). Display-only strokes here; the draggable handles
                render at the END of the svg (painted last = TOPMOST) so a dense heat's lap
                markers can never sit over the grab bands and eat the pointer — dead handles on
                lap-heavy pilots were exactly the bug (live 2026-07-03). -->
-          {#if th.enter != null}
-            {@const y = yOf(th.enter, range)}
-            <line class="enter-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
-          {/if}
-          {#if th.exit != null}
-            {@const y = yOf(th.exit, range)}
-            <line class="exit-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
-          {/if}
+            {#if th.enter != null}
+              {@const y = yOf(th.enter, range)}
+              <line class="enter-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
+            {/if}
+            {#if th.exit != null}
+              {@const y = yOf(th.exit, range)}
+              <line class="exit-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
+            {/if}
 
-          <!-- The sample line -->
-          <polyline class="signal" points={polyline(ct, span, range)} />
+            <!-- The sample line -->
+            <polyline class="signal" points={polyline(ct, span, range)} />
 
-          <!-- Lap markers (vertical) at each lap's gate-pass time -->
-          {#each compLaps as lap (lap.end_ref)}
-            {@const x = xOf(lap.at, span)}
-            <g
-              class="marker"
-              class:selected={isSelected(ref, lap)}
-              class:removed={pv.removedRefs.has(lap.end_ref)}
-              role="button"
-              tabindex="0"
-              aria-pressed={isSelected(ref, lap)}
-              aria-label={`Lap ${lap.number} at ${formatMicros(lap.duration_micros)} — select`}
-              onclick={() => onselect(ref, lap)}
-              onkeydown={(e: KeyboardEvent) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  onselect(ref, lap);
-                }
-              }}
-            >
-              <!-- Wide invisible hit target for the field (sunlit laptop, finger/trackpad). -->
-              <line class="hit" x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
-              <line class="rule" x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
-              <text class="label" x={x + 3} y={PAD_T + 10}>{lap.number}</text>
-            </g>
-          {/each}
+            <!-- Lap markers (vertical) at each lap's gate-pass time -->
+            {#each compLaps as lap (lap.end_ref)}
+              {@const x = xOf(lap.at, span)}
+              <g
+                class="marker"
+                class:selected={isSelected(ref, lap)}
+                class:removed={pv.removedRefs.has(lap.end_ref)}
+                role="button"
+                tabindex="0"
+                aria-pressed={isSelected(ref, lap)}
+                aria-label={`Lap ${lap.number} at ${formatMicros(lap.duration_micros)} — select`}
+                onclick={() => onselect(ref, lap)}
+                onkeydown={(e: KeyboardEvent) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onselect(ref, lap);
+                  }
+                }}
+              >
+                <!-- Wide invisible hit target for the field (sunlit laptop, finger/trackpad). -->
+                <line class="hit" x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
+                <line class="rule" x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
+                <text class="label" x={x + 3} y={PAD_T + 10}>{lap.number}</text>
+              </g>
+            {/each}
 
-          <!-- PREVIEW pass markers: hollow/dashed candidates the tuned thresholds would ADD.
+            <!-- PREVIEW pass markers: hollow/dashed candidates the tuned thresholds would ADD.
                Distinct from the solid official lap markers; non-interactive (commit is explicit,
                in the parent's tuning panel). -->
-          {#each pv.added as t (t)}
-            {@const x = xOf(t, span)}
-            <g class="preview-added" aria-hidden="true">
-              <line x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
-              <text class="label" x={x + 3} y={PAD_T + plotH - 4}>+</text>
-            </g>
-          {/each}
+            {#each pv.added as t (t)}
+              {@const x = xOf(t, span)}
+              <g class="preview-added" aria-hidden="true">
+                <line x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
+                <text class="label" x={x + 3} y={PAD_T + plotH - 4}>+</text>
+              </g>
+            {/each}
+          </g>
 
           <!-- Draggable threshold handles — LAST in paint order (topmost), so nothing (signal
                line, lap markers, preview markers) can intercept their pointer events. -->
@@ -649,6 +812,25 @@
     font-style: italic;
     color: var(--gf-text-faint);
   }
+  .zoom-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-1);
+    margin-left: auto;
+  }
+  .zoom-controls button {
+    min-width: 2rem;
+    padding: 0.1rem 0.4rem;
+    font-size: var(--gf-font-size-sm);
+  }
+  .zoom-note {
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
+  }
+  .plot.panning {
+    cursor: grabbing;
+  }
+
   .trace {
     margin: 0;
     padding: var(--gf-space-3);

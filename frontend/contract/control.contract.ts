@@ -98,7 +98,7 @@ describe('seam 5: control command shape + headers', () => {
     expect(illegal.error?.code).toBe('BadRequest');
   });
 
-  it('Register + the marshaling adjudications ack ok', async () => {
+  it('Register + the marshaling adjudications ack ok (heat-voids are run-scoped)', async () => {
     await rdControl(director.baseUrl, TOKEN, {
       ScheduleHeat: { heat: 'h-marshal', lineup: ['A'] }
     });
@@ -114,6 +114,20 @@ describe('seam 5: control command shape + headers', () => {
       }
     });
     expect(penalty.ok).toBe(true);
+    // A heat-void is RUN-SCOPED (D25): voiding a heat that never ran is rejected — there is
+    // nothing to void, and the inert ruling would block a real void later.
+    const preRun = await rdControl(director.baseUrl, TOKEN, { VoidHeat: { heat: 'h-marshal' } });
+    expect(preRun.ok).toBe(false);
+    expect(preRun.error?.code).toBe('BadRequest');
+    // Drive the heat into a run; the void is then legal.
+    for (const cmd of [
+      { Stage: { heat: 'h-marshal' } },
+      { Start: { heat: 'h-marshal' } },
+      { SkipCountdown: { heat: 'h-marshal' } }
+    ]) {
+      const ack = await rdControl(director.baseUrl, TOKEN, cmd);
+      expect(ack.ok).toBe(true);
+    }
     const voidHeat = await rdControl(director.baseUrl, TOKEN, { VoidHeat: { heat: 'h-marshal' } });
     expect(voidHeat.ok).toBe(true);
   });

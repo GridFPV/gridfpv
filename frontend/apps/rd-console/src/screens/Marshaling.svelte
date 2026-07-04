@@ -67,6 +67,7 @@
   } from '../lib/marshaling.js';
   import type { ProtestOutcome } from '@gridfpv/types';
   import {
+    DEFAULT_MATCH_TOLERANCE_MICROS,
     defaultThresholds,
     detectPasses,
     diffPasses,
@@ -279,6 +280,9 @@
     if (selected && selected.competitor === competitor && selected.lap.end_ref === lap.end_ref) {
       selected = null; // toggle off
     } else {
+      // A fresh selection gets a fresh time input: a value typed for lap 2 must not sit
+      // pre-armed in lap 5's editor (one misread click would re-time it).
+      editSeconds = 0;
       selected = { competitor, lap };
     }
   }
@@ -341,18 +345,6 @@
     if (heat) await session.refreshMarshaling(heat);
   }
 
-  function doVoidSelected(): Promise<void> {
-    return submitCorrection(async () => {
-      if (!selected) return;
-      const target: LogRef = selected.lap.end_ref;
-      const ack = await session.send(voidDetectionCommand(target));
-      if (ack.ok) {
-        selected = null;
-        await afterCorrection();
-      }
-    });
-  }
-
   function doSplitSelected(): Promise<void> {
     return submitCorrection(async () => {
       if (!selected) return;
@@ -403,13 +395,41 @@
     });
   }
 
-  // The explicit per-competitor "Add lap" control: a typed time in seconds (source clock), so an RD
-  // running a sim heat (no graph) can still add a lap, including to a competitor with no laps yet.
-  let addLapTarget = $state<CompetitorRef | ''>('');
+  // The "Add lap" control lives IN the lap-times box (one per competitor entry): a small
+  // toggle that opens an inline typed-time row — no separate panel, no competitor picker (the
+  // box IS the competitor). Works with zero existing laps (sim heats included).
+  let addLapOpen = $state(false);
   let addLapSeconds = $state<number | null>(0);
-  async function doAddLapAtTime(): Promise<void> {
-    if (!canControl || !addLapTarget || typeof addLapSeconds !== 'number') return;
-    await insertLap(addLapTarget, secondsToSourceTime(addLapSeconds));
+  const addLapSecondsValid = $derived(typeof addLapSeconds === 'number' && addLapSeconds > 0);
+  async function doAddLapAtTime(competitor: CompetitorRef): Promise<void> {
+    if (!canControl || typeof addLapSeconds !== 'number' || !(addLapSeconds > 0)) {
+      toast.error('Enter a positive time (seconds) first.');
+      return;
+    }
+    await insertLap(competitor, secondsToSourceTime(addLapSeconds));
+    addLapOpen = false;
+  }
+
+  /** RESTORE a removed pass: void-the-void, targeting the standing removal event. The
+   *  sanctioned undo for a mistaken one-click Remove (the fold walks the chain; the pass
+   *  returns to the laps and leaves the removal record, re-opening re-detection there). */
+  function doRestorePass(v: { void_ref: number }): Promise<void> {
+    return submitCorrection(async () => {
+      const ack = await session.send(voidDetectionCommand(v.void_ref));
+      if (ack.ok) await afterCorrection();
+    });
+  }
+
+  /** Remove (void) a lap straight from its row — the one-click removal on the lap list. */
+  function doVoidLap(competitor: CompetitorRef, lap: Lap): Promise<void> {
+    return submitCorrection(async () => {
+      const ack = await session.send(voidDetectionCommand(lap.end_ref));
+      if (ack.ok) {
+        if (selected && selected.competitor === competitor && selected.lap.end_ref === lap.end_ref)
+          selected = null;
+        await afterCorrection();
+      }
+    });
   }
 
   // Throw out the selected lap from the SCORED count — distinct from "Remove (void)": the lap stays
@@ -596,6 +616,13 @@
   // below scope to just them. `shownPilot` is the chosen pilot if still in the field, else the first
   // competitor — so it self-heals when the heat changes without an extra effect.
   let selectedPilot = $state<CompetitorRef | undefined>(undefined);
+  // Pilot/heat moves close the add-lap row and clear its time (state is shared across boxes).
+  $effect(() => {
+    void shownPilot;
+    void heat;
+    addLapOpen = false;
+    addLapSeconds = 0;
+  });
   const shownPilot = $derived<CompetitorRef | undefined>(
     selectedPilot !== undefined && competitors.includes(selectedPilot)
       ? selectedPilot
@@ -630,9 +657,14 @@
   const tuneTrace = $derived<CompetitorTrace | undefined>(
     signalTrace?.competitors.find((c) => c.competitor.competitor === shownPilot)
   );
-  let tuneFor = $state<CompetitorRef | undefined>(undefined);
+  let tuneFor = $state<string | undefined>(undefined);
   let tuneEnter = $state(0);
   let tuneExit = $state(0);
+  // Whether the RD has ACTIVELY moved the levels this session (a drag or a typed edit). The
+  // lap box only switches into re-detection preview on explicit intent — a trace whose
+  // recorded thresholds happen to disagree with the official laps must not hijack the
+  // interactive lap list on its own.
+  let tuneTouched = $state(false);
 
   /** The trace's recorded thresholds; an unset trace falls back to a percentile derivation. */
   function recordedThresholds(t: CompetitorTrace): { enter: number; exit: number } {
@@ -651,8 +683,13 @@
       tuneFor = undefined;
       return;
     }
-    if (tuneFor === t.competitor.competitor) return;
-    tuneFor = t.competitor.competitor;
+    // Keyed by HEAT + competitor: node-seat refs (`node-0`) recur across heats, and a
+    // ref-only key carried the previous heat's levels AND tuning intent into the next one
+    // (instant phantom preview with Commit armed).
+    const key = `${heat ?? ''}::${t.competitor.competitor}`;
+    if (tuneFor === key) return;
+    tuneFor = key;
+    tuneTouched = false;
     const rec = recordedThresholds(t);
     tuneEnter = rec.enter;
     tuneExit = rec.exit;
@@ -661,6 +698,7 @@
   /** The graph's drag handles emit here — two-way with the number inputs. */
   function onGraphThresholds(competitor: CompetitorRef, enter: number, exit: number): void {
     if (competitor !== shownPilot) return;
+    tuneTouched = true;
     tuneEnter = enter;
     tuneExit = exit;
   }
@@ -671,21 +709,50 @@
   // Flatten across entries: the shown pilot can hold several lap-list entries (one per
   // adapter after a mid-heat failover) — the tune diff must see ALL their official passes.
   const shownPilotLaps = $derived<Lap[]>((shownLaps?.competitors ?? []).flatMap((c) => c.laps));
-  const detectedPassTimes = $derived<number[]>(
-    tuneTrace && tuneValid && tuneFor === shownPilot
-      ? detectPasses(tuneTrace, tuneEnter, tuneExit)
-      : []
+  const tuneKeyCurrent = $derived(
+    tuneTrace !== undefined && tuneFor === `${heat ?? ''}::${tuneTrace.competitor.competitor}`
   );
-  const redetectDiff = $derived(diffPasses(officialPasses(shownPilotLaps), detectedPassTimes));
+  const detectedPassTimes = $derived<number[]>(
+    tuneTrace && tuneValid && tuneKeyCurrent ? detectPasses(tuneTrace, tuneEnter, tuneExit) : []
+  );
+  // The RD's removal record (`CompetitorLaps.voided`) — the lap list and the tuner share this
+  // data, so a crossing the marshal explicitly voided is SUPPRESSED from re-detection (the
+  // trace still shows it; without this the tuner kept offering the removed lap back as an add).
+  const shownVoidedAt = $derived<number[]>(
+    (shownLaps?.competitors ?? []).flatMap((c) => (c.voided ?? []).map((v) => v.at))
+  );
+  const redetectDiff = $derived(
+    diffPasses(
+      officialPasses(shownPilotLaps),
+      detectedPassTimes,
+      DEFAULT_MATCH_TOLERANCE_MICROS,
+      shownVoidedAt
+    )
+  );
   const redetectDirty = $derived(redetectDiff.added.length > 0 || redetectDiff.removed.length > 0);
   // The UNIFIED preview: one chronological row list — kept/added laps interleaved with the
-  // official passes the re-detection drops (redetect.ts `previewRows`), so the whole story reads
-  // top-down instead of a confusing side-by-side of preview vs official lists.
-  const previewRowList = $derived(previewRows(officialPasses(shownPilotLaps), detectedPassTimes));
-  const previewLapCount = $derived(previewRowList.filter((r) => r.status !== 'removed').length);
+  // dropped official passes and the RD-voided crossings (which stay removed). Rendered IN the
+  // lap-times box while tuning, so the lap list itself is the live detection readout.
+  const previewRowList = $derived(
+    previewRows(
+      officialPasses(shownPilotLaps),
+      detectedPassTimes,
+      DEFAULT_MATCH_TOLERANCE_MICROS,
+      shownVoidedAt
+    )
+  );
+  const previewLapCount = $derived(
+    previewRowList.filter((r) => r.status === 'kept' || r.status === 'added').length
+  );
+  /** Whether the lap box is in live-preview mode: the RD actively moved the levels AND the
+   *  re-detection differs from the official record. Never entered passively. */
+  const tuningPreview = $derived(
+    canControl && tuneTouched && tuneTrace != null && tuneKeyCurrent && tuneValid && redetectDirty
+  );
 
   function doResetThresholds(): void {
     if (!tuneTrace) return;
+    tuneTouched = false;
     const rec = recordedThresholds(tuneTrace);
     tuneEnter = rec.enter;
     tuneExit = rec.exit;
@@ -732,6 +799,7 @@
       }
       await afterCorrection();
       if (ok) {
+        tuneTouched = false;
         const plus = added.length === 1 ? '+1 pass' : `+${added.length} passes`;
         toast.success(
           `Committed re-detection for ${competitorName(key.competitor)}: ${plus}, −${removed.length} removed`
@@ -853,7 +921,7 @@
       {/if}
 
       {#if hasShownTrace && shownTrace}
-        {@const tuning = canControl && tuneTrace != null && tuneFor === shownPilot}
+        {@const tuning = canControl && tuneTrace != null && tuneKeyCurrent}
         <!-- Signal-as-evidence (Slice 4): the RSSI graph for the selected pilot's captured trace. A
              marker click selects that lap in the action surface below; the lap-list selection
              highlights the same marker (two-way — `selectLap` is the one shared selection). With
@@ -899,12 +967,19 @@
                 type="number"
                 step="1"
                 bind:value={tuneEnter}
+                oninput={() => (tuneTouched = true)}
                 aria-label="Enter threshold"
               /></label
             >
             <label
               >Exit
-              <input type="number" step="1" bind:value={tuneExit} aria-label="Exit threshold" />
+              <input
+                type="number"
+                step="1"
+                bind:value={tuneExit}
+                oninput={() => (tuneTouched = true)}
+                aria-label="Exit threshold"
+              />
             </label>
             <button type="button" onclick={doResetThresholds}>Reset</button>
             <!-- The lock disables COMMITTING only — the sliders + preview above stay live, so an
@@ -928,37 +1003,15 @@
               Enter must be above exit — these levels detect nothing.
             </p>
           {:else}
+            <!-- The panel is PURELY the enter/exit levels: the lap-times box below is the live
+                 detection readout (it switches into preview mode while the diff is dirty). -->
             <p class="tune-summary" role="status" data-testid="redetect-summary">
               Would be {previewLapCount} lap{previewLapCount === 1 ? '' : 's'}
-              (+{redetectDiff.added.length} added, −{redetectDiff.removed.length} removed)
+              (+{redetectDiff.added.length} added, −{redetectDiff.removed.length} removed{redetectDiff
+                .suppressed.length > 0
+                ? `, ${redetectDiff.suppressed.length} voided by you stay removed`
+                : ''})
             </p>
-            {#if redetectDirty}
-              <!-- The UNIFIED preview: one chronological list — the lap list the commit would
-                   produce, with each new lap accent-marked (+) and each official pass the new
-                   levels drop struck through (−) at its place in time. Replaces the old
-                   side-by-side preview-vs-official lists (confusing in the field). -->
-              <ol
-                class="preview-rows"
-                aria-label={`Re-detection preview for ${competitorName(shownPilot)}`}
-              >
-                {#each previewRowList as row (row.status === 'removed' ? `x${row.ref}` : `l${row.at}`)}
-                  {#if row.status === 'removed'}
-                    <li class="removed">
-                      <span class="mark" aria-hidden="true">−</span>
-                      <span class="what">pass at {formatMicros(row.at)}s — removed</span>
-                    </li>
-                  {:else}
-                    <li class={row.status}>
-                      <span class="mark" aria-hidden="true"
-                        >{row.status === 'added' ? '+' : ''}</span
-                      >
-                      <span class="lap-num">Lap {row.number}</span>
-                      <span class="lap-time">{formatMicros(row.durationMicros)}</span>
-                    </li>
-                  {/if}
-                {/each}
-              </ol>
-            {/if}
           {/if}
         </fieldset>
       {/if}
@@ -967,34 +1020,234 @@
         <div class="laps">
           <!-- Keyed by the FULL competitor key: the same ref can appear under two adapters
                (mid-heat failover), and a bare-ref key crashed the whole screen on it. -->
-          {#each shownLaps.competitors as cl (cl.competitor.adapter + '/' + cl.competitor.competitor)}
+          {#each shownLaps.competitors as cl, entryIndex (cl.competitor.adapter + '/' + cl.competitor.competitor)}
+            {@const canCorrect = canControl && !resultLocked}
             <div class="comp">
-              <h4>{competitorName(cl.competitor.competitor)}</h4>
-              {#if cl.laps.length === 0}
-                <p class="empty">No laps yet.</p>
-              {:else}
-                <ol>
-                  {#each cl.laps as lap (lap.end_ref)}
-                    <li>
-                      <button
-                        type="button"
-                        class="lap"
-                        class:selected={isSelected(cl.competitor.competitor, lap)}
-                        aria-pressed={isSelected(cl.competitor.competitor, lap)}
-                        onclick={() => selectLap(cl.competitor.competitor, lap)}
-                      >
-                        <span class="lap-num">Lap {lap.number}</span>
-                        <span class="lap-time">{formatMicros(lap.duration_micros)}</span>
-                      </button>
-                    </li>
+              <h4>
+                {competitorName(cl.competitor.competitor)}
+                {#if tuningPreview && entryIndex === 0}<span class="preview-badge"
+                    >re-detection preview</span
+                  >{/if}
+              </h4>
+              {#if tuningPreview && entryIndex > 0}
+                <!-- The preview is PILOT-scoped (it already spans every adapter entry):
+                     render it once, under the first entry only. -->
+              {:else if tuningPreview}
+                <!-- LIVE detection readout: the lap list the tuned levels would produce — new
+                     laps marked +, official passes the levels drop struck −, and crossings the
+                     RD already voided flagged (they STAY removed; the tuner never re-adds
+                     them). Commit lives in the Tune panel above. -->
+                <ol
+                  class="preview-rows"
+                  aria-label={`Re-detection preview for ${competitorName(cl.competitor.competitor)}`}
+                >
+                  {#each previewRowList as row (row.status === 'removed' ? `x${row.ref}` : `${row.status}${row.at}`)}
+                    {#if row.status === 'removed'}
+                      <li class="removed">
+                        <span class="mark" aria-hidden="true">−</span>
+                        <span class="what">pass at {formatMicros(row.at)}s — removed</span>
+                      </li>
+                    {:else if row.status === 'voided'}
+                      <li class="voided">
+                        <span class="mark" aria-hidden="true">∅</span>
+                        <span class="what"
+                          >crossing at {formatMicros(row.at)}s — voided by you, stays removed</span
+                        >
+                      </li>
+                    {:else}
+                      <li class={row.status}>
+                        <span class="mark" aria-hidden="true"
+                          >{row.status === 'added' ? '+' : ''}</span
+                        >
+                        <span class="lap-num">Lap {row.number}</span>
+                        <span class="lap-time">{formatMicros(row.durationMicros)}</span>
+                      </li>
+                    {/if}
                   {/each}
                 </ol>
+              {:else}
+                {#if cl.laps.length === 0 && (cl.voided ?? []).length === 0}
+                  <p class="empty">No laps yet.</p>
+                {:else}
+                  {@const voidedSorted = [...(cl.voided ?? [])].sort((a, b) => a.at - b.at)}
+                  <ol>
+                    {#each cl.laps as lap (lap.end_ref)}
+                      {#each voidedSorted.filter((v) => v.at < lap.at && !cl.laps.some((o) => o.number < lap.number && o.at > v.at)) as v (v.pass_ref)}
+                        <li class="voided-row">
+                          <span class="mark" aria-hidden="true">∅</span>
+                          <span class="what"
+                            >removed pass at {formatMicros(v.at)}s — stays removed</span
+                          >
+                          {#if canCorrect}
+                            <button
+                              type="button"
+                              class="lap-restore"
+                              onclick={() => doRestorePass(v)}
+                              disabled={busy}
+                              title="Restore this removed pass (undo the removal)"
+                              aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
+                              >Restore</button
+                            >
+                          {/if}
+                        </li>
+                      {/each}
+                      <li class="lap-row">
+                        <button
+                          type="button"
+                          class="lap"
+                          class:selected={isSelected(cl.competitor.competitor, lap)}
+                          aria-pressed={isSelected(cl.competitor.competitor, lap)}
+                          onclick={() => selectLap(cl.competitor.competitor, lap)}
+                          title="Select to edit (split / re-time / insert / throw out)"
+                        >
+                          <span class="lap-num">Lap {lap.number}</span>
+                          <span class="lap-time">{formatMicros(lap.duration_micros)}</span>
+                        </button>
+                        {#if canCorrect}
+                          <button
+                            type="button"
+                            class="lap-remove"
+                            onclick={() => doVoidLap(cl.competitor.competitor, lap)}
+                            disabled={busy}
+                            aria-label={`Remove lap ${lap.number}`}
+                            title="Remove (void) this lap's closing pass">Remove</button
+                          >
+                        {/if}
+                      </li>
+                      {#if canCorrect && isSelected(cl.competitor.competitor, lap)}
+                        <!-- The inline editor for the selected lap — the old separate
+                             corrections box, moved to where the lap is. -->
+                        <li class="lap-editor" aria-label={`Edit lap ${lap.number}`}>
+                          <label class="time"
+                            >Time (s)
+                            <input
+                              type="number"
+                              step="0.001"
+                              min="0.001"
+                              bind:value={editSeconds}
+                              aria-label="Correction time"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onclick={doSplitSelected}
+                            disabled={busy || !editSecondsValid}
+                            title={!editSecondsValid ? editSecondsTitle : undefined}>Split</button
+                          >
+                          <button
+                            type="button"
+                            onclick={doEditTimeSelected}
+                            disabled={busy || !editSecondsValid}
+                            title={!editSecondsValid ? editSecondsTitle : undefined}
+                            >Edit time</button
+                          >
+                          <button
+                            type="button"
+                            onclick={doInsertAfterSelected}
+                            disabled={busy || !editSecondsValid}
+                            title={!editSecondsValid ? editSecondsTitle : undefined}
+                            >Insert after</button
+                          >
+                          <button
+                            type="button"
+                            onclick={doThrowOutSelected}
+                            disabled={busy}
+                            title="Exclude this valid lap from the scored count (the lap stays real)"
+                            >Throw out</button
+                          >
+                        </li>
+                      {/if}
+                    {/each}
+                    {#each voidedSorted.filter((v) => cl.laps.length === 0 || v.at >= cl.laps[cl.laps.length - 1].at) as v (v.pass_ref)}
+                      <!-- The RD's removal record, kept visible where the lap was: the shared
+                           data that also stops re-detection from re-proposing the crossing. -->
+                      <li class="voided-row">
+                        <span class="mark" aria-hidden="true">∅</span>
+                        <span class="what"
+                          >removed pass at {formatMicros(v.at)}s — stays removed</span
+                        >
+                        {#if canCorrect}
+                          <button
+                            type="button"
+                            class="lap-restore"
+                            onclick={() => doRestorePass(v)}
+                            disabled={busy}
+                            title="Restore this removed pass (undo the removal)"
+                            aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
+                            >Restore</button
+                          >
+                        {/if}
+                      </li>
+                    {/each}
+                  </ol>
+                {/if}
+                {#if canCorrect}
+                  <div class="add-lap-row">
+                    {#if addLapOpen}
+                      <label class="time"
+                        >Time (s)
+                        <input
+                          type="number"
+                          step="0.001"
+                          min="0.001"
+                          bind:value={addLapSeconds}
+                          aria-label="Add-lap time"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onclick={() => doAddLapAtTime(cl.competitor.competitor)}
+                        disabled={busy || !addLapSecondsValid}
+                        title={!addLapSecondsValid ? editSecondsTitle : undefined}>Add</button
+                      >
+                      <button type="button" onclick={() => (addLapOpen = false)}>Cancel</button>
+                    {:else}
+                      <button
+                        type="button"
+                        class="add-lap"
+                        onclick={() => (addLapOpen = true)}
+                        title={hasTrace
+                          ? 'Add a missed lap at a typed time — or click the trace on the graph'
+                          : 'Add a missed lap at a typed time (source clock)'}>+ Add lap</button
+                      >
+                    {/if}
+                  </div>
+                {/if}
               {/if}
             </div>
           {/each}
         </div>
       {:else}
         <p class="empty">No lap list for this heat yet.</p>
+        {#if canControl && !resultLocked && shownPilot !== undefined}
+          <!-- A pilot with no recorded passes still needs the add path (a sim heat, a totally
+               missed run): the same inline control, targeting the shown pilot. -->
+          <div class="add-lap-row">
+            {#if addLapOpen}
+              <label class="time"
+                >Time (s)
+                <input
+                  type="number"
+                  step="0.001"
+                  min="0.001"
+                  bind:value={addLapSeconds}
+                  aria-label="Add-lap time"
+                />
+              </label>
+              <button
+                type="button"
+                onclick={() => doAddLapAtTime(shownPilot!)}
+                disabled={busy || !addLapSecondsValid}
+                title={!addLapSecondsValid ? editSecondsTitle : undefined}>Add</button
+              >
+              <button type="button" onclick={() => (addLapOpen = false)}>Cancel</button>
+            {:else}
+              <button type="button" class="add-lap" onclick={() => (addLapOpen = true)}
+                >+ Add lap</button
+              >
+            {/if}
+          </div>
+        {/if}
       {/if}
 
       {#if canControl}
@@ -1013,97 +1266,6 @@
             >
           </div>
         {:else}
-          <!-- Inline corrections on the selected lap -->
-          <fieldset class="selection-actions" disabled={!selected}>
-            <legend>
-              {#if selected}
-                Selected: {competitorName(selected.competitor)} · Lap {selected.lap.number}
-              {:else}
-                Select a lap to correct
-              {/if}
-            </legend>
-            <div class="row">
-              <button type="button" onclick={doVoidSelected} disabled={!selected || busy}
-                >Remove (void)</button
-              >
-              <label class="time"
-                >Time (s)
-                <input
-                  type="number"
-                  step="0.001"
-                  min="0.001"
-                  bind:value={editSeconds}
-                  aria-label="Correction time"
-                />
-              </label>
-              <!-- The time-input corrections require a POSITIVE entered time: sending the
-                   empty/zeroed input (at: 0) re-times the pass to race start and wrecks the
-                   lap chain, so the buttons disable with the explaining title instead. -->
-              <button
-                type="button"
-                onclick={doSplitSelected}
-                disabled={!selected || busy || !editSecondsValid}
-                title={!editSecondsValid ? editSecondsTitle : undefined}>Split</button
-              >
-              <button
-                type="button"
-                onclick={doEditTimeSelected}
-                disabled={!selected || busy || !editSecondsValid}
-                title={!editSecondsValid ? editSecondsTitle : undefined}>Edit time</button
-              >
-              <button
-                type="button"
-                onclick={doInsertAfterSelected}
-                disabled={!selected || busy || !editSecondsValid}
-                title={!editSecondsValid ? editSecondsTitle : undefined}>Insert after</button
-              >
-              <button
-                type="button"
-                onclick={doThrowOutSelected}
-                disabled={!selected || busy}
-                title="Exclude this valid lap from the scored count (the lap stays real)"
-                >Throw out lap</button
-              >
-            </div>
-          </fieldset>
-
-          <!-- Add a brand-new lap (works with zero existing laps). On the graph, click a competitor's
-             trace to add at the cursor's time; here, pick a competitor + a typed time so it also
-             works for sim heats with no graph. -->
-          <fieldset>
-            <legend>Add a lap</legend>
-            <p class="muted hint">
-              {#if hasTrace}
-                Click a competitor's trace on the graph to add a lap at that time, or add one at a
-                typed time here.
-              {:else}
-                Add a missed lap at a typed time (source clock) — works even with no laps yet.
-              {/if}
-            </p>
-            <div class="row">
-              <label
-                >Competitor
-                <select bind:value={addLapTarget} aria-label="Add-lap competitor">
-                  <option value="" disabled>—</option>
-                  {#each competitors as c (c)}<option value={c}>{competitorName(c)}</option>{/each}
-                </select>
-              </label>
-              <label class="time"
-                >Time (s)
-                <input
-                  type="number"
-                  step="0.001"
-                  min="0"
-                  bind:value={addLapSeconds}
-                  aria-label="Add-lap time"
-                />
-              </label>
-              <button type="button" onclick={doAddLapAtTime} disabled={!addLapTarget || busy}
-                >Add lap</button
-              >
-            </div>
-          </fieldset>
-
           <!-- Per-competitor rulings -->
           <fieldset>
             <legend>Competitor ruling</legend>
@@ -1601,6 +1763,61 @@
   /* The unified re-detection preview: one chronological list, big mono rows (sunlit-laptop
      readable). Kept rows read plain; added rows carry the accent "+" chip styling; removed
      rows read struck/dimmed danger — "this pass leaves the record on commit" at a glance. */
+  .preview-badge {
+    margin-left: var(--gf-space-2);
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    color: var(--gf-warn);
+  }
+  .lap-row {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  .lap-row .lap {
+    flex: 1;
+  }
+  .lap-remove {
+    flex: none;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-danger);
+  }
+  .lap-editor {
+    display: flex;
+    align-items: end;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+    padding: var(--gf-space-2);
+    margin: 0 0 var(--gf-space-2);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface-sunken);
+    list-style: none;
+  }
+  .voided-row,
+  .preview-rows .voided {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    color: var(--gf-text-faint);
+    text-decoration: line-through;
+    list-style: none;
+    padding: var(--gf-space-1) 0;
+  }
+  .lap-restore {
+    flex: none;
+    font-size: var(--gf-font-size-sm);
+    text-decoration: none;
+  }
+  .add-lap-row {
+    display: flex;
+    align-items: end;
+    gap: var(--gf-space-2);
+    margin-top: var(--gf-space-2);
+  }
+
   .preview-rows {
     margin: var(--gf-space-2) 0 0;
     padding: 0;

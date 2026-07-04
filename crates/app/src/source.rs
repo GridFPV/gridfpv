@@ -1564,6 +1564,13 @@ fn spawn_start_driver(
     let config = heat_clock_config(state, registry, event_id, &heat);
     let delay_ms = pick_start_delay_ms(&config.start_procedure);
     let state = state.clone();
+    let spawn_watermark = read_tail(&state, 0)
+        .ok()
+        .map(|events| {
+            let events: Vec<Event> = events.into_iter().map(|(_, e)| e).collect();
+            latest_transition_offset(&events, &heat)
+        })
+        .unwrap_or(None);
     tokio::spawn(async move {
         // The chosen delay is logged as a fact *before* the hold, so a console cueing the tone and a
         // replay both read it; only the append timing below uses wall-clock.
@@ -1587,6 +1594,9 @@ fn spawn_start_driver(
             move |events: &[Event]| {
                 gridfpv_engine::heat::heat_state(events, &h)
                     == Some(gridfpv_engine::heat::HeatState::Armed)
+                    // …and it is the SAME arming (an abort + re-arm during this hold would
+                    // read Armed again — but with a NEW countdown; this one is superseded).
+                    && latest_transition_offset(events, &h) == spawn_watermark
             }
         };
         match state.append_checked(
@@ -1646,6 +1656,15 @@ fn spawn_completion_driver(
         _ => None,
     };
     let state = state.clone();
+    // The run this driver belongs to, as a spawn-time watermark (the heat's latest transition
+    // offset) — the fire-time recheck stands down if ANY transition landed since.
+    let spawn_watermark = read_tail(&state, 0)
+        .ok()
+        .map(|events| {
+            let events: Vec<Event> = events.into_iter().map(|(_, e)| e).collect();
+            latest_transition_offset(&events, &heat)
+        })
+        .unwrap_or(None);
     // The running clock origin: the moment the heat entered `Running` (this spawn). The time-limit
     // deadline, when set, is measured from here — a deterministic wall-clock span (a test drives it
     // with a short limit; production with the practice duration).
@@ -1667,7 +1686,7 @@ fn spawn_completion_driver(
             // win-condition branch below never fires for it). Logged like the other autos.
             if let Some(limit) = time_limit {
                 if running_since.elapsed() >= limit {
-                    if let Err(e) = append_finished_if_running(&state, &heat) {
+                    if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
                         eprintln!(
                             "gridfpv: completion driver could not append time-limit Finished: {e:?}"
                         );
@@ -1690,7 +1709,7 @@ fn spawn_completion_driver(
             if let Some(window) = timed_window {
                 let anchor = first_pass_seen.unwrap_or(running_since);
                 if anchor.elapsed() >= window + grace_hold(config.grace_window) {
-                    if let Err(e) = append_finished_if_running(&state, &heat) {
+                    if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
                         eprintln!(
                             "gridfpv: completion driver could not append timed-window Finished: {e:?}"
                         );
@@ -1705,13 +1724,28 @@ fn spawn_completion_driver(
                 // The race-end criterion is met: hold the grace window for late crossings, then
                 // close the race. The hold is wall-clock; the *decision* was pure.
                 tokio::time::sleep(grace_hold(config.grace_window)).await;
-                if let Err(e) = append_finished_if_running(&state, &heat) {
+                if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
                     eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
                 }
                 return;
             }
         }
     })
+}
+
+/// The offset of `heat`'s LATEST `HeatStateChanged` — the spawn-time watermark a driver
+/// captures so its fire-time recheck can tell "still the SAME state" from "the same state
+/// AGAIN": a heat that was Force-Ended and re-raced during a driver's hold is Running like
+/// before, but it is a NEW run and the stale driver must stand down (state alone can't tell).
+fn latest_transition_offset(events: &[Event], heat: &HeatId) -> Option<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Event::HeatStateChanged { heat: h, .. } if h == heat => Some(i),
+            _ => None,
+        })
+        .next_back()
 }
 
 /// Append `Finished` for `heat` iff it is STILL `Running` at fire time — the completion
@@ -1721,6 +1755,7 @@ fn spawn_completion_driver(
 fn append_finished_if_running(
     state: &AppState,
     heat: &HeatId,
+    spawn_watermark: Option<usize>,
 ) -> Result<(), gridfpv_server::error::ProtocolError> {
     let h = heat.clone();
     state
@@ -1733,6 +1768,9 @@ fn append_finished_if_running(
             move |events| {
                 gridfpv_engine::heat::heat_state(events, &h)
                     == Some(gridfpv_engine::heat::HeatState::Running)
+                    // …and it is the SAME run this driver was spawned for: any transition
+                    // since spawn (ForceEnd + Restart + re-race in one hold) supersedes it.
+                    && latest_transition_offset(events, &h) == spawn_watermark
             },
         )
         .map(|_| ())
@@ -1785,6 +1823,13 @@ fn spawn_auto_official_driver(
 ) -> JoinHandle<()> {
     let config = heat_clock_config(state, registry, event_id, &heat);
     let state = state.clone();
+    let spawn_watermark = read_tail(&state, 0)
+        .ok()
+        .map(|events| {
+            let events: Vec<Event> = events.into_iter().map(|(_, e)| e).collect();
+            latest_transition_offset(&events, &heat)
+        })
+        .unwrap_or(None);
     tokio::spawn(async move {
         let ProtestWindow::After { micros } = config.protest_window else {
             // Off (the default): no auto-official timer — manual finalize only. Nothing to do.
@@ -1848,6 +1893,9 @@ fn spawn_auto_official_driver(
         let gate = move |events: &[Event]| {
             gridfpv_engine::heat::heat_state(events, &h)
                 == Some(gridfpv_engine::heat::HeatState::Unofficial)
+                // …the SAME provisional window (a revert→finalize→revert chain during the
+                // hold reads Unofficial again — with a NEW window; this one is superseded)…
+                && latest_transition_offset(events, &h) == spawn_watermark
                 && open_protest_count(events, &h) == 0
         };
         match state.append_checked(
