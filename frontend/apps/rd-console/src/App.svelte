@@ -230,6 +230,17 @@
   }
 
   // ── Settings (the RD token, set/cleared up front) ──────────────────────────
+  // The running Director's identity for the footer build-stamp (alpha field-support: a bug
+  // report should quote the version). Same-origin fetch — the console is always served BY the
+  // Director; a failed read leaves the footer blank rather than lying.
+  let about = $state<{ version: string } | undefined>(undefined);
+  $effect(() => {
+    fetch('/about')
+      .then((r) => (r.ok ? r.json() : undefined))
+      .then((a) => (about = a))
+      .catch(() => {});
+  });
+
   // v1 keeps NO manual settings surface: the control token is requested automatically by
   // TokenDialog when a privileged action needs one (loopback needs none at all), and the
   // setup wizard runs once on event creation (everything it sets stays editable on the
@@ -375,9 +386,25 @@
 <!-- The lazy token prompt lives above any screen (the ONLY token surface in v1). -->
 <TokenDialog bind:this={tokenDialog} />
 
+{#if about}
+  <footer class="build-stamp" aria-label="Build version">GridFPV v{about.version}</footer>
+{/if}
+
 <ToastHost />
 
 <style>
+  .build-stamp {
+    position: fixed;
+    right: var(--gf-space-3);
+    bottom: var(--gf-space-2);
+    z-index: 5;
+    font-family: var(--gf-font-family);
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
+    opacity: 0.7;
+    pointer-events: none;
+  }
+
   /* The active-event resume loading state (#90). */
   .resume-loading {
     display: flex;

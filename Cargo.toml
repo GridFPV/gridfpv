@@ -23,9 +23,13 @@ exclude = ["src-tauri"]
 # Shared metadata + dependency versions for every crate in the spine.
 # Crates inherit these with `field.workspace = true` so versions are set once.
 [workspace.package]
+# The ONE product version (v0.4.0-alpha.1 scheme: 0.x milestones, -alpha/-beta pre-releases;
+# bump with `cargo xtask version <x.y.z[-pre]>`). Crates inherit it; tauri.conf.json and the
+# console package.json are kept in lock-step by the same xtask command.
+version = "0.4.0-alpha.1"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-repository = "https://gitlab.com/gridfpv/gridfpv"
+repository = "https://github.com/GridFPV/gridfpv"
 rust-version = "1.85"
 
 [workspace.dependencies]
