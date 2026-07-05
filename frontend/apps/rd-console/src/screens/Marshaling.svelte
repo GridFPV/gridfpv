@@ -281,11 +281,17 @@
     if (selected && selected.competitor === competitor && selected.lap.end_ref === lap.end_ref) {
       selected = null; // toggle off
     } else {
-      // A fresh selection gets a fresh time input: a value typed for lap 2 must not sit
-      // pre-armed in lap 5's editor (one misread click would re-time it).
-      editSeconds = 0;
+      // The editor opens showing the lap's CURRENT time — the RD reads it, tweaks it, and
+      // Save arms only once the value actually changes (no free-typed instants, no value
+      // from another lap's editor sitting pre-armed).
+      editSeconds = lapSeconds(lap);
       selected = { competitor, lap };
     }
+  }
+
+  /** A lap's duration in display seconds (the editor's unit — 3 decimals like the list). */
+  function lapSeconds(lap: Lap): number {
+    return Number((lap.duration_micros / 1_000_000).toFixed(3));
   }
 
   function isSelected(competitor: CompetitorRef, lap: Lap): boolean {
@@ -314,15 +320,10 @@
   let editSeconds = $state<number | null>(0);
   const editSecondsValid = $derived(typeof editSeconds === 'number' && editSeconds > 0);
   const editSecondsTitle = 'Enter a positive time (s) first';
-  /** The validated time input (µs), or `undefined` — toasting the refusal (visible feedback). */
-  function editTimeMicros(): number | undefined {
-    const seconds = editSeconds;
-    if (typeof seconds !== 'number' || !(seconds > 0)) {
-      toast.error('Enter a positive time (seconds) first.');
-      return undefined;
-    }
-    return secondsToSourceTime(seconds);
-  }
+  /** Whether the RD actually CHANGED the pre-filled lap time — Save arms only then. */
+  const editDirty = $derived(
+    selected !== null && editSecondsValid && editSeconds !== lapSeconds(selected.lap)
+  );
 
   // One shared in-flight guard for the correction / ruling / lifecycle submits (the `committing`
   // pattern): every correction APPENDS a ruling, so a double-clicked Apply lands the penalty
@@ -346,32 +347,33 @@
     if (heat) await session.refreshMarshaling(heat);
   }
 
+  /** SPLIT the selected lap at its MIDPOINT — no input needed: the case is a missed gate
+   *  crossing folding two real laps into one double-length lap, and halving is the best
+   *  first approximation (the RD then tunes either half's time with Save if needed). */
   function doSplitSelected(): Promise<void> {
     return submitCorrection(async () => {
       if (!selected) return;
-      const at = editTimeMicros();
-      if (at === undefined) return;
-      const ack = await session.send(splitLapCommand(selected.lap.end_ref, at));
+      const lap = selected.lap;
+      const at = Math.round(lap.at - lap.duration_micros / 2);
+      const ack = await session.send(splitLapCommand(lap.end_ref, at));
       if (ack.ok) await afterCorrection();
     });
   }
 
-  function doEditTimeSelected(): Promise<void> {
+  /** SAVE the edited lap time: the new duration re-times the lap's CLOSING pass (start
+   *  instant + new duration). The next lap's start shifts with it — one crossing moved. */
+  function doSaveTimeSelected(): Promise<void> {
     return submitCorrection(async () => {
       if (!selected) return;
-      const at = editTimeMicros();
-      if (at === undefined) return;
-      const ack = await session.send(adjustLapCommand(selected.lap.end_ref, at));
-      if (ack.ok) await afterCorrection();
-    });
-  }
-
-  function doInsertAfterSelected(): Promise<void> {
-    return submitCorrection(async () => {
-      if (!selected || !heat) return;
-      const at = editTimeMicros();
-      if (at === undefined) return;
-      const ack = await session.send(insertLapCommand(adapter, selected.competitor, at, heat));
+      const seconds = editSeconds;
+      if (typeof seconds !== 'number' || !(seconds > 0)) {
+        toast.error('Enter a positive lap time (seconds) first.');
+        return;
+      }
+      const lap = selected.lap;
+      const start = lap.at - lap.duration_micros;
+      const at = start + secondsToSourceTime(seconds);
+      const ack = await session.send(adjustLapCommand(lap.end_ref, at));
       if (ack.ok) await afterCorrection();
     });
   }
@@ -1123,7 +1125,8 @@
                             onclick={() => doVoidLap(cl.competitor.competitor, lap)}
                             disabled={busy}
                             aria-label={`Remove lap ${lap.number}`}
-                            title="Remove (void) this lap's closing pass">Remove</button
+                            title="This crossing never really happened (noise / a reflection) — the pass is removed and the neighbouring laps merge. Throw out is for a real lap that shouldn't count."
+                            >Remove</button
                           >
                         {/if}
                       </li>
@@ -1132,40 +1135,35 @@
                              corrections box, moved to where the lap is. -->
                         <li class="lap-editor" aria-label={`Edit lap ${lap.number}`}>
                           <label class="time"
-                            >Time (s)
+                            >Lap time (s)
                             <input
                               type="number"
                               step="0.001"
                               min="0.001"
                               bind:value={editSeconds}
-                              aria-label="Correction time"
+                              aria-label="Lap time"
                             />
                           </label>
                           <button
                             type="button"
+                            onclick={doSaveTimeSelected}
+                            disabled={busy || !editDirty}
+                            title={editDirty
+                              ? 'Re-time this lap to the entered time'
+                              : 'Change the time to enable saving'}>Save time</button
+                          >
+                          <button
+                            type="button"
                             onclick={doSplitSelected}
-                            disabled={busy || !editSecondsValid}
-                            title={!editSecondsValid ? editSecondsTitle : undefined}>Split</button
-                          >
-                          <button
-                            type="button"
-                            onclick={doEditTimeSelected}
-                            disabled={busy || !editSecondsValid}
-                            title={!editSecondsValid ? editSecondsTitle : undefined}
-                            >Edit time</button
-                          >
-                          <button
-                            type="button"
-                            onclick={doInsertAfterSelected}
-                            disabled={busy || !editSecondsValid}
-                            title={!editSecondsValid ? editSecondsTitle : undefined}
-                            >Insert after</button
+                            disabled={busy}
+                            title="Split this lap into two at its midpoint (a missed crossing) — tune either half after"
+                            >Split</button
                           >
                           <button
                             type="button"
                             onclick={doThrowOutSelected}
                             disabled={busy}
-                            title="Exclude this valid lap from the scored count (the lap stays real)"
+                            title="The lap HAPPENED but doesn't count (course cut / penalty) — it stays on the clock, excluded from scoring. Remove is for a crossing that never really happened."
                             >Throw out</button
                           >
                         </li>

@@ -39,16 +39,15 @@ describe('Marshaling (Slice 3)', () => {
     expect(sendSpy).toHaveBeenCalledWith({ VoidDetection: { target: 14 } });
   });
 
-  it('splits the selected lap at the entered time, targeting its end_ref', async () => {
+  it('splits the selected lap at its MIDPOINT — no time input needed (a missed crossing)', async () => {
     const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
     render(Marshaling, { session });
 
-    // Marshal one pilot at a time: show BOB, then select his only lap (end_ref 13).
+    // Marshal one pilot at a time: show BOB, then select his only lap (end_ref 13, 0→43.0s).
     await fireEvent.change(screen.getByLabelText('Pilot to marshal'), { target: { value: 'BOB' } });
     await fireEvent.click(screen.getByRole('button', { name: /Lap 1\s*43\.000/ }));
-    await fireEvent.input(screen.getByLabelText('Correction time'), { target: { value: '21' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Split' }));
-    expect(sendSpy).toHaveBeenCalledWith({ SplitLap: { target: 13, at: 21_000_000 } });
+    expect(sendSpy).toHaveBeenCalledWith({ SplitLap: { target: 13, at: 21_500_000 } });
   });
 
   it('marshals a different heat WITHOUT moving Race Control’s current heat', async () => {
@@ -90,14 +89,20 @@ describe('Marshaling (Slice 3)', () => {
     expect(movedCurrent).toBeUndefined();
   });
 
-  it('edits the selected lap time (AdjustLap on end_ref)', async () => {
+  it('the editor pre-fills the lap time; Save arms on change and re-times the closing pass', async () => {
     const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
     render(Marshaling, { session });
 
+    // ALICE lap 1: 41.000s (start at 0, end_ref 12). The input opens PRE-FILLED with it and
+    // Save stays disabled until the value changes — no free-typed instants.
     await fireEvent.click(screen.getByRole('button', { name: /Lap 1\s*41\.000/ }));
-    await fireEvent.input(screen.getByLabelText('Correction time'), { target: { value: '40' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Edit time' }));
-    // ALICE lap 1 end_ref = 12.
+    expect((screen.getByLabelText('Lap time') as HTMLInputElement).value).toBe('41');
+    expect(screen.getByRole('button', { name: 'Save time' })).toBeDisabled();
+
+    await fireEvent.input(screen.getByLabelText('Lap time'), { target: { value: '40' } });
+    expect(screen.getByRole('button', { name: 'Save time' })).toBeEnabled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Save time' }));
+    // New duration 40s from the lap's start (0) → the closing pass re-times to 40.0s.
     expect(sendSpy).toHaveBeenCalledWith({ AdjustLap: { target: 12, at: 40_000_000 } });
   });
 
@@ -407,8 +412,7 @@ describe('Marshaling (Slice 3)', () => {
       // …but every result-changing surface is gone: the per-row Remove + the inline editor…
       expect(screen.queryByRole('button', { name: /Remove lap/ })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Split' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Edit time' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Insert after' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Save time' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Throw out' })).toBeNull();
       // …and the inline Add-lap control.
       expect(screen.queryByRole('button', { name: '+ Add lap' })).toBeNull();
@@ -528,29 +532,27 @@ describe('Marshaling (Slice 3)', () => {
       expect(sendSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('requires a positive time for Split / Edit time / Insert after (never sends at=0)', async () => {
+    it('Save time never sends a degenerate value: disabled pristine, emptied, or zeroed', async () => {
       const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: lapList });
       render(Marshaling, { session });
 
-      // Select a lap with the time input still at its 0 default: the time-based corrections stay
-      // DISABLED (with the explaining title) — an `AdjustLap at: 0` wrecks the whole lap chain.
+      // Pristine (pre-filled with the lap's own time): nothing to save.
       await fireEvent.click(screen.getByRole('button', { name: /Lap 1\s*41\.000/ }));
-      for (const name of ['Split', 'Edit time', 'Insert after']) {
-        const button = screen.getByRole('button', { name });
-        expect(button).toBeDisabled();
-        expect(button).toHaveAttribute('title', 'Enter a positive time (s) first');
-      }
-      await fireEvent.click(screen.getByRole('button', { name: 'Edit time' }));
+      expect(screen.getByRole('button', { name: 'Save time' })).toBeDisabled();
+      // Insert after is GONE (the + Add lap footer covers insertion).
+      expect(screen.queryByRole('button', { name: 'Insert after' })).toBeNull();
+
+      // An EMPTIED input (binds null) and a zero both keep Save disabled — an
+      // `AdjustLap at: start+0` wrecks the lap chain.
+      await fireEvent.input(screen.getByLabelText('Lap time'), { target: { value: '' } });
+      expect(screen.getByRole('button', { name: 'Save time' })).toBeDisabled();
+      await fireEvent.input(screen.getByLabelText('Lap time'), { target: { value: '0' } });
+      expect(screen.getByRole('button', { name: 'Save time' })).toBeDisabled();
       expect(sendSpy).not.toHaveBeenCalled();
 
-      // An EMPTIED input (binds null) is refused the same way.
-      await fireEvent.input(screen.getByLabelText('Correction time'), { target: { value: '' } });
-      expect(screen.getByRole('button', { name: 'Edit time' })).toBeDisabled();
-
-      // A positive time enables them and the command carries it.
-      await fireEvent.input(screen.getByLabelText('Correction time'), { target: { value: '40' } });
-      expect(screen.getByRole('button', { name: 'Edit time' })).toBeEnabled();
-      await fireEvent.click(screen.getByRole('button', { name: 'Edit time' }));
+      // A changed positive time arms Save and the command carries the re-timed instant.
+      await fireEvent.input(screen.getByLabelText('Lap time'), { target: { value: '40' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Save time' }));
       expect(sendSpy).toHaveBeenCalledWith({ AdjustLap: { target: 12, at: 40_000_000 } });
     });
 
