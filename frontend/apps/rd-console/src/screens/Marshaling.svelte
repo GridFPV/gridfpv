@@ -933,6 +933,14 @@
         </div>
       {/if}
 
+      <!-- ── REGION: pilot marshaling ─────────────────────────────────────────────────
+           Everything from here to the heat-rulings divider is scoped to the SHOWN PILOT:
+           their trace, their detection levels, their laps and corrections. -->
+      <h3 class="region-head">
+        Pilot marshaling
+        <span class="region-hint">the shown pilot's laps, trace &amp; corrections</span>
+      </h3>
+
       {#if hasShownTrace && shownTrace}
         {@const tuning = canControl && tuneTrace != null && tuneKeyCurrent}
         <!-- Signal-as-evidence (Slice 4): the RSSI graph for the selected pilot's captured trace. A
@@ -1264,6 +1272,15 @@
       {/if}
 
       {#if canControl}
+        <!-- ── REGION: heat rulings & protests ────────────────────────────────────────────
+             A deliberate hard break from the per-pilot surfaces above (RD-requested): from
+             here down the scope is the WHOLE HEAT — penalties, protests, the result
+             lifecycle, and the void — independent of which pilot is shown. -->
+        <hr class="region-divider" />
+        <h3 class="region-head heat">
+          Heat rulings &amp; protests
+          <span class="region-hint">whole-heat scope — penalties, protests &amp; the result</span>
+        </h3>
         {#if resultLocked}
           <!-- The official-result lock: the Director rejects every result-changing ruling on a
                Final heat, so the correction surfaces below are withheld entirely and the ONE way
@@ -1819,6 +1836,34 @@
     list-style: none;
     padding: var(--gf-space-1) 0;
   }
+  /* Region heads: the two scopes of this page (pilot vs heat), RD-requested after the
+     lap-editor consolidation made the seam invisible. The divider is deliberately HEAVY —
+     sunlit-laptop legible — and the heat region reads as a distinct zone, not more pilot UI. */
+  .region-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--gf-space-3);
+    margin: var(--gf-space-4) 0 var(--gf-space-2);
+    font-size: var(--gf-font-size-lg);
+    letter-spacing: var(--gf-tracking-caps);
+    text-transform: uppercase;
+  }
+  .region-head .region-hint {
+    font-size: var(--gf-font-size-sm);
+    letter-spacing: normal;
+    text-transform: none;
+    color: var(--gf-text-muted);
+    font-weight: var(--gf-font-weight-normal);
+  }
+  .region-divider {
+    margin: var(--gf-space-7) 0 var(--gf-space-2);
+    border: 0;
+    border-top: 3px solid color-mix(in srgb, var(--gf-accent, #7aa2ff) 45%, var(--gf-border));
+  }
+  .region-head.heat {
+    color: color-mix(in srgb, var(--gf-accent, #7aa2ff) 70%, var(--gf-text));
+  }
+
   .lap-restore {
     flex: none;
     font-size: var(--gf-font-size-sm);

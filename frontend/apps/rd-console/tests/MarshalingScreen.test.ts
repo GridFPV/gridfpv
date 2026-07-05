@@ -50,6 +50,17 @@ describe('Marshaling (Slice 3)', () => {
     expect(sendSpy).toHaveBeenCalledWith({ SplitLap: { target: 13, at: 21_500_000 } });
   });
 
+  it('the page reads as TWO scopes: pilot marshaling above, heat rulings below the divider', () => {
+    const { session } = makeTestSession({ live: liveRunning, laps: lapList });
+    render(Marshaling, { session });
+    expect(screen.getByRole('heading', { name: /Pilot marshaling/ })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Heat rulings & protests/ })).toBeInTheDocument();
+    // The pilot region precedes the heat region in document order (the divider separates them).
+    const heads = screen.getAllByRole('heading', { name: /Pilot marshaling|Heat rulings/ });
+    expect(heads[0]).toHaveTextContent('Pilot marshaling');
+    expect(heads[1]).toHaveTextContent('Heat rulings & protests');
+  });
+
   it('marshals a different heat WITHOUT moving Race Control’s current heat', async () => {
     const heats: HeatSummary[] = [
       {
