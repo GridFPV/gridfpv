@@ -65,6 +65,14 @@ const DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 /// on the wait (the drain loop still runs regardless — this only bounds the staging settle).
 const STAGE_SETTLE: Duration = Duration::from_secs(15);
 
+/// How often to RE-EMIT `stage_race` while staged-but-not-RACING inside the settle window — a
+/// busy RH silently drops a stage ("status is not 'ready'"); without the retry the race never
+/// starts on the RH side and no passes are ever recorded. Paced ABOVE RH's stock staging
+/// sequence (~3-4s with unzeroed delays) so a retry can never land mid-staging and restart the
+/// countdown it is waiting on; with the instant-start prepare applied, staging is sub-second
+/// and the retry only ever fires on a genuinely dropped stage.
+const STAGE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 /// How long the driver keeps routing drained events into a **finishing** heat's sink after it
 /// stopped the RH race (marshaling path-2). Stopping the race drives RH to `DONE`, which
 /// auto-triggers the dense `current_marshal_data` / `save_laps` → `race_list` → `get_pilotrace`
@@ -131,6 +139,14 @@ struct ArmedHeat {
     sink: PassSink,
     /// Set by the driver once it has staged the RH race for this arming.
     staged: bool,
+    /// Set once RH confirmed **RACING for this arming** (its READY/DONE → RACING transition —
+    /// the adapter's `SessionStarted`). Lap records drained BEFORE this are a stale replay:
+    /// a busy RH ("stage while status is not 'ready'") re-broadcasts the PREVIOUS race's
+    /// `current_laps` snapshot, and remapping those into the new heat recorded the last
+    /// race's laps as this race's passes (observed live: a fresh heat opening with lap 6+).
+    /// Lives in the shared slot so a mid-race reconnect (where RH re-sends the LIVE race's
+    /// snapshot for the carried adapter to dedup) keeps flowing.
+    started: bool,
     /// Set by [`disarm`](RhConnection::disarm) when the heat left `Running`: the driver finishes the
     /// heat by **stopping the RH race** (driving it to `DONE`, which auto-triggers the dense
     /// `current_marshal_data`/`get_pilotrace` marshal pull — marshaling path-2), keeps routing the
@@ -297,6 +313,7 @@ impl RhConnection {
             lineup,
             sink,
             staged: false,
+            started: false,
             finishing: false,
             done: false,
         });
@@ -569,6 +586,9 @@ fn maintain(
     let mut last_activity = Instant::now();
     let mut probed_since_activity = false;
     let mut stage_deadline: Option<Instant> = None;
+    // Paces the busy-RH stage retry (see STAGE_RETRY_INTERVAL); seeded in the past so the
+    // first retry fires as soon as it is needed.
+    let mut last_stage_retry = Instant::now() - STAGE_RETRY_INTERVAL;
     // The settle window for a **finishing** heat (disarmed): the deadline by which the heat's sink
     // stays armed after the RH race is stopped, so the DONE-triggered dense marshal pull lands in
     // the right heat's log before the slot clears. `None` ⇒ no heat is finishing.
@@ -668,6 +688,19 @@ fn maintain(
             matches!(slot.as_ref(), Some(heat) if !heat.staged)
         };
         if do_stage {
+            // Re-zero the staging delays of the format RH will ACTUALLY race, right before the
+            // stage. The Stage-time prepare targeted the format that was current THEN — but
+            // seating the heat can switch RH's effective format (a heat with a class races the
+            // CLASS's format, RHRace's class_format_id override), whose stock multi-second
+            // staging sequence then ran on top of Grid's start procedure: every race began
+            // ~5-7s after Grid's go (lap stamps stayed self-consistent, so the skew was
+            // invisible in results — but live laps, tones, and callouts all arrived that much
+            // late; a DB-bloated RH stretched it past 15s). By now the seat's race_status has
+            // long since folded, so `prepare_instant_start` targets the effective format —
+            // and RH is READY here, which `alter_race_format` requires. Idempotent.
+            if conn.prepare_instant_start().is_err() {
+                return true;
+            }
             // Drop any churn accumulated since the prepare so it isn't remapped as race passes.
             let _ = conn.events();
             if conn.stage_race().is_err() {
@@ -689,6 +722,23 @@ fn maintain(
         } else if armed.lock().expect("armed-heat lock poisoned").is_none() {
             // Nothing armed: clear any stale stage wait.
             stage_deadline = None;
+        } else if stage_deadline.is_some() {
+            // Staged but RH has not confirmed RACING yet (no SessionStarted this arming): a
+            // busy RH — the previous race's dense save still settling — logs "Attempted to
+            // stage race while status is not 'ready'" and DROPS the stage on the floor. The
+            // race would then never start (and, before the pass gate above, the replayed old
+            // snapshot contaminated the new heat). Re-emit the stage every couple of seconds
+            // until RH takes it or the settle window gives up.
+            let needs_restage = {
+                let slot = armed.lock().expect("armed-heat lock poisoned");
+                matches!(slot.as_ref(), Some(heat) if heat.staged && !heat.started)
+            };
+            if needs_restage && last_stage_retry.elapsed() >= STAGE_RETRY_INTERVAL {
+                last_stage_retry = Instant::now();
+                if conn.stage_race().is_err() {
+                    return true;
+                }
+            }
         }
         if just_staged {
             last_activity = Instant::now();
@@ -796,6 +846,16 @@ fn maintain(
                 for event in drained {
                     if matches!(event, Event::SessionStarted { .. }) {
                         saw_start = true;
+                        heat.started = true;
+                    }
+                    // Gate LAP RECORDS on RH having gone RACING for THIS arming: anything
+                    // earlier is the previous race's snapshot replayed by a still-busy RH —
+                    // remapping it used to contaminate the fresh heat with the last race's
+                    // laps. (Processed in drain order, so passes in the same batch AFTER the
+                    // RACING transition flow normally; signal facts always flow — a pre-start
+                    // trace baseline is harmless and useful.)
+                    if matches!(event, Event::Pass(_)) && !heat.started {
+                        continue;
                     }
                     if let Some(remapped) = remap(event, &heat.lineup, &adapter) {
                         if heat.sink.append_event(remapped).is_err() {
