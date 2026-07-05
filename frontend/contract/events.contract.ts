@@ -1662,3 +1662,15 @@ describe('race Slice 3a: FillRound (round-driven engine)', () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe('seam: /about (the build stamp)', () => {
+  it('serves the product version + the wire contract version', async () => {
+    const res = await fetch(`${director.baseUrl}/about`);
+    expect(res.ok).toBe(true);
+    const about = await res.json();
+    expect(about.name).toBe('GridFPV');
+    // x.y.z with an optional -prerelease tail (the v0.4.0-alpha.1 scheme).
+    expect(about.version).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
+    expect(typeof about.contract_version).toBe('number');
+  });
+});

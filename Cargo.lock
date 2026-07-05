@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-adapters"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 dependencies = [
  "gridfpv-events",
  "gridfpv-projection",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-app"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 dependencies = [
  "axum",
  "gridfpv-adapters",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-engine"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 dependencies = [
  "gridfpv-adapters",
  "gridfpv-events",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-events"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-projection"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 dependencies = [
  "gridfpv-events",
  "serde",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-server"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-storage"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 dependencies = [
  "gridfpv-events",
  "rusqlite",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-testkit"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 
 [[package]]
 name = "h2"
@@ -2236,7 +2236,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.4.0-alpha.1"
 dependencies = [
  "gridfpv-testkit",
  "serde_json",

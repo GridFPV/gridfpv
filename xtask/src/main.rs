@@ -214,6 +214,83 @@ fn live() -> bool {
         && rh_connect
 }
 
+/// `cargo xtask version <x.y.z[-pre.N]>` — set the product version in every file that
+/// carries it, keeping them in lock-step (the v0.4.0-alpha.1 scheme): the root workspace
+/// `Cargo.toml` (`[workspace.package].version`, which every spine crate inherits), the
+/// standalone `src-tauri/Cargo.toml` (excluded from the root workspace, so it cannot
+/// inherit), `src-tauri/tauri.conf.json`, and the console `package.json`. With no argument,
+/// prints the current version. Refuses a malformed version rather than writing a partial set.
+fn version(args: &[String]) -> bool {
+    let root = workspace_root_dir();
+    let cargo_toml = root.join("Cargo.toml");
+    let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap_or_default();
+    let current = read(&cargo_toml)
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("version = \"")
+                .and_then(|r| r.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".into());
+    let Some(new) = args.first() else {
+        println!("{current}");
+        return true;
+    };
+    // A light semver shape check: MAJOR.MINOR.PATCH with an optional -prerelease tail.
+    let core = new.split('-').next().unwrap_or("");
+    let ok_shape = core.split('.').count() == 3
+        && core
+            .split('.')
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    if !ok_shape {
+        eprintln!("version {new:?} is not x.y.z[-pre] shaped");
+        return false;
+    }
+    let targets = [
+        (root.join("Cargo.toml"), format!("version = \"{current}\"")),
+        (
+            root.join("src-tauri/Cargo.toml"),
+            format!("version = \"{current}\""),
+        ),
+        (
+            root.join("src-tauri/tauri.conf.json"),
+            format!("\"version\": \"{current}\""),
+        ),
+        (
+            root.join("frontend/apps/rd-console/package.json"),
+            format!("\"version\": \"{current}\""),
+        ),
+    ];
+    // Verify every site carries the current version BEFORE writing any (no partial bumps).
+    for (path, needle) in &targets {
+        if !read(path).contains(needle.as_str()) {
+            eprintln!(
+                "{} does not carry version {current} — refusing a partial bump",
+                path.display()
+            );
+            return false;
+        }
+    }
+    for (path, needle) in &targets {
+        let replaced = read(path).replacen(needle.as_str(), &needle.replace(&current, new), 1);
+        if std::fs::write(path, replaced).is_err() {
+            eprintln!("failed writing {}", path.display());
+            return false;
+        }
+    }
+    println!("{current} -> {new}");
+    true
+}
+
+fn workspace_root_dir() -> std::path::PathBuf {
+    // xtask runs from the workspace (cargo sets the manifest dir of xtask itself).
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask has a parent")
+        .to_path_buf()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let task = args.first().cloned().unwrap_or_else(|| "ci".to_string());
@@ -230,9 +307,12 @@ fn main() {
         // The mock race-day autopilot: emulate races via the gridfpv_mock plugin while you drive
         // the Director. See `race_day.rs`.
         "race-day" => race_day::run(&args[1..]),
+        // Bump the ONE product version everywhere it lives (workspace Cargo.toml + the
+        // standalone src-tauri crate + tauri.conf.json + the console package.json).
+        "version" => version(&args[1..]),
         other => {
             eprintln!("unknown task: {other}");
-            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live|rh-mock|race-day]");
+            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live|rh-mock|race-day|version]");
             false
         }
     };

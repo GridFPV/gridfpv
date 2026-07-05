@@ -35,6 +35,11 @@ jobs:
           - os: windows-latest
             portable-artifact: gridfpv-windows-portable
             portable-path: src-tauri/target/release/gridfpv-desktop.exe
+          - os: macos-latest
+            # Apple Silicon (macos-latest = arm64) — covers every modern Mac; an Intel
+            # (x86_64) leg is a matrix add if one ever turns up at the field.
+            portable-artifact: gridfpv-macos-portable
+            portable-path: src-tauri/target/release/gridfpv-desktop
 
     steps:
       - uses: actions/checkout@v7
