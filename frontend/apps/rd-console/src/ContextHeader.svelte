@@ -14,7 +14,8 @@
    *     Running and stays visible *frozen* at the race-end time through Unofficial/Final, so the
    *     header clock matches the live screen's heat clock rather than vanishing when the race ends.
    *   • Connection status — the existing connection pill.
-   *   • "← Switch event" — the only way back to the picker.
+   *   (The old "← Switch event" button is gone — the breadcrumb's Home/Events crumbs are
+   *   the way back, and the header stays purely informational on the right.)
    * (No date/location hover — the maintainer explicitly dropped that.)
    *
    * The clock is the shared #62 logic via {@link useRaceClock}, so it ticks while Running,
@@ -31,13 +32,11 @@
   let {
     session,
     /** Go to the Live control screen (the event-name click target). */
-    ongolive,
+    ongolive
     /** Return to the event picker (the only way out of the workspace). */
-    onswitchevent
   }: {
     session: Session;
     ongolive: () => void;
-    onswitchevent: () => void;
   } = $props();
 
   const eventName = $derived(session.currentEvent?.name ?? '');
@@ -202,7 +201,6 @@
       <!-- Text hook for the e2e (`.conn-label` === status text); visually folded into the pill. -->
       <span class="conn-label">{session.connectionStatus}</span>
     </div>
-    <button type="button" class="ctx-switch" onclick={onswitchevent}>← Switch event</button>
   </div>
 </div>
 
@@ -371,26 +369,6 @@
     clip: rect(0 0 0 0);
     white-space: nowrap;
   }
-  .ctx-switch {
-    flex-shrink: 0;
-    background: transparent;
-    border: 1px solid var(--gf-border);
-    border-radius: var(--gf-radius-sm);
-    padding: var(--gf-space-1) var(--gf-space-3);
-    color: var(--gf-text-secondary);
-    font-family: inherit;
-    font-size: var(--gf-font-size-xs);
-    cursor: pointer;
-    white-space: nowrap;
-    transition:
-      border-color var(--gf-motion-fast) var(--gf-ease-out),
-      color var(--gf-motion-fast) var(--gf-ease-out);
-  }
-  .ctx-switch:hover {
-    border-color: var(--gf-border-strong);
-    color: var(--gf-text);
-  }
-
   @media (max-width: 60rem) {
     .ctx-heat-label,
     .ctx-timer-name {

@@ -37,7 +37,7 @@ describe('ContextHeader heat clock', () => {
   it('ticks while Running, then stays frozen and visible through Unofficial and Final', async () => {
     // Server race-go at t=0; the header anchors to it.
     const { session, pushLive } = makeTestSession({ live: liveAt('Running', { startedAtMs: 0 }) });
-    render(ContextHeader, { session, ongolive: () => {}, onswitchevent: () => {} });
+    render(ContextHeader, { session, ongolive: () => {} });
 
     // The clock is on view while Running and advancing.
     await tick();
@@ -70,7 +70,7 @@ describe('ContextHeader heat clock', () => {
 
   it('hides the clock before the race (Scheduled) to avoid a misleading 0:00', async () => {
     const { session } = makeTestSession({ live: liveAt('Scheduled') });
-    render(ContextHeader, { session, ongolive: () => {}, onswitchevent: () => {} });
+    render(ContextHeader, { session, ongolive: () => {} });
     await tick();
     expect(clockEl()).toBeNull();
     // The heat + phase pill still render so the bar shows context.
@@ -128,7 +128,7 @@ describe('ContextHeader heat name', () => {
       live: live(),
       listHeatsImpl: vi.fn(async () => [HEAT])
     });
-    render(ContextHeader, { session, ongolive: () => {}, onswitchevent: () => {} });
+    render(ContextHeader, { session, ongolive: () => {} });
 
     await waitFor(() => expect(heatId()?.textContent).toBe('Qualifying R1 Heat 1'));
     expect(heatId()?.textContent).not.toContain('q1-heat');
@@ -145,7 +145,7 @@ describe('ContextHeader heat name', () => {
       live: live(),
       listHeatsImpl: vi.fn(async () => (calls++ === 0 ? [] : [HEAT]))
     });
-    render(ContextHeader, { session, ongolive: () => {}, onswitchevent: () => {} });
+    render(ContextHeader, { session, ongolive: () => {} });
 
     // First (empty) read → raw id fallback, the visible symptom of the cold-load race.
     await waitFor(() => expect(heatId()?.textContent).toBe('q1-heat'));
@@ -171,7 +171,7 @@ describe('ContextHeader heat name', () => {
         return [HEAT];
       })
     });
-    render(ContextHeader, { session, ongolive: () => {}, onswitchevent: () => {} });
+    render(ContextHeader, { session, ongolive: () => {} });
 
     // The error state renders in place of the heat name — the raw id never reaches the screen.
     const retry = await screen.findByRole('button', { name: /Couldn.t load — retry/ });
