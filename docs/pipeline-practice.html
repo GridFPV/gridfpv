@@ -18,7 +18,7 @@
       Flying time before anything counts. An optional, event-wide warm-up where pilots shake
       out gear, get comfortable on their channel, and (on a real timer) let the system calibrate
       to them — without a single result feeding the competition. As built, it is a single
-      channel-seated <em>Open Practice</em> round.
+      channel-seated <em>Practice</em> round.
     </p>
 
     <div class="callout">
@@ -26,7 +26,7 @@
         This is a deep dive on one phase of the
         <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
         and surfaces the decisions and data each implies. It does not define the schema or
-        APIs; those belong to the Architecture doc (coming soon).
+        APIs; those belong to the <a href="architecture.html">Architecture</a> doc.
       </p>
     </div>
 
@@ -44,7 +44,7 @@
         <strong>As built (v0.4) — Practice is the <code>open_practice</code> round.</strong> In the
         race-running redesign there is no separate &ldquo;Practice phase&rdquo; with its own modes.
         Practice is just a <strong>round</strong> on the event whose <strong>format is
-        <code>open_practice</code></strong> (friendly name <em>&ldquo;Open Practice&rdquo;</em>),
+        <code>open_practice</code></strong> (friendly name <em>&ldquo;Practice&rdquo;</em>),
         created from the same Rounds+Heats stage-page as every other round. Selecting that format
         swaps the round form's class/win-condition/seeding block for an <strong>active-channels
         picker</strong> and an <strong>optional time-limit (minutes)</strong> field — nothing else.
@@ -59,7 +59,7 @@
 
     <h3>Organize the field — one open heat over the active channels</h3>
     <p>
-      Open Practice is <strong>channel-seated, not pilot-seated</strong>. The round form's
+      Practice is <strong>channel-seated, not pilot-seated</strong>. The round form's
       active-channels picker selects which of the primary timer's <strong>node seats</strong> are
       live; the engine then <strong>auto-creates a single open heat</strong> whose &ldquo;lineup&rdquo;
       is those channels (competitor refs are <code>node-0</code>, <code>node-1</code>, … — the seats,

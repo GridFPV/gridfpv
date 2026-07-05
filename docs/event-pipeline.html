@@ -25,8 +25,8 @@
         This doc defines the pipeline at the level of <strong>intent and
         capability</strong> — the ideas we must hit. It deliberately leaves the data
         model, the timer-adapter spec, protocol message shapes, and the Cloud warehouse
-        to their own docs (see <em>Architecture</em>, <em>Timer Adapters</em> —
-        coming soon). When this doc and the vision disagree, the
+        to their own docs (see <a href="architecture.html">Architecture</a> and
+        <a href="timer-adapters.html">Timer Adapters</a>). When this doc and the vision disagree, the
         <a href="vision.html">Vision</a> wins.
       </p>
     </div>
@@ -136,6 +136,12 @@
       <li><strong>Skip it</strong> — seed from registration order or a manual seed, and go straight to the mains.</li>
     </ul>
     <h3>Formats (when run live)</h3>
+    <p class="phase-meta">
+      <em>Intent-level list, superseded by the shipped model:</em> the as-built format set is the
+      three primitives (Practice / Time Trials / Head-to-Head) — see
+      <a href="format-model.html">Format Model</a>; ZippyQ was built then shelved (D10) and the
+      structure formats live on <code>tournaments-snapshot</code> for the post-v1 rebuild.
+    </p>
     <ul>
       <li><strong>Timed</strong> — best single lap, or fastest N consecutive laps (commonly 2 or 3).</li>
       <li><strong>Rounds-based</strong> — a fixed number of rounds, best result kept.</li>
@@ -193,7 +199,7 @@
     <p>
       This phase leans on the optional Cloud — the analytics warehouse and season linking —
       so it is intentionally light here and will get its own treatment alongside the Cloud
-      design (Architecture, coming soon). The single-event pipeline above stands on its own
+      design (<a href="architecture.html">Architecture</a>). The single-event pipeline above stands on its own
       without it.
     </p>
 

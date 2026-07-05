@@ -94,8 +94,8 @@
       <tbody>
         <tr><td>A recorded Velocidrone WebSocket message stream</td><td>Velocidrone</td><td>The exact ordered <code>Pass</code> / lifecycle / <code>CompetitorSeen</code> events, with split indices and source timestamps</td></tr>
         <tr><td>A recorded RotorHazard Socket.IO frame log</td><td>RotorHazard</td><td>Passes with per-node signal context attached, calibration/lifecycle events</td></tr>
-        <tr><td>A recorded LapRF binary serial capture</td><td>LapRF</td><td>Passes from <code>PassingRecord</code> + RSSI stats, device-clock timestamps</td></tr>
-        <tr><td>A scripted sequence of manual UI entries</td><td>Manual</td><td>Passes with wall-clock timestamps, no signal/calibration</td></tr>
+        <tr><td>A recorded LapRF binary serial capture</td><td>LapRF</td><td>Passes from <code>PassingRecord</code> + RSSI stats, device-clock timestamps <em>(aspirational — no LapRF adapter exists)</em></td></tr>
+        <tr><td>A scripted sequence of manual UI entries</td><td>Manual</td><td>Passes with wall-clock timestamps, no signal/calibration <em>(aspirational — no manual adapter exists)</em></td></tr>
       </tbody>
     </table>
     <p>
@@ -309,7 +309,18 @@ flowchart LR
       canonical-log fixtures (§4).</p>
     </div>
 
-    <h3>5.2 The interactive mock-signal harness — <code>cargo xtask rh-mock</code></h3>
+    <h3>5.2 The plugin-era hands-on harnesses</h3>
+    <p>
+      Since the D16 plugin pivot the primary hands-on layer is the <strong>plugin-equipped RH
+      rig</strong>: <code>docker/rotorhazard/</code> builds RH <strong>v4.4.0 from source</strong>
+      with the <code>gridfpv</code> plugin plus the test-only <code>gridfpv_mock</code> plugin, and
+      <strong><code>cargo xtask race-day</code></strong> runs the autopilot (scenario personalities
+      <code>clean / varied / messy / pack</code>) that emulates the seated nodes whenever the
+      Director stages a heat — see <a href="mock-race-day.md">mock-race-day</a>. The older
+      <code>rh-mock</code> harness below remains for low-level signal poking.
+    </p>
+
+    <h3>5.3 The interactive mock-signal harness — <code>cargo xtask rh-mock</code></h3>
     <p>
       The same emulated-signal mechanism (§5.1) is also a <strong>runnable, interactive tool</strong>
       for hands-on marshaling testing: drive a <em>real</em> dockerized RotorHazard with a controllable
@@ -352,7 +363,7 @@ cargo run -p gridfpv-app --features live
 #    a heat left only Staged never races, so it records no laps).
 
 # 4. After the heat, dump the captured signal values for that heat:
-cargo xtask rh-mock dump http://localhost:3000 practice q-1</pre>
+cargo xtask rh-mock dump http://localhost:8080 practice q-1</pre>
     <div class="principle">
       <p><span class="name">Stage <em>and</em> Start — and seat a pilot on a fed node.</span>
       The two ways a mock-feed heat silently records <strong>no laps</strong>: (a) the heat never
@@ -414,7 +425,7 @@ cargo xtask rh-mock dump http://localhost:3000 practice q-1</pre>
       assert exactly who moves up, who is eliminated, and the seeds of the next heats.</li>
       <li><strong>Completion &amp; final ranking.</strong> Given the last results, assert the
       generator declares the format complete and exposes the correct final ordering.</li>
-      <li><strong>The dynamic case.</strong> ZippyQ / rolling is the honesty-forcing format
+      <li><strong>The dynamic case.</strong> ZippyQ / rolling was the honesty-forcing format (built then shelved, D10; the structure generators live on <code>tournaments-snapshot</code> — the shipping registry is the three primitives)
       (<a href="race-engine.html">Race Engine</a> §3) — a table that adds rounds on demand and
       asserts the generator produces sensible next heats from current state, never a
       precomputed schedule.</li>

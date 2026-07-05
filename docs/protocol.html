@@ -105,8 +105,10 @@
         <code>race_ended_at</code>, server-time authoritative — see
         <a href="live-state-clock.html">Live State &amp; the Race Clock</a>) all ship. Per-gate
         <em>splits</em> remain a later refinement (the lap-count + last-lap pair is the live core).
-        The <strong>Tauri shell + 3-OS single-binary packaging are still not built (#57/#58)</strong>
-        — the RD console runs as a web app served by the Director, not yet a native window.
+        The <strong>Tauri shell + 3-OS packaging SHIPPED (#57/#58)</strong> with v0.4.0-alpha.1:
+        self-contained portables for Linux / Windows / macOS (console embedded, live RH adapter in),
+        built by the gated <code>release-builds</code> workflow. The web-served console remains the
+        hosted mode — same app either way.
       </p>
     </div>
 
@@ -161,6 +163,9 @@
       </thead>
       <tbody>
         <tr><td><code>GET /health</code></td><td>liveness</td></tr>
+        <tr><td><code>GET /about</code></td><td>product identity: name, version, contract version (the console build-stamp source)</td></tr>
+        <tr><td><code>GET /time</code></td><td>the server clock (µs) — every server-anchored UI clock offsets against this, never <code>Date.now()</code></td></tr>
+        <tr><td><code>GET /plugin/gridfpv.zip</code></td><td>the GridFPV RotorHazard plugin bundle (embedded at compile time — always matches the Director)</td></tr>
         <tr><td><code>GET /events</code> · <code>POST /events</code> · <code>DELETE /events/{id}</code></td><td>list (Practice first) / RD-gated create / RD-gated permanent delete (Practice can't be deleted)</td></tr>
         <tr><td><code>GET·PUT /active-event</code></td><td>the Director's active event (open read; RD-gated write) — <code>ActiveEvent</code> / <code>SetActiveEventRequest</code></td></tr>
         <tr><td><code>GET·POST /timers</code> · <code>PUT·DELETE /timers/{id}</code></td><td>app-level timer registry: Mock + RotorHazard, carrying <code>channel_capability</code> / <code>node_count</code> / <code>available_channels</code> (§ below). Open read; RD-gated writes; Mock undeletable</td></tr>
@@ -178,7 +183,8 @@
         <tr><td><code>PUT /classes</code> · <code>PUT /classes/{class}/membership</code></td><td>per-event class selection and per-class roster membership (RD-gated)</td></tr>
         <tr><td><code>POST /rounds</code> · <code>PUT·DELETE /rounds/{round}</code></td><td>per-event class-tagged rounds (RD-gated) — <code>RoundDef</code> / <code>NewRoundReq</code> / <code>UpdateRoundReq</code></td></tr>
         <tr><td><code>GET /heats</code></td><td>the round-tagged scheduled-heats list (<code>HeatSummary[]</code>) the Heats UI reads. Open read</td></tr>
-        <tr><td><code>GET /rounds/{round}/ranking</code> · <code>GET /classes/{class}/standings</code></td><td>a round's per-pilot ranking and a class's aggregated standings. Open reads</td></tr>
+        <tr><td><code>GET /rounds/{round}/ranking</code> · <code>GET /rounds/{round}/standings</code> · <code>GET /classes/{class}/standings</code></td><td>a round's per-pilot ranking / standings and a class's aggregated standings. Open reads</td></tr>
+        <tr><td><code>GET /audit</code></td><td>the event-wide audit trail (every ruling, event-scoped). Open read</td></tr>
         <tr><td><code>PUT /roster</code> · <code>POST·DELETE /roster/{pilot}</code></td><td>per-event roster, wholesale or single-pilot (RD-gated)</td></tr>
         <tr><td><code>PUT /timers</code> · <code>PUT /primary-timer</code></td><td>per-event timer selection and the primary timer (RD-gated)</td></tr>
         <tr><td><code>GET /snapshot/event/{event}</code></td><td>event-scope live race-state snapshot</td></tr>
@@ -386,8 +392,10 @@ sequenceDiagram
       runs on the Director's own machine (the Tauri app, or the v0.4 web app served at
       <code>localhost</code>). A request whose source address is loopback is the operator at the
       keyboard <em>by definition</em>, so it gets full control with <strong>no login, no token,
-      no passphrase</strong> — the RD opens the app and is in. This is enforced by source-IP
-      middleware (<code>peer.ip().is_loopback()</code>), and it is safe because the OS drops
+      no passphrase</strong> — the RD opens the app and is in. This is the decided design — the source-IP
+      middleware (<code>peer.ip().is_loopback()</code>) is <strong>not built yet (#80)</strong>;
+      today control is open unless an RD token (<code>GRIDFPV_RD_TOKEN</code>) is configured
+      (the dev/local-trust posture, §9.4). It will be safe because the OS drops
       spoofed-loopback "martian" packets at the kernel before they ever reach the server: a
       remote host cannot forge a loopback source address. The practical consequence is that
       <strong>there is no local auth UI</strong> — no login screen in front of the event picker,

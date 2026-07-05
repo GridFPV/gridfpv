@@ -11,15 +11,15 @@ inject emulated passes. See [`rotorhazard-plugin.html`](rotorhazard-plugin.html)
 
 ## What's running
 
-After the overnight deploy, three things are up:
+When the harness is up (bring-up commands below), three things run:
 
 | Service | Where | What |
 |---------|-------|------|
 | **Director** | http://127.0.0.1:8080 | The GridFPV app (latest `devel` build), data in `~/gridfpv-data` |
 | **Race RotorHazard** | http://localhost:5055 | RH v4.4.0 with the `gridfpv` + `gridfpv_mock` plugins (container `gridfpv-race-rh`) |
-| (untouched) | :5099 | The maintainer's `gridfpv-demo-rh` — left alone |
+(Any other RH containers on the box — demo/deploy rigs — are unrelated; leave them alone.)
 
-The active event's timer already points at `http://localhost:5055` and reads **Connected**
+Point the active event's timer at `http://localhost:5055`; it should read **Connected**
 with a green **plugin ✓** chip.
 
 > If the Director or race RH aren't running, restart them — see "Restarting" at the bottom.

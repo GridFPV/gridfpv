@@ -27,11 +27,14 @@
       </p>
       <p>
         User-facing documentation (guides for race directors, pilots, and
-        self-hosters) is a separate concern and will live in its own repository
-        later. Keep that material out of this repo.
+        self-hosters) is a separate concern and lives in its own repository —
+        published at <a href="https://docs.gridfpv.com">docs.gridfpv.com</a>. Keep that
+        material out of this repo.
       </p>
       <p>
-        <strong>Release state (2026-06-30):</strong> this is a <strong>primitives-first</strong> release —
+        <strong>Release state:</strong> <strong>v0.4.0-alpha.1 released 2026-07-05</strong>
+        (tagged on <code>main</code>; Linux/Windows/macOS desktop portables with the live RH
+        adapter). It is a <strong>primitives-first</strong> release —
         three round types (Practice / Time Trials / Head-to-Head) ship; the tournament structures are
         carved to the <code>tournaments-snapshot</code> branch (PR #327) for a post-v1 rebuild.
       </p>
@@ -187,11 +190,11 @@
         </div>
       </li>
       <li>
-        <div class="doc-title"><a href="marshaling-plan.html">Marshaling Build Plan</a></div>
+        <div class="doc-title"><a href="marshaling-plan.html">Marshaling Build Plan</a> <em>(superseded — fully shipped)</em></div>
         <div class="doc-desc">
-          The sliced implementation plan for marshaling — the headline finding (the correction model
-          and deterministic fold already exist), the refinements that shrink the design, the six
-          slices in recommended order, and the load-bearing risks (RSSI fidelity, throw-out
+          The historical sliced build plan for marshaling — every slice shipped in
+          v0.4.0-alpha.1 (see <a href="marshaling.html">Marshaling</a> for the as-built design).
+          Kept as the record of the headline finding, the refinements, and the risks (RSSI fidelity, throw-out
           determinism, the offset convention).
         </div>
       </li>
@@ -257,7 +260,7 @@
         <div class="doc-title"><a href="roadmap.html">Roadmap</a></div>
         <div class="doc-desc">
           The release-versioned phase plan (v0.1 → v0.8) from foundations through the Director,
-          Cloud, PWA, and integrations — and how it maps onto GitLab's free-tier planning features.
+          Cloud, PWA, and integrations — and how it is tracked on GitHub.
         </div>
       </li>
     </ul>

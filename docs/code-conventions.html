@@ -46,9 +46,19 @@
       <p><span class="name"><code>cargo xtask</code> defines every check.</span> Local and CI
       run the identical suite: <code>cargo xtask ci</code> = <code>fmt --check</code> &amp;&amp;
       <code>clippy --all-targets -D warnings</code> &amp;&amp; <code>test --all</code> &amp;&amp;
-      the Rust→TS bindings drift-check. The GitLab pipeline is thin — it only calls
-      <code>cargo xtask ci</code>. Never put check logic in <code>.gitlab-ci.yml</code>; add it
-      to <code>xtask</code> so local and CI can't drift.</p>
+      the Rust→TS bindings drift-check. CI is <strong>GitHub Actions</strong>
+      (<code>.github/workflows/ci.yml</code>): the Rust job calls <code>cargo xtask ci</code>
+      verbatim, alongside a <code>cargo audit</code> job and a frontend job
+      (build / type-check / lint / test / Director build / <strong>contract suite</strong>);
+      the gated <code>release-builds.yml</code> builds the Tauri portables. Never put check
+      logic in the workflow files; add it to <code>xtask</code> so local and CI can't drift.</p>
+      <p><span class="name">One product version, bumped by <code>cargo xtask version</code>.</span>
+      The version lives in <code>[workspace.package].version</code>
+      (<code>0.x</code> milestones, <code>-alpha.N</code>/<code>-beta.N</code> pre-releases) and is
+      kept in lock-step with <code>src-tauri</code>, <code>tauri.conf.json</code>, and the console
+      <code>package.json</code> by <code>cargo xtask version &lt;x.y.z[-pre]&gt;</code>. It is
+      surfaced by <code>GET /about</code> and the console build-stamp;
+      <code>CONTRACT_VERSION</code> is the separate wire-compat integer.</p>
     </div>
 
     <h2>3. Generated wire types</h2>

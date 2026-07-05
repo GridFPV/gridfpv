@@ -90,7 +90,7 @@ stateDiagram-v2
   Staged     --> Scheduled  : Abort
   Armed      --> Scheduled  : Abort / Restart
   Running    --> Scheduled  : Abort / Restart
-  Unofficial --> Scheduled  : Restart
+  Unofficial --> Scheduled  : Restart / Discard
   Final      --> Scheduled  : Discard
     </pre>
 
@@ -118,14 +118,13 @@ stateDiagram-v2
       <code>Abort</code>, <code>Restart</code>, <code>Discard</code>, <code>Revert</code>, and
       the two race-day overrides <code>SkipCountdown</code> (force
       <code>Armed → Running</code> now) and <code>ForceEnd</code> (force
-      <code>Running → Unofficial</code> now) for when the clock can't be trusted. Notably,
+      <code>Running → Unofficial</code> now) for when the clock can't be trusted. (Console reality: <code>ForceEnd</code> surfaces as the plain <strong>Stop</strong> button; <code>SkipCountdown</code> is wire-only — the console retired it, the countdown just runs.) Notably,
       <strong>both <code>Abort</code> and <code>Restart</code> now reset the heat all the way
       to <code>Scheduled</code></strong> (the RD re-Stages it): <code>Abort</code> is legal
       from <code>Staged</code>/<code>Armed</code>/<code>Running</code>, <code>Restart</code>
       from <code>Armed</code>/<code>Running</code>/<code>Unofficial</code>.
       <code>Revert</code> re-opens a finalized result (<code>Final → Unofficial</code>);
-      <code>Discard</code> queues a finalized heat for a clean re-run
-      (<code>Final → Scheduled</code>).
+      <code>Discard</code> throws a heat out for a clean re-run — legal from <strong>Unofficial or Final</strong> (both land back at <code>Scheduled</code>).
     </p>
     <p>
       In the log these are canonical events: a heat is created by a <code>HeatScheduled</code>
@@ -313,11 +312,11 @@ stateDiagram-v2
     <p>
       <strong>Multi-class scheduling.</strong> Several classes can be live at once, each with
       its own format, sharing scarce resources — the timer and, for IRL, its channels.
-      The engine interleaves heats <strong>round-robin</strong> across classes in a fixed
-      rotation (so no class starves; a format that emits several heats at once has them buffered
-      and drained one per turn rather than monopolising the serialized timer), and
-      <strong>allocates</strong> each IRL heat's video channels by deterministic first-fit in seed
-      order — the engine's half of the split (§7.3): it decides who flies on what channel, the
+      Heat production is <strong>RD-driven per round</strong> (fill-round / generate-next; a
+      cross-class round-robin rotation scheduler remains future work), and the engine
+      <strong>allocates</strong> each IRL heat's video channels by <strong>IMD-aware set
+      selection</strong> (the cleanest third-order-intermod set, #209) then deterministic
+      seed-order assignment — the engine's half of the split (§7.3): it decides who flies on what channel, the
       adapter applies the tuning. The channel set is <strong>defined by the selected timer</strong>,
       not a free-floating event pool — the standard FPV catalog plus the adapter's fixed-or-flexible
       capability (custom raw-MHz where allowed) — and the timer's <strong>node/slot count caps the
@@ -387,7 +386,8 @@ stateDiagram-v2
       <a href="heat-lifecycle.html">Heat Lifecycle</a>; rationale in
       <a href="decisions.html">Decisions</a>.</li>
       <li><span class="resolved">Resolved — Start / holeshot &amp; lap model.</span> Start
-      type is configurable (gate-start vs staggered); the first crossing of the start/finish
+      procedure has one shipped mode (<code>RandomizedDelay</code> — gate-start-vs-staggered
+      configurability never landed; add a variant if needed); the first crossing of the start/finish
       gate after arming opens lap 1; splits derive per the gate model in
       <a href="timer-adapters.html">Timer Adapters</a>.</li>
       <li><span class="resolved">Resolved — Frequency / channel allocation ownership.</span>

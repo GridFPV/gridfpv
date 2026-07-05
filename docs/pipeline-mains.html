@@ -36,7 +36,7 @@
         This is a deep dive on one phase of the
         <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
         and surfaces the decisions and data each implies. It does not define the schema or
-        APIs; those belong to the Architecture doc (coming soon).
+        APIs; those belong to the <a href="architecture.html">Architecture</a> doc.
       </p>
     </div>
 
@@ -52,9 +52,9 @@
 
     <div class="callout">
       <p>
-        <strong>As built (v0.4) — the Rounds form.</strong> A bracket round is created on the
+        <strong>Recorded design (pre-carve v0.4 form — NOT the current console)</strong> A bracket round is created on the
         Rounds+Heats stage-page: a <strong>Label</strong>, a <strong>Format</strong> (friendly name —
-        <em>Single/Double Elimination</em>, <em>Multi-Main</em>, <em>Round Robin</em>),
+        <em>Single/Double Elimination</em>, <em>Multi-Main</em>, <em>Round Robin</em> — these formats now live on <code>tournaments-snapshot</code>; the current Add-round picker offers only the three primitives),
         then dynamic per-format fields — a <strong>single-select class</strong> (a round targets one
         class), a <strong>win condition</strong>, a <strong>seeding</strong> rule (<em>From roster</em>
         or <em>From ranking</em> with a source round + top-N — the cut is now labeled
@@ -74,7 +74,9 @@
         qualifying ranking (top-N)</strong> as a set of rounds — then editable by the RD (the #84
         Class→Rounds carry). <strong>Decided (not yet built):</strong> a bracket generates as
         <strong>one round per level</strong> (Quarters/Semis/Final), seeded round-to-round via
-        <code>FromRanking</code> — single-elim is a clean winners-chain, double-elim's cross-bracket
+        <code>FromHeatWinners</code> (the advancement seeding is <em>built server-side</em>,
+        form-preserved but not form-creatable; the <em>builders</em> are what's carved) — single-elim
+        is a clean winners-chain, double-elim's cross-bracket
         losers-of feed is the design problem (<a href="decisions.html">D13</a>, #217). Heat-filling has
         two v1 modes: <strong>manual</strong> and <strong>format-generated</strong> (the generators);
         a <strong>&ldquo;Generate heats&rdquo;</strong> action fills the whole deterministic round in
