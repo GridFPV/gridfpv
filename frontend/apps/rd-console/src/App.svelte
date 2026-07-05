@@ -24,7 +24,7 @@
    * routes between them and owns the session.
    */
   import '@gridfpv/components/tokens.css';
-  import { ToastHost, Dialog, Button, Field, Input, toast } from '@gridfpv/components';
+  import { ToastHost } from '@gridfpv/components';
   import { Session } from './lib/session.svelte.js';
   import { mountRaceDayAudio } from './lib/raceDayAudio.svelte.js';
   import ContextHeader from './ContextHeader.svelte';
@@ -230,23 +230,10 @@
   }
 
   // ── Settings (the RD token, set/cleared up front) ──────────────────────────
-  let settingsOpen = $state(false);
-  let tokenInput = $state('');
-  function openSettings() {
-    tokenInput = '';
-    settingsOpen = true;
-  }
-  function saveToken() {
-    if (!tokenInput.trim()) return;
-    session.setToken(tokenInput.trim());
-    settingsOpen = false;
-    toast.success('Control token saved for this session.');
-  }
-  function clearToken() {
-    session.clearToken();
-    tokenInput = '';
-    toast.info('Control token cleared.');
-  }
+  // v1 keeps NO manual settings surface: the control token is requested automatically by
+  // TokenDialog when a privileged action needs one (loopback needs none at all), and the
+  // setup wizard runs once on event creation (everything it sets stays editable on the
+  // pages). The old gear/settings dialog + "Setup wizard" relaunch button are gone.
 </script>
 
 <svelte:window onkeydown={onKeydown} onhashchange={onHashChange} onpopstate={onHashChange} />
@@ -332,45 +319,9 @@
       </div>
 
       <header class="topbar">
-        <ContextHeader {session} ongolive={() => setTab('live')} onswitchevent={leaveToPicker} />
+        <ContextHeader {session} ongolive={() => setTab('live')} />
         <div class="topbar-actions">
           <h1 class="screen-title">{activeScreen?.label}</h1>
-          <button
-            type="button"
-            class="wizard-launch"
-            onclick={() => (wizardOpen = true)}
-            title="Walk this event's setup — classes, roster, timer, first round"
-          >
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-              <path
-                d="M5 3v4M3 5h4M6 17v4M4 19h4M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5L13 3z"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <span>Setup wizard</span>
-          </button>
-          <button
-            type="button"
-            class="gear"
-            onclick={openSettings}
-            aria-label="Settings"
-            title={session.hasToken ? 'Settings — token set' : 'Settings — no token'}
-          >
-            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-              <path
-                d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 13a7.8 7.8 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.8 7.8 0 0 0-1.7-1l-.4-2.6h-4l-.4 2.6a7.8 7.8 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.8 7.8 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.8 7.8 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.8 7.8 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6z"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.4"
-                stroke-linejoin="round"
-              />
-            </svg>
-            {#if session.hasToken}<span class="gear-dot" aria-hidden="true"></span>{/if}
-          </button>
         </div>
       </header>
 
@@ -421,32 +372,8 @@
   </div>
 {/if}
 
-<!-- The lazy token prompt + the up-front settings menu live above any screen. -->
+<!-- The lazy token prompt lives above any screen (the ONLY token surface in v1). -->
 <TokenDialog bind:this={tokenDialog} />
-
-<Dialog bind:open={settingsOpen} title="Settings">
-  <div class="settings">
-    <Field label="Control token" hint="Held for this session only — never written to disk.">
-      <Input
-        type="password"
-        bind:value={tokenInput}
-        placeholder={session.hasToken ? '•••••••• (set)' : 'bearer token'}
-        aria-label="Control token"
-        autocomplete="off"
-      />
-    </Field>
-    <p class="settings-note">
-      A token is only needed for privileged actions (creating an event, running a heat, registering,
-      marshaling). You'll be asked automatically when one is required.
-    </p>
-  </div>
-  {#snippet footer()}
-    {#if session.hasToken}
-      <Button variant="ghost" onclick={clearToken}>Clear token</Button>
-    {/if}
-    <Button variant="primary" onclick={saveToken} disabled={!tokenInput.trim()}>Save token</Button>
-  {/snippet}
-</Dialog>
 
 <ToastHost />
 
@@ -614,84 +541,13 @@
     gap: var(--gf-space-3);
     flex-shrink: 0;
   }
-  .wizard-launch {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--gf-space-2);
-    height: 2rem;
-    padding: 0 var(--gf-space-3);
-    border: 1px solid var(--gf-border);
-    border-radius: var(--gf-radius-sm);
-    background: transparent;
-    color: var(--gf-text-secondary);
-    font-family: inherit;
-    font-size: var(--gf-font-size-sm);
-    font-weight: var(--gf-font-weight-medium);
-    cursor: pointer;
-    white-space: nowrap;
-    transition:
-      border-color var(--gf-motion-fast) var(--gf-ease-out),
-      color var(--gf-motion-fast) var(--gf-ease-out);
-  }
-  .wizard-launch:hover {
-    border-color: var(--gf-accent);
-    color: var(--gf-accent);
-  }
-  .wizard-launch:focus-visible {
-    outline: none;
-    box-shadow: var(--gf-focus-ring);
-  }
   @media (max-width: 48rem) {
-    .wizard-launch span {
-      display: none;
-    }
-  }
-
-  .gear {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 2rem;
-    height: 2rem;
-    border: 1px solid var(--gf-border);
-    border-radius: var(--gf-radius-sm);
-    background: transparent;
-    color: var(--gf-text-muted);
-    cursor: pointer;
-    transition:
-      border-color var(--gf-motion-fast) var(--gf-ease-out),
-      color var(--gf-motion-fast) var(--gf-ease-out);
-  }
-  .gear:hover {
-    border-color: var(--gf-border-strong);
-    color: var(--gf-text);
-  }
-  .gear-dot {
-    position: absolute;
-    top: 3px;
-    right: 3px;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--gf-accent);
   }
 
   .content {
     flex: 1;
     padding: var(--gf-space-8);
     overflow: auto;
-  }
-
-  .settings {
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-3);
-  }
-  .settings-note {
-    margin: 0;
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-muted);
   }
 
   @media (max-width: 60rem) {

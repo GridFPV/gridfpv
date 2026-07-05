@@ -11,5 +11,6 @@
   // The controller binds to ONE session for its lifetime (exactly like App.svelte's mount);
   // tests never swap the prop, so capturing the initial value is the intent.
   // eslint-disable-next-line svelte/valid-compile
+  // svelte-ignore state_referenced_locally
   mountRaceDayAudio(session);
 </script>
