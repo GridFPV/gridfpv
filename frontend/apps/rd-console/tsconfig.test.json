@@ -1,0 +1,10 @@
+{
+  // Type-checks the console's tests (kept out of `src` so the app build never bundles
+  // them). Run by the `check` script; Vitest runs them at runtime via vitest.config.ts.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["svelte", "vite/client", "vitest/globals", "@testing-library/jest-dom"]
+  },
+  "include": ["tests", "vitest.setup.ts", "src"]
+}

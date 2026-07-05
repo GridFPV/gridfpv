@@ -2,7 +2,7 @@
 //!
 //! Drives a full heat against a **real dockerized RotorHazard** via the shared
 //! [`common::run_mock_heat`] harness, then asserts — structurally — that the heat
-//! ran the whole loop to `Scored`, that the recorded transitions appear in canonical
+//! ran the whole loop to `Final`, that the recorded transitions appear in canonical
 //! order, and that the timer crossings were collected only while the heat was live
 //! (cross-checked against [`consumes_pass`]). This is the first consumer of the
 //! reusable harness; #30 (scoring), #31 (marshaling), #33–37 fold the same log.
@@ -35,6 +35,7 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
                 ticks_per_lap: 6,
                 peak_rssi: 150,
                 baseline_rssi: 70,
+                seed: 0,
             }),
         ),
         (
@@ -43,6 +44,7 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
                 ticks_per_lap: 10,
                 peak_rssi: 120,
                 baseline_rssi: 60,
+                seed: 0,
             }),
         ),
     ];
@@ -50,11 +52,11 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
     let log = run_mock_heat(DEFAULT_PORT, HEAT, &scenario);
     let heat = HeatId(HEAT.to_string());
 
-    // --- the heat reached Scored (fold the whole log back) ---
+    // --- the heat reached Final (fold the whole log back) ---
     assert_eq!(
         heat_state(&log, &heat),
-        Some(HeatState::Scored),
-        "the heat must fold back to Scored"
+        Some(HeatState::Final),
+        "the heat must fold back to Final"
     );
 
     // --- the forward-path transitions appear, in canonical order ---
@@ -75,7 +77,7 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
             HeatTransition::Armed,
             HeatTransition::Running,
             HeatTransition::Finished,
-            HeatTransition::Scored,
+            HeatTransition::Finalized,
         ],
         "the recorded transitions must be the forward heat loop, in order"
     );
@@ -135,15 +137,15 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
     );
 
     // Sanity on the boundary rule the harness relies on: a pass is NOT consumed once
-    // the heat is Scored — so any crossing that leaked past Finished/Scored would have
+    // the heat is Final — so any crossing that leaked past Finished/Final would have
     // failed the in-loop check above (it never reaches here as Running).
     assert!(
-        !consumes_pass(HeatState::Scored, GraceWindow::default(), None),
-        "the grace window is closed once Scored"
+        !consumes_pass(HeatState::Final, GraceWindow::default(), None),
+        "the grace window is closed once Final"
     );
 
     println!(
-        "mock heat e2e: {} transitions, {pass_count} passes, folded to Scored",
+        "mock heat e2e: {} transitions, {pass_count} passes, folded to Final",
         transitions.len()
     );
 }

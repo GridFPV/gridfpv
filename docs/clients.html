@@ -16,7 +16,8 @@
 
     <p class="lead">
       Everything that renders GridFPV is a <strong>web client of the one protocol</strong>:
-      the RD console in the Tauri window, the racer/spectator PWA, the OBS overlays, and (future)
+      the RD console (now shipping in a native Tauri desktop app as the release form; PRs #195,
+      #204), the racer/spectator PWA, the OBS overlays, and (future)
       a privileged RD mobile-control surface on the LAN. They
       differ only in <em>permissions</em>, <em>transport</em>, and <em>what they emphasize</em> —
       not in how they talk to the Director. This doc settles the frontend stack those surfaces
@@ -58,7 +59,7 @@ flowchart TB
     ui["Component library&lt;br/&gt;leaderboard · bracket · clock"]
   end
 
-  rd["RD console&lt;br/&gt;control · dense · authenticated&lt;br/&gt;in Tauri window"]
+  rd["RD console&lt;br/&gt;control · dense · loopback-trusted&lt;br/&gt;native Tauri app (release) · web app (dev)"]
   pwa["Racer / spectator PWA&lt;br/&gt;read · installable · push"]
   ovl["OBS overlays&lt;br/&gt;read-only · lean · browser source"]
 
@@ -83,22 +84,131 @@ flowchart TB
       contract can't drift between surfaces because there is only one client.</p>
     </div>
 
-    <h3>The RD console — control-oriented, dense, authenticated</h3>
+    <h3>The RD console — control-oriented, dense, loopback-trusted</h3>
     <p>
-      The race director's cockpit, loaded inside the <strong>Tauri window</strong> (Architecture
-      §2). It is the only surface that exercises the protocol's privileged write/control path —
-      arming heats, marshaling, configuring the pipeline — so it authenticates with the RD role
-      (Architecture §9; mechanics in <a href="protocol.html">Protocol</a>). It is information-dense
-      and keyboard-friendly: a working tool for someone running a live event, not a viewer.
+      The race director's cockpit, loaded inside the <strong>Tauri window</strong>
+      (Architecture §2). <strong>The Tauri shell has landed (PRs #195, #204) as the release form — a
+      self-contained, portable single-file binary with the Director embedded in-process (see the
+      native-desktop section below); the hosted web app served by the Director remains the
+      development path.</strong> It is the only surface that exercises the protocol's privileged
+      write/control path —
+      arming heats, marshaling, configuring the pipeline. Because it runs on the Director's own
+      machine, it is trusted by <strong>loopback</strong> and needs <strong>no login at all</strong>:
+      the RD opens it and is in (Architecture §9; mechanics in <a href="protocol.html">Protocol</a> §5).
+      It is information-dense and keyboard-friendly: a working tool for someone running a live event,
+      not a viewer.
     </p>
     <div class="callout">
       <p>
-        The console is "just a co-located web client" (Architecture §2): it loads over the
-        Tauri webview but talks to the same local <code>axum</code> server, over the same
-        protocol, as everyone else. The Tauri shell buys a friendly native window and OS
-        integration (file dialogs for export, single-binary packaging) — it does
-        <strong>not</strong> buy a private back channel. Control authority is a protocol role,
-        not a shell privilege.
+        <strong>As built (v0.4) — the console information architecture: a home hub of pages, then an
+        event workspace.</strong> The console opens on a <strong>home hub</strong> whose top-level
+        navigation is four <em>pages</em> (not modals): <strong>Pilots</strong>, <strong>Classes</strong>,
+        <strong>Events</strong>, and <strong>Timers</strong>. The first three of those — pilots,
+        classes, and timers — are <strong>app-level registries</strong> you configure once and
+        <em>select</em> from per event (the &ldquo;configure once, select per event&rdquo; model;
+        <a href="pipeline-setup.html">Setup</a>). Navigation is <strong>hash-based</strong>, so a
+        browser refresh preserves the current page and the hub stays the hub. The header carries the
+        GridFPV monogram logo and the colored wordmark. The <strong>event workspace</strong> — the
+        live race-running surface — is entered from the <strong>Events</strong> page by opening one
+        event.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Planned — the event workspace is a sequence of editable stage-pages, not a
+        &ldquo;Setup&rdquo; tab.</strong> Inside an event the workspace is a left-to-right sequence of
+        <em>stage-pages</em> you can revisit and edit at any time:
+        <strong>Classes&nbsp;· Roster&nbsp;· Rounds+Heats&nbsp;· Live&nbsp;control&nbsp;·
+        Marshaling&nbsp;· Results</strong> (Rounds and Heats are <em>combined</em> on one page). There
+        is no separate &ldquo;Setup&rdquo; phase or tab — setting an event up is just visiting its
+        early stage-pages. A <strong>guided setup wizard</strong> is a thin first-pass <em>over</em>
+        those same pages for the common path, and is built <strong>last</strong> (v0.4 Slice&nbsp;7) so
+        the pages exist before the wizard that walks them. One event flies <strong>one track</strong>.
+        (The race-running redesign; <a href="pipeline-setup.html">Setup</a>,
+        <a href="pipeline-mains.html">Mains</a>, <em>Roadmap</em> v0.4.)
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>No local auth UI.</strong> Loopback-trust means there is nothing to log into on the
+        RD's own machine — no login screen before the event picker, no token to paste. The earlier
+        "RD token" is not a local login; it survives only as the <em>remote-access passphrase</em>
+        the RD opts into to reach control from off-machine (the mobile-control surface below). A
+        local RD never types a credential to run a race.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Built for the field — readable on a sunlit laptop.</strong> The RD console is
+        operated outdoors in direct sun, on a medium-size laptop, glanced at mid-race from a few
+        feet away — so it is designed for <strong>field readability</strong>: a <strong>larger base
+        text size</strong> than a typical desktop app, a <strong>dark-mode default</strong> (to cut
+        glare), and high contrast. &ldquo;Is this legible on a laptop in bright sunlight?&rdquo;
+        gates any console UI — favor bigger, high-contrast type over dense/small. (Bumping the
+        design-system base sizes is tracked as a follow-up.)
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        The console is "just a co-located web client" (Architecture §2): in the native app it loads
+        over the Tauri webview, but either way it talks to the same local <code>axum</code> server,
+        over the same protocol, as everyone else. The Tauri shell buys a friendly native window and
+        a self-contained single-file binary — it does <strong>not</strong> buy a private back
+        channel. Control authority is a protocol role, not a shell privilege. <em>The native shell
+        has now landed (PRs #195, #204) as the release form — see the native-desktop section below;
+        the hosted web app remains the development path.</em>
+      </p>
+    </div>
+
+    <h4>The native desktop app — the release form <em>(as built; PRs #195, #204)</em></h4>
+    <p>
+      The console's <strong>release form</strong> is a <strong>Tauri 2 desktop app</strong>
+      (<code>src-tauri/</code>) that <strong>embeds the Director in-process</strong>. On launch it
+      runs the <em>same</em> <code>gridfpv_app::director::run_director</code> the hosted
+      <code>gridfpv</code> binary runs, on a tokio task bound to a <strong>loopback ephemeral
+      port</strong> (<code>127.0.0.1:0</code>), then opens a native window pointed at
+      <code>http://127.0.0.1:&lt;port&gt;/</code>. The window loads the Director's own HTTP origin
+      directly, so the SPA's same-origin API (<code>/snapshot/…</code>, <code>/control/…</code>) and
+      the realtime WebSocket work with no cross-origin shims. Because it is
+      <strong>loopback</strong>, the control path is open with <strong>no auth</strong> — there is no
+      passphrase prompt (per the auth model; §1, <a href="protocol.html">Protocol</a> §5). The shell
+      reuses the exact same core rather than duplicating it: one <code>run_director</code> serves both
+      the hosted binary and the desktop app, so the two cannot drift. <em>(The decision and its
+      rationale are recorded as D9 in <a href="decisions.html">Decisions</a>.)</em>
+    </p>
+    <div class="callout">
+      <p>
+        <strong>Self-contained &amp; portable-only.</strong> The frontend dist is baked into the
+        binary via the <code>embed-assets</code> cargo feature, so the produced
+        <code>gridfpv-desktop</code> / <code>.exe</code> is a single self-contained executable that
+        serves the console from memory — no external assets folder. Distribution is
+        <strong>portable-only</strong>: the gated release workflow builds with
+        <code>--no-bundle</code> and publishes <em>only</em> that binary. The msi/nsis/appimage/deb
+        <strong>installers were dropped</strong> — there is nothing to install, which removes setup
+        friction for a non-technical RD and makes the app trivially movable.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Data lives next to the executable.</strong> Created events persist as SQLite files in
+        a <strong><code>gridfpv-data/</code> folder beside the running binary</strong> — copy the exe
+        and that folder together (e.g. to a USB stick) and the events travel with them, true-portable.
+        If the executable's directory isn't writable (a read-only mount, or
+        <code>current_exe()</code> can't be resolved), the app <strong>falls back</strong> to the OS
+        per-user app-data directory and <strong>logs</strong> which location is in use. (The built-in
+        Practice event stays in-memory, matching the hosted Director.)
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>The hosted Director stays the development path.</strong> The native app is
+        <strong>purely additive</strong> — it is the release form, not a replacement for the dev loop.
+        Day-to-day work is unchanged: <code>cargo build -p gridfpv-app --features live</code> serves
+        the API + RD console at <code>:8080</code>. The desktop crate is <strong>excluded</strong>
+        from the root Cargo workspace, so <code>cargo xtask ci</code> never compiles it (CI runners
+        have no webkit2gtk/GTK); the Tauri build is a separate, deliberate command. Windows packaging
+        is deferred — the crate is Windows-ready in principle, but no Windows artifact is built and no
+        cross-compile is attempted.
       </p>
     </div>
 
@@ -141,24 +251,27 @@ flowchart TB
       </p>
     </div>
 
-    <h3>RD mobile-control surface — privileged, mobile, LAN-only <em>(future)</em></h3>
+    <h3>RD mobile-control surface — privileged, mobile, LAN-only <em>(opt-in, v0.5)</em></h3>
     <p>
-      <strong>Future surface.</strong> A second <em>control</em> client for the race director,
-      mobile-optimized and exposed <strong>only on the LAN — never the Cloud</strong>. The use
-      case: the RD is racing themselves, straps into their seat, and needs to start, abort, or
-      advance the race from their phone without returning to the console. It is the same
-      privileged write/control path as the console (mechanics in <a href="protocol.html">Protocol</a>
-      §5), just reached from a phone on the LAN.
+      A second <em>control</em> client for the race director, mobile-optimized and exposed
+      <strong>only on the LAN — never the Cloud</strong>. The use case: the RD is racing
+      themselves, straps into their seat, and needs to start, abort, or advance the race from
+      their phone without returning to the console. It is the same privileged write/control path
+      as the console (mechanics in <a href="protocol.html">Protocol</a> §5), just reached from a
+      phone on the LAN. Remote control is <strong>opt-in and off by default</strong>; the RD turns
+      it on deliberately for a given event.
     </p>
     <div class="callout">
       <p>
-        <strong>Stricter authentication than the console.</strong> The co-located console gets
-        its trust from <em>living in the Tauri window</em> on the Director's own machine; a phone
-        on the LAN has no such standing and must <strong>prove itself</strong>. This surface
-        therefore requires explicit RD login or device pairing — stricter than the console's
-        ambient trust — before it can touch the control path. <strong>Control authority stays
+        <strong>Passphrase-gated, because it is not loopback.</strong> The co-located console gets
+        its trust from <em>living on the Director's own machine</em> (loopback, Architecture §9); a
+        phone on the LAN has no such standing and must <strong>present a credential</strong>. So
+        remote control is gated by an <strong>RD-set passphrase</strong> — the passphrase is the
+        opt-in: enabling remote control is the act of setting it. <strong>Control authority stays
         Director-only and LAN-only</strong>: this surface never widens who can control a race or
-        over what transport, it only adds a mobile place to exercise the existing Director role.
+        over what transport, it only adds a mobile place to exercise the existing Director role. The
+        passphrase must not cross untrusted WiFi in clear, so it rides the v0.5 TLS plan
+        (<a href="protocol.html">Protocol</a> §5; §4 below).
       </p>
     </div>
 
@@ -167,10 +280,10 @@ flowchart TB
         <tr><th>Surface</th><th>Direction</th><th>Auth</th><th>Transport</th><th>Shell</th><th>Emphasis</th></tr>
       </thead>
       <tbody>
-        <tr><td>RD console</td><td>read + <strong>control</strong></td><td>RD role</td><td>LAN (local)</td><td>Tauri</td><td>dense, keyboard, working tool</td></tr>
-        <tr><td>Racer / spectator PWA</td><td>read</td><td>open / light token (LAN) · account (Cloud)</td><td>LAN <em>or</em> Cloud</td><td>browser → future Capacitor</td><td>approachable, mobile-first, installable</td></tr>
-        <tr><td>OBS overlay</td><td>read-only</td><td>open / light token</td><td>LAN <em>or</em> Cloud</td><td>OBS browser source</td><td>transparent, fixed canvas, lean</td></tr>
-        <tr><td>RD mobile-control <em>(future)</em></td><td><strong>control</strong></td><td>RD role, <strong>stricter</strong> (explicit login / pairing)</td><td>LAN-only</td><td>mobile browser / PWA</td><td>focused live-control</td></tr>
+        <tr><td>RD console</td><td>read + <strong>control</strong></td><td><strong>loopback-trusted</strong>, no login</td><td>LAN (local)</td><td>native Tauri app (release) · web app (dev)</td><td>dense, keyboard, working tool</td></tr>
+        <tr><td>Racer / spectator PWA</td><td>read</td><td>open / join token (LAN) · account (Cloud)</td><td>LAN <em>or</em> Cloud</td><td>browser → future Capacitor</td><td>approachable, mobile-first, installable</td></tr>
+        <tr><td>OBS overlay</td><td>read-only</td><td>open / join token</td><td>LAN <em>or</em> Cloud</td><td>OBS browser source</td><td>transparent, fixed canvas, lean</td></tr>
+        <tr><td>RD mobile-control <em>(opt-in, v0.5)</em></td><td><strong>control</strong></td><td>RD <strong>passphrase</strong> (opt-in, off by default)</td><td>LAN-only</td><td>mobile browser / PWA</td><td>focused live-control</td></tr>
       </tbody>
     </table>
 
@@ -208,6 +321,8 @@ flowchart TB
       tiny bundles suiting lean OBS overlays and the LAN PWA. It matches the lean,
       single-binary Tauri ethos rather than fighting it. The contract is the same generated
       TypeScript either way, so the realtime/overlay work is comfortably within Svelte's reach.</p>
+      <p>As built (v0.4): Svelte 5 + Vite (no SvelteKit), an npm-workspaces monorepo
+      (<code>packages/{types,protocol-client,components}</code> + <code>apps/rd-console</code>).</p>
     </div>
 
     <div class="callout">
@@ -267,6 +382,10 @@ flowchart TB
       from Rust; the frontend consumes them. The component library is the only place UI lives, so
       every surface shows the same data the same way unless it deliberately chooses otherwise.</p>
     </div>
+    <p>
+      As built (v0.4): the frontend uses vitest; the suite is green (78 tests — 20 component,
+      7 protocol-client, 51 RD console).
+    </p>
 
     <h2>4. PWA mechanics</h2>
     <p>
@@ -357,11 +476,13 @@ flowchart LR
 
     <h2>6. Native deferral via Capacitor</h2>
     <p>
-      Native apps are deferred but kept cheap, by deliberate symmetry with the Director
-      (Architecture §7). The Director's RD console is a web UI wrapped in <strong>Tauri</strong>;
-      the racer/spectator PWA can later be wrapped in <strong>Capacitor</strong> to ship a native
-      app to the app stores. In both cases the <em>web protocol-client is the constant</em>, and
-      the native shell is an optional enhancement, not a rewrite.
+      Native apps follow a deliberate symmetry with the Director (Architecture §7). The Director's
+      RD console is a web UI wrapped in <strong>Tauri</strong> (now shipped as the release form — a
+      self-contained portable binary with the Director embedded; PRs #195, #204, see §1); the
+      racer/spectator PWA can later be wrapped in <strong>Capacitor</strong> to ship a native app to
+      the app stores. In both cases the
+      <em>web protocol-client is the constant</em>, and the native shell is an optional
+      enhancement, not a rewrite.
     </p>
     <div class="principle">
       <p><span class="name">The web client is the constant on both ends.</span> Tauri wraps the
@@ -396,19 +517,24 @@ flowchart LR
       size on a transparent background, and an overlay is told which race/class it shows via its
       URL — coordinated with <a href="streaming.html">Streaming</a>, which owns the catalogue and
       theming.</li>
-      <li><span class="q">LAN read access posture. <strong>Resolved:</strong> open, with an
-      optional signed join-token.</span> LAN reads are open by default, with an optional signed
-      join-token (per <a href="protocol.html">Protocol</a>) when an event wants to gate access —
-      pairs with the auth model in <a href="protocol.html">Protocol</a> and the trust boundaries
-      in <a href="architecture.html">Architecture</a> §9.</li>
+      <li><span class="q">Read access tier. <strong>Resolved:</strong> a first-class, scoped read
+      tier — open on the LAN, optional signed join-token.</span> Read is the tier every pilot and
+      spectator client uses (a pilot app shows that pilot's own scope), not an afterthought of
+      control. LAN reads are open by default, with an optional signed join-token (per
+      <a href="protocol.html">Protocol</a> §5) when an event wants to gate access, and the same tier
+      backs the Cloud account's read authorization — pairs with the auth model in
+      <a href="protocol.html">Protocol</a> §5 and the trust boundaries in
+      <a href="architecture.html">Architecture</a> §9.</li>
       <li><span class="q">Native push details <em>(deferred)</em>.</span> When the Capacitor wrap
       lands, how native push registration maps onto the Cloud push infrastructure — paired with
       <a href="cloud.html">Cloud &amp; Season</a>.</li>
-      <li><span class="q">RD mobile-control surface <em>(future)</em>.</span> A privileged,
-      mobile-optimized control client exposed LAN-only (§1), reusing the control path
-      (<a href="protocol.html">Protocol</a> §5) but requiring stricter authentication than the
-      console (explicit RD login / device pairing). The auth/pairing mechanics and exact mobile
-      control UX are future work; control authority stays Director-only and LAN-only.</li>
+      <li><span class="q">RD mobile-control surface. <strong>Resolved:</strong> opt-in, off by
+      default, gated by an RD-set passphrase (v0.5).</span> A privileged, mobile-optimized control
+      client exposed LAN-only (§1), reusing the control path (<a href="protocol.html">Protocol</a> §5).
+      Because it is not loopback, it must present a credential — an <strong>RD-set passphrase</strong>
+      the RD opts into (the console itself, on loopback, needs none). It rides the v0.5 TLS plan so the
+      passphrase never crosses untrusted WiFi in clear. The exact mobile control UX is later work;
+      control authority stays Director-only and LAN-only.</li>
     </ol>
 
     <footer class="doc-footer">

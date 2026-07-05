@@ -1,0 +1,13 @@
+{
+    "name": "GridFPV Mock (test)",
+    "author": "GridFPV",
+    "author_uri": "https://github.com/GridFPV",
+    "description": "TEST-ONLY: network control of RotorHazard mock nodes (set RSSI/frequency, inject laps) over the gridfpv_mock_* socket namespace. Never ship this to users.",
+    "info_uri": "https://github.com/GridFPV/gridfpv",
+    "license": "MIT",
+    "license_uri": "https://github.com/GridFPV/gridfpv/blob/main/LICENSE",
+    "version": "0.1.0",
+    "required_rhapi_version": "1.3",
+    "update_uri": null,
+    "text_domain": null
+}

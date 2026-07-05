@@ -16,8 +16,9 @@
 
     <p class="lead">
       Flying time before anything counts. An optional, event-wide warm-up where pilots shake
-      out gear, get comfortable on their seat and frequency, and (on a real timer) let the
-      system calibrate to them — without a single result feeding the competition.
+      out gear, get comfortable on their channel, and (on a real timer) let the system calibrate
+      to them — without a single result feeding the competition. As built, it is a single
+      channel-seated <em>Open Practice</em> round.
     </p>
 
     <div class="callout">
@@ -35,87 +36,109 @@
       Practice sits <strong>above the classes</strong> — it is open to everyone at the event,
       not a per-class competition. Its job is to get pilots and equipment ready: warm up, verify
       seat and frequency, and give the timer a chance to learn each pilot. Its output is
-      readiness plus an informal hot-lap board and logged practice laps — none of which ever
-      seed qualifying.
+      readiness plus an informal hot-lap board — none of which ever seeds qualifying.
     </p>
+
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4) — Practice is the <code>open_practice</code> round.</strong> In the
+        race-running redesign there is no separate &ldquo;Practice phase&rdquo; with its own modes.
+        Practice is just a <strong>round</strong> on the event whose <strong>format is
+        <code>open_practice</code></strong> (friendly name <em>&ldquo;Open Practice&rdquo;</em>),
+        created from the same Rounds+Heats stage-page as every other round. Selecting that format
+        swaps the round form's class/win-condition/seeding block for an <strong>active-channels
+        picker</strong> and an <strong>optional time-limit (minutes)</strong> field — nothing else.
+        The three-mode model below (rolling / scheduled / free-fly) and the shared rolling-queue
+        engine are <strong>not built</strong>; what shipped is the channel-seated free-fly case only.
+        (Engine: <code>round_engine.rs</code> open-practice path; UI:
+        <a href="clients.html">Clients</a> §1 Rounds+Heats + Live control.)
+      </p>
+    </div>
 
     <h2>Capabilities</h2>
 
-    <h3>Organize the field</h3>
-    <p>Three modes; the race director picks what fits the session:</p>
-    <ul>
-      <li><strong>Rolling "fly when ready."</strong> Pilots join a queue and the system assigns
-        the next open slot and frequency/seat as it frees up, managing throughput so the field
-        keeps flowing. This is the same queue idea qualifying's ZippyQ uses — likely one shared
-        engine (see <em>Qualifying</em>, coming soon).</li>
-      <li><strong>Scheduled practice rounds.</strong> Fixed practice heats with assigned pilots
-        and frequencies — a mini-schedule for structured practice windows.</li>
-      <li><strong>Free-fly (manual).</strong> No structure; pilots self-coordinate. The Director
-        optionally still provides live timing and overlays. In this mode timing is keyed to the
-        <strong>frequency / node</strong>, not a specific pilot — anyone can hop on a channel and
-        get lap times without being bound to an identity. (Pilot binding is optional here; it's
-        what the structured modes add.)</li>
-    </ul>
+    <h3>Organize the field — one open heat over the active channels</h3>
+    <p>
+      Open Practice is <strong>channel-seated, not pilot-seated</strong>. The round form's
+      active-channels picker selects which of the primary timer's <strong>node seats</strong> are
+      live; the engine then <strong>auto-creates a single open heat</strong> whose &ldquo;lineup&rdquo;
+      is those channels (competitor refs are <code>node-0</code>, <code>node-1</code>, … — the seats,
+      not pilots). Anyone can hop on an active channel and get timed; there is no roster, no binding,
+      no class. An optional <strong>time limit</strong> (entered in minutes; blank = no limit, end it
+      manually) auto-ends the heat when it expires.
+    </p>
+    <div class="callout">
+      <p>
+        <strong>Not built (deferred):</strong> a rolling &ldquo;fly when ready&rdquo; queue,
+        scheduled practice rounds with assigned pilots, and the shared rolling-queue engine that was
+        once meant to span practice and ZippyQ. The redesign deliberately ships only the open,
+        channel-keyed run; ZippyQ-style rolling fills and the PWA self-register queue are post-v0.4.
+      </p>
+    </div>
 
-    <h3>Hot-lap board &amp; logging</h3>
+    <h3>Hot-lap board — per channel, in-memory</h3>
     <ul>
-      <li>A live, informal <strong>hot-lap board</strong> so pilots can gauge themselves — keyed by
-        pilot in the structured modes, or by <strong>frequency / node</strong> in free-fly
-        (optionally tagged by class). Every entry shows the <strong>fastest lap</strong>; the
-        <strong>recent laps (last ~5)</strong> are essential in free-fly — where a node has no
-        pilot identity, the running laps are how someone recognizes their own flying — and a nice
-        addition in the structured modes too, so a pilot can read pace lap by lap rather than just
-        their single best.</li>
-      <li>Raw laps are logged, but <strong>flagged practice and non-binding</strong> — practice
-        never feeds seeding. The board is feedback, not a result.</li>
+      <li>Live control renders a <strong>per-channel practice board</strong> in place of the usual
+        pilot panels: one row per active channel showing the <strong>node seat</strong>, its resolved
+        channel label, <strong>laps</strong>, <strong>last lap</strong>, and <strong>best lap</strong>
+        (best tracked client-side across the run).</li>
+      <li>Practice laps are <strong>held in memory, not appended to the log</strong> — they are cleared
+        when the heat changes (a <em>&ldquo;New run · clear board&rdquo;</em> action mints a fresh heat
+        and resets the board). Practice never feeds seeding; the board is feedback, not a result.</li>
     </ul>
 
     <h3>Warm-up &amp; the heat loop</h3>
     <ul>
       <li>Shake out gear; confirm the right seat and frequency before it counts.</li>
-      <li>Practice runs the same recurring heat loop as every other phase
-        (<code>schedule → stage → arm → race → land → score</code>), but scoring is
-        non-binding (see the <a href="event-pipeline.html">event pipeline</a> overview).</li>
+      <li>The open-practice heat still runs the shared heat lifecycle
+        (<code>schedule → stage → arm → race → land</code>), but it scores nothing and persists
+        nothing (see the <a href="event-pipeline.html">event pipeline</a> overview).</li>
     </ul>
 
     <h2>Sim vs IRL</h2>
     <div class="sim-note">
-      <p><span class="label">IRL</span>Frequency/seat assignment applies in the rolling and
-      scheduled modes; practice is the natural <strong>timer-calibration</strong> window — the
-      timer learns each pilot's signal so real races read clean.</p>
-      <p><span class="label">Sim</span>Runs can fire back-to-back; free-fly is just hot laps on
-      the track; no frequency management and no calibration.</p>
+      <p><span class="label">IRL</span>The active channels are the primary timer's node seats; the
+      adapter tunes those nodes and anyone on a channel gets timed. Practice is still the natural
+      <strong>timer-calibration</strong> window (planned), where the timer learns each pilot's signal
+      so real races read clean.</p>
+      <p><span class="label">Sim</span>The sim timer declares no channels, so the active-channels
+      picker is empty; free-fly is just hot laps on the track. No frequency management, no calibration.</p>
     </div>
 
     <h2>Entities &amp; data implied</h2>
     <p>What this phase needs to exist (conceptual — not a schema; the Architecture doc formalizes it):</p>
     <dl class="entities">
-      <dt>Practice session (event-wide)</dt>
-      <dd>mode (rolling / scheduled / free-fly) and an enabled flag.</dd>
-      <dt>Practice queue (rolling mode)</dt>
-      <dd>entries of pilot, ready state, assigned slot/frequency, and throughput/rest — the same concept as qualifying's queue.</dd>
-      <dt>Practice run</dt>
-      <dd>a heat-loop run marked non-binding.</dd>
-      <dt>Practice lap record</dt>
-      <dd>raw laps, flagged practice; never linked to seeding.</dd>
-      <dt>Hot-lap board</dt>
-      <dd>per pilot (structured modes) or per frequency/node (free-fly): the recent laps (last ~5) and the fastest lap, with an optional class tag.</dd>
+      <dt>Open-practice round (<code>open_practice</code>)</dt>
+      <dd><em>As built:</em> a round on the event with no class and no win condition; its seeding is the
+      <strong>active-channels set</strong> (the chosen node seats) and an optional
+      <code>time_limit_secs</code>.</dd>
+      <dt>Open-practice heat (auto-created)</dt>
+      <dd>one heat whose competitor refs are the active channels (<code>node-i</code>); carries no
+      channel assignment (the channels <em>are</em> the seats) and is not scored.</dd>
+      <dt>Per-channel practice board (in-memory)</dt>
+      <dd>per active channel: laps, last lap, and best lap — held in memory and cleared on heat change;
+      never logged, never linked to seeding.</dd>
     </dl>
-    <p>Reuses the <strong>frequency/seat pool</strong> and <strong>track</strong> defined in <a href="pipeline-setup.html">Setup</a>.</p>
+    <p>Reuses the primary timer's <strong>channels</strong> (its node seats and
+    <a href="channel-model.html">available channels</a>) and the <strong>track</strong> from
+    <a href="pipeline-setup.html">Setup</a>.</p>
 
     <h2>Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">Shared queue engine. <em>(decided)</em></span> One shared rolling-queue
-        engine across practice and <a href="pipeline-qualifying.html">qualifying</a> — built once;
-        practice runs it non-binding, qualifying adds binding scoring.</li>
-      <li><span class="q">Practice-lap persistence.</span> Are practice laps event-local and
-        discardable, or retained as career "practice" records? Open-data value versus noise.</li>
-      <li><span class="q">Hot-lap board scope.</span> One event-wide board, per-class boards, or
-        per-track.</li>
+      <li><span class="resolved">Resolved — practice is the <code>open_practice</code> round, not a
+        phase with modes.</span> What shipped is the single channel-seated free-fly run; the
+        three-mode model (rolling / scheduled / free-fly) and the shared rolling-queue engine were
+        <strong>not built</strong> (ZippyQ rolling fills + PWA self-register are post-v0.4).</li>
+      <li><span class="resolved">Resolved — practice-lap persistence: in-memory, discardable.</span>
+        Open-practice laps live in memory and are cleared on heat change; they are not appended to the
+        log and never seed qualifying.</li>
+      <li><span class="resolved">Resolved — hot-lap board scope: per channel.</span> The board is keyed
+        by the active channel / node seat, not by pilot or class (there is no roster in open practice).</li>
       <li><span class="q">Presence feedback.</span> Does practice presence feed Setup's
-        auto-presence — i.e. a pilot who practiced is "here"?</li>
-      <li><span class="q">Frequency authority.</span> In practice, does the system assign channels
-        or do pilots self-select?</li>
+        auto-presence — i.e. a pilot who practiced is "here"? (Open practice has no pilot binding, so
+        this stays open.)</li>
+      <li><span class="q">Calibration window.</span> The per-pilot timer-calibration use of practice is
+        still <em>planned</em>, not built.</li>
     </ol>
 
     <footer class="doc-footer">

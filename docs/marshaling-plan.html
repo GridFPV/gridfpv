@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Marshaling Build Plan</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Marshaling Build Plan</h1>
+      <p class="doc-kind">Internal design doc · the sliced implementation plan for marshaling</p>
+    </header>
+
+    <p class="lead">
+      The <a href="marshaling.html">Marshaling</a> doc says <em>what</em> we're building and
+      <em>why</em>; this doc says <strong>how and in what order</strong>. It is the sliced build plan —
+      six vertical slices in recommended sequence — grounded in the headline finding that most of the
+      machinery already exists, plus the refinements that shrink the work and the risks that could
+      undermine it. When this doc and the <a href="marshaling.html">Marshaling</a> doc disagree, that
+      doc (and the <a href="vision.html">Vision</a> above it) wins.
+    </p>
+
+    <div class="callout">
+      <p>
+        Read alongside <a href="marshaling.html">Marshaling</a> (the three-layer design), the
+        correction primitives in <a href="architecture.html">Architecture</a> §3, the provisional
+        <code>Unofficial</code> → locked <code>Final</code> states in
+        <a href="heat-lifecycle.html">Heat Lifecycle</a>, the control/read auth split in
+        <a href="protocol.html">Protocol</a> §5, and the canonical passes / signal context from
+        <a href="timer-adapters.html">Timer Adapters</a>.
+      </p>
+    </div>
+
+    <h2>1. Headline finding — the hard part is already built</h2>
+    <div class="principle">
+      <p><span class="name">The correction data model and the deterministic fold already exist.</span>
+      The append-only spine already carries the <strong>correction primitives</strong> and the
+      <strong>scoring fold</strong> that consumes them. The corrected-passes path
+      (<code>corrected_passes</code>) already does <strong>void</strong> a detection,
+      <strong>insert</strong> a lap, and <strong>adjust</strong> a lap — and it already handles
+      <strong>"void the void"</strong> (a correction can itself be superseded, because corrections are
+      appended facts, never destructive edits). The scoring fold already <strong>folds penalties</strong>
+      and a <strong>heat-void</strong> into the result. So the foundation marshaling needs — immutable
+      raw observations, appended corrections, deterministic recompute — is not new work. The build is
+      mostly <em>surfacing</em> and <em>governing</em> what the engine already computes.</p>
+    </div>
+
+    <h2>2. Refinements that shrink the design</h2>
+    <dl class="entities">
+      <dt>No per-person provenance</dt>
+      <dd>The original design imagined who-changed-what attribution per correction. In practice there is
+      a <strong>single RD actor</strong> at the console — corrections are RD acts, full stop. So we do
+      <strong>not</strong> carry a per-correction person field; the <strong>audit derives from the event
+      type</strong> (the kind of fact appended <em>is</em> the record of what happened). This removes an
+      identity/attribution sub-system from the v1 scope without losing the audit trail — the log is
+      still the complete, ordered record of every change.</dd>
+      <dt>Provisional → official reuses the heat FSM</dt>
+      <dd>The lifecycle is <strong>not new states</strong>: it reuses the heat FSM's
+      <code>Unofficial</code> → <code>Final</code> transition (<a href="heat-lifecycle.html">Heat
+      Lifecycle</a>). The <strong>protest window</strong> is an <strong>optional, OFF-by-default
+      auto-official timer</strong> — when set, it fires the <code>Finalize</code> the RD would have
+      pressed; when unset (the default), nothing auto-finalizes and the RD commits explicitly. No new
+      lifecycle, just a timer that can drive the existing transition.</dd>
+      <dt>RD-only changes; pilots read-only</dt>
+      <dd>All marshaling mutation is <strong>RD-only</strong>, enforced by the control/read split
+      (<a href="protocol.html">Protocol</a> §5). The read-only pilot tier <strong>sees</strong> the
+      record and the corrections but <strong>cannot change</strong> anything — a real boundary, not a UI
+      courtesy. This is consistent with the single-actor model above: one writer, many readers.</dd>
+    </dl>
+
+    <h2>3. The six slices, in recommended order</h2>
+    <p>
+      Each slice is a vertical cut (backend&nbsp;→&nbsp;data&nbsp;→&nbsp;UI where applicable), shippable
+      before the next. The order front-loads the lap-level capability that works for <em>any</em> timer,
+      then layers signal evidence, then the governance lifecycle, then full adjudication.
+    </p>
+    <dl class="entities">
+      <dt>Slice 2 — Correction primitives <span class="tag required">DONE</span></dt>
+      <dd>The lap-level correction facts: <strong>split</strong> (one over-long lap into two),
+      <strong>edit-time</strong> (adjust a lap's time with the neighbour auto-adjusting), and the
+      <strong>reversible DQ</strong> (DQ as a toggle, not a destructive op). Built on the existing
+      void/insert/adjust + "void the void" primitives. <em>Done</em> — this is the foundation the rest
+      surfaces.</dd>
+      <dt>Slice 3 — Lap-level Marshaling UI + audit <span class="tag optional">IN PROGRESS</span></dt>
+      <dd>The marshal-facing surface for the Slice&nbsp;2 primitives: add / remove / split / edit-time /
+      reversible-DQ against the lap list, plus the <strong>audit view</strong> (the ordered list of
+      corrections, derived from the event types per §2). Timer-agnostic — works without any signal
+      trace. <em>In progress.</em></dd>
+      <dt>Slice 1 — RSSI-trace capture</dt>
+      <dd>The one genuinely new plumbing (<a href="marshaling.html">Marshaling</a> §4): the
+      <a href="timer-adapters.html">RotorHazard adapter</a> additionally captures and persists the
+      per-node <strong>RSSI trace plus enter/exit thresholds</strong> for the heat as
+      <strong>immutable facts</strong>. No UI yet — this lands the evidence in the log so the next slice
+      can draw it.</dd>
+      <dt>Slice 4 — Signal-as-evidence graph</dt>
+      <dd>Render the captured RSSI trace as a graph with lap markers and thresholds overlaid, so the
+      marshal sees <em>why</em> the timer called (or missed) a lap and corrects against the visual.
+      Signal-<strong>as-evidence only</strong> — we display the trace, we do <strong>not</strong>
+      re-run detection (the RotorHazard-style "Recalculate" with draggable thresholds stays deferred,
+      a clean add-on on the stored trace). Sim heats have no trace and skip the graph.</dd>
+      <dt>Slice 5 — Provisional → official lifecycle</dt>
+      <dd>Surface the <code>Unofficial</code> → <code>Final</code> commit as the explicit
+      software lifecycle, with the <strong>optional, OFF-by-default protest-window timer</strong> that
+      can auto-finalize (§2). RD commits; <code>Revert</code> re-opens; pilots read-only.
+      <em>Realized note (2026-06-30): <strong>Finalize is now gated on open protests</strong> —
+      rejected, backend and UI, while a protest is open (#330).</em></dd>
+      <dt>Slice 6 — Full adjudication</dt>
+      <dd>The real adjudication framework: first-class <strong>DQ states</strong>, penalty
+      <strong>time and points</strong>, lap <strong>throw-outs</strong>, and <strong>protests</strong> —
+      richer than RotorHazard's <code>+time</code>/note model. The deepest slice, built last on top of
+      everything above.
+      <em>Realized note (2026-06-30): adjudications (DQ / TimeAdded / lap edits / throw-out / void)
+      now reach round ranking, standings, and seeding via the shared <code>score_heat_window</code>
+      scorer (#329, closing <strong>#226</strong>), and DQ is <strong>excluded from ranking</strong>
+      (#331).</em></dd>
+    </dl>
+
+    <pre class="mermaid">
+flowchart LR
+  S2["Slice 2<br/>Correction primitives<br/>(DONE)"]
+  S3["Slice 3<br/>Lap-level UI + audit<br/>(IN PROGRESS)"]
+  S1["Slice 1<br/>RSSI-trace capture"]
+  S4["Slice 4<br/>Signal-as-evidence graph"]
+  S5["Slice 5<br/>Provisional &rarr; official"]
+  S6["Slice 6<br/>Full adjudication"]
+  S2 --> S3 --> S1 --> S4 --> S5 --> S6
+    </pre>
+
+    <h2>4. Key risks</h2>
+    <dl class="entities">
+      <dt>RSSI fidelity (open question)</dt>
+      <dd>The load-bearing risk for the evidence layer (Slice&nbsp;1/4). RotorHazard's own worst
+      marshaling bug was the <em>recorded</em> trace diverging from the <em>realtime</em> signal. Before
+      we rely on it: <strong>does RH expose a continuous RSSI history, or only the latest sample?</strong>
+      This must be <strong>verified on hardware</strong> — if only the latest sample is exposed, the
+      "trace" we capture is sparse and the evidence layer's value drops accordingly. Verify before
+      committing the graph UI.</dd>
+      <dt>Throw-out determinism</dt>
+      <dd>Lap throw-outs (Slice&nbsp;6) must fold <strong>deterministically</strong> — the same log must
+      always yield the same thrown-out set, regardless of correction order. Any throw-out rule that
+      depends on evaluation order (rather than being a pure function of the folded laps) breaks replay.</dd>
+      <dt>Offset convention: window-relative vs. global</dt>
+      <dd>Corrections reference times; the convention for those times — <strong>relative to the heat's
+      start window</strong> vs. an <strong>absolute/global</strong> timestamp — must be fixed and
+      consistent across capture, correction, and display, or edits land at the wrong instant. Pick one
+      convention and hold it through every slice.</dd>
+    </dl>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation ·
+        <a href="marshaling.html">Marshaling</a> ·
+        <a href="architecture.html">Architecture</a> ·
+        <a href="heat-lifecycle.html">Heat Lifecycle</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

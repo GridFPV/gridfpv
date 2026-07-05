@@ -261,6 +261,23 @@ pre.mermaid {
 pre.mermaid:not([data-processed]) { visibility: hidden; }
 pre.mermaid svg { max-width: 100%; height: auto; }
 
+/* --- Code / schema blocks ----------------------------------------------- */
+
+/* A literal code/SQL sketch — distinct from the rendered mermaid diagrams. */
+pre.code {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--gfpv-green);
+  border-radius: var(--radius);
+  padding: 0.9rem 1.1rem;
+  margin: 1.25rem 0;
+  overflow-x: auto;
+  color: var(--text);
+}
+
 /* --- Footer / meta ------------------------------------------------------ */
 
 .doc-footer {

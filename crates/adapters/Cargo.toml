@@ -1,6 +1,6 @@
 [package]
 name = "gridfpv-adapters"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,7 +12,11 @@ rust-version.workspace = true
 # crate stays dependency-light; the live integration tests (`tests/rh_live.rs`
 # against dockerized RotorHazard, `tests/velocidrone_ws.rs` against an in-process
 # mock WebSocket server) enable it.
-live = ["dep:rust_socketio", "dep:tungstenite"]
+#
+# `live` also pulls `native-tls` with `vendored` so the TLS backend is self-contained on
+# Linux (see the dependency note below) — a `--features live` AppImage carries no system
+# libssl dependency.
+live = ["dep:rust_socketio", "dep:tungstenite", "dep:native-tls"]
 
 [dependencies]
 gridfpv-events.workspace = true
@@ -20,6 +24,13 @@ serde.workspace = true
 serde_json.workspace = true
 rust_socketio = { version = "0.6", optional = true }
 tungstenite = { version = "0.29", optional = true }
+# The TLS backend behind the live transports' `wss://` support. `native-tls` selects the
+# OS-native stack per platform — SChannel on Windows, Secure Transport on macOS, OpenSSL on
+# Linux. The `vendored` feature statically compiles OpenSSL *into the binary* on Linux, so a
+# `--features live` build (the AppImage) is self-contained and pulls no system libssl; it is a
+# no-op on Windows/macOS, which use the OS-provided TLS. Declared here (not just transitively via
+# rust_socketio) so we can pin `vendored` on; `live` enables it.
+native-tls = { version = "0.2", features = ["vendored"], optional = true }
 
 [dev-dependencies]
 gridfpv-projection.workspace = true

@@ -54,13 +54,35 @@
       <a href="testing-strategy.html">testing strategy</a> is a phase input, not an afterthought.</p>
     </div>
 
+    <div class="callout">
+      <p>
+        <strong>How we build (v0.4+): vertical slices over horizontal layers.</strong> Through
+        v0.3 we built the spine in horizontal layers — all of the engine, then the protocol
+        server, then the console shell — and that horizontal <strong>foundation</strong>
+        (engine, server, console, contract-suite/observability) is now <strong>done</strong>.
+        A hands-on UI review made the lesson plain: stacking more horizontal layers leaves nothing
+        a director can actually <em>use</em> until the very end. So from v0.4 onward we build the
+        workflow through that foundation <strong>one feature at a time</strong> — each slice goes
+        <strong>backend → API → UI</strong> and genuinely <em>works</em> end to end before the next
+        begins. The root realization: the missing backbone is the <strong>Event</strong>
+        aggregate — you are always inside an event, and an event owns its timers, pilots, heats,
+        format, and results.
+      </p>
+      <p>
+        Two rules ride along. <strong>Design is foundation-first:</strong> the design system
+        (tokens, components, app shell) is its own first slice, and every later slice inherits it
+        rather than reinventing UI. And <strong>entities carry auto-generated unique IDs</strong> —
+        names, callsigns, and channels are human-facing <em>display</em>, never the identity.
+      </p>
+    </div>
+
     <h2>2. The phases</h2>
 
     <pre class="mermaid">
 flowchart LR
   v01["v0.1&lt;br/&gt;Walking skeleton"] --> v02["v0.2&lt;br/&gt;First adapters"]
   v02 --> v03["v0.3&lt;br/&gt;Race engine"]
-  v03 --> v04["v0.4&lt;br/&gt;Director + RD console"]
+  v03 --> v04["v0.4&lt;br/&gt;Direct a single race (RD console)"]
   v04 --> v05["v0.5&lt;br/&gt;Racer/spectator PWA"]
   v05 --> v06["v0.6&lt;br/&gt;Streaming / broadcast"]
   v06 --> v07["v0.7&lt;br/&gt;Cloud"]
@@ -74,16 +96,28 @@ flowchart LR
   classDef live fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
   class v04 live
     </pre>
-    <p class="phase-meta">v0.4 (highlighted) is the first build that can run a real event end to end.</p>
+    <p class="phase-meta">v0.4 (highlighted) is the first build that can run a real event end to end — and, after a hands-on UI review, the first we build as <strong>vertical feature slices</strong> rather than horizontal layers (see §1).</p>
 
     <div class="callout">
       <p>
-        <strong>Status (2026-06):</strong> <strong>v0.1</strong> (walking skeleton) and
-        <strong>v0.2</strong> (first adapters + replay harness) are <strong>complete and
-        merged</strong> — the SQLite append-only log, projection engine, Rust→TS generation,
-        RotorHazard + Velocidrone adapters, recorded-session replay golden tests, and live +
-        emulated-signal dockerized-RH tests are all in the tree. As designed, v0.2 already
-        ingests a live (dockerized) source — "shadow mode." Next: <strong>v0.3 — Race engine</strong>.
+        <strong>Status (2026-06):</strong> <strong>v0.1</strong> (walking skeleton),
+        <strong>v0.2</strong> (first adapters + replay harness), and <strong>v0.3</strong>
+        (race engine) are <strong>complete and merged</strong> — the SQLite append-only log,
+        projection engine, Rust→TS generation, RotorHazard + Velocidrone adapters,
+        recorded-session replay golden tests, live + emulated-signal dockerized-RH tests, the
+        heat-loop state machine, scoring/marshaling, and the format generators are all in
+        the tree — since the primitives-first carve-out (2026-06-30, PR #327) the registry ships
+        <strong>three primitive generators</strong> (Practice / Time Trials / Head-to-Head); the
+        tournament structures are preserved on <code>tournaments-snapshot</code>, rebuilt post-v1.
+        As designed, v0.2 already ingests a live (dockerized) source — "shadow mode."
+      </p>
+      <p>
+        The <strong>v0.4 foundation</strong> is also built: the embedded axum
+        <strong>protocol server</strong> (snapshot + WS stream, scoping, auth), the
+        <strong>Svelte console</strong> shell + generated types, and the
+        <strong>contract-suite / observability</strong> backbone. After a hands-on UI review,
+        the remaining v0.4 work — actually <em>directing</em> a race from the console — is being
+        rebuilt as <strong>vertical feature slices</strong> (see §1 and the v0.4 section below).
       </p>
     </div>
 
@@ -108,18 +142,80 @@ flowchart LR
     <p><strong>Goal:</strong> turn passes + a format into a run race. (<a href="race-engine.html">Race Engine</a>)</p>
     <ul>
       <li>The logged <strong>heat-loop state machine</strong>; scoring/lap-derivation + win conditions; marshaling adjudications.</li>
-      <li>The unified <strong>format/generator interface</strong> + first formats (timed qualifying, single-elim; ZippyQ as the honesty check); advancement; multi-class + engine-side frequency allocation.</li>
+      <li>The unified <strong>format/generator interface</strong> + first formats (Time Trials, single-elim; ZippyQ built then <strong>shelved</strong> as the dynamic-generator honesty check — <a href="decisions.html">D10</a>); advancement; multi-class + engine-side frequency allocation.</li>
     </ul>
     <p><strong>Done when:</strong> a full event (qualifying → bracket → winner) runs from a recorded source with correct results and marshaling; generators are table-tested.</p>
 
-    <h3>v0.4 — Director server + RD console</h3>
-    <p><strong>Goal:</strong> a person can run a real event end to end. (<a href="protocol.html">Protocol</a>, <a href="clients.html">Clients</a>)</p>
+    <h3>v0.4 — Direct a single race (RD console) — vertical slices</h3>
+    <p><strong>Goal:</strong> a person can run a real event end to end from the RD console. (<a href="protocol.html">Protocol</a>, <a href="clients.html">Clients</a>)</p>
+    <p>
+      The horizontal foundation — embedded <strong>axum protocol server</strong> (snapshot + WS
+      stream, scoping, bearer + LAN join-token auth), the <strong>Svelte</strong> console shell +
+      shared component library + generated types, and the contract-suite/observability backbone —
+      is <strong>built</strong>. The remaining work is the director workflow itself, delivered as
+      <strong>vertical slices</strong> (each <strong>backend → API → UI</strong>, working before the
+      next):
+    </p>
+    <div class="callout">
+      <p>
+        <strong>Built so far in v0.4.</strong> The earlier slices landed the
+        <strong>design-system foundation</strong>, the <strong>Event</strong> aggregate + workspace
+        (always-present non-persistent Practice; event-picker; you cannot act outside an event), and
+        three <strong>app-level registries</strong> with &ldquo;configure once, select per event&rdquo;
+        semantics: the <strong>Pilot directory</strong> (#74), the <strong>Class registry</strong>
+        (nine locked built-ins + Custom), and the <strong>Timer registry</strong> (Mock + RotorHazard,
+        persistent connect-on-select, drop detection / reconnect, primary/alternate failover; #73).
+        The console <strong>home-hub IA</strong> (Pilots / Classes / Events / Timers pages, hash
+        routing, monogram + wordmark) and per-event persistence via the sidecar <code>meta</code>
+        table (#115) are in. A hands-on review then reshaped the <em>remaining</em> v0.4 work into the
+        <strong>race-running redesign</strong> below.
+      </p>
+    </div>
+    <p>
+      <strong>Race-running redesign — the remaining v0.4 slices.</strong> The event workspace becomes a
+      sequence of editable <strong>stage-pages</strong> (Classes · Roster · Rounds+Heats · Live control ·
+      Marshaling · Results — no &ldquo;Setup&rdquo; tab), and the work is staged to wire the existing
+      v0.3 engine per-event:
+    </p>
     <ul>
-      <li>Embedded <strong>axum protocol server</strong> (snapshot + WS stream, scoping, bearer + LAN join-token auth).</li>
-      <li><strong>Svelte</strong> frontend foundation + shared component library + generated types; the <strong>RD console</strong> (setup wizard, registration, live race control, marshaling, results).</li>
-      <li><strong>Tauri</strong> shell + single-binary packaging for Windows/Linux/macOS.</li>
+      <li><strong>Slice 0 — Log tags.</strong> Tag the log (notably <code>HeatScheduled</code>) with
+      class / round / per-pilot frequencies; promote <code>ClassId</code> / <code>RoundId</code> into
+      the events crate (<a href="architecture.html">Architecture</a> §4).</li>
+      <li><strong>Slice 1 — Roster = membership = presence.</strong> Per-class roster membership;
+      IRL = RD adds pilots + binds node→pilot, Sim = auto-membership from <code>CompetitorSeen</code>
+      (auto-add + auto-bind name matches).</li>
+      <li><strong>Slice 2 — Rounds.</strong> Event-level, class-tagged, dynamically-added rounds
+      (practice / quali as-you-go).</li>
+      <li><strong>Slice 3 — Engine + heats.</strong> Wire the v0.3 heat-loop FSM, scoring, and the six
+      generators per-event; heat-filling = manual + format-generated.</li>
+      <li><strong>Slice 4 — Channels.</strong> Timer-defined channels (standard catalog + adapter
+      fixed/flexible capability + custom raw-MHz), node-count cap, engine first-fit + manual assign,
+      dynamic node tuning at race time (#117, folded into timers).</li>
+      <li><strong>Slice 5 — Bracket carry.</strong> Advance-to-brackets generates the full bracket from
+      the top-N quali ranking, editable — reusing <code>run_event</code>'s quali→bracket carry (#84).</li>
+      <li><strong>Slice 6 — Per-class standings.</strong> Results and standings derived per class.</li>
+      <li><strong>Slice 7 — Setup wizard.</strong> A guided first-pass <em>over</em> the stage-pages,
+      built last.</li>
     </ul>
-    <p><strong>Done when:</strong> a complete event runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
+    <p>
+      <strong>Deferred out of v0.4:</strong> ZippyQ <strong>shelved</strong> from the active format
+      set (<a href="decisions.html">D10</a>, #218) and PWA self-register; the <strong>tournament
+      structures</strong> (round-robin, single/double elim, multi-main, chase-the-ace, bracket
+      builders + viz) carved to <code>tournaments-snapshot</code> for the primitives-first release
+      (PR #327), rebuilt post-v1; channel
+      management as a standalone feature (#117 is folded into the Timer registry instead);
+      <strong>IMD-aware channel assignment</strong> — scoring a heat's channels by third-order intermod
+      gap and auto-picking the cleanest set (#209), a race-quality refinement on top of the v0.4 channel
+      model that cuts interference-related video dropouts; seasons (#129) stay local-first for now;
+      multi-cloud (#132) is later. Packaging follows alongside: a <strong>Tauri</strong> shell +
+      single-binary build for Windows/Linux/macOS (#57/#58).
+    </p>
+    <p><strong>Done when:</strong> a complete event — registration → heats → live races → marshaling → results, across a multi-heat format — runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
+
+    <p class="phase-meta">
+      v0.5 and beyond stay as the later milestones — they begin once a single race, and a full
+      multi-heat event, is genuinely directable from the console (v0.4 complete).
+    </p>
 
     <h3>v0.5 — Racer/spectator PWA</h3>
     <p><strong>Goal:</strong> racers and spectators can follow along on their phones. (<a href="clients.html">Clients</a>)</p>
@@ -139,7 +235,7 @@ flowchart LR
     <h3>v0.7 — Cloud</h3>
     <p><strong>Goal:</strong> off-LAN reach and longevity. (<a href="cloud.html">Cloud &amp; Season</a>)</p>
     <ul>
-      <li><strong>One-way resumable push</strong> (Director → Cloud); Postgres warehouse via the same server crate + storage trait.</li>
+      <li><strong>One-way resumable push</strong> (Director → Cloud); Postgres warehouse via the same server crate + storage trait — the Cloud realization of the event-as-container model (the <code>events</code> + <code>event_log</code> schema in <a href="architecture.html">Architecture</a> §4).</li>
       <li><strong>Accounts</strong> + free-account-gated reads; the live relay (same PWA off-LAN) + web push; long-term portal basics (career, standings); the <strong>season</strong> model.</li>
     </ul>
     <p><strong>Done when:</strong> a Director with internet relays a live event to off-LAN viewers, a season aggregates across events, and a self-hosted Cloud deploy is documented.</p>
@@ -151,6 +247,28 @@ flowchart LR
       <li><strong>Open-data API</strong> + export + embeddable widgets — the cross-event surface leans on the Cloud warehouse from v0.7.</li>
     </ul>
     <p><strong>Done when:</strong> roster import + results push work against a chapter, and the open-data API + widgets serve.</p>
+
+    <h3>RH integration — a required GridFPV RotorHazard plugin</h3>
+    <p><strong>Goal:</strong> make the RotorHazard integration plugin-based, for native control and live dense signal. (<a href="timer-adapters.html">Timer Adapters</a>, <a href="decisions.html">D16</a>)</p>
+    <ul>
+      <li>A <strong>required GridFPV RotorHazard plugin</strong> running <em>inside</em> the RH server
+      with <strong>RHAPI access</strong> (node manager / race events / config). It supersedes the
+      socket-API workarounds: <strong>live dense RSSI</strong> (no save-then-pull), <strong>clean
+      start/stop</strong> bypassing the RMS staging, <strong>per-node passes</strong> without the
+      seating dance, and <strong>threshold/calibration access</strong> — which <strong>unblocks the
+      draggable-threshold "recalculate" re-detection marshaling feature</strong> (#3). It
+      <strong>reuses RH's entire proven stack</strong> (node firmware + RMS + the detection moat):
+      no RMS replacement, no firmware re-hosting.</li>
+    </ul>
+    <p>
+      This <strong>replaces the dropped "own-the-stack" native timer-server</strong> (D15,
+      superseded): the plugin delivers the same payoff far more cheaply, so the RH integration is no
+      longer a post-1.0 firmware project — it is the <strong>integration path</strong>.
+      <strong>"Required" is a guided one-step install</strong> (Grid detects a missing plugin and
+      offers to install it), not a hard-fail, keeping the "try it fast" feel. The plugin becomes the
+      <strong>primary RH integration</strong>; the full plugin design doc + sliced build plan are
+      forthcoming (<a href="decisions.html">D16</a>).
+    </p>
 
     <h2>3. Cross-cutting workstreams</h2>
     <p>These run across every phase rather than living in one:</p>

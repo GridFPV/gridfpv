@@ -1,0 +1,107 @@
+name: Release builds
+
+# Gated, cost-aware native-app build pipeline — produces the Tauri desktop
+# PORTABLE binary (the RELEASE form of GridFPV; see src-tauri/README.md). This is
+# a PORTABLE-ONLY build: it builds with `--no-bundle`, so no installers
+# (msi/nsis/appimage/deb) are produced — just the self-contained
+# gridfpv-desktop[.exe] with the embedded frontend. This is
+# DELIBERATELY NOT part of the per-push CI (ci.yml): it does NOT run on devel,
+# on pull_request, or on every push, so dev velocity and Actions cost are
+# preserved. It only runs:
+#   - manually (workflow_dispatch — the "Run workflow" button / `gh workflow run`)
+#   - on merge to main (release builds)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }} — Tauri portable
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            # Single-file portable: the raw self-contained gridfpv-desktop binary
+            # (frontend embedded via the embed-assets feature — no external dist).
+            portable-artifact: gridfpv-linux-portable
+            portable-path: src-tauri/target/release/gridfpv-desktop
+          - os: windows-latest
+            portable-artifact: gridfpv-windows-portable
+            portable-path: src-tauri/target/release/gridfpv-desktop.exe
+          - os: macos-latest
+            # Apple Silicon (macos-latest = arm64) — covers every modern Mac; an Intel
+            # (x86_64) leg is a matrix add if one ever turns up at the field.
+            portable-artifact: gridfpv-macos-portable
+            portable-path: src-tauri/target/release/gridfpv-desktop
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Linux-only: Tauri's webkit2gtk/GTK system deps (Windows uses the bundled
+      # WebView2 runtime and needs none of these). Mirror src-tauri/README.md.
+      - name: Install Tauri Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Cache keyed per-OS; src-tauri is a standalone workspace, so point the
+      # cache at its own lockfile so the matrix legs don't collide.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.os }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Build the frontend (the workspace packages + the rd-console dist that the
+      # app bundles). This is exactly what tauri.conf.json's beforeBuildCommand
+      # runs (`cd frontend && npm ci && npm run build`); doing it explicitly here
+      # makes the dist build a visible, cached step and matches ci.yml's
+      # conventions (npm ci + npm run build under frontend/).
+      - name: Build frontend (rd-console dist)
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+
+      # PORTABLE-ONLY build: `--no-bundle` compiles the gridfpv-desktop crate (with
+      # the embedded frontend + the Windows icon) into
+      # src-tauri/target/release/gridfpv-desktop[.exe] but produces NO installers
+      # (msi/nsis/appimage/deb) — bundle.targets in tauri.conf.json is irrelevant
+      # because --no-bundle skips bundling entirely. It re-runs beforeBuildCommand
+      # (idempotent — frontend already built above).
+      - name: Build Tauri portable binary (--no-bundle)
+        run: npx -y @tauri-apps/cli@2 build --no-bundle
+        working-directory: src-tauri
+
+      # Single-file portable: the raw gridfpv-desktop binary. Because gridfpv-app is
+      # built with the embed-assets feature, the frontend dist is baked into the
+      # binary, so it self-serves the RD console with no external assets folder — a
+      # standalone executable. This is the ONLY release artifact (portable-only).
+      - name: Upload portable binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.portable-artifact }}
+          path: ${{ matrix.portable-path }}
+          if-no-files-found: error

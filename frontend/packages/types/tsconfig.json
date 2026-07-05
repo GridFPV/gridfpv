@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // This package is a pure type seam: every `export` in src/ is `export type`,
+    // so there is no JS to emit and consumers resolve `@gridfpv/types` straight to
+    // `src/index.ts` (see package.json `exports`). We type-check only (`noEmit`)
+    // rather than emit a `dist/`, which also lets the `@bindings/*` re-exports
+    // (resolved via the shared base-config alias) live outside this package's tree
+    // without tripping `rootDir`.
+    "noEmit": true,
+    "declaration": false
+  },
+  "include": ["src"]
+}

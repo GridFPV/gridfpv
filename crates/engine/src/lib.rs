@@ -10,10 +10,11 @@
 pub mod event;
 pub mod format;
 pub mod heat;
+pub mod imd;
 pub mod schedule;
 pub mod scoring;
 
 // Concrete formats on the `format::Generator` interface (#33/#34/#35).
-pub mod single_elim;
+pub mod head_to_head;
 pub mod timed_qual;
 pub mod zippyq;

@@ -1,6 +1,13 @@
 # Rust build artifacts
 /target/
 
+# Tauri native-app build artifacts. `src-tauri` is the release-only desktop crate
+# (excluded from the workspace; built with `cargo tauri build`). Its own `target/` and
+# Tauri's generated `gen/` (capability schemas) are derived — never committed. The bundled
+# RD-console dist is built fresh by the `beforeBuildCommand`, so it's ignored too.
+/src-tauri/target/
+/src-tauri/gen/
+
 # Claude Code local state (agent worktrees, etc.)
 .claude/
 
@@ -12,3 +19,20 @@
 
 # Local reverse-engineering / analysis artifacts (not part of the project)
 pyghidra_mcp_projects/
+
+# Frontend monorepo (frontend/)
+frontend/node_modules/
+frontend/**/node_modules/
+frontend/**/dist/
+frontend/**/build/
+frontend/**/.svelte-kit/
+frontend/**/.vite/
+frontend/**/*.tsbuildinfo
+frontend/.eslintcache
+
+# Playwright e2e run artifacts + downloaded browser binaries (never committed)
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/.playwright/
+frontend/e2e-artifacts/

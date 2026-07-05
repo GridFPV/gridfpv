@@ -7,16 +7,29 @@ members = [
     "crates/adapters",
     "crates/engine",
     "crates/testkit",
+    "crates/server",
     "crates/app",
     "xtask",
 ]
+# `src-tauri` is the **release-only** native desktop app (Tauri 2). It is deliberately
+# EXCLUDED from this workspace so `cargo xtask ci` (which runs `cargo {clippy,test} --all` /
+# `--workspace`) never tries to compile it — CI runners have no webkit2gtk/GTK system libs.
+# The Tauri build is a separate command (`cd src-tauri && cargo tauri build`); it carries its
+# OWN `[workspace]` table so it resolves as a standalone crate that path-depends back into the
+# spine (`gridfpv-app`). See `src-tauri/README.md`. The hosted Director (`gridfpv-app`) stays
+# the dev path and is unaffected.
+exclude = ["src-tauri"]
 
 # Shared metadata + dependency versions for every crate in the spine.
 # Crates inherit these with `field.workspace = true` so versions are set once.
 [workspace.package]
+# The ONE product version (v0.4.0-alpha.1 scheme: 0.x milestones, -alpha/-beta pre-releases;
+# bump with `cargo xtask version <x.y.z[-pre]>`). Crates inherit it; tauri.conf.json and the
+# console package.json are kept in lock-step by the same xtask command.
+version = "0.4.0-alpha.1"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-repository = "https://gitlab.com/gridfpv/gridfpv"
+repository = "https://github.com/GridFPV/gridfpv"
 rust-version = "1.85"
 
 [workspace.dependencies]
@@ -26,6 +39,7 @@ gridfpv-storage = { path = "crates/storage" }
 gridfpv-projection = { path = "crates/projection" }
 gridfpv-adapters = { path = "crates/adapters" }
 gridfpv-engine = { path = "crates/engine" }
+gridfpv-server = { path = "crates/server" }
 gridfpv-testkit = { path = "crates/testkit" }
 
 # Third-party.

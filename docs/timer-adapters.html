@@ -202,14 +202,34 @@ flowchart LR
       proceeds. A source that drops mid-race reconnects and resumes appending; deduplication
       relies on source sequence numbers / timestamps so a reconnect can't double-count a pass.
     </p>
+    <div class="callout">
+      <p>
+        <strong>Channel capability is part of what an adapter declares.</strong> Beyond the yes/no
+        &ldquo;frequency / channel mgmt&rdquo; row, an adapter that manages channels declares
+        <em>how</em>: a <strong>fixed</strong> capability (only a built-in allowed set of channels) or a
+        <strong>flexible</strong> one (the standard FPV channel catalog plus arbitrary custom raw-MHz,
+        as RotorHazard allows), together with its <strong>node/slot count</strong>. The standard
+        catalog is built-in; what a given timer can actually tune to lives in <em>that timer's
+        config</em>. The race engine assigns channels from this declared set (first-fit + RD override),
+        capped by the node count, and the adapter <strong>dynamically tunes</strong> its nodes to the
+        assignment at race time (<a href="race-engine.html">Race Engine</a> §5,
+        <a href="pipeline-setup.html">Setup</a>). Sim sources declare no channel capability. <em>As
+        built (v0.4), this is the Timer-registry model (#73/#117): channels are configured on the timer,
+        not on the event — and crucially a timer's <strong>available channels can exceed its node
+        count</strong>. The full model (channels ≠ nodes, the standard catalog, Fixed/Flexible, static
+        vs per-heat assignment) has its own deep dive: <a href="channel-model.html">Channel Model</a>.</em>
+      </p>
+    </div>
 
     <h2>6. Identity binding</h2>
     <p>
       Each source speaks in its own local references — a node seat, a sim player name, a
       transponder id. Binding those to a GridFPV pilot is a registration action (Architecture
       §9), not something the adapter decides; the adapter only <em>reports</em> the local
-      refs it sees (<code>CompetitorSeen</code>), which drives auto-presence ("everyone in
-      the room at 8 PM gets bracketed") and gives the RD the list to bind against.
+      refs it sees (<code>CompetitorSeen</code>), which for sim drives <strong>auto-membership</strong>
+      — auto-adding seen players to the class roster (membership = presence) and auto-binding name
+      matches ("everyone in the room at 8 PM gets bracketed") — and gives the RD the list to bind
+      against (<a href="pipeline-setup.html">Setup</a>).
     </p>
 
     <h2>7. Velocidrone — the first adapter</h2>
@@ -253,6 +273,45 @@ flowchart LR
     </div>
 
     <h2>8. Other sources (sketch)</h2>
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4) — the timer model &amp; connection lifecycle.</strong> A timer in the
+        registry is one of two kinds: <strong>Mock</strong> (a synthetic source — <code>laps</code> and
+        <code>lap_ms</code> drive fake passes; seeded with the 8-seat Raceband grid) or
+        <strong>RotorHazard&nbsp;{ url }</strong> (a real RH server base URL). A RotorHazard timer
+        <strong>connects when it is selected for the active event and stays connected</strong> (it does
+        <em>not</em> connect only while a heat runs); a persistent driver maintains the link and
+        reconnects with backoff, surfacing a <code>TimerStatus</code> of
+        <code>Ready / Configured / Connecting / Connected / Disconnected / Error</code>. RH support is
+        gated behind the Director's <code>--features live</code> build. When a heat enters
+        <em>Running</em>, the bridge arms the heat (remapping node seats onto the lineup) and tunes the
+        nodes; <code>stage_race()</code> stops any prior race, discards old laps, stages, and waits up
+        to ~15&nbsp;s for RH to reach <em>racing</em>; leaving <em>Running</em> disarms the race but
+        keeps the connection alive.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Direction (2026-06-26) — the RH integration becomes a required GridFPV plugin
+        (<a href="decisions.html">D16</a>).</strong> The <strong>socket-only</strong> path described
+        here works against stock RH but is limiting: the dense per-tick signal needs a
+        <strong>save-then-pull</strong>, staging is zeroed with an <code>alter_race_format</code>
+        hack, seating needs an <code>add_pilot</code>/<code>alter_heat</code> dance, and the ~0.9&nbsp;s
+        prestage can't be zeroed. The decided direction is a <strong>required GridFPV RotorHazard
+        plugin</strong> running <em>inside</em> the RH server with <strong>RHAPI access</strong>
+        (node manager / race events / config). The plugin makes those workarounds native — <strong>live
+        dense RSSI</strong> (no save-then-pull), <strong>clean start/stop</strong> bypassing the RMS
+        staging, <strong>per-node passes</strong> without the seating dance, and
+        <strong>threshold/calibration access</strong> (unblocking the re-detection "recalculate"
+        marshaling feature). It reuses RH's proven stack (node firmware + RMS + detection); GridFPV
+        owns start/stop timing while RH owns start/stop/get-data. "Required" is a <strong>guided
+        one-step install</strong>, not a hard-fail. The plugin <strong>supersedes the socket
+        workarounds</strong> and becomes the <strong>primary RH integration</strong>; its full design
+        + build plan are forthcoming separate work (this records the direction). It also
+        <strong>replaces the dropped own-the-stack timer-server</strong> (<a href="decisions.html">D15</a>,
+        superseded).
+      </p>
+    </div>
     <dl class="entities">
       <dt>RotorHazard</dt>
       <dd>Socket.IO / RHAPI; the full-signal case, with calibration and signal-based recovery.
@@ -271,7 +330,11 @@ flowchart LR
       the session start/end edges, and the per-node <code>lap_number</code> is carried as the pass
       sequence and anchors dedup. Built in parallel with Velocidrone as the first real-world
       target; the dockerized RH both feeds recorded fixtures <em>and</em> is allowed for live
-      integration tests (a <strong>local</strong> class — Docker required). The guardrail bans
+      integration tests (a <strong>local</strong> class — Docker required). The harness runs
+      <code>cruwaller/rotorhazard</code> with <strong>8 mock nodes</strong> on <strong>port 5000</strong>,
+      attached via the timer's URL; the test driver emits <code>stage_race</code> over Socket.IO and
+      injects passes with <code>simulate_lap {node}</code>, bypassing signal detection (see
+      <code>docker/rotorhazard/</code>). The guardrail bans
       depending on a <strong>live, shared/production backend</strong> (concretely the Velocidrone
       game servers, which stay fixtures-only) — not all live timers.</dd>
       <dt>LapRF</dt>
@@ -305,11 +368,13 @@ flowchart LR
       idempotent, keyed on (source, sequence#) — or (source, local-ref, source-timestamp)
       where no sequence counter exists. On reconnect the adapter buffers and de-dups against
       those keys, so a resume can't double-count or lose passes.</li>
-      <li><span class="resolved">Resolved — Frequency / channel management ownership.</span>
+      <li><span class="resolved">Resolved — Frequency / channel management ownership &amp; model.</span>
       The <strong>race engine allocates</strong> channels — it knows the heat/field and avoids
       conflicts — while the <strong>adapter advertises</strong> the hardware's channel
-      capabilities/constraints and <strong>applies</strong> the tuning. Shared with the Race
-      Engine; IRL sources only.</li>
+      capability (<em>fixed</em> allowed-set or <em>flexible</em> standard-catalog + custom raw-MHz)
+      and node count, and <strong>applies</strong> the tuning dynamically at race time. Channels are
+      <strong>defined on the timer</strong> (the Timer registry, #73/#117), not an event-level pool.
+      Shared with the Race Engine; IRL sources only.</li>
       <li><span class="resolved">Resolved — Velocidrone WebSocket message schema.</span>
       Reconstructed and implemented from two independent open-source consumers (the
       <code>rh-velocidrone</code> plugin and <code>VelocidroneWebSocketConsumer</code>); a raw

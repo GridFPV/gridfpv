@@ -40,6 +40,21 @@
       consume.
     </p>
 
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4) — &ldquo;configure once, select per event.&rdquo;</strong> The pieces
+        an event is assembled from now live as <strong>app-level registries</strong> the RD manages
+        once on the console home hub, then <em>selects</em> from per event: a
+        <strong>Pilot directory</strong> (#74), a <strong>Class registry</strong> (#73's sibling) with
+        nine locked built-in classes, and a <strong>Timer registry</strong> (#73). An event holds its
+        own <strong>selection</strong> from these registries plus its per-event state, persisted in the
+        event's SQLite sidecar <code>meta</code> table so events survive a restart (#115). The
+        sections below describe the registries and how an event selects from them. <em>(IA in
+        <a href="clients.html">Clients</a> §1; the registry vs. per-event-selection split in
+        <a href="architecture.html">Architecture</a> §4.)</em>
+      </p>
+    </div>
+
     <h2>Capabilities</h2>
 
     <h3>Define the event</h3>
@@ -47,41 +62,66 @@
       <li><strong>Identity</strong> — name and date.</li>
       <li><strong>Classes / categories.</strong> An event runs <strong>one or more classes</strong>,
         and each class is a <em>self-contained competition</em> — its own roster subset,
-        qualifying, bracket, and results. The predefined set is drawn from MultiGP:
-        <em>Spec, Pro Spec, Freedom Spec, Street League, Open, Tiny Whoop, Tiny Trainer</em>,
-        plus a <strong>Custom/Other</strong> free-text class. A class is a
-        <strong>categorization</strong>; GridFPV does not enforce equipment/hardware specs —
-        those rules live with the league, not the app.</li>
-      <li><strong>Track selection.</strong> A physical track layout (IRL) or a Velocidrone spec
-        track and its track id (sim).</li>
+        qualifying, bracket, and results. Classes come from the <strong>app-level Class registry</strong>
+        (<em>as built, v0.4</em>): each class carries a name, a <code>ClassSource</code>
+        provenance tag (<code>MultiGP | Five33 | FreedomSpec | StreetLeague | UDL | Custom | Other</code>),
+        a reference, and a description. The registry ships <strong>nine locked built-in classes with
+        fixed ids</strong> — MultiGP <em>Open / Pro Spec / Whoop / Micro</em>, Five33 <em>Tiny
+        Trainer</em>, <em>Freedom Spec</em>, <em>Street League</em>, and UDL <em>Igniter / Shrieker</em>
+        — whose stable ids give a class one cross-event identity (so per-class season standings line up
+        across events without fuzzy name-matching). Users create <strong>Custom</strong> classes
+        (full CRUD); built-ins are read-only. An event simply <strong>selects</strong> which classes it
+        runs. A class is a <strong>categorization</strong>; GridFPV does not enforce equipment/hardware
+        specs — those rules live with the league, not the app.</li>
+      <li><strong>Track selection.</strong> <strong>One track per event</strong> (<em>resolved</em>):
+        a physical track layout (IRL) or a Velocidrone spec track and its track id (sim). All classes
+        in an event share that one track.</li>
       <li><strong>Format configuration.</strong> Which phases this event runs — practice on/off,
         qualifying mode (<em>run live</em> / <em>import</em> / <em>skip</em>), and the mains
         format. The pipeline is configurable per event, not fixed.</li>
-      <li><strong>Guided setup wizard.</strong> Make the common path effortless (a table stake
-        against the incumbents) while leaving every choice editable afterward.</li>
+      <li><strong>Pilot directory (app registry).</strong> <em>As built (#74):</em> a pilot is
+        defined once in the app-level directory — <strong>callsign</strong> plus name, phonetic,
+        team, color, country (ISO code), <code>vtx_types</code> (a <em>multi</em>-select of
+        <code>Analog | HDZero | DJI | Walksnail | Other</code>), MultiGP and Velocidrone ids, and
+        free-form custom attributes (any field is clearable via a null edit). An event
+        <strong>selects</strong> pilots from the directory rather than re-typing them.</li>
+      <li><strong>Guided setup wizard <em>(built)</em>.</strong> Make the common path effortless (a
+        table stake against the incumbents) while leaving every choice editable afterward. As built the
+        wizard is a thin guided <em>first pass over the event workspace's stage-pages</em> —
+        <em>Classes&nbsp;&amp;&nbsp;Roster → Timer&nbsp;&amp;&nbsp;channels → First round → Review</em>,
+        embedding the same stage components — and is <strong>Next-only</strong> (Back / Skip / Next /
+        Finish); every selection <strong>auto-saves</strong>, so there are no Save buttons. The Review
+        step is a live readiness check (a class selected, a pilot placed, a timer chosen, a round
+        defined) but never blocks finishing.</li>
     </ul>
 
-    <h3>Assemble the field — intake</h3>
-    <p>Registration is mapping pilots into an event-class roster. Four intake paths, all first-class:</p>
+    <h3>Assemble the field — roster = per-class membership = presence</h3>
+    <p>
+      <strong>Presence is membership (resolved).</strong> Putting a pilot into an event's
+      <strong>class roster</strong> <em>is</em> declaring them present for that class — there is no
+      separate check-in flag layered on top. A pilot can be in more than one class's roster; each
+      class roster is its own self-contained field. How a pilot lands in a roster differs by mode:
+    </p>
+    <div class="sim-note">
+      <p><span class="label">IRL</span>The RD <strong>adds</strong> pilots to a class roster (selecting
+      from the pilot directory) and <strong>binds</strong> each timer node/seat to a pilot, so live
+      timing lands on the right pilot. Membership is a deliberate RD act.</p>
+      <p><span class="label">Sim (Velocidrone)</span><strong>Auto-membership</strong> from the
+      adapter's <code>CompetitorSeen</code>: players the room reports are auto-added to the roster and
+      auto-bound when their sim name matches a directory pilot. The RD can still modify or remove
+      anyone. This is the &ldquo;everyone in the room at 8&nbsp;PM gets bracketed&rdquo; flow.</p>
+    </div>
+    <p>Other intake paths remain first-class where they apply:</p>
     <ul>
-      <li><strong>RD manual entry</strong> — the race director adds and edits pilots directly. The
-        always-available baseline.</li>
-      <li><strong>Self-registration (racer PWA)</strong> — pilots register themselves from their
-        phone on the LAN against the Director (e.g. scan a QR, enter a callsign). Reduces RD load.</li>
+      <li><strong>RD manual entry</strong> — selecting directory pilots into a class roster; the
+        always-available baseline (IRL and sim).</li>
+      <li><strong>Self-registration (racer PWA) <em>(deferred)</em></strong> — pilots registering
+        themselves from a phone on the LAN. Useful but not in the v0.4 race-running slices; deferred
+        alongside ZippyQ self-register.</li>
       <li><strong>MultiGP RaceSync import</strong> — pull a chapter's roster (pilots and their
-        MultiGP ids) from RaceSync. First-class league integration.</li>
+        MultiGP ids) from RaceSync into the directory. First-class league integration (v0.8).</li>
       <li><strong>Velocidrone / CSV import</strong> — import from a Velocidrone room roster or a
         leaderboard CSV; the leaderboard variant also seeds qualifying.</li>
-    </ul>
-
-    <h3>Check-in &amp; presence</h3>
-    <ul>
-      <li><strong>Check-in</strong> — mark who is actually here, per class. A pilot on the roster
-        is not necessarily present.</li>
-      <li><strong>Auto-presence</strong> — pilots a timer or sim room currently sees can be
-        activated automatically. This powers the "everyone in the room at 8 PM gets bracketed"
-        flow and relies on the adapter presence capability.</li>
-      <li><strong>Manual activate / prune</strong> — the RD can always override presence by hand.</li>
     </ul>
 
     <h3>Pilot-identity binding</h3>
@@ -92,12 +132,45 @@
         callsign), which is what makes the four intake paths reconcile to one pilot.</li>
     </ul>
 
+    <h3>Channels — defined on the timer, dynamically tuned</h3>
+    <p>
+      <strong>Channels belong to the timer, not the event (resolved).</strong> Rather than declare a
+      free-floating &ldquo;frequency pool&rdquo; at the event, GridFPV models channels as a property of
+      the <strong>selected timer</strong>:
+    </p>
+    <ul>
+      <li><strong>A built-in standard FPV channel catalog</strong> — the common bands/channels every
+        analog pilot knows (e.g. Raceband), shipped with the app.</li>
+      <li><strong>Each timer adapter declares its channel capability</strong> — either
+        <em>fixed</em> (only a built-in allowed set, e.g. a hardware timer locked to certain
+        channels) or <em>flexible</em> (the standard catalog plus arbitrary custom raw-MHz entries,
+        as RotorHazard allows). A sim timer (Velocidrone) declares <strong>none</strong>.</li>
+      <li><strong>Channels are configured in the timer's own config</strong> — what this timer can
+        tune to is set up once with the timer in the registry (its <code>available_channels</code> pool),
+        not re-declared per event.</li>
+      <li><strong>The timer's node count caps the field per heat — but the channel pool can exceed
+        it.</strong> You can assign at most as many pilots to a heat as the timer has nodes
+        (<code>node_count</code>), yet a timer may offer <em>more</em> available channels than nodes (a
+        4-node timer can list 8 channels). <strong>Channels are not nodes</strong>; the full model has
+        its own deep dive (<a href="channel-model.html">Channel Model</a>).</li>
+    </ul>
+    <p>
+      Per-pilot channels (the Classes&nbsp;+&nbsp;Roster page's channel dropdown, fed by the
+      <strong>primary timer</strong>) and per-heat channel <em>assignment</em> (engine first-fit +
+      manual) plus the <strong>dynamic tuning</strong> of the timer's nodes at race time are detailed in
+      <a href="channel-model.html">Channel Model</a>, <a href="pipeline-mains.html">Mains</a>, and
+      <a href="race-engine.html">Race Engine</a> §5: the engine decides who flies on which channel, and
+      the adapter applies the tuning to the hardware.
+    </p>
+
     <h2>Sim vs IRL</h2>
     <div class="sim-note">
-      <p><span class="label">IRL</span>Declare the frequency / seat pool; assign transponders or
-      timer seats; capture waivers and the safety briefing.</p>
-      <p><span class="label">Sim</span>Select the Velocidrone spec track; no frequency pool and no
-      waivers; intake and presence come from the Velocidrone room.</p>
+      <p><span class="label">IRL</span>Add pilots to class rosters and bind transponders / timer
+      nodes; the selected timer defines the available channels (its capability + node count); capture
+      waivers and the safety briefing.</p>
+      <p><span class="label">Sim</span>Select the Velocidrone spec track; no channels (the sim timer
+      declares no channel capability) and no waivers; roster membership and presence come
+      automatically from the Velocidrone room.</p>
     </div>
 
     <h2>Entities &amp; data implied</h2>
@@ -107,33 +180,55 @@
     </p>
     <dl class="entities">
       <dt>Event</dt>
-      <dd>name, date, format-config (which phases are enabled, qualifying mode, mains format), and one or more Classes.</dd>
-      <dt>Class</dt>
-      <dd>class type (predefined enum + custom); scopes its own roster, qualifying, bracket, and results; references a track.</dd>
-      <dt>Pilot (global registry)</dt>
-      <dd>callsign, name, and the external ids it's known by (Velocidrone uid, MultiGP id, …).</dd>
-      <dt>Roster entry (pilot ↔ event-class)</dt>
-      <dd>presence / check-in flag, seed inputs (qualifying position / metric), and the per-source identity binding (pilot_ref).</dd>
+      <dd>name, date, one track, format-config (which phases are enabled, qualifying mode, mains
+      format), the selected Classes, and per-event state persisted in the event's sidecar
+      <code>meta</code> table (#115).</dd>
+      <dt>Class (app registry → per-event selection)</dt>
+      <dd><em>Registry:</em> name, <code>ClassSource</code> provenance
+      (<code>MultiGP | Five33 | FreedomSpec | StreetLeague | UDL | Custom | Other</code>), reference,
+      description; nine locked built-ins with fixed ids for stable cross-event identity, plus
+      user-created Custom classes. <em>Per event:</em> an event selects which classes it runs; each
+      selected class scopes its own roster, qualifying, bracket, and results.</dd>
+      <dt>Pilot (app directory)</dt>
+      <dd>callsign, name/phonetic, team, color, country (ISO), <code>vtx_types</code> (multi-select),
+      MultiGP + Velocidrone ids, and custom attributes — the external ids are what reconcile the
+      intake paths to one pilot (#74).</dd>
+      <dt>Roster entry (pilot ↔ event-class) = membership = presence</dt>
+      <dd>membership in a class roster <em>is</em> presence; carries seed inputs (qualifying position /
+      metric) and the per-source identity binding (node/seat or sim name → pilot). IRL = RD-added;
+      sim = auto from <code>CompetitorSeen</code>.</dd>
       <dt>Track</dt>
-      <dd>a physical layout reference (IRL) or a Velocidrone spec track + id (sim).</dd>
-      <dt>Frequency / seat pool</dt>
-      <dd>(IRL) the channels or timer seats available to assign during heats.</dd>
+      <dd>one per event — a physical layout reference (IRL) or a Velocidrone spec track + id (sim).</dd>
+      <dt>Timer (app registry) &amp; its channels</dt>
+      <dd>one of <strong>Mock</strong> or <strong>RotorHazard&nbsp;{ url }</strong>. The selected timer
+      defines the channels — a standard catalog + the adapter's fixed/flexible capability + custom
+      raw-MHz, held as an <code>available_channels</code> pool — and a <code>node_count</code> that caps
+      pilots-per-heat (the pool may exceed it). Channels live in the timer config, not an event-level
+      pool (<a href="channel-model.html">Channel Model</a>).</dd>
     </dl>
 
     <h2>Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">Pilot-identity model.</span> One global Pilot carrying multiple external
-        ids, or per-source identities? How do we dedupe / merge a pilot who arrives via Velocidrone,
-        MultiGP, and manual entry?</li>
-      <li><span class="q">Track scope.</span> Is the track set per event or per class? Multi-class
-        events sometimes share a track and sometimes don't.</li>
-      <li><span class="q">Self-registration trust.</span> Do self-registered pilots need RD
-        approval before they're on the roster? How does a racer's device pair with and trust a
-        Director on the LAN? (Links to the mDNS pairing decision.)</li>
-      <li><span class="q">Class semantics.</span> Label-only (proposed) versus storing — or even
-        enforcing — equipment specs per class.</li>
+      <li><span class="resolved">Resolved — Pilot-identity model.</span> One global Pilot in the
+        app-level <strong>pilot directory</strong> (#74) carrying the external ids it's known by
+        (Velocidrone uid, MultiGP id, callsign), which is what reconciles a pilot arriving via
+        multiple intake paths. Events <em>select</em> directory pilots; sim auto-membership auto-binds
+        by name match.</li>
+      <li><span class="resolved">Resolved — Track scope: one track per event.</span> A single track is
+        set on the event and shared by all its classes (the redesign chose one-track-per-event for
+        simplicity; multi-track is not a v0.4 concern).</li>
+      <li><span class="q">Self-registration trust <em>(deferred)</em>.</span> Whether self-registered
+        pilots need RD approval, and how a racer's device pairs with a Director on the LAN — deferred
+        with the PWA self-register path (post-v0.4).</li>
+      <li><span class="resolved">Resolved — Class semantics &amp; identity: label-only, with stable
+        built-in ids.</span> A class is a categorization (label), not an equipment-spec enforcer; the
+        Class registry's nine locked built-ins carry <strong>fixed ids</strong> so a class keeps one
+        identity across events (satisfying the per-class season-identity need;
+        <a href="pipeline-season.html">Season</a>). Users add Custom classes; provenance is recorded
+        via <code>ClassSource</code>.</li>
       <li><span class="q">MultiGP import.</span> Does roster import require connectivity at setup
-        time, and where does MultiGP identity get reconciled against existing pilots?</li>
+        time, and where does MultiGP identity get reconciled against existing pilots? (v0.8;
+        reconciliation keys on the directory's MultiGP id.)</li>
       <li><span class="q">Multi-class scheduling. <em>(decided)</em></span> How parallel class
         competitions share one timer/track is settled in
         <a href="pipeline-mains.html">Mains</a>: sequential by class by default, with a unified

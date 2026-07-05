@@ -65,6 +65,7 @@ fn marshaling_folds_corrections_over_a_real_heat_log() {
             ticks_per_lap: 2,
             peak_rssi: 150,
             baseline_rssi: 70,
+            seed: 0,
         }),
     )];
 

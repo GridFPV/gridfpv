@@ -1,0 +1,26 @@
+# cargo-audit configuration — see https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# `cargo audit` fails the build on any advisory it surfaces. We keep the default
+# behaviour (informational `unmaintained`/`yanked`/`notice` warnings ARE treated
+# as failures) so the CI job is a real gate, and explicitly enumerate the small
+# set of advisories we have triaged and chosen to accept below. Anything new —
+# including any actual vulnerability — therefore breaks CI until it is handled.
+
+[advisories]
+ignore = [
+    # `backoff` is unmaintained (RUSTSEC-2025-0012). It is pulled in ONLY as a
+    # transitive dependency of `rust_socketio` 0.6.0 (the latest published
+    # release), behind the optional `live` feature of `gridfpv-adapters` used by
+    # the dockerized-RotorHazard e2e suite — never in shipped/default builds.
+    # No patched version exists and 0.6.0 is upstream's newest release, so there
+    # is no `cargo update` fix available. This is an unmaintained warning, not a
+    # vulnerability. Revisit when `rust_socketio` cuts a release that drops the
+    # `backoff` dependency (or when we replace the `live` socket.io client).
+    "RUSTSEC-2025-0012",
+
+    # `instant` is unmaintained (RUSTSEC-2024-0384). Transitive dependency of
+    # `backoff` (see above) → `rust_socketio` 0.6.0, same optional `live`-only
+    # code path. No patched version; resolved automatically once the `backoff`
+    # chain is dropped upstream. Unmaintained warning, not a vulnerability.
+    "RUSTSEC-2024-0384",
+]

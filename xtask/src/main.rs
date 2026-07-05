@@ -5,6 +5,9 @@
 //! never drift. Pure std + cargo, so it works the same on Windows/Linux/macOS.
 #![forbid(unsafe_code)]
 
+mod race_day;
+mod rh_mock;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
@@ -66,22 +69,21 @@ fn test() -> bool {
     )
 }
 
-/// Regenerate the Rust→TypeScript bindings (#4).
+/// Regenerate the Rust→TypeScript bindings (#4, #40).
 ///
 /// ts-rs exports its types from a generated `#[test]` per `#[ts(export)]` type, so
-/// "generation" is just running the events crate's export tests: each derived `TS`
-/// impl writes its `.ts` file. `TS_RS_EXPORT_DIR` pins the base directory to the
-/// workspace root, so every `export_to = "bindings/"` lands in `<root>/bindings/`.
+/// "generation" is just running the export tests of every crate that derives `TS`:
+/// each derived impl writes its `.ts` file. The wire contract now spans four crates —
+/// the event model (`gridfpv-events`), the served lap projection (`gridfpv-projection`),
+/// the heat results / rankings / event outcome (`gridfpv-engine`), and the protocol
+/// wire types themselves (`gridfpv-server`) — so we run the `export_bindings` filter
+/// across the whole workspace. `TS_RS_EXPORT_DIR` pins the base directory to the
+/// workspace root, so every `export_to = "bindings/"` lands in `<root>/bindings/`
+/// regardless of which crate the type lives in.
 fn gen_bindings(root: &Path) -> bool {
     run_env(
         "cargo",
-        &[
-            "test",
-            "--package",
-            "gridfpv-events",
-            "--quiet",
-            "export_bindings",
-        ],
+        &["test", "--workspace", "--quiet", "export_bindings"],
         &[("TS_RS_EXPORT_DIR", root)],
     )
 }
@@ -137,6 +139,15 @@ fn gen_check() -> bool {
 /// up and tears down its own disposable RotorHazard, so no external state is needed —
 /// just Docker. `--include-ignored` runs the `#[ignore]`d container tests too.
 fn live() -> bool {
+    // Boot every live RotorHazard against the GridFPV plugin (S0+): the testkit's
+    // RhContainer mounts the dir named by `GRIDFPV_RH_PLUGIN` into the container's
+    // user `plugins/gridfpv`. The plugin is additive — at S0 it's a load-only
+    // placeholder, so the socket-path live tests behave identically — and this lets
+    // later slices iterate on the plugin in-container under the live suite. Set on the
+    // child `cargo test` process (env, not a process-global set_var, which is unsafe
+    // under this crate's `#![forbid(unsafe_code)]`).
+    let plugin_dir = workspace_root().join("plugins/gridfpv");
+
     // Run each target sequentially so at most one RotorHazard container exists at a
     // time (cargo runs separate test binaries in parallel otherwise).
     let target = |package: &str, name: &str, ignored: bool| {
@@ -154,7 +165,11 @@ fn live() -> bool {
         if ignored {
             args.push("--ignored");
         }
-        run("cargo", &args)
+        run_env(
+            "cargo",
+            &args,
+            &[(gridfpv_testkit::PLUGIN_ENV, &plugin_dir)],
+        )
     };
     // No container needed (in-process mock WS server).
     let ws = target("gridfpv-adapters", "velocidrone_ws", false);
@@ -172,6 +187,15 @@ fn live() -> bool {
     let zippyq_live = target("gridfpv-engine", "zippyq_live", true);
     let multiclass_live = target("gridfpv-engine", "multiclass_live", true);
     let full_event_live = target("gridfpv-engine", "full_event_live", true);
+    // Additional format generators (#68 double-elim, #69 round-robin, #70 multi-main).
+    let double_elim_live = target("gridfpv-engine", "double_elim_live", true);
+    let round_robin_live = target("gridfpv-engine", "round_robin_live", true);
+    let multi_main_live = target("gridfpv-engine", "multi_main_live", true);
+    // The protocol server's mock-RH e2e: full event → server log → protocol client (#47).
+    let server_e2e = target("gridfpv-server", "full_event_live", true);
+    // The Director's RH-connect e2e (#65, #73): the per-event bridge connects dockerized RH,
+    // drives status to Connected, and feeds real passes into the event log.
+    let rh_connect = target("gridfpv-app", "rh_connect_live", true);
     ws && live_rh
         && signal
         && heat_live
@@ -183,10 +207,93 @@ fn live() -> bool {
         && zippyq_live
         && multiclass_live
         && full_event_live
+        && double_elim_live
+        && round_robin_live
+        && multi_main_live
+        && server_e2e
+        && rh_connect
+}
+
+/// `cargo xtask version <x.y.z[-pre.N]>` — set the product version in every file that
+/// carries it, keeping them in lock-step (the v0.4.0-alpha.1 scheme): the root workspace
+/// `Cargo.toml` (`[workspace.package].version`, which every spine crate inherits), the
+/// standalone `src-tauri/Cargo.toml` (excluded from the root workspace, so it cannot
+/// inherit), `src-tauri/tauri.conf.json`, and the console `package.json`. With no argument,
+/// prints the current version. Refuses a malformed version rather than writing a partial set.
+fn version(args: &[String]) -> bool {
+    let root = workspace_root_dir();
+    let cargo_toml = root.join("Cargo.toml");
+    let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap_or_default();
+    let current = read(&cargo_toml)
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("version = \"")
+                .and_then(|r| r.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".into());
+    let Some(new) = args.first() else {
+        println!("{current}");
+        return true;
+    };
+    // A light semver shape check: MAJOR.MINOR.PATCH with an optional -prerelease tail.
+    let core = new.split('-').next().unwrap_or("");
+    let ok_shape = core.split('.').count() == 3
+        && core
+            .split('.')
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    if !ok_shape {
+        eprintln!("version {new:?} is not x.y.z[-pre] shaped");
+        return false;
+    }
+    let targets = [
+        (root.join("Cargo.toml"), format!("version = \"{current}\"")),
+        (
+            root.join("src-tauri/Cargo.toml"),
+            format!("version = \"{current}\""),
+        ),
+        (
+            root.join("src-tauri/tauri.conf.json"),
+            format!("\"version\": \"{current}\""),
+        ),
+        (
+            root.join("frontend/apps/rd-console/package.json"),
+            format!("\"version\": \"{current}\""),
+        ),
+    ];
+    // Verify every site carries the current version BEFORE writing any (no partial bumps).
+    for (path, needle) in &targets {
+        if !read(path).contains(needle.as_str()) {
+            eprintln!(
+                "{} does not carry version {current} — refusing a partial bump",
+                path.display()
+            );
+            return false;
+        }
+    }
+    for (path, needle) in &targets {
+        let replaced = read(path).replacen(needle.as_str(), &needle.replace(&current, new), 1);
+        if std::fs::write(path, replaced).is_err() {
+            eprintln!("failed writing {}", path.display());
+            return false;
+        }
+    }
+    println!("{current} -> {new}");
+    true
+}
+
+fn workspace_root_dir() -> std::path::PathBuf {
+    // xtask runs from the workspace (cargo sets the manifest dir of xtask itself).
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask has a parent")
+        .to_path_buf()
 }
 
 fn main() {
-    let task = std::env::args().nth(1).unwrap_or_else(|| "ci".to_string());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let task = args.first().cloned().unwrap_or_else(|| "ci".to_string());
     let ok = match task.as_str() {
         "fmt" => fmt(),
         "lint" | "clippy" => lint(),
@@ -194,9 +301,18 @@ fn main() {
         "gen" => generate(),
         "ci" => fmt() && lint() && test() && gen_check(),
         "live" => live(),
+        // The interactive RotorHazard mock-signal harness (marshaling testing). Needs Docker to
+        // `feed`; `dump`/`list` are plain HTTP/std. See `rh_mock.rs`.
+        "rh-mock" => rh_mock::run(&args[1..]),
+        // The mock race-day autopilot: emulate races via the gridfpv_mock plugin while you drive
+        // the Director. See `race_day.rs`.
+        "race-day" => race_day::run(&args[1..]),
+        // Bump the ONE product version everywhere it lives (workspace Cargo.toml + the
+        // standalone src-tauri crate + tauri.conf.json + the console package.json).
+        "version" => version(&args[1..]),
         other => {
             eprintln!("unknown task: {other}");
-            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live]");
+            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live|rh-mock|race-day|version]");
             false
         }
     };

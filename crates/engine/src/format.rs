@@ -48,6 +48,8 @@
 use std::collections::BTreeMap;
 
 use gridfpv_events::{CompetitorRef, HeatId};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::scoring::HeatResult;
 
@@ -80,7 +82,8 @@ impl HeatPlan {
 /// scored heats (produced by [`crate::scoring::score`]) and never raw passes. The
 /// `heat` id ties the result back to the [`HeatPlan`] that produced it, so a
 /// generator that emitted several heats can tell which result is which.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct CompletedHeat {
     /// Which planned heat this result is for.
     pub heat: HeatId,
@@ -119,7 +122,8 @@ pub enum GeneratorStep {
 /// and the next distinct entry skips past them (1, 2, 2, 4). Entries are returned in
 /// ranking order (best first), with a total, deterministic tie-break so the order is
 /// stable across runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct RankEntry {
     /// The competitor this entry ranks.
     pub competitor: CompetitorRef,
@@ -175,6 +179,22 @@ pub trait Generator {
     /// has returned [`GeneratorStep::Complete`]. Best-placed competitor first, ties
     /// sharing a position (see [`RankEntry`]).
     fn ranking(&self, completed: &[CompletedHeat]) -> Vec<RankEntry>;
+
+    /// The competitors that **advance** out of this round — the bracket-advancement carry a
+    /// `FromHeatWinners` successor level seeds from (decisions D13, #217), in advancement order
+    /// (each heat's winners in heat order, then byes).
+    ///
+    /// The default derives them from [`ranking`](Self::ranking) via [`ranking_advancers`] — every
+    /// competitor ranked strictly better than the worst (bottom) band. That is correct only when
+    /// the eliminated all tie at the single worst position (a head-to-head level). A format whose
+    /// heats eliminate **several** pilots at distinct in-heat positions — a 4-up heat advancing two
+    /// ranks its two losers at *different* overall positions — **overrides** this to return its real
+    /// advancing set, so the carry is exactly the winners and not the better-placed losers too.
+    ///
+    /// [`ranking`]: Self::ranking
+    fn advancers(&self, completed: &[CompletedHeat]) -> Vec<CompetitorRef> {
+        ranking_advancers(&self.ranking(completed))
+    }
 }
 
 // --- Advancement & seeding helpers (RE §5) ----------------------------------
@@ -194,6 +214,45 @@ pub fn advance_top_n(ranking: &[RankEntry], n: usize) -> Vec<CompetitorRef> {
         .iter()
         .take(n)
         .map(|entry| entry.competitor.clone())
+        .collect()
+}
+
+/// Advance a **ranking slice** — the competitors at positions `skip+1 ..= skip+take`, in ranking
+/// order (best first) — the seeds for a *lower* main / consolation bracket (e.g. a C-main = qual
+/// seeds 13–20 is `skip = 12, take = 8`).
+///
+/// A thin `ranking.iter().skip(skip).take(take)` over the already-total, deterministic
+/// [`RankEntry`] order, so the slice is deterministic too (including across a tie at either
+/// boundary, where the tie's deterministic intra-group order decides the cut). `skip` past the end
+/// of the ranking yields an empty slice; `take == 0` yields empty; a `take` that runs past the end
+/// simply returns the remaining competitors. The generalisation of [`advance_top_n`] (which is
+/// `advance_range(ranking, 0, n)`) to an arbitrary window.
+pub fn advance_range(ranking: &[RankEntry], skip: usize, take: usize) -> Vec<CompetitorRef> {
+    ranking
+        .iter()
+        .skip(skip)
+        .take(take)
+        .map(|entry| entry.competitor.clone())
+        .collect()
+}
+
+/// The advancers **derived from a ranking** — every competitor ranked **strictly better than the
+/// worst position** (the bottom band). The fallback the default [`Generator::advancers`] uses, and
+/// the provisional carry a bracket level uses before it completes.
+///
+/// This is only correct when the eliminated competitors **all share the single worst position**
+/// (one loser per heat, tied last) — true for a head-to-head level. A level whose heats eliminate
+/// **several** pilots at **distinct** in-heat positions (a 4-up heat's 3rd + 4th place rank, say,
+/// 5th and 7th overall) would wrongly keep the better-placed losers, so such a format **overrides**
+/// [`Generator::advancers`] to return its real advancing set rather than relying on this.
+pub fn ranking_advancers(ranking: &[RankEntry]) -> Vec<CompetitorRef> {
+    let Some(worst) = ranking.iter().map(|e| e.position).max() else {
+        return Vec::new();
+    };
+    ranking
+        .iter()
+        .filter(|e| e.position < worst)
+        .map(|e| e.competitor.clone())
         .collect()
 }
 
@@ -226,6 +285,39 @@ pub fn bracket_pairs(seeds: &[CompetitorRef]) -> Vec<CompetitorRef> {
         }
     }
     out
+}
+
+/// The **finishing-position points** a `position` (1-based) earns in a heat of `heat_size`, the
+/// shared scoring building block (D17) every points-based structure uses so they all score racing
+/// the same way. With an explicit per-position `table` (1st most, descending; positions past the
+/// table earn 0) the table decides; with no table it falls back to the linear `heat_size − position +
+/// 1` (winner of a `k`-up heat gets `k`, last gets `1`). Never negative.
+pub fn position_points(table: Option<&[u32]>, position: u32, heat_size: usize) -> i64 {
+    match table {
+        Some(t) => t
+            .get((position as usize).saturating_sub(1))
+            .copied()
+            .unwrap_or(0) as i64,
+        None => (heat_size as i64 - position as i64 + 1).max(0),
+    }
+}
+
+/// Parse a per-position **points table** config value — a comma/space-separated list like
+/// `"10, 7, 5, 3"` (index 0 = 1st place) — into a table for [`position_points`]. An absent value, or
+/// one with no parseable entries, yields `None` (the linear fallback). Shared by every points-based
+/// structure so the editable table is read the same way everywhere.
+///
+/// A non-numeric token (e.g. the `x` in `"10, x, 3"`) is treated as **0 in place** rather than
+/// dropped, so it does not silently *shift* every later position up a place (which would award the
+/// wrong points). Empty tokens (from adjacent separators / trailing commas) are skipped.
+pub fn parse_points_table(raw: Option<&str>) -> Option<Vec<u32>> {
+    let table: Vec<u32> = raw?
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>().unwrap_or(0))
+        .collect();
+    if table.is_empty() { None } else { Some(table) }
 }
 
 // --- Recorded outcomes (RE §6) ----------------------------------------------
@@ -342,6 +434,107 @@ impl FormatConfig {
     }
 }
 
+/// The **kind** of a format parameter (race redesign Slice 7a) — how a UI renders / validates it.
+///
+/// A `number` is a free integer/decimal input; an `enum` is a fixed choice from
+/// [`options`](FormatParam::options); a `bool` is a toggle. Externally tagged so it maps to a TS
+/// discriminated-union-friendly string literal. Derives serde + `ts_rs::TS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "bindings/")]
+pub enum ParamKind {
+    /// A numeric input (e.g. `rounds`, `heat_size`).
+    Number,
+    /// A fixed choice from [`options`](FormatParam::options) (e.g. a `metric`).
+    Enum,
+    /// A boolean toggle (e.g. `bracket_reset`).
+    Bool,
+}
+
+/// One **parameter schema** entry for a format (race redesign Slice 7a) — the declared shape of a
+/// config knob the format's generator reads.
+///
+/// The Rounds UI's params editor reads these to render the right control per knob (a number field,
+/// an enum dropdown, a toggle) with its default; the server declares one per param each generator
+/// actually consumes. Derives serde (its JSON *is* the `GET /formats` wire shape) + `ts_rs::TS`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct FormatParam {
+    /// The param key as it appears in a round's `params` map (e.g. `"rounds"`).
+    pub key: String,
+    /// A human-readable label for the param (e.g. `"Rounds"`).
+    pub label: String,
+    /// How the param is rendered / validated.
+    pub kind: ParamKind,
+    /// For an [`Enum`](ParamKind::Enum) param, the allowed values (the raw strings stored in
+    /// `params`); empty for `number` / `bool`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// The default value (the raw string the format falls back to when the param is unset), or
+    /// `None` when the format has no default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default: Option<String>,
+}
+
+impl FormatParam {
+    /// A numeric param with a default.
+    fn number(key: &str, label: &str, default: &str) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: ParamKind::Number,
+            options: Vec::new(),
+            default: Some(default.into()),
+        }
+    }
+
+    /// An enum param with its allowed `options` and a default.
+    ///
+    /// No standard format declares an enum param at the moment (the qualifying `metric` enum was
+    /// removed when the qualifying metric became the win condition — Rounds form redesign), but the
+    /// [`Enum`](ParamKind::Enum) kind and its frontend rendering path are still supported, so this
+    /// constructor is kept for the next format that needs a fixed-choice param.
+    #[allow(dead_code)]
+    fn enumerated(key: &str, label: &str, options: &[&str], default: &str) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: ParamKind::Enum,
+            options: options.iter().map(|s| s.to_string()).collect(),
+            default: Some(default.into()),
+        }
+    }
+
+    /// A boolean param with a default (`"1"` / `"0"`).
+    ///
+    /// No standard format currently declares a boolean param (the only user, `double_elim`'s
+    /// `bracket_reset`, was carved out for the primitives-first release), but the
+    /// [`Bool`](ParamKind::Bool) kind and its frontend rendering path are still supported, so this
+    /// constructor is kept for the next format that needs a toggle param.
+    #[allow(dead_code)]
+    fn boolean(key: &str, label: &str, default: &str) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: ParamKind::Bool,
+            options: Vec::new(),
+            default: Some(default.into()),
+        }
+    }
+}
+
+/// A format's **declared param schema** (race redesign Slice 7a): the format name plus the params
+/// its generator reads. The shape `GET /formats` returns so the Rounds UI renders a params editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct FormatSchema {
+    /// The format name (a [`FormatRegistry::standard`] name).
+    pub name: String,
+    /// The params this format's generator reads, in display order.
+    pub params: Vec<FormatParam>,
+}
+
 /// A constructor that builds a boxed [`Generator`] from a [`FormatConfig`].
 pub type FormatCtor = fn(&FormatConfig) -> Box<dyn Generator>;
 
@@ -371,9 +564,98 @@ impl FormatRegistry {
         self.ctors.insert(name.into(), ctor);
     }
 
+    /// A registry pre-populated with every **production** format the engine ships:
+    /// [`timed_qual`](crate::timed_qual::TimedQualifying), [`zippyq`](crate::zippyq::ZippyQ),
+    /// [`head_to_head`](crate::head_to_head::HeadToHead), and the casual
+    /// [`open_practice`](OpenPractice) format.
+    ///
+    /// This is the single authority for "which format names are valid": the server validates a
+    /// round's configured format name against [`names`](Self::names) / [`contains`](Self::contains)
+    /// of this registry. The `*-demo` formats in this module are test fixtures and are deliberately
+    /// **not** registered here.
+    pub fn standard() -> Self {
+        let mut registry = Self::new();
+        crate::timed_qual::TimedQualifying::register(&mut registry);
+        crate::zippyq::ZippyQ::register(&mut registry);
+        // Head-to-Head (D17): the atomic racing building block the structures compose. Registered so
+        // its rounds build/replay; UI offering + the points-table editor land with the rollout.
+        crate::head_to_head::HeadToHead::register(&mut registry);
+        OpenPractice::register(&mut registry);
+        registry
+    }
+
     /// The format names registered, in sorted order.
     pub fn names(&self) -> Vec<&str> {
         self.ctors.keys().map(String::as_str).collect()
+    }
+
+    /// The **param schema** for every **offered** production format (race redesign Slice 7a), in
+    /// sorted name order. This is the **offered set** the Rounds UI picks from — a subset of the
+    /// registered formats in [`standard`](Self::standard): a format can be registered (so its
+    /// persisted rounds still validate and replay) yet excluded here so it can't be selected for a
+    /// new round. ZippyQ is currently in exactly that state — shelved (#218), registered but not
+    /// offered.
+    ///
+    /// Each entry declares the params that format's generator actually reads (with kind, options,
+    /// and default), the single source of truth `GET /formats` returns so the Rounds UI renders a
+    /// per-format params editor. Kept in lock-step with the generators' `from_config` readers:
+    ///
+    /// - `timed_qual`: `rounds` ("Heats per pilot", number, 3). The ranking metric is **derived
+    ///   from the round's win condition** (the qualifying metric *is* the win condition), so it is
+    ///   **not** a separate param here.
+    /// - `head_to_head`: `group_size` ("Group size", 2), `rotations` ("Heats per group", 1 — the
+    ///   same groups run back to back N times, scoring accumulating; the grouping is drawn once,
+    ///   so re-grouping between heats stays a tournament-structure job), `scoring` ("Scoring",
+    ///   placement/points).
+    /// - `open_practice`: no params (the active channels are the field, carried by the round's
+    ///   `AllChannels` seeding).
+    /// - `zippyq`: **not offered** — shelved (#218); still registered in
+    ///   [`standard`](Self::standard) so persisted rounds load, but omitted from this offered set.
+    pub fn standard_schemas() -> Vec<FormatSchema> {
+        vec![
+            // Head-to-Head (D17): the atomic racing round type the Add-round picker offers. Group
+            // size + rotations (heats per group — one grouping decision, run N times) + scoring
+            // (Placement, or Points — the per-position points table is authored by a dedicated
+            // editor in the round form, not a generic param field).
+            FormatSchema {
+                name: "head_to_head".into(),
+                params: vec![
+                    FormatParam::number("group_size", "Group size", "2"),
+                    FormatParam::number("rotations", "Heats per group", "1"),
+                    FormatParam::enumerated(
+                        "scoring",
+                        "Scoring",
+                        &["placement", "points"],
+                        "placement",
+                    ),
+                ],
+            },
+            // Open practice (open-practice format): one open heat over the active channels, no
+            // config knobs (the active channels are the field, carried by the round's seeding —
+            // see [`OpenPractice`]). Kept in sorted name order (after `head_to_head`, before
+            // `timed_qual`) to match [`names`](Self::names).
+            FormatSchema {
+                name: OpenPractice::NAME.into(),
+                params: Vec::new(),
+            },
+            FormatSchema {
+                name: "timed_qual".into(),
+                // No `metric` param: the qualifying metric is **derived from the round's win
+                // condition** (the qualifying metric *is* the win condition — Rounds form redesign),
+                // not a separate stored knob. The `rounds` param is "Heats per pilot": how many heats
+                // each pilot flies in the qualifying round (their best flight ranks).
+                params: vec![FormatParam::number("rounds", "Heats per pilot", "3")],
+            },
+            // NOTE: ZippyQ shelved (#218) — re-add to the offered set when needed. The generator
+            // stays registered in [`standard`](Self::standard) (so persisted `zippyq` rounds still
+            // validate and replay), but it is deliberately omitted from the offered schema set here
+            // so the Rounds UI's format picker can't select it for a new round (decisions D10).
+        ]
+    }
+
+    /// Whether a format is registered under `name`.
+    pub fn contains(&self, name: &str) -> bool {
+        self.ctors.contains_key(name)
     }
 
     /// Build a generator for the format registered under `name`, or `None` if no such
@@ -410,6 +692,71 @@ pub fn rank_by<K: Ord + Clone>(rows: Vec<(CompetitorRef, K)>) -> Vec<RankEntry> 
         });
     }
     out
+}
+
+// --- Open practice (open-practice format) -----------------------------------
+
+/// The **open-practice** format (casual-practice mode): a round is **one open heat** over the
+/// active **channels**, run once.
+///
+/// Unlike the competitive formats, open practice is keyed on *channels*, not pilots: the RD picks
+/// which video channels are live, and the round's field is exactly those channels as source-local
+/// `node-{i}` [`CompetitorRef`]s (the seat handles the timer emits passes for). The generator emits
+/// a single heat lining up those channels, then declares the format
+/// [`Complete`](GeneratorStep::Complete) — there is no advancement, no ranking aggregation, no
+/// second heat. Laps are tracked **per channel, live and in memory** (not logged) by the Director's
+/// open-practice accumulator; this generator only decides the one heat that runs.
+///
+/// The field comes in via [`FormatConfig::field`] (the active channels, in node order). An empty
+/// field still emits the (empty) heat then completes — the server's field builder is what rejects
+/// an open-practice round with no active channels.
+pub struct OpenPractice {
+    /// The active channels as `node-{i}` competitor refs, in node order — the one heat's lineup.
+    channels: Vec<CompetitorRef>,
+}
+
+impl OpenPractice {
+    /// The format name this registers under (the `RoundDef::format` value an open-practice round
+    /// carries).
+    pub const NAME: &'static str = "open_practice";
+
+    /// The id of the single open heat this format emits.
+    const HEAT: &'static str = "open-practice";
+
+    /// Build over the active channels (the seeded field, in node order).
+    pub fn new(channels: Vec<CompetitorRef>) -> Self {
+        Self { channels }
+    }
+
+    /// The registry constructor: the active channels are the seeded field (the round's
+    /// `AllChannels` seeding laid them out as `node-{i}` refs); no params, no draw.
+    pub fn from_config(config: &FormatConfig) -> Box<dyn Generator> {
+        Box::new(Self::new(config.seeding.apply(&config.field)))
+    }
+
+    /// Register the open-practice format under [`NAME`](Self::NAME).
+    pub fn register(registry: &mut FormatRegistry) {
+        registry.register(Self::NAME, Self::from_config);
+    }
+}
+
+impl Generator for OpenPractice {
+    fn next(&mut self, completed: &[CompletedHeat]) -> GeneratorStep {
+        // Exactly one heat ever: emit it while nothing has been completed, otherwise the format is
+        // done. The open heat carries the active channels as its lineup.
+        if completed.is_empty() {
+            GeneratorStep::Run(vec![HeatPlan::new(Self::HEAT, self.channels.clone())])
+        } else {
+            GeneratorStep::Complete
+        }
+    }
+
+    fn ranking(&self, _completed: &[CompletedHeat]) -> Vec<RankEntry> {
+        // Open practice has no competitive ranking — it is casual per-channel lap practice. The
+        // channels are listed in node order so a caller reading a "ranking" gets a stable, if
+        // meaningless, ordering rather than nothing.
+        seed_ranking(&self.channels)
+    }
 }
 
 // --- Demo generators (exercise the contract) --------------------------------
@@ -677,8 +1024,10 @@ mod tests {
                     position: *position,
                     laps: *laps,
                     metric: Metric::LastLapAt(None),
+                    ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -699,6 +1048,62 @@ mod tests {
     fn advance_top_n_clamps_to_the_field() {
         let ranking = seed_ranking(&field(&["A", "B"]));
         assert_eq!(advance_top_n(&ranking, 5), field(&["A", "B"]));
+    }
+
+    // --- advance_range ------------------------------------------------------
+
+    #[test]
+    fn advance_range_takes_the_slice_in_order() {
+        // The B-main slice: seeds 3–4 of a 6-deep ranking (skip 2, take 2).
+        let ranking = seed_ranking(&field(&["A", "B", "C", "D", "E", "F"]));
+        assert_eq!(advance_range(&ranking, 2, 2), field(&["C", "D"]));
+    }
+
+    #[test]
+    fn advance_range_skip_zero_is_top_n() {
+        let ranking = seed_ranking(&field(&["A", "B", "C", "D"]));
+        assert_eq!(advance_range(&ranking, 0, 2), advance_top_n(&ranking, 2));
+    }
+
+    #[test]
+    fn advance_range_take_zero_is_empty() {
+        let ranking = seed_ranking(&field(&["A", "B", "C"]));
+        assert!(advance_range(&ranking, 1, 0).is_empty());
+    }
+
+    #[test]
+    fn advance_range_skip_past_end_is_empty() {
+        let ranking = seed_ranking(&field(&["A", "B"]));
+        assert!(advance_range(&ranking, 5, 3).is_empty());
+    }
+
+    #[test]
+    fn advance_range_take_past_end_clamps() {
+        let ranking = seed_ranking(&field(&["A", "B", "C"]));
+        // skip 1, take 10 → just the remaining two.
+        assert_eq!(advance_range(&ranking, 1, 10), field(&["B", "C"]));
+    }
+
+    // --- parse_points_table -------------------------------------------------
+
+    #[test]
+    fn parse_points_table_reads_a_plain_list() {
+        assert_eq!(
+            parse_points_table(Some("10, 7, 5, 3")),
+            Some(vec![10, 7, 5, 3])
+        );
+    }
+
+    #[test]
+    fn parse_points_table_treats_a_bad_token_as_zero_in_place() {
+        // The `x` must NOT shift 3 up into 2nd place: it becomes a 0 where it stands.
+        assert_eq!(parse_points_table(Some("10, x, 3")), Some(vec![10, 0, 3]));
+    }
+
+    #[test]
+    fn parse_points_table_none_for_absent_or_unparseable() {
+        assert_eq!(parse_points_table(None), None);
+        assert_eq!(parse_points_table(Some("   ")), None);
     }
 
     // --- bracket_pairs ------------------------------------------------------
@@ -914,6 +1319,42 @@ mod tests {
         assert_eq!(g1.next(&[]), g2.next(&[]));
     }
 
+    // --- OpenPractice: one open heat over the active channels ----------------
+
+    #[test]
+    fn open_practice_emits_one_heat_with_the_active_channels_then_completes() {
+        // The active channels are the field, as `node-{i}` refs in node order.
+        let channels = field(&["node-0", "node-2", "node-5"]);
+        let mut generator = OpenPractice::new(channels.clone());
+
+        // First call: one open heat lining up exactly the active channels.
+        assert_eq!(
+            generator.next(&[]),
+            GeneratorStep::Run(vec![HeatPlan::new("open-practice", channels.clone())])
+        );
+
+        // Once that heat has completed, the format is done — no second heat, ever.
+        let done = CompletedHeat::new("open-practice", result(&[("node-0", 1, 5)]));
+        assert_eq!(
+            generator.next(std::slice::from_ref(&done)),
+            GeneratorStep::Complete
+        );
+    }
+
+    #[test]
+    fn open_practice_builds_its_heat_from_the_config_field() {
+        // The registry constructor reads the active channels off the config field.
+        let cfg = FormatConfig::new(field(&["node-0", "node-1"]));
+        let mut generator = OpenPractice::from_config(&cfg);
+        assert_eq!(
+            generator.next(&[]),
+            GeneratorStep::Run(vec![HeatPlan::new(
+                "open-practice",
+                field(&["node-0", "node-1"])
+            )])
+        );
+    }
+
     // --- FormatRegistry -----------------------------------------------------
 
     #[test]
@@ -935,6 +1376,50 @@ mod tests {
         );
 
         assert!(registry.build("no-such-format", &cfg).is_none());
+    }
+
+    #[test]
+    fn standard_registry_holds_every_production_format() {
+        let registry = FormatRegistry::standard();
+        assert_eq!(
+            registry.names(),
+            vec!["head_to_head", "open_practice", "timed_qual", "zippyq",]
+        );
+        assert!(registry.contains("open_practice"));
+        // The validation surface the server uses.
+        assert!(registry.contains("timed_qual"));
+        assert!(!registry.contains("knockout-demo"));
+        assert!(!registry.contains("no-such-format"));
+        // #218: ZippyQ stays **registered** even though it is shelved — so persisted `zippyq` rounds
+        // still build/validate/replay. It is only excluded from the *offered* set (see
+        // `standard_schemas_offer_every_format_except_shelved_zippyq`).
+        assert!(registry.contains("zippyq"));
+    }
+
+    #[test]
+    fn standard_schemas_offer_every_format_except_shelved_zippyq() {
+        // The **offered** set (`GET /formats`, the Rounds UI's picker source) is a subset of the
+        // registered formats: ZippyQ is shelved (#218) so it is registered but NOT offered, which is
+        // what keeps it un-selectable for a new round while persisted `zippyq` rounds still load.
+        let schemas = FormatRegistry::standard_schemas();
+        let offered: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(offered, vec!["head_to_head", "open_practice", "timed_qual"]);
+        // Head-to-Head carries group size + rotations (heats per group) + scoring; the points table
+        // is authored by the form editor.
+        let h2h = schemas.iter().find(|s| s.name == "head_to_head").unwrap();
+        assert_eq!(
+            h2h.params
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["group_size", "rotations", "scoring"]
+        );
+        assert!(
+            !offered.contains(&"zippyq"),
+            "ZippyQ is shelved (#218) — must not be offered"
+        );
+        // …yet it remains registered, so it's the offered set that shrank, not the registry.
+        assert!(FormatRegistry::standard().contains("zippyq"));
     }
 
     #[test]

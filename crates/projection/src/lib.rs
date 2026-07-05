@@ -17,19 +17,28 @@
 //! Corrections are never mutations (architecture.html §3): the raw [`Pass`]es
 //! stay byte-identical in the log forever, and a marshal's ruling is a *new*
 //! appended event that the projection **folds in** over them.
-//! [`lap_list_marshaled`] is the marshaling-aware lap projection — it takes each
+//! [`corrected_passes`] is the **single home** of that fold (#39): it takes each
 //! event paired with its append **offset** and folds the adjudications
 //! ([`Event::DetectionVoided`], [`Event::LapInserted`], [`Event::LapAdjusted`])
-//! into a *corrected view* of the lap-gate passes, then derives laps from that
-//! view exactly as [`lap_list`] does. [`lap_list`] is the no-adjudications case:
+//! into a *corrected view* of the lap-gate passes. [`lap_list_marshaled`] is the
+//! marshaling-aware lap projection — a thin consumer of [`corrected_passes`] that
+//! groups that corrected view by competitor and derives laps from it exactly as
+//! [`lap_list`] does — and the engine's marshaling-aware scorer
+//! (`gridfpv_engine::event::score_marshaled`) consumes the *same* [`corrected_passes`]
+//! output, so the void/insert/adjust logic exists once. [`lap_list`] is the no-adjudications case:
 //! it is a thin wrapper that assigns positional offsets and folds the same way,
 //! so a log with no rulings projects identically through either entry point.
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+pub mod recalc;
 
-use gridfpv_events::{AdapterId, CompetitorRef, Event, Pass, SourceTime};
+use std::collections::{BTreeMap, BTreeSet};
+
+use gridfpv_events::{
+    AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SignalHistory, SourceTime,
+};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Identifies a competitor *within a single timing source*.
 ///
@@ -38,7 +47,8 @@ use serde::{Deserialize, Serialize};
 /// timer), so laps are grouped on the `(AdapterId, CompetitorRef)` pair. Binding
 /// these per-source competitors to a single GridFPV pilot is a later registration
 /// concern (Architecture §9) and deliberately out of scope here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct CompetitorKey {
     /// The timing source the competitor belongs to.
     pub adapter: AdapterId,
@@ -57,22 +67,89 @@ impl CompetitorKey {
 }
 
 /// A single completed lap: the interval between two consecutive lap-gate passes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The lap also carries the **global append offsets** ([`LogRef`]) of the two passes that
+/// bound it — `start_ref` (the opening pass) and `end_ref` (the closing pass). These are the
+/// *stable* log offsets a marshaling command targets (`VoidDetection`/`AdjustLap`/`SplitLap`
+/// all key on a single pass's offset), so a UI that selects a lap can address the correct pass
+/// without the operator hand-typing an offset (#55). They are real global offsets even when the
+/// lap list is folded from a heat window — the fold is fed `(global_offset, &Event)` pairs, so
+/// `end_ref`/`start_ref` are valid command targets across a multi-heat log (the heat-window
+/// re-enumeration bug this fixes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct Lap {
     /// 1-based lap number within the competitor's run.
     pub number: u32,
     /// Lap duration in microseconds on the source clock
     /// (`pass[n + 1].at - pass[n].at`). Always `>= 0` for in-order passes.
+    /// Renders as a plain TS `number` (bounded far below 2^53).
+    #[ts(type = "number")]
     pub duration_micros: i64,
+    /// Source-clock timestamp (µs) of the pass that **closes** this lap — the gate-pass instant.
+    /// On the same clock as the signal trace's sample times (`from + i·period_micros`), so the
+    /// Marshaling RSSI graph can place a vertical lap marker at exactly this lap's gate pass
+    /// without re-deriving it from durations (Slice 4 — signal-as-evidence).
+    pub at: SourceTime,
+    /// Global append offset of the pass that **opens** this lap (the lap's start gate).
+    pub start_ref: LogRef,
+    /// Global append offset of the pass that **closes** this lap (the lap's end gate). This is
+    /// the natural correction target: voiding/adjusting it edits this lap's boundary, and a
+    /// `SplitLap` splits the over-long lap *ending* here.
+    pub end_ref: LogRef,
 }
 
 /// Every lap a single competitor completed, in order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct CompetitorLaps {
     /// Which source-local competitor these laps belong to.
     pub competitor: CompetitorKey,
     /// Completed laps, ordered by lap number (1-based, ascending).
     pub laps: Vec<Lap>,
+    /// Gate passes the RD **voided** (`DetectionVoided`, not undone), chronologically. The
+    /// record of removals travels WITH the lap list so every consumer shares it: the console
+    /// renders them struck-through in place, and threshold re-detection must NOT re-propose a
+    /// crossing the RD explicitly removed — the RSSI trace still shows the crossing, so without
+    /// this the tuner kept offering a voided lap back as "a lap to add". Additive: absent on
+    /// the wire when empty, so older payloads round-trip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voided: Vec<VoidedPass>,
+}
+
+/// One RD-voided gate pass, as the lap list records it (see [`CompetitorLaps::voided`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct VoidedPass {
+    /// Source-clock time (µs) of the voided pass — its RAW instant (no re-time applied): the
+    /// removal record exists so re-detection can recognise the crossing on the trace, and the
+    /// trace knows nothing of a re-time.
+    pub at: SourceTime,
+    /// The voided pass's own global log offset (a stable row identity for the UI).
+    pub pass_ref: LogRef,
+    /// The **standing void event's** offset — the target a RESTORE (void-the-void) addresses.
+    /// For an AUTO-suppressed pass (see [`VoidReason::UnderMinLap`]) this is the pass's own
+    /// offset: there is no void event, and the restore path is a marshal ruling on the pass
+    /// itself (an [`Event::LapAdjusted`] re-asserting its raw instant — an explicit ruling
+    /// always outranks the floor).
+    pub void_ref: LogRef,
+    /// WHY the pass is off the lap chain — the console labels the row (and picks the restore
+    /// command) by this.
+    #[serde(default)]
+    pub reason: VoidReason,
+}
+
+/// Why a pass sits on the removal record instead of the lap chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum VoidReason {
+    /// A marshal explicitly removed it ([`Event::DetectionVoided`]).
+    #[default]
+    Marshal,
+    /// The corrected fold suppressed it: it would close a lap under the round's minimum lap
+    /// time (D26 — a gate reflection / double-detection; timers are dumb emitters, GridFPV
+    /// owns lap semantics).
+    UnderMinLap,
 }
 
 impl CompetitorLaps {
@@ -96,7 +173,8 @@ impl CompetitorLaps {
 ///
 /// Competitors are ordered deterministically by [`CompetitorKey`] so the
 /// projection is stable across runs regardless of event arrival order.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct LapList {
     /// Per-competitor laps, ordered by competitor key.
     pub competitors: Vec<CompetitorLaps>,
@@ -107,6 +185,41 @@ impl LapList {
     pub fn competitor(&self, key: &CompetitorKey) -> Option<&CompetitorLaps> {
         self.competitors.iter().find(|c| &c.competitor == key)
     }
+}
+
+/// Fold the log's registration bindings into a `(adapter, competitor) -> pilot` map (#60).
+///
+/// Each [`Event::CompetitorRegistered`] records that a source-local competitor *is* a
+/// GridFPV pilot (Architecture §9). A competitor is keyed by its per-source
+/// [`CompetitorKey`] — a bare [`CompetitorRef`] is only meaningful relative to its adapter
+/// — and **last registration wins**: a later re-bind of the same `(adapter, competitor)`
+/// supersedes the earlier one. The fold is pure and order-preserving, so replaying the
+/// same log yields the same mapping. Competitors with no registration are simply absent —
+/// they still appear by their bare [`CompetitorRef`] in the projections that consume this.
+pub fn registrations<'a, I>(events: I) -> BTreeMap<CompetitorKey, PilotId>
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    let mut bindings = BTreeMap::new();
+    for event in events {
+        if let Event::CompetitorRegistered {
+            adapter,
+            competitor,
+            pilot,
+        } = event
+        {
+            // Insert (overwriting any earlier binding) — log order is append order, so the
+            // last writer for a given competitor wins.
+            bindings.insert(
+                CompetitorKey {
+                    adapter: adapter.clone(),
+                    competitor: competitor.clone(),
+                },
+                pilot.clone(),
+            );
+        }
+    }
+    bindings
 }
 
 /// Fold a sequence of events into the lap-list read model.
@@ -147,27 +260,25 @@ where
     lap_list_marshaled(events.into_iter().enumerate().map(|(i, e)| (i as u64, e)))
 }
 
-/// A lap-gate pass in the **corrected view** the marshaling fold builds.
+/// Fold a sequence of `(offset, event)` pairs into the **corrected lap-gate pass
+/// stream**, applying every marshaling adjudication keyed on its target's append
+/// **offset** (#31).
 ///
-/// It is never a mutation of a raw [`Pass`] — it is a derived datum carrying just
-/// the `(adapter, competitor, at, sequence)` the lap derivation needs, sourced
-/// either from a raw `Pass` (possibly re-timed by a [`Event::LapAdjusted`]) or
-/// synthesised from a [`Event::LapInserted`]. The raw log is untouched.
-#[derive(Debug, Clone)]
-struct CorrectedPass {
-    competitor: CompetitorKey,
-    at: SourceTime,
-    sequence: Option<u64>,
-}
-
-/// Fold a sequence of `(offset, event)` pairs into the lap-list read model,
-/// applying marshaling adjudications keyed on the target's append **offset** (#31).
+/// This is the *single source of truth* for the void/insert/adjust marshaling fold.
+/// Both [`lap_list_marshaled`] (which groups these passes by competitor and derives
+/// laps) and the engine's marshaling-aware scorer
+/// (`gridfpv_engine::event::score_marshaled`) consume this one function — the fold
+/// is implemented here, once, and nowhere else (#39).
 ///
-/// This is the marshaling-aware sibling of [`lap_list`]. Each event is paired with
-/// its append [`LogRef`](gridfpv_events::LogRef) offset; rulings reference the raw
-/// event they correct by that offset. The fold builds a **corrected view** of the
-/// lap-gate passes and then derives laps from it exactly like [`lap_list`] — the
-/// raw [`Pass`]es in the input are never mutated (architecture.html §3).
+/// Each event is paired with its append [`LogRef`](gridfpv_events::LogRef) offset;
+/// rulings reference the raw event they correct by that offset. The result is a fresh
+/// `Vec<(u64, Pass)>` of the surviving lap-gate passes (synthetic inserts included, re-timed
+/// passes moved to their new instant), in **offset order**, each paired with the **global
+/// append offset** that addresses it for a future correction — a raw/inserted/split pass's
+/// own offset (the split's synthetic pass is addressable by the split event's offset, exactly
+/// as "void the void" already relies on). The raw [`Pass`]es in the input are never mutated
+/// (architecture.html §3); callers re-group/re-order as needed and may carry the offset onto
+/// the projection (e.g. [`Lap::end_ref`]) so a UI can target the right pass.
 ///
 /// # Adjudications folded
 ///
@@ -177,7 +288,13 @@ struct CorrectedPass {
 ///   a synthetic lap-gate pass for that competitor at `at` (a lap the timer missed).
 ///   The insert's own offset becomes a valid `target` for a later ruling.
 /// - [`Event::LapAdjusted { target, at }`](Event::LapAdjusted) — re-time the pass
-///   at `target` offset to `at`.
+///   at `target` offset to `at`. Because a lap is two consecutive passes, this shifts
+///   *both* adjacent lap durations sharing the moved pass (the duration recompute is
+///   structural — no extra event needed).
+/// - [`Event::LapSplit { target, at }`](Event::LapSplit) — split the over-long lap
+///   *ending* at the `target` pass by adding a synthetic mid-lap pass at `at`, attributed
+///   to the target pass's competitor. Like an insert, the split's own offset is a valid
+///   `target` for a later ruling (so it is reversible via "void the void").
 ///
 /// # Offsets and last-writer-wins
 ///
@@ -208,11 +325,38 @@ struct CorrectedPass {
 ///
 /// # Heat / result-level rulings
 ///
-/// [`Event::HeatVoided`] and [`Event::PenaltyApplied`] are *not* lap-level — they
-/// reshape the heat result, not the per-competitor lap list — so the lap projection
-/// ignores them here. They are consumed by scoring/results (#30, #33+), which fold
-/// the same log alongside this lap view.
-pub fn lap_list_marshaled<'a, I>(events: I) -> LapList
+/// [`Event::HeatVoided`], [`Event::PenaltyApplied`], and [`Event::RulingReversed`] are
+/// *not* lap-level — they reshape the heat result, not the per-competitor lap list — so
+/// this fold ignores them. They are consumed by scoring/results (#30, #33+), which fold
+/// the same log alongside this corrected view.
+pub fn corrected_passes<'a, I>(events: I) -> Vec<(u64, Pass)>
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    corrected_and_voided_passes(events).0
+}
+
+/// [`corrected_passes`] under a round's **minimum-lap floor** (D26) — the scoring-path
+/// sibling of [`lap_list_marshaled_with_floor`], so results and the lap list can never
+/// disagree about a suppressed pass.
+pub fn corrected_passes_with_floor<'a, I>(
+    events: I,
+    min_lap_micros: Option<i64>,
+) -> Vec<(u64, Pass)>
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    corrected_and_voided_passes_with_floor(events, min_lap_micros).0
+}
+
+/// One removed pass as the fold emits it:
+/// `(pass offset, restore-target offset, pass, why)`.
+pub type VoidedEmit = (u64, u64, Pass, VoidReason);
+
+/// [`corrected_passes`] plus the passes the RD **voided** (and did not un-void), each resolved
+/// to its concrete pass (re-time applied) with its own offset — the shared removal record the
+/// lap list carries so re-detection never re-proposes an explicitly-removed crossing.
+pub fn corrected_and_voided_passes<'a, I>(events: I) -> (Vec<(u64, Pass)>, Vec<VoidedEmit>)
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
@@ -220,17 +364,17 @@ where
     // raw lap-gate passes and the adjudications themselves — plus the rulings to
     // apply. We resolve targets against this map so "void the void" (a ruling whose
     // target is another ruling) and last-writer-wins both fall out of offset order.
-    #[derive(Clone)]
     enum Entry<'a> {
         /// A raw lap-gate pass observed by an adapter (never mutated).
         RawPass(&'a Pass),
         /// A synthetic lap-gate pass inserted by marshaling.
-        Inserted {
-            competitor: CompetitorKey,
-            at: SourceTime,
-        },
+        Inserted(Pass),
         /// A re-time ruling: the target pass's `at` is overridden to this value.
         Adjusted { target: u64, at: SourceTime },
+        /// A split ruling: insert a synthetic mid-lap pass at `at`, attributed to the
+        /// competitor whose lap *ends* at the `target` pass. Resolved to a concrete
+        /// [`Pass`] in the second loop, where the target's adapter/competitor are known.
+        Split { target: u64, at: SourceTime },
         /// A void ruling: the target entry is dropped from the corrected view.
         Voided { target: u64 },
     }
@@ -245,16 +389,22 @@ where
                 adapter,
                 competitor,
                 at,
+                // The heat tag routes the insertion into the right heat *window* upstream;
+                // the synthetic pass carries it through so tag-aware folds agree.
+                heat,
             } => {
                 entries.insert(
                     offset,
-                    Entry::Inserted {
-                        competitor: CompetitorKey {
-                            adapter: adapter.clone(),
-                            competitor: competitor.clone(),
-                        },
+                    Entry::Inserted(Pass {
+                        adapter: adapter.clone(),
+                        competitor: competitor.clone(),
                         at: *at,
-                    },
+                        // A synthetic pass carries no source sequence; ordered by `at`.
+                        sequence: None,
+                        gate: gridfpv_events::GateIndex::LAP,
+                        signal: None,
+                        heat: heat.clone(),
+                    }),
                 );
             }
             Event::LapAdjusted { target, at } => {
@@ -269,8 +419,21 @@ where
             Event::DetectionVoided { target } => {
                 entries.insert(offset, Entry::Voided { target: target.0 });
             }
-            // Splits, lifecycle, heat transitions, and the heat/result-level
-            // rulings (`HeatVoided`, `PenaltyApplied`) never touch the lap view.
+            Event::LapSplit { target, at } => {
+                // A split inserts a synthetic mid-lap pass at `at` for the competitor whose
+                // lap (the one *ending* at `target`) is being split — so the synthetic pass
+                // carries the target pass's adapter/competitor. It is addressable by *this*
+                // event's offset (just like an insert), so "void the void" reverses it.
+                entries.insert(
+                    offset,
+                    Entry::Split {
+                        target: target.0,
+                        at: *at,
+                    },
+                );
+            }
+            // Lifecycle, heat transitions, and the heat/result-level rulings
+            // (`HeatVoided`, `PenaltyApplied`, `RulingReversed`) never touch the lap view.
             _ => {}
         }
     }
@@ -283,19 +446,29 @@ where
     // (we process offsets ascending, so a later ruling overwrites an earlier one).
     let mut voided: BTreeMap<u64, bool> = BTreeMap::new();
     let mut retime: BTreeMap<u64, SourceTime> = BTreeMap::new();
-    for (_offset, entry) in entries.iter() {
+    // Which VOID EVENT (its own offset) currently holds each base pass voided — the target a
+    // restore (void-the-void) addresses; carried onto the removal record for the UI.
+    let mut void_source: BTreeMap<u64, u64> = BTreeMap::new();
+    for (entry_offset, entry) in entries.iter() {
         match entry {
-            Entry::RawPass(_) | Entry::Inserted { .. } => {}
+            // Passes (raw, inserted, or split) carry no ruling of their own; the split is
+            // resolved to a concrete pass in the emit loop. A void/adjust *targeting* a split
+            // is handled below via `entries.get(target)` falling into the pass arms.
+            Entry::RawPass(_) | Entry::Inserted(_) | Entry::Split { .. } => {}
             Entry::Adjusted { target, at } => {
                 // Re-time the target raw/inserted pass, and un-void it: an adjust is
                 // the newest ruling on that target, so it supersedes an earlier void.
                 voided.insert(*target, false);
+                void_source.remove(target);
                 retime.insert(*target, *at);
             }
             Entry::Voided { target } => {
                 // Void the target. If the target is itself a ruling, supersede it:
                 // voiding an adjust cancels its re-time (revert to the raw `at`);
-                // voiding a void un-voids *that* void's target.
+                // voiding a void un-voids *that* void's target — and the chain WALKS,
+                // so a depth-3 "void the un-void" re-voids the base pass (each link
+                // flips the parity; the old two-level special case silently no-opped
+                // at depth 3, breaking last-writer-wins).
                 match entries.get(target) {
                     Some(Entry::Adjusted {
                         target: inner_target,
@@ -306,57 +479,251 @@ where
                         // target present (the adjust, not the pass, was voided).
                         retime.remove(inner_target);
                     }
-                    Some(Entry::Voided {
-                        target: inner_target,
-                    }) => {
-                        // Void the void: resurrect the originally-voided target.
-                        voided.insert(*inner_target, false);
+                    Some(Entry::Voided { .. }) => {
+                        // Walk the void chain to the base (non-void) target, flipping
+                        // the intended state at each link: void(void(P)) restores P,
+                        // void(void(void(P))) re-voids it, and so on.
+                        let mut cursor = *target;
+                        let mut state = true; // what THIS event wants for the base
+                        while let Some(Entry::Voided { target: inner }) = entries.get(&cursor) {
+                            state = !state;
+                            cursor = *inner;
+                        }
+                        voided.insert(cursor, state);
+                        if state {
+                            void_source.insert(cursor, *entry_offset);
+                        } else {
+                            void_source.remove(&cursor);
+                        }
                     }
                     // Voiding a raw pass or an inserted pass simply drops it.
                     _ => {
                         voided.insert(*target, true);
+                        void_source.insert(*target, *entry_offset);
                     }
                 }
             }
         }
     }
 
-    // Build the corrected view: every raw/inserted pass that survived voiding,
-    // with any re-time applied. Group by competitor for lap derivation.
-    let mut by_competitor: BTreeMap<CompetitorKey, Vec<CorrectedPass>> = BTreeMap::new();
+    // Emit the passes (raw + inserted + split-synthetic) with any re-time applied, in offset
+    // order, each paired with the global offset that addresses it for a future correction —
+    // surviving passes into `out`, RD-voided ones into `voided_out` (the shared removal
+    // record); callers re-group and re-order them as needed.
+    let mut out: Vec<(u64, Pass)> = Vec::new();
+    let mut voided_out: Vec<VoidedEmit> = Vec::new();
+    let mut scratch: Vec<(u64, Pass)> = Vec::new();
     for (offset, entry) in entries.iter() {
-        if voided.get(offset).copied().unwrap_or(false) {
-            continue;
+        let is_voided = voided.get(offset).copied().unwrap_or(false);
+        scratch.clear();
+        let sink: &mut Vec<(u64, Pass)> = if is_voided { &mut scratch } else { &mut out };
+        match entry {
+            Entry::RawPass(pass) => {
+                let mut p = (*pass).clone();
+                // A VOIDED pass keeps its RAW instant: the removal record exists so
+                // re-detection can recognise the crossing on the trace, and the trace
+                // knows nothing of a re-time (an adjusted-then-voided pass would
+                // otherwise leave the suppression zone at the wrong instant).
+                if !is_voided {
+                    if let Some(at) = retime.get(offset) {
+                        p.at = *at;
+                    }
+                }
+                sink.push((*offset, p));
+            }
+            Entry::Inserted(pass) => {
+                let mut p = pass.clone();
+                if !is_voided {
+                    if let Some(at) = retime.get(offset) {
+                        p.at = *at;
+                    }
+                }
+                sink.push((*offset, p));
+            }
+            Entry::Split { target, at } => {
+                // Attribute the synthetic mid-lap pass to the competitor whose lap ends at
+                // `target` (the target pass's adapter/competitor). A later adjust of *this*
+                // split's offset re-times the synthetic pass; a void drops it. If the target
+                // pass is unknown (a dangling ref — the command layer rejects these), skip.
+                // The synthetic pass is addressable by *this* split's own offset.
+                // Resolve the source pass RECURSIVELY: a split may target another split's
+                // synthetic pass (splitting the second half of a twice-missed stretch) —
+                // the old single-step lookup silently skipped it while the audit showed
+                // the split as landed.
+                let mut src_offset = *target;
+                let src = loop {
+                    match entries.get(&src_offset) {
+                        Some(Entry::RawPass(p)) => break Some((*p).clone()),
+                        Some(Entry::Inserted(p)) => break Some(p.clone()),
+                        Some(Entry::Split { target: inner, .. }) => src_offset = *inner,
+                        _ => break None,
+                    }
+                };
+                if let Some(src) = src {
+                    sink.push((
+                        *offset,
+                        Pass {
+                            adapter: src.adapter,
+                            competitor: src.competitor,
+                            at: retime.get(offset).copied().unwrap_or(*at),
+                            sequence: None,
+                            gate: gridfpv_events::GateIndex::LAP,
+                            signal: None,
+                            heat: src.heat,
+                        },
+                    ));
+                }
+            }
+            Entry::Adjusted { .. } | Entry::Voided { .. } => {}
         }
-        let corrected = match entry {
-            Entry::RawPass(pass) => CorrectedPass {
-                competitor: CompetitorKey::from_pass(pass),
-                at: retime.get(offset).copied().unwrap_or(pass.at),
-                sequence: pass.sequence,
-            },
-            Entry::Inserted { competitor, at } => CorrectedPass {
-                competitor: competitor.clone(),
-                // An inserted lap can itself be re-timed by a later adjust.
-                at: retime.get(offset).copied().unwrap_or(*at),
-                // Synthetic passes carry no source sequence; ordered by `at`.
-                sequence: None,
-            },
-            // Rulings are not passes in the view.
-            Entry::Adjusted { .. } | Entry::Voided { .. } => continue,
-        };
+        if is_voided {
+            let void_ref = void_source.get(offset).copied().unwrap_or(*offset);
+            for (o, p) in scratch.drain(..) {
+                voided_out.push((o, void_ref, p, VoidReason::Marshal));
+            }
+        }
+    }
+    (out, voided_out)
+}
+
+/// [`corrected_and_voided_passes`] with the round's **minimum-lap floor** applied (D26).
+///
+/// After the marshaling corrections fold, each competitor's surviving chain is walked
+/// chronologically: a **raw, unruled** pass that would close a lap shorter than
+/// `min_lap_micros` is AUTO-SUPPRESSED — moved onto the removal record with
+/// [`VoidReason::UnderMinLap`] (its restore target is itself; a marshal re-time exempts it).
+/// Marshal-created passes (inserted, split-synthetic) and re-timed passes are NEVER
+/// suppressed: an explicit ruling outranks the floor. `None`/`0` floor ⇒ identical to the
+/// plain fold, so rounds predating the setting keep their results bit-identical.
+pub fn corrected_and_voided_passes_with_floor<'a, I>(
+    events: I,
+    min_lap_micros: Option<i64>,
+) -> (Vec<(u64, Pass)>, Vec<VoidedEmit>)
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    // The plain fold needs to tell us which surviving passes are raw-and-unruled; re-derive
+    // that from the events here so the core fold stays untouched. Collect first (two passes
+    // over the data, but windows are per-heat and small).
+    let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
+    let (surviving, mut voided) = corrected_and_voided_passes(pairs.iter().copied());
+    let Some(floor) = min_lap_micros.filter(|f| *f > 0) else {
+        return (surviving, voided);
+    };
+
+    // A pass is EXEMPT from the floor when a marshal shaped it: inserted or split-synthetic
+    // by construction, or re-timed by a standing (un-voided) adjust.
+    let mut exempt: BTreeSet<u64> = BTreeSet::new();
+    for (offset, event) in &pairs {
+        match event {
+            Event::LapInserted { .. } | Event::LapSplit { .. } => {
+                exempt.insert(*offset);
+            }
+            Event::LapAdjusted { target, .. } => {
+                exempt.insert(target.0);
+            }
+            _ => {}
+        }
+    }
+
+    // Walk each competitor's chain in time order, keep-first: a too-close successor that is
+    // not marshal-blessed drops to the removal record.
+    let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
+    for (offset, pass) in surviving {
         by_competitor
-            .entry(corrected.competitor.clone())
+            .entry(CompetitorKey::from_pass(&pass))
             .or_default()
-            .push(corrected);
+            .push((offset, pass));
+    }
+    let mut out: Vec<(u64, Pass)> = Vec::new();
+    for (_, mut chain) in by_competitor {
+        chain.sort_by_key(|(offset, p)| (p.at, *offset));
+        let mut last_kept: Option<SourceTime> = None;
+        for (offset, pass) in chain {
+            let too_close =
+                last_kept.is_some_and(|prev| pass.at.micros.saturating_sub(prev.micros) < floor);
+            if too_close && !exempt.contains(&offset) {
+                voided.push((offset, offset, pass, VoidReason::UnderMinLap));
+            } else {
+                last_kept = Some(pass.at);
+                out.push((offset, pass));
+            }
+        }
+    }
+    out.sort_by_key(|(offset, _)| *offset);
+    (out, voided_out_sorted(voided))
+}
+
+/// Stable ordering for the removal record (offset order, like the surviving stream).
+fn voided_out_sorted(mut voided: Vec<VoidedEmit>) -> Vec<VoidedEmit> {
+    voided.sort_by_key(|(offset, _, _, _)| *offset);
+    voided
+}
+
+/// Fold a sequence of `(offset, event)` pairs into the lap-list read model,
+/// applying marshaling adjudications keyed on the target's append **offset** (#31).
+///
+/// This is the marshaling-aware sibling of [`lap_list`]. It is a thin consumer of
+/// [`corrected_passes`] — the single home of the void/insert/adjust fold (#39): it
+/// takes that corrected lap-gate pass stream, groups it by `(adapter, competitor)`,
+/// orders each group, and derives laps exactly like [`lap_list`]. The raw [`Pass`]es
+/// in the input are never mutated (architecture.html §3).
+///
+/// See [`corrected_passes`] for the adjudications folded, the offset/last-writer-wins
+/// semantics, and the "void the void" cases.
+pub fn lap_list_marshaled<'a, I>(events: I) -> LapList
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    lap_list_marshaled_with_floor(events, None)
+}
+
+/// [`lap_list_marshaled`] under a round's **minimum-lap floor** (D26): auto-suppressed passes
+/// land on each competitor's removal record with [`VoidReason::UnderMinLap`].
+pub fn lap_list_marshaled_with_floor<'a, I>(events: I, min_lap_micros: Option<i64>) -> LapList
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    // Group the corrected pass stream by competitor and derive laps. The fold itself
+    // lives in `corrected_passes`; here we only project it into the lap-list view. Each
+    // pass keeps the global offset that addresses it, so the derived laps carry their
+    // `start_ref`/`end_ref` command targets.
+    let (surviving, voided) = corrected_and_voided_passes_with_floor(events, min_lap_micros);
+    let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
+    for (offset, pass) in surviving {
+        by_competitor
+            .entry(CompetitorKey::from_pass(&pass))
+            .or_default()
+            .push((offset, pass));
+    }
+    // The RD-voided passes, grouped the same way — a competitor may have voids but no
+    // surviving laps (every crossing removed), so they seed the map too.
+    let mut voided_by_competitor: BTreeMap<CompetitorKey, Vec<VoidedPass>> = BTreeMap::new();
+    for (offset, void_offset, pass, reason) in voided {
+        by_competitor
+            .entry(CompetitorKey::from_pass(&pass))
+            .or_default();
+        voided_by_competitor
+            .entry(CompetitorKey::from_pass(&pass))
+            .or_default()
+            .push(VoidedPass {
+                at: pass.at,
+                pass_ref: LogRef(offset),
+                void_ref: LogRef(void_offset),
+                reason,
+            });
     }
 
     let competitors = by_competitor
         .into_iter()
         .map(|(competitor, mut passes)| {
-            passes.sort_by_key(corrected_order_key);
+            passes.sort_by_key(|(_, p)| corrected_order_key(p));
+            let mut voided = voided_by_competitor.remove(&competitor).unwrap_or_default();
+            voided.sort_by_key(|v| v.at);
             CompetitorLaps {
                 competitor,
                 laps: laps_from_corrected(&passes),
+                voided,
             }
         })
         .collect();
@@ -374,21 +741,443 @@ where
 /// [`lap_list`]: when there are no rulings, a source either numbers its passes
 /// monotonically in step with `at` or carries no sequence at all, so ordering by
 /// `at` yields the same lap list.
-fn corrected_order_key(pass: &CorrectedPass) -> (SourceTime, bool, Option<u64>) {
+fn corrected_order_key(pass: &Pass) -> (SourceTime, bool, Option<u64>) {
     (pass.at, pass.sequence.is_none(), pass.sequence)
 }
 
-/// Turn an ordered run of corrected lap-gate passes into laps: `K` passes ⇒
-/// `K - 1` laps, each spanning a consecutive pair.
-fn laps_from_corrected(passes: &[CorrectedPass]) -> Vec<Lap> {
+/// Turn an ordered run of corrected lap-gate passes (each carrying its global offset) into
+/// laps: `K` passes ⇒ `K - 1` laps, each spanning a consecutive pair. The lap's
+/// `start_ref`/`end_ref` are the global offsets of the opening/closing pass — the stable
+/// command targets a UI uses to address this lap (the end pass is the natural target for
+/// void/adjust/split).
+fn laps_from_corrected(passes: &[(u64, Pass)]) -> Vec<Lap> {
     passes
         .windows(2)
         .enumerate()
-        .map(|(idx, pair)| Lap {
-            number: (idx + 1) as u32,
-            duration_micros: pair[1].at.micros_since(pair[0].at),
+        .map(|(idx, pair)| {
+            let (start_off, start_pass) = &pair[0];
+            let (end_off, end_pass) = &pair[1];
+            Lap {
+                number: (idx + 1) as u32,
+                duration_micros: end_pass.at.micros_since(start_pass.at),
+                at: end_pass.at,
+                start_ref: LogRef(*start_off),
+                end_ref: LogRef(*end_off),
+            }
         })
         .collect()
+}
+
+/// The kind of a marshaling audit entry — *what sort of action* a logged fact was (#55).
+///
+/// Derived purely from the event **type**, this is the "defensible results" surface: every
+/// marshaling correction is a recorded, attributable, reversible fact (marshaling.html §3.3).
+/// The automatic timer pass is included as [`AuditKind::Pass`] so the panel can distinguish a
+/// *human ruling* from an *automatic detection* — but note `marshaling_log` only folds the
+/// human rulings into entries (a heat has far too many passes to list); `Pass` exists so a
+/// future "show automatic detections too" toggle is an additive consumer, not a model change.
+///
+/// There is deliberately **no actor / who**: per the no-login decision every change is implicitly
+/// the RD, so naming an actor would be a false precision (marshaling.html §3.3, the audit records
+/// what-changed-when, and the single-RD trust model supplies the who).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum AuditKind {
+    /// A detection was voided (a phantom lap removed, or a "void the void" undo).
+    Voided,
+    /// A missed lap was inserted.
+    Inserted,
+    /// A lap's time was adjusted (re-timed).
+    Adjusted,
+    /// An over-long lap was split into two.
+    Split,
+    /// A penalty (DQ, added time, or points) was applied to a competitor.
+    PenaltyApplied,
+    /// A valid lap was thrown out of a competitor's scored count (not a void — the lap stays real).
+    LapThrownOut,
+    /// A protest was filed against a heat result.
+    ProtestFiled,
+    /// A filed protest was resolved (upheld / denied / withdrawn).
+    ProtestResolved,
+    /// A prior ruling (a penalty, throw-out, protest resolution, or heat-void) was reversed.
+    RulingReversed,
+    /// The whole heat was voided.
+    HeatVoided,
+    /// An automatic timer detection (NOT a marshal action). Folded only when a consumer asks for
+    /// the raw stream; `marshaling_log` omits these so the audit reads as a ruling history.
+    Pass,
+}
+
+/// A single reverse-chronological marshaling audit entry (#55): *what changed, when, what kind*.
+///
+/// A thin, render-ready fact derived from one logged marshaling event. `at` is the event's
+/// `recorded_at` (the server wall-clock instant the log received it), so the panel can show
+/// "when"; `summary` is a short human string ("Lap split", "DQ applied"); `kind` drives the visual
+/// treatment. There is no actor field by design (see [`AuditKind`]).
+///
+/// `competitor` carries the **structured** competitor ref the action targeted (when it targets one),
+/// kept *out* of `summary` on purpose: the ref is a source-local handle (a pilot id, a node seat),
+/// not a friendly name, so the client resolves it to the pilot's **callsign** and composes the final
+/// line (e.g. prepends "Ace · " to "DQ applied"). A server-baked `summary` cannot be re-resolved, so
+/// the name lives in this field, not in the string (the Marshaling raw-id bug, #214 follow-up). It is
+/// `None` for the lap-/heat-addressed actions that name no competitor (void, split, heat-void, …).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct AuditEntry {
+    /// What kind of marshaling action this was — derived from the event type.
+    pub kind: AuditKind,
+    /// When the log received this fact (microseconds since the Unix epoch), if recorded.
+    /// `None` when the append carried no arrival timestamp (e.g. a replay with none supplied).
+    #[ts(type = "number | null")]
+    pub at: Option<i64>,
+    /// The global append offset of this fact — a stable identity for the entry (and what a
+    /// later "reverse this" would target). Lets the UI key the list deterministically.
+    pub at_ref: LogRef,
+    /// The competitor this action targeted, as a **structured ref** the client resolves to a
+    /// callsign and composes into the displayed line. `None` for actions that name no competitor.
+    pub competitor: Option<CompetitorRef>,
+    /// A short human-readable description of the change — **without** the raw competitor ref (that
+    /// is carried structured in `competitor` so the client can show the resolved callsign instead).
+    pub summary: String,
+}
+
+/// Fold a **heat-scoped** sequence of `(recorded_at, offset, &Event)` into the marshaling
+/// audit trail (#55), newest first.
+///
+/// This is the "defensible results" panel's projection: it walks the heat's events and emits one
+/// [`AuditEntry`] per **marshaling action** (the human rulings — void/insert/adjust/split, penalty,
+/// reversal, heat-void), in **reverse-chronological** (offset-descending) order. Automatic passes
+/// are *not* emitted (a heat has too many to list, and they are not rulings); they fold into the
+/// lap list instead. The fold is pure and deterministic — folding the same heat window twice yields
+/// the same trail — so it recomputes from the log like every other projection.
+///
+/// `events` must already be scoped to the heat (e.g. via the server's heat window) so the audit
+/// reflects only this heat's rulings; `heat` is carried so the heat-addressed rulings
+/// ([`Event::PenaltyApplied`], [`Event::HeatVoided`]) that name a *different* heat are excluded
+/// even if they happen to fall inside the window.
+pub fn marshaling_log<'a, I>(events: I, heat: &HeatId) -> Vec<AuditEntry>
+where
+    I: IntoIterator<Item = (Option<i64>, u64, &'a Event)>,
+{
+    let mut entries: Vec<AuditEntry> = Vec::new();
+    for (at, offset, event) in events {
+        // `competitor` carries the structured ref the client resolves to a callsign; it is kept OUT
+        // of `summary` (the server can't resolve a friendly name; the client composes the final line).
+        let (kind, competitor, summary) = match event {
+            Event::DetectionVoided { target } => (
+                AuditKind::Voided,
+                None,
+                format!("Detection voided (ref {})", target.0),
+            ),
+            Event::LapInserted {
+                competitor, at: t, ..
+            } => (
+                AuditKind::Inserted,
+                Some(competitor.clone()),
+                format!("Lap inserted at {}", fmt_secs(*t)),
+            ),
+            Event::LapAdjusted { target, at: t } => (
+                AuditKind::Adjusted,
+                None,
+                format!("Lap re-timed (ref {}) to {}", target.0, fmt_secs(*t)),
+            ),
+            Event::LapSplit { target, at: t } => (
+                AuditKind::Split,
+                None,
+                format!("Lap split (ref {}) at {}", target.0, fmt_secs(*t)),
+            ),
+            Event::PenaltyApplied {
+                heat: h,
+                competitor,
+                penalty,
+            } if h == heat => (
+                AuditKind::PenaltyApplied,
+                Some(competitor.clone()),
+                fmt_penalty(penalty),
+            ),
+            Event::LapThrownOut { target } => (
+                AuditKind::LapThrownOut,
+                None,
+                format!("Lap thrown out (ref {})", target.0),
+            ),
+            Event::ProtestFiled {
+                heat: h,
+                competitor,
+                note,
+            } if h == heat => (
+                AuditKind::ProtestFiled,
+                Some(competitor.clone()),
+                format!("Protest filed: {note}"),
+            ),
+            Event::ProtestResolved { target, outcome } => (
+                AuditKind::ProtestResolved,
+                None,
+                format!("Protest {} (ref {})", fmt_outcome(*outcome), target.0),
+            ),
+            Event::RulingReversed { target } => (
+                AuditKind::RulingReversed,
+                None,
+                format!("Ruling reversed (ref {})", target.0),
+            ),
+            Event::HeatVoided { heat: h } if h == heat => {
+                (AuditKind::HeatVoided, None, "Heat voided".to_string())
+            }
+            // Passes and lifecycle/heat-loop events are not marshaling actions — skip them.
+            _ => continue,
+        };
+        entries.push(AuditEntry {
+            kind,
+            at,
+            at_ref: LogRef(offset),
+            competitor,
+            summary,
+        });
+    }
+    // Reverse-chronological: newest action first. Offset is append order, so descending offset
+    // is descending time.
+    entries.reverse();
+    entries
+}
+
+/// Format a `SourceTime` as whole seconds for an audit summary ("4.000s").
+fn fmt_secs(t: SourceTime) -> String {
+    let micros = t.micros_since(SourceTime::from_micros(0));
+    format!("{:.3}s", micros as f64 / 1_000_000.0)
+}
+
+/// Format a [`Penalty`](gridfpv_events::Penalty) for an audit summary.
+fn fmt_penalty(penalty: &gridfpv_events::Penalty) -> String {
+    match penalty {
+        gridfpv_events::Penalty::Disqualify { reason } => match reason {
+            Some(r) => format!("DQ applied ({r})"),
+            None => "DQ applied".to_string(),
+        },
+        gridfpv_events::Penalty::TimeAdded { micros } => {
+            format!("+{:.3}s penalty", *micros as f64 / 1_000_000.0)
+        }
+        gridfpv_events::Penalty::PointsDeducted { points } => {
+            format!("-{points} points")
+        }
+        gridfpv_events::Penalty::PointsAdded { points } => {
+            format!("+{points} points")
+        }
+    }
+}
+
+/// Format a [`ProtestOutcome`](gridfpv_events::ProtestOutcome) for an audit summary.
+fn fmt_outcome(outcome: gridfpv_events::ProtestOutcome) -> &'static str {
+    match outcome {
+        gridfpv_events::ProtestOutcome::Upheld => "upheld",
+        gridfpv_events::ProtestOutcome::Denied => "denied",
+        gridfpv_events::ProtestOutcome::Withdrawn => "withdrawn",
+    }
+}
+
+// --- Signal trace (marshaling Slice 1 — signal-as-evidence) -----------------------------------
+
+/// One competitor's reconstructed RSSI trace within a heat: the concatenated samples plus the
+/// enter/exit thresholds the timer detected against (marshaling.html §3.2).
+///
+/// The `samples` are the per-tick RSSI values in capture order; `from`/`period_micros` carry the
+/// time base of the **first** chunk so a UI can place each sample on the source clock (chunks are
+/// captured back-to-back at a fixed cadence, so the first chunk's base plus the running index
+/// reconstructs every sample's time — see [`signal_trace`] for the contiguity it assumes).
+/// `enter`/`exit` are the last thresholds seen for this competitor, `None` until one is captured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct CompetitorTrace {
+    /// Which source-local competitor this trace belongs to.
+    pub competitor: CompetitorKey,
+    /// The source-clock timestamp of the first captured sample, if any.
+    #[ts(optional)]
+    pub from: Option<SourceTime>,
+    /// Microseconds between consecutive samples (the capture cadence of the first chunk).
+    #[ts(type = "number")]
+    pub period_micros: u32,
+    /// The concatenated per-tick RSSI samples (filtered ADC counts), oldest first.
+    pub samples: Vec<u16>,
+    /// The **actual** source-clock timestamp (µs) of each sample, when the trace came from a dense
+    /// history. RH's marshal history is non-uniformly spaced (bursts of peak/nadir entries around
+    /// each crossing), so a uniform `from + i·period_micros` grid badly misplaces samples and
+    /// understates the span; a renderer that has these should plot each sample at its real time.
+    /// `None` for the coarse streaming path, where `from`/`period_micros` is exact.
+    #[serde(default)]
+    #[ts(optional, type = "Array<number>")]
+    pub times: Option<Vec<i64>>,
+    /// The enter detection threshold, where captured.
+    #[ts(optional)]
+    pub enter: Option<u16>,
+    /// The exit detection threshold, where captured.
+    #[ts(optional)]
+    pub exit: Option<u16>,
+}
+
+/// The signal-trace read model for a heat: one [`CompetitorTrace`] per competitor that produced
+/// any signal facts, ordered deterministically by [`CompetitorKey`] (marshaling Slice 1).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignalTraceView {
+    /// Per-competitor traces, ordered by competitor key.
+    pub competitors: Vec<CompetitorTrace>,
+}
+
+impl SignalTraceView {
+    /// Look up a single competitor's trace by key, if present.
+    pub fn competitor(&self, key: &CompetitorKey) -> Option<&CompetitorTrace> {
+        self.competitors.iter().find(|c| &c.competitor == key)
+    }
+}
+
+/// Fold a sequence of events into the per-heat [`SignalTraceView`] (marshaling Slice 1; dense
+/// upgrade — RH `current_marshal_data`).
+///
+/// Folds [`Event::SignalChunk`], [`Event::SignalThresholds`], and [`Event::SignalHistory`].
+/// Thresholds are **last-writer-wins** per competitor. The two trace sources are handled with a
+/// **prefer-dense** rule:
+///
+/// - [`Event::SignalChunk`] — the *coarse* live-streamed samples (one per `node_data` heartbeat).
+///   They **append** to the competitor's running buffer in log order, reconstructing the stream
+///   exactly.
+/// - [`Event::SignalHistory`] — the *dense, full-fidelity* per-tick history RotorHazard records,
+///   pulled from the request-driven `current_marshal_data` at heat end. When a competitor has **any**
+///   dense history, it **supersedes** the coarse chunk samples entirely: the view carries the dense
+///   trace, not the streaming approximation. Multiple histories for one competitor are last-writer-
+///   wins (a re-pull replaces the earlier one). With no dense history the coarse chunks stand, so a
+///   heat that ended before the pull (or a non-RH source) is unchanged.
+///
+/// Because the dense history carries an **explicit per-sample time** (not a uniform cadence), the
+/// view's uniform `from`/`period_micros` grid is derived from those times: `from` is the first
+/// sample's instant and `period_micros` is the **first inter-sample delta** (RotorHazard samples at
+/// a near-fixed rate). The samples themselves are stored verbatim — native integer ADC counts, no
+/// resampling (the Slice 1 fidelity caution) — so the rendered grid is faithful to the real sample
+/// count even where the cadence drifts slightly. A single-sample history keeps a `period_micros` of
+/// `0` (degenerate, but the grid still places it at `from`).
+///
+/// Pure and deterministic — no clock, no hidden state — so folding the same events twice yields the
+/// identical view (the determinism-on-replay guarantee Slice 1 is built around): the dense/coarse
+/// choice is a pure function of which facts are present, independent of fold order.
+///
+/// `events` is the heat's window (the server scopes it before folding, exactly as the lap/audit
+/// projections do); the fold itself is window-agnostic, so it is equally correct over the full log.
+pub fn signal_trace<'a, I>(events: I) -> SignalTraceView
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    // Per competitor, in first-seen order; sorted by key at the end for a stable view.
+    struct Acc {
+        from: Option<SourceTime>,
+        period_micros: u32,
+        samples: Vec<u16>,
+        enter: Option<u16>,
+        exit: Option<u16>,
+        /// The dense history that supersedes the coarse `samples`/`from`/`period_micros`, if any has
+        /// been seen (last writer wins). When present it is resolved into the trace at emit time.
+        dense: Option<SignalHistory>,
+    }
+    impl Acc {
+        fn empty() -> Self {
+            Acc {
+                from: None,
+                period_micros: 0,
+                samples: Vec::new(),
+                enter: None,
+                exit: None,
+                dense: None,
+            }
+        }
+    }
+    let mut by_competitor: BTreeMap<CompetitorKey, Acc> = BTreeMap::new();
+
+    for event in events {
+        match event {
+            Event::SignalChunk(chunk) => {
+                let key = CompetitorKey {
+                    adapter: chunk.adapter.clone(),
+                    competitor: chunk.competitor.clone(),
+                };
+                let acc = by_competitor.entry(key).or_insert_with(Acc::empty);
+                // The first chunk anchors the time base; later chunks append onto it.
+                if acc.from.is_none() {
+                    acc.from = Some(chunk.from);
+                    acc.period_micros = chunk.period_micros;
+                }
+                acc.samples.extend_from_slice(&chunk.rssi);
+            }
+            Event::SignalHistory(history) => {
+                let key = CompetitorKey {
+                    adapter: history.adapter.clone(),
+                    competitor: history.competitor.clone(),
+                };
+                let acc = by_competitor.entry(key).or_insert_with(Acc::empty);
+                // Prefer-dense: the dense history supersedes the coarse chunks. Last writer wins, so
+                // a re-pull replaces the earlier history. An empty history is ignored (it carries no
+                // evidence, so it must not blank out the coarse trace).
+                if !history.rssi.is_empty() {
+                    acc.dense = Some(history.clone());
+                }
+            }
+            Event::SignalThresholds(t) => {
+                let key = CompetitorKey {
+                    adapter: t.adapter.clone(),
+                    competitor: t.competitor.clone(),
+                };
+                let acc = by_competitor.entry(key).or_insert_with(Acc::empty);
+                // Last writer wins.
+                acc.enter = Some(t.enter);
+                acc.exit = Some(t.exit);
+            }
+            _ => {}
+        }
+    }
+
+    SignalTraceView {
+        competitors: by_competitor
+            .into_iter()
+            .map(|(competitor, acc)| {
+                // Prefer-dense: when a dense history is present it replaces the coarse stream. The
+                // uniform `from`/`period_micros` grid is kept (compat), but the explicit per-sample
+                // `times` are carried too so a renderer can plot each sample at its real instant — RH's
+                // history is bursty, so the uniform grid alone badly compresses the trace.
+                let (from, period_micros, samples, times) = match acc.dense {
+                    Some(history) => {
+                        let (from, period_micros, samples) = dense_trace_grid(&history);
+                        (from, period_micros, samples, Some(history.times))
+                    }
+                    None => (acc.from, acc.period_micros, acc.samples, None),
+                };
+                CompetitorTrace {
+                    competitor,
+                    from,
+                    period_micros,
+                    samples,
+                    times,
+                    enter: acc.enter,
+                    exit: acc.exit,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Resolve a dense [`SignalHistory`] into the `(from, period_micros, samples)` the uniform-grid
+/// [`CompetitorTrace`] carries, preserving the native samples verbatim (no resampling).
+///
+/// `from` is the first sample's instant; `period_micros` is the first **positive** inter-sample
+/// delta (RH samples at a near-fixed rate, so this anchors the grid the renderer draws on). The
+/// `samples` are the dense RSSI vector unchanged. A dense history can legitimately repeat a timestamp
+/// — e.g. a peak reported at the same first/last time, so `history_times` reads `[t, t, …]` — so the
+/// grid skips zero/negative deltas to avoid a degenerate period of `0`; it falls back to `0` only
+/// when every delta is non-positive (a single distinct time, including a single-sample history).
+fn dense_trace_grid(history: &SignalHistory) -> (Option<SourceTime>, u32, Vec<u16>) {
+    let from = history.times.first().copied().map(SourceTime::from_micros);
+    let period_micros = history
+        .times
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .find(|&d| d > 0)
+        .unwrap_or(0)
+        .clamp(0, u32::MAX as i64) as u32;
+    (from, period_micros, history.rssi.clone())
 }
 
 #[cfg(test)]
@@ -405,6 +1194,7 @@ mod tests {
             sequence,
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         })
     }
 
@@ -417,6 +1207,7 @@ mod tests {
             sequence: None,
             gate: GateIndex(gate),
             signal: Some(SignalContext { rssi_peak: None }),
+            heat: None,
         })
     }
 
@@ -425,6 +1216,19 @@ mod tests {
             adapter: AdapterId(adapter.into()),
             competitor: CompetitorRef(competitor.into()),
         }
+    }
+
+    /// Expected `(lap number, duration)` pair — the marshaling-irrelevant lap shape these
+    /// fold tests assert. Laps now also carry `start_ref`/`end_ref` global offsets (#55);
+    /// those are exercised by dedicated offset-targeting tests, so the duration folds compare
+    /// on `(number, duration)` via [`bare`] to stay focused on the fold arithmetic.
+    fn ld(number: u32, duration_micros: i64) -> (u32, i64) {
+        (number, duration_micros)
+    }
+
+    /// Project laps to their `(number, duration)` pairs, dropping the ref offsets.
+    fn bare(laps: &[Lap]) -> Vec<(u32, i64)> {
+        laps.iter().map(|l| (l.number, l.duration_micros)).collect()
     }
 
     #[test]
@@ -439,21 +1243,8 @@ mod tests {
         let result = lap_list(&events);
         let laps = &result.competitor(&key("vd", "A")).unwrap().laps;
         assert_eq!(
-            laps,
-            &vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000,
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_500_000,
-                },
-                Lap {
-                    number: 3,
-                    duration_micros: 4_500_000,
-                },
-            ]
+            bare(laps),
+            vec![ld(1, 3_000_000), ld(2, 2_500_000), ld(3, 4_500_000),]
         );
         let cl = result.competitor(&key("vd", "A")).unwrap();
         assert_eq!(cl.lap_count(), 3);
@@ -466,7 +1257,7 @@ mod tests {
         let events = vec![pass("vd", "A", 1_000_000, Some(1))];
         let result = lap_list(&events);
         let cl = result.competitor(&key("vd", "A")).unwrap();
-        assert_eq!(cl.laps, vec![]);
+        assert_eq!(bare(&cl.laps), vec![]);
         assert_eq!(cl.lap_count(), 0);
         assert_eq!(cl.total_micros(), 0);
         assert_eq!(cl.best(), None);
@@ -491,28 +1282,10 @@ mod tests {
         let result = lap_list(&events);
 
         let a = result.competitor(&key("vd", "A")).unwrap();
-        assert_eq!(
-            a.laps,
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000,
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_000_000,
-                },
-            ]
-        );
+        assert_eq!(bare(&a.laps), vec![ld(1, 3_000_000), ld(2, 2_000_000),]);
 
         let b = result.competitor(&key("vd", "B")).unwrap();
-        assert_eq!(
-            b.laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 4_000_000,
-            }]
-        );
+        assert_eq!(bare(&b.laps), vec![ld(1, 4_000_000)]);
     }
 
     #[test]
@@ -527,18 +1300,12 @@ mod tests {
         let result = lap_list(&events);
         assert_eq!(result.competitors.len(), 2);
         assert_eq!(
-            result.competitor(&key("rh-a", "node-2")).unwrap().laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 2_000_000,
-            }]
+            bare(&result.competitor(&key("rh-a", "node-2")).unwrap().laps),
+            vec![ld(1, 2_000_000)]
         );
         assert_eq!(
-            result.competitor(&key("rh-b", "node-2")).unwrap().laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 3_000_000,
-            }]
+            bare(&result.competitor(&key("rh-b", "node-2")).unwrap().laps),
+            vec![ld(1, 3_000_000)]
         );
     }
 
@@ -553,11 +1320,8 @@ mod tests {
         ];
         let result = lap_list(&events);
         assert_eq!(
-            result.competitor(&key("vd", "A")).unwrap().laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 4_000_000,
-            }]
+            bare(&result.competitor(&key("vd", "A")).unwrap().laps),
+            vec![ld(1, 4_000_000)]
         );
     }
 
@@ -584,11 +1348,8 @@ mod tests {
         ];
         let result = lap_list(&events);
         assert_eq!(
-            result.competitor(&key("vd", "A")).unwrap().laps,
-            vec![Lap {
-                number: 1,
-                duration_micros: 2_000_000,
-            }]
+            bare(&result.competitor(&key("vd", "A")).unwrap().laps),
+            vec![ld(1, 2_000_000)]
         );
     }
 
@@ -603,17 +1364,8 @@ mod tests {
         ];
         let result = lap_list(&events);
         assert_eq!(
-            result.competitor(&key("vd", "A")).unwrap().laps,
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_000_000, // 6.0s - 4.0s
-                },
-            ]
+            bare(&result.competitor(&key("vd", "A")).unwrap().laps),
+            vec![ld(1, 3_000_000), ld(2, 2_000_000),]
         );
     }
 
@@ -627,17 +1379,67 @@ mod tests {
         ];
         let result = lap_list(&events);
         assert_eq!(
-            result.competitor(&key("vd", "A")).unwrap().laps,
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 5.0s - 2.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_000_000, // 7.0s - 5.0s
-                },
-            ]
+            bare(&result.competitor(&key("vd", "A")).unwrap().laps),
+            vec![ld(1, 3_000_000), ld(2, 2_000_000),]
+        );
+    }
+
+    #[test]
+    fn registrations_map_bindings_last_writer_wins() {
+        use gridfpv_events::PilotId;
+        let events = vec![
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh".into()),
+                competitor: CompetitorRef("node-2".into()),
+                pilot: PilotId("acroace".into()),
+            },
+            // A different competitor binds to a different pilot.
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh".into()),
+                competitor: CompetitorRef("node-3".into()),
+                pilot: PilotId("bee".into()),
+            },
+            // node-2 is re-bound: the later registration wins.
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh".into()),
+                competitor: CompetitorRef("node-2".into()),
+                pilot: PilotId("zoomer".into()),
+            },
+        ];
+        let map = registrations(&events);
+        assert_eq!(
+            map.get(&key("rh", "node-2")),
+            Some(&PilotId("zoomer".into()))
+        );
+        assert_eq!(map.get(&key("rh", "node-3")), Some(&PilotId("bee".into())));
+        // An unregistered competitor is simply absent.
+        assert_eq!(map.get(&key("rh", "node-9")), None);
+    }
+
+    #[test]
+    fn registrations_are_per_source() {
+        use gridfpv_events::PilotId;
+        // The same ref on two adapters is two distinct bindings.
+        let events = vec![
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh-a".into()),
+                competitor: CompetitorRef("node-2".into()),
+                pilot: PilotId("acroace".into()),
+            },
+            Event::CompetitorRegistered {
+                adapter: AdapterId("rh-b".into()),
+                competitor: CompetitorRef("node-2".into()),
+                pilot: PilotId("bee".into()),
+            },
+        ];
+        let map = registrations(&events);
+        assert_eq!(
+            map.get(&key("rh-a", "node-2")),
+            Some(&PilotId("acroace".into()))
+        );
+        assert_eq!(
+            map.get(&key("rh-b", "node-2")),
+            Some(&PilotId("bee".into()))
         );
     }
 
@@ -670,6 +1472,7 @@ mod marshaling_tests {
             sequence,
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         })
     }
 
@@ -684,11 +1487,19 @@ mod marshaling_tests {
             adapter: AdapterId(adapter.into()),
             competitor: CompetitorRef(competitor.into()),
             at: SourceTime::from_micros(at),
+            heat: None,
         }
     }
 
     fn adjusted(target: u64, at: i64) -> Event {
         Event::LapAdjusted {
+            target: LogRef(target),
+            at: SourceTime::from_micros(at),
+        }
+    }
+
+    fn split(target: u64, at: i64) -> Event {
+        Event::LapSplit {
             target: LogRef(target),
             at: SourceTime::from_micros(at),
         }
@@ -711,7 +1522,28 @@ mod marshaling_tests {
             .collect()
     }
 
-    fn laps_of(list: &LapList, adapter: &str, competitor: &str) -> Vec<Lap> {
+    /// Expected `(lap number, duration)` pair. Laps also carry `start_ref`/`end_ref` offsets
+    /// (#55); these fold goldens assert the duration arithmetic via [`laps_of`], and the
+    /// offset-targeting behaviour is checked by the dedicated `*_ref*` tests below.
+    fn ld(number: u32, duration_micros: i64) -> (u32, i64) {
+        (number, duration_micros)
+    }
+
+    /// A competitor's laps as `(number, duration)` pairs, dropping the ref offsets — the fold
+    /// goldens compare on lap arithmetic only.
+    fn laps_of(list: &LapList, adapter: &str, competitor: &str) -> Vec<(u32, i64)> {
+        list.competitor(&key(adapter, competitor))
+            .map(|c| {
+                c.laps
+                    .iter()
+                    .map(|l| (l.number, l.duration_micros))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A competitor's raw laps (with refs intact), for the offset-targeting tests.
+    fn raw_laps_of(list: &LapList, adapter: &str, competitor: &str) -> Vec<Lap> {
         list.competitor(&key(adapter, competitor))
             .map(|c| c.laps.clone())
             .unwrap_or_default()
@@ -739,13 +1571,7 @@ mod marshaling_tests {
             voided(1),                           // offset 3 — voids the phantom
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 5_000_000, // 6.0s - 1.0s, the 4.0s pass is gone
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 5_000_000)]);
     }
 
     #[test]
@@ -760,16 +1586,7 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 3_000_000, // 7.0s - 4.0s
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
         );
     }
 
@@ -785,16 +1602,7 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s (was 4.0s before adjust)
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 3_000_000, // 7.0s - 4.0s (was 2.0s before adjust)
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
         );
     }
 
@@ -810,13 +1618,7 @@ mod marshaling_tests {
             voided(1),                           // offset 4 — ...then void (wins)
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 7_000_000, // 8.0s - 1.0s, offset 1 voided
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 7_000_000)]);
     }
 
     #[test]
@@ -834,16 +1636,273 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
-            vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 3_000_000, // 4.0s - 1.0s — pass 1 is back
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 2_000_000, // 6.0s - 4.0s
-                },
-            ]
+            vec![ld(1, 3_000_000), ld(2, 2_000_000),]
+        );
+    }
+
+    #[test]
+    fn a_voided_pass_is_recorded_on_the_lap_list_and_unvoiding_clears_it() {
+        // The removal record travels WITH the lap list (the void/re-detection shared-data
+        // rule): an RD-voided crossing shows up in `CompetitorLaps::voided` at its recorded
+        // instant with its own offset — so the console can render it struck-through and the
+        // threshold re-detection can refuse to re-propose it. Un-voiding (void the void)
+        // returns the pass to the laps and clears the record.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 4_000_000, Some(2)), // offset 1 — the not-a-full-lap crossing
+            pass("vd", "A", 6_000_000, Some(3)), // offset 2
+            voided(1),                           // offset 3 — the RD removes it
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        // One surviving lap (0 → 2); the voided crossing is recorded, not forgotten.
+        assert_eq!(cl.laps.len(), 1);
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(4_000_000),
+                pass_ref: LogRef(1),
+                void_ref: LogRef(3),
+                reason: VoidReason::Marshal,
+            }]
+        );
+
+        // Void the void: the pass returns to the laps and leaves the removal record.
+        let mut events = events;
+        events.push(voided(3)); // offset 4
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 2);
+        assert!(cl.voided.is_empty());
+    }
+
+    #[test]
+    fn min_lap_floor_suppresses_the_phantom_double_detection() {
+        // The live bug (Audit Shakedown): every pilot got TWO passes 4ms apart at race start —
+        // the second closed a phantom 0.004s "lap 1" and shifted every real lap's number.
+        // Under a 5s floor the echo drops to the removal record; the chain reads holeshot →
+        // real laps, exactly as if the timer had never double-fired.
+        let events = vec![
+            pass("vd", "A", 651_000, Some(1)), // offset 0 — holeshot (kept: first)
+            pass("vd", "A", 655_000, Some(2)), // offset 1 — the 4ms echo (suppressed)
+            pass("vd", "A", 7_208_000, Some(3)), // offset 2 — real lap 1
+            pass("vd", "A", 13_500_000, Some(4)), // offset 3 — real lap 2
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        let durations: Vec<i64> = cl.laps.iter().map(|l| l.duration_micros).collect();
+        assert_eq!(
+            durations,
+            vec![6_557_000, 6_292_000],
+            "holeshot opens the chain; the echo never closes a lap"
+        );
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(655_000),
+                pass_ref: LogRef(1),
+                void_ref: LogRef(1), // restore target = the pass itself (a marshal re-time)
+                reason: VoidReason::UnderMinLap,
+            }]
+        );
+        // No floor ⇒ bit-identical to the plain fold (rounds predating the setting).
+        let unfloored = lap_list_marshaled_with_floor(tagged(&events), None);
+        let plain = lap_list_marshaled(tagged(&events));
+        assert_eq!(unfloored, plain);
+        assert_eq!(plain.competitors[0].laps.len(), 3);
+    }
+
+    #[test]
+    fn a_marshal_re_time_exempts_a_pass_from_the_floor() {
+        // The RESTORE path: the floor suppressed a pass the marshal believes is real. An
+        // AdjustLap re-asserting its raw instant is an explicit ruling — it outranks the
+        // floor and the pass returns to the chain (whiff of a whoop track's 2s laps).
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 3_000_000, Some(2)), // offset 1 — 2s lap, under a 5s floor
+            pass("vd", "A", 9_000_000, Some(3)), // offset 2
+            adjusted(1, 3_000_000),              // offset 3 — marshal: "that 2s lap is real"
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            cl.laps
+                .iter()
+                .map(|l| l.duration_micros)
+                .collect::<Vec<_>>(),
+            vec![2_000_000, 6_000_000],
+            "the blessed pass closes its lap despite the floor"
+        );
+        assert!(cl.voided.is_empty());
+    }
+
+    #[test]
+    fn marshal_created_passes_are_never_floor_suppressed() {
+        // An inserted pass is a ruling by construction — even one that closes a short lap
+        // stands (the marshal typed the time; the floor guards raw detections only).
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)),  // offset 0
+            pass("vd", "A", 10_000_000, Some(2)), // offset 1
+            inserted("vd", "A", 2_500_000),       // offset 2 — a 1.5s lap, by ruling
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 2, "the inserted pass closes its lap");
+        assert!(cl.voided.is_empty());
+    }
+
+    #[test]
+    fn a_burst_of_rapid_echoes_all_suppress_against_the_last_kept_pass() {
+        // Three reflections inside the floor window: each compares against the last KEPT
+        // pass, so the whole burst drops — not every-other one.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // kept (first)
+            pass("vd", "A", 1_004_000, Some(2)), // echo — suppressed
+            pass("vd", "A", 1_009_000, Some(3)), // echo — suppressed
+            pass("vd", "A", 1_030_000, Some(4)), // echo — suppressed
+            pass("vd", "A", 8_000_000, Some(5)), // real — kept (7s from last kept)
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 1);
+        assert_eq!(cl.laps[0].duration_micros, 7_000_000);
+        assert_eq!(cl.voided.len(), 3);
+        assert!(
+            cl.voided
+                .iter()
+                .all(|v| v.reason == VoidReason::UnderMinLap)
+        );
+    }
+
+    #[test]
+    fn floor_suppression_composes_with_marshal_voids() {
+        // A marshal void recomputes the chain BEFORE the floor: voiding the first pass makes
+        // the echo the new chain opener (kept — nothing precedes it), and both removal
+        // reasons render side by side.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0 — marshal-voided below
+            pass("vd", "A", 1_004_000, Some(2)), // offset 1 — becomes the opener
+            pass("vd", "A", 8_000_000, Some(3)), // offset 2 — real lap
+            voided(0),                           // offset 3
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 1, "opener (echo) -> real pass = one lap");
+        assert_eq!(cl.voided.len(), 1);
+        assert_eq!(cl.voided[0].reason, VoidReason::Marshal);
+    }
+
+    #[test]
+    fn a_depth_three_void_chain_re_voids_the_base_pass() {
+        // void(void(void(P))) — the RD removed, restored, and re-removed: last writer wins,
+        // so P is voided again and back on the removal record. (The old two-level special
+        // case silently no-opped here, leaving P alive against the newest ruling.)
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 4_000_000, Some(2)), // offset 1
+            pass("vd", "A", 6_000_000, Some(3)), // offset 2
+            voided(1),                           // offset 3 — remove
+            voided(3),                           // offset 4 — restore
+            voided(4),                           // offset 5 — remove again
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 1, "0 -> 2 is the one surviving lap");
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(4_000_000),
+                pass_ref: LogRef(1),
+                void_ref: LogRef(5),
+                reason: VoidReason::Marshal,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_retimed_then_voided_pass_records_its_raw_instant() {
+        // The removal record exists so RE-DETECTION recognises the crossing on the trace —
+        // and the trace knows nothing of a re-time. Adjust 4.0s -> 14.0s, then void: the
+        // record must say 4.0s (where the crossing physically is), not 14.0s.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 4_000_000, Some(2)), // offset 1
+            adjusted(1, 14_000_000),             // offset 2
+            voided(1),                           // offset 3
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(4_000_000),
+                pass_ref: LogRef(1),
+                void_ref: LogRef(3),
+                reason: VoidReason::Marshal,
+            }]
+        );
+    }
+
+    #[test]
+    fn splitting_a_split_synthetic_pass_works_recursively() {
+        // One 12s lap missed TWO crossings: split at 4s, then split the still-too-long
+        // second half (the lap ending at the synthetic pass? no — ending at the raw pass)
+        // by targeting the SYNTHETIC pass's own lap. The second split targets the first
+        // split's offset and must resolve to a real source recursively (it used to vanish
+        // silently while the audit showed it landed).
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)),  // offset 0 — opens
+            pass("vd", "A", 13_000_000, Some(2)), // offset 1 — one 12s lap
+            split(1, 5_000_000),                  // offset 2 — synthetic at 5s
+            split(2, 9_000_000),                  // offset 3 — split the SYNTHETIC's chain
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        let durations: Vec<i64> = cl.laps.iter().map(|l| l.duration_micros).collect();
+        assert_eq!(
+            durations,
+            vec![4_000_000, 4_000_000, 4_000_000],
+            "three real laps: 1-5, 5-9, 9-13"
         );
     }
 
@@ -858,13 +1917,7 @@ mod marshaling_tests {
             voided(2),                           // offset 3 — void the insert
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 6_000_000, // 7.0s - 1.0s, the insert is gone
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 6_000_000)]);
     }
 
     #[test]
@@ -878,13 +1931,7 @@ mod marshaling_tests {
             voided(2),                           // offset 3 — ...cancel the re-time
         ];
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 4_000_000, // 5.0s - 1.0s, reverted from the 4.0s adjust
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 4_000_000)]);
     }
 
     #[test]
@@ -906,10 +1953,7 @@ mod marshaling_tests {
         assert_eq!(lap_list_marshaled(tagged(&events)), lap_list(&events));
         assert_eq!(
             laps_of(&lap_list_marshaled(tagged(&events)), "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 3_000_000,
-            }]
+            vec![ld(1, 3_000_000)]
         );
     }
 
@@ -950,13 +1994,7 @@ mod marshaling_tests {
 
         // Fold — and use the result so the corrected view genuinely differs.
         let result = lap_list_marshaled(tagged(&events));
-        assert_eq!(
-            laps_of(&result, "vd", "A"),
-            vec![Lap {
-                number: 1,
-                duration_micros: 3_000_000, // 4.0s - 1.0s (adjusted), offset 2 voided
-            }]
-        );
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 3_000_000)]);
 
         let after: Vec<String> = events
             .iter()
@@ -967,6 +2005,118 @@ mod marshaling_tests {
             before, after,
             "raw passes must be byte-identical after folding"
         );
+    }
+
+    // --- LapSplit (Slice 2) ----------------------------------------------------
+
+    #[test]
+    fn lap_split_makes_two_laps_from_one() {
+        // One over-long lap (1.0s → 7.0s) ending at the offset-1 pass; the timer missed a
+        // mid-lap detection. Splitting it at 4.0s — attributed to the target's competitor —
+        // turns the single 6.0s lap into two 3.0s laps.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 7_000_000, Some(2)), // offset 1 — ends the over-long lap
+            split(1, 4_000_000),                 // offset 2 — split at 4.0s
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        assert_eq!(
+            laps_of(&result, "vd", "A"),
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
+        );
+    }
+
+    #[test]
+    fn lap_split_attributes_to_the_target_competitor_only() {
+        // Two competitors interleaved; splitting B's lap must add a pass for B, never A.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "B", 2_000_000, Some(1)), // offset 1
+            pass("vd", "A", 4_000_000, Some(2)), // offset 2
+            pass("vd", "B", 8_000_000, Some(2)), // offset 3 — ends B's over-long lap
+            split(3, 5_000_000),                 // offset 4 — split B's lap at 5.0s
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        // A is untouched: one 3.0s lap.
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 3_000_000)]);
+        // B's single 6.0s lap becomes two (2.0→5.0, 5.0→8.0).
+        assert_eq!(
+            laps_of(&result, "vd", "B"),
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
+        );
+    }
+
+    #[test]
+    fn void_the_split_removes_the_synthetic_pass() {
+        // The split's synthetic pass is addressable by the split's own offset, so a later
+        // void of that offset removes it — the single over-long lap is restored.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 7_000_000, Some(2)), // offset 1
+            split(1, 4_000_000),                 // offset 2 — synthetic mid-lap pass
+            voided(2),                           // offset 3 — void the split
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        assert_eq!(laps_of(&result, "vd", "A"), vec![ld(1, 6_000_000)]);
+    }
+
+    #[test]
+    fn void_the_void_of_a_split_restores_it() {
+        // "Void the void" works on a split: void the split (offset 3), then void *that*
+        // void (offset 4) — the synthetic pass comes back and the lap is two again.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 7_000_000, Some(2)), // offset 1
+            split(1, 4_000_000),                 // offset 2 — synthetic
+            voided(2),                           // offset 3 — void the split
+            voided(3),                           // offset 4 — void the void
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        assert_eq!(
+            laps_of(&result, "vd", "A"),
+            vec![ld(1, 3_000_000), ld(2, 3_000_000),]
+        );
+    }
+
+    #[test]
+    fn folding_the_same_events_twice_is_identical_with_a_split() {
+        // Determinism-on-replay (mirrors `fold_is_idempotent_recompute_equivalence`): a log
+        // mixing a split with the other rulings folds to the identical result twice over.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)),
+            pass("vd", "A", 7_000_000, Some(2)),
+            pass("vd", "A", 10_000_000, Some(3)),
+            split(1, 4_000_000),
+            adjusted(2, 9_500_000),
+            inserted("vd", "A", 12_000_000),
+        ];
+        let first = lap_list_marshaled(tagged(&events));
+        let second = lap_list_marshaled(tagged(&events));
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn edit_time_shifts_both_neighbour_lap_durations() {
+        // Slice-2 "edit-time": re-timing a *middle* pass shifts BOTH adjacent lap durations
+        // that share it — no new event, the duration recompute is structural in
+        // `corrected_passes`. Verify the prior-lap and next-lap durations both change.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 5_000_000, Some(2)), // offset 1 — the shared middle pass
+            pass("vd", "A", 9_000_000, Some(3)), // offset 2
+        ];
+        // Before the edit: laps are 4.0s (1→5) and 4.0s (5→9).
+        let before = laps_of(&lap_list_marshaled(tagged(&events)), "vd", "A");
+        assert_eq!(before[0].1, 4_000_000);
+        assert_eq!(before[1].1, 4_000_000);
+
+        // Re-time the middle pass from 5.0s to 6.0s — the prior lap lengthens and the next
+        // lap shortens by the same 1.0s, both neighbours moving off one edit.
+        let mut edited = events.clone();
+        edited.push(adjusted(1, 6_000_000)); // offset 3
+        let after = laps_of(&lap_list_marshaled(tagged(&edited)), "vd", "A");
+        assert_eq!(after[0].1, 5_000_000, "prior lap lengthened 4→5s");
+        assert_eq!(after[1].1, 3_000_000, "next lap shortened 4→3s");
     }
 
     #[test]
@@ -981,16 +2131,554 @@ mod marshaling_tests {
         let result = lap_list_marshaled(tagged(&events));
         assert_eq!(
             laps_of(&result, "vd", "A"),
+            vec![ld(1, 4_000_000), ld(2, 4_000_000),]
+        );
+    }
+
+    // --- Lap end_ref/start_ref: the load-bearing UI-targeting offsets (#55) ----------
+
+    #[test]
+    fn lap_refs_carry_the_global_pass_offsets() {
+        // Each lap's start_ref/end_ref are the GLOBAL append offsets of its bounding passes —
+        // the stable command target a UI selects. 3 passes at offsets 0,1,2 ⇒ laps
+        // (start=0,end=1) and (start=1,end=2).
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)), // offset 0
+            pass("vd", "A", 4_000_000, Some(2)), // offset 1
+            pass("vd", "A", 6_000_000, Some(3)), // offset 2
+        ];
+        let result = lap_list_marshaled(tagged(&events));
+        let laps = raw_laps_of(&result, "vd", "A");
+        assert_eq!(laps[0].start_ref, LogRef(0));
+        assert_eq!(laps[0].end_ref, LogRef(1));
+        assert_eq!(laps[1].start_ref, LogRef(1));
+        assert_eq!(laps[1].end_ref, LogRef(2));
+    }
+
+    #[test]
+    fn lap_refs_are_global_offsets_not_window_relative() {
+        // THE BUG THIS FIXES: when the fold is fed real global offsets (a heat starting at
+        // offset 100, e.g. the heat-window path), the lap refs are those global offsets — NOT
+        // re-enumerated 0,1,2. A UI selecting lap 2's end targets global offset 102, and a void
+        // of that offset removes the right pass.
+        let events = vec![
+            pass("vd", "A", 1_000_000, Some(1)),
+            pass("vd", "A", 4_000_000, Some(2)),
+            pass("vd", "A", 6_000_000, Some(3)),
+        ];
+        // Feed the fold global offsets 100,101,102 (as the heat window now does).
+        let tagged_global: Vec<(u64, &Event)> = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (100 + i as u64, e))
+            .collect();
+        let result = lap_list_marshaled(tagged_global);
+        let laps = raw_laps_of(&result, "vd", "A");
+        assert_eq!(
+            laps[1].end_ref,
+            LogRef(102),
+            "must be the global offset, not 2"
+        );
+
+        // And that ref is a valid void target: void lap 2's end pass (offset 102) and the lap is
+        // gone — proving the UI-selected ref hits the RIGHT pass.
+        let end_ref = laps[1].end_ref;
+        let mut log: Vec<Event> = events.clone();
+        // Append the void at its own real global offset; re-fold the same global window.
+        let mut full: Vec<(u64, Event)> = log
+            .drain(..)
+            .enumerate()
+            .map(|(i, e)| (100 + i as u64, e))
+            .collect();
+        full.push((103, Event::DetectionVoided { target: end_ref }));
+        let refolded = lap_list_marshaled(full.iter().map(|(o, e)| (*o, e)));
+        // Voiding the offset-102 pass leaves laps (100→101) only.
+        assert_eq!(laps_of(&refolded, "vd", "A"), vec![ld(1, 3_000_000)]);
+    }
+
+    #[test]
+    fn selecting_a_lap_to_split_targets_the_right_pass() {
+        // A UI selects an over-long lap and splits it: the split must target that lap's END pass.
+        // Two competitors interleaved with non-zero global offsets so a window-relative bug would
+        // target the wrong pass.
+        let events = [
+            pass("vd", "A", 1_000_000, Some(1)), // global 50
+            pass("vd", "B", 2_000_000, Some(1)), // global 51
+            pass("vd", "A", 4_000_000, Some(2)), // global 52
+            pass("vd", "B", 8_000_000, Some(2)), // global 53 — ends B's over-long lap
+        ];
+        let tagged_global: Vec<(u64, &Event)> = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (50 + i as u64, e))
+            .collect();
+        let list = lap_list_marshaled(tagged_global);
+        // The UI selects B's only lap and reads its end_ref to target.
+        let b_lap = raw_laps_of(&list, "vd", "B")[0].clone();
+        assert_eq!(b_lap.end_ref, LogRef(53));
+
+        // Split that lap at 5.0s, targeting end_ref — B's lap becomes two, A untouched.
+        let mut full: Vec<(u64, Event)> = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (50 + i as u64, e.clone()))
+            .collect();
+        full.push((
+            54,
+            Event::LapSplit {
+                target: b_lap.end_ref,
+                at: SourceTime::from_micros(5_000_000),
+            },
+        ));
+        let refolded = lap_list_marshaled(full.iter().map(|(o, e)| (*o, e)));
+        assert_eq!(laps_of(&refolded, "vd", "A"), vec![ld(1, 3_000_000)]);
+        assert_eq!(
+            laps_of(&refolded, "vd", "B"),
+            vec![ld(1, 3_000_000), ld(2, 3_000_000)]
+        );
+    }
+
+    // --- marshaling_log: the audit projection (#55) ---------------------------------
+
+    fn audit(events: &[(Option<i64>, Event)], heat: &str) -> Vec<AuditEntry> {
+        let heat = HeatId(heat.into());
+        let tagged: Vec<(Option<i64>, u64, &Event)> = events
+            .iter()
+            .enumerate()
+            .map(|(i, (at, e))| (*at, i as u64, e))
+            .collect();
+        marshaling_log(tagged, &heat)
+    }
+
+    #[test]
+    fn marshaling_log_lists_rulings_newest_first_no_passes() {
+        let heat = "q-1";
+        let log = vec![
+            (Some(10), pass("vd", "A", 1_000_000, Some(1))), // offset 0 — automatic, excluded
+            (Some(20), pass("vd", "A", 4_000_000, Some(2))), // offset 1 — automatic, excluded
+            (Some(30), Event::DetectionVoided { target: LogRef(1) }), // offset 2
+            (
+                Some(40),
+                Event::LapSplit {
+                    target: LogRef(1),
+                    at: SourceTime::from_micros(2_500_000),
+                },
+            ), // offset 3
+        ];
+        let entries = audit(&log, heat);
+        // Only the two rulings appear, newest (split, offset 3) first.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, AuditKind::Split);
+        assert_eq!(entries[0].at_ref, LogRef(3));
+        assert_eq!(entries[0].at, Some(40));
+        assert_eq!(entries[1].kind, AuditKind::Voided);
+        assert_eq!(entries[1].at_ref, LogRef(2));
+    }
+
+    #[test]
+    fn marshaling_log_covers_every_ruling_kind() {
+        use gridfpv_events::Penalty;
+        let heat = "q-1";
+        let log = vec![
+            (
+                Some(1),
+                Event::LapInserted {
+                    adapter: AdapterId("vd".into()),
+                    competitor: CompetitorRef("A".into()),
+                    at: SourceTime::from_micros(3_000_000),
+                    heat: None,
+                },
+            ),
+            (
+                Some(2),
+                Event::LapAdjusted {
+                    target: LogRef(0),
+                    at: SourceTime::from_micros(4_000_000),
+                },
+            ),
+            (
+                Some(3),
+                Event::PenaltyApplied {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("B".into()),
+                    penalty: Penalty::Disqualify { reason: None },
+                },
+            ),
+            (Some(4), Event::RulingReversed { target: LogRef(2) }),
+            (
+                Some(5),
+                Event::HeatVoided {
+                    heat: HeatId(heat.into()),
+                },
+            ),
+        ];
+        let kinds: Vec<AuditKind> = audit(&log, heat).into_iter().map(|e| e.kind).collect();
+        // Newest first.
+        assert_eq!(
+            kinds,
             vec![
-                Lap {
-                    number: 1,
-                    duration_micros: 4_000_000, // 5.0s - 1.0s
-                },
-                Lap {
-                    number: 2,
-                    duration_micros: 4_000_000, // 9.0s - 5.0s
-                },
+                AuditKind::HeatVoided,
+                AuditKind::RulingReversed,
+                AuditKind::PenaltyApplied,
+                AuditKind::Adjusted,
+                AuditKind::Inserted,
             ]
         );
+    }
+
+    #[test]
+    fn marshaling_log_covers_slice6_ruling_kinds() {
+        use gridfpv_events::{Penalty, ProtestOutcome};
+        let heat = "q-1";
+        let log = vec![
+            (Some(1), Event::LapThrownOut { target: LogRef(0) }),
+            (
+                Some(2),
+                Event::PenaltyApplied {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("A".into()),
+                    penalty: Penalty::PointsDeducted { points: 5 },
+                },
+            ),
+            (
+                Some(3),
+                Event::ProtestFiled {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("B".into()),
+                    note: "cut the course".into(),
+                },
+            ),
+            (
+                Some(4),
+                Event::ProtestResolved {
+                    target: LogRef(2),
+                    outcome: ProtestOutcome::Upheld,
+                },
+            ),
+        ];
+        let entries = audit(&log, heat);
+        // Newest first.
+        let kinds: Vec<AuditKind> = entries.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                AuditKind::ProtestResolved,
+                AuditKind::ProtestFiled,
+                AuditKind::PenaltyApplied,
+                AuditKind::LapThrownOut,
+            ]
+        );
+        // The summaries read cleanly: the points penalty, the protest text, the outcome.
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.kind == AuditKind::PenaltyApplied && e.summary.contains("-5 points"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.kind == AuditKind::ProtestFiled && e.summary.contains("cut the course"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.kind == AuditKind::ProtestResolved && e.summary.contains("upheld"))
+        );
+        // Competitor-addressed actions carry the STRUCTURED ref (for client callsign resolution) and
+        // keep it out of the summary string; the client composes the resolved name into the line.
+        let penalty = entries
+            .iter()
+            .find(|e| e.kind == AuditKind::PenaltyApplied)
+            .unwrap();
+        assert_eq!(penalty.competitor, Some(CompetitorRef("A".into())));
+        let protest = entries
+            .iter()
+            .find(|e| e.kind == AuditKind::ProtestFiled)
+            .unwrap();
+        assert_eq!(protest.competitor, Some(CompetitorRef("B".into())));
+        assert!(!protest.summary.contains('B'));
+        // Lap-/heat-addressed actions name no competitor.
+        let resolved = entries
+            .iter()
+            .find(|e| e.kind == AuditKind::ProtestResolved)
+            .unwrap();
+        assert_eq!(resolved.competitor, None);
+    }
+
+    #[test]
+    fn marshaling_log_excludes_other_heats_penalties_and_voids() {
+        use gridfpv_events::Penalty;
+        let heat = "q-1";
+        let log = vec![
+            (
+                Some(1),
+                Event::PenaltyApplied {
+                    heat: HeatId("q-2".into()), // a DIFFERENT heat — excluded
+                    competitor: CompetitorRef("B".into()),
+                    penalty: Penalty::Disqualify { reason: None },
+                },
+            ),
+            (
+                Some(2),
+                Event::HeatVoided {
+                    heat: HeatId("q-2".into()),
+                },
+            ), // different heat — excluded
+            (
+                Some(3),
+                Event::PenaltyApplied {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("A".into()),
+                    penalty: Penalty::TimeAdded { micros: 2_000_000 },
+                },
+            ),
+        ];
+        let entries = audit(&log, heat);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, AuditKind::PenaltyApplied);
+        assert!(entries[0].summary.contains("+2.000s"));
+        // The competitor ref is carried STRUCTURED (for client callsign resolution), not baked into
+        // the summary string — the summary holds only the penalty description.
+        assert!(!entries[0].summary.contains('A'));
+        assert_eq!(entries[0].competitor, Some(CompetitorRef("A".into())));
+    }
+
+    #[test]
+    fn marshaling_log_is_deterministic_fold_twice() {
+        use gridfpv_events::Penalty;
+        let heat = "q-1";
+        let log = vec![
+            (
+                Some(1),
+                Event::LapInserted {
+                    adapter: AdapterId("vd".into()),
+                    competitor: CompetitorRef("A".into()),
+                    at: SourceTime::from_micros(3_000_000),
+                    heat: None,
+                },
+            ),
+            (
+                Some(2),
+                Event::PenaltyApplied {
+                    heat: HeatId(heat.into()),
+                    competitor: CompetitorRef("B".into()),
+                    penalty: Penalty::Disqualify { reason: None },
+                },
+            ),
+            (Some(3), Event::RulingReversed { target: LogRef(1) }),
+        ];
+        assert_eq!(audit(&log, heat), audit(&log, heat));
+    }
+
+    // --- Signal trace (marshaling Slice 1) ----------------------------------------------------
+
+    use gridfpv_events::{SignalChunk, SignalThresholds};
+
+    fn chunk(adapter: &str, competitor: &str, from: i64, period: u32, rssi: &[u16]) -> Event {
+        Event::SignalChunk(SignalChunk {
+            adapter: AdapterId(adapter.into()),
+            competitor: CompetitorRef(competitor.into()),
+            from: SourceTime::from_micros(from),
+            period_micros: period,
+            rssi: rssi.to_vec(),
+        })
+    }
+
+    fn thresholds(adapter: &str, competitor: &str, enter: u16, exit: u16) -> Event {
+        Event::SignalThresholds(SignalThresholds {
+            adapter: AdapterId(adapter.into()),
+            competitor: CompetitorRef(competitor.into()),
+            enter,
+            exit,
+        })
+    }
+
+    #[test]
+    fn signal_trace_concatenates_chunks_in_log_order() {
+        // Two appended chunks for one node reconstruct into one contiguous sample buffer, anchored
+        // at the FIRST chunk's time base; thresholds fold in alongside.
+        let log = vec![
+            thresholds("rh", "node-0", 90, 80),
+            chunk("rh", "node-0", 1_000_000, 100_000, &[70, 72, 150]),
+            chunk("rh", "node-0", 1_300_000, 100_000, &[148, 71, 70]),
+        ];
+        let view = signal_trace(&log);
+        let key = CompetitorKey {
+            adapter: AdapterId("rh".into()),
+            competitor: CompetitorRef("node-0".into()),
+        };
+        let trace = view.competitor(&key).expect("node-0 trace present");
+        assert_eq!(trace.samples, vec![70, 72, 150, 148, 71, 70]);
+        assert_eq!(trace.from, Some(SourceTime::from_micros(1_000_000)));
+        assert_eq!(trace.period_micros, 100_000);
+        assert_eq!(trace.enter, Some(90));
+        assert_eq!(trace.exit, Some(80));
+    }
+
+    #[test]
+    fn signal_trace_thresholds_are_last_writer_wins() {
+        let log = vec![
+            thresholds("rh", "node-0", 90, 80),
+            thresholds("rh", "node-0", 95, 85),
+        ];
+        let view = signal_trace(&log);
+        let trace = &view.competitors[0];
+        assert_eq!((trace.enter, trace.exit), (Some(95), Some(85)));
+    }
+
+    #[test]
+    fn signal_trace_ignores_passes_and_other_events() {
+        // A heat full of passes/lifecycle/marshaling with no signal facts projects empty.
+        let log = vec![
+            pass("rh", "node-0", 1_000_000, Some(0)),
+            pass("rh", "node-0", 4_000_000, Some(1)),
+            voided(0),
+        ];
+        assert!(signal_trace(&log).competitors.is_empty());
+    }
+
+    #[test]
+    fn signal_trace_is_per_competitor_and_key_ordered() {
+        let log = vec![
+            chunk("rh", "node-1", 0, 100_000, &[60, 120]),
+            chunk("rh", "node-0", 0, 100_000, &[70, 150]),
+        ];
+        let view = signal_trace(&log);
+        // Ordered by CompetitorKey (node-0 before node-1) regardless of arrival order.
+        let keys: Vec<&str> = view
+            .competitors
+            .iter()
+            .map(|c| c.competitor.competitor.0.as_str())
+            .collect();
+        assert_eq!(keys, vec!["node-0", "node-1"]);
+    }
+
+    #[test]
+    fn signal_trace_fold_twice_identical() {
+        // Determinism-on-replay: the same log always yields the same view.
+        let log = vec![
+            chunk("rh", "node-0", 1_000_000, 100_000, &[70, 150, 71]),
+            thresholds("rh", "node-0", 90, 80),
+            chunk("rh", "node-1", 1_000_000, 100_000, &[60, 120, 61]),
+            chunk("rh", "node-0", 1_300_000, 100_000, &[70]),
+        ];
+        assert_eq!(signal_trace(&log), signal_trace(&log));
+    }
+
+    fn history(adapter: &str, competitor: &str, times: &[i64], rssi: &[u16]) -> Event {
+        Event::SignalHistory(SignalHistory {
+            adapter: AdapterId(adapter.into()),
+            competitor: CompetitorRef(competitor.into()),
+            times: times.to_vec(),
+            rssi: rssi.to_vec(),
+        })
+    }
+
+    #[test]
+    fn dense_history_supersedes_coarse_chunks() {
+        // A competitor with both coarse chunks AND a dense history: the view carries the DENSE trace
+        // (far more samples), not the streamed approximation — the prefer-dense rule.
+        let log = vec![
+            thresholds("rh", "node-0", 90, 80),
+            // Coarse: two streamed samples.
+            chunk("rh", "node-0", 1_000_000, 100_000, &[70, 150]),
+            // Dense: the full per-tick history pulled at heat end (6 samples, finer grid).
+            history(
+                "rh",
+                "node-0",
+                &[0, 50_000, 100_000, 150_000, 200_000, 250_000],
+                &[70, 88, 150, 149, 90, 71],
+            ),
+        ];
+        let view = signal_trace(&log);
+        let key = CompetitorKey {
+            adapter: AdapterId("rh".into()),
+            competitor: CompetitorRef("node-0".into()),
+        };
+        let trace = view.competitor(&key).expect("node-0 trace");
+        // The DENSE samples win, not the 2 coarse ones.
+        assert_eq!(trace.samples, vec![70, 88, 150, 149, 90, 71]);
+        // Grid derived from the dense times: from = first time, period = first inter-sample delta.
+        assert_eq!(trace.from, Some(SourceTime::from_micros(0)));
+        assert_eq!(trace.period_micros, 50_000);
+        // Thresholds still fold in alongside (independent of the trace source).
+        assert_eq!((trace.enter, trace.exit), (Some(90), Some(80)));
+    }
+
+    #[test]
+    fn coarse_chunks_stand_without_a_dense_history() {
+        // No SignalHistory: the coarse chunks are the trace (a heat that ended before the pull).
+        let log = vec![chunk("rh", "node-0", 1_000_000, 100_000, &[70, 150, 71])];
+        let view = signal_trace(&log);
+        let trace = &view.competitors[0];
+        assert_eq!(trace.samples, vec![70, 150, 71]);
+        assert_eq!(trace.period_micros, 100_000);
+    }
+
+    #[test]
+    fn empty_dense_history_does_not_blank_the_coarse_trace() {
+        // A pull that returned an empty history must NOT erase the coarse evidence already captured.
+        let log = vec![
+            chunk("rh", "node-0", 0, 100_000, &[70, 150, 71]),
+            history("rh", "node-0", &[], &[]),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 150, 71]);
+    }
+
+    #[test]
+    fn dense_history_last_writer_wins() {
+        // Two pulls for one competitor: the later dense history replaces the earlier one.
+        let log = vec![
+            history("rh", "node-0", &[0, 100_000], &[70, 150]),
+            history("rh", "node-0", &[0, 50_000, 100_000], &[70, 88, 150]),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 88, 150]);
+        assert_eq!(trace.period_micros, 50_000);
+    }
+
+    #[test]
+    fn dense_history_fold_is_order_independent() {
+        // Determinism: the dense/coarse choice is a pure function of which facts are present, not of
+        // fold order — the history before or after the chunk yields the same (dense) view.
+        let chunk_first = vec![
+            chunk("rh", "node-0", 0, 100_000, &[70, 150]),
+            history("rh", "node-0", &[0, 50_000, 100_000], &[70, 88, 150]),
+        ];
+        let history_first = vec![
+            history("rh", "node-0", &[0, 50_000, 100_000], &[70, 88, 150]),
+            chunk("rh", "node-0", 0, 100_000, &[70, 150]),
+        ];
+        assert_eq!(signal_trace(&chunk_first), signal_trace(&history_first));
+    }
+
+    #[test]
+    fn single_sample_dense_history_has_zero_period() {
+        let log = vec![history("rh", "node-0", &[42_000], &[150])];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![150]);
+        assert_eq!(trace.from, Some(SourceTime::from_micros(42_000)));
+        assert_eq!(trace.period_micros, 0);
+    }
+
+    #[test]
+    fn dense_history_with_repeated_timestamp_derives_a_positive_period() {
+        // A live dense history (RH `history_values`) can repeat a timestamp — a peak reported at the
+        // same first/last time gives `[t, t, …]`. The grid period must skip the zero delta and use
+        // the first POSITIVE one, not collapse to a degenerate 0.
+        let log = vec![history(
+            "rh",
+            "node-0",
+            &[1_000, 1_000, 1_100, 1_100],
+            &[70, 150, 150, 71],
+        )];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.from, Some(SourceTime::from_micros(1_000)));
+        assert_eq!(
+            trace.period_micros, 100,
+            "first positive delta (1_100 - 1_000), skipping the leading 0"
+        );
+        assert_eq!(trace.samples, vec![70, 150, 150, 71]);
     }
 }

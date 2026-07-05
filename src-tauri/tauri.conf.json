@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GridFPV",
+  "version": "0.4.0-alpha.1",
+  "identifier": "org.gridfpv.desktop",
+  "build": {
+    "beforeBuildCommand": "cd frontend && npm ci && npm run build",
+    "beforeDevCommand": "cd frontend && npm ci && npm run build",
+    "frontendDist": "../frontend/apps/rd-console/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "deb", "msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "GridFPV native desktop — embeds the Director, opens the RD console.",
+    "longDescription": "GridFPV native desktop app. On launch it runs the GridFPV Director server in-process, bound to a loopback ephemeral port with a per-user data directory, then opens the RD console pointed at it. Loopback means the control path is open (no auth), per the GridFPV auth model. The hosted Director (gridfpv-app) remains the development path."
+  }
+}

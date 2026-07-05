@@ -78,6 +78,13 @@
       over any event's truth (see §5, §6). A Director remains authoritative for its own events
       and can compute a fully-local season over them with no internet.</p>
     </div>
+    <p>
+      <strong>One Director &harr; one Cloud is an assumption, not a decision.</strong> Everything
+      below describes a Director relating to a <em>single</em> Cloud instance. Whether an RD can
+      <strong>federate one Director to several Cloud instances at once</strong> — given the Cloud is
+      FOSS and self-hostable — is an <a href="#open">open question (&sect;8)</a>: unresolved, and
+      flagged here so the single-Cloud framing throughout this doc is read as provisional.
+    </p>
 
     <pre class="mermaid">
 flowchart LR
@@ -200,7 +207,11 @@ sequenceDiagram
     <p>
       Where the Director keeps one SQLite file per event (the file <em>is</em> the event), the
       Cloud aggregates many events' logs — across classes, chapters, and Directors — into one
-      Postgres store. It is the third storage tier from Architecture §4.
+      Postgres store. It is the third storage tier from Architecture §4. The container shape this
+      builds on — an <code>events</code> table plus an <code>event_log</code> table keyed
+      <code>(event_id, offset)</code> with the fact as JSONB — is the Cloud storage realization
+      sketched in <a href="architecture.html">Architecture</a> §4; this section adds the
+      warehouse-scale concerns (aggregation, partitioning, retention) on top of it.
     </p>
 
     <h3>Raw log vs projections</h3>
@@ -369,10 +380,25 @@ sequenceDiagram
     </div>
     <div class="principle">
       <p><span class="name">Accounts gate reads; control never leaves the Director.</span> A Cloud
-      account identifies an off-LAN viewer and maps to the read authorization the
-      <a href="protocol.html">Protocol</a> spec defines. The privileged <em>control</em> role
-      (race control, marshaling, configuration) exists only on the Director and is never granted
-      by a Cloud account.</p>
+      account identifies an off-LAN viewer and maps to the protocol's first-class scoped
+      <strong>read tier</strong> — the same tier the LAN's open / join-token reads use
+      (<a href="protocol.html">Protocol</a> §5). The privileged <em>control</em> role (race control,
+      marshaling, configuration) exists only on the Director and is never granted by a Cloud
+      account.</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Mandatory TLS — zero unencrypted traffic over the internet, ever.</strong>
+        Everything the Cloud serves or receives over the public internet — account auth, the read
+        snapshot and change stream, and the Director&rarr;Cloud log push (§2) — travels over
+        <strong>HTTPS / WSS end-to-end, always</strong>. There is no plain-HTTP Cloud mode and no
+        exception for convenience on a public address. This is a <strong>hard, non-negotiable
+        requirement enforced in the architecture</strong>, not a recommendation
+        (<a href="architecture.html">Architecture</a> §9; mechanics in
+        <a href="protocol.html">Protocol</a> §5). It contrasts with the trusted LAN, where plain
+        HTTP is acceptable because the network is trusted and loopback control carries no
+        credential at all.
+      </p>
     </div>
     <p>Accounts serve a few concrete needs beyond plain viewing:</p>
     <ul>
@@ -448,6 +474,19 @@ sequenceDiagram
       how the account maps onto the protocol's read-authorization scopes, and which chapter data is
       private / pre-publication vs the open-data default (shared with the
       <a href="protocol.html">Protocol</a> spec).</li>
+      <li><span class="q">Open — Multi-cloud / federation (no decision yet).</span> &sect;1&ndash;&sect;7
+      assume a Director links to <strong>one</strong> Cloud. But the Cloud is FOSS and self-hostable,
+      so an RD may legitimately want to <strong>federate a single Director to several Cloud instances
+      at once</strong> — the project SaaS, a league/community-run instance, and a chapter's private
+      self-host — pushing and reading <em>selectively</em> per instance. This fits the project's FOSS
+      ethos and is <strong>unresolved &amp; deliberately deferred</strong>. It ripples through several
+      decisions above: the per-Director push credential (&sect;2) becomes <em>per-(Director, Cloud)</em>
+      with per-target selection, batching, and dedup; <strong>identity reconciliation</strong> (&sect;6)
+      and the global pilot registry must reconcile across <em>independent</em> clouds with <strong>no
+      single authority</strong>; <strong>season aggregation</strong> (&sect;5) and the
+      <strong>account model</strong> (&sect;7) may differ per instance, and a pilot/viewer may hold
+      accounts on several. Captured now so the single-Cloud assumptions baked into &sect;1&ndash;&sect;7
+      are known to be provisional; <strong>path forward to be designed in a future session.</strong></li>
     </ol>
 
     <footer class="doc-footer">

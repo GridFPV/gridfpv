@@ -16,7 +16,7 @@
 //!    ranking — the seeds, best first.
 //! 2. **Seed the bracket.** [`crate::format::advance_top_n`] takes the top `bracket_size`
 //!    of that ranking and feeds them, *in qualifying-rank order*, as the seeded field of
-//!    a [`crate::single_elim::SingleElim`].
+//!    a per-level bracket generator (caller-supplied).
 //! 3. **Bracket.** The bracket runs to completion; its winner is the survivor at the top
 //!    of its final ranking, and that ranking is the final event standings.
 //!
@@ -35,18 +35,19 @@
 //! A heat's log may carry marshaling adjudications ([`gridfpv_events::Event::DetectionVoided`],
 //! [`gridfpv_events::Event::LapInserted`], [`gridfpv_events::Event::LapAdjusted`]). The
 //! raw passes are never mutated (architecture.html §3); instead [`score_marshaled`]
-//! builds the **corrected view** of the lap-gate passes — exactly as
-//! [`gridfpv_projection::lap_list_marshaled`] does — and scores *that*, so an
+//! scores the **corrected view** of the lap-gate passes built by
+//! [`gridfpv_projection::corrected_passes`] — the single home of the void/insert/adjust
+//! fold that [`gridfpv_projection::lap_list_marshaled`] also folds through (#39) — so an
 //! adjudication in any heat flows straight through into the qualifying ranking and the
 //! bracket via the same scorer the un-marshaled path uses.
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
-
-use gridfpv_events::{Event, Pass, SourceTime};
+use gridfpv_events::{Event, SourceTime};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::format::{CompletedHeat, Generator, GeneratorStep, HeatPlan, RankEntry, advance_top_n};
-use crate::scoring::{HeatResult, WinCondition, score};
+use crate::scoring::{HeatResult, WinCondition, apply_adjudications};
 
 /// Turn one planned heat into its scored result. The single injected dependency the
 /// event driver needs: it owns *how* a heat is run (replay a fixture log, drive real
@@ -92,7 +93,8 @@ pub fn run_format(
 
 /// The result of running a whole event: the qualifying ranking that seeded the bracket,
 /// the bracket's final standings, and the single winner at the top of them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
 pub struct EventOutcome {
     /// The qualifying phase's final ranking (best seed first) — what seeds the bracket.
     pub qualifying: Vec<RankEntry>,
@@ -114,16 +116,28 @@ impl EventOutcome {
 }
 
 /// Run a full event: drive `qualifying` to completion, take the top `bracket_size` of
-/// its ranking into `bracket`, drive that to a single winner, and return both rankings.
+/// its ranking into the bracket, run the bracket **level by level** to a single winner, and
+/// return both rankings.
 ///
-/// The two generators are constructed by the caller (so the qualifying win condition /
-/// metric and the bracket's `heat_size` are the caller's choice); the same `run` closure
-/// scores every heat in both phases. `bracket_size` clamps to the qualifying field, so a
-/// short field simply takes everyone into the bracket. Pure orchestration over the
-/// existing pieces — deterministic given a deterministic `run`.
+/// The qualifying generator and a per-**level** bracket generator factory are supplied by the
+/// caller (so the qualifying win condition / metric and the bracket's `heat_size` are the
+/// caller's choice); the same `run` closure scores every heat in both phases. `bracket_size`
+/// clamps to the qualifying field, so a short field simply takes everyone into the bracket.
+///
+/// # Level-per-round (decisions D13, #217)
+///
+/// A single-elimination bracket is now **one round per level**, not one generator for the whole
+/// bracket: `make_level` builds a fresh per-level [`Generator`] seeded with that level's field,
+/// emits exactly that level's heats, and completes. This driver chains the levels — the **first**
+/// level is seeded from the quali top-N, and each **next** level is seeded from the prior level's
+/// advancers (its ranking, winners first — the same `FromHeatWinners` carry the live engine does
+/// round-to-round) — until a single competitor remains. The returned `bracket` ranking is the
+/// **final level's** placement (winner first), `bracket_heats` are every level's heats in order.
+///
+/// Pure orchestration over the existing pieces — deterministic given a deterministic `run`.
 pub fn run_event(
     qualifying: &mut dyn Generator,
-    make_bracket: impl FnOnce(Vec<gridfpv_events::CompetitorRef>) -> Box<dyn Generator>,
+    mut make_level: impl FnMut(Vec<gridfpv_events::CompetitorRef>) -> Box<dyn Generator>,
     bracket_size: usize,
     run: &mut dyn RunHeat,
     max_heats: usize,
@@ -131,12 +145,42 @@ pub fn run_event(
     // Phase 1 — qualifying to a ranking.
     let (qualifying_heats, qualifying) = run_format(qualifying, run, max_heats);
 
-    // Seed the bracket from the top of the qualifying ranking, in rank order.
+    // Seed the first bracket level from the top of the qualifying ranking, in rank order.
     let bracket_seeds = advance_top_n(&qualifying, bracket_size);
 
-    // Phase 2 — the bracket to a single winner.
-    let mut bracket_gen = make_bracket(bracket_seeds.clone());
-    let (bracket_heats, bracket) = run_format(bracket_gen.as_mut(), run, max_heats);
+    // Phase 2 — the bracket, level by level. Each level is its own generator seeded from the
+    // previous level's advancers (winners in heat order); the chain ends when a level produces
+    // a single survivor. `bracket` holds the latest level's ranking (the final standings).
+    let mut bracket_heats: Vec<CompletedHeat> = Vec::new();
+    let mut level_seeds = bracket_seeds.clone();
+    let mut bracket: Vec<RankEntry> = qualifying_seed_ranking(&level_seeds);
+
+    let mut level = 0usize;
+    while level_seeds.len() > 1 {
+        assert!(
+            level < max_heats,
+            "bracket ran more than {max_heats} levels without resolving a winner"
+        );
+        level += 1;
+
+        // Run this one level. Each level reuses the generator's own heat ids (`se-h0`, …), so
+        // scope them per level (`l{level}-…`) before scoring — mirroring how the live engine
+        // scopes heat ids per round — so a fixture keyed by heat id never collides across levels.
+        let mut level_gen = make_level(level_seeds.clone());
+        let (level_heats, level_ranking) = run_level(level_gen.as_mut(), run, max_heats, level);
+        bracket_heats.extend(level_heats);
+        bracket = level_ranking;
+
+        // The level's advancers (its ranking ahead of the eliminated) seed the next level. A
+        // single-elim level eliminates exactly the competitors tied at the worst position, so
+        // the advancers are everyone above that band — preserving winners-first heat order.
+        let advancers = level_advancers(&bracket);
+        // Guard against a degenerate level that fails to shrink the field (would loop forever).
+        if advancers.len() >= level_seeds.len() {
+            break;
+        }
+        level_seeds = advancers;
+    }
 
     EventOutcome {
         qualifying,
@@ -147,6 +191,65 @@ pub fn run_event(
     }
 }
 
+/// Drive one bracket **level** to completion, scoping each emitted heat id with the level number
+/// (`l{level}-{id}`) so a fixture keyed by heat id never confuses two levels that reuse the same
+/// per-level ids — the engine analogue of the server scoping a round's heat ids per round.
+fn run_level(
+    generator: &mut dyn Generator,
+    run: &mut dyn RunHeat,
+    max_heats: usize,
+    level: usize,
+) -> (Vec<CompletedHeat>, Vec<RankEntry>) {
+    let mut completed: Vec<CompletedHeat> = Vec::new();
+    while let GeneratorStep::Run(plans) = generator.next(&completed) {
+        for plan in &plans {
+            assert!(
+                completed.len() < max_heats,
+                "level ran more than {max_heats} heats without completing"
+            );
+            // Scope the heat id with the level so the fixture / log can tell levels apart, but
+            // hand the generator back its OWN id (it keyed `next` on the unscoped ids).
+            let scoped = HeatPlan::new(format!("l{level}-{}", plan.heat.0), plan.lineup.clone());
+            let result = run.run(&scoped);
+            completed.push(CompletedHeat::new(plan.heat.0.clone(), result));
+        }
+    }
+    let ranking = generator.ranking(&completed);
+    (completed, ranking)
+}
+
+/// A trivial 1, 2, 3, … ranking from a seed order — the bracket standings before any level has
+/// run (the seeds in qualifying-rank order), so a degenerate (≤1-seed) bracket still reports a
+/// ranking.
+fn qualifying_seed_ranking(seeds: &[gridfpv_events::CompetitorRef]) -> Vec<RankEntry> {
+    seeds
+        .iter()
+        .enumerate()
+        .map(|(i, competitor)| RankEntry {
+            competitor: competitor.clone(),
+            position: i as u32 + 1,
+        })
+        .collect()
+}
+
+/// The competitors **advancing** out of a single-elim level — everyone the level did *not*
+/// eliminate. A level's [`Generator::ranking`] lists the advancers first (winners, in heat order,
+/// at distinct positions) and the eliminated last, all **tied at the worst position** (each heat's
+/// losers share the single bottom band). So the advancers are exactly the entries whose `position`
+/// is strictly better than that worst band — which preserves the winners-first heat order the next
+/// level seeds from. A degenerate level whose ranking is all one band advances no one (the loop
+/// guards against that).
+fn level_advancers(ranking: &[RankEntry]) -> Vec<gridfpv_events::CompetitorRef> {
+    let Some(worst) = ranking.iter().map(|e| e.position).max() else {
+        return Vec::new();
+    };
+    ranking
+        .iter()
+        .filter(|e| e.position < worst)
+        .map(|e| e.competitor.clone())
+        .collect()
+}
+
 // --- Marshaling-aware scoring ----------------------------------------------
 
 /// Score a heat's event log under `condition`, **folding in any marshaling
@@ -154,163 +257,53 @@ pub fn run_event(
 ///
 /// Scoring proper ([`score`]) consumes raw lap-gate [`Pass`]es; marshaling corrections
 /// are appended events that must be folded into a *corrected view* of those passes
-/// before scoring — never by mutating the raw passes (architecture.html §3). This builds
-/// that corrected pass stream exactly as [`gridfpv_projection::lap_list_marshaled`] does
-/// — voiding voided detections, inserting recovered laps, re-timing adjusted ones, with
-/// the same last-writer-wins-by-offset and "void the void" resolution — and then scores
-/// it. A log with no adjudications produces the raw pass stream unchanged, so this agrees
-/// with [`crate::scoring::score_events`] byte-for-byte on a clean log.
+/// before scoring — never by mutating the raw passes (architecture.html §3).
+///
+/// The void/insert/adjust fold lives in **one** place — [`gridfpv_projection::corrected_passes`]
+/// — and this scorer simply consumes its output (#39): rather than re-implement the same
+/// last-writer-wins-by-offset / "void the void" resolution here, we hand the log's
+/// positional `(offset, event)` pairs to the projection's fold (the storage layer assigns
+/// these same dense append offsets) and score the corrected pass stream it returns. A log
+/// with no adjudications yields the raw pass stream unchanged, so this agrees with
+/// [`crate::scoring::score_events`] byte-for-byte on a clean log, and stays in lock-step
+/// with [`gridfpv_projection::lap_list_marshaled`] by construction (both fold via the
+/// single source of truth).
+///
+/// On top of the marshaling fold, this also applies the heat's **adjudications**
+/// ([`gridfpv_events::Event::PenaltyApplied`] / [`gridfpv_events::Event::HeatVoided`], #13):
+/// a `Disqualify` sinks a competitor below the field (flagging it), a `TimeAdded` worsens
+/// their deciding time, and a `HeatVoided` flags the whole result voided — so a full event
+/// run reflects penalties and heat-voids, not just lap corrections.
 ///
 /// `race_start` is the shared race clock for [`WinCondition::Timed`] (ignored by the
-/// qualifying / first-to-N conditions), matching [`score`].
+/// qualifying / first-to-N conditions), matching [`crate::scoring::score`].
 pub fn score_marshaled(
     events: &[Event],
     condition: WinCondition,
     race_start: SourceTime,
 ) -> HeatResult {
-    score(&corrected_passes(events), condition, race_start)
-}
-
-/// Build the **corrected** lap-gate pass stream from a heat log: apply every marshaling
-/// adjudication by the offset it targets, leaving raw passes untouched, and return the
-/// surviving passes (synthetic inserts included) as a fresh `Vec<Pass>`.
-///
-/// This mirrors [`gridfpv_projection::lap_list_marshaled`]'s fold so the scorer and the
-/// lap projection agree on the corrected view; rather than duplicate every rule here it
-/// resolves the same three adjudications keyed on the target's positional offset:
-///
-/// - [`Event::DetectionVoided`] drops the target pass / ruling from the view,
-/// - [`Event::LapInserted`] adds a synthetic lap-gate pass,
-/// - [`Event::LapAdjusted`] re-times the target pass,
-///
-/// with last-writer-wins by offset and the "void the void" / "void the adjust" cases
-/// resolved exactly as the projection does. The returned passes carry absolute
-/// [`SourceTime`]s (a re-time moves a pass; an insert slots in at its `at`) so the
-/// timed/first-to-N conditions still see real completion times.
-fn corrected_passes(events: &[Event]) -> Vec<Pass> {
-    // An entry the fold can target by its append offset: a raw pass, a synthetic insert,
-    // or a ruling against another offset.
-    enum Entry<'a> {
-        RawPass(&'a Pass),
-        Inserted(Pass),
-        Adjusted { target: u64, at: SourceTime },
-        Voided { target: u64 },
-    }
-
-    // First pass: index every fold-relevant event by its positional offset (the storage
-    // layer assigns these same dense offsets, so positional indexing mirrors the log).
-    let mut entries: BTreeMap<u64, Entry<'_>> = BTreeMap::new();
-    for (offset, event) in events.iter().enumerate() {
-        let offset = offset as u64;
-        match event {
-            Event::Pass(pass) if pass.gate.is_lap_gate() => {
-                entries.insert(offset, Entry::RawPass(pass));
-            }
-            Event::LapInserted {
-                adapter,
-                competitor,
-                at,
-            } => {
-                entries.insert(
-                    offset,
-                    Entry::Inserted(Pass {
-                        adapter: adapter.clone(),
-                        competitor: competitor.clone(),
-                        at: *at,
-                        // A synthetic pass carries no source sequence; ordered by `at`.
-                        sequence: None,
-                        gate: gridfpv_events::GateIndex::LAP,
-                        signal: None,
-                    }),
-                );
-            }
-            Event::LapAdjusted { target, at } => {
-                entries.insert(
-                    offset,
-                    Entry::Adjusted {
-                        target: target.0,
-                        at: *at,
-                    },
-                );
-            }
-            Event::DetectionVoided { target } => {
-                entries.insert(offset, Entry::Voided { target: target.0 });
-            }
-            // Splits, lifecycle, heat transitions, and heat/result-level rulings never
-            // touch the lap-gate pass view.
-            _ => {}
-        }
-    }
-
-    // Resolve rulings in offset order (BTreeMap iterates ascending), last writer winning.
-    // `voided[off]` drops an offset from the view; `retime[off]` overrides a pass's `at`.
-    let mut voided: BTreeMap<u64, bool> = BTreeMap::new();
-    let mut retime: BTreeMap<u64, SourceTime> = BTreeMap::new();
-    for entry in entries.values() {
-        match entry {
-            Entry::RawPass(_) | Entry::Inserted(_) => {}
-            Entry::Adjusted { target, at } => {
-                // An adjust is the newest ruling on its target: un-void and re-time it.
-                voided.insert(*target, false);
-                retime.insert(*target, *at);
-            }
-            Entry::Voided { target } => match entries.get(target) {
-                // Voiding an adjust cancels its re-time (target reverts to its raw `at`).
-                Some(Entry::Adjusted {
-                    target: inner_target,
-                    ..
-                }) => {
-                    retime.remove(inner_target);
-                }
-                // Voiding a void resurrects the originally-voided target.
-                Some(Entry::Voided {
-                    target: inner_target,
-                }) => {
-                    voided.insert(*inner_target, false);
-                }
-                // Voiding a raw or inserted pass simply drops it.
-                _ => {
-                    voided.insert(*target, true);
-                }
-            },
-        }
-    }
-
-    // Emit the surviving passes (raw + inserted) with any re-time applied, in offset
-    // order; the scorer re-groups and re-orders them by competitor itself.
-    let mut out: Vec<Pass> = Vec::new();
-    for (offset, entry) in entries.iter() {
-        if voided.get(offset).copied().unwrap_or(false) {
-            continue;
-        }
-        match entry {
-            Entry::RawPass(pass) => {
-                let mut p = (*pass).clone();
-                if let Some(at) = retime.get(offset) {
-                    p.at = *at;
-                }
-                out.push(p);
-            }
-            Entry::Inserted(pass) => {
-                let mut p = pass.clone();
-                if let Some(at) = retime.get(offset) {
-                    p.at = *at;
-                }
-                out.push(p);
-            }
-            Entry::Adjusted { .. } | Entry::Voided { .. } => {}
-        }
-    }
-    out
+    // The single home of the marshaling fold is `gridfpv_projection::corrected_passes`;
+    // tag each event with its positional append offset and fold there, then score the
+    // corrected lap-gate passes it returns. The scorer re-groups/re-orders by competitor.
+    // `corrected_passes` pairs each surviving pass with the global offset that addresses it
+    // — **kept** here so a `LapThrownOut` (whose target is a lap's end-pass offset) excludes
+    // the matching lap from the scored count.
+    let corrected: Vec<(u64, gridfpv_events::Pass)> =
+        gridfpv_projection::corrected_passes(events.iter().enumerate().map(|(i, e)| (i as u64, e)));
+    // Penalties / heat-void / throw-outs are a *separate* fold from the marshaling corrections
+    // above: apply them on the corrected pass stream so an adjudicated, marshaled heat reflects
+    // both (#13). A log with no penalties scores exactly as before.
+    apply_adjudications(&corrected, condition, race_start, events)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::scoring::{Metric, score_events};
-    use crate::single_elim::SingleElim;
     use crate::timed_qual::{QualMetric, TimedQualifying};
-    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex, LogRef};
+    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex, LogRef, Pass};
 
     const ADAPTER: &str = "vd";
 
@@ -330,6 +323,7 @@ mod tests {
             sequence: Some(seq),
             gate: GateIndex::LAP,
             signal: None,
+            heat: None,
         })
     }
 
@@ -388,6 +382,7 @@ mod tests {
                 adapter: AdapterId(ADAPTER.into()),
                 competitor: cref("A"),
                 at: SourceTime::from_micros(3_000_000),
+                heat: None,
             }, // offset 2
         ];
         let start = SourceTime::from_micros(0);
@@ -396,6 +391,55 @@ mod tests {
         };
         assert_eq!(score_events(&log, cond, start).places[0].laps, 1);
         assert_eq!(score_marshaled(&log, cond, start).places[0].laps, 2);
+    }
+
+    #[test]
+    fn lap_thrown_out_excludes_a_lap_through_the_marshaled_path() {
+        // The marshaled scorer (corrected_passes → apply_adjudications) excludes a thrown-out lap
+        // by its corrected end-pass offset. A has 3 laps (4 passes at offsets 0..3); throw out the
+        // lap ending at offset 2 → 2 counted laps. Proves the offset is preserved end-to-end.
+        let clean = vec![
+            pass("A", 0, 0),         // offset 0
+            pass("A", 3_000_000, 1), // offset 1
+            pass("A", 6_000_000, 2), // offset 2
+            pass("A", 9_000_000, 3), // offset 3
+        ];
+        let mut thrown = clean.clone();
+        thrown.push(Event::LapThrownOut {
+            target: gridfpv_events::LogRef(2),
+        }); // offset 4
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        let start = SourceTime::from_micros(0);
+        // Clean: 3 laps. With the throw-out: 2 counted laps (via the marshaled path).
+        assert_eq!(score_marshaled(&clean, cond, start).places[0].laps, 3);
+        assert_eq!(score_marshaled(&thrown, cond, start).places[0].laps, 2);
+    }
+
+    #[test]
+    fn lap_thrown_out_excludes_an_inserted_lap_through_the_marshaled_path() {
+        // A throw-out targeting an INSERTED lap (its end_ref is the LapInserted offset) is excluded
+        // by the marshaled scorer — the corrected synthetic pass carries that offset.
+        let log = vec![
+            pass("A", 0, 0),         // offset 0
+            pass("A", 6_000_000, 1), // offset 1
+            Event::LapInserted {
+                adapter: AdapterId(ADAPTER.into()),
+                competitor: cref("A"),
+                at: SourceTime::from_micros(3_000_000),
+                heat: None,
+            }, // offset 2 — inserts a lap → A has 2 laps
+            Event::LapThrownOut {
+                target: gridfpv_events::LogRef(2),
+            }, // offset 3 — throw out the lap ending at the inserted pass
+        ];
+        let cond = WinCondition::Timed {
+            window_micros: 60_000_000,
+        };
+        let start = SourceTime::from_micros(0);
+        // The insert gives 2 laps; throwing out the inserted lap's end drops it back to 1 counted.
+        assert_eq!(score_marshaled(&log, cond, start).places[0].laps, 1);
     }
 
     // --- run_format / run_event --------------------------------------------
@@ -428,27 +472,10 @@ mod tests {
                     position: (i as u32) + 1,
                     laps: 0,
                     metric: Metric::BestLapMicros(*micros),
+                    ..Default::default()
                 })
                 .collect(),
-        }
-    }
-
-    fn h2h(winner: &str, loser: &str) -> HeatResult {
-        use crate::scoring::Placement;
-        use gridfpv_projection::CompetitorKey;
-        HeatResult {
-            places: [(winner, 1u32, 5u32), (loser, 2, 3)]
-                .iter()
-                .map(|(name, position, laps)| Placement {
-                    competitor: CompetitorKey {
-                        adapter: AdapterId(ADAPTER.into()),
-                        competitor: cref(name),
-                    },
-                    position: *position,
-                    laps: *laps,
-                    metric: Metric::LastLapAt(None),
-                })
-                .collect(),
+            ..Default::default()
         }
     }
 
@@ -458,7 +485,7 @@ mod tests {
         // Best laps: A 1.6, B 1.8, C 1.7 across two rounds → A, C, B.
         let mut run = fixture(vec![
             (
-                "round-1",
+                "tq-r1-h1",
                 best_lap_result(&[
                     ("A", Some(2_000_000)),
                     ("B", Some(1_900_000)),
@@ -466,7 +493,7 @@ mod tests {
                 ]),
             ),
             (
-                "round-2",
+                "tq-r2-h1",
                 best_lap_result(&[
                     ("A", Some(1_600_000)),
                     ("B", Some(1_800_000)),
@@ -477,89 +504,5 @@ mod tests {
         let (heats, ranking) = run_format(&mut qual, &mut run, 100);
         assert_eq!(heats.len(), 2);
         assert_eq!(names(&ranking), vec!["A", "C", "B"]);
-    }
-
-    #[test]
-    fn run_event_qualifying_seeds_bracket_to_a_winner() {
-        // Four-pilot field: qualifying ranks A,B,C,D; a 4-seed head-to-head bracket
-        // where the top seed wins every heat → A wins the event.
-        let mut qual = TimedQualifying::new(field(&["A", "B", "C", "D"]), 1, QualMetric::BestLap);
-        let mut run = fixture(vec![
-            (
-                "round-1",
-                best_lap_result(&[
-                    ("A", Some(1_500_000)),
-                    ("B", Some(1_600_000)),
-                    ("C", Some(1_700_000)),
-                    ("D", Some(1_800_000)),
-                ]),
-            ),
-            // Bracket round 1: A v D, B v C (bracket order A,D,B,C).
-            ("se-r1-h0", h2h("A", "D")),
-            ("se-r1-h1", h2h("B", "C")),
-            // Final: A v B.
-            ("se-r2-h0", h2h("A", "B")),
-        ]);
-
-        let outcome = run_event(
-            &mut qual,
-            |seeds| Box::new(SingleElim::new(seeds, 2)),
-            4,
-            &mut run,
-            100,
-        );
-
-        assert_eq!(names(&outcome.qualifying), vec!["A", "B", "C", "D"]);
-        assert_eq!(outcome.bracket_seeds, field(&["A", "B", "C", "D"]));
-        assert_eq!(outcome.winner(), Some(&cref("A")));
-        assert_eq!(outcome.bracket[0].position, 1);
-        assert_eq!(
-            outcome.bracket.iter().filter(|e| e.position == 1).count(),
-            1,
-            "exactly one event winner"
-        );
-    }
-
-    #[test]
-    fn run_event_is_deterministic_on_replay() {
-        let build = || TimedQualifying::new(field(&["A", "B", "C", "D"]), 1, QualMetric::BestLap);
-        let make_run = || {
-            fixture(vec![
-                (
-                    "round-1",
-                    best_lap_result(&[
-                        ("A", Some(1_500_000)),
-                        ("B", Some(1_600_000)),
-                        ("C", Some(1_700_000)),
-                        ("D", Some(1_800_000)),
-                    ]),
-                ),
-                ("se-r1-h0", h2h("A", "D")),
-                ("se-r1-h1", h2h("B", "C")),
-                ("se-r2-h0", h2h("A", "B")),
-            ])
-        };
-
-        let mut q1 = build();
-        let mut r1 = make_run();
-        let first = run_event(
-            &mut q1,
-            |s| Box::new(SingleElim::new(s, 2)),
-            4,
-            &mut r1,
-            100,
-        );
-
-        let mut q2 = build();
-        let mut r2 = make_run();
-        let second = run_event(
-            &mut q2,
-            |s| Box::new(SingleElim::new(s, 2)),
-            4,
-            &mut r2,
-            100,
-        );
-
-        assert_eq!(first, second, "the full event replays identically");
     }
 }

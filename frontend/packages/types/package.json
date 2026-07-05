@@ -1,0 +1,22 @@
+{
+  "name": "@gridfpv/types",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Single import seam for the GridFPV protocol types generated from Rust via ts-rs (repo-root bindings/).",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

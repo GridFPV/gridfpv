@@ -30,7 +30,9 @@
         does <strong>not</strong> redefine the projections themselves — those belong to the
         engines that derive them (<a href="race-engine.html">Race Engine</a>,
         <a href="cloud.html">Cloud &amp; Season</a>) — nor the timing vocabulary
-        (<a href="timer-adapters.html">Timer Adapters</a>). It defers the cross-event registry
+        (<a href="timer-adapters.html">Timer Adapters</a>). The live race-state projection, its
+        server-time race clock, and the open-practice overlay get their own deep-dive in
+        <a href="live-state-clock.html">Live State &amp; the Race Clock</a>. It defers the cross-event registry
         and account model to <a href="cloud.html">Cloud &amp; Season</a>, and the overlay
         catalogue to <a href="streaming.html">Streaming</a>. Trust boundaries are fixed in
         <a href="architecture.html">Architecture</a> §9; the wire mechanics are decided here.
@@ -59,10 +61,13 @@
     <p>The projections the contract serves, each its own addressable resource:</p>
     <dl class="entities">
       <dt>Live race-state</dt>
-      <dd>The current heat and its loop state (<code>Scheduled → Staged → Armed → Running →
-      Landed → Scored</code>, see <a href="race-engine.html">Race Engine</a> §2), the active
-      pilots and their live lap/split progress, the running order, and the on-deck heat. The
-      latency-sensitive core every overlay and spectator watches.</dd>
+      <dd>The current heat and its loop phase (<code>Scheduled → Staged → Armed → Running →
+      Unofficial → Final</code>, the projected <code>HeatPhase</code>; see
+      <a href="race-engine.html">Race Engine</a> §2), the active pilots and their live lap progress,
+      the running order, the on-deck heat, and the <strong>server-authoritative race clock</strong>
+      (<code>race_started_at</code> / <code>race_ended_at</code>). The latency-sensitive core every
+      overlay and spectator watches. Its full fold, the clock model, and the open-practice overlay
+      are the subject of <a href="live-state-clock.html">Live State &amp; the Race Clock</a>.</dd>
       <dt>Lap lists</dt>
       <dd>Per-pilot, per-heat laps and splits, already folding marshaling adjudications (void,
       insert, adjust). What the engine derives, not what the timer reported.</dd>
@@ -89,6 +94,19 @@
         decision, it lives in the log and the client never sees it directly; if it's an answer
         computed from those, it's a projection and the protocol serves it. This keeps the wire
         contract stable while the log vocabulary and projection internals evolve underneath.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>As built.</strong> Most of what was deferred in early v0.4 is now wired: the
+        registration-binding event (<code>CompetitorRegistered</code>, surfaced in
+        <code>LiveRaceState.progress[].pilot</code>), the event-setup commands, and the
+        <code>LiveRaceState</code> race clock (<code>race_started_at</code> /
+        <code>race_ended_at</code>, server-time authoritative — see
+        <a href="live-state-clock.html">Live State &amp; the Race Clock</a>) all ship. Per-gate
+        <em>splits</em> remain a later refinement (the lap-count + last-lap pair is the live core).
+        The <strong>Tauri shell + 3-OS single-binary packaging are still not built (#57/#58)</strong>
+        — the RD console runs as a web app served by the Director, not yet a native window.
       </p>
     </div>
 
@@ -125,6 +143,59 @@
       apart.
     </p>
 
+    <h3>Endpoint surface (as built)</h3>
+    <p>
+      The concrete HTTP/WS surface the Director serves today, behind the
+      <code>EventRegistry</code> storage seam. <strong>Every read / realtime / control surface is
+      event-rooted</strong> under <code>/events/{eventId}/…</code> (issue #72): the handler resolves
+      <code>eventId</code> to that event's own log (its <code>AppState</code>) before serving, and an
+      unknown <code>eventId</code> is a typed <code>ProtocolError</code> 404 (<code>UnknownScope</code>),
+      the same shape a wrong scope-within-event gets. Only the events lifecycle, the app-level
+      directories (timers / pilots / classes), the static config reads, and <code>GET /health</code>
+      sit at the root.
+    </p>
+    <p><strong>Root surface — lifecycle, directories, static config:</strong></p>
+    <table>
+      <thead>
+        <tr><th>Endpoint</th><th>What it serves</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>GET /health</code></td><td>liveness</td></tr>
+        <tr><td><code>GET /events</code> · <code>POST /events</code> · <code>DELETE /events/{id}</code></td><td>list (Practice first) / RD-gated create / RD-gated permanent delete (Practice can't be deleted)</td></tr>
+        <tr><td><code>GET·PUT /active-event</code></td><td>the Director's active event (open read; RD-gated write) — <code>ActiveEvent</code> / <code>SetActiveEventRequest</code></td></tr>
+        <tr><td><code>GET·POST /timers</code> · <code>PUT·DELETE /timers/{id}</code></td><td>app-level timer registry: Mock + RotorHazard, carrying <code>channel_capability</code> / <code>node_count</code> / <code>available_channels</code> (§ below). Open read; RD-gated writes; Mock undeletable</td></tr>
+        <tr><td><code>GET·POST /pilots</code> · <code>PUT·DELETE /pilots/{id}</code></td><td>app-level pilot directory (typed fields only — no attributes bag). Open read; RD-gated writes</td></tr>
+        <tr><td><code>GET·POST /classes</code> · <code>PUT·DELETE /classes/{id}</code> · <code>PUT /classes/{id}/hidden</code></td><td>app-level class directory incl. the hide/archive visibility toggle. Open read; control-gated writes</td></tr>
+        <tr><td><code>GET /formats</code> · <code>GET /channels</code></td><td>static compiled-in config: the valid format names and the standard FPV channel catalog (band/channel ↔ raw MHz). Open reads, no token</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Per-event surface — everything under <code>/events/{eventId}</code>:</strong></p>
+    <table>
+      <thead>
+        <tr><th>Endpoint (under <code>/events/{eventId}</code>)</th><th>What it serves</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>PUT /classes</code> · <code>PUT /classes/{class}/membership</code></td><td>per-event class selection and per-class roster membership (RD-gated)</td></tr>
+        <tr><td><code>POST /rounds</code> · <code>PUT·DELETE /rounds/{round}</code></td><td>per-event class-tagged rounds (RD-gated) — <code>RoundDef</code> / <code>NewRoundReq</code> / <code>UpdateRoundReq</code></td></tr>
+        <tr><td><code>GET /heats</code></td><td>the round-tagged scheduled-heats list (<code>HeatSummary[]</code>) the Heats UI reads. Open read</td></tr>
+        <tr><td><code>GET /rounds/{round}/ranking</code> · <code>GET /classes/{class}/standings</code></td><td>a round's per-pilot ranking and a class's aggregated standings. Open reads</td></tr>
+        <tr><td><code>PUT /roster</code> · <code>POST·DELETE /roster/{pilot}</code></td><td>per-event roster, wholesale or single-pilot (RD-gated)</td></tr>
+        <tr><td><code>PUT /timers</code> · <code>PUT /primary-timer</code></td><td>per-event timer selection and the primary timer (RD-gated)</td></tr>
+        <tr><td><code>GET /snapshot/event/{event}</code></td><td>event-scope live race-state snapshot</td></tr>
+        <tr><td><code>GET /snapshot/class/{event}/{class}</code></td><td>class-scope snapshot (a real class filter — only that class's heats)</td></tr>
+        <tr><td><code>GET /snapshot/heat/{heat}</code></td><td>heat-scope snapshot</td></tr>
+        <tr><td><code>GET /snapshot/pilot/{event}/{pilot}</code></td><td>pilot-scope snapshot</td></tr>
+        <tr><td><code>GET /stream</code></td><td>WS change stream (<code>SubscribeRequest</code> → <code>StreamMessage</code>)</td></tr>
+        <tr><td><code>GET /control</code> (WS) and <code>POST /control</code> (one-shot)</td><td>control-gated; <code>Command</code> → <code>CommandAck</code> (§5)</td></tr>
+        <tr><td><code>POST /auth/join-token</code></td><td>RD-gated; mints a read-only <code>JoinTokenResponse { token }</code> — the QR/URL spectator capability (§5)</td></tr>
+      </tbody>
+    </table>
+    <p>
+      <strong>Unknown API routes</strong> under any known API tree return a typed
+      <code>ProtocolError</code> 404 (an <code>api_fallback</code>) — not the SPA shell — so a contract
+      miss surfaces as a structured error rather than an HTML page a client can't parse.
+    </p>
+
     <h2>3. The realtime change stream</h2>
     <p>
       After the snapshot, the client opens a <strong>WebSocket</strong> and receives a stream
@@ -140,6 +211,10 @@
       local copy identical to the server's, and the server may collapse a burst into a single
       "this projection changed, here's its new value" envelope when a delta would be larger or
       ambiguous (e.g. after a marshaling correction that re-folds a whole lap list).</p>
+      <p>As built (v0.4) every envelope is a fresh-value carrying the projection's complete new
+      state (<code>ProjectionBody</code>); the incremental delta encodings are wired in the type
+      system (<code>Change::Delta</code>) but deferred, so the stream is correct-but-chatty until
+      they land.</p>
     </div>
 
     <h3>Sequence, ordering &amp; resume</h3>
@@ -162,6 +237,23 @@
       cursor. Re-snapshot is always correct because projections are recomputable; the stream
       is an optimization, never the source of truth.</p>
     </div>
+    <div class="callout">
+      <p>
+        <strong>As built — two integers, deliberately distinct.</strong> The design above commits to
+        a <em>projection sequence</em> as the public ordering; the implementation realizes this as
+        <strong>two</strong> integers a client persists together. The resume <code>from</code> cursor
+        (the <code>Cursor</code> the <strong>snapshot</strong> hands back) is the <strong>log length
+        at snapshot time</strong> — the offset of the first event after the snapshot — and is what a
+        reconnect re-presents to resume. The change-stream <code>sequence</code> on each
+        <code>ChangeEnvelope</code> is a <em>separate</em> per-stream counter starting at
+        <strong>1</strong> and advancing once per emitted envelope (one log append may fan out into
+        several envelopes, or none this scope subscribes to). A client <strong>renders by
+        <code>sequence</code> order and resumes by the <code>from</code> log-offset cursor</strong>;
+        the two coincide numerically only by accident. This keeps the log offset usable as the resume
+        key while the per-stream sequence stays the public ordering. Detailed in
+        <a href="live-state-clock.html">Live State &amp; the Race Clock</a> §3.
+      </p>
+    </div>
     <p>
       Ordering guarantees, stated plainly:
     </p>
@@ -178,6 +270,20 @@
       sequence makes that harmless. The protocol does not promise exactly-once delivery, only
       exactly-once <em>effect</em>.</li>
     </ul>
+
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4) the contract is enforced, not just described.</strong> The
+        read / realtime / control contract is covered by a <strong>strict contract suite</strong>
+        — the real protocol client plus raw HTTP/WS, both run against the real Director — asserting
+        the path-scoped snapshot routes (§4), the externally-tagged <code>StreamMessage</code>
+        stream frames (§3), the per-stream <code>sequence</code>-vs-snapshot <code>cursor</code>
+        distinction (§9.5), the control path (headers + auth + acks, §5), and that the wire carries
+        plain <code>number</code>s (§9). It exists because <strong>five integration-seam bugs</strong>
+        — all contract drift that had hidden behind mocks, where each side tested its own assumption
+        of the contract rather than the contract itself — motivated pinning the real wire behaviour.
+      </p>
+    </div>
 
     <pre class="mermaid">
 sequenceDiagram
@@ -240,8 +346,10 @@ sequenceDiagram
       heat.</dd>
     </dl>
     <p>
-      Scopes compose (a pilot within a class) and a client may hold several at once over one
-      connection. The three client kinds differ in scope <em>and</em> permission:
+      Scopes are designed to compose (a pilot within a class) and a client will eventually hold
+      several over one connection; as built (v0.4) a subscription addresses exactly one of the
+      four resources (event / class / heat / pilot). The three client kinds differ in scope
+      <em>and</em> permission:
     </p>
     <table>
       <thead>
@@ -263,53 +371,112 @@ sequenceDiagram
 
     <h2>5. Auth &amp; authorization</h2>
     <p>
-      Access splits into <strong>read</strong> and <strong>control</strong>, following the
-      trust boundaries fixed in <a href="architecture.html">Architecture</a> §9. This doc
-      decides only the wire mechanics.
+      Access splits into two capabilities — <strong>control</strong> (run the race) and
+      <strong>read</strong> (watch it) — following the trust boundaries fixed in
+      <a href="architecture.html">Architecture</a> §9. This doc decides the wire mechanics. The
+      model below is the <strong>decided evolution</strong> of the earlier "RD bearer token +
+      read-only join token" sketch: loopback-trust replaces the local RD <em>login</em>, the
+      old RD token becomes a remote-access <em>passphrase setting</em>, and the join token is
+      the basis of a first-class read tier.
     </p>
+
+    <h3>Control — loopback is trusted, remote is opt-in</h3>
     <div class="principle">
-      <p><span class="name">Reads are open (or lightly tokened) on the LAN.</span> Anyone on
-      the venue LAN can fetch snapshots and subscribe to the read stream — that's the point of
-      a local spectator/overlay experience with no internet. An optional lightweight join
-      token (printed as a QR code, baked into the URL) can gate casual access to the event
-      without standing up accounts; it grants read scope only and never confers control.</p>
+      <p><span class="name">Loopback is trusted; there is no local auth.</span> The RD console
+      runs on the Director's own machine (the Tauri app, or the v0.4 web app served at
+      <code>localhost</code>). A request whose source address is loopback is the operator at the
+      keyboard <em>by definition</em>, so it gets full control with <strong>no login, no token,
+      no passphrase</strong> — the RD opens the app and is in. This is enforced by source-IP
+      middleware (<code>peer.ip().is_loopback()</code>), and it is safe because the OS drops
+      spoofed-loopback "martian" packets at the kernel before they ever reach the server: a
+      remote host cannot forge a loopback source address. The practical consequence is that
+      <strong>there is no local auth UI</strong> — no login screen in front of the event picker,
+      nothing to type to start running a race on your own machine.</p>
     </div>
     <div class="principle">
-      <p><span class="name">Control is authenticated and Director-local.</span> Race control,
-      marshaling, and configuration require the RD's authenticated role and run only against
-      the Director. The control path is a distinct, privileged set of endpoints / a privileged
-      channel on the same connection — bidirectional by nature (commands up, acknowledgements
-      and resulting state down), which is part of why the RD console wants WebSocket
-      regardless of the spectator-transport decision.</p>
-      <p><em>Future:</em> the control path may serve <strong>one or more</strong> authenticated
-      RD-role clients on the LAN — the desktop RD console and/or a future <strong>mobile
-      RD-control surface</strong> the RD uses to run the race from their phone (e.g. start the
-      heat from their seat). It still requires the RD role (with stricter auth for a mobile
-      device) and, like all control, is <strong>Director-only and never exposed on the
-      Cloud</strong>.</p>
+      <p><span class="name">Remote control is opt-in and off by default, gated by a passphrase.</span>
+      Reaching the control path from anywhere other than loopback — the RD's PWA on a phone over
+      the LAN, so the RD can start, abort, or advance a heat from their seat — is a deliberate
+      choice the RD makes, <strong>disabled by default</strong>. When the RD enables it, they set
+      a <strong>passphrase</strong>; a non-loopback request must present it to touch control. The
+      same source-IP middleware that grants loopback its free pass is what holds remote requests
+      to the passphrase gate. <strong>Control authority stays Director-only and LAN-only</strong>
+      either way — enabling remote control only adds a second place to exercise the existing
+      Director role over the LAN; it never widens <em>who</em> controls a race or exposes control
+      to the Cloud.</p>
+      <p>This is what the earlier "RD bearer token" becomes: not a login a local RD must clear,
+      but a <em>remote-access passphrase</em> the RD opts into for off-machine control.</p>
     </div>
+
+    <h3>Read — a first-class tier for pilots and spectators</h3>
+    <div class="principle">
+      <p><span class="name">Reads are a first-class, scoped capability — required for the pilot apps.</span>
+      Reading is not an afterthought of control; it is the tier <em>every</em> pilot and spectator
+      client uses. A read client gets a lightweight, scoped capability (a <code>Scope::Pilot</code>
+      or event scope, §4): a pilot app shows <em>that pilot's</em> schedule, laps, and bracket
+      position; a spectator or overlay watches the event or a heat. On the LAN this read is open by
+      default, optionally gated by a lightweight <strong>join token</strong> (printed as a QR code,
+      baked into the URL) when an event wants to gate casual access — the join token grants
+      <strong>read scope only and never confers control</strong>. This read tier is the basis of the
+      Cloud account's read authorization too (§ below, and <a href="cloud.html">Cloud &amp; Season</a> §7).</p>
+    </div>
+
     <div class="principle">
       <p><span class="name">The Cloud authenticates accounts but never controls.</span>
       Off-LAN viewers reach the Cloud with accounts; the Cloud serves the identical read
-      contract and relays. <strong>It exposes no control path at all</strong> — control
-      authority never leaves the Director (<a href="architecture.html">Architecture</a> §9).
-      An RD does not run a race "through the Cloud"; the Cloud only ever reflects what the
-      Director already decided.</p>
+      contract and relays, mapping an account onto the same scoped read tier. <strong>It exposes
+      no control path at all</strong> — control authority never leaves the Director
+      (<a href="architecture.html">Architecture</a> §9). An RD does not run a race "through the
+      Cloud"; the Cloud only ever reflects what the Director already decided.</p>
     </div>
     <div class="callout">
       <p>
         <strong>Same read contract, different gate.</strong> The read half of the protocol is
-        byte-identical on both transports; only what stands in front of it differs — open /
+        byte-identical on every transport; only what stands in front of it differs — open /
         join-token on the LAN, account auth on the Cloud. Because the storage trait makes the
         server crate identical on both sides, "authorize this read" is a thin policy layer,
         not a fork of the contract. The exact token/session format (opaque token, signed JWT,
-        cookie session) is deliberately left open below.
+        cookie session) is recorded in Open decisions.
       </p>
     </div>
+
+    <h3>TLS posture</h3>
+    <p>
+      The two access tiers above carry a credential only in two cases — the remote-control
+      passphrase, and Cloud account auth. Where that credential (or any traffic) travels over an
+      untrusted network, it must be encrypted. The posture is staged with the transports:
+    </p>
+    <dl class="entities">
+      <dt>Local / LAN (now)</dt>
+      <dd>Plain HTTP is acceptable. The venue LAN is a trusted network and loopback control
+      carries no credential at all, so there is nothing to protect in clear on the wire at this
+      stage.</dd>
+      <dt>PWA / remote control (v0.5)</dt>
+      <dd>A <strong>TLS plan is required</strong> before the remote-control passphrase or the
+      installable PWA ships — self-signed certificates or a challenge-response scheme — so the
+      passphrase never crosses untrusted WiFi in the clear. (A secure context is also what
+      unlocks the PWA's install / service-worker / push features; see
+      <a href="clients.html">Clients</a> §4.)</dd>
+      <dt>Cloud (v0.7)</dt>
+      <dd><strong>TLS is mandatory — HTTPS / WSS end-to-end, with zero unencrypted traffic over
+      the internet, ever.</strong> This is a hard requirement enforced in the architecture, not a
+      recommendation. Cloud account auth and the read stream both ride encrypted transport without
+      exception. See the callout below and <a href="cloud.html">Cloud &amp; Season</a>.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>Mandatory Cloud TLS is non-negotiable.</strong> Every byte the Cloud serves or
+        receives over the public internet — account auth, the read snapshot and change stream, the
+        Director&rarr;Cloud log push — travels over <strong>HTTPS / WSS, end-to-end, always</strong>.
+        There is no "plain-HTTP Cloud" mode and no exception for development convenience reachable on
+        a public address. This is stated as a hard, enforced requirement, not a best-effort "should."
+      </p>
+    </div>
+
     <div class="sim-note">
       <p><span class="label">IRL</span>The control path is exercised constantly — staging,
-      frequency assignment, marshaling rulings, re-runs — all from the authenticated RD
-      console.</p>
+      frequency assignment, marshaling rulings, re-runs — almost always from the loopback RD
+      console; remote control is the occasional "RD is racing too" case.</p>
       <p><span class="label">Sim</span>Same control path, lighter use — mostly start/abort and
       discard-and-re-run; no frequency or signal marshaling.</p>
     </div>
@@ -335,6 +502,18 @@ sequenceDiagram
       as a build step that emits the TS module the frontend imports; keeping it offline and
       reproducible is part of the build story (deferred to the Roadmap).
     </p>
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4): every transferred integer is a plain <code>number</code>.</strong>
+        Microsecond times / durations (<code>i64</code>) and cursors / sequences / log-offsets
+        (<code>u64</code>) all render to TypeScript as a plain <code>number</code>, not a
+        <code>bigint</code>. These values are bounded far below
+        <code>Number.MAX_SAFE_INTEGER</code> (≈9e15) in our domain, so a JS <code>number</code>
+        round-trips them exactly, and serde already serialises them as JSON numbers — so the type
+        matches the wire. A genuinely full-range <code>u64</code> (e.g. a random id) would instead
+        be carried as a <code>string</code>; we have none today.
+      </p>
+    </div>
 
     <h2>7. Versioning &amp; evolution</h2>
     <p>
@@ -400,44 +579,75 @@ flowchart LR
       regardless, so the contract ships <strong>WebSocket-only</strong> for every client. The
       change envelope stays transport-neutral, so an SSE read-only path can be added later
       <em>only if</em> a real spectator/overlay need appears — not by default, to avoid a second
-      code path.</li>
+      code path. <strong>As built (v0.4):</strong> WS-only, no SSE — <code>/stream</code> for
+      reads and <code>/control</code> for the RD path.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Change-envelope schema: delta vs fresh-value, per projection.</span>
       The accepted approach is <strong>deltas for append-heavy projections</strong> (lap lists,
       live state) and <strong>fresh-value for cheap or re-folded ones</strong> (heat result,
       ranking after a correction), with a marshaling re-fold surfacing as a fresh-value envelope.
-      The exact envelope shapes are refined at implementation.</li>
+      The exact envelope shapes are refined at implementation. <strong>As built (v0.4):</strong>
+      the delta-vs-fresh split is wired in the type system but all envelopes are
+      <code>FreshValue</code> today; the delta encodings are deferred.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Resume window &amp; retention.</span>
       The server retains a <strong>bounded window</strong> of replayable envelopes before forcing
       a re-snapshot: the <strong>Director is memory-bounded</strong> (one event) and the
       <strong>Cloud keeps a larger window</strong> (many events). Pairs with the storage tiers in
       <a href="architecture.html">Architecture</a> §4. Exact window sizes are tuned at
-      implementation.</li>
-      <li><span class="q">RESOLVED — Auth credential format: opaque bearer tokens (+ optional signed join-token).</span>
-      RD and account auth use <strong>opaque bearer tokens</strong> backed by a server-side
-      session (easy to revoke), plus an optional <strong>lightweight signed join-token</strong>
-      (printed as a QR code, baked into the URL) granting read-only LAN access. Trust boundaries
-      are fixed in <a href="architecture.html">Architecture</a> §9. <em>Revisit JWT only if</em>
-      stateless Cloud scaling later demands it.</li>
+      implementation. <strong>As built (v0.4):</strong> the retained window is 256 log offsets;
+      an older cursor gets a <code>ReSnapshotRequired</code> / <code>StaleCursor</code> response.</li>
+      <li><span class="q">RESOLVED — Access model: loopback-trust control + opt-in remote passphrase + first-class read tier.</span>
+      Control is granted to <strong>loopback with no auth</strong> (source-IP middleware,
+      <code>peer.ip().is_loopback()</code>; safe because the OS drops spoofed-loopback martians);
+      <strong>remote control is opt-in, off by default, gated by an RD-set passphrase</strong>; and
+      <strong>read is a first-class scoped tier</strong> every pilot/spectator client uses, open or
+      join-token-gated on the LAN (§5). The old local "RD token" is therefore a remote-access
+      passphrase setting, not a login — there is no local auth UI. <em>Credential format:</em> the
+      passphrase and Cloud account auth use <strong>opaque bearer tokens</strong> backed by a
+      revocable server-side session, with the lightweight signed join-token granting read scope
+      only; revisit JWT only if stateless Cloud scaling later demands it. Trust boundaries are fixed
+      in <a href="architecture.html">Architecture</a> §9. <strong>As built (v0.4):</strong> opaque
+      256-bit bearer tokens in an in-memory revocable <code>TokenStore</code>, with roles
+      <code>Rd</code> and <code>ReadOnly</code>; loopback-trust and the remote passphrase land with
+      the auth slice (#80), and the PWA remote-control path follows in v0.5.</li>
+      <li><span class="q">RESOLVED — TLS posture: HTTP on the trusted LAN, mandatory TLS on the Cloud.</span>
+      Plain HTTP is acceptable on the <strong>local/LAN</strong> trusted network (loopback control
+      carries no credential); a <strong>TLS plan is required for the v0.5 PWA / remote control</strong>
+      (self-signed or challenge-response) so the passphrase never crosses untrusted WiFi in clear;
+      and <strong>Cloud TLS is mandatory and non-negotiable</strong> — HTTPS/WSS end-to-end, zero
+      unencrypted traffic over the internet, ever, enforced in the architecture (§5,
+      <a href="cloud.html">Cloud &amp; Season</a>). <strong>As built (v0.4):</strong> Director serves
+      plain HTTP on the LAN; the PWA TLS plan is v0.5 and mandatory Cloud TLS is v0.7.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Sequence-cursor representation.</span>
       The public projection sequence is a <strong>single monotonic integer per stream</strong>
       (not per-projection cursors a client composes). How it stays stable across a Director
-      restart / projection recompute is settled at implementation.</li>
+      restart / projection recompute is settled at implementation. <strong>As built:</strong> two
+      distinct <code>u64</code>s a client persists together — the per-envelope
+      <strong>sequence</strong> (the public ordering, counting from 1) and the resume
+      <strong>cursor</strong> (the <strong>log length</strong> the snapshot returns, the offset the
+      client re-presents in <code>from</code>). The <code>Cursor</code> wire type renders as a plain
+      TS <code>number</code> (<code>#[ts(as = "f64")]</code>; bounded well below 2^53). See the
+      "two integers, distinct" callout in §3 and
+      <a href="live-state-clock.html">Live State &amp; the Race Clock</a> §3.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Scope grammar &amp; pagination.</span>
       The contract uses a <strong>scope grammar</strong> for addressing (with multi-scope
       subscribe) and <strong>cursor-based pagination</strong> for large historical / open-data
       reads. The exact addressing scheme, URL shapes, and filter expressiveness are refined at
-      implementation.</li>
+      implementation. <strong>As built (v0.4):</strong> concrete REST scope addressing with one
+      scope per subscribe; the richer scope grammar and pagination are deferred.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Contract version negotiation &amp; support band.</span>
       The version is carried <strong>in the connect message</strong>; the server serves a
       <strong>band of recent versions</strong> so an un-refreshed PWA keeps working, and emits an
       explicit <strong>"too old, please refresh" signal</strong> when a client falls outside it.
       Paired with log/schema versioning in <a href="architecture.html">Architecture</a> §11. The
-      exact support-band depth is set at implementation.</li>
+      exact support-band depth is set at implementation. <strong>As built (v0.4):</strong> a
+      <code>ContractVersion</code> on the WS subscribe, a support band of <code>1..=1</code>, and
+      a <code>VersionMismatch</code> refresh signal.</li>
       <li><span class="q">RESOLVED (accepted as working design) — Error model.</span> The
       contract uses a <strong>single shared error shape</strong> across HTTP reads, the WS stream,
       and control acknowledgements — auth failure, unknown scope, stale-cursor, version-mismatch —
       defined once in Rust like the rest of the contract. The exact fields are pinned at
-      implementation.</li>
+      implementation. <strong>As built (v0.4):</strong> a single <code>ProtocolError{code,
+      message}</code> with six <code>ErrorCode</code> variants spanning HTTP, WS, and control.</li>
     </ol>
 
     <footer class="doc-footer">

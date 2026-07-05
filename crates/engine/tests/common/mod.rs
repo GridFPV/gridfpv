@@ -97,13 +97,13 @@ fn wait_until(
 ///    `CompetitorRef("node-{i}")` per scenario node index, in scenario order),
 /// 2. the forward-path [`Event::HeatStateChanged`] transitions the FSM records —
 ///    `Staged`, `Armed`, then (after RH actually starts) `Running`, then `Finished`
-///    and `Scored`,
+///    and `Finalized`,
 /// 3. interleaved between the `Running` and `Finished` transitions, the
 ///    [`Event::Pass`]es the timer produced while the heat was live (other adapter
 ///    events such as lifecycle/`CompetitorSeen` are dropped — only `Pass`es are kept).
 ///
 /// Folding the result with [`gridfpv_engine::heat::heat_state`] yields
-/// [`HeatState::Scored`]; the passes all fall in the live window, so cross-checking
+/// [`HeatState::Final`]; the passes all fall in the live window, so cross-checking
 /// each pass's surrounding state with [`gridfpv_engine::heat::consumes_pass`] holds.
 ///
 /// Timing is tolerant: it waits for RH to reach `RACING` and for at least one pass,
@@ -124,6 +124,10 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     let mut log: Vec<Event> = vec![Event::HeatScheduled {
         heat: heat.clone(),
         lineup,
+        class: None,
+        round: None,
+        frequencies: vec![],
+        label: None,
     }];
     // The heat's current FSM state, validated by `apply` and advanced by `next_state`.
     let mut state = HeatState::Scheduled;
@@ -136,9 +140,9 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     std::thread::sleep(Duration::from_secs(2));
     let _ = conn.events(); // drop the reset's snapshot churn
 
-    // Drive the heat loop forward: Scheduled -> Staged -> Armed.
+    // Drive the heat loop forward: Scheduled -> Staged -> Armed (Start arms the heat).
     drive(&mut log, &heat, &mut state, HeatCommand::Stage);
-    drive(&mut log, &heat, &mut state, HeatCommand::Arm);
+    drive(&mut log, &heat, &mut state, HeatCommand::Start);
 
     // Actually start the race on RH (it stages + auto-starts), then record Running.
     conn.stage_race().expect("stage_race");
@@ -150,7 +154,9 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
         }),
         "RotorHazard never reached RACING"
     );
-    drive(&mut log, &heat, &mut state, HeatCommand::Start);
+    // The override stands in for the runtime auto-start here (this harness drives the FSM by
+    // hand rather than running the Director clock): force Armed -> Running.
+    drive(&mut log, &heat, &mut state, HeatCommand::SkipCountdown);
     debug_assert_eq!(state, HeatState::Running);
 
     // While Running, poll the timer crossings; keep at least one pass.
@@ -162,7 +168,7 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     conn.stop_race().ok();
     std::thread::sleep(Duration::from_millis(800));
     live.extend(conn.events());
-    conn.disconnect().ok();
+    conn.disconnect();
 
     assert!(
         got_pass,
@@ -174,10 +180,11 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     // are adapter bookkeeping, not part of the heat's canonical race-engine log.
     log.extend(live.into_iter().filter(|e| matches!(e, Event::Pass(_))));
 
-    // Close the heat loop: Finished -> Scored.
-    drive(&mut log, &heat, &mut state, HeatCommand::Finish);
-    drive(&mut log, &heat, &mut state, HeatCommand::Score);
-    debug_assert_eq!(state, HeatState::Scored);
+    // Close the heat loop: ForceEnd (Running -> Unofficial) then Finalize. ForceEnd stands in for
+    // the runtime auto-complete here (the harness has already stopped the RH race).
+    drive(&mut log, &heat, &mut state, HeatCommand::ForceEnd);
+    drive(&mut log, &heat, &mut state, HeatCommand::Finalize);
+    debug_assert_eq!(state, HeatState::Final);
 
     log
 }

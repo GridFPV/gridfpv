@@ -26,7 +26,9 @@
       The spine lives under <code>crates/</code>: <code>events</code> (the canonical event model),
       <code>storage</code> (the append-only log + SQLite), <code>projection</code>,
       <code>engine</code> (the race engine — heat loop, scoring, marshaling, format generators,
-      scheduling), <code>adapters</code> (timer adapters), and <code>app</code> (which builds the
+      scheduling), <code>adapters</code> (timer adapters), <code>server</code> (the protocol
+      server — snapshot/stream/control wire types + the axum read/realtime/control surface),
+      and <code>app</code> (which builds the
       single <code>gridfpv</code> binary). <code>xtask/</code> and <code>testkit/</code> (the
       shared mock-RH test harness) are non-published (<code>publish = false</code>) helper crates. Internal dependencies are path deps declared
       once in <code>[workspace.dependencies]</code> and inherited with
@@ -52,11 +54,20 @@
     <h2>3. Generated wire types</h2>
     <div class="principle">
       <p><span class="name">Rust→TypeScript via ts-rs, drift-gated.</span> Wire types are
-      generated from Rust with <a href="https://github.com/Aleph-Alpha/ts-rs">ts-rs</a>, derived
-      only on the canonical event model in <code>gridfpv-events</code>, exported to repo-root
+      generated from Rust with <a href="https://github.com/Aleph-Alpha/ts-rs">ts-rs</a> across the
+      crates that own contract types — <code>gridfpv-events</code> (the canonical event model),
+      <code>gridfpv-projection</code>, <code>gridfpv-engine</code>, and <code>gridfpv-server</code>
+      (the protocol contract) — exported to repo-root
       <code>bindings/</code>. <code>cargo xtask gen</code> regenerates; <code>cargo xtask ci</code>
       fails if the checked-in <code>bindings/*.ts</code> drift from the Rust types. Commit
-      regenerated bindings with the Rust change.</p>
+      regenerated bindings with the Rust change. The protocol <strong>contract version</strong>
+      (<code>CONTRACT_VERSION</code>, a monotonic <code>u32</code>) bumps only on a breaking wire
+      change; additive changes an older client can ignore do not bump it.</p>
+      <p>Transferred integers render as a TS <code>number</code>: microsecond times / durations
+      (<code>i64</code>) and cursors / sequences (<code>u64</code>) are all bounded ≪ 2<sup>53</sup>,
+      so <code>number</code> is exact and matches serde's JSON-number output — avoiding a
+      <code>bigint</code>/<code>number</code> mismatch between the two ends. Reserve
+      <code>string</code> for any full-range <code>u64</code>.</p>
     </div>
 
     <h2>4. Safety &amp; the data model</h2>
@@ -68,8 +79,8 @@
       <p><span class="name">Integer-microsecond source time.</span> Time is carried as
       <code>SourceTime</code> — <strong>integer microseconds on the source's own clock</strong>
       (<code>i64</code>). Interval math uses no floats, so comparisons are stable and tests are
-      byte-deterministic. It is serde-<code>transparent</code> / <code>ts(as = "i64")</code>, a
-      bare <code>number</code> on the wire.</p>
+      byte-deterministic. It is serde-<code>transparent</code> — a bare integer-microsecond
+      value, rendered to TS as a <code>number</code> (not <code>bigint</code>; see §3).</p>
     </div>
     <div class="principle">
       <p><span class="name">Externally-tagged events; observations only.</span> The canonical

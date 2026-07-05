@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    // The ts-rs–generated bindings live at the repo root (one file per type). The
+    // `@bindings/*` alias is the single place that knows their physical location.
+    // It lives in the shared base config (resolved relative to this file in
+    // frontend/) so any workspace that follows an import chain into
+    // `@gridfpv/types` → src/generated.ts resolves the re-exports identically.
+    // Only `@gridfpv/types` should import from `@bindings/*` directly; everything
+    // else imports from `@gridfpv/types`.
+    "baseUrl": ".",
+    "paths": {
+      "@bindings/*": ["../bindings/*"]
+    },
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "sourceMap": true
+  }
+}

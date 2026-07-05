@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — Decisions</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>Decisions</h1>
+      <p class="doc-kind">Internal design doc · an ADR-style log of the race-engine &amp; heat-lifecycle decisions</p>
+    </header>
+
+    <p class="lead">
+      A decision log for the race engine and the heat lifecycle, written ADR-style:
+      <strong>context → decision → rationale</strong>. These are the calls that shaped the FSM
+      and the round/format model as they stand in the code today. The mechanics they describe
+      live in <a href="heat-lifecycle.html">Heat Lifecycle</a> and
+      <a href="race-engine.html">Race Engine</a>; this doc records <em>why</em>.
+    </p>
+
+    <div class="callout">
+      <p>
+        Each entry is a small accepted decision, not a spec. Where a decision changed an earlier
+        stance (e.g. an abort once landed at <code>Staged</code>), the entry says so. When this
+        doc and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+      </p>
+    </div>
+
+    <h2>D1 · A six-phase heat lifecycle, named for honesty</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The original heat loop was <code>Scheduled → Staged → Armed → Running → Finished →
+      Scored</code>, with "Scored" as the terminal. But a scored heat is not yet
+      <em>official</em>: the grace window for late crossings is still open, marshaling may still
+      land, and the RD has not committed the result.</dd>
+      <dt>Decision</dt>
+      <dd>The phases are <code>Scheduled → Staged → Armed → Running → Unofficial → Final</code>.
+      The closed-but-uncommitted state is named <strong>Unofficial</strong> (not "Scored" or
+      "Completed"); <strong>Final</strong> is the locked terminal. The transition that closes the
+      race is <code>Finished</code>; it lands the heat in <code>Unofficial</code>.</dd>
+      <dt>Rationale</dt>
+      <dd>"Unofficial" tells the truth on the console: a real, displayable result that is
+      explicitly provisional and can still change. "Final" makes the commit a distinct, deliberate
+      act (<code>Finalize</code>), and gives <code>Revert</code> a clean inverse. Naming the
+      <em>transition</em> (<code>Finished</code>) differently from the <em>state</em>
+      (<code>Unofficial</code>) keeps "the race finished" and "the result is unofficial" as two
+      separate, accurate statements.</dd>
+    </dl>
+
+    <h2>D2 · Abort and Restart both reset to Scheduled</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>An earlier model had <code>Abort</code> land in different places depending on where it
+      was issued (e.g. <code>Armed → Staged</code>), and <code>Restart</code> as a separate
+      half-reset. That left the off-ramp ambiguous — "abort to where?" depended on timing.</dd>
+      <dt>Decision</dt>
+      <dd>Both <code>Abort</code> and <code>Restart</code> reset the heat <strong>all the way to
+      <code>Scheduled</code></strong>, from any legal state, and the RD re-Stages. <code>Abort</code>
+      is legal from <code>Staged</code>/<code>Armed</code>/<code>Running</code>;
+      <code>Restart</code> from <code>Armed</code>/<code>Running</code>/<code>Unofficial</code>.</dd>
+      <dt>Rationale</dt>
+      <dd>One unambiguous landing state for every off-ramp: whatever went wrong, the heat returns
+      to a clean, un-run state. It collapses a fiddly multi-target table into a uniform rule,
+      makes the fold trivial (every reset lands at <code>Scheduled</code>), and matches how an RD
+      actually recovers — stop, reset, re-Stage. <code>Discard</code> (re-run a finalized heat)
+      follows the same landing; <code>Revert</code> is the one non-resetting off-ramp because its
+      whole purpose is to keep the result and re-open it for correction.</dd>
+    </dl>
+
+    <h2>D3 · The two middle forward steps are runtime-driven, not RD commands</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd><code>Armed → Running</code> and <code>Running → Unofficial</code> used to be manual
+      commands (<code>Start</code>/<code>Finish</code>). But an RD pressing "go" at exactly the
+      right instant, and "stop" at exactly the win condition, is busywork the system can do more
+      precisely — and the FSM must stay pure for replay.</dd>
+      <dt>Decision</dt>
+      <dd>The Director's <strong>runtime clock</strong> appends both transitions: it auto-advances
+      <code>Armed → Running</code> when the start procedure's hold elapses, and
+      <code>Running → Unofficial</code> when the win condition plus grace window are met. The old
+      <code>Arm</code> command is renamed <strong><code>Start</code></strong> (the RD presses
+      "Start", which arms the heat and runs the start procedure). Two manual overrides remain for
+      when the clock can't be trusted: <code>SkipCountdown</code> and <code>ForceEnd</code>, each
+      legal only in its matching state and recording exactly the transition the auto-path would.</dd>
+      <dt>Rationale</dt>
+      <dd>The clock is more precise and frees the RD's hands during the most time-critical moments.
+      Keeping the FSM module pure (no clock, no RNG) preserves deterministic replay; the runtime —
+      which <em>does</em> read wall-time — lives outside the pure engine and only ever appends facts
+      the fold can replay. The overrides are the race-day escape hatch, so a stuck countdown or a
+      race that must be called now never traps the RD.</dd>
+    </dl>
+
+    <h2>D4 · The console owns the start tone; the hold is randomized and logged</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The canonical FPV start is "arm… and… <em>go</em>" after an unpredictable hold, so pilots
+      can't time the launch. Something must roll that hold and play the tone — and whatever rolls it
+      must not break replay determinism.</dd>
+      <dt>Decision</dt>
+      <dd>The start procedure (per round, default a randomized <strong>2000–5000ms</strong> hold)
+      is run by the runtime when a heat enters <code>Armed</code>. The runtime picks the delay
+      <strong>once</strong>, writes it to the log as <code>HeatStarting { delay_ms }</code>, and
+      schedules the <code>Running</code> transition for then. The <strong>GridFPV console owns the
+      start tone</strong> (cued from <code>HeatStarting</code>), not the timer.</dd>
+      <dt>Rationale</dt>
+      <dd>Logging the chosen delay once makes the random hold a recorded <em>fact</em>: a replay
+      reads <code>delay_ms</code> and reproduces the exact start, so nothing re-rolls. Letting the
+      console own the tone keeps the audible start consistent across every timer (sim or hardware),
+      driven by one source of truth on the wire. The procedure is an extensible enum, so a future
+      fixed countdown or external arm-trigger is an additive variant.</dd>
+    </dl>
+
+    <h2>D5 · Open-practice laps are ephemeral; the session is logged</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Open practice is casual flying over the active channels — pilots come and go and nobody
+      is scoring. Recording every practice pass would bloat the durable log with data nobody
+      adjudicates, yet the session boundaries are worth keeping.</dd>
+      <dt>Decision</dt>
+      <dd>An open-practice round is <strong>one open heat over the active channels</strong>
+      (<code>node-{i}</code> seats, seeded by <code>AllChannels { channels }</code>), and is
+      <strong>auto-created</strong>. The session <em>is</em> logged (the heat's
+      <code>HeatScheduled</code> and its start/stop transitions), but the per-channel
+      <strong>laps are in-memory only, never appended</strong>. A live accumulator holds them and
+      the served live state takes its phase/clock from the real log, splicing the non-logged laps
+      over it. There is no win condition (an inert one is stored, never consulted); an optional
+      <code>time_limit_secs</code> auto-ends the heat (<code>Running → Unofficial</code>), else the
+      RD <code>ForceEnd</code>s.</dd>
+      <dt>Rationale</dt>
+      <dd>The durable log stays lean — it carries the session boundaries and zero practice passes —
+      while pilots still see live laps. Keying laps by channel (not pilot) fits practice, where seats
+      are unbound. Driving phase/clock from the real log (not a synthetic one) avoids the drift bug an
+      earlier fully-synthetic live state had — a <code>Restart</code> or a time-limit end is always
+      reflected because the phase is the log's.</dd>
+    </dl>
+
+    <h2>D6 · The win condition <em>is</em> the qualifying metric (unified) — <em>implemented</em></h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>A round used to risk carrying two overlapping scoring knobs: a per-heat "win condition" and
+      a separate "qualifying metric" for the cross-flight ranking. Two knobs that mean almost the
+      same thing invite contradiction (rank on best lap, but win on most laps?).</dd>
+      <dt>Decision</dt>
+      <dd>A round carries one <code>WinCondition</code> that drives both per-heat results and the
+      qualifying ranking. The catalogue is <code>Timed</code> (displayed <strong>"Timed — Most
+      Laps"</strong>), <code>FirstToLaps</code>, <code>BestLap</code>, and
+      <code>BestConsecutive</code>. The qualifying generator ranks each pilot on their best flight
+      under that same condition (<code>BestLap</code> → fastest lap, <code>BestConsecutive</code> →
+      fastest N-lap window, <code>Timed</code> → most laps). Open practice does no scoring and stores
+      an inert condition.</dd>
+      <dt>Rationale</dt>
+      <dd>One rule per round can't contradict itself, and the same scorer serves heat results,
+      live/provisional ranking, and qualifying aggregation — written once, replayed identically.</dd>
+      <dt>Realized (as built)</dt>
+      <dd>Implemented (PR #188 on <code>devel</code>). The separate <code>metric</code> param was
+      <strong>removed</strong> from the <code>timed_qual</code> and <code>round_robin</code> format
+      schemas (<code>engine/src/format.rs</code>); the ranking metric is now <strong>derived from the
+      round's win condition</strong> by <code>qual_metric_for</code>
+      (<code>server/src/round_engine.rs</code>). The mapping —
+      <code>timed_qual</code>: Best lap&nbsp;&rarr;&nbsp;<code>best-lap</code>,
+      Best N consecutive&nbsp;&rarr;&nbsp;<code>best-consecutive</code>,
+      Timed (Most Laps)&nbsp;&rarr;&nbsp;<code>most-laps</code>, First-to-N&nbsp;&rarr;&nbsp;the
+      <code>best-lap</code> default; <code>round_robin</code>:
+      Timed&nbsp;&rarr;&nbsp;<code>total-laps</code>, else&nbsp;&rarr;&nbsp;<code>points</code>.
+      The <code>rounds</code> param is now labeled <strong>"Heats per pilot"</strong> (default 3) in
+      the schema, and <code>EventRounds.svelte</code> shows only the qualifying-applicable win
+      conditions (First-to-N hidden) with no separate metric field.</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The <code>round_robin</code> half of this mapping was <strong>carved out</strong> with the
+      tournament structures (PR #327, preserved on <code>tournaments-snapshot</code>). Release
+      hardening also landed on the remaining path: <code>timed_qual</code> now <strong>chunks large
+      fields into heats of <code>heat_size</code></strong> (heat ids <code>tq-r{n}-h{m}</code>) and
+      <strong>excludes DQ'd placements from the ranking</strong> (#331); and adjudications (DQ /
+      TimeAdded / lap edits / throw-out / void) now reach round ranking, round standings, class
+      standings, and seeding via the shared <code>score_heat_window</code> scorer (#329, closing
+      <strong>#226</strong>).</dd>
+    </dl>
+
+    <h2>D7 · The grace window defaults to a bounded 30 seconds</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>When the win condition is met, a trailing pilot may be mid-lap; their final lap should
+      still count. But the runtime's completion clock must eventually fire the auto
+      <code>Running → Unofficial</code> — an open-ended window would never let it.</dd>
+      <dt>Decision</dt>
+      <dd>The grace window (<code>GraceWindow</code>) is either <code>UntilScored</code> (the whole
+      <code>Unofficial</code> phase) or <code>Duration { micros }</code>. A round defaults to a
+      bounded <strong>30 seconds</strong> (<code>Duration</code>, deliberately <em>not</em>
+      <code>UntilScored</code>), RD-configurable per round.</dd>
+      <dt>Rationale</dt>
+      <dd>Thirty seconds comfortably covers a trailing pilot finishing the lap they were on when the
+      leader met the criterion, while still closing on its own so the auto-transition fires. A
+      bounded default is what makes runtime auto-completion possible at all; <code>UntilScored</code>
+      remains available where the RD wants to gate the close on scoring instead of a timer.</dd>
+    </dl>
+
+    <h2>D8 · The qualifying → bracket carry seeds from a ranking's top-N</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Brackets don't start from the roster — they start from how qualifying ended. The model
+      needs a clean seam from "a round's ranking" to "a bracket's field" without bolting bracket
+      logic onto qualifying.</dd>
+      <dt>Decision</dt>
+      <dd>Rounds are <strong>event-level and class-tagged</strong>, added as-you-go. A bracket round
+      uses a <code>FromRanking { source_round, top_n }</code> seeding rule: its field is the
+      <strong>top-N</strong> of the source round's ranking (via <code>advance_top_n</code>, the same
+      phase-2 seeding the wholesale <code>run_event</code> does). The full bracket is generated from
+      that ranking and is then <strong>editable</strong> as event-level rounds.</dd>
+      <dt>Rationale</dt>
+      <dd>Reusing the existing ranking + <code>advance_top_n</code> means the carry is one seeding
+      rule, not a new code path — the generator interface and advancement are unchanged. Making the
+      generated bracket editable lets the RD fix seeds, byes, or a withdrawal before pilots fly, while
+      everything stays a pure function of the log so the bracket recomputes deterministically.</dd>
+      <dt>Update (2026-07-03)</dt>
+      <dd>The <code>FromRanking</code> UI cut was renamed <strong>"Top N advance" → "Take top"</strong>
+      (PR #332), and the value is now <strong>bounded by the source rounds' real field</strong> — you
+      cannot take more pilots than the source ranking actually contains.</dd>
+      <dt>Update (2026-07-03) — the carry freezes at first fill (#334)</dt>
+      <dd>A carry seeding (<code>FromRanking</code> / <code>FromRankingRange</code> /
+      <code>FromHeatWinners</code> / <code>Combine</code>) is resolved <strong>once, at the round's
+      first fill</strong>, recorded in the log (<code>Event::RoundFieldDrawn</code>), and every later
+      read — fills, ranking, standings, dependent seeding — replays the recorded draw. Live
+      re-resolution let an adjudication on the <em>source</em> round, landing after the dependent
+      round had raced, silently rewrite who its field "was" (raced results vanished from its
+      ranking). Before the first fill, resolution stays live (a build-ahead round tracks its source
+      until it draws), and roster seedings (<code>FromRoster</code> / <code>AllChannels</code>) never
+      freeze — a late entrant still joins mid-round. The user's call: freeze, not warn.</dd>
+    </dl>
+
+    <h2>D9 · The native desktop app embeds the Director, ships portable-only, stores data next to the exe — <em>implemented</em></h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The RD console was always destined for a native shell (<a href="clients.html">Clients</a>;
+      <a href="architecture.html">Architecture</a> §2), shipped as a plain web app in v0.4 while the
+      Tauri work was deferred. A release form needs to answer three questions at once: how a
+      non-technical RD <em>gets and runs</em> the app, how the shell relates to the Director that
+      actually runs races, and where an event's data lives. The hosted Director
+      (<code>cargo build -p gridfpv-app --features live</code> serving the dist at <code>:8080</code>)
+      is the fast development loop and must not be disturbed.</dd>
+      <dt>Decision</dt>
+      <dd>The release form is a <strong>Tauri 2 desktop app</strong> (<code>src-tauri/</code>; PRs
+      #195, #204) that <strong>embeds the Director in-process</strong>. On launch it runs the
+      <em>same</em> <code>gridfpv_app::director::run_director</code> the hosted binary runs, on a
+      tokio task bound to a <strong>loopback ephemeral port</strong> (<code>127.0.0.1:0</code>), and
+      opens a native window pointed at <code>http://127.0.0.1:&lt;port&gt;/</code>. The
+      <strong>frontend is baked into the binary</strong> via the <code>embed-assets</code> cargo
+      feature, so the executable is a single self-contained file. Distribution is
+      <strong>portable-only</strong>: the gated release workflow
+      (<code>.github/workflows/release-builds.yml</code>) builds with <code>--no-bundle</code> and
+      publishes <em>only</em> the self-contained binary (<code>gridfpv-desktop</code> /
+      <code>.exe</code>) — the msi/nsis/appimage/deb installers were dropped. Data is stored in a
+      <strong><code>gridfpv-data/</code> folder next to the executable</strong> (created events'
+      SQLite files), with a <strong>graceful fallback</strong> to the per-user app-data dir when the
+      exe's directory isn't writable (the chosen location is logged on startup). The hosted Director
+      stays the development/testing path, unchanged; <code>cargo xtask ci</code> excludes
+      <code>src-tauri</code> (CI runners have no webkit2gtk/GTK).</dd>
+      <dt>Rationale</dt>
+      <dd><strong>Embed the Director</strong> because the app is then self-contained and reuses the
+      exact same core — one <code>run_director</code> serves both the hosted binary and the desktop
+      shell, so the two can't drift, and loading the Director's own HTTP origin keeps the SPA's
+      same-origin API and WebSocket calls working with no cross-origin shims. Loopback also means
+      <strong>no auth</strong> (per the auth model, loopback = trusted), so the RD opens the window
+      and is in. <strong>Portable-only</strong> removes install friction for a club volunteer — there
+      is nothing to install, no admin rights, no uninstaller; the single file is the app, and it is
+      trivially movable (copy it to a USB stick). <strong>Data next to the exe</strong> makes the
+      build <em>truly</em> portable: copy the exe and its <code>gridfpv-data/</code> folder together
+      and the events travel with them — the maintainer's deliberate call, with the per-user app-data
+      fallback so a read-only mount still works rather than failing. Keeping the hosted Director as
+      the dev path means the native app is <strong>purely additive</strong>: it is the release form,
+      never a replacement for the day-to-day loop.</dd>
+      <dt>Realized (as built)</dt>
+      <dd>Implemented on <code>devel</code> (PRs #195, #204). The shared entry point is
+      <code>gridfpv_app::director::run_director(addr, data_dir, assets, on_ready, shutdown)</code>,
+      called by both the hosted <code>gridfpv</code> binary (<code>crates/app/src/main.rs</code>) and
+      the desktop app (<code>src-tauri/src/lib.rs</code>). The desktop crate carries its own
+      standalone <code>[workspace]</code> so it resolves outside the root spine (which excludes it),
+      and depends on <code>gridfpv-app</code> with <code>features = ["embed-assets"]</code>. The
+      release workflow runs on <code>workflow_dispatch</code> and on merge to <code>main</code>,
+      building <code>--no-bundle</code> and uploading only the portable binary as the sole artifact.
+      Windows packaging is deferred (the crate is Windows-ready in principle; no artifact is built and
+      no cross-compile is attempted). The server half is covered headless by
+      <code>crates/app/tests/director.rs</code>.</dd>
+    </dl>
+
+    <div class="callout">
+      <p>
+        The entries below (D10–D14) are <strong>decided, not yet built</strong>. They settle the
+        format set, the qualifying-vs-time-trials naming, generate-all-heats, and the bracket round
+        model. The <em>build</em> follows the marshaling slices (see the
+        <a href="marshaling-plan.html">Marshaling Build Plan</a>); these are recorded now so the
+        plan of record is unambiguous when the work starts. Tracking issues are referenced inline.
+      </p>
+    </div>
+
+    <h2>D10 · The format set is finalized; ZippyQ is shelved</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The generator registry has carried seven formats, one of which —
+      <code>zippyq</code> (rolling "fly when ready") — was only ever a <em>deferred seam</em>: it
+      proved the dynamic-generator shape (rounds added on demand, see
+      <a href="race-engine.html">Race Engine</a> §3) but no surface uses it, and the rolling-queue
+      engine it would need is out of scope (<a href="pipeline-qualifying.html">Qualifying</a>,
+      <a href="roadmap.html">Roadmap</a> v0.4 deferrals). Carrying an unused, half-wired format in
+      the active set muddies the format picker and the build plan.</dd>
+      <dt>Decision</dt>
+      <dd>The active format set is fixed at six: <strong>Open Practice · Time Trials · Single
+      Elimination · Double Elimination · Multi-Main · Round Robin</strong>. <strong>ZippyQ is
+      shelved</strong> — removed from the active set for now. It remains re-addable later (the
+      generator code and its honesty-check rationale stay on the shelf, not deleted); it simply
+      leaves the picker and the plan until a rolling surface actually needs it.</dd>
+      <dt>Rationale</dt>
+      <dd>The set should name what GridFPV actually offers. ZippyQ was a seam, not a feature — keeping
+      it "active" implied a rolling-queue capability that does not exist. Shelving it (rather than
+      deleting) keeps the deferred seam honest: the option is preserved without pretending it ships.
+      (Tracking: <strong>#218</strong> — rename Time Trials + remove ZippyQ from the active set.)</dd>
+      <dt>Update</dt>
+      <dd><strong>Reframed by <a href="#d17">D17</a>:</strong> the flat format set collapses to three
+      RD-facing round types (Practice / Time Trial / Head-to-Head); Round Robin, the elim brackets and
+      Multi-Main become <em>tournament structures</em> over Head-to-Head, surfaced through builders
+      rather than the Add-round picker (Multi-Main now shelved there alongside ZippyQ).</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The tournament structures were <strong>carved off <code>devel</code></strong> and preserved
+      on the <code>tournaments-snapshot</code> branch (PR #327); the primitives-first release ships the
+      three round types — <strong>Practice · Time Trials · Head-to-Head</strong> — and the structures
+      will be rebuilt on the hardened base later.</dd>
+    </dl>
+
+    <h2>D11 · "Qualifying" → "Time Trials": name the format, not the purpose</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The <code>timed_qual</code> format carries the friendly name <em>"Qualifying"</em>. But
+      "qualifying" names a <em>purpose</em> — to qualify, to produce a seeding — not a
+      <em>format</em>. The format itself is individual-best-ranked heats: every pilot flies their own
+      best flight and is ranked on it. That <em>is</em> time-trial scoring, and a round can be a time
+      trial without its output ever feeding a bracket.</dd>
+      <dt>Decision</dt>
+      <dd>The format's friendly name becomes <strong>"Time Trials"</strong> (the engine key
+      <code>timed_qual</code> is unchanged). The format is the time-trial scorer; <em>qualifying</em>
+      is one thing you <em>do</em> with it. It pairs with the round's win-condition metric exactly as
+      before (the metric is derived from the win condition, D6). The
+      <strong>MultiGP Global Qualifier</strong> is then named precisely as
+      <strong>Time Trials + Best&nbsp;3&nbsp;Consecutive</strong>. The
+      <strong>"Heats per pilot"</strong> param (key <code>rounds</code>, default 3) stays as-is.</dd>
+      <dt>Rationale</dt>
+      <dd>Naming the format for what it <em>is</em> (not what it's <em>for</em>) makes the picker
+      honest and lets a Time-Trials round stand alone — a practice-style ranked session, a GQ
+      leaderboard, or the seeding for a bracket — without the name presupposing the bracket. It also
+      makes "GQ = Time Trials + Best 3 Consecutive" a clean, composable statement rather than a
+      special case. (Tracking: <strong>#218</strong>.)</dd>
+    </dl>
+
+    <h2>D12 · "Generate heats" fills the whole round at once</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Heat-filling has a per-heat primitive: the backend's <code>FillRound</code> appends the
+      next heat and acks whether the round merely <em>appended</em> a heat or is now
+      <em>complete</em>. For the deterministic formats — Time Trials, Round Robin, Multi-Main, and the
+      bracket structure — the whole round's heats are a pure function of the field, so clicking
+      "fill next heat" repeatedly to lay down a round the engine could compute in one pass is
+      busywork.</dd>
+      <dt>Decision</dt>
+      <dd>A single <strong>"Generate heats"</strong> action fills the <strong>whole round at
+      once</strong>: the backend <strong>loops the generator</strong> (calling the existing
+      <code>FillRound</code> step until the round reports complete) and the UI gets one filled round.
+      It applies to the <strong>deterministic formats</strong> (Time Trials, Round Robin, Multi-Main,
+      and the bracket structure). The incremental <strong>"next heat"</strong> path remains <em>only</em>
+      for inherently <strong>dynamic</strong> formats — Open Practice — where the next heat depends on
+      who shows up, so there is nothing to compute ahead.</dd>
+      <dt>Rationale</dt>
+      <dd>It reuses the primitive that already exists: <code>FillRound</code> already distinguishes
+      appended-vs-complete, so "generate the round" is just a backend loop over it, not a new code
+      path. The deterministic formats know their full shape up front, so one action should produce it;
+      keeping incremental fill for Open Practice matches the one format whose heats genuinely can't be
+      computed in advance. (Tracking: <strong>#216</strong>.)</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The tournament structures named here (Round Robin, Multi-Main, the bracket structure) were
+      carved to <code>tournaments-snapshot</code> (PR #327); the primitives-first release ships the
+      three round types, to which generate-heats applies as built.</dd>
+    </dl>
+
+    <h2>D13 · Brackets: one round per bracket <em>level</em> (supersedes one-round-per-bracket)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The original carry (D8) generated a bracket as <strong>one round for the whole bracket</strong>,
+      with intra-round advancement logic walking the bracket tree inside that single round. That makes
+      the bracket round a special, internally-stateful shape unlike every other round in the model.</dd>
+      <dt>Decision</dt>
+      <dd><strong>Each round is one bracket level</strong> — Quarters, Semis, Final are three rounds,
+      seeded round-to-round via the existing <code>FromRanking</code> rule (D8). This
+      <strong>supersedes</strong> the one-round-per-whole-bracket structure.
+      <strong>Single elimination</strong> becomes a clean chain of winners-rounds: each level seeds
+      from the prior level's ranking, no intra-round bracket-walking. <strong>Double
+      elimination is the design problem</strong>: a losers-bracket round is fed by <em>both</em> the
+      prior LB round's winners <em>and</em> the current WB round's losers (a cross-bracket,
+      "losers-of" feed), so <code>FromRanking</code> must grow from single-source top-N into
+      <strong>multi-source winner/loser selection</strong>. <strong>Single-elim ships first;
+      double-elim seeding is designed carefully</strong> before it's built.</dd>
+      <dt>Rationale</dt>
+      <dd>One level per round is more uniform with the round model — a bracket becomes an ordinary
+      chain of rounds, each a pure function of the previous round's ranking — and is likely simpler
+      per round because it removes the intra-round advancement machinery. The cost is concentrated and
+      named: double-elim's cross-bracket feed is the one place the seeding rule must genuinely grow, so
+      it's called out as the design problem and deferred until that growth is designed rather than
+      improvised. (Tracking: <strong>#217</strong>, which notes it supersedes one-round-per-bracket.)</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The bracket builders and level-per-round structures were carved to
+      <code>tournaments-snapshot</code> (PR #327); the primitives-first release ships the three round
+      types, and brackets will be rebuilt on this model post-v1.</dd>
+    </dl>
+
+    <h2>D14 · Double-elim and MultiGP Multi-Main are first-class next-iteration must-haves</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The format set (D10) includes Double Elimination and Multi-Main, but they are the two with
+      genuine design depth left. They must not slip into "someday" — they are the formats serious
+      chapters expect.</dd>
+      <dt>Decision</dt>
+      <dd><strong>Double elimination</strong> (its cross-bracket losers-of seeding, D13) and
+      <strong>MultiGP Multi-Main</strong> are <strong>first-class, next-iteration must-haves</strong>.
+      Multi-Main is distinct from elimination: it is a <strong>finals split by qualifying rank</strong>
+      — A/B/C-mains racing in <strong>parallel</strong> for placement within their tier, with
+      <strong>bump-ups</strong> between tiers — so it gets <strong>its own design</strong>, not a
+      reuse of the elimination chain.</dd>
+      <dt>Rationale</dt>
+      <dd>Both are table-stakes for the formats GridFPV claims, and both carry real model work
+      (double-elim's seeding, multi-main's parallel-tier-with-bump-up structure) that shouldn't be
+      improvised under race-day pressure. Flagging them as next-iteration must-haves keeps them on the
+      near plan with the design done up front. (Tracking: <strong>#219</strong> — Multi-Main as a
+      first-class finals format.)</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>Both structures (with the rest of the tournament work) were carved to
+      <code>tournaments-snapshot</code> (PR #327); the primitives-first release ships the three round
+      types, and double-elim / multi-main are rebuilt as structures over Head-to-Head post-v1.</dd>
+    </dl>
+
+    <h2 id="d15">D15 · GridFPV native timer-server (post-v1.0.0): reuse RH firmware, strip the RMS <span class="tag optional">superseded</span></h2>
+    <div class="callout">
+      <p>
+        <strong>Superseded by <a href="#d16">D16</a> (2026-06-26).</strong> The own-the-stack
+        timer-server is <strong>dropped</strong> in favor of a <strong>required GridFPV RotorHazard
+        plugin</strong>. The plugin delivers what owning the server was <em>for</em> — live dense
+        RSSI, clean start/stop, per-node passes, and threshold/calibration access (which unblocks
+        re-detection marshaling) — far more cheaply, by running <em>inside</em> the RH server with
+        RHAPI access and reusing RH's entire proven stack (no RMS replacement, no firmware
+        re-hosting). The text below is retained as history. (Note: D16 also revises D15's premise
+        that GridFPV must <em>never</em> gate on a GridFPV timer — see D16's rationale.)
+      </p>
+    </div>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>GridFPV depends on RotorHazard as both the <strong>timer</strong> and the
+      <strong>race-management system (RMS)</strong>. RH only <em>streams</em> scalar RSSI aggregates
+      on the wire — the dense per-tick signal history needs a post-race pull — and we don't control
+      that wire protocol. So the richest signal, the one marshaling most wants, never arrives live and
+      isn't ours to shape (<a href="timer-adapters.html">Timer Adapters</a> §3,
+      <a href="marshaling.html">Marshaling</a>).</dd>
+      <dt>Decision</dt>
+      <dd>A <strong>two-tier</strong> timer strategy. <strong>Tier 1 (now, non-negotiable):</strong>
+      the <strong>RH adapter stays the primary path</strong> — it works with any existing RH install
+      at zero friction (the adoption path), and we <em>never gate GridFPV on a GridFPV timer</em>.
+      <strong>Tier 2 (post-v1.0.0):</strong> a lightweight, fully <strong>remote-controlled GridFPV
+      timer-server</strong> on the <strong>same Pi&nbsp;+&nbsp;RX5808 hardware</strong> that
+      <strong>reuses the RH node firmware</strong> (the proven RX5808 driver + node-level RSSI
+      crossing detection) and <strong>strips the RH RMS</strong> — replacing only the server/RMS
+      layer. Same hardware, software swap.</dd>
+      <dt>Rationale</dt>
+      <dd>The RX5808 driver is the easy part; RH's real moat is the <em>detection</em> — the
+      hysteresis, calibration, and start-of-race tuning — so we reuse the node firmware rather than
+      re-earn it. Owning the server gives us the <strong>dense signal</strong> natively (it solves the
+      marshaling fidelity gap rather than working around it) and enables <strong>full re-detection
+      marshaling</strong> (the deferred RH-style recalculate). The <strong>mock-timer protocol is a
+      first draft</strong> of this server's wire protocol. <strong>Sequence after the core RMS +
+      marshaling are proven; this is post-v1.0.0, not a near-term dependency</strong> — Tier 1 carries
+      us until then. (Tracking: <strong>#238</strong>.)</dd>
+    </dl>
+
+    <h2 id="d16">D16 · Require a GridFPV RotorHazard plugin; drop own-the-stack (supersedes D15)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>D15 committed to owning the server half of the stack — a post-v1.0.0 native timer-server
+      reusing the RH node firmware and stripping the RH RMS — to get the <strong>dense per-tick
+      signal</strong> natively and unblock full re-detection marshaling. That is real engineering:
+      a firmware re-host, an RMS replacement, and the standing risk of having to prove our detection
+      is as good as RH's. Meanwhile the live integration kept accreting <strong>socket-API scar
+      tissue</strong>: the save-then-pull dense-signal path, the <code>alter_race_format</code>
+      staging-zero hack, the <code>add_pilot</code>/<code>alter_heat</code> seating dance, and an
+      un-zeroable ~0.9&nbsp;s prestage — all symptoms of the RH <em>socket</em> protocol being too
+      limiting, not of RH itself.</dd>
+      <dt>Decision</dt>
+      <dd><strong>Require a GridFPV RotorHazard plugin; drop the own-the-stack timer-server.</strong>
+      The plugin runs <em>inside</em> the RH server with <strong>RHAPI access</strong> to the node
+      manager, race events, and config, and becomes the <strong>primary RH integration</strong>. It
+      delivers exactly what owning the server was <em>for</em> — <strong>live dense RSSI</strong> (no
+      save-then-pull), <strong>clean start/stop</strong> bypassing the RMS staging,
+      <strong>per-node passes</strong> without the seating dance, and
+      <strong>threshold/calibration access</strong> (which unblocks the draggable-threshold
+      "recalculate" re-detection marshaling feature, #3) — while <strong>reusing RH's entire proven
+      stack</strong> (node firmware + RMS + the detection moat): no RMS replacement, no firmware
+      re-hosting, no "is our firmware as good as theirs" risk. <strong>"Required" means a guided
+      install</strong> — Grid detects a missing plugin and offers a one-step install — <em>not</em> a
+      cryptic hard-fail, so the "try it fast" feel is preserved. The plugin makes the socket
+      workarounds native, so that workaround code (the dense-signal save-then-pull, the
+      <code>alter_race_format</code> hack, the seating dance, the prestage fight) can be
+      <strong>retired</strong>. This <strong>revises D15's premise</strong> that GridFPV must never
+      gate on a GridFPV timer (see rationale). The full plugin <em>design doc</em> + sliced build plan
+      are forthcoming separate work; this entry records the <em>direction</em>, not the full design.</dd>
+      <dt>Rationale</dt>
+      <dd><strong>Friction is a non-issue.</strong> Every other serious RMS — FPVTrackside, LiveTime —
+      already requires its own timing plugin/install, so requiring ours is the <em>normal shape</em>
+      of a serious RMS, not a barrier. That fact revises the prior "zero-friction stock RH / never
+      gate on a GridFPV timer" principle (D15): a guided one-step install is not friction worth
+      designing the whole stack around. <strong>The plugin is far cheaper than owning the stack</strong>
+      and gets the same payoff: it inherits RH's detection moat instead of re-earning it, and its
+      RHAPI access yields the dense signal and the clean control surface the socket API can't.
+      <strong>The socket API is the actual problem</strong> — proven by the scar tissue above — and the
+      plugin makes those paths native rather than worked-around. Net: we keep RH's proven hardware and
+      detection, gain the fidelity and control we wanted, retire the workaround code, and unblock
+      re-detection marshaling — without a firmware project. The mock-timer protocol remains a useful
+      reference, but the RH integration path is now <strong>the plugin</strong>.</dd>
+    </dl>
+
+    <h2 id="d17">D17 · Round types &amp; scoring: Practice / Time Trial / Head-to-Head, structures over rounds (refines D10/D11/D14)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The format set (D10) is a flat zoo — <code>timed_qual</code>, <code>round_robin</code>,
+      <code>single_elim</code>, <code>double_elim</code>, <code>multi_main</code>,
+      <code>chase_the_ace</code>, <code>open_practice</code> — which tangles three different things into
+      one "format" knob: the <em>kind of flying</em>, how a <em>heat</em> is won, and how a
+      <em>round</em> ranks. An RD thinks in fewer, cleaner buckets.</dd>
+      <dt>Decision</dt>
+      <dd>The RD-facing model is <strong>three round types</strong> — <strong>Practice</strong>,
+      <strong>Time Trial</strong>, <strong>Head-to-Head</strong> — with two orthogonal knobs:
+      <strong>win condition</strong> (wins a <em>heat</em> — First-to-N / Most-laps / Best-of-N) and
+      <strong>scoring</strong> (ranks a <em>round</em> — <strong>Points</strong> via a customisable
+      per-position table, or <strong>Placement</strong>). <strong>Round-robin and brackets are not
+      formats</strong> — they are <strong>tournament structures</strong> assembled from Head-to-Head
+      rounds (round-robin = Points + all-play-all; bracket = Placement + elimination chain), buildable
+      by hand and automated by builders. Best-Lap folds into Best-of-N (N=1); Practice is one
+      channel-based format, optionally named after a class. Full spec:
+      <a href="format-model.html">Format Model</a>.</dd>
+      <dt>Rationale</dt>
+      <dd>Separating <em>racing type</em> from <em>structure</em> (and <em>win condition</em> from
+      <em>scoring</em>) matches how RDs reason — "practice / qualify / race", then "how do I bracket
+      them". <strong>Key tenet:</strong> all racing is built from the <strong>atomic formats</strong>;
+      a tournament <strong>structure composes format rounds</strong> to assemble itself and never
+      reimplements racing. The engine is <strong>refactored</strong> to honour this — one racing
+      generator (Head-to-Head), with round-robin / brackets / multi-main / chase-the-ace driving it —
+      rather than a silo generator per structure (so <code>round_robin</code> / <code>single_elim</code>
+      dissolve into Head-to-Head + composition). Refines D11 (Time-Trial naming) and reframes D10/D14.
+      Rolls out: bracket win-condition picker (shipped) → Head-to-Head building block → recompose
+      round-robin → recompose the bracket → taxonomy collapse; the console keeps legacy names until
+      each stage ships. Full spec: <a href="format-model.html">Format Model</a>.</dd>
+      <dt>Update (2026-06-30)</dt>
+      <dd>The rollout's structure stages (recompose round-robin, recompose the bracket, build
+      tournament) are <strong>deferred</strong>: the tournament structures were carved off
+      <code>devel</code> to the <code>tournaments-snapshot</code> branch (PR #327). The
+      <strong>primitives-first release</strong> ships the three round types —
+      <code>open_practice</code> (<em>Practice</em>, renamed in the UI from "Open Practice"),
+      <code>timed_qual</code> (<em>Time Trials</em>), <code>head_to_head</code>
+      (<em>Head-to-Head</em>) — and the structures are rebuilt on the hardened base later.</dd>
+    </dl>
+
+    <h2 id="d18">D18 · One grouping decision per round (extends D17)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>With Head-to-Head shipped as a primitive (D17), the question arose whether a round should be
+      able to <em>re-group</em> its pilots between heats — fly a pass, re-draw the groups, fly again.
+      That would smuggle seeding logic (a structure concern) into a round param, and would make a
+      round's heats no longer a single, reviewable draw.</dd>
+      <dt>Decision</dt>
+      <dd><strong>A Head-to-Head round makes one grouping decision, at fill</strong> (2026-07-03,
+      PR #332). The new <code>rotations</code> param (labeled <strong>"Heats per group"</strong>,
+      default&nbsp;1) re-runs the <strong>same</strong> groups back to back: with
+      <code>rotations = N</code>, each group races N consecutive heats. Scoring accumulates across
+      every heat flown — <strong>Points</strong> sums a pilot's points over all their heats;
+      <strong>Placement</strong> reads the best single result. <strong>Re-grouping between heats is
+      seeding work and belongs to tournament structures, never a round param.</strong> Multi-rotation
+      heat ids are <code>h2h-r{n}-h{m}</code>; single-pass rounds keep <code>h2h-h{n}</code>. (In the
+      log every generator id is additionally <strong>round-scoped</strong> — <code>{round}-…</code> —
+      so two rounds of the same format in one event never collide on heat ids.)
+      Alongside this, the <code>FromRanking</code> UI cut was renamed
+      <strong>"Top N advance" → "Take top"</strong> and is bounded by the source rounds' real
+      field.</dd>
+      <dt>Rationale</dt>
+      <dd>One grouping decision keeps a round a pure, reviewable draw — the RD sees the groups once
+      and knows exactly what will fly — and keeps the primitive atomic per the D17 tenet: anything
+      that re-draws groups between heats is <em>composition</em>, so it lives in the structures layer
+      (rebuilt post-v1), where seeding is explicit and auditable. <code>rotations</code> covers the
+      legitimate round-level need (more track time per group, points that reward consistency) without
+      opening the seeding door. Full round-type spec:
+      <a href="format-model.html">Format Model</a>.</dd>
+    </dl>
+
+    <h2 id="d19">D19 · A timed heat always ends on the wall clock (fallback beside the pass-based criterion)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The completion clock ended a <code>Timed</code> heat via the pure predicate
+      <code>race_end_reached</code>, which needs a counted crossing <em>at or after</em> the window
+      close — the observable, source-clock signal that the window elapsed. But when every pilot
+      lands at the buzzer, no such crossing ever arrives, and the heat ran forever (caught live:
+      a 30-second time trial still "Running" hours later). The same audit found the degenerate
+      configs that inverted the problem — a zero window, First-to-0, a zero time limit — ended
+      heats at the start signal.</dd>
+      <dt>Decision</dt>
+      <dd>The completion driver also holds a <strong>wall-clock deadline</strong>: window +
+      grace, anchored to the first <em>observed</em> pass (race-go when nobody ever crossed).
+      Whichever fires first — the pass-based criterion or the deadline — appends the same
+      <code>Finished</code>. Degenerate end-condition values are rejected at round
+      create/update. Alongside this, <code>Discarded</code> joined <code>Aborted</code>/<code>
+      Restarted</code> as a run-reset boundary, so a discarded run's laps stop rendering (and
+      re-scoring) the moment the RD discards.</dd>
+      <dt>Rationale</dt>
+      <dd>The pass-based criterion stays primary (it is pure and replayable — the deadline is
+      runtime-only, like every clock decision per §6 of the Race Engine); the fallback anchors to
+      the first <em>observed</em> pass so it can fire late but never early. A race that cannot end
+      is a race-day stopper; a heat that ends at the start signal is worse. Both now impossible.</dd>
+    </dl>
+
+    <h2 id="d20">D20 · Passes carry a heat tag; attribution is by tag, position is legacy</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Raw passes carried no heat id: every fold attributed them <em>positionally</em> — a pass
+      belongs to whichever heat's span is open at that log offset. The release audit traced the
+      failure family that follows: scheduling or filling another round <em>mid-race</em> closes the
+      running heat's span, silently dropping every later lap from its live view and its result;
+      marshaling a finished heat mid-race could steal the cursor the same way; selecting an old
+      heat as current absorbed every later heat's passes.</dd>
+      <dt>Decision</dt>
+      <dd><code>Pass</code> gains an optional <code>heat</code> tag, stamped by the Director's
+      <strong>bridge sink</strong> at append time (the adapter doesn't know the heat; the bridge
+      routes passes only while a heat is Running, so it does). Every fold — heat window, class
+      window, live state, the completion clock — attributes a tagged pass <strong>by its
+      tag</strong>; an untagged pass (a legacy log) keeps the positional rule, so old logs replay
+      unchanged.</dd>
+      <dt>Rationale</dt>
+      <dd>The tag is recorded where the knowledge lives (the router, not the adapter), keeps the
+      fold pure, and removes the whole "heat-span event mid-race" bug class instead of gating the
+      commands that could trigger it — the RD may now fill the next round while a heat races,
+      which is exactly what a busy race day wants.</dd>
+    </dl>
+
+    <h2 id="d21">D21 · Runtime clocks are per-heat, never replayed, and re-check state at fire time</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The runtime clock tracked ONE start, ONE completion, and ONE protest driver — but the
+      windows genuinely overlap in normal operation (heat 2 finishes while heat 1's protest window
+      is open). Installing the newer driver silently <em>detached</em> the older task: cancellation
+      could never find it again, and the orphan later force-finalized a heat the RD had discarded.
+      Separately, the bridge replayed the whole log on startup — re-firing historical drivers and
+      sim sources on every Director restart — and its cancel-by-poll left a ~200ms window where an
+      expiring driver's stale transition landed after a manual command.</dd>
+      <dt>Decision</dt>
+      <dd>Drivers are keyed <strong>per heat</strong> (a map, not a slot). The bridge starts from
+      the <strong>log tail</strong> — history is never replayed — and any heat currently
+      <code>Armed</code>/<code>Running</code>/<code>Unofficial</code> is handed once to the normal
+      transition handler, so a mid-race Director restart mints fresh clocks over current state
+      (the race still auto-ends; the RD gets new race clocks, per the user-approved policy). Every
+      driver <strong>re-checks the heat's folded state at fire time</strong> (under D22's lock)
+      before appending; a transient log read error retries instead of ending the event's runtime.</dd>
+      <dt>Rationale</dt>
+      <dd>The engine fold deliberately accepts any recorded transition ("legality is apply's
+      job"), so the runtime must never leak a stale append — belt (cancellation that can actually
+      find its task), braces (fire-time recheck), and no replays to leak from in the first
+      place.</dd>
+    </dl>
+
+    <h2 id="d22">D22 · Validated writes are serialized: validate→append is one atomic step</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Command validation read the log, then appended — two separate lock acquisitions.
+      Concurrent appenders exist by design (the runtime drivers, a second console), so every gate
+      had a TOCTOU window: a ruling could land on a heat that went Final in between (the
+      auto-official racing the RD), <code>Finalize</code> could slip past a fresh protest, two
+      <code>ScheduleHeat</code>s could both pass the fresh-id check.</dd>
+      <dt>Decision</dt>
+      <dd>A per-event <strong>command serialization lock</strong> spans the whole
+      validate→append sequence for every control command (including the multi-step fill /
+      advance / schedule paths) and for every runtime driver's checked append
+      (<code>AppState::append_checked</code>). Raw pass appends bypass it — they validate
+      nothing. Lock ordering is fixed: command lock before log lock, never the reverse.</dd>
+      <dt>Rationale</dt>
+      <dd>Human-scale command traffic doesn't need finer concurrency; it needs the invariants the
+      gates promise to actually hold. One coarse lock is obviously correct and unnoticeable at
+      race-day rates (the user's explicit trade: correct over clever).</dd>
+    </dl>
+
+    <h2 id="d23">D23 · A protest dies with the run it contests; rulings apply effectively once</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>The open-protest predicate (which gates <code>Finalize</code>, manual and auto) counted
+      filings over the whole log, but the audit/lap views window per run — so a protest filed
+      before a <code>Restart</code> blocked finalization forever while no view could show it: an
+      RD deadlock. Separately, a filing accepted a second resolution (possibly contradictory), and
+      a heat accepted a second void — after which reversing "the" ruling silently didn't take.</dd>
+      <dt>Decision</dt>
+      <dd>A protest contests a specific run's result: filings before the heat's latest
+      <strong>reset</strong> (Abort / Restart / Discard) no longer count — the field re-races
+      anyway (user-confirmed semantics). A filing takes ONE effective resolution (reverse it to
+      re-decide); a heat takes ONE effective void (reverse it to re-void).</dd>
+      <dt>Rationale</dt>
+      <dd>The predicate and the views now window by the same boundary, so what gates Finalize is
+      always visible; idempotent rulings keep the reversal chain meaningful (undoing a ruling must
+      actually undo it).</dd>
+    </dl>
+
+    <h2 id="d24">D24 · A raced round's scoring config is frozen (the heats-per-pilot count stays open)</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Scoring re-derives from a round's <em>current</em> config on every read — by design
+      (pure folds). But <code>update_round</code> replaced the round wholesale with no look at the
+      log, so editing a raced round's win condition retroactively re-scored already-official heats
+      (a config-side bypass of the Final lock), re-seeding could rewrite a bracket chain, and
+      deleting a round stranded its heats. The console's Edit form compounded it by collapsing
+      any seeding it couldn't model to <code>FromRoster</code> on save.</dd>
+      <dt>Decision</dt>
+      <dd>Once a round has a heat beyond <code>Scheduled</code>, its <strong>format, classes, win
+      condition, seeding, channel mode, and format params are frozen</strong> — except the
+      <code>rounds</code> (heats-per-pilot) count, which only extends future fills
+      (user-specified carve-out). Label, staging timer, start procedure, grace, protest window,
+      and race time stay editable. A round with any heats cannot be removed. The form preserves
+      unmodeled seedings verbatim. Declared format params are validated at create/update, so
+      garbage fails at the form, not at fill time.</dd>
+      <dt>Rationale</dt>
+      <dd>Pure re-derivation is only trustworthy if the inputs an official result derived from
+      can't drift underneath it. Freezing beats re-scoring guards: the RD keeps the race-day knobs
+      and loses only the edits that would silently rewrite history.</dd>
+    </dl>
+
+    <h2 id="d25">D25 · The removal record: voids and re-detection share one truth; rulings are run-scoped</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>Threshold re-detection reads the RSSI trace; a marshal's <code>DetectionVoided</code>
+      reads the log. The two never met: the RD removes a valid-crossing-but-not-a-lap detection,
+      and the tuner — seeing the crossing plain as day on the trace — keeps proposing it back as
+      "a lap to add" (field report, Audit Shakedown). The deep-dive fuzz then showed the wider
+      family: rulings accepted against abandoned runs, stacked duplicates that made reversal a
+      no-op, degenerate instants that hijacked the race clock, and no way to undo a void at all.</dd>
+      <dt>Decision</dt>
+      <dd>The lap list carries each competitor's <strong>voided passes</strong> (raw instant +
+      pass offset + the standing void's offset) as first-class projection data. Re-detection
+      SUPPRESSES unmatched crossings near a voided instant — matching runs first, so a void can
+      never claim a surviving pass's crossing. <strong>Restore</strong> (void-the-void) is a
+      sanctioned command path with a button on the removal record. And the command layer is
+      <strong>run-scoped and effectively-once</strong>: targets from abandoned runs are rejected,
+      protests/heat-voids need a current run, one standing throw-out per lap and one standing DQ
+      per pilot per heat, and inserted/re-timed instants must be sane (positive, bounded, never
+      colliding into a zero-duration lap).</dd>
+      <dt>Rationale</dt>
+      <dd>An adjudication is a statement about a specific observation in a specific run — every
+      surface that can see the observation must see the ruling too, and a ruling that applies to
+      nothing (stale run, duplicate, phantom instant) must be refused at the door rather than
+      recorded as an ack-ok lie. Extends D22/D23's serialization + effectively-once discipline to
+      the whole correction vocabulary.</dd>
+    </dl>
+
+    <h2 id="d26">D26 · Timers are dumb emitters: lap semantics — including the minimum-lap floor — live in GridFPV</h2>
+    <dl class="entities">
+      <dt>Context</dt>
+      <dd>A start-line double-detection gave every pilot a phantom 0.004s "lap 1" (Audit
+      Shakedown). RotorHazard HAD <code>MinLapSec=10</code> configured — but its default
+      behavior is highlight-don't-discard, so the sub-min lap was recorded and forwarded with
+      no invalid marker. Any timer, any config drift, same hole: relying on the timer to
+      enforce lap semantics means the results depend on someone else's settings screen.</dd>
+      <dt>Decision</dt>
+      <dd>Timers emit <em>observations</em> (passes, signal); GridFPV owns <em>lap
+      semantics</em>. Each round carries an optional <code>min_lap_secs</code> floor (the
+      form seeds 5s for new rounds; 0/absent = off, so pre-existing rounds keep bit-identical
+      results). The corrected-passes fold AUTO-SUPPRESSES a raw pass that would close an
+      under-floor lap — applied identically in the lap list, the live view, and every scoring
+      path, and surfaced on the marshaling removal record as "under min lap, auto-removed"
+      with a <strong>Restore</strong> override. Marshal-created passes (inserts,
+      split-synthetics) and re-timed passes are EXEMPT: an explicit ruling always outranks
+      the floor — and Restore is exactly that ruling (an <code>AdjustLap</code> re-asserting
+      the pass's raw instant). The floor freezes once the round has raced (D24: it re-scores
+      official heats). The log keeps every raw pass — suppression is a view-fold rule, never
+      data destruction.</dd>
+      <dt>Rationale</dt>
+      <dd>Defensible results require the enforcement point to be the system of record, not an
+      upstream device. Folding the floor once, beneath every projection, keeps the lap list
+      and the score incapable of disagreeing; recording everything keeps the evidence; the
+      marshal override keeps a whoop track's genuine 2-second laps scoreable.</dd>
+    </dl>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

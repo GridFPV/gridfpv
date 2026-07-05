@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridFPV — RotorHazard Plugin</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="brand">GridFPV</p>
+      <h1>RotorHazard Plugin</h1>
+      <p class="doc-kind">Internal design doc · the required in-process RH integration + its sliced build plan</p>
+    </header>
+
+    <p class="lead">
+      The decided primary RotorHazard integration (<a href="decisions.html">D16</a>): a small
+      GridFPV plugin that runs <strong>inside</strong> the RH server with <strong>RHAPI access</strong>,
+      replacing the socket-API ceiling. It makes the socket workarounds native — <strong>live dense
+      RSSI</strong> (no save-then-pull), <strong>clean start/stop</strong> bypassing RH's RMS staging,
+      <strong>per-node passes</strong> without the seating dance, and <strong>threshold access</strong>
+      that unblocks the draggable-threshold <em>recalculate</em> marshaling feature
+      (<a href="marshaling-plan.html">#3</a>). It reuses RH's entire proven stack — node firmware, RMS,
+      and the detection moat — at a fraction of the dropped own-the-stack cost.
+    </p>
+
+    <div class="callout">
+      <p>
+        This doc owns the <strong>plugin architecture</strong>, the <strong>Grid&harr;plugin
+        protocol</strong>, the <strong>required-with-guided-install</strong> onboarding, and the
+        <strong>sliced build plan</strong>. It is downstream of <a href="timer-adapters.html">Timer
+        Adapters</a> (the canonical event model — unchanged; the plugin is a richer RH adapter behind
+        the <em>same</em> vocabulary) and <a href="decisions.html">D16</a> (the direction). Where this
+        doc and Timer Adapters disagree on the event model, Timer Adapters wins.
+      </p>
+    </div>
+
+    <h2>1. Principles</h2>
+    <div class="principle">
+      <p><span class="name">Grid owns timing; the plugin is start/stop/get-data.</span> The plugin
+      never decides <em>when</em> a race begins or ends — Grid does, on Grid's clock. The plugin
+      exposes a thin executor surface (seat, start, stop, read signal, set threshold) and reports
+      observations. This is the same adapter philosophy as the socket path; only the transport and
+      fidelity change.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Same canonical events, richer source.</span> The plugin still produces
+      <code>Pass</code>, <code>CompetitorSeen</code>, and <code>SessionStarted/Ended</code> — the
+      <a href="timer-adapters.html">canonical model</a> is untouched. What changes is that signal
+      context arrives <em>live and dense</em> instead of via a post-race pull, and the control surface
+      is native instead of worked-around. The Grid-side RH adapter gains a new <strong>transport</strong>
+      (the plugin channel), not a new event model.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Required means guided, not gated.</span> Grid detects a missing or
+      incompatible plugin and offers a <strong>one-step install</strong> — it does not hard-fail with a
+      cryptic error. Every serious RMS (FPVTrackside, LiveTime) already requires its own timing
+      plugin, so this is the normal shape, not friction (<a href="decisions.html">D16</a>).</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Raw handles on the wire; friendly names resolved in Grid.</span> The
+      protocol carries <em>raw</em> handles — node-seat index, RH pilot id, frequency in MHz. Grid
+      resolves callsigns and channel labels through the shared resolvers (CLAUDE.md). The plugin never
+      invents a display name.</p>
+    </div>
+
+    <h2>2. What the plugin taps (verified RHAPI surface)</h2>
+    <p>
+      The floor is <strong>RHAPI&nbsp;v1.3 (RotorHazard&nbsp;v4.3.0+)</strong>; current is v1.4 (RH&nbsp;v4.4.0).
+      The in-process mechanics were spiked against the harness image
+      (<code>cruwaller/rotorhazard:latest</code> = RH&nbsp;4.0.0-beta.4) and the API surface verified
+      against the <strong>v4.3.0</strong> and <strong>v4.4.0</strong> source. A plugin is a directory
+      under RH's <code>plugins/</code> with an <code>__init__.py</code> exposing
+      <code>initialize(rhapi)</code> and a <code>manifest.json</code> declaring
+      <code>required_rhapi_version</code> (gated by the loader at 1.3+); RH imports it and hands over the
+      <code>rhapi</code> object. From there:
+    </p>
+    <dl class="entities">
+      <dt>Event hooks — <code>rhapi.events.on(evt, handler)</code></dt>
+      <dd>The race lifecycle and pass stream arrive as events, not snapshot diffs:
+      <code>RACE_STAGE</code>, <code>RACE_START</code>, <code>RACE_FINISH</code>, <code>RACE_STOP</code>,
+      <code>RACE_LAP_RECORDED</code> (the pass atom), <code>CROSSING_ENTER</code>/<code>CROSSING_EXIT</code>,
+      <code>ENTER_AT_LEVEL_SET</code>/<code>EXIT_AT_LEVEL_SET</code>, <code>FREQUENCY_SET</code>,
+      <code>HEAT_SET</code>.</dd>
+      <dt>Live dense signal — <code>rhapi.interface.seats</code></dt>
+      <dd>The node list. Each <code>Node</code> carries <code>current_rssi</code>,
+      <code>node_peak_rssi</code>, <code>pass_peak_rssi</code>, the nadir variants,
+      <code>enter_at_level</code>, <code>exit_at_level</code>, <code>frequency</code>, <code>index</code>,
+      and the dense per-pass trace <code>history_values[]</code> / <code>history_times[]</code> — read
+      <strong>live, in-process</strong>. This is the save-then-pull killer.</dd>
+      <dt>Race state — <code>rhapi.race</code></dt>
+      <dd><code>status</code>, <code>slots</code>, <code>pilots</code>, <code>laps</code>,
+      <code>start_time_internal</code> — read for attribution and to anchor the clock.</dd>
+      <dt>Clean control — <code>rhapi.race.stage(args)</code> / <code>rhapi.race.stop(doSave)</code></dt>
+      <dd>Real, sanctioned methods at 1.3+ (in RHAPI&nbsp;1.0 they were <code>pass</code> stubs
+      monkeypatched at runtime — the floor avoids that). This is the clean start/stop, no socket
+      <code>stage_race</code> / <code>alter_race_format</code> dance.</dd>
+      <dt>Calibration write — <code>rhapi.db.frequencyset_alter(enter_ats=, exit_ats=)</code></dt>
+      <dd>The sanctioned, persisted threshold write-path (per-channel enter/exit levels on the frequency
+      set). <strong>Note:</strong> <code>rhapi.interface</code> stays <em>read-only</em> even at 1.4
+      (<code>seats</code> + <code>add</code> only), so an <em>immediate, live</em> threshold change uses
+      the internal interface setter via <code>RaceContext</code> (semi-private, stable). For
+      <a href="marshaling-plan.html">#3 recalc</a> we mostly need the dense trace (below), not a live
+      setter — see §3.</dd>
+      <dt>Seating — <code>rhapi.db</code> + <code>rhapi.race.slots</code></dt>
+      <dd>Read/assign node-seat &harr; pilot in-process, no <code>add_pilot</code>/<code>alter_heat</code>
+      socket round-trips and no new-pilot-id polling.</dd>
+      <dt>The channel back to Grid — <code>rhapi.ui.socket_listen</code> / <code>socket_broadcast</code></dt>
+      <dd>At the 1.3 floor the plugin registers custom socket.io handlers
+      (<code>socket_listen(message, handler)</code>) and pushes (<code>socket_broadcast</code> /
+      <code>socket_send</code>) under a <code>gridfpv_*</code> event namespace — on RH's
+      <em>existing</em> socket.io server. The Grid adapter already holds a socket.io connection to RH, so
+      the plugin channel rides <strong>that same connection and port</strong> — no hosted blueprint, no
+      second transport.</dd>
+    </dl>
+
+    <h2>3. The Grid&harr;plugin protocol</h2>
+    <p>
+      A versioned <code>gridfpv_*</code> event namespace the plugin registers on RH's existing socket.io
+      server (the same host/port RH already serves, default <code>:5000</code>, and the same connection
+      the Grid adapter already holds): socket.io <strong>acks</strong> carry request/response control,
+      <strong>broadcasts</strong> carry the live push (passes, signal, lifecycle). JSON encoding,
+      versioned in the <code>gridfpv_hello</code> handshake. The two directions:
+    </p>
+    <dl class="entities">
+      <dt>Control · Grid &rarr; plugin (<code>gridfpv_*</code> with ack)</dt>
+      <dd><code>gridfpv_hello</code> (handshake: plugin version, RHAPI version, declared capabilities,
+      node count) · <code>gridfpv_clock_sync</code> (NTP-style exchange — RH's monotonic clock demands
+      it) · <code>gridfpv_seat</code> (assign node&nbsp;&rarr;&nbsp;{raw RH pilot id, callsign,
+      frequency/channel}) · <code>gridfpv_start</code> / <code>gridfpv_stop</code> (Grid's go/finish —
+      maps to <code>race.stage()</code> / <code>race.stop()</code>) · <code>gridfpv_calibrate</code>
+      (write per-channel enter/exit via <code>frequencyset_alter</code>).</dd>
+      <dt>Data · plugin &rarr; Grid (<code>gridfpv_*</code> broadcast)</dt>
+      <dd><code>gridfpv_session</code> (stage/start/finish/stop edges) · <code>gridfpv_competitor_seen</code>
+      (a node seat went active) · <code>gridfpv_pass</code> (the atom: node seat, source timestamp,
+      lap#/sequence, peak RSSI) · <code>gridfpv_signal</code> (live dense RSSI per node —
+      <code>current_rssi</code> heartbeat plus the per-pass <code>history_values</code> window) ·
+      <code>gridfpv_status</code> (liveness + node/threshold snapshot).</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>The #3 recalc is a re-detection, not a hardware command.</strong> RH exposes no "re-run
+        detection at new thresholds" call, so the draggable-threshold recalculate is a <em>computation
+        over the stored dense trace</em> (the <code>history_values</code> Grid captured in S2): replay RH's
+        enter/exit hysteresis at the marshal's chosen levels and <em>propose</em> the resulting laps. It
+        needs the trace + a faithful copy of the detection rule — not a live setter. Committing a new
+        calibration optionally writes it back via <code>gridfpv_calibrate</code>.
+      </p>
+    </div>
+    <p>
+      Each message maps 1:1 onto a canonical event: <code>pass</code>&nbsp;&rarr;&nbsp;<code>Pass</code>
+      (with signal context attached), <code>competitor-seen</code>&nbsp;&rarr;&nbsp;<code>CompetitorSeen</code>,
+      <code>session</code>&nbsp;&rarr;&nbsp;<code>SessionStarted/Ended</code>. The Grid-side adapter
+      (<code>crates/adapters/src/rotorhazard</code>) keeps its translator and gains a plugin transport
+      alongside the socket one — the same dedup-on-sequence and reconnect-resume guarantees apply
+      (<a href="timer-adapters.html">Timer Adapters §4–5</a>).
+    </p>
+
+    <pre class="mermaid">
+flowchart LR
+  subgraph rh["RotorHazard server · :5000 · socket.io"]
+    nm["Node manager&lt;br/&gt;dense RSSI · thresholds"]
+    rms["RMS · race lifecycle"]
+    subgraph plug["GridFPV plugin (in-process, RHAPI 1.3+)"]
+      hooks["events.on / interface.seats&lt;br/&gt;race.stage·stop · frequencyset_alter"]
+      ch["socket_listen / socket_broadcast&lt;br/&gt;gridfpv_* namespace"]
+    end
+    nm --> hooks
+    rms --> hooks
+    hooks --> ch
+  end
+  subgraph grid["GridFPV Director"]
+    adp["RH adapter&lt;br/&gt;plugin transport"]
+    canon{{"Canonical events&lt;br/&gt;Pass · signal · lifecycle"}}
+  end
+  ch -->|"broadcast: pass · signal · session"| adp
+  adp -->|"ack: seat · start · stop · calibrate"| ch
+  adp --> canon
+
+  classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
+  class canon sot;
+    </pre>
+
+    <h2>4. What it supersedes</h2>
+    <p>Every socket scar from the current path has a native plugin equivalent — the workaround code retires:</p>
+    <table>
+      <thead>
+        <tr><th>Socket workaround (today)</th><th>Native plugin path</th><th>Retires in</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>save-then-pull</strong> dense RSSI (<code>save_laps</code>&rarr;<code>load_data</code>&rarr;<code>get_pilotrace</code>)</td><td><code>interface.seats[i].history_values</code> read live</td><td>S2</td></tr>
+        <tr><td><strong><code>alter_race_format</code> staging-zero</strong> hack</td><td>plugin owns the format + calls <code>race.stage()</code></td><td>S3</td></tr>
+        <tr><td><strong><code>add_pilot</code>/<code>alter_heat</code> seating dance</strong></td><td><code>rhapi.db</code> + <code>race.slots</code> in-process</td><td>S3</td></tr>
+        <tr><td><strong>un-zeroable ~0.9&nbsp;s prestage</strong> (<code>RACE_START_DELAY_EXTRA_SECS</code>)</td><td>plugin <strong>zeroes it via <code>rhapi.config</code></strong> at load — shipped independently of the control rewrite, so <code>stage_race</code> reaches RACING immediately</td><td>done</td></tr>
+        <tr><td>per-pass RSSI only via <code>node_data</code></td><td>full <code>current_rssi</code>/<code>pass_peak_rssi</code>/levels every heartbeat</td><td>S2</td></tr>
+        <tr><td><strong>no signal write-back</strong> (blocks #3 recalc)</td><td>re-detection over the stored dense trace + <code>frequencyset_alter</code> calibrate</td><td>S4</td></tr>
+      </tbody>
+    </table>
+
+    <h2>5. Onboarding — required, with a guided install</h2>
+    <p>
+      On connecting its socket.io link to a configured RH timer, Grid emits <code>gridfpv_hello</code>
+      and awaits the ack (with a short timeout). Three outcomes:
+    </p>
+    <dl class="entities">
+      <dt>Present &amp; compatible</dt>
+      <dd>The ack returns the plugin version, RHAPI version, and capabilities. Grid prefers the plugin
+      transport and surfaces a healthy <code>TimerStatus</code>. (The friendly timer name is shown, never
+      the URL — CLAUDE.md.)</dd>
+      <dt>Missing</dt>
+      <dd>The handshake times out (no <code>gridfpv_*</code> handler registered). Grid shows a
+      <strong>guided one-step install</strong>: the plugin is a small folder dropped into RH's
+      <code>plugins/</code> directory followed by an RH restart. Grid offers the versioned plugin bundle
+      to download plus the copy-and-restart steps; where Grid runs on the same host as RH it can automate
+      the copy. This is a <em>prompt</em>, not a hard error. (An RH older than v4.3.0 fails the same way
+      and is told to update RH first.)</dd>
+      <dt>Present but incompatible</dt>
+      <dd>The handshake version is outside Grid's supported range. Grid offers the matching plugin
+      version and explains the mismatch in plain language.</dd>
+    </dl>
+    <div class="callout">
+      <p>
+        <strong>Transition:</strong> while the plugin rolls out, the existing socket transport stays as
+        a <em>fallback</em> behind the same adapter — a stock RH without the plugin still works at
+        reduced fidelity (no live dense signal, no recalc), and Grid nudges toward the install. Once the
+        plugin is the assumed path, the socket-workaround code (the save-then-pull, the
+        <code>alter_race_format</code> hack, the seating dance) is deleted (S3).
+      </p>
+    </div>
+
+    <h2>6. Version &amp; compatibility</h2>
+    <div class="principle">
+      <p><span class="name">Floor on RHAPI 1.3 (RH v4.3.0+); use the new features.</span> The plugin
+      requires <strong>RH&nbsp;v4.3.0+</strong> (RHAPI&nbsp;1.3, verified to carry <code>socket_listen</code>/
+      <code>socket_broadcast</code>, real <code>race.stage()/stop()</code>, <code>frequencyset_alter</code>,
+      and <code>manifest.json</code> + <code>required_rhapi_version</code> gating). Current RH is v4.4.0
+      (RHAPI&nbsp;1.4). The <code>manifest.json</code> declares <code>required_rhapi_version</code> 1.3 so
+      RH's own loader refuses to load us into a too-old server, and Grid surfaces "update RH to v4.3.0+"
+      as part of the guided install. We are comfortable making users update RH — every serious RMS
+      requires a current timer (<a href="decisions.html">D16</a>).</p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>Harness reality:</strong> <code>cruwaller/rotorhazard:latest</code> is stale at
+        <strong>4.0.0-beta.4</strong> (only <code>:latest</code> is published) — below our floor. So the
+        harness bump (S0) is <em>not</em> a tag swap: we build a mock-node image ourselves from the
+        RotorHazard <strong>v4.4.0</strong> source. The <code>MockInterface</code> reads RSSI/history from
+        a <code>mock_data</code> CSV, so the emulated-signal slice (S2) is testable against the mock once
+        the image is current.
+      </p>
+    </div>
+
+    <h2>7. Build plan — five slices</h2>
+    <p>
+      Each slice is a vertical cut, shippable before the next, and gated on
+      <code>cargo xtask ci</code> + the full frontend gate (backend binding changes run the frontend
+      gates too). The Grid&harr;plugin protocol is additive to the existing adapter, so each slice
+      leaves the socket fallback intact until S3 deletes it.
+    </p>
+    <dl class="entities">
+      <dt>Slice 0 — Current-RH plugin dev harness</dt>
+      <dd>Build a <code>docker/rotorhazard/</code> image from <strong>RH v4.4.0</strong> with
+      <code>MockInterface</code> + an emulated-signal CSV, and extend <code>cargo xtask live</code> /
+      <code>rh-mock</code> to mount the GridFPV plugin into the container's <code>plugins/</code> dir.
+      Unblocks testing every later slice against current RH. <em>(A local
+      <code>rh-plugin-dev-env</code> image already exists — fold it in.)</em></dd>
+      <dt>Slice 1 — Plugin skeleton + handshake + guided-install UX</dt>
+      <dd><code>plugins/gridfpv/__init__.py</code> (+ <code>manifest.json</code>, <code>required_rhapi_version</code>&nbsp;1.3)
+      registering <code>gridfpv_hello</code> via <code>socket_listen</code> (version/capabilities). Grid-side: the handshake probe, the
+      <strong>required-with-guided-install</strong> flow (§5), and the adapter learning to prefer the
+      plugin transport (socket fallback retained). Ships: Grid recognizes a plugin-equipped RH and walks
+      a missing one through install.</dd>
+      <dt>Slice 2 — Live dense RSSI &rarr; replace the save-then-pull</dt>
+      <dd>Plugin broadcasts per-node signal over the <code>gridfpv_signal</code> channel (<code>current_rssi</code> heartbeat +
+      per-pass <code>history_values</code> window); Grid consumes it as the pass's signal context and the
+      heat's trace. Retires the path-2 <code>save_laps</code>&rarr;<code>load_data</code>&rarr;<code>get_pilotrace</code>
+      pull. Validated against the emulated-signal harness. <strong>Headline marshaling-fidelity win.</strong></dd>
+      <dt>Slice 3 — Clean start/stop + per-node passes &rarr; retire the socket hacks</dt>
+      <dd>Plugin executes <code>seat</code> (via <code>rhapi.db</code>), <code>start</code>
+      (<code>race.stage()</code>), <code>stop</code> (<code>race.stop()</code>), and emits passes from
+      <code>RACE_LAP_RECORDED</code> attributed by node seat. Grid still owns the timing. Deletes the
+      <code>alter_race_format</code> staging-zero, the <code>add_pilot</code>/<code>alter_heat</code>
+      dance, and the prestage fight. The socket fallback's workaround code is removed here.</dd>
+      <dt>Slice 4 — Draggable-threshold recalculate (<a href="marshaling-plan.html">#3</a>)</dt>
+      <dd>A <code>recalculate</code> that replays detection over the stored dense trace at marshal-chosen
+      enter/exit levels and <em>proposes</em> lap changes (Grid/marshal commits; RH truth is not mutated
+      under the RD), plus an optional <code>gridfpv_calibrate</code> write-back via
+      <code>frequencyset_alter</code>. The marshaling graph gets draggable thresholds over the captured
+      trace. The payoff feature owning-the-stack was for — delivered on RH's detection.</dd>
+    </dl>
+
+    <pre class="mermaid">
+flowchart LR
+  S0["Slice 0&lt;br/&gt;RH 4.4 dev harness"]
+  S1["Slice 1&lt;br/&gt;skeleton + handshake&lt;br/&gt;+ install UX"]
+  S2["Slice 2&lt;br/&gt;live dense RSSI"]
+  S3["Slice 3&lt;br/&gt;clean start/stop&lt;br/&gt;+ per-node passes"]
+  S4["Slice 4&lt;br/&gt;threshold recalc (#3)"]
+  S0 --> S1 --> S2 --> S3 --> S4
+    </pre>
+
+    <h2>8. Risks &amp; open decisions</h2>
+    <ol class="decisions">
+      <li><span class="resolved">Resolved — RH-only, no cross-RMS abstraction.</span> RotorHazard is the
+      only FPV timing system with a user-installable plugin API (FPVTrackside is compile-in C#; LiveTime
+      and LapRF are fixed protocols; MultiGP is a cloud REST API whose RH integration is <em>itself</em>
+      an RH plugin). Any future non-RH timer is a protocol <em>adapter</em>, not a plugin host, and the
+      canonical event model already provides that seam — so we build concretely for RH and do not design
+      a speculative cross-RMS plugin protocol.</li>
+      <li>Pass attribution across the pilot gate — <strong>verify in S3</strong> that
+      <code>RACE_LAP_RECORDED</code> attributes by node seat regardless of RH's seated-pilot gate (so we
+      need no socket-era seating just to make passes count), or seat via <code>rhapi.db</code> if RH
+      still gates.</li>
+      <li><strong>Recalc detection fidelity (load-bearing).</strong> The #3 recalculate replays RH's
+      enter/exit hysteresis over the stored trace — its credibility depends on that replay matching RH's
+      real detector. Either reimplement RH's crossing algorithm faithfully (and pin it to an RH version)
+      or run the recalc <em>in the plugin</em> against RH's own detection code. Decide in S4; verify a
+      recalc at RH's actual thresholds reproduces RH's actual laps on a captured trace.</li>
+      <li>Recalc must be <strong>deterministic and non-destructive</strong> — re-running detection over a
+      stored trace yields the same result every time and proposes (never silently rewrites) laps, per the
+      <a href="marshaling.html">Marshaling</a> commit/reversibility model.</li>
+      <li>Live-signal volume — <code>history_values</code> can be large; bound the streamed window and
+      decimate the heartbeat so the broadcast stays cheap on a Pi.</li>
+      <li>Install automation vs. instructions — same-host Grid can copy the plugin folder directly;
+      remote RH gets download + copy-and-restart steps. Pick the same-host automation as the happy path.</li>
+    </ol>
+
+    <footer class="doc-footer">
+      <p>
+        Internal design documentation ·
+        <a href="timer-adapters.html">Timer Adapters</a> ·
+        <a href="decisions.html">Decisions</a> ·
+        <a href="marshaling-plan.html">Marshaling Build Plan</a> ·
+        <a href="index.html">&larr; back to docs index</a>
+      </p>
+    </footer>
+  </main>
+  <script src="assets/vendor/mermaid.min.js"></script>
+  <script src="assets/diagrams.js"></script>
+</body>
+</html>

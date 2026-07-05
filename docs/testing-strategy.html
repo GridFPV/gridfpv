@@ -309,7 +309,98 @@ flowchart LR
       canonical-log fixtures (§4).</p>
     </div>
 
-    <h2>6. Testing the format generators</h2>
+    <h3>5.2 The interactive mock-signal harness — <code>cargo xtask rh-mock</code></h3>
+    <p>
+      The same emulated-signal mechanism (§5.1) is also a <strong>runnable, interactive tool</strong>
+      for hands-on marshaling testing: drive a <em>real</em> dockerized RotorHazard with a controllable
+      mock signal, run a heat against a Director, and <strong>see the exact RSSI/signal values that get
+      captured</strong>. It is a thin <code>xtask</code> wrapper over the <code>gridfpv-testkit</code>
+      scenario library and a read-only fetch of the existing <code>?projection=signal</code> route — it
+      modifies no adapter or projection code.
+    </p>
+    <p>Three subcommands:</p>
+    <table>
+      <thead><tr><th>Command</th><th>Does</th></tr></thead>
+      <tbody>
+        <tr><td><code>cargo xtask rh-mock list</code></td><td>print the scenario menu</td></tr>
+        <tr><td><code>cargo xtask rh-mock feed [scenario] [--port P] [--tick T]</code></td><td>generate the chosen mock signal, feed it to a fresh disposable RotorHazard, and stay running while you point a Director at the timer and run a heat (needs Docker)</td></tr>
+        <tr><td><code>cargo xtask rh-mock dump &lt;director-url&gt; &lt;event&gt; &lt;heat&gt;</code></td><td>after the heat, pretty-print the captured per-competitor RSSI samples, enter/exit thresholds, a sparkline, and the recorded lap list — the raw "what values flowed" view (the marshaling graph renders it visually)</td></tr>
+      </tbody>
+    </table>
+    <p>
+      The scenario menu reuses the testkit generators, so the same situations the e2e suite asserts on
+      can be driven by hand: <code>clean</code> (metronomic laps), <code>missed-lap</code> (a skipped
+      crossing), <code>false-pass</code> (a fast double-trigger to void), <code>noisy</code> (marginal
+      RSSI at the edge of detection), <code>strong-vs-weak</code> (two nodes to compare signal context),
+      <code>dnf</code> (one node drops out), and <code>pack</code> (simultaneous passes).
+    </p>
+    <p>A typical marshaling-testing session:</p>
+    <pre>
+# 1. Spin up a real RH fed a "missed lap" signal (parks until Ctrl-C):
+cargo xtask rh-mock feed missed-lap
+
+# 2. In another shell, start a Director BUILT WITH THE LIVE FEATURE (the RH
+#    connector is `live`-gated — a default build never connects to RH):
+cargo run -p gridfpv-app --features live
+
+# 3. In its console: add a RotorHazard timer pointing at the printed URL
+#    (e.g. http://localhost:5055), select it, and MAKE THE EVENT ACTIVE — the
+#    Director only connects the ACTIVE event's selected RH timers (the timer
+#    should read `Connected`). Build a heat seating a pilot on node-0 (the seat
+#    the scenario actually feeds — a pilot on an unfed node gets no crossings),
+#    then Stage -> Start it (a normal heat: Start is what drives RH into RACING;
+#    a heat left only Staged never races, so it records no laps).
+
+# 4. After the heat, dump the captured signal values for that heat:
+cargo xtask rh-mock dump http://localhost:3000 practice q-1</pre>
+    <div class="principle">
+      <p><span class="name">Stage <em>and</em> Start — and seat a pilot on a fed node.</span>
+      The two ways a mock-feed heat silently records <strong>no laps</strong>: (a) the heat never
+      reaches RACING — a RotorHazard timer only replays its mock signal into passes while it is in a
+      racing state, so a heat that is only <em>Staged</em> (never Started), or one whose staging is
+      aborted, produces nothing; and (b) the heat's pilot is on a node the scenario does not feed, so
+      crossings arrive for an empty seat and attribute to nobody. The Director drives RH
+      Staged&nbsp;&rarr;&nbsp;RACING on <em>Start</em>; the
+      <code>director_connects_rotorhazard_on_selection_and_keeps_it_connected_through_a_heat</code>
+      live test (<code>crates/app/tests/rh_connect_live.rs</code>) is the regression guard that real
+      passes flow over the staged-then-started connection.</p>
+    </div>
+    <p>
+      Like the rest of §5, this is a <strong>local class</strong>: <code>feed</code> needs Docker, so
+      it never runs in CI; the scenario menu + JSON-pointer extraction are unit-tested in the core
+      suite (no Docker, no server). See <code>xtask/src/rh_mock.rs</code>.
+    </p>
+
+    <h2>6. The frontend wire-contract suite &amp; observability harness</h2>
+    <p>
+      Two test layers landed in v0.4 that sit <em>between</em> the mocked frontend unit tests and
+      the dockerized mock-RH end-to-end run, and they exist for one reason: the v0.4 integration-seam
+      bugs <strong>all passed their unit tests</strong> — each side mocked its own assumption of the
+      contract, so the drift between the two sides was exactly what nothing tested.
+    </p>
+    <div class="principle">
+      <p><span class="name">A real-client ↔ real-Director contract suite at every seam.</span>
+      The contract suite (<code>frontend/contract/</code>, <code>npm run contract</code>) runs the
+      <em>real</em> protocol client against the <em>real</em> Director and asserts actual wire
+      behaviour — the path-scoped snapshot routes, the externally-tagged <code>StreamMessage</code>
+      frames, the per-stream-<code>sequence</code>-vs-snapshot-<code>cursor</code> distinction
+      (<a href="protocol.html">Protocol</a> §9.5), the control path (headers + auth + acks), and
+      that the wire carries <code>number</code>s. It is the layer between the mocked unit tests and
+      the dockerized mock-RH e2e, and it needs <strong>no Docker and no browser</strong>, so it runs
+      in the shared CI pipeline. It exists because the v0.4 seam bugs each passed their own unit
+      tests while drifting from the contract.</p>
+    </div>
+    <div class="principle">
+      <p><span class="name">Debug with full-stack observability first.</span> A reusable harness
+      (<code>frontend/test-harness/</code>, <code>npm run observe</code>) boots the real Director and
+      captures the <strong>browser console, page errors, WS frames, and server logs together</strong>,
+      dumping all of them on any failure. The standing rule that follows: when something breaks,
+      <strong>look at full-stack observability — browser console + server logs + wire — before
+      forming a hypothesis</strong>. A render-time fault (a thrown exception during render) then
+      surfaces immediately in the console capture instead of presenting as a silent blank page.</p>
+    </div>
+
+    <h2>7. Testing the format generators</h2>
     <p>
       Format / qualifying generators are a pure function of state too
       (<a href="race-engine.html">Race Engine</a> §3): given the seeded field, config, and the
@@ -338,7 +429,7 @@ flowchart LR
       this same interface.
     </p>
 
-    <h2>7. Test levels</h2>
+    <h2>8. Test levels</h2>
     <p>
       The levels mirror the Director's data path — translate in, derive, serve out — and each
       proves a different claim. Nothing above unit level touches a live source; replay is the
@@ -348,7 +439,7 @@ flowchart LR
       <dt>Unit</dt>
       <dd>Pure functions in isolation: adapter <strong>translators</strong> (golden cases,
       §2), the <strong>derivation</strong> stages (passes→laps→results→standings, §4), and the
-      format <strong>generators</strong> (table-driven, §6). Fast, hermetic, the bulk of the
+      format <strong>generators</strong> (table-driven, §7). Fast, hermetic, the bulk of the
       suite.</dd>
       <dt>Integration — replay</dt>
       <dd>A recorded session (raw or canonical) replayed through the assembled adapter →
@@ -392,7 +483,7 @@ flowchart TB
   contract -.-> e2e
     </pre>
 
-    <h2>8. Open decisions</h2>
+    <h2>9. Open decisions</h2>
     <ol class="decisions">
       <li><span class="resolved">Resolved — Fixture format &amp; storage.</span> Fixtures are
       stored as JSON and checked in alongside the code: per-adapter source/canonical fixtures

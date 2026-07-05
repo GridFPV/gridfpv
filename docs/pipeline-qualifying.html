@@ -38,60 +38,100 @@
       seed.
     </p>
 
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4) — qualifying is a round, run live.</strong> In the race-running
+        redesign, &ldquo;qualifying&rdquo; is a <strong>round</strong> on the event whose
+        <strong>format is <code>timed_qual</code></strong> (friendly name <em>&ldquo;Time Trials&rdquo;</em>,
+        renamed from &ldquo;Qualifying&rdquo; — <a href="decisions.html">D11</a>: the format is the
+        time-trial scorer; <em>qualifying</em> is what you do with it)
+        or <code>round_robin</code> <em>(since carved to <code>tournaments-snapshot</code> with the
+        tournament structures — 2026-06-30, PR #327)</em>, created from the Rounds+Heats stage-page like any other round and
+        <strong>targeting one class</strong> (single-select). Within that one round each pilot flies
+        <strong>multiple heats</strong> — the format's <strong>&ldquo;Heats per pilot&rdquo; param</strong>
+        (key <code>rounds</code>, default&nbsp;<strong>3</strong>) sets how many — over the static,
+        channel-balanced field, and
+        the round's final ranking is the seeding the bracket consumes via the <code>FromRanking</code>
+        seed (top-N; the UI cut is now labeled <em>&ldquo;Take top&rdquo;</em>, bounded by the source
+        rounds' real field — PR #332). Live is the path that shipped; <strong>import / skip and the rolling-queue
+        (ZippyQ) engine are not built</strong> in v0.4. (Engine: <code>round_engine.rs</code> static
+        path + the <code>timed_qual</code> generator; UI:
+        <a href="clients.html">Clients</a> §1 Rounds+Heats.)
+      </p>
+    </div>
+
     <h2>Capabilities</h2>
 
     <h3>Three ways to get a ranking</h3>
     <ul>
-      <li><strong>Run it live</strong> — fly qualifying through the heat loop and score it.</li>
-      <li><strong>Import it</strong> — pull a ranking from outside. A Velocidrone leaderboard
-        import is first-class (fixed sim tracks make this natural); MultiGP results are another
-        source. The import maps directly to the qualifying ranking.</li>
-      <li><strong>Skip it</strong> — seed from registration order or a manual seed and go straight
-        to the mains.</li>
+      <li><strong>Run it live <em>(built)</em></strong> — fly a <code>timed_qual</code> (Time Trials)
+        qualifying round and score it (<code>round_robin</code> was carved to
+        <code>tournaments-snapshot</code>, PR #327).</li>
+      <li><strong>Import it <em>(planned)</em></strong> — pull a ranking from outside. A Velocidrone
+        leaderboard import is first-class (fixed sim tracks make this natural); MultiGP results are
+        another source. The import maps directly to the qualifying ranking. <em>Not built in v0.4.</em></li>
+      <li><strong>Skip it <em>(partial)</em></strong> — seed a bracket from a manual / roster order
+        instead of a qualifying ranking (the bracket's <code>FromRoster</code> seed). Registration-order
+        and explicit-import seeds are planned.</li>
     </ul>
 
-    <h3>Qualifying metric (when run live)</h3>
-    <p>How a pilot's flying becomes a rank. Two metrics, both configurable:</p>
-    <ul>
-      <li><strong>Fastest N consecutive laps</strong> — the sum of the best N back-to-back laps,
-        normally flown within a <strong>time limit</strong>. N is configurable and
-        <strong>defaults to 3</strong>; N = 1 is simply the single best lap. The time limit is
-        configurable, and the usual <em>last-lap rule</em> applies: if a pilot crosses the
-        start/finish before the limit expires, that lap completes and counts even though it ends
-        after the buzzer.</li>
-      <li><strong>Most laps in a fixed time</strong> — most laps within a set window, with total
-        time as the tiebreak.</li>
-    </ul>
+    <h3>Win condition = qualifying metric (when run live)</h3>
     <p>
-      Position-based group / round-robin ranking is a different philosophy and lives with the
-      <a href="event-pipeline.html">mains</a> as a bracket format — it is not a qualifying metric
-      here.
+      How a pilot's flying becomes a rank. In the as-built engine the qualifying metric <strong>is</strong>
+      the round's <strong>heat win condition</strong> — there is no separate metric param. The win
+      condition both ends each heat and, derived from it, determines how heats roll up into the
+      per-pilot ranking:
     </p>
-
-    <h3>Organizing qualifying flights</h3>
     <ul>
-      <li><strong>Solo / timed heats</strong> — pilots fly for time, alone or in small heats.</li>
-      <li><strong>Scheduled rounds</strong> — a fixed set of qualifying rounds.</li>
-      <li><strong>Rolling "fly when ready" queue</strong> — the <em>same</em> shared rolling-queue
-        engine practice uses, here in its scored form: pack limit, queue depth,
-        rest-between-rounds, and rounds added on demand; it assigns the next slot and
-        frequency/seat as the field flows.</li>
+      <li><strong>Win condition</strong> (the round form's <em>Win condition</em> dropdown) — for a
+        qualifying format the form shows only the qualifying-applicable conditions:
+        <em>Best lap</em>, <em>Best N consecutive</em>, or <em>Timed — Most Laps</em>
+        (<em>First to N laps</em> is hidden). The usual <em>last-lap rule</em> applies to timed
+        windows: a lap whose start/finish crossing came before the limit completes and counts even
+        if it ends after the buzzer.</li>
+      <li><strong>Derived ranking metric</strong> — the engine
+        (<code>qual_metric_for</code> in <code>round_engine.rs</code>) maps the win condition to the
+        ranking metric, so the two can never disagree. For <code>timed_qual</code>:
+        <em>Best lap</em>&nbsp;&rarr;&nbsp;<code>best-lap</code>,
+        <em>Best N consecutive</em>&nbsp;&rarr;&nbsp;<code>best-consecutive</code>,
+        <em>Timed — Most Laps</em>&nbsp;&rarr;&nbsp;<code>most-laps</code>. For
+        <code>round_robin</code> <em>(carved to <code>tournaments-snapshot</code>, PR #327)</em>:
+        <em>Timed</em>&nbsp;&rarr;&nbsp;<code>total-laps</code>, otherwise
+        a <code>points</code> standing. For <code>best-consecutive</code> the span N defaults to 3.</li>
+      <li><strong>Adjudications reach the ranking <em>(hardened 2026-06-30..07-01)</em></strong> —
+        marshaling adjudications (DQ / TimeAdded / lap edits / throw-out / void) fold into round
+        ranking, round standings, class standings, and seeding via the shared
+        <code>score_heat_window</code> scorer (#329, closed #226), and <strong>DQ'd placements are
+        excluded from the ranking</strong> (#331).</li>
     </ul>
 
-    <h3>Rounds</h3>
+    <h3>Organizing qualifying flights — multiple heats per pilot</h3>
     <ul>
-      <li>Rounds are an <strong>administrative / management construct</strong> — a way to organize
-        and schedule when pilots fly — not a scoring mechanism.</li>
-      <li>A pilot's rank <strong>always uses their best result across all rounds</strong>: the
-        fastest qualifying time for the fastest-N metric, or the most laps (total time as tiebreak)
-        for the laps metric. A bad round never counts against you.</li>
-      <li>Rounds can be added on demand as pilots keep flying.</li>
+      <li><strong>One qualifying round per class</strong> — the round targets a single class
+        (single-select), and within it every member flies the same number of heats.</li>
+      <li><strong>&ldquo;Heats per pilot&rdquo; param</strong> — the format's
+        <code>rounds</code> param (labeled <em>&ldquo;Heats per pilot&rdquo;</em>, default
+        <strong>3</strong>) sets how many heats each pilot flies; the
+        engine builds a deterministic, <strong>channel-balanced</strong> plan (one pilot per distinct
+        channel per heat, capped by the timer's node count) across all of them.</li>
+      <li><strong>Chunking large fields <em>(#331)</em></strong> — when the class field exceeds
+        <code>heat_size</code>, <code>timed_qual</code> chunks each pass into multiple heats of
+        <code>heat_size</code> (heat ids <code>tq-r{n}-h{m}</code>), so every pilot still flies the
+        configured number of heats.</li>
+      <li><strong>Static channel mode</strong> — qualifying uses fixed per-pilot channels (each
+        member's channel from the roster), so heats are channel-balanced rather than per-heat allocated
+        (see <a href="channel-model.html">Channel Model</a>).</li>
+      <li><strong>Rolling &ldquo;fly when ready&rdquo; queue <em>(not built)</em></strong> — the
+        shared rolling-queue / ZippyQ engine is deferred to post-v0.4.</li>
     </ul>
 
     <h3>Output → seeding</h3>
     <p>
-      Each pilot's best result across all rounds sets their metric; the class is ranked; every
-      pilot gets a qualifying position. That ranking is the seed input the mains are generated from.
+      The qualifying round's final ranking (its generator's ranking, per the metric derived from the
+      win condition) gives every member a qualifying position. A bracket round then seeds from it with the
+      <code>FromRanking</code> rule, taking the <strong>top-N</strong> (the UI cut labeled
+      <em>&ldquo;Take top&rdquo;</em>, bounded by the source rounds' real field) — that is the seed
+      input the mains are generated from.
     </p>
 
     <h2>Sim vs IRL</h2>
@@ -106,34 +146,33 @@
     <h2>Entities &amp; data implied</h2>
     <p>What this phase needs to exist (conceptual — not a schema; the Architecture doc formalizes it):</p>
     <dl class="entities">
-      <dt>Qualifying config (per class)</dt>
-      <dd>mode (run / import / skip); metric (type + N and time limit, or the time window); the last-lap rule; rounds (organizational only — rank always takes a pilot's best across all rounds).</dd>
-      <dt>Rolling queue</dt>
-      <dd>the shared rolling-queue engine in its binding/scored variant.</dd>
-      <dt>Qualifying run</dt>
-      <dd>a heat-loop run, scored (binding).</dd>
-      <dt>Qualifying result</dt>
-      <dd>per pilot per round: the metric value, plus the raw laps.</dd>
-      <dt>Qualifying ranking</dt>
-      <dd>derived — aggregated metric → qualifying position per class; the seed output for the mains.</dd>
-      <dt>Import source mapping</dt>
-      <dd>Velocidrone leaderboard / MultiGP results → ranking.</dd>
+      <dt>Qualifying round (per class) — <code>timed_qual</code> (<code>round_robin</code> carved to <code>tournaments-snapshot</code>, PR #327)</dt>
+      <dd><em>As built:</em> a round targeting one class; carries a heat <strong>win condition</strong>
+      (which <em>is</em> the qualifying metric — derived, not stored separately) and a
+      <code>rounds</code> param labeled <em>&ldquo;Heats per pilot&rdquo;</em> (default 3). Channel
+      mode is <strong>Static</strong> (fixed per-pilot channels).</dd>
+      <dt>Qualifying heat (scored)</dt>
+      <dd>a channel-balanced heat over the class members; scored under the round's win condition and
+      appended to the log.</dd>
+      <dt>Qualifying ranking (derived)</dt>
+      <dd>the round generator's final ranking → qualifying position per member; the seed output a
+      bracket consumes via <code>FromRanking</code> (top-N).</dd>
+      <dt>Import source mapping <em>(planned)</em></dt>
+      <dd>Velocidrone leaderboard / MultiGP results → ranking. Not built in v0.4.</dd>
     </dl>
-    <p>Reuses the <strong>frequency/seat pool</strong>, <strong>track</strong>, and <strong>roster</strong> from <a href="pipeline-setup.html">Setup</a>.</p>
+    <p>Reuses the primary timer's <strong>channels</strong> (<a href="channel-model.html">Channel Model</a>),
+    the <strong>track</strong>, and the per-class <strong>roster / membership</strong> from
+    <a href="pipeline-setup.html">Setup</a>.</p>
 
     <h2>Open decisions</h2>
     <ol class="decisions">
-      <li><span class="q">"Fastest N laps" definition.</span> Consecutive laps (the default,
-        MultiGP-standard) versus the best N individual (non-consecutive) laps — should both be
-        selectable?</li>
-      <li><span class="q">Tiebreakers.</span> Within a metric — fastest-N ties broken by the next
-        best lap; most-laps ties broken by total time.</li>
+      <li><span class="q">Rank aggregation across heats.</span> Confirm how each pilot's multiple
+        qualifying heats roll into one ranking per the chosen metric (best-of vs aggregate), and the
+        tiebreakers (next-best lap; total time for most-laps).</li>
       <li><span class="q">Holeshot handling.</span> Whether the holeshot / first partial lap is
         excluded from the metric (consistent with how the engine treats it).</li>
-      <li><span class="q">Import + live interaction.</span> Can a class import a ranking and then
-        also fly (override / merge), or is it one or the other?</li>
-      <li><span class="q">Solo vs heats.</span> Supporting both solo time-trial and heat-based
-        timed qualifying, and how each is scheduled.</li>
+      <li><span class="q">Import + live interaction <em>(deferred)</em>.</span> Import / skip seeds and
+        whether a class can import then also fly — deferred with the import path (post-v0.4).</li>
       <li><span class="q">Cross-class scheduling.</span> Multiple classes qualifying on one
         timer/track during the day (cross-ref multi-class scheduling — decided in Mains).</li>
     </ol>

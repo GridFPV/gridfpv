@@ -21,6 +21,24 @@
 //! `offset` is the `INTEGER PRIMARY KEY` it is the table's rowid: ordered scans
 //! and range reads are index lookups, and a duplicate offset would be rejected
 //! by the primary-key constraint — a structural guard for the append-only rule.
+//!
+//! ## Sidecar `meta` table (issue #111)
+//!
+//! Alongside the append-only `log`, a tiny key→value `meta` table holds an
+//! event's **mutable configuration** (its [`EventMeta`](../../gridfpv_server)
+//! name, timer selection, etc.) so an event's SQLite file is **self-contained**:
+//!
+//! ```sql
+//! CREATE TABLE IF NOT EXISTS meta (
+//!     key   TEXT PRIMARY KEY,
+//!     value TEXT NOT NULL  -- arbitrary string (JSON, in practice)
+//! );
+//! ```
+//!
+//! This is deliberately *not* part of the append-only log — it is config, not a
+//! fact, so it is **upserted in place** (no offsets, no replay). The server
+//! stores the event's `EventMeta` JSON here on create and on every meta change,
+//! and reloads it on boot so created events survive a Director restart.
 
 use crate::{EventLog, Offset, Result, StorageError, StoredEvent};
 use gridfpv_events::Event;
@@ -61,7 +79,44 @@ impl SqliteLog {
             )",
             [],
         )?;
+        // The sidecar config table (issue #111): a tiny key→value store, separate
+        // from the append-only `log`, holding mutable per-event config (the
+        // server's `EventMeta` JSON) so the file is self-contained and a created
+        // event survives a restart.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
+        )?;
         Ok(Self { conn })
+    }
+
+    /// Read a value from the sidecar `meta` table (issue #111), or `None` if the
+    /// key is absent. Used by the server to restore an event's `EventMeta` on boot.
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    /// Upsert a value into the sidecar `meta` table (issue #111), overwriting any
+    /// prior value for `key`. Unlike the append-only `log`, the `meta` table is
+    /// mutable config — written on create and on every meta change.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     /// The next offset to assign = one past the current maximum, or `0` when

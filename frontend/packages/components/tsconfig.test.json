@@ -1,0 +1,11 @@
+{
+  // Type-checks the component tests (kept out of `src` so svelte-package never
+  // packages them into `dist`). Run by the `check` script; Vitest runs them at
+  // runtime via vitest.config.ts.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["svelte", "vitest/globals", "@testing-library/jest-dom"]
+  },
+  "include": ["tests", "vitest.setup.ts"]
+}
