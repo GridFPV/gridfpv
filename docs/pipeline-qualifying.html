@@ -24,7 +24,7 @@
         This is a deep dive on one phase of the
         <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
         and surfaces the decisions and data each implies. It does not define the schema or
-        APIs; those belong to the Architecture doc (coming soon).
+        APIs; those belong to the <a href="architecture.html">Architecture</a> doc.
       </p>
     </div>
 
@@ -84,9 +84,7 @@
     </p>
     <ul>
       <li><strong>Win condition</strong> (the round form's <em>Win condition</em> dropdown) — for a
-        qualifying format the form shows only the qualifying-applicable conditions:
-        <em>Best lap</em>, <em>Best N consecutive</em>, or <em>Timed — Most Laps</em>
-        (<em>First to N laps</em> is hidden). The usual <em>last-lap rule</em> applies to timed
+        qualifying format the form shows only the qualifying-applicable conditions — as built, two entries: <em>Timed — most laps</em> and <em>Best of N laps</em> (N=1 serialises <code>BestLap</code>, N&gt;1 <code>BestConsecutive</code>). The usual <em>last-lap rule</em> applies to timed
         windows: a lap whose start/finish crossing came before the limit completes and counts even
         if it ends after the buzzer.</li>
       <li><strong>Derived ranking metric</strong> — the engine
@@ -113,8 +111,13 @@
         <code>rounds</code> param (labeled <em>&ldquo;Heats per pilot&rdquo;</em>, default
         <strong>3</strong>) sets how many heats each pilot flies; the
         engine builds a deterministic, <strong>channel-balanced</strong> plan (one pilot per distinct
-        channel per heat, capped by the timer's node count) across all of them.</li>
-      <li><strong>Chunking large fields <em>(#331)</em></strong> — when the class field exceeds
+        channel per heat, capped by the timer's node count) across all of them.
+        <strong>0 = open-ended</strong>: the generator produces one more rotation each time the RD
+        asks (fill-all is rejected) — &ldquo;qualify until we run out of time.&rdquo; Once the round
+        has <em>raced</em>, its scoring-defining config <strong>freezes</strong> (D24 — only
+        <code>rounds</code> stays editable), and like every round it carries the D26
+        <strong>min-lap floor</strong> (auto-removes double-detection echoes, marshal-restorable).</li>
+      <li><strong>Chunking large fields <em>(#326)</em></strong> — when the class field exceeds
         <code>heat_size</code>, <code>timed_qual</code> chunks each pass into multiple heats of
         <code>heat_size</code> (heat ids <code>tq-r{n}-h{m}</code>), so every pilot still flies the
         configured number of heats.</li>

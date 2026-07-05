@@ -115,15 +115,16 @@ flowchart TB
     </div>
     <div class="callout">
       <p>
-        <strong>Planned — the event workspace is a sequence of editable stage-pages, not a
+        <strong>As built — the event workspace is a sequence of editable stage-pages, not a
         &ldquo;Setup&rdquo; tab.</strong> Inside an event the workspace is a left-to-right sequence of
         <em>stage-pages</em> you can revisit and edit at any time:
-        <strong>Classes&nbsp;· Roster&nbsp;· Rounds+Heats&nbsp;· Live&nbsp;control&nbsp;·
-        Marshaling&nbsp;· Results</strong> (Rounds and Heats are <em>combined</em> on one page). There
+        <strong>Timers&nbsp;· Classes&nbsp;&amp;&nbsp;Roster&nbsp;· Rounds&nbsp;&amp;&nbsp;Heats&nbsp;·
+        Race&nbsp;control&nbsp;· Marshaling&nbsp;· Results&nbsp;· Audit</strong>. There
         is no separate &ldquo;Setup&rdquo; phase or tab — setting an event up is just visiting its
         early stage-pages. A <strong>guided setup wizard</strong> is a thin first-pass <em>over</em>
-        those same pages for the common path, and is built <strong>last</strong> (v0.4 Slice&nbsp;7) so
-        the pages exist before the wizard that walks them. One event flies <strong>one track</strong>.
+        those same pages, auto-opened once when an event is created (the manual relaunch button was
+        retired in the v1 chrome trim). <strong>Race audio</strong> — procedure tones + spoken lap
+        callouts — is an app-shell controller that follows the live stream on every page. One event flies <strong>one track</strong>.
         (The race-running redesign; <a href="pipeline-setup.html">Setup</a>,
         <a href="pipeline-mains.html">Mains</a>, <em>Roadmap</em> v0.4.)
       </p>
@@ -206,9 +207,9 @@ flowchart TB
         Day-to-day work is unchanged: <code>cargo build -p gridfpv-app --features live</code> serves
         the API + RD console at <code>:8080</code>. The desktop crate is <strong>excluded</strong>
         from the root Cargo workspace, so <code>cargo xtask ci</code> never compiles it (CI runners
-        have no webkit2gtk/GTK); the Tauri build is a separate, deliberate command. Windows packaging
-        is deferred — the crate is Windows-ready in principle, but no Windows artifact is built and no
-        cross-compile is attempted.
+        have no webkit2gtk/GTK); the Tauri build is a separate, deliberate command. The gated
+        <code>release-builds</code> workflow builds the portables for <strong>Linux, Windows, and
+        macOS</strong> (all three shipped with v0.4.0-alpha.1, live RH adapter included).
       </p>
     </div>
 
@@ -383,8 +384,7 @@ flowchart TB
       every surface shows the same data the same way unless it deliberately chooses otherwise.</p>
     </div>
     <p>
-      As built (v0.4): the frontend uses vitest; the suite is green (78 tests — 20 component,
-      7 protocol-client, 51 RD console).
+      As built (v0.4): the frontend uses vitest; the suite is green (the counts grow with every slice — see CI).
     </p>
 
     <h2>4. PWA mechanics</h2>

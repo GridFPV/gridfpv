@@ -11,19 +11,19 @@
     <header class="masthead">
       <p class="brand">GridFPV</p>
       <h1>Roadmap</h1>
-      <p class="doc-kind">Internal design doc · the phased build plan, and how it lives in GitLab (free tier)</p>
+      <p class="doc-kind">Internal design doc · the phased build plan, and how it lives on GitHub</p>
     </header>
 
     <p class="lead">
       The sequence we build in, and how that sequence is tracked. Written last, on purpose —
       it orders the now-settled design into release-versioned phases, each a shippable step,
-      and maps cleanly onto the GitLab <strong>free-tier</strong> planning features so the plan
-      can become real milestones and issues without paid add-ons.
+      tracked as GitHub issues and pull requests on
+      <a href="https://github.com/GridFPV/gridfpv">github.com/GridFPV/gridfpv</a>.
     </p>
 
     <div class="callout">
       <p>
-        This doc owns the <strong>phase plan</strong> and the <strong>GitLab planning model</strong>.
+        This doc owns the <strong>phase plan</strong> and how it is tracked on GitHub.
         It sequences the work the other docs specify — it does not redefine their designs; each
         phase links to the doc that owns its detail. It is a <strong>living plan</strong>
         (<a href="index.html">authoritative but revisable</a>): phases and scope will shift as we
@@ -80,9 +80,9 @@
 
     <pre class="mermaid">
 flowchart LR
-  v01["v0.1&lt;br/&gt;Walking skeleton"] --> v02["v0.2&lt;br/&gt;First adapters"]
-  v02 --> v03["v0.3&lt;br/&gt;Race engine"]
-  v03 --> v04["v0.4&lt;br/&gt;Direct a single race (RD console)"]
+  v01["v0.1 ✓&lt;br/&gt;Walking skeleton"] --> v02["v0.2 ✓&lt;br/&gt;First adapters"]
+  v02 --> v03["v0.3 ✓&lt;br/&gt;Race engine"]
+  v03 --> v04["v0.4 ✓ RELEASED&lt;br/&gt;Direct a single race (v0.4.0-alpha.1)"]
   v04 --> v05["v0.5&lt;br/&gt;Racer/spectator PWA"]
   v05 --> v06["v0.6&lt;br/&gt;Streaming / broadcast"]
   v06 --> v07["v0.7&lt;br/&gt;Cloud"]
@@ -96,28 +96,34 @@ flowchart LR
   classDef live fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
   class v04 live
     </pre>
-    <p class="phase-meta">v0.4 (highlighted) is the first build that can run a real event end to end — and, after a hands-on UI review, the first we build as <strong>vertical feature slices</strong> rather than horizontal layers (see §1).</p>
+    <p class="phase-meta">v0.1–v0.4 are complete; v0.4 (highlighted) shipped as the
+    <strong>v0.4.0-alpha.1</strong> release — the first build that runs a real event end to end,
+    and the first built as <strong>vertical feature slices</strong> rather than horizontal layers (see §1).</p>
 
     <div class="callout">
       <p>
-        <strong>Status (2026-06):</strong> <strong>v0.1</strong> (walking skeleton),
-        <strong>v0.2</strong> (first adapters + replay harness), and <strong>v0.3</strong>
-        (race engine) are <strong>complete and merged</strong> — the SQLite append-only log,
-        projection engine, Rust→TS generation, RotorHazard + Velocidrone adapters,
-        recorded-session replay golden tests, live + emulated-signal dockerized-RH tests, the
-        heat-loop state machine, scoring/marshaling, and the format generators are all in
-        the tree — since the primitives-first carve-out (2026-06-30, PR #327) the registry ships
-        <strong>three primitive generators</strong> (Practice / Time Trials / Head-to-Head); the
-        tournament structures are preserved on <code>tournaments-snapshot</code>, rebuilt post-v1.
-        As designed, v0.2 already ingests a live (dockerized) source — "shadow mode."
+        <strong>Status (2026-07-05): v0.4 is RELEASED as
+        <a href="https://github.com/GridFPV/gridfpv/releases/tag/v0.4.0-alpha.1">v0.4.0-alpha.1</a></strong> —
+        tagged on <code>main</code>, with self-contained Tauri desktop portables for
+        Linux / Windows / macOS, all carrying the live RotorHazard adapter.
+        <strong>v0.1</strong> (walking skeleton), <strong>v0.2</strong> (first adapters +
+        replay harness, live "shadow mode"), and <strong>v0.3</strong> (race engine) merged
+        before it; since the primitives-first carve-out (2026-06-30, PR #327) the registry
+        ships <strong>three primitive generators</strong> (Practice / Time Trials /
+        Head-to-Head), with the tournament structures preserved on
+        <code>tournaments-snapshot</code> for the post-v1 rebuild.
       </p>
       <p>
-        The <strong>v0.4 foundation</strong> is also built: the embedded axum
-        <strong>protocol server</strong> (snapshot + WS stream, scoping, auth), the
-        <strong>Svelte console</strong> shell + generated types, and the
-        <strong>contract-suite / observability</strong> backbone. After a hands-on UI review,
-        the remaining v0.4 work — actually <em>directing</em> a race from the console — is being
-        rebuilt as <strong>vertical feature slices</strong> (see §1 and the v0.4 section below).
+        Between v0.3 and the alpha, v0.4 grew well past "direct a single race": the six-slice
+        <strong>marshaling</strong> build (signal-as-evidence RSSI traces, re-detection with
+        tune-commit, the shared removal record <a href="decisions.html#d25">D25</a>, native
+        min-lap <a href="decisions.html#d26">D26</a>, penalties/protests/audit, the Final
+        freeze), app-wide <strong>race audio</strong> (procedure tones + spoken lap callouts),
+        the pre-release <strong>audit</strong> (<a href="release-audit-2026-07.html">D19–D24</a>),
+        and the <strong>alpha versioning scheme</strong> (0.x milestones with
+        -alpha.N/-beta.N pre-releases, one workspace version via <code>cargo xtask version</code>,
+        <code>GET /about</code> + the console build-stamp; <code>CONTRACT_VERSION</code> stays
+        the independent wire integer).
       </p>
     </div>
 
@@ -142,19 +148,18 @@ flowchart LR
     <p><strong>Goal:</strong> turn passes + a format into a run race. (<a href="race-engine.html">Race Engine</a>)</p>
     <ul>
       <li>The logged <strong>heat-loop state machine</strong>; scoring/lap-derivation + win conditions; marshaling adjudications.</li>
-      <li>The unified <strong>format/generator interface</strong> + first formats (Time Trials, single-elim; ZippyQ built then <strong>shelved</strong> as the dynamic-generator honesty check — <a href="decisions.html">D10</a>); advancement; multi-class + engine-side frequency allocation.</li>
+      <li>The unified <strong>format/generator interface</strong> + first formats (Time Trials; single-elim built here, later carved to <code>tournaments-snapshot</code> with the rest of the structures — PR #327; ZippyQ built then <strong>shelved</strong> as the dynamic-generator honesty check — <a href="decisions.html">D10</a>); advancement; multi-class + engine-side frequency allocation.</li>
     </ul>
-    <p><strong>Done when:</strong> a full event (qualifying → bracket → winner) runs from a recorded source with correct results and marshaling; generators are table-tested.</p>
+    <p><strong>Done when (met):</strong> a full event ran from a recorded source with correct results and marshaling; generators table-tested. The shipping format set was later narrowed to the three primitives (see the status note above).</p>
 
-    <h3>v0.4 — Direct a single race (RD console) — vertical slices</h3>
-    <p><strong>Goal:</strong> a person can run a real event end to end from the RD console. (<a href="protocol.html">Protocol</a>, <a href="clients.html">Clients</a>)</p>
+    <h3>v0.4 — Direct a single race (RD console) — RELEASED (v0.4.0-alpha.1)</h3>
+    <p><strong>Goal (met):</strong> a person can run a real event end to end from the RD console. (<a href="protocol.html">Protocol</a>, <a href="clients.html">Clients</a>)</p>
     <p>
       The horizontal foundation — embedded <strong>axum protocol server</strong> (snapshot + WS
       stream, scoping, bearer + LAN join-token auth), the <strong>Svelte</strong> console shell +
       shared component library + generated types, and the contract-suite/observability backbone —
-      is <strong>built</strong>. The remaining work is the director workflow itself, delivered as
-      <strong>vertical slices</strong> (each <strong>backend → API → UI</strong>, working before the
-      next):
+      plus the director workflow, delivered as <strong>vertical slices</strong> (each
+      <strong>backend → API → UI</strong>). The slice record, with outcomes:
     </p>
     <div class="callout">
       <p>
@@ -186,13 +191,16 @@ flowchart LR
       (auto-add + auto-bind name matches).</li>
       <li><strong>Slice 2 — Rounds.</strong> Event-level, class-tagged, dynamically-added rounds
       (practice / quali as-you-go).</li>
-      <li><strong>Slice 3 — Engine + heats.</strong> Wire the v0.3 heat-loop FSM, scoring, and the six
-      generators per-event; heat-filling = manual + format-generated.</li>
+      <li><strong>Slice 3 — Engine + heats.</strong> ✅ Wire the v0.3 heat-loop FSM, scoring, and the
+      generators per-event (the three shipping primitives); heat-filling = manual + format-generated.</li>
       <li><strong>Slice 4 — Channels.</strong> Timer-defined channels (standard catalog + adapter
       fixed/flexible capability + custom raw-MHz), node-count cap, engine first-fit + manual assign,
       dynamic node tuning at race time (#117, folded into timers).</li>
-      <li><strong>Slice 5 — Bracket carry.</strong> Advance-to-brackets generates the full bracket from
-      the top-N quali ranking, editable — reusing <code>run_event</code>'s quali→bracket carry (#84).</li>
+      <li><strong>Slice 5 — Bracket carry.</strong> ✂ CUT to the post-v1 tournament rebuild: bracket
+      <em>builders</em> went to <code>tournaments-snapshot</code> (PR #327). What shipped instead is
+      hand-chained <code>FromRanking</code> seeding (a quali → top-N final) plus engine-level
+      <code>FromHeatWinners</code> advancement; the generate-full-bracket helper (#30) and bracket
+      container/viz (#31) are the rebuild's first steps, on the D13 level-per-round model.</li>
       <li><strong>Slice 6 — Per-class standings.</strong> Results and standings derived per class.</li>
       <li><strong>Slice 7 — Setup wizard.</strong> A guided first-pass <em>over</em> the stage-pages,
       built last.</li>
@@ -207,14 +215,30 @@ flowchart LR
       <strong>IMD-aware channel assignment</strong> — scoring a heat's channels by third-order intermod
       gap and auto-picking the cleanest set (#209), a race-quality refinement on top of the v0.4 channel
       model that cuts interference-related video dropouts; seasons (#129) stay local-first for now;
-      multi-cloud (#132) is later. Packaging follows alongside: a <strong>Tauri</strong> shell +
-      single-binary build for Windows/Linux/macOS (#57/#58).
+      multi-cloud (#132) is later. Packaging <strong>shipped with the alpha</strong>: the
+      <strong>Tauri</strong> desktop portables for Windows/Linux/macOS (#57/#58), self-contained
+      with the live RotorHazard adapter.
     </p>
-    <p><strong>Done when:</strong> a complete event — registration → heats → live races → marshaling → results, across a multi-heat format — runs live from the RD console against real/dockerized RH, and the single binary launches on all three OSes.</p>
+    <p><strong>Done when (met, 2026-07-05):</strong> a complete event — registration → heats → live
+    races → marshaling → results, across a multi-heat format — runs live from the RD console against
+    real/dockerized RH, and the single binary launches on all three OSes. Released as
+    <strong>v0.4.0-alpha.1</strong>.</p>
+
+    <h3>In flight — between the alpha and v0.5</h3>
+    <ul>
+      <li><strong>Alpha hardening:</strong> real-hardware field testing of the portables against a
+      live RotorHazard rig (the first exercise of the staging-sync + stale-replay fixes on real RF).</li>
+      <li><strong>Tournament rebuild</strong> (post-v1, from <code>tournaments-snapshot</code> on the
+      D13 level-per-round model): small fixes #32/#33 → the generate-full-bracket helper #30 → the
+      bracket container + tree viz #31; double-elim and multi-main first-class.</li>
+      <li><strong>The required RotorHazard plugin</strong> (D16, <a href="rotorhazard-plugin.html">design</a>):
+      slice 0 (the RH 4.4.0 mock harness) is built; next the versioned handshake, dense live RSSI,
+      clean start/stop ownership, and re-detection over stored traces (#3 recalc).</li>
+    </ul>
 
     <p class="phase-meta">
-      v0.5 and beyond stay as the later milestones — they begin once a single race, and a full
-      multi-heat event, is genuinely directable from the console (v0.4 complete).
+      v0.5 and beyond stay as the later milestones — the single-race and multi-heat-event bars are
+      met; what follows builds outward from the shipped alpha.
     </p>
 
     <h3>v0.5 — Racer/spectator PWA</h3>
@@ -266,8 +290,10 @@ flowchart LR
       longer a post-1.0 firmware project — it is the <strong>integration path</strong>.
       <strong>"Required" is a guided one-step install</strong> (Grid detects a missing plugin and
       offers to install it), not a hard-fail, keeping the "try it fast" feel. The plugin becomes the
-      <strong>primary RH integration</strong>; the full plugin design doc + sliced build plan are
-      forthcoming (<a href="decisions.html">D16</a>).
+      <strong>primary RH integration</strong>; the design doc lives at
+      <a href="rotorhazard-plugin.html">RotorHazard Plugin</a> (floor: RHAPI 1.3 / RH 4.3.0+),
+      slice 0 (the RH 4.4.0 mock harness) is built, and the released alpha integrates via the
+      live RH <em>adapter</em> while the plugin path lands (<a href="decisions.html">D16</a>).
     </p>
 
     <h2>3. Cross-cutting workstreams</h2>
@@ -282,66 +308,39 @@ flowchart LR
       Every milestone is <strong>bookended by docs</strong>: <strong>read the owning docs before</strong> breaking the
       milestone into issues (so the build follows the design), and run a <strong>doc-reconciliation pass after</strong>,
       before merging — fixing drift, resolving now-validated open decisions, and recording new conventions. Doc updates
-      are part of the milestone's definition-of-done and ride along in the same milestone MR.</dd>
+      are part of the milestone's definition-of-done and ride along in the same PR.</dd>
     </dl>
 
-    <h2>4. The GitLab planning model (free tier)</h2>
+    <h2>4. Planning on GitHub</h2>
     <p>
-      GitLab puts Epics, the Roadmap timeline view, and Iterations behind paid tiers, so the
-      plan is built from the free-tier primitives and emulates the rest. We use a
-      <strong>single project</strong>.
-    </p>
-    <table>
-      <thead>
-        <tr><th>Plan concept</th><th>Free-tier mechanism</th></tr>
-      </thead>
-      <tbody>
-        <tr><td><strong>Phase / release</strong></td><td><strong>Milestone</strong> (release-versioned, e.g. "v0.2 — First adapters") with start/due dates. The milestone list + dates is our timeline.</td></tr>
-        <tr><td><strong>Epic / feature</strong></td><td>A <strong>tracking issue</strong> whose description holds a <strong>task checklist of child issues</strong> (<code>- [ ] #123</code>); GitLab shows % progress.</td></tr>
-        <tr><td><strong>Work item</strong></td><td>An <strong>issue</strong>, assigned to its milestone + labels, listed under a tracking issue.</td></tr>
-        <tr><td><strong>Type / area</strong></td><td><strong>Labels</strong> by convention: <code>type/feature</code>, <code>type/chore</code>, <code>type/bug</code>; <code>area/adapters</code>, <code>area/engine</code>, <code>area/protocol</code>, <code>area/clients</code>, <code>area/cloud</code>, <code>area/streaming</code>, <code>area/integrations</code>. (Scoped-label exclusivity is paid; these are plain prefixes.)</td></tr>
-        <tr><td><strong>Workflow / status</strong></td><td>A single project <strong>issue board</strong> with columns Open → Doing → Review → Done (board lists by status label).</td></tr>
-        <tr><td><strong>Dependencies</strong></td><td><strong>"Relates to"</strong> links (blocking/blocked-by links are paid); express ordering in the tracking issue.</td></tr>
-        <tr><td><strong>Timeline narrative</strong></td><td>This doc (and optionally a Wiki page) — the Roadmap timeline view is paid.</td></tr>
-      </tbody>
-    </table>
-    <div class="callout">
-      <p>
-        <strong>What we deliberately don't rely on:</strong> Epics, the Roadmap view, Iterations,
-        scoped-label enforcement, group-level multi-boards, and blocking links — all paid. The
-        tracking-issue + milestone + label-convention model covers the same ground on free tier,
-        and this doc remains the source of truth either way.
-      </p>
-    </div>
-
-    <h2>5. From plan to GitLab</h2>
-    <p>The agreed sequence once this roadmap is finalized:</p>
-    <ol>
-      <li><strong>Finalize</strong> this roadmap (review &amp; sign-off).</li>
-      <li><strong>Merge</strong> <code>planning</code> → <code>devel</code> (which promotes to <code>main</code> on releases).</li>
-      <li><strong>Add the GitLab MCP</strong> integration.</li>
-      <li><strong>Instantiate</strong> the plan: create the label set and the project board; create the milestones (v0.1 … v0.8) in sequence; create one <strong>tracking issue per feature</strong> and seed its child issues.</li>
-    </ol>
-    <p>
-      <strong>Seeding depth:</strong> break <strong>v0.1</strong> down fully into issues now, create the
-      tracking issues for all phases as placeholders, and detail later phases just-in-time — so the
-      board reflects what's actionable without pretending we've planned the far future to the task level.
+      The plan lives on <a href="https://github.com/GridFPV/gridfpv">GitHub</a> (migrated from
+      GitLab 2026-06-20, issue numbers preserved): <strong>issues</strong> for the work,
+      <strong>labels</strong> for the axes, <strong>pull requests into <code>devel</code></strong>
+      for slices (GitFlow: <code>devel</code> is the working trunk, <code>main</code> is releases;
+      both protected — PR + CI required), and <strong>GitHub Actions</strong> for CI
+      (<code>cargo xtask ci</code> + the frontend job) plus the manual/main-gated
+      <code>release-builds</code> workflow for the desktop portables. Releases are
+      <code>devel → main</code> PRs, tagged (<code>v0.4.0-alpha.1</code> is the first), with the
+      portables attached to the GitHub Release.
     </p>
 
-    <h2>6. Open decisions</h2>
+    <h2>5. Open decisions</h2>
     <ol class="decisions">
       <li><span class="resolved">Resolved — License: AGPL-3.0 (+ optional commercial dual-license).</span>
       FOSS with network-use copyleft — anyone offering it as a hosted service must release their
       modifications, which protects the hosted-SaaS model while staying true FOSS; as copyright
       holder we can offer a commercial license later (a contributor CLA/DCO keeps that open).
       Applied early (at/around v0.1) as the FOSS foundation.</li>
-      <li><span class="resolved">Resolved — Branch flow.</span> <code>planning</code> merges into
-      <code>devel</code>; <code>devel</code> promotes to <code>main</code> on releases (main stays
-      release-stable).</li>
+      <li><span class="resolved">Resolved — Branch flow.</span> GitFlow on GitHub: slices land as
+      PRs into <code>devel</code> (the working trunk); <code>devel</code> promotes to
+      <code>main</code> on releases (main stays release-stable, tagged). The GitLab-era
+      <code>planning</code> branch is history.</li>
       <li><span class="resolved">Resolved — Milestone dates.</span> Sequence-only for now — order
       the milestones without calendar commitments; attach target dates once a real cadence emerges.</li>
-      <li><span class="q">Per-format milestone placement.</span> Which bracket/qualifying formats
-      land in v0.3 vs later (each per-format spec, <a href="race-engine.html">Race Engine</a> §7).</li>
+      <li><span class="resolved">Resolved — Per-format milestone placement.</span> Settled by the
+      primitives-first carve (PR #327, D17): the three primitives shipped in the v0.4 alpha; the
+      tournament structures rebuild post-v1 from <code>tournaments-snapshot</code> on the D13
+      level-per-round model.</li>
     </ol>
 
     <footer class="doc-footer">

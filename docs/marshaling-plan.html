@@ -12,6 +12,19 @@
       <p class="brand">GridFPV</p>
       <h1>Marshaling Build Plan</h1>
       <p class="doc-kind">Internal design doc · the sliced implementation plan for marshaling</p>
+
+    <div class="callout">
+      <p>
+        <strong>SUPERSEDED — fully shipped (v0.4.0-alpha.1).</strong> Every slice this plan
+        sequences is built: signal capture + the RSSI graph, lap-level marshaling + the audit,
+        the provisional → official lifecycle with the protest gate, full adjudication, and —
+        beyond the plan — the D25 shared removal record, the D26 min-lap floor, and Tune
+        Detection (the re-detect this plan deferred). The as-built design lives in
+        <a href="marshaling.html">Marshaling</a>; this file is kept as the historical build
+        record only. The §2 refinements (no per-person provenance; protest window optional and
+        OFF by default; RD-only writes) all carried through to the shipped model.
+      </p>
+    </div>
     </header>
 
     <p class="lead">

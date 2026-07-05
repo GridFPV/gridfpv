@@ -26,7 +26,7 @@
         <a href="event-pipeline.html">event pipeline</a>. It describes intent and
         capability — the things we want to hit — and surfaces the decisions and data each
         capability implies. It does not define the schema or APIs; those belong to the
-        Architecture doc (coming soon).
+        <a href="architecture.html">Architecture</a> doc.
       </p>
     </div>
 
@@ -73,12 +73,10 @@
         (full CRUD); built-ins are read-only. An event simply <strong>selects</strong> which classes it
         runs. A class is a <strong>categorization</strong>; GridFPV does not enforce equipment/hardware
         specs — those rules live with the league, not the app.</li>
-      <li><strong>Track selection.</strong> <strong>One track per event</strong> (<em>resolved</em>):
+      <li><strong>Track selection.</strong> <strong>One track per event</strong> (<em>decided, not built</em> — no track field exists in the event model yet):
         a physical track layout (IRL) or a Velocidrone spec track and its track id (sim). All classes
         in an event share that one track.</li>
-      <li><strong>Format configuration.</strong> Which phases this event runs — practice on/off,
-        qualifying mode (<em>run live</em> / <em>import</em> / <em>skip</em>), and the mains
-        format. The pipeline is configurable per event, not fixed.</li>
+      <li><strong>Format configuration.</strong> <em>Superseded as designed:</em> there is no event-level format-config — an event simply accumulates <strong>rounds</strong> (each with its own format/win condition/seeding) as the day is built. See <a href="format-model.html">Format Model</a>.</li>
       <li><strong>Pilot directory (app registry).</strong> <em>As built (#74):</em> a pilot is
         defined once in the app-level directory — <strong>callsign</strong> plus name, phonetic,
         team, color, country (ISO code), <code>vtx_types</code> (a <em>multi</em>-select of
@@ -88,7 +86,7 @@
       <li><strong>Guided setup wizard <em>(built)</em>.</strong> Make the common path effortless (a
         table stake against the incumbents) while leaving every choice editable afterward. As built the
         wizard is a thin guided <em>first pass over the event workspace's stage-pages</em> —
-        <em>Classes&nbsp;&amp;&nbsp;Roster → Timer&nbsp;&amp;&nbsp;channels → First round → Review</em>,
+        <em>Timer&nbsp;&amp;&nbsp;channels → Classes&nbsp;&amp;&nbsp;Roster → First round → Review</em>,
         embedding the same stage components — and is <strong>Next-only</strong> (Back / Skip / Next /
         Finish); every selection <strong>auto-saves</strong>, so there are no Save buttons. The Review
         step is a live readiness check (a class selected, a pilot placed, a timer chosen, a round
@@ -180,7 +178,7 @@
     </p>
     <dl class="entities">
       <dt>Event</dt>
-      <dd>name, date, one track, format-config (which phases are enabled, qualifying mode, mains
+      <dd>name, date, one track, its rounds (no event-level format-config — superseded; each round carries its format/win condition/seeding
       format), the selected Classes, and per-event state persisted in the event's sidecar
       <code>meta</code> table (#115).</dd>
       <dt>Class (app registry → per-event selection)</dt>

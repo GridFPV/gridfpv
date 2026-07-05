@@ -84,6 +84,10 @@
       player name, transponder id), later bound to a GridFPV pilot.</li>
       <li><strong>source timestamp</strong> — in the source's own clock (see §4), plus a
       monotonic sequence number where the source provides one.</li>
+      <li><strong>heat tag</strong> (<a href="decisions.html">D20</a>) — the adapter leaves it
+      empty; the bridge sink <strong>stamps the running heat at append</strong>, and every fold
+      attributes the pass by tag (positional attribution is the legacy fallback). Once a heat's
+      result is <em>Final</em>, late passes are frozen out of its window entirely.</li>
       <li><strong>gate / split index</strong> — optional; defaults to the lap gate. Present
       for sources that report multiple gates or splits (Velocidrone).</li>
       <li><strong>signal context</strong> — optional; RSSI peak / stats, enter-exit window,
@@ -283,11 +287,21 @@ flowchart LR
         <em>not</em> connect only while a heat runs); a persistent driver maintains the link and
         reconnects with backoff, surfacing a <code>TimerStatus</code> of
         <code>Ready / Configured / Connecting / Connected / Disconnected / Error</code>. RH support is
-        gated behind the Director's <code>--features live</code> build. When a heat enters
-        <em>Running</em>, the bridge arms the heat (remapping node seats onto the lineup) and tunes the
-        nodes; <code>stage_race()</code> stops any prior race, discards old laps, stages, and waits up
-        to ~15&nbsp;s for RH to reach <em>racing</em>; leaving <em>Running</em> disarms the race but
-        keeps the connection alive.
+        gated behind the Director's <code>--features live</code> build. At the heat's <em>Stage</em>
+        transition the bridge <strong>prepares</strong> RH (tunes nodes, zeroes the current format's
+        staging delays for an instant start, resets to READY) and <strong>seats</strong> a fresh RH
+        heat with the bound pilots (RH's pass gate rejects crossings on unseated nodes); at
+        <em>Armed → Running</em> — Grid's go — it emits a single <code>stage_race</code>.
+        Because seating can switch RH's effective format to the seated heat's <em>class</em> format,
+        the instant-start prepare is <strong>re-run right before the stage</strong>; a stage a busy RH
+        drops ("status is not 'ready'") is <strong>retried every 5&nbsp;s</strong> inside the ~15&nbsp;s
+        settle; and lap records are <strong>gated on RH confirming RACING for this arming</strong>, so
+        a replayed previous-race snapshot can never contaminate the new heat. Every (re)connect also
+        probes the <strong>GridFPV plugin handshake</strong> (missing / present / incompatible,
+        surfaced on the timer row). With multiple timers selected, all stay hot-standby-connected and
+        only the active source's passes feed the log — primary-preferred, non-sticky failover (#112);
+        the switchover window is not yet buffered (a known deferred gap). Leaving <em>Running</em>
+        disarms the race but keeps the connection alive.
       </p>
     </div>
     <div class="callout">
@@ -306,10 +320,21 @@ flowchart LR
         marshaling feature). It reuses RH's proven stack (node firmware + RMS + detection); GridFPV
         owns start/stop timing while RH owns start/stop/get-data. "Required" is a <strong>guided
         one-step install</strong>, not a hard-fail. The plugin <strong>supersedes the socket
-        workarounds</strong> and becomes the <strong>primary RH integration</strong>; its full design
-        + build plan are forthcoming separate work (this records the direction). It also
+        workarounds</strong> and becomes the <strong>primary RH integration</strong>. It also
         <strong>replaces the dropped own-the-stack timer-server</strong> (<a href="decisions.html">D15</a>,
         superseded).
+      </p>
+      <p>
+        <strong>Status (v0.4.0-alpha.1):</strong> the design lives at
+        <a href="rotorhazard-plugin.html">RotorHazard Plugin</a>; the plugin itself ships
+        <strong>in-repo</strong> (<code>plugins/gridfpv/</code>), is <strong>served by the Director</strong>
+        at <code>GET /plugin/gridfpv.zip</code> (embedded at compile time so the bundle always matches
+        the Director), and installs via the guided one-step flow. Shipped capabilities:
+        <code>hello</code> (versioned handshake), <code>live_signal</code> (incremental dense RSSI,
+        suppressing the save-then-pull), <code>live_pass</code> (native per-node passes, deduped
+        against <code>current_laps</code>). Clean start/stop ownership and calibration write-back are
+        the remaining slices; until then the Stage-time socket prepare/seat flow above IS the
+        production control path.
       </p>
     </div>
     <dl class="entities">
@@ -330,8 +355,9 @@ flowchart LR
       the session start/end edges, and the per-node <code>lap_number</code> is carried as the pass
       sequence and anchors dedup. Built in parallel with Velocidrone as the first real-world
       target; the dockerized RH both feeds recorded fixtures <em>and</em> is allowed for live
-      integration tests (a <strong>local</strong> class — Docker required). The harness runs
-      <code>cruwaller/rotorhazard</code> with <strong>8 mock nodes</strong> on <strong>port 5000</strong>,
+      integration tests (a <strong>local</strong> class — Docker required). The harness builds
+      <strong>RotorHazard v4.4.0 from source</strong> (the <code>cruwaller</code> image went stale at
+      4.0.0-beta.4; <code>MOCK_NODE_SIGNAL=1</code> required) with <strong>8 mock nodes</strong>,
       attached via the timer's URL; the test driver emits <code>stage_race</code> over Socket.IO and
       injects passes with <code>simulate_lap {node}</code>, bypassing signal detection (see
       <code>docker/rotorhazard/</code>). The guardrail bans
@@ -356,8 +382,10 @@ flowchart LR
       is retained as an <strong>event-local sidecar</strong> — not pushed to the Cloud by
       default — so a missed lap can be re-derived. Pairs with the storage tiers in
       <a href="architecture.html">Architecture</a> §4. <em>Implemented today: a per-pass
-      <code>rssi_peak</code>; the enter/exit window and bounded-RSSI sidecar arrive with the
-      hardware-signal extension.</em></li>
+      <code>rssi_peak</code>, coarse streamed <code>SignalChunk</code> traces +
+      <code>SignalThresholds</code> (enter/exit levels), and the dense per-tick
+      <code>SignalHistory</code> — live via the plugin's <code>gridfpv_signal</code>, or the
+      post-race save-then-pull on stock RH.</em></li>
       <li><span class="resolved">Resolved — Multi-gate / split track model.</span> A track is
       modeled as ordered gates per lap; a <code>Pass</code> carries a gate index. A lap is a
       start/finish-gate crossing and splits are sector times; the default is a single gate.</li>

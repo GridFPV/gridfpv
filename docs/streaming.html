@@ -184,8 +184,9 @@ flowchart LR
     <h3>3.2 Mapping race-state to scenes</h3>
     <p>
       The heat loop already appends the events broadcast wants (Race Engine §2):
-      <code>staged</code>, <code>armed</code>, <code>started</code> (running),
-      <code>landed</code>, <code>scored</code>, <code>advance</code>. A <strong>scene
+      <code>Staged</code>, <code>Armed</code>, <code>Running</code>,
+      <code>Finished</code> (results pending), <code>Finalized</code> (results final),
+      <code>Advanced</code>. A <strong>scene
       map</strong> associates phases of that lifecycle with OBS scenes; as race-state changes,
       the subsystem requests the mapped scene.
     </p>
@@ -194,11 +195,11 @@ flowchart LR
         <tr><th>Race-state event</th><th>Typical broadcast intent</th><th>Default mapping</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>staged</code></td><td>field is on the line; show who's up</td><td>Staging / grid scene</td></tr>
-        <tr><td><code>armed</code></td><td>countdown imminent</td><td>(hold staging, arm lower-third)</td></tr>
-        <tr><td><code>started</code> (running)</td><td>race is live</td><td>Race / split-screen scene</td></tr>
-        <tr><td><code>landed</code></td><td>flying done, result pending</td><td>(hold race, results lower-third)</td></tr>
-        <tr><td><code>scored</code></td><td>result is final</td><td>Results / replay scene</td></tr>
+        <tr><td><code>Staged</code></td><td>field is on the line; show who's up</td><td>Staging / grid scene</td></tr>
+        <tr><td><code>Armed</code></td><td>countdown imminent</td><td>(hold staging, arm lower-third)</td></tr>
+        <tr><td><code>Running</code></td><td>race live</td><td>Live race scene</td></tr>
+        <tr><td><code>Finished</code></td><td>flying done, result pending (Unofficial)</td><td>(hold race, results lower-third)</td></tr>
+        <tr><td><code>Finalized</code></td><td>result is official (Final)</td><td>Results / replay scene</td></tr>
         <tr><td><code>advance</code></td><td>moving to next heat / podium</td><td>Bracket or podium scene</td></tr>
       </tbody>
     </table>
@@ -300,7 +301,7 @@ flowchart LR
       video. Heat-bound; reacts to <code>running</code> passes.</dd>
       <dt>Podium / results</dt>
       <dd>Final placings for a heat or a completed format. Heat- or event-bound; reacts to
-      <code>scored</code>/<code>advance</code>.</dd>
+      <code>Finalized</code>/<code>Advanced</code>.</dd>
       <dt>Bracket</dt>
       <dd>The mains tree with seeds advancing, or a qualifying ranking. Event/class-bound;
       reacts to <code>advance</code> and updated standings.</dd>

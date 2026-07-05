@@ -101,14 +101,14 @@ stateDiagram-v2
       <tbody>
         <tr><td><code>Stage</code></td><td>Scheduled</td><td><code>Staged</code></td><td>Staged</td></tr>
         <tr><td><code>Start</code></td><td>Staged</td><td><code>Armed</code></td><td>Armed</td></tr>
-        <tr><td><code>SkipCountdown</code> <em>(override)</em></td><td>Armed</td><td><code>Running</code></td><td>Running</td></tr>
-        <tr><td><code>ForceEnd</code> <em>(override)</em></td><td>Running</td><td><code>Finished</code></td><td>Unofficial</td></tr>
+        <tr><td><code>SkipCountdown</code> <em>(wire-only — retired from the console)</em></td><td>Armed</td><td><code>Running</code></td><td>Running</td></tr>
+        <tr><td><code>ForceEnd</code> <em>(the console's <strong>Stop</strong> button)</em></td><td>Running</td><td><code>Finished</code></td><td>Unofficial</td></tr>
         <tr><td><code>Finalize</code></td><td>Unofficial</td><td><code>Finalized</code></td><td>Final</td></tr>
         <tr><td><code>Advance</code></td><td>Final</td><td><code>Advanced</code></td><td>Final <em>(terminal)</em></td></tr>
         <tr><td><code>Revert</code></td><td>Final</td><td><code>Reverted</code></td><td>Unofficial</td></tr>
         <tr><td><code>Abort</code></td><td>Staged / Armed / Running</td><td><code>Aborted</code></td><td>Scheduled</td></tr>
         <tr><td><code>Restart</code></td><td>Armed / Running / Unofficial</td><td><code>Restarted</code></td><td>Scheduled</td></tr>
-        <tr><td><code>Discard</code></td><td>Final</td><td><code>Discarded</code></td><td>Scheduled</td></tr>
+        <tr><td><code>Discard</code></td><td>Unofficial, Final</td><td><code>Discarded</code></td><td>Scheduled</td></tr>
       </tbody>
     </table>
     <p>
@@ -118,9 +118,11 @@ stateDiagram-v2
       backend and UI (release hardening, #330) — so a result cannot be locked with an unresolved
       protest. The two <strong>middle forward steps</strong> —
       <code>Armed → Running</code> and <code>Running → Unofficial</code> — have no everyday
-      command: they are appended by the runtime clock (§4). The override commands
+      command: they are appended by the runtime clock (§4). The manual commands
       <code>SkipCountdown</code> and <code>ForceEnd</code> record exactly the same transitions
-      the auto-path would, as race-day escape hatches.
+      the auto-path would, as race-day escape hatches. (Console reality: <code>ForceEnd</code>
+      surfaces as the plain <strong>Stop</strong> button; <code>SkipCountdown</code> is
+      wire-only — the console retired it, and the &ldquo;override&rdquo; styling concept with it.)
     </p>
 
     <h3>Abort and Restart both reset to Scheduled</h3>
@@ -194,7 +196,7 @@ stateDiagram-v2
     </div>
     <p>
       If the clock can't be trusted — a stuck countdown, or a race that must go now — the RD's
-      <code>SkipCountdown</code> override forces <code>Armed → Running</code> immediately,
+      <code>SkipCountdown</code> command (wire-only) forces <code>Armed → Running</code> immediately,
       recording the same <code>Running</code> transition the driver would.
     </p>
 
@@ -221,7 +223,7 @@ stateDiagram-v2
       <p><span class="name">Win condition, then the grace window, then auto-Unofficial.</span>
       Once the race-end criterion is met the driver holds the heat in <code>Running</code> for
       the round's <strong>grace window</strong> — so a trailing pilot's final lap still counts —
-      and only then appends <code>Running → Unofficial</code>. The <code>ForceEnd</code> override
+      and only then appends <code>Running → Unofficial</code>. The <code>ForceEnd</code> command (the console's Stop)
       forces the same step now when the completion clock must be bypassed.</p>
     </div>
 

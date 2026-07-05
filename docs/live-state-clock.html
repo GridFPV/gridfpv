@@ -50,12 +50,13 @@
     </p>
     <dl class="entities">
       <dt><code>current_heat</code></dt>
-      <dd>The heat currently on the timer: the heat whose latest <code>HeatScheduled</code> /
-      <code>HeatStateChanged</code> appears <em>last</em> in the log. A heat that reached the
+      <dd>The heat currently on the timer: the last event among
+      <code>HeatStateChanged</code> / <code>CurrentHeatSelected</code> wins (a freshly-scheduled
+      heat must <em>not</em> steal focus — the fill-no-steal rule), with the <em>first</em>
+      <code>HeatScheduled</code> as the fallback before anything has run. A heat that reached the
       terminal <code>Final</code> phase is still reported as current until a <em>newer</em> heat
       takes the timer — mirroring what an overlay shows between heats ("last heat, now scored").
-      <em>(Planned: a manual-selection override so the RD can pin the live view to a chosen heat
-      regardless of last-scheduled order.)</em></dd>
+      <em>(Built: the RD's manual selection appends <code>CurrentHeatSelected</code>, which the fold honors — pinning the live view without racing it.)</em></dd>
       <dt><code>phase</code></dt>
       <dd>The current heat's folded <code>HeatPhase</code> — the linear status
       <code>Scheduled → Staged → Armed → Running → Unofficial → Final</code>. The engine's off-ramp

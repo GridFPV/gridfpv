@@ -96,10 +96,14 @@
       exit — and the marshal can:
     </p>
     <ul>
-      <li><strong>Add</strong> / <strong>remove</strong> a detection;</li>
-      <li><strong>Split</strong> one over-long lap into two (a missed mid-lap detection);</li>
-      <li><strong>Edit a lap's time</strong>, with the <strong>neighbouring lap auto-adjusting</strong>
-      so total race time stays consistent;</li>
+      <li><strong>Add</strong> / <strong>Remove</strong> a detection (removals land on the shared
+      removal record with a <strong>Restore</strong> — D25);</li>
+      <li><strong>Split</strong> one over-long lap into two at its midpoint (a missed mid-lap
+      detection), tuning either half afterwards;</li>
+      <li><strong>Save an edited lap time</strong> (the editor pre-fills the current time; the
+      neighbouring lap auto-adjusts because the correction re-times the shared crossing);</li>
+      <li><strong>Throw out</strong> a real lap from scoring (distinct from Remove — the lap stays
+      on the clock);</li>
       <li><strong>DQ a pilot reversibly</strong> — disqualification is a toggle, not a destructive op.</li>
     </ul>
     <p>
@@ -152,7 +156,7 @@ flowchart TB
     <p>
       FPVTrackside-grade lap editing, but for <em>any</em> timer. Laps are enter/exit detections; the
       marshal can add, remove, split, edit-time (with the neighbour auto-adjusting), and reversibly DQ,
-      with the deferred smart-minimum so borderline laps aren't invalidated prematurely. This is built
+      with the D26 <strong>min-lap floor</strong> shipping instead of the once-planned deferred smart-minimum: an under-floor crossing is auto-removed immediately, visibly, with a marshal <strong>Restore</strong> override. This is built
       on the logged correction primitives that already exist in
       <a href="architecture.html">Architecture</a> §3 — <code>DetectionVoided</code>,
       <code>LapInserted</code>, <code>LapAdjusted</code>, <code>PenaltyApplied</code> — extended with
@@ -187,12 +191,12 @@ flowchart TB
     </p>
     <div class="principle">
       <p><span class="name">Decision: v1 is signal-AS-EVIDENCE, not a re-implemented detector.</span>
-      We persist and <em>display</em> the trace as the ground truth to review against, but we do
-      <strong>not</strong> re-run detection in v1. The full RotorHazard-style "Recalculate" with
-      draggable thresholds (re-deriving laps from the stored signal) is <strong>explicitly deferred</strong>
-      — it is a clean later add-on on top of the stored trace, not a v1 requirement. Building evidence
-      first, re-detection later, keeps the differentiating governance layer from waiting on a signal
-      algorithm we don't yet need.</p>
+      We persist and <em>display</em> the trace as the ground truth to review against — and the
+      full RotorHazard-style "Recalculate" <strong>shipped</strong> as <strong>Tune Detection</strong>:
+      draggable enter/exit levels over the captured trace, a live preview in the lap list, committed
+      as canonical void/insert rulings. It shares the D25 removal record, so a crossing the marshal
+      removed is never re-proposed. (The original v1 plan deferred this; it landed ahead of
+      schedule, Grid-side.)</p>
     </div>
     <div class="sim-note">
       <p><span class="label">IRL</span>RotorHazard heats carry an RSSI trace; the graph is the evidence
@@ -295,9 +299,9 @@ flowchart TB
 
     <h2>5. Deferred / future seams</h2>
     <ul>
-      <li><strong>Full signal re-detect.</strong> The RotorHazard-style "Recalculate" with draggable
-      thresholds, re-deriving laps from the stored trace. The v1 evidence layer stores the trace precisely
-      so this is a clean later add-on.</li>
+      <li><strong>Full signal re-detect — realized</strong> (Tune Detection, §3.2). The remaining
+      future half is calibration <em>write-back</em> to the timer (<code>gridfpv_calibrate</code>,
+      plugin S4).</li>
       <li><strong>Video / DVR evidence linkage.</strong> FPVTrackside grounds calls in video; we want the
       same. Designed as a <strong>timestamp-flag seam</strong> now — marshaling facts carry timestamps that
       a future DVR layer can pivot on — without building the capture pipeline yet.</li>

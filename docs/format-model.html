@@ -28,8 +28,7 @@
         This is the <strong>target model</strong> (decision <a href="decisions.html#d17">D17</a>). It
         supersedes the per-format framing in the earlier heat-gen/formats decisions (D10/D11/D14): the
         engine still has generators per mechanic, but the <em>RD-facing</em> vocabulary is the three
-        round types + scoring + structures. It rolls out in stages (see <a href="#rollout">Rollout</a>);
-        until a stage ships, the console still exposes the legacy format names.
+        round types + scoring + structures. Every planned stage has shipped; the console exposes exactly the three round types.
       </p>
       <p>
         <strong>Release state (2026-06-30, PR #327) — this release is primitives-first.</strong> The
@@ -73,13 +72,13 @@
           <td><strong>Practice</strong></td>
           <td>Fly, no competition. Pick channels; pilots hop on and coordinate.</td>
           <td>none</td>
-          <td>channels; optional time limit; named <em>"Open Practice"</em> or <em>"‹Class› Practice"</em> (a label only — no mechanical difference)</td>
+          <td>channels; optional time limit; friendly name <em>"Practice"</em> (class-free — practice rounds attach no class)</td>
         </tr>
         <tr>
           <td><strong>Time Trial</strong></td>
           <td>Qualify against the clock on fixed channels; your best result ranks you.</td>
           <td>best result ranks the field</td>
-          <td><strong>Best of N laps</strong> (N configurable; <em>N = 1 is "best lap"</em>) + a race time</td>
+          <td><strong>Best of N laps</strong> (N configurable; <em>N = 1 is "best lap"</em>) or <strong>Timed — most laps</strong>, + a race time; <em>"Heats per pilot"</em> (<code>rounds</code>, default 3; <strong>0 = open-ended</strong> — generate the next rotation on demand)</td>
         </tr>
         <tr>
           <td><strong>Head-to-Head</strong></td>
@@ -164,7 +163,7 @@
 
     <h2 id="rollout">6 · Rollout</h2>
     <ol>
-      <li><strong>Bracket win-condition picker</strong> — the "Advance to bracket" modal picks one win condition for all the bracket's heats (default First-to-N; option Most-laps). <em>Shipped.</em></li>
+      <li><strong>Bracket win-condition picker</strong> — the "Advance to bracket" modal picks one win condition for all the bracket's heats (default First-to-N; option Most-laps). <em>Shipped, then carved to <code>tournaments-snapshot</code> with the bracket machinery (PR #327) — not in the current console.</em></li>
       <li><strong>Head-to-Head building-block generator</strong> — the atomic racing format: group size, per-heat win condition, scoring (Points with a custom table, or Placement). Built first, because the structures compose it.</li>
       <li><strong>Recompose Round Robin</strong> over Head-to-Head (all-play-all + Points), retiring the bespoke <code>round_robin</code> generator. <em>Deferred — carved to <code>tournaments-snapshot</code> (PR #327); rebuilt post-v1.</em></li>
       <li><strong>Recompose the Bracket</strong> over Head-to-Head (Placement + seeding + the existing FromHeatWinners chain), folding away <code>single_elim</code>. <em>Deferred — carved to <code>tournaments-snapshot</code> (PR #327); rebuilt post-v1.</em></li>
