@@ -496,7 +496,15 @@
         </Field>
       </div>
     {:else}
-      <Field label="URL" hint="Stored now; the live connection lands in a later slice (2b).">
+      <!--
+        The URL is dialed verbatim by the RH connector — no trimming, no scheme defaulting — so the
+        hint names the exact shape. A trailing slash, a missing scheme, or https against a
+        plain-HTTP RH all fail with the same opaque connection error (#381).
+      -->
+      <Field
+        label="URL"
+        hint={'The RotorHazard server’s base URL — http://<host>:5000. Dialed exactly as entered: use plain http (not https), and no trailing slash.'}
+      >
         <Input
           type="url"
           bind:value={formUrl}

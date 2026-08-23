@@ -1,7 +1,7 @@
 //! Timers as **application-level configuration** — the `TimerRegistry` and `Timer` (issue #73).
 //!
 //! A timer is the thing that *produces lap-gate passes* — the built-in synthetic
-//! **Mock**, or (reserved for #65/2b) a real **RotorHazard** server. The model parallels
+//! **Mock**, or a real **RotorHazard** server (connected since #65). The model parallels
 //! the event model ([`EventRegistry`](crate::events::EventRegistry)): a Race Director configures
 //! their timers **once** at the application level (a persisted registry) and each event simply
 //! **selects** which of them to use (see [`EventMeta::timers`](crate::events::EventMeta::timers)).
@@ -21,9 +21,13 @@
 //! # The kinds
 //!
 //! [`TimerKind::Mock`] is the synthetic source wired end-to-end here (its `laps`/`lap_ms` drive
-//! the per-event sim bridge). [`TimerKind::Rotorhazard`] is **config-only / reserved** — it
-//! holds the RH server `url` so the surface and persistence are forward-compatible, but nothing
-//! connects to it in this slice; that is 2b (#65). A selected RotorHazard timer is a no-op stub.
+//! the per-event sim bridge). [`TimerKind::Rotorhazard`] holds the RH server `url`, and **is
+//! connected** (#65): the Director dials it, drives the
+//! [`Connecting`](TimerStatus::Connecting) → [`Connected`](TimerStatus::Connected) →
+//! [`Disconnected`](TimerStatus::Disconnected)/[`Error`](TimerStatus::Error) lifecycle, probes for
+//! the GridFPV plugin (see [`PluginPresence`]), and feeds its passes into the event log. This
+//! module stays purely the *configuration* half — the connector itself lives in the app crate,
+//! behind its default `live` feature (a non-`live` build leaves an RH timer inert).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -65,9 +69,9 @@ pub struct TimerId(pub String);
 /// The kind of a timer — *how* it produces passes (issue #73).
 ///
 /// Externally tagged so it maps to a TS discriminated union. [`Mock`](TimerKind::Mock) is the
-/// synthetic source wired end-to-end in this slice; [`Rotorhazard`](TimerKind::Rotorhazard) is
-/// **reserved / config-only** — its `url` is stored and round-trips on the wire and on disk, but
-/// nothing connects to it here (that is 2b / #65). A selected RotorHazard timer is a no-op stub.
+/// built-in synthetic source; [`Rotorhazard`](TimerKind::Rotorhazard) is a **real, connected**
+/// timer (#65) — its `url` is stored here and round-trips on the wire and on disk, and the
+/// Director dials it, probes for the GridFPV plugin, and streams its passes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum TimerKind {
@@ -80,10 +84,16 @@ pub enum TimerKind {
         #[ts(type = "number")]
         lap_ms: u64,
     },
-    /// A **RotorHazard** server — config-only / reserved for 2b (#65). Holds the RH base URL the
-    /// connector will dial; not connected in this slice.
+    /// A **RotorHazard** server (#65): holds the base URL the connector dials.
     Rotorhazard {
-        /// The RotorHazard server base URL (e.g. `http://rotorhazard.local:5000`).
+        /// The RotorHazard server base URL — `http://<host>:5000`, e.g.
+        /// `http://rotorhazard.local:5000`.
+        ///
+        /// Passed **verbatim** to the socket.io client: no trimming, no trailing-slash removal, no
+        /// scheme defaulting. [`validate_timer_config`] only rejects empty/whitespace, so a
+        /// trailing slash, a missing `http://`, or `https://` against a plain-HTTP RH all reach the
+        /// dialer as-is and fail as a connection [`Error`](TimerStatus::Error). The console's URL
+        /// field states that shape (#381).
         url: String,
     },
 }
@@ -220,7 +230,7 @@ pub struct Timer {
     pub id: TimerId,
     /// The human-readable display name (display-only; the id is authoritative).
     pub name: String,
-    /// The kind + config: a [`TimerKind::Mock`] or a reserved [`TimerKind::Rotorhazard`].
+    /// The kind + config: a [`TimerKind::Mock`] or a [`TimerKind::Rotorhazard`].
     pub kind: TimerKind,
     /// The derived usability of the timer (see [`TimerStatus`]).
     pub status: TimerStatus,
@@ -276,7 +286,8 @@ fn default_node_count() -> u32 {
 
 impl Timer {
     /// Derive the [`TimerStatus`] from a [`TimerKind`]: the Mock is [`Ready`](TimerStatus::Ready);
-    /// a reserved RotorHazard timer is [`Configured`](TimerStatus::Configured) (not yet connected).
+    /// a RotorHazard timer starts [`Configured`](TimerStatus::Configured) (a URL on file, not yet
+    /// dialed) — the connector then drives it through the live statuses.
     fn status_for(kind: &TimerKind) -> TimerStatus {
         match kind {
             TimerKind::Mock { .. } => TimerStatus::Ready,

@@ -71,7 +71,8 @@
       The in-process mechanics were spiked against the harness image
       (<code>cruwaller/rotorhazard:latest</code> = RH&nbsp;4.0.0-beta.4) and the API surface verified
       against the <strong>v4.3.0</strong> and <strong>v4.4.0</strong> source. A plugin is a directory
-      under RH's <code>plugins/</code> with an <code>__init__.py</code> exposing
+      under RH's <code>plugins/</code> (<a href="#plugins-dir">where that is</a>) with an
+      <code>__init__.py</code> exposing
       <code>initialize(rhapi)</code> and a <code>manifest.json</code> declaring
       <code>required_rhapi_version</code> (gated by the loader at 1.3+); RH imports it and hands over the
       <code>rhapi</code> object. From there:
@@ -214,17 +215,62 @@ flowchart LR
       the URL — CLAUDE.md.)</dd>
       <dt>Missing</dt>
       <dd>The handshake times out (no <code>gridfpv_*</code> handler registered). Grid shows a
-      <strong>guided one-step install</strong>: the plugin is a small folder dropped into RH's
+      <strong>guided install</strong>: the plugin is a small folder dropped into RH's
       <code>plugins/</code> directory followed by an RH restart. Grid offers the versioned plugin bundle
-      to download plus the copy-and-restart steps (as shipped: download <code>gridfpv-plugin.zip</code>
-      from the Director, copy, restart RH — the same-host copy automation is a possible future nicety,
-      not built). This is a <em>prompt</em>, not a hard error. (An RH older than v4.3.0 fails the same way
-      and is told to update RH first.)</dd>
+      to download plus the unzip-copy-and-restart steps (as shipped: download
+      <code>gridfpv-plugin.zip</code> from the Director, <strong>unzip it</strong>, copy the inner
+      <code>gridfpv/</code> folder, restart RH — the same-host copy automation is a possible future
+      nicety, not built). This is a <em>prompt</em>, not a hard error. (An RH older than v4.3.0 fails
+      the same way and is told to update RH first.)</dd>
       <dt>Present but incompatible</dt>
       <dd>The handshake <code>protocol_version</code> differs from the Director's (compatibility is
       exact-equality today, widening to a band only if the protocol ever needs it). Grid offers the matching plugin
       version and explains the mismatch in plain language.</dd>
     </dl>
+    <div class="callout" id="plugins-dir">
+      <p>
+        <strong>Where RH's <code>plugins/</code> directory actually is.</strong> The guided install's
+        last step is the one that stops people (field session, 2026-08-24). User plugins live at
+        <code>DATA_DIR/plugins</code> — <em>not</em> <code>PROGRAM_DIR/bundled_plugins</code>, which is
+        RH's own bundled set. <code>DATA_DIR</code> resolves through a six-step cascade
+        (<code>--data</code> argument → <code>datapath.ini</code> in <code>PROGRAM_DIR</code> → an
+        <em>already existing</em> <code>~/rh-data</code> → <code>PROGRAM_DIR</code> if
+        <code>config.json</code> sits there → the CWD if <code>config.json</code> sits there →
+        <code>~/rh-data</code>, created), so no single hardcoded path is right for everyone:
+      </p>
+      <ul>
+        <li><strong>Modern default install — <code>~/rh-data/plugins/</code></strong> (on a Pi,
+        <code>/home/pi/rh-data/plugins/</code>). The usual answer, but a <em>typical default</em>, not
+        a guarantee.</li>
+        <li><strong>Legacy in-place install — <code>&lt;RotorHazard&gt;/src/server/plugins/</code>.</strong>
+        RH v4.x actively prompts users to migrate off this, so both layouts are in the wild.</li>
+        <li><strong>Vendor / custom rigs</strong> (e.g. a <strong>NuclearHazard</strong> timer, confirmed
+        in the field) sit somewhere else again. Whatever the layout, it is the <code>plugins/</code>
+        folder beside RH's <code>config.json</code> / <code>database.db</code>, and RH logs
+        <code>Data path: &lt;DATA_DIR&gt;</code> at startup.</li>
+      </ul>
+      <p>
+        <strong>And it frequently does not exist.</strong> RH only scans <code>DATA_DIR/plugins</code>
+        <em>if present</em> (logging "No user plugins directory found." otherwise), so on a fresh
+        install there is no folder to hunt for — it has to be created. This was the actual sticking
+        point in the field.
+      </p>
+      <p>
+        The final layout is <code>&lt;DATA_DIR&gt;/plugins/gridfpv/</code> holding
+        <code>__init__.py</code> + <code>manifest.json</code> <em>directly</em> — no wrapper folder
+        (the bundle is a zip, so it must be unzipped first). Rather than restate RH's own rules, the
+        console links
+        <a href="https://github.com/RotorHazard/RotorHazard/blob/v4.3.0/doc/Plugins.md"
+        target="_blank" rel="noreferrer">RotorHazard <code>doc/Plugins.md</code></a>.
+      </p>
+      <p>
+        <strong>Guidance only — no auto-detection.</strong> Reporting RH's real <code>data_dir</code>
+        through <code>gridfpv_hello_ack</code> (RHAPI exposes it) was considered and dropped: the value
+        is reachable only once the plugin is <em>loaded</em>, so it cannot help the first install —
+        exactly the moment the RD is lost. It would add protocol surface for people who no longer have
+        the problem.
+      </p>
+    </div>
     <div class="callout">
       <p>
         <strong>Transition:</strong> while the plugin rolls out, the existing socket transport stays as
