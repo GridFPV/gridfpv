@@ -16,6 +16,7 @@
  *
  * These dynamic states are **not persisted** (`timers.json` always restores a timer's resting
  * status from its kind — see [`Timer::status_for`]); they are live, in-memory, and reset to
- * `Configured` whenever the RH timer is reconfigured.
+ * `Configured` whenever the RH timer's kind/config **actually changes** (a no-op edit leaves the
+ * live state alone — see [`TimerRegistry::update`] and #382).
  */
 export type TimerStatus = "Ready" | "Configured" | "Connecting" | "Connected" | "Disconnected" | "Error";

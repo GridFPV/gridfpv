@@ -152,7 +152,8 @@ impl ChannelCapability {
 ///
 /// These dynamic states are **not persisted** (`timers.json` always restores a timer's resting
 /// status from its kind — see [`Timer::status_for`]); they are live, in-memory, and reset to
-/// `Configured` whenever the RH timer is reconfigured.
+/// `Configured` whenever the RH timer's kind/config **actually changes** (a no-op edit leaves the
+/// live state alone — see [`TimerRegistry::update`] and #382).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum TimerStatus {
@@ -500,10 +501,18 @@ impl TimerRegistry {
             }
         }
         if let Some(kind) = &request.kind {
-            timer.kind = kind.clone();
-            timer.status = Timer::status_for(kind);
-            // A reconfigured timer (new URL/kind) must be re-probed: drop any stale plugin state.
-            timer.plugin = None;
+            // Only a **real** kind/config change resets the live state (#382). A reconfigured timer
+            // (new URL/kind) must be re-probed — the reconciler notices the change and supersedes +
+            // reopens the connection, which republishes `Connecting → Connected` and re-runs the
+            // plugin probe. A *no-op* edit (the same kind resubmitted, e.g. a rename PUT that
+            // echoes the kind back) changes nothing for the reconciler, so nothing would ever
+            // republish: wiping here would strand a live `Connected`+`Present` timer at the resting
+            // `Configured` with no plugin, permanently, until a restart.
+            if timer.kind != *kind {
+                timer.kind = kind.clone();
+                timer.status = Timer::status_for(kind);
+                timer.plugin = None;
+            }
         }
         if let Some(capability) = &request.channel_capability {
             timer.channel_capability = capability.clone();
@@ -941,6 +950,74 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_real_kind_change_resets_live_state_but_a_no_op_edit_does_not() {
+        // #382: the reset exists so a reconfigured timer is re-dialled + re-probed. It must fire
+        // ONLY on a genuine change — the reconciler is what republishes the live values, and it
+        // sees nothing to do when the kind is unchanged, so wiping on a no-op edit strands the
+        // timer at `Configured` with no plugin **permanently**.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&rh_req("Field RH", "http://rh.local:5000"))
+            .unwrap();
+        reg.set_status(&rh.id, TimerStatus::Connected);
+        reg.set_plugin(
+            &rh.id,
+            PluginPresence::Present {
+                plugin_version: "0.1.0".into(),
+                rhapi_version: "1.4".into(),
+                capabilities: vec!["hello".into()],
+            },
+        );
+
+        // A rename that echoes the SAME kind back leaves the live status + plugin alone.
+        reg.update(
+            &rh.id,
+            &UpdateTimerRequest {
+                name: Some("Field RH (north)".into()),
+                kind: Some(TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let got = reg.get(&rh.id).unwrap();
+        assert_eq!(got.name, "Field RH (north)");
+        assert_eq!(got.status, TimerStatus::Connected);
+        assert!(got.plugin.is_some(), "a no-op edit must not drop the probe");
+
+        // A real URL edit DOES reset both — the connection is about to be superseded and re-probed.
+        reg.update(
+            &rh.id,
+            &UpdateTimerRequest {
+                kind: Some(TimerKind::Rotorhazard {
+                    url: "http://rh-new.local:5000".into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let got = reg.get(&rh.id).unwrap();
+        assert_eq!(got.status, TimerStatus::Configured);
+        assert!(got.plugin.is_none());
+
+        // A kind change to Mock rests at `Ready`, likewise re-probed from scratch.
+        reg.set_status(&rh.id, TimerStatus::Connected);
+        reg.update(
+            &rh.id,
+            &UpdateTimerRequest {
+                kind: Some(TimerKind::Mock {
+                    laps: 3,
+                    lap_ms: 2000,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.get(&rh.id).unwrap().status, TimerStatus::Ready);
     }
 
     #[test]
