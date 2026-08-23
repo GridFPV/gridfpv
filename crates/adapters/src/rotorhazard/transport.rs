@@ -113,14 +113,28 @@ pub struct PluginHello {
     /// The RHAPI version the plugin reports (e.g. `"1.4"`).
     #[serde(default)]
     pub rhapi_version: String,
-    /// Capabilities the plugin declares it implements (e.g. `["hello"]`; later `"live_signal"`,
-    /// `"clean_control"`, `"recalc"`). The Director keys transport decisions off these.
+    /// Capabilities the plugin declares it implements (e.g. `["hello"]`, `"live_signal"`,
+    /// [`CAP_LIVE_PASS`]; later `"clean_control"`, `"recalc"`). The Director keys transport
+    /// decisions off these — see [`PluginHello::advertises`].
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// The plugin's node/seat count.
     #[serde(default)]
     pub node_count: u32,
 }
+
+impl PluginHello {
+    /// Whether the plugin advertised `capability` in its handshake.
+    pub fn advertises(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
+    }
+}
+
+/// The plugin capability that makes it the **authoritative pass source** (#389): it emits
+/// `gridfpv_pass` natively from `RACE_LAP_RECORDED`. The plugin earns this with a load-time
+/// self-check and omits it when its lap atom is unreadable, so its presence in the handshake — and
+/// nothing else — decides whether the adapter takes plugin passes or RotorHazard's `current_laps`.
+pub const CAP_LIVE_PASS: &str = "live_pass";
 
 /// Parse a `gridfpv_hello_ack` socket payload (a one-element array, like every RH emit) into a
 /// [`PluginHello`]. `None` for a malformed/unexpected shape (treated as no answer).
@@ -173,6 +187,14 @@ impl RotorHazardConnection {
     /// RotorHazard socket stream through `adapter`.
     pub fn connect(url: &str, adapter: RotorHazardAdapter) -> Result<Self, rust_socketio::Error> {
         let adapter = Arc::new(Mutex::new(adapter));
+        // Fresh link, fresh pass-source decision (#389). The adapter is REUSED across reconnects
+        // (the #105 fix), so a stale `live_pass` would survive a plugin being uninstalled and leave
+        // the adapter waiting for passes that can no longer come. Start from "no plugin has
+        // spoken" — `current_laps` — and let this connection's `gridfpv_hello_ack` re-earn it.
+        adapter
+            .lock()
+            .expect("adapter lock")
+            .set_plugin_live_pass(false);
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         // Starts alive; flipped to `false` by the `close`/`error` reserved-event handlers below.
         let alive = Arc::new(AtomicBool::new(true));
@@ -428,10 +450,29 @@ impl RotorHazardConnection {
             )
             // The GridFPV plugin's handshake reply (D16, S1): a plugin-equipped RH answers our
             // `gridfpv_hello` (emitted below) with `gridfpv_hello_ack`. Stash it for the driver.
+            // It also carries the plugin's capabilities, which is where the **pass source** is
+            // decided (#389): `live_pass` present ⇒ the plugin's `gridfpv_pass` mints the laps and
+            // `current_laps` becomes a checked backstop; absent ⇒ `current_laps` mints them and
+            // plugin passes are ignored. Declared here, not inferred from whichever stream happens
+            // to arrive first.
             .on("gridfpv_hello_ack", {
                 let hello = hello.clone();
+                let adapter = adapter.clone();
                 move |payload: Payload, _client: RawClient| {
                     if let Some(parsed) = parse_hello(&payload) {
+                        let live_pass = parsed.advertises(CAP_LIVE_PASS);
+                        adapter
+                            .lock()
+                            .expect("adapter lock")
+                            .set_plugin_live_pass(live_pass);
+                        if !live_pass {
+                            eprintln!(
+                                "gridfpv: rotorhazard: the GridFPV plugin (v{}) did not advertise \
+                                 `{CAP_LIVE_PASS}` — it could not prove it can read this timer's \
+                                 lap atom, so RotorHazard's own lap table is the pass source (#389)",
+                                parsed.plugin_version,
+                            );
+                        }
                         *hello.lock().expect("plugin-hello lock") = Some(parsed);
                     }
                 }
@@ -475,6 +516,30 @@ impl RotorHazardConnection {
     /// until the `heat_data` response has been folded.
     pub fn take_savable_heat(&self) -> Option<u64> {
         self.savable_heat.lock().expect("savable-heat lock").take()
+    }
+
+    /// Take (and clear) the adapter's latest **pass-source warning** (#389), if any.
+    ///
+    /// `Some` means the timer's plugin advertised `live_pass` but did not deliver laps RotorHazard
+    /// itself reported, so the adapter fell back to the `current_laps` snapshot. Laps keep flowing;
+    /// the operator needs to know the plugin is faulty on this timer. The warning is written to stderr
+    /// when it fires; this is the hook for the driver to surface it in the Director UI too — a
+    /// silent degrade is exactly what made #389 undiagnosable.
+    pub fn take_pass_warning(&self) -> Option<String> {
+        self.adapter
+            .lock()
+            .expect("adapter lock")
+            .take_pass_warning()
+    }
+
+    /// Whether the connected plugin advertised the `live_pass` capability, i.e. whether the plugin
+    /// is the selected pass source (#389). `false` against a stock RH or a plugin whose lap-atom
+    /// self-check failed.
+    pub fn plugin_live_pass(&self) -> bool {
+        self.adapter
+            .lock()
+            .expect("adapter lock")
+            .plugin_live_pass()
     }
 
     /// Wait up to `timeout` for the GridFPV plugin's `gridfpv_hello_ack` (D16, S1), returning the
