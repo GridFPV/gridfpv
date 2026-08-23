@@ -648,3 +648,148 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
         count_passes(&read_all(&state))
     );
 }
+
+/// DISTINCT RH host port for the in-place URL-edit e2e (5042/5043 are taken above).
+const RH_URL_EDIT_PORT: u16 = 5044;
+
+/// The wrong address the RD actually types at a venue — right host, nothing listening on that port.
+/// Port 1 is privileged and unbound, so the dial is **refused immediately**: a fast, deterministic
+/// `Error` rather than a long connect timeout.
+const WRONG_URL: &str = "http://127.0.0.1:1";
+
+/// Repointing a **live** RotorHazard timer's URL in place recovers without a restart (issue #382).
+///
+/// The field failure this guards, verbatim: an RD configures a timer, fat-fingers the address, sees
+/// the timer sit in `Error`, and **edits the URL on the existing timer** to the right one — and the
+/// Director has to notice. It did not, and the timer stayed dead until the whole app was restarted,
+/// which cost a user a debugging session because nothing on screen said "restart me".
+///
+/// The reconciler's decision for this ([`Step::Supersede`] + re-`Open` when the wanted URL differs
+/// from the dialled one) already has in-crate unit coverage in `src/source/rh_connections.rs`; what
+/// had **no** coverage is the socket-level end of it — that superseding a dialer stuck in its
+/// connect-retry backoff actually cancels it, that the re-open lands on a real RotorHazard, and
+/// that the plugin is re-probed on the new address. That is what this asserts, against the live
+/// dockerized RH.
+///
+/// "No restart" is structural here: the `EventRegistry`, the `spawn_registry_bridge` handle, and the
+/// timer's own [`TimerId`] are all created **once**, before the bad URL is ever dialled, and are
+/// never rebuilt — the only thing that changes between `Error` and `Connected` is the URL on the
+/// existing timer record.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker (dials a wrong URL, asserts Error, then edits the URL in place and asserts it reaches Connected with no restart)"]
+async fn editing_a_live_timers_url_in_place_re_dials_without_a_restart() {
+    let scenario = vec![(
+        0usize,
+        node_csv(&NodeCsv {
+            ticks_per_lap: 2,
+            peak_rssi: 180,
+            baseline_rssi: 70,
+            seed: 0,
+        }),
+    )];
+    let rh = RhContainer::start(RH_URL_EDIT_PORT, TICK, &scenario);
+
+    // === Everything below is built ONCE. Nothing here is rebuilt after the URL edit. ===
+    let registry = EventRegistry::new(None).expect("event registry");
+    // The timer is created pointing at the WRONG address — the typo, as the RD would save it.
+    let rh_timer = registry
+        .timers()
+        .create(&CreateTimerRequest {
+            name: "Field RH".into(),
+            kind: TimerKind::Rotorhazard {
+                url: WRONG_URL.to_string(),
+            },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
+        })
+        .expect("create RH timer at the wrong URL");
+    registry
+        .set_active(&practice())
+        .expect("make Practice active");
+    registry
+        .set_timers(&practice(), vec![rh_timer.id.clone()])
+        .expect("select the RH timer for Practice");
+
+    let _bridge = spawn_registry_bridge(
+        registry.clone(),
+        SourceConfig::from_env(),
+        AdapterId(SIM_ADAPTER.to_string()),
+    );
+
+    // === 1. The wrong URL surfaces as `Error` — the state the RD is staring at. ===
+    // The dialer retries with backoff, so it oscillates Connecting → Error; we only need to observe
+    // that it *reaches* Error (it never reaches Connected — there is nothing on that port).
+    let timers = registry.timers();
+    let id = rh_timer.id.clone();
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            timers.get(&id).map(|t| t.status) == Some(TimerStatus::Error)
+        })
+        .await,
+        "a timer pointed at an unreachable URL must surface TimerStatus::Error; status = {:?}",
+        timers.get(&id).map(|t| t.status)
+    );
+    eprintln!("app url-edit e2e: wrong URL surfaced Error, as the RD would see it");
+
+    // === 2. The RD EDITS THE URL IN PLACE — same timer, same id, no restart. ===
+    registry
+        .timers()
+        .update(
+            &rh_timer.id,
+            &gridfpv_server::timers::UpdateTimerRequest {
+                kind: Some(TimerKind::Rotorhazard {
+                    url: rh.url().to_string(),
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("repoint the existing timer at the real RotorHazard");
+    eprintln!(
+        "app url-edit e2e: repointed {:?} → {} (in place, no restart)",
+        rh_timer.name,
+        rh.url()
+    );
+
+    // === 3. It re-dials on its own and reaches `Connected` at the new address. ===
+    // The reconciler supersedes the failing dialer (cancelling it out of its retry backoff, which
+    // caps at 10s) and opens a fresh connection on the edited URL; the container also needs its
+    // socket handshake. 60s is generous headroom over that worst case.
+    assert!(
+        wait_for(Duration::from_secs(60), || {
+            timers.get(&id).map(|t| t.status) == Some(TimerStatus::Connected)
+        })
+        .await,
+        "the edited URL must re-dial and reach Connected with no restart; status = {:?}",
+        timers.get(&id).map(|t| t.status)
+    );
+
+    // The connection is genuinely live at the NEW address, not just a status flag: `Connected` is
+    // only published after a real socket connect, and the plugin handshake is re-probed over it.
+    assert!(
+        wait_for(Duration::from_secs(15), || {
+            timers.get(&id).and_then(|t| t.plugin).is_some()
+        })
+        .await,
+        "the plugin must be re-probed over the re-dialled connection; plugin = {:?}",
+        timers.get(&id).and_then(|t| t.plugin)
+    );
+
+    // The timer is the same record throughout — the recovery was an edit, not a re-create.
+    let settled = timers.get(&id).expect("the timer still exists");
+    assert_eq!(settled.id, rh_timer.id, "the timer id must be unchanged");
+    assert_eq!(
+        settled.kind,
+        TimerKind::Rotorhazard {
+            url: rh.url().to_string()
+        },
+        "the timer must be dialled at the edited URL"
+    );
+    eprintln!(
+        "app url-edit e2e: {:?} recovered to Connected at {} after an in-place URL edit \
+         (no restart) — plugin {:?}",
+        settled.name,
+        rh.url(),
+        settled.plugin
+    );
+}
