@@ -85,8 +85,10 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   // The round lists as an open-practice round seeded from 2 channels, showing its time limit.
   const row = page.getByRole('listitem').filter({ hasText: LABEL });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  // The friendly format name shows in the list (Rounds form redesign item 1), not the raw key.
-  await expect(row.getByText('Open Practice', { exact: true })).toBeVisible();
+  // The friendly format name shows in the list (Rounds form redesign item 1), not the raw key. The
+  // `open_practice` wire key is unchanged; only the friendly label was shortened to "Practice"
+  // (#218 — see `lib/formats.ts` FORMAT_LABELS).
+  await expect(row.getByText('Practice', { exact: true })).toBeVisible();
   await expect(row.getByText(/Open practice · 2 channel/)).toBeVisible();
   await expect(row.getByText('1m', { exact: true })).toBeVisible();
 
@@ -98,8 +100,9 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   await expect(heatSection.getByRole('button', { name: 'Generate heats' })).toHaveCount(0);
   // The auto-created heat lands (its node lineup shows in the heats list).
   await expect(heatSection.getByText(/node-0/).first()).toBeVisible({ timeout: 15_000 });
-  // It displays under the friendly name "Open Practice Heat", not its generated heat id.
-  await expect(heatSection.getByText('Open Practice Heat').first()).toBeVisible();
+  // It displays under the friendly name "Practice Heat", not its generated heat id
+  // (`OPEN_PRACTICE_HEAT_NAME` in `lib/heats.ts`).
+  await expect(heatSection.getByText('Practice Heat').first()).toBeVisible();
 
   // ── Make this round's auto-created heat the current heat (SetCurrentHeat) ────────────────────
   // The per-channel board only renders when the open-practice heat is the current heat on the
