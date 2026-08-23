@@ -80,6 +80,29 @@
 //! itself trusts (deleted laps already removed, lap numbers assigned). So we treat
 //! `pass_record` as advisory only and translate it to no events; the snapshot diff is
 //! the single source of truth for passes.
+//!
+//! # Which source mints a pass (#389)
+//!
+//! Two streams can carry the same lap: RotorHazard's own `current_laps` snapshot and — on a
+//! plugin-equipped timer — the plugin's `gridfpv_pass` broadcast. The source is an **explicit,
+//! declared decision**, never a race:
+//!
+//! - The plugin is authoritative **only when it advertised the `live_pass` capability** in its
+//!   `gridfpv_hello_ack` (the transport calls
+//!   [`set_plugin_live_pass`](RotorHazardAdapter::set_plugin_live_pass)). The plugin earns that
+//!   capability with a load-time self-check, so advertising it means "I have proven I can read a
+//!   lap atom on this RH build".
+//! - Otherwise `current_laps` is authoritative and `gridfpv_pass` broadcasts are **ignored**.
+//! - When the plugin is authoritative, a lap that `current_laps` reports and the plugin never
+//!   delivered triggers a **loud** liveness fallback: the adapter emits the lap from the snapshot,
+//!   surfaces a warning ([`take_pass_warning`](RotorHazardAdapter::take_pass_warning)), and
+//!   switches this race's pass source back to `current_laps` for good.
+//!
+//! Before #389 both paths simply shared the dedup and "whichever arrived first won". That is
+//! timing-dependent — RotorHazard triggers `RACE_LAP_RECORDED` into a **spawned gevent greenlet**
+//! and then calls `emit_current_laps()` inline, so which broadcast reaches the socket first is not
+//! actually determined — and, worse, a bad plugin atom that won the race silently suppressed the
+//! correct `current_laps` value with no way to notice. Explicit selection removes both.
 
 use gridfpv_events::{
     AdapterId, CompetitorRef, Event, GateIndex, Pass, SessionId, SignalChunk, SignalContext,
@@ -553,7 +576,8 @@ pub struct RawGridSignalNode {
 /// A `gridfpv_pass` broadcast from the GridFPV RH plugin (see [`Raw::GridPass`]) — the per-node pass
 /// atom the plugin emits natively from `RACE_LAP_RECORDED` (D16, Slice 3), attributed by node seat.
 /// Folds to the same canonical [`Pass`] the `current_laps` snapshot does, deduped on the per-node
-/// `lap_number`, so the two coexist (whichever arrives first wins; a stock RH has only `current_laps`).
+/// `lap_number`. Honoured **only** when the plugin advertised the `live_pass` capability — see the
+/// [source-selection rules](self#which-source-mints-a-pass-389); a stock RH never sends one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawGridPass {
     /// Zero-based node/seat index the lap was recorded on.
@@ -565,6 +589,35 @@ pub struct RawGridPass {
     /// The pass's peak RSSI, if RH reported one — becomes the [`Pass`]'s [`SignalContext`].
     #[serde(default)]
     pub peak_rssi: Option<f64>,
+}
+
+/// Which stream is currently authoritative for minting a [`Pass`] — see the
+/// [source-selection rules](self#which-source-mints-a-pass-389). Reported by
+/// [`RotorHazardAdapter::pass_source`] so the decision is inspectable rather than implied by
+/// whatever happened to arrive first (#389).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassSource {
+    /// The GridFPV RH plugin's native `gridfpv_pass` broadcast. Selected because the plugin
+    /// advertised `live_pass`; `current_laps` is then a checked backstop, not a second source.
+    Plugin,
+    /// RotorHazard's own `current_laps` snapshot — the stock path. Selected when no plugin
+    /// advertised `live_pass`, or after the liveness fallback fired for this race.
+    CurrentLaps,
+}
+
+/// A lap seen in a `current_laps` snapshot that the authoritative plugin has not delivered *yet*.
+///
+/// Held for exactly one snapshot round before the fallback treats it as a confirmed miss: RH
+/// dispatches the plugin's `RACE_LAP_RECORDED` handler on a spawned greenlet but emits
+/// `current_laps` inline, so a snapshot legitimately arriving *before* the plugin's pass must not
+/// be mistaken for a dead plugin. Everything needed to mint the pass later is kept here.
+#[derive(Debug, Clone)]
+struct PendingLap {
+    /// The lap's `lap_time_stamp` (cumulative ms since race start).
+    lap_time_stamp: f64,
+    /// The seat's pilot callsign where the snapshot carried one — used to name the seat in the
+    /// fallback warning (and in `CompetitorSeen`) rather than leaking a raw `node-N` handle.
+    callsign: Option<String>,
 }
 
 /// The competitor handle for a RotorHazard node seat: `"node-{index}"`. Stable across
@@ -665,6 +718,59 @@ pub struct RotorHazardAdapter {
     /// just created (`add_pilot` — the highest id) to assign onto a heat seat when seating. Empty
     /// until a `pilot_data` is folded.
     pending_pilot_ids: Vec<i64>,
+    /// Whether the connected GridFPV plugin advertised the **`live_pass`** capability (#389). Set
+    /// by the transport from the `gridfpv_hello_ack`, and reset to `false` on every (re)connect so
+    /// a timer whose plugin was removed degrades to `current_laps` instead of waiting forever for
+    /// passes that will never come. `true` makes the plugin the authoritative pass source; `false`
+    /// makes `gridfpv_pass` broadcasts inert.
+    plugin_live_pass: bool,
+    /// `(node_index, lap_number)` of every lap the plugin's `gridfpv_pass` delivered this race —
+    /// the record of what the authoritative source actually produced, which is what lets a
+    /// `current_laps` lap be recognised as a genuine plugin miss. Reset each race.
+    plugin_passes: std::collections::HashSet<(usize, u64)>,
+    /// Laps a `current_laps` snapshot reported that the authoritative plugin has not delivered yet,
+    /// held one snapshot round (see [`PendingLap`]). Ordered so a flush emits deterministically by
+    /// `(node, lap)`. Always empty unless the plugin is authoritative. Reset each race.
+    pending_snapshot_laps: std::collections::BTreeMap<(usize, u64), PendingLap>,
+    /// Set when the liveness fallback fires: the plugin advertised `live_pass` but `current_laps`
+    /// showed a lap it never delivered. From then on (for this race) `current_laps` is
+    /// authoritative and `gridfpv_pass` is ignored, so a plugin producing wrong atoms cannot
+    /// re-poison the stream. Reset each race.
+    pass_fallback_engaged: bool,
+    /// The most recent pass-source warning, drained by the app via
+    /// [`take_pass_warning`](Self::take_pass_warning) to surface it to the operator. #389's
+    /// symptom was a *silent* degrade; this is what makes the next one self-announcing.
+    pass_warning: Option<String>,
+    /// Per-race diagnostics counters: passes minted from the plugin path, passes minted from the
+    /// `current_laps` path, laps dropped by the dedup, and `gridfpv_pass` broadcasts ignored
+    /// because the plugin is not the selected source. Logged as one line at each race end (#380
+    /// makes that reachable in the field).
+    counts: PassCounts,
+    /// One-shot latch so an un-advertised plugin's `gridfpv_pass` flood logs once per adapter, not
+    /// once per lap.
+    warned_unadvertised_pass: bool,
+    /// One-shot latch for the dense-trace growth warning (see [`DENSE_TRACE_WARN_SAMPLES`]).
+    warned_dense_trace: bool,
+    /// Per-seat pilot callsign, learned from `current_laps` (which carries each node's pilot, with
+    /// or without laps, from the moment a heat is staged). It names the seat in
+    /// [`Event::CompetitorSeen`] and in the fallback warning whichever stream mints the pass — the
+    /// plugin's `gridfpv_pass` atom carries no pilot, and announcing a raw `node-N` where a
+    /// callsign is known is the friendly-name leak the project rules forbid.
+    seat_callsign: std::collections::HashMap<usize, String>,
+}
+
+/// Per-race ingest counters for the pass path (#389 field diagnostics).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PassCounts {
+    /// Passes minted from the plugin's `gridfpv_pass`.
+    plugin: u64,
+    /// Passes minted from the `current_laps` snapshot.
+    snapshot: u64,
+    /// Laps the [`Deduplicator`] suppressed (a re-sent snapshot, a reconnect replay, or the
+    /// non-authoritative stream re-reporting a lap already emitted).
+    deduped: u64,
+    /// `gridfpv_pass` broadcasts discarded because the plugin is not the selected source.
+    ignored_plugin: u64,
 }
 
 /// A pending per-pilotrace marshal pull the transport issues (`get_pilotrace { pilotrace_id }`),
@@ -681,6 +787,15 @@ pub struct PilotRaceRequest {
 /// (marshaling.html §4) — the capture is faithful to *what RH streams*, which is one aggregate
 /// sample per emit, not the detector's internal per-tick history.
 pub const DEFAULT_NODE_DATA_PERIOD_MICROS: u32 = 100_000;
+
+/// Per-seat dense-trace length past which the adapter warns once (#389 field diagnostics).
+///
+/// The plugin streams the dense history incrementally, but the adapter re-emits the whole
+/// accumulated trace each time it grows, so the per-tick cost rises with heat length. A long heat
+/// on a full field can push this into the range where the socket callback thread — the same thread
+/// that parses `current_laps` — spends most of its time copying signal. Mock heats never get near
+/// it, which is why nothing in the harness ever said so.
+const DENSE_TRACE_WARN_SAMPLES: usize = 20_000;
 
 impl RotorHazardAdapter {
     /// A RotorHazard adapter with the default id (`"rotorhazard"`).
@@ -710,7 +825,72 @@ impl RotorHazardAdapter {
             pending_heat_ids: Vec::new(),
             pending_heat_slots: std::collections::HashMap::new(),
             pending_pilot_ids: Vec::new(),
+            // No plugin has spoken yet: `current_laps` is authoritative until one advertises
+            // `live_pass` (#389).
+            plugin_live_pass: false,
+            plugin_passes: std::collections::HashSet::new(),
+            pending_snapshot_laps: std::collections::BTreeMap::new(),
+            pass_fallback_engaged: false,
+            pass_warning: None,
+            counts: PassCounts::default(),
+            warned_unadvertised_pass: false,
+            warned_dense_trace: false,
+            seat_callsign: std::collections::HashMap::new(),
         }
+    }
+
+    /// Declare whether the connected GridFPV plugin advertised the **`live_pass`** capability
+    /// (#389) — the *explicit* pass-source selection.
+    ///
+    /// The transport calls this from the `gridfpv_hello_ack` handler, and calls it with `false` on
+    /// every (re)connect before any handler can fire, so the decision always reflects the plugin
+    /// actually in front of us. `true` ⇒ the plugin's `gridfpv_pass` mints the laps and
+    /// `current_laps` is a checked backstop; `false` ⇒ `current_laps` mints the laps and
+    /// `gridfpv_pass` is ignored.
+    pub fn set_plugin_live_pass(&mut self, advertised: bool) {
+        if self.plugin_live_pass != advertised {
+            eprintln!(
+                "gridfpv: rotorhazard: pass source = {} (plugin `live_pass` capability {})",
+                if advertised {
+                    "GridFPV plugin (gridfpv_pass)"
+                } else {
+                    "RotorHazard current_laps"
+                },
+                if advertised {
+                    "advertised"
+                } else {
+                    "not advertised"
+                },
+            );
+        }
+        self.plugin_live_pass = advertised;
+        // A source switch invalidates the in-flight liveness bookkeeping, not the dedup: laps
+        // already emitted stay emitted.
+        self.pending_snapshot_laps.clear();
+        self.warned_unadvertised_pass = false;
+    }
+
+    /// Whether the connected plugin advertised `live_pass`.
+    pub fn plugin_live_pass(&self) -> bool {
+        self.plugin_live_pass
+    }
+
+    /// The stream currently authoritative for minting passes — see [`PassSource`].
+    pub fn pass_source(&self) -> PassSource {
+        if self.plugin_live_pass && !self.pass_fallback_engaged {
+            PassSource::Plugin
+        } else {
+            PassSource::CurrentLaps
+        }
+    }
+
+    /// Take (and clear) the latest pass-source warning, if the liveness fallback fired.
+    ///
+    /// A `Some` means the plugin advertised `live_pass` but did not deliver laps RotorHazard
+    /// reported, so the adapter fell back to `current_laps`. It is a **loud** fallback by design:
+    /// #389 was undiagnosable precisely because the degrade was silent.
+    pub fn take_pass_warning(&mut self) -> Option<String> {
+        self.pass_warning.take()
     }
 
     /// Take (and clear) the configured heat ids learned from the most recent `heat_data`.
@@ -786,13 +966,34 @@ impl RotorHazardAdapter {
         SourceTime::from_micros((lap_time_stamp * 1_000.0).round() as i64)
     }
 
-    /// Translate a `current_laps` snapshot. For each node array index, emit a `Pass`
-    /// for every lap the [`Deduplicator`] has not already accepted (keyed on the
-    /// per-node `lap_number`). A node's first surfaced lap also announces the seat as
-    /// a [`Event::CompetitorSeen`]. Annotates passes with the cached per-node RSSI.
+    /// Translate a `current_laps` snapshot.
+    ///
+    /// **When `current_laps` is the selected source** (the stock path — no plugin advertised
+    /// `live_pass`, or the liveness fallback already fired) this emits a `Pass` for every lap the
+    /// [`Deduplicator`] has not already accepted, keyed on the per-node `lap_number`. A node's
+    /// first surfaced lap also announces the seat as [`Event::CompetitorSeen`], and passes are
+    /// annotated with the cached per-node RSSI.
+    ///
+    /// **When the plugin is the selected source** the snapshot stops being a pass source and
+    /// becomes the *check* on the authoritative one (#389): a lap the plugin already delivered is
+    /// dropped, and one it has not is held for a single snapshot round ([`PendingLap`]) — because
+    /// RH dispatches the plugin's handler on a spawned greenlet while emitting `current_laps`
+    /// inline, so a snapshot arriving first is normal and is not evidence of a dead plugin. A lap
+    /// still undelivered when the *next* snapshot repeats it is a confirmed miss: the fallback
+    /// engages loudly and `current_laps` mints the laps for the rest of the race.
     fn translate_current_laps(&mut self, snapshot: RawCurrentLaps, out: &mut Vec<Event>) {
         for (node_index, node) in snapshot.current.node_index.into_iter().enumerate() {
-            let competitor = seat_ref(node_index);
+            // Learn the seat's pilot from the snapshot even when it has no laps yet: it is the
+            // only place RotorHazard names the seat, and the plugin's pass atom never does.
+            // Mirror the latest snapshot exactly — including *forgetting* a seat that is no
+            // longer seated — so a later heat can never be announced under a previous heat's
+            // pilot. RotorHazard emits `current_laps` at staging, before any lap, so the names are
+            // always current by the time a pass can arrive.
+            let callsign = node.pilot.as_ref().and_then(|p| p.callsign.clone());
+            match callsign.clone() {
+                Some(callsign) => self.seat_callsign.insert(node_index, callsign),
+                None => self.seat_callsign.remove(&node_index),
+            };
 
             for lap in node.laps {
                 // RH 4.3+/4.4 may carry deleted laps inline (older RH pre-filtered them);
@@ -800,47 +1001,142 @@ impl RotorHazardAdapter {
                 if lap.deleted == Some(true) {
                     continue;
                 }
-                let signal = self
-                    .pass_peak_rssi
-                    .get(&node_index)
-                    .map(|&rssi_peak| SignalContext {
-                        rssi_peak: Some(rssi_peak),
-                    });
+                let key = (node_index, lap.lap_number);
 
-                let pass = Pass {
-                    adapter: self.id.clone(),
-                    competitor: competitor.clone(),
-                    at: Self::lap_stamp_to_source_time(lap.lap_time_stamp),
-                    // The per-node lap_number is the monotonic sequence: it orders
-                    // passes and anchors snapshot/reconnect dedup.
-                    sequence: Some(lap.lap_number),
-                    // RotorHazard reports the lap gate only (single start/finish gate).
-                    gate: GateIndex::LAP,
-                    signal,
-                    // The adapter doesn't know the heat; the bridge sink stamps it at append.
-                    heat: None,
-                };
-
-                // A re-sent snapshot replays every lap; only accept genuinely new ones.
-                if !self.dedup.observe(&pass) {
+                // --- the plugin is authoritative: this snapshot only checks it ---------------
+                if self.pass_source() == PassSource::Plugin {
+                    if self.plugin_passes.contains(&key) {
+                        // The authoritative source already minted this lap. Expected on every
+                        // snapshot after every lap, so counted rather than logged per-drop.
+                        self.counts.deduped += 1;
+                        continue;
+                    }
+                    if !self.pending_snapshot_laps.contains_key(&key) {
+                        // First sighting — give the plugin its round to deliver.
+                        self.pending_snapshot_laps.insert(
+                            key,
+                            PendingLap {
+                                lap_time_stamp: lap.lap_time_stamp,
+                                callsign: callsign.clone(),
+                            },
+                        );
+                        continue;
+                    }
+                    // Second sighting with the plugin still silent: a confirmed miss.
+                    self.engage_pass_fallback(node_index, lap.lap_number, callsign.as_deref());
+                    self.flush_pending_snapshot_laps(out);
+                    // This lap was among the flushed pending set, so it is already out.
                     continue;
                 }
 
-                // First genuinely new lap for this seat implies the seat is active.
-                if self.seen_seats.insert(node_index) {
-                    let callsign = node.pilot.as_ref().and_then(|p| p.callsign.clone());
-                    out.push(Event::CompetitorSeen {
-                        adapter: self.id.clone(),
-                        // The competitor handle is always the node seat (stable across
-                        // pilot edits); a known callsign is informational only.
-                        competitor: callsign
-                            .map(CompetitorRef)
-                            .unwrap_or_else(|| competitor.clone()),
-                    });
-                }
-
-                out.push(Event::Pass(pass));
+                // --- `current_laps` is authoritative: mint the pass -------------------------
+                self.emit_snapshot_pass(
+                    node_index,
+                    lap.lap_number,
+                    lap.lap_time_stamp,
+                    callsign.as_deref(),
+                    out,
+                );
             }
+        }
+    }
+
+    /// Mint a [`Pass`] (and, for a seat's first, a [`Event::CompetitorSeen`]) from a `current_laps`
+    /// lap. Runs through the shared [`Deduplicator`], so a re-sent snapshot or a reconnect replay
+    /// is suppressed exactly as before.
+    fn emit_snapshot_pass(
+        &mut self,
+        node_index: usize,
+        lap_number: u64,
+        lap_time_stamp: f64,
+        callsign: Option<&str>,
+        out: &mut Vec<Event>,
+    ) {
+        let competitor = seat_ref(node_index);
+        let signal = self
+            .pass_peak_rssi
+            .get(&node_index)
+            .map(|&rssi_peak| SignalContext {
+                rssi_peak: Some(rssi_peak),
+            });
+
+        let pass = Pass {
+            adapter: self.id.clone(),
+            competitor: competitor.clone(),
+            at: Self::lap_stamp_to_source_time(lap_time_stamp),
+            // The per-node lap_number is the monotonic sequence: it orders passes and anchors
+            // snapshot/reconnect dedup.
+            sequence: Some(lap_number),
+            // RotorHazard reports the lap gate only (single start/finish gate).
+            gate: GateIndex::LAP,
+            signal,
+            // The adapter doesn't know the heat; the bridge sink stamps it at append.
+            heat: None,
+        };
+
+        // A re-sent snapshot replays every lap; only accept genuinely new ones.
+        if !self.dedup.observe(&pass) {
+            self.counts.deduped += 1;
+            return;
+        }
+
+        // First genuinely new lap for this seat implies the seat is active.
+        if self.seen_seats.insert(node_index) {
+            out.push(Event::CompetitorSeen {
+                adapter: self.id.clone(),
+                // Name the seat by its pilot where RotorHazard gave us one — the project rule is
+                // that a raw `node-N` handle never reaches a surface that has a friendly name. The
+                // seat ref stays the durable handle everything else keys on.
+                competitor: callsign
+                    .map(|c| c.to_string())
+                    .or_else(|| self.seat_callsign.get(&node_index).cloned())
+                    .map(CompetitorRef)
+                    .unwrap_or_else(|| competitor.clone()),
+            });
+        }
+
+        self.counts.snapshot += 1;
+        out.push(Event::Pass(pass));
+    }
+
+    /// Engage the **loud** liveness fallback (#389): the plugin advertised `live_pass` but
+    /// RotorHazard's own snapshot reports a lap it never delivered.
+    ///
+    /// Switches this race's [`PassSource`] back to `current_laps` for good — a plugin that missed
+    /// a lap has already shown its stream is not trustworthy, and letting it keep minting could
+    /// re-poison the dedup — and records a warning the app drains via
+    /// [`take_pass_warning`](Self::take_pass_warning). Silent fallback is what made #389 cost a day
+    /// of bisecting; this names it in seconds.
+    fn engage_pass_fallback(&mut self, node_index: usize, lap_number: u64, callsign: Option<&str>) {
+        self.pass_fallback_engaged = true;
+        // Name the seat by its pilot where we know one; the raw `node-N` handle is the last resort.
+        let who = callsign
+            .map(|c| c.to_string())
+            .or_else(|| self.seat_callsign.get(&node_index).cloned())
+            .unwrap_or_else(|| seat_ref(node_index).0);
+        let warning = format!(
+            "The timer's GridFPV plugin advertised live passes but never delivered lap {lap_number} \
+             for {who}, which RotorHazard itself reports. Falling back to RotorHazard's own lap \
+             table for the rest of this race — laps are still being recorded, but the plugin's \
+             pass stream is not trustworthy on this timer (#389)."
+        );
+        eprintln!("gridfpv: rotorhazard: WARNING — {warning}");
+        self.pass_warning = Some(warning);
+    }
+
+    /// Emit every held [`PendingLap`] (deterministically, by `(node, lap)`) through the
+    /// `current_laps` path. Called when the fallback engages, and again at race end so a lap held
+    /// at the final snapshot is never lost.
+    fn flush_pending_snapshot_laps(&mut self, out: &mut Vec<Event>) {
+        let pending = std::mem::take(&mut self.pending_snapshot_laps);
+        for ((node_index, lap_number), held) in pending {
+            self.emit_snapshot_pass(
+                node_index,
+                lap_number,
+                held.lap_time_stamp,
+                held.callsign.as_deref(),
+                out,
+            );
         }
     }
 
@@ -878,6 +1174,14 @@ impl RotorHazardAdapter {
                 // spanning) lifetime.
                 self.dedup = Deduplicator::new();
                 self.seen_seats.clear();
+                // Pass-source bookkeeping is per race too (#389): a new heat re-offers the plugin
+                // the authoritative role, and last heat's delivered/held laps say nothing about
+                // this one. The advertised capability itself (`plugin_live_pass`) persists — it is
+                // a property of the connected plugin, refreshed on each (re)connect handshake.
+                self.plugin_passes.clear();
+                self.pending_snapshot_laps.clear();
+                self.pass_fallback_engaged = false;
+                self.counts = PassCounts::default();
                 // Marshaling Slice 1: a fresh race resets the trace's time base so each heat's
                 // captured chunks start at source-time 0 — deterministic and heat-local.
                 self.race_active = true;
@@ -889,6 +1193,7 @@ impl RotorHazardAdapter {
                 // builds a fresh trace. (`live_signal_active` persists — once the plugin is
                 // streaming, it streams every heat.)
                 self.dense_accum.clear();
+                self.warned_dense_trace = false;
                 self.pending_pilotrace_requests.clear();
                 self.pilotrace_start_time.clear();
                 out.push(Event::SessionStarted {
@@ -900,6 +1205,43 @@ impl RotorHazardAdapter {
                 // Stop capturing trace samples once the race closes (idle `node_data` is not
                 // heat evidence).
                 self.race_active = false;
+                // A lap held for the plugin at the final snapshot has no next snapshot to confirm
+                // it, so the race end is its deadline: fall back loudly and emit it rather than
+                // lose it (#389).
+                if !self.pending_snapshot_laps.is_empty() {
+                    let held = self.pending_snapshot_laps.len();
+                    let (node_index, lap_number) = *self
+                        .pending_snapshot_laps
+                        .keys()
+                        .next()
+                        .expect("non-empty pending laps");
+                    let callsign = self
+                        .pending_snapshot_laps
+                        .values()
+                        .next()
+                        .and_then(|lap| lap.callsign.clone());
+                    eprintln!(
+                        "gridfpv: rotorhazard: race ended with {held} lap(s) the `live_pass` \
+                         plugin never delivered"
+                    );
+                    self.engage_pass_fallback(node_index, lap_number, callsign.as_deref());
+                    self.flush_pending_snapshot_laps(out);
+                }
+                // One diagnostic line per heat: where the laps actually came from. #389 had no
+                // field diagnostics at all, so "the plugin delivered 0 of 14" was unanswerable.
+                // Skipped for a DONE that carried no laps at all (the status RotorHazard replays
+                // on connect), which would otherwise print a line of zeros per reconnect.
+                if self.counts != PassCounts::default() {
+                    eprintln!(
+                        "gridfpv: rotorhazard: heat pass summary — source={:?}, plugin={}, \
+                         current_laps={}, deduped={}, ignored_plugin_passes={}",
+                        self.pass_source(),
+                        self.counts.plugin,
+                        self.counts.snapshot,
+                        self.counts.deduped,
+                        self.counts.ignored_plugin,
+                    );
+                }
                 // The heat just ended: a signal-capable adapter should now pull RotorHazard's dense
                 // `current_marshal_data` history (the full-fidelity trace its marshal page reviews).
                 // Record the intent for the transport to act on — the pure translator can't emit the
@@ -1214,6 +1556,19 @@ impl RotorHazardAdapter {
                 false // out-of-sync slice; wait for the next full snapshot to resync
             };
             if changed {
+                // The accumulated trace is re-emitted in full whenever it grows, so a very long
+                // dense run costs O(n) per plugin tick. That is invisible on the mock harness
+                // (short heats, few samples) and was one of #389's suspects in the field, so say
+                // it out loud once per race rather than degrade silently.
+                if acc.0.len() > DENSE_TRACE_WARN_SAMPLES && !self.warned_dense_trace {
+                    self.warned_dense_trace = true;
+                    eprintln!(
+                        "gridfpv: rotorhazard: the plugin's dense signal trace has passed {} \
+                         samples on one seat; each further tick re-emits the whole trace, so \
+                         ingest cost is growing with heat length (#389 diagnostics)",
+                        DENSE_TRACE_WARN_SAMPLES,
+                    );
+                }
                 out.push(Event::SignalHistory(SignalHistory {
                     adapter: self.id.clone(),
                     competitor: seat_ref(node_index),
@@ -1225,13 +1580,40 @@ impl RotorHazardAdapter {
     }
 
     /// Fold a `gridfpv_pass` broadcast (D16, Slice 3) into a canonical [`Pass`], attributed by node
-    /// seat. Mirrors [`translate_current_laps`](Self::translate_current_laps): same
-    /// `(competitor, sequence=lap_number)` dedup (so the plugin's native pass and the `current_laps`
-    /// re-pass never double-count — whichever arrives first wins), and a seat's first surfaced pass
-    /// announces it as [`Event::CompetitorSeen`].
+    /// seat — **only when the plugin is the selected pass source** (#389).
+    ///
+    /// The plugin is selected when it advertised `live_pass` and the liveness fallback has not
+    /// fired this race; otherwise the broadcast is inert and `current_laps` mints the lap. That is
+    /// the whole of the source decision: no arrival-order race, and a plugin that never earned the
+    /// capability cannot pre-empt the stock path. Deduped on `(competitor, sequence=lap_number)`
+    /// like the snapshot path, so a lap already emitted is never double-counted, and a seat's first
+    /// surfaced pass announces it as [`Event::CompetitorSeen`].
     fn translate_grid_pass(&mut self, p: RawGridPass, out: &mut Vec<Event>) {
+        if !self.plugin_live_pass {
+            self.counts.ignored_plugin += 1;
+            if !self.warned_unadvertised_pass {
+                self.warned_unadvertised_pass = true;
+                eprintln!(
+                    "gridfpv: rotorhazard: ignoring `gridfpv_pass` broadcasts — the timer's \
+                     GridFPV plugin did not advertise the `live_pass` capability, so RotorHazard's \
+                     own lap table is the pass source (#389)"
+                );
+            }
+            return;
+        }
+        if self.pass_fallback_engaged {
+            // The fallback already ruled this stream untrustworthy for the rest of the race.
+            self.counts.ignored_plugin += 1;
+            return;
+        }
+
         let node_index = p.node_index;
         let competitor = seat_ref(node_index);
+        // Record what the authoritative source actually produced — this is what lets a
+        // `current_laps` lap be recognised as a genuine miss rather than a duplicate.
+        self.plugin_passes.insert((node_index, p.lap_number));
+        self.pending_snapshot_laps
+            .remove(&(node_index, p.lap_number));
         let signal = p.peak_rssi.map(|rssi| SignalContext {
             rssi_peak: Some(rssi as f32),
         });
@@ -1246,14 +1628,23 @@ impl RotorHazardAdapter {
             heat: None,
         };
         if !self.dedup.observe(&pass) {
+            self.counts.deduped += 1;
             return;
         }
         if self.seen_seats.insert(node_index) {
             out.push(Event::CompetitorSeen {
                 adapter: self.id.clone(),
-                competitor: competitor.clone(),
+                // Name the seat by its pilot where the snapshot told us one — the same handle the
+                // `current_laps` path announces, so the pass source cannot change how a seat is
+                // introduced. The raw node handle is the last resort.
+                competitor: self
+                    .seat_callsign
+                    .get(&node_index)
+                    .map(|c| CompetitorRef(c.clone()))
+                    .unwrap_or_else(|| competitor.clone()),
             });
         }
+        self.counts.plugin += 1;
         out.push(Event::Pass(pass));
     }
 }
@@ -2227,6 +2618,8 @@ mod tests {
     #[test]
     fn grid_pass_emits_pass_seen_and_dedups_with_current_laps() {
         let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        // The plugin advertised `live_pass`, so it is the selected pass source (#389).
+        a.set_plugin_live_pass(true);
         a.translate(Raw::RaceStatus(RawRaceStatus {
             race_status: race_status::RACING,
             race_heat_id: Some(1),
@@ -2321,6 +2714,229 @@ mod tests {
         let h = histories(&events);
         assert_eq!(h[0].times[0], 0, "a pre-start sample clamps to 0");
         assert_eq!(h[0].rssi, vec![0, u16::MAX]);
+    }
+
+    // ---------------------------------------------------------------------------------
+    // #389 — explicit pass-source selection. Before this, `gridfpv_pass` and `current_laps`
+    // shared one dedup and "whichever arrived first won", so a bad plugin atom silently
+    // suppressed the correct snapshot value and the timer recorded no laps at all.
+    // ---------------------------------------------------------------------------------
+
+    /// Count the `Pass` events in a batch.
+    fn passes(events: &[Event]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Pass(_)))
+            .count()
+    }
+
+    /// Start a race on an adapter, discarding the lifecycle events.
+    fn start_race(a: &mut RotorHazardAdapter) {
+        a.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        }));
+    }
+
+    fn grid_pass(node_index: usize, lap_number: u64, lap_time_stamp: f64) -> Raw {
+        Raw::GridPass(RawGridPass {
+            node_index,
+            lap_number,
+            lap_time_stamp,
+            peak_rssi: Some(180.0),
+        })
+    }
+
+    /// Advertised `live_pass` ⇒ the plugin mints the lap and the `current_laps` snapshot that
+    /// re-reports it does **not** double-count.
+    #[test]
+    fn advertised_plugin_is_the_pass_source_and_current_laps_does_not_double_count() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        a.set_plugin_live_pass(true);
+        start_race(&mut a);
+        assert_eq!(a.pass_source(), PassSource::Plugin);
+
+        let from_plugin = a.translate(grid_pass(0, 1, 1500.0));
+        assert_eq!(passes(&from_plugin), 1, "the plugin mints the lap");
+
+        // RH re-reports the same lap in every subsequent snapshot, forever.
+        let snap_one = a.translate(snapshot(0, 0, vec![lap(1, 1500.0)]));
+        let snap_two = a.translate(snapshot(0, 0, vec![lap(1, 1500.0)]));
+        assert_eq!(
+            passes(&snap_one) + passes(&snap_two),
+            0,
+            "current_laps must not re-mint a lap the authoritative plugin delivered"
+        );
+        assert_eq!(a.pass_source(), PassSource::Plugin, "no fallback fired");
+        assert!(a.take_pass_warning().is_none(), "nothing to warn about");
+    }
+
+    /// RotorHazard emits `current_laps` inline but dispatches the plugin's handler on a spawned
+    /// greenlet, so the snapshot legitimately arrives FIRST. That must not read as a dead plugin:
+    /// the lap is held one round, the plugin's pass lands, and exactly one pass is emitted.
+    #[test]
+    fn a_snapshot_arriving_before_the_plugin_pass_is_not_a_miss() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        a.set_plugin_live_pass(true);
+        start_race(&mut a);
+
+        let early = a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
+        assert_eq!(passes(&early), 0, "held for the authoritative source");
+
+        let late = a.translate(grid_pass(0, 0, 900.0));
+        assert_eq!(passes(&late), 1, "the plugin's pass mints it");
+        assert_eq!(a.pass_source(), PassSource::Plugin);
+        assert!(
+            a.take_pass_warning().is_none(),
+            "an out-of-order arrival is not a plugin failure"
+        );
+
+        // And the next snapshot still does not double-count it.
+        let again = a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
+        assert_eq!(passes(&again), 0);
+    }
+
+    /// No `live_pass` capability ⇒ `current_laps` is the source and plugin passes are inert. This
+    /// is the stock-RH path, and the safe degrade for a plugin whose self-check failed.
+    #[test]
+    fn without_the_capability_current_laps_is_the_pass_source() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        start_race(&mut a);
+        assert_eq!(a.pass_source(), PassSource::CurrentLaps);
+
+        // A plugin broadcasting passes it never earned the right to mint is ignored — including a
+        // degenerate zero-filled one, the shape that made #389 destructive.
+        let ignored = a.translate(grid_pass(0, 0, 0.0));
+        assert_eq!(passes(&ignored), 0, "an un-advertised plugin mints nothing");
+
+        // ...and the snapshot path still works, unpoisoned.
+        let snap = a.translate(snapshot(0, 0, vec![lap(0, 900.0), lap(1, 1500.0)]));
+        assert_eq!(passes(&snap), 2, "current_laps mints both laps");
+        let times: Vec<_> = snap
+            .iter()
+            .filter_map(|e| match e {
+                Event::Pass(p) => Some(p.at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            times,
+            vec![
+                SourceTime::from_micros(900_000),
+                SourceTime::from_micros(1_500_000)
+            ],
+            "the correct snapshot timestamps survive"
+        );
+    }
+
+    /// Advertised but silent: the plugin claimed `live_pass` and never delivered. The second
+    /// snapshot repeating an undelivered lap is the confirmation, and the fallback fires LOUDLY —
+    /// emitting the laps from `current_laps` and surfacing a warning — instead of dropping them.
+    #[test]
+    fn advertised_but_silent_plugin_falls_back_loudly() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        a.set_plugin_live_pass(true);
+        start_race(&mut a);
+
+        let first = a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
+        assert_eq!(passes(&first), 0, "one round of grace for the plugin");
+
+        // The next lap crossing re-sends the whole table; lap 0 is still undelivered.
+        let second = a.translate(snapshot(0, 0, vec![lap(0, 900.0), lap(1, 1500.0)]));
+        assert_eq!(
+            passes(&second),
+            2,
+            "the fallback emits the held lap AND the new one"
+        );
+        assert_eq!(
+            a.pass_source(),
+            PassSource::CurrentLaps,
+            "the source switches back for the rest of the race"
+        );
+        let warning = a.take_pass_warning().expect("the fallback must be loud");
+        assert!(
+            warning.contains("live passes") && warning.contains("#389"),
+            "the warning names the fault: {warning}"
+        );
+
+        // A plugin that starts talking again does not get to re-poison the stream this race.
+        let late = a.translate(grid_pass(0, 2, 2100.0));
+        assert_eq!(passes(&late), 0, "the demoted source mints nothing");
+        // And laps keep flowing from the snapshot.
+        let third = a.translate(snapshot(
+            0,
+            0,
+            vec![lap(0, 900.0), lap(1, 1500.0), lap(2, 2100.0)],
+        ));
+        assert_eq!(passes(&third), 1, "lap 2 still lands, from current_laps");
+    }
+
+    /// A lap held for the plugin at the FINAL snapshot has no next snapshot to confirm it, so the
+    /// race end is its deadline — it must be flushed, not lost.
+    #[test]
+    fn a_lap_held_for_the_plugin_is_flushed_at_race_end() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        a.set_plugin_live_pass(true);
+        start_race(&mut a);
+
+        assert_eq!(
+            passes(&a.translate(snapshot(0, 0, vec![lap(3, 4200.0)]))),
+            0
+        );
+
+        let done = a.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(1),
+        }));
+        assert_eq!(passes(&done), 1, "the held lap is emitted at race end");
+        assert!(a.take_pass_warning().is_some(), "and it is announced");
+    }
+
+    /// The fallback is per race: a fresh heat re-offers the plugin the authoritative role.
+    #[test]
+    fn the_pass_fallback_resets_on_the_next_race() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        a.set_plugin_live_pass(true);
+        start_race(&mut a);
+        a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
+        a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
+        assert_eq!(a.pass_source(), PassSource::CurrentLaps);
+
+        // Finish that heat and start the next one (the reset rides the RACING *transition*).
+        a.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(1),
+        }));
+        a.take_pass_warning();
+        a.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(2),
+        }));
+        assert_eq!(
+            a.pass_source(),
+            PassSource::Plugin,
+            "a new heat starts the plugin back on trial"
+        );
+        assert_eq!(passes(&a.translate(grid_pass(0, 0, 900.0))), 1);
+    }
+
+    /// A reconnect against a timer whose plugin was uninstalled must not leave the adapter waiting
+    /// for passes that can never come — the transport clears the capability, and `current_laps`
+    /// takes over immediately (no held laps carried across).
+    #[test]
+    fn clearing_the_capability_returns_the_source_to_current_laps() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        a.set_plugin_live_pass(true);
+        start_race(&mut a);
+        assert_eq!(passes(&a.translate(snapshot(0, 0, vec![lap(0, 900.0)]))), 0);
+
+        a.set_plugin_live_pass(false);
+        assert_eq!(a.pass_source(), PassSource::CurrentLaps);
+        assert_eq!(
+            passes(&a.translate(snapshot(0, 0, vec![lap(0, 900.0)]))),
+            1,
+            "the snapshot mints the lap once the plugin is gone"
+        );
     }
 
     #[test]
