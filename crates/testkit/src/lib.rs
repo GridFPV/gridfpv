@@ -41,6 +41,13 @@
 //! // ... connect a transport to `rh.url()`, drive a race, assert on the events ...
 //! // The container is torn down when `rh` is dropped.
 //! ```
+//!
+//! ## Which RotorHazard, with or without the plugin
+//!
+//! A test doesn't choose either: both come from the environment, so one test body runs in
+//! every configuration of `cargo xtask live`'s matrix. [`RH_VERSION_ENV`] picks the version
+//! (image `gridfpv-rotorhazard:<version>`, built on demand by [`ensure_rh_image`]);
+//! [`PLUGIN_ENV`] names a plugin dir to mount, and unset means stock RotorHazard.
 
 use std::fs;
 use std::net::TcpStream;
@@ -705,14 +712,54 @@ pub fn simultaneous(nodes: usize, laps: usize, gap: usize) -> Vec<(usize, String
     race(&plans)
 }
 
-/// The locally-built RotorHazard harness image (RH **v4.4.0**, mock nodes,
+/// The RotorHazard version the harness runs unless told otherwise: the current stable
+/// (RHAPI 1.4). One locally-built image per version, tagged `gridfpv-rotorhazard:<version>`.
+pub const DEFAULT_RH_VERSION: &str = "4.4.0";
+
+/// The **declared floor** (D16): RHAPI 1.3 / RotorHazard v4.3.0+ — the version the field
+/// timers actually run. The version × plugin matrix (`cargo xtask live`) covers this leg as
+/// well as [`DEFAULT_RH_VERSION`], so a regression that only bites on the floor — or only
+/// with the plugin installed (#389) — cannot hide behind a single green configuration.
+pub const FLOOR_RH_VERSION: &str = "4.3.0";
+
+/// Env var selecting which RotorHazard version the container runs — e.g. `4.3.0`
+/// (a leading `v` is accepted). Unset = [`DEFAULT_RH_VERSION`]. `cargo xtask live` sets it
+/// per matrix configuration, the same way [`PLUGIN_ENV`] selects with/without the plugin.
+pub const RH_VERSION_ENV: &str = "GRIDFPV_RH_VERSION";
+
+/// Normalize a version string to the bare `x.y.z` form used in image tags (`v4.3.0` →
+/// `4.3.0`); blank falls back to [`DEFAULT_RH_VERSION`].
+fn normalize_version(version: &str) -> String {
+    let v = version.trim().trim_start_matches(['v', 'V']);
+    if v.is_empty() {
+        DEFAULT_RH_VERSION.to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+/// The RotorHazard version this process's containers run: [`RH_VERSION_ENV`] if set,
+/// else [`DEFAULT_RH_VERSION`].
+pub fn rh_version() -> String {
+    normalize_version(&std::env::var(RH_VERSION_ENV).unwrap_or_default())
+}
+
+/// The locally-built RotorHazard harness image for `version` (mock nodes,
 /// `MOCK_NODE_SIGNAL=1` so `mock_data_{N}.csv` drives the signal). Built from
-/// `docker/rotorhazard/Dockerfile`; [`RhContainer::start`] builds it on demand if it
-/// is missing, so `cargo xtask live` stays a one-command run.
+/// `docker/rotorhazard/Dockerfile` with `--build-arg RH_VERSION=v<version>`;
+/// [`RhContainer::start`] builds it on demand if it is missing, so `cargo xtask live`
+/// stays a one-command run.
 ///
 /// This **replaces** the old `cruwaller/rotorhazard:latest` pull, which is stale at
 /// 4.0.0-beta.4 — below the GridFPV plugin floor (RHAPI 1.3 / RH v4.3.0+, D16).
-pub const RH_IMAGE: &str = "gridfpv-rotorhazard:4.4.0";
+pub fn rh_image_for(version: &str) -> String {
+    format!("gridfpv-rotorhazard:{}", normalize_version(version))
+}
+
+/// The image this process's containers run — [`rh_image_for`] at [`rh_version`].
+pub fn rh_image() -> String {
+    rh_image_for(&rh_version())
+}
 
 /// The server dir inside the image: `DATA_DIR` (= `PROGRAM_DIR`), so `mock_data_{N}.csv`
 /// and the user `plugins/` dir both resolve here (see `docker/rotorhazard/Dockerfile`).
@@ -722,6 +769,10 @@ const RH_SERVER_DIR: &str = "/opt/RotorHazard/src/server";
 /// `plugins/` dir as `plugins/gridfpv` (read-only). Set by `cargo xtask live` /
 /// `rh-mock` so live runs boot against the GridFPV plugin; unset = stock RH (the
 /// socket-fallback path). Mounting an empty/placeholder plugin is harmless.
+///
+/// Together with [`RH_VERSION_ENV`] this is the axis of `cargo xtask live`'s matrix: the
+/// no-plugin legs simply run with this **unset**, which is the only way the stock
+/// `current_laps` snapshot path gets live coverage at all (#389).
 pub const PLUGIN_ENV: &str = "GRIDFPV_RH_PLUGIN";
 
 /// A disposable dockerized RotorHazard for a single test, with emulated node CSVs
@@ -819,7 +870,7 @@ impl RhContainer {
                 );
             }
         }
-        args.push(RH_IMAGE.into());
+        args.push(rh_image());
 
         let out = Command::new("docker")
             .args(&args)
@@ -833,7 +884,9 @@ impl RhContainer {
 
         let url = format!("http://localhost:{port}");
         wait_for_port(port, Duration::from_secs(60));
-        // Give the server a moment past TCP-accept to finish booting its socket API.
+        // …then wait for RH to actually answer HTTP (docker binds the port long before the
+        // server serves), and give it a moment more to finish booting its socket API.
+        wait_for_http(port, Duration::from_secs(120));
         std::thread::sleep(Duration::from_secs(3));
         Self {
             name,
@@ -886,14 +939,23 @@ impl Drop for RhContainer {
     }
 }
 
-/// Ensure the [`RH_IMAGE`] exists locally, building it from
-/// `docker/rotorhazard/Dockerfile` if not. Keeps `cargo xtask live`/`rh-mock` a single
-/// command now that the harness uses a locally-built image (RH v4.4.0) instead of a
-/// Docker Hub pull. The first build takes a couple of minutes; subsequent runs are a
-/// no-op (cached). Panics if the build fails — a live test cannot proceed without it.
+/// Ensure the image for the version this process runs ([`rh_version`]) exists locally.
 fn ensure_image() {
+    ensure_rh_image(&rh_version());
+}
+
+/// Ensure `gridfpv-rotorhazard:<version>` exists locally, building it from
+/// `docker/rotorhazard/Dockerfile` (`--build-arg RH_VERSION=v<version>`) if not. Keeps
+/// `cargo xtask live`/`rh-mock` a single command now that the harness uses locally-built
+/// images instead of a Docker Hub pull. The first build of a given version takes a few
+/// minutes (it clones RH and pip-installs); subsequent runs are a no-op (cached). Public so
+/// `cargo xtask live` can pre-build every version in its matrix up front instead of paying
+/// for it mid-suite. Panics if the build fails — a live test cannot proceed without it.
+pub fn ensure_rh_image(version: &str) {
+    let version = normalize_version(version);
+    let image = rh_image_for(&version);
     let present = Command::new("docker")
-        .args(["image", "inspect", RH_IMAGE])
+        .args(["image", "inspect", &image])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -909,17 +971,24 @@ fn ensure_image() {
         .expect("locate docker/rotorhazard build context");
 
     eprintln!(
-        "\x1b[1mBuilding {RH_IMAGE}\x1b[0m from {} (first run only; ~1–2 min)…",
+        "\x1b[1mBuilding {image}\x1b[0m from {} (first run only; ~2–4 min)…",
         context.display()
     );
-    let status = Command::new("docker")
-        .args(["build", "-t", RH_IMAGE, "-t", "gridfpv-rotorhazard:latest"])
+    let mut cmd = Command::new("docker");
+    cmd.args(["build", "-t", &image]);
+    // `:latest` follows the default version only, so it never silently points at a
+    // floor-version image built by one leg of the matrix.
+    if version == DEFAULT_RH_VERSION {
+        cmd.args(["-t", "gridfpv-rotorhazard:latest"]);
+    }
+    cmd.args(["--build-arg", &format!("RH_VERSION=v{version}")]);
+    let status = cmd
         .arg(&context)
         .status()
         .expect("run docker build for the RH harness image");
     assert!(
         status.success(),
-        "failed to build {RH_IMAGE} from {} — see the docker build output above",
+        "failed to build {image} from {} — see the docker build output above",
         context.display()
     );
 }
@@ -933,6 +1002,51 @@ fn wait_for_port(port: u16, timeout: Duration) {
         }
         if Instant::now() >= deadline {
             panic!("RotorHazard container did not open port {port} within {timeout:?}");
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Block until RotorHazard actually **serves HTTP** on `port`, or panic after `timeout`.
+///
+/// A TCP connect is not readiness: docker's port proxy binds the host port the instant the
+/// container starts, so [`wait_for_port`] returns while the Python server is still booting.
+/// A connect therefore succeeds and the first socket.io handshake gets a connection reset —
+/// which surfaces as `IncompleteResponseFromEngineIo` seconds into a test rather than as a
+/// clear "not up yet". Rare on an idle box; routine when several containers boot under load
+/// (the version × plugin matrix does exactly that). So we speak just enough HTTP/1.0 to
+/// require a real status line back from RH before handing the container to a test.
+fn wait_for_http(port: u16, timeout: Duration) {
+    use std::io::{Read, Write};
+
+    let deadline = Instant::now() + timeout;
+    let mut last = String::from("no response");
+    loop {
+        let served = (|| -> std::io::Result<bool> {
+            let mut sock = TcpStream::connect(("127.0.0.1", port))?;
+            sock.set_read_timeout(Some(Duration::from_secs(5)))?;
+            sock.set_write_timeout(Some(Duration::from_secs(5)))?;
+            sock.write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+            let mut head = [0u8; 64];
+            let read = sock.read(&mut head)?;
+            let status = String::from_utf8_lossy(&head[..read]).to_string();
+            let ok = status.starts_with("HTTP/") && status.contains(" 200");
+            if !ok {
+                last = status
+                    .lines()
+                    .next()
+                    .unwrap_or("empty response")
+                    .to_string();
+            }
+            Ok(ok)
+        })();
+        match served {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(err) => last = err.to_string(),
+        }
+        if Instant::now() >= deadline {
+            panic!("RotorHazard on port {port} did not serve HTTP within {timeout:?} ({last})");
         }
         std::thread::sleep(Duration::from_millis(500));
     }
