@@ -466,7 +466,7 @@ impl RotorHazardConnection {
                             .expect("adapter lock")
                             .set_plugin_live_pass(live_pass);
                         if !live_pass {
-                            eprintln!(
+                            crate::diag!(
                                 "gridfpv: rotorhazard: the GridFPV plugin (v{}) did not advertise \
                                  `{CAP_LIVE_PASS}` — it could not prove it can read this timer's \
                                  lap atom, so RotorHazard's own lap table is the pass source (#389)",

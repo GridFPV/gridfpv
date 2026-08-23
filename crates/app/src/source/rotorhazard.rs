@@ -543,6 +543,13 @@ fn drive(
         };
         timers.set_status(&timer_id, TimerStatus::Connected);
         backoff = RECONNECT_BACKOFF_MIN;
+        // Drop any restart request that outlived the previous connection. The route only accepts
+        // one while the timer reads `Connected`, but the link can drop in the window between that
+        // check and the reconciler's drain — and `maintain` only consumes the flag while a socket
+        // is up. Without this the request would survive backoff and fire on a reconnect minutes
+        // later, restarting the timer with no one asking: exactly the surprise `restart`'s own
+        // contract says cannot happen.
+        restart.store(false, Ordering::Relaxed);
 
         // Probe for the GridFPV plugin (D16, S1): `connect` already emitted `gridfpv_hello`, so
         // wait briefly for the `gridfpv_hello_ack`. Present-&-compatible / incompatible / missing

@@ -515,7 +515,22 @@ async function setTimerConnection(
     `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/${action}`,
     { method: 'POST', headers }
   );
-  if (!resp.ok) throw new Error(`POST /timers/${id}/${action} failed: HTTP ${resp.status}`);
+  if (!resp.ok) {
+    // Prefer the Director's typed refusal: it is already phrased for the RD and names the timer by
+    // its FRIENDLY name. The old message interpolated the raw timer id, and `TimerManager`'s catch
+    // re-raises the string verbatim into a toast for any non-400 — putting a raw id on screen, which
+    // the repo display rule forbids. Same handling `restartTimer` above already does.
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof body === 'object' && body !== null && 'message' in body
+          ? String((body as { message: unknown }).message)
+          : ''
+      )
+      .catch(() => '');
+    const verb = action === 'connect' ? 'connect to' : 'disconnect from';
+    throw new Error(detail || `The Director could not ${verb} that timer (HTTP ${resp.status}).`);
+  }
   return (await resp.json()) as Timer;
 }
 

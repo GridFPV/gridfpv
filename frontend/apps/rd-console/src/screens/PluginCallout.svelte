@@ -105,6 +105,17 @@
     timer.status === 'Disconnected' || timer.status === 'Error' || timer.status === 'Connecting'
   );
 
+  // Clear the restart narration once the timer is actually back. Without this, `awaitingReconnect`
+  // stayed set forever: if the restart did NOT fix the plugin — a wrongly-nested folder (step 2
+  // warns about exactly that) or a `live_pass` self-check failure — this branch keeps rendering and
+  // every later blip is narrated "waiting for it to come back… this is expected", telling the RD a
+  // real, persistent fault is normal. Reaching `Connected` again is the signal the restart round
+  // trip is over, whatever its outcome; if the plugin is now present the whole branch disappears
+  // anyway, and if it is not, the RD sees the install guide rather than a reassuring message.
+  $effect(() => {
+    if (awaitingReconnect && timer.status === 'Connected') awaitingReconnect = false;
+  });
+
   /**
    * Whether **Restart timer** can fire: we need a session to make the RD-gated call, and the
    * Director only accepts a restart on a live connection (there is no socket to emit on otherwise).

@@ -613,12 +613,27 @@ pub enum PassSource {
 /// be mistaken for a dead plugin. Everything needed to mint the pass later is kept here.
 #[derive(Debug, Clone)]
 struct PendingLap {
+    /// How many `current_laps` snapshots have carried this lap while the plugin stayed silent.
+    ///
+    /// The grace is counted in **snapshots, not wall time**, and RotorHazard emits one snapshot per
+    /// recorded lap — so when two seats cross inside one gevent scheduling window, seat A's lap
+    /// appears in the snapshot from its own crossing *and* in the snapshot from B's, both before
+    /// A's spawned `RACE_LAP_RECORDED` greenlet has run. Demoting on the second sighting therefore
+    /// fired on a plugin that was working correctly. Requiring [`PLUGIN_GRACE_SNAPSHOTS`] absorbs a
+    /// full field crossing together without meaningfully delaying a real miss.
+    seen: u32,
     /// The lap's `lap_time_stamp` (cumulative ms since race start).
     lap_time_stamp: f64,
     /// The seat's pilot callsign where the snapshot carried one — used to name the seat in the
     /// fallback warning (and in `CompetitorSeen`) rather than leaking a raw `node-N` handle.
     callsign: Option<String>,
 }
+
+/// How many `current_laps` snapshots may carry a lap the plugin has not delivered before the
+/// adapter calls it a confirmed miss and falls back. One snapshot lands per recorded lap, so this
+/// must exceed the number of seats that can plausibly cross inside one RotorHazard scheduling
+/// window — otherwise a full field crossing together looks like a broken plugin.
+const PLUGIN_GRACE_SNAPSHOTS: u32 = 8;
 
 /// The competitor handle for a RotorHazard node seat: `"node-{index}"`. Stable across
 /// pilot reassignment (the binding to a GridFPV pilot is a registration action, not
@@ -849,7 +864,7 @@ impl RotorHazardAdapter {
     /// `gridfpv_pass` is ignored.
     pub fn set_plugin_live_pass(&mut self, advertised: bool) {
         if self.plugin_live_pass != advertised {
-            eprintln!(
+            crate::diag!(
                 "gridfpv: rotorhazard: pass source = {} (plugin `live_pass` capability {})",
                 if advertised {
                     "GridFPV plugin (gridfpv_pass)"
@@ -1016,10 +1031,19 @@ impl RotorHazardAdapter {
                     {
                         // First sighting — give the plugin its round to deliver.
                         slot.insert(PendingLap {
+                            seen: 1,
                             lap_time_stamp: lap.lap_time_stamp,
                             callsign: callsign.clone(),
                         });
                         continue;
+                    }
+                    if let Some(pending) = self.pending_snapshot_laps.get_mut(&key) {
+                        pending.seen += 1;
+                        if pending.seen < PLUGIN_GRACE_SNAPSHOTS {
+                            // Still inside the grace — the plugin's greenlet may simply not have run
+                            // yet. Keep holding; `current_laps` remains the check, not the source.
+                            continue;
+                        }
                     }
                     // Second sighting with the plugin still silent: a confirmed miss.
                     self.engage_pass_fallback(node_index, lap.lap_number, callsign.as_deref());
@@ -1119,7 +1143,7 @@ impl RotorHazardAdapter {
              table for the rest of this race — laps are still being recorded, but the plugin's \
              pass stream is not trustworthy on this timer (#389)."
         );
-        eprintln!("gridfpv: rotorhazard: WARNING — {warning}");
+        crate::diag!("gridfpv: rotorhazard: WARNING — {warning}");
         self.pass_warning = Some(warning);
     }
 
@@ -1219,7 +1243,7 @@ impl RotorHazardAdapter {
                         .values()
                         .next()
                         .and_then(|lap| lap.callsign.clone());
-                    eprintln!(
+                    crate::diag!(
                         "gridfpv: rotorhazard: race ended with {held} lap(s) the `live_pass` \
                          plugin never delivered"
                     );
@@ -1231,7 +1255,7 @@ impl RotorHazardAdapter {
                 // Skipped for a DONE that carried no laps at all (the status RotorHazard replays
                 // on connect), which would otherwise print a line of zeros per reconnect.
                 if self.counts != PassCounts::default() {
-                    eprintln!(
+                    crate::diag!(
                         "gridfpv: rotorhazard: heat pass summary — source={:?}, plugin={}, \
                          current_laps={}, deduped={}, ignored_plugin_passes={}",
                         self.pass_source(),
@@ -1561,7 +1585,7 @@ impl RotorHazardAdapter {
                 // it out loud once per race rather than degrade silently.
                 if acc.0.len() > DENSE_TRACE_WARN_SAMPLES && !self.warned_dense_trace {
                     self.warned_dense_trace = true;
-                    eprintln!(
+                    crate::diag!(
                         "gridfpv: rotorhazard: the plugin's dense signal trace has passed {} \
                          samples on one seat; each further tick re-emits the whole trace, so \
                          ingest cost is growing with heat length (#389 diagnostics)",
@@ -1592,7 +1616,7 @@ impl RotorHazardAdapter {
             self.counts.ignored_plugin += 1;
             if !self.warned_unadvertised_pass {
                 self.warned_unadvertised_pass = true;
-                eprintln!(
+                crate::diag!(
                     "gridfpv: rotorhazard: ignoring `gridfpv_pass` broadcasts — the timer's \
                      GridFPV plugin did not advertise the `live_pass` capability, so RotorHazard's \
                      own lap table is the pass source (#389)"
@@ -2828,19 +2852,28 @@ mod tests {
         );
     }
 
-    /// Advertised but silent: the plugin claimed `live_pass` and never delivered. The second
-    /// snapshot repeating an undelivered lap is the confirmation, and the fallback fires LOUDLY —
-    /// emitting the laps from `current_laps` and surfacing a warning — instead of dropping them.
+    /// Advertised but silent: the plugin claimed `live_pass` and never delivered. Once a lap has
+    /// survived [`PLUGIN_GRACE_SNAPSHOTS`] snapshots undelivered it is a confirmed miss, and the
+    /// fallback fires LOUDLY — emitting the laps from `current_laps` and surfacing a warning —
+    /// instead of dropping them.
+    ///
+    /// The grace spans a whole field on purpose: one snapshot lands per recorded lap, so a field
+    /// crossing together puts a lap in several snapshots before its own plugin greenlet runs.
+    /// Confirming on the *second* sighting mistook that for a broken plugin.
     #[test]
     fn advertised_but_silent_plugin_falls_back_loudly() {
         let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
         a.set_plugin_live_pass(true);
         start_race(&mut a);
 
-        let first = a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
-        assert_eq!(passes(&first), 0, "one round of grace for the plugin");
+        // Every snapshot inside the grace holds the lap rather than minting it.
+        for n in 1..PLUGIN_GRACE_SNAPSHOTS {
+            let held = a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
+            assert_eq!(passes(&held), 0, "snapshot {n} is still within the grace");
+        }
 
-        // The next lap crossing re-sends the whole table; lap 0 is still undelivered.
+        // The grace is spent and lap 0 is still undelivered: a confirmed miss. This snapshot also
+        // carries a new lap, so both come out through `current_laps`.
         let second = a.translate(snapshot(0, 0, vec![lap(0, 900.0), lap(1, 1500.0)]));
         assert_eq!(
             passes(&second),
@@ -2897,8 +2930,10 @@ mod tests {
         let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
         a.set_plugin_live_pass(true);
         start_race(&mut a);
-        a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
-        a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
+        // Spend the grace so the fallback actually engages (see PLUGIN_GRACE_SNAPSHOTS).
+        for _ in 0..PLUGIN_GRACE_SNAPSHOTS {
+            a.translate(snapshot(0, 0, vec![lap(0, 900.0)]));
+        }
         assert_eq!(a.pass_source(), PassSource::CurrentLaps);
 
         // Finish that heat and start the next one (the reset rides the RACING *transition*).

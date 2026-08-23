@@ -843,6 +843,18 @@ async fn restart_timer(
             format!("no timer with id {:?}", timer_id.0),
         )
     })?;
+    // Kind first: the built-in Mock is in every event's DEFAULT timer selection, so gating on the
+    // heat before the kind answered a Mock with "… is running Heat 1 — finish or reset that heat",
+    // which is both wrong and actionable-looking. A Mock has no timing server at all.
+    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is not a RotorHazard timer — there is no timing server to restart",
+                timer.name
+            ),
+        ));
+    }
     // The hard gate: never restart the timing hardware out from under a live race.
     if let Some(heat) = registry.heat_in_progress_on_timer(&timer_id) {
         return Err(ProtocolError::new(
@@ -3793,6 +3805,13 @@ mod tests {
         registry
             .set_timers(&EventId(PRACTICE_EVENT_ID.into()), vec![rh.id.clone()])
             .expect("select the RH timer for Practice");
+        // Practice must be ACTIVE, not merely selecting the timer: only the active event's
+        // selection opens a connection, so only its heats can be in progress on the timer. The
+        // in-progress scan is scoped to the active event for that reason, and a fixture that
+        // stages a heat in a non-active event models a state the Director cannot reach.
+        registry
+            .set_active(&EventId(PRACTICE_EVENT_ID.into()))
+            .expect("make Practice the active event");
         registry.timers().get(&rh.id).unwrap()
     }
 

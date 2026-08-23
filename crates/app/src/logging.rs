@@ -103,7 +103,14 @@ struct Open {
 ///
 /// Returns the active log file's path, or `None` when no writable directory could be found.
 pub fn init() -> Option<&'static Path> {
-    sink().map(|s| s.path.as_path())
+    let path = sink().map(|s| s.path.as_path());
+    // Adapters sit BELOW this crate, so they cannot call `record` and their `eprintln!`s are not
+    // covered by the shadow macro — on the GUI-subsystem Windows build those writes vanish, which
+    // would silently drop exactly the #389 pass-source diagnostics the field needs. Hand them a
+    // sink pointing back here so they land in the same file. Idempotent: first caller wins.
+    #[cfg(feature = "live")]
+    gridfpv_adapters::diag::set_sink(|line| record(format_args!("{line}")));
+    path
 }
 
 /// The active log file's path, if logging is running. Served to the console over
@@ -208,13 +215,17 @@ impl Sink {
     /// and reopen a fresh live file. On any failure we keep writing to the file we already
     /// have — an over-long log beats a lost log.
     fn rotate(&self, open: &mut Open) {
-        for n in (1..MAX_FILES).rev() {
+        // `MAX_FILES` counts the LIVE file plus its rotated generations, so the oldest kept
+        // generation is `.{MAX_FILES - 1}` and the highest rename is `.{MAX_FILES - 2}` ->
+        // `.{MAX_FILES - 1}`. Iterating to `MAX_FILES` instead produced one generation too many
+        // (a `.5` alongside `.1..=.4`), i.e. ~6x MAX_BYTES on disk against a documented 5x.
+        for n in (1..MAX_FILES - 1).rev() {
             let from = self.dir.join(format!("{LOG_FILE_NAME}.{n}"));
             let to = self.dir.join(format!("{LOG_FILE_NAME}.{}", n + 1));
             if from.exists() {
-                if n + 1 >= MAX_FILES {
-                    let _ = fs::remove_file(&to);
-                }
+                // Clear the target first regardless of depth: Windows refuses a rename onto an
+                // existing path, so without this the oldest generation would pin the whole chain.
+                let _ = fs::remove_file(&to);
                 let _ = fs::rename(&from, &to);
             }
         }

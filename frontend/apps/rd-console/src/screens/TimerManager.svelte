@@ -545,7 +545,10 @@
             {/if}
           </div>
           <StatusPill status={timer.status} label={timer.status} size="sm" />
-          <PluginCallout {timer} baseUrl={session.baseUrl} />
+          <!-- `session` is what unlocks the guided install's Restart-timer action (#386);
+               without it the callout degrades to chip + guide + download and step 4 points
+               at a button that never renders. -->
+          <PluginCallout {timer} baseUrl={session.baseUrl} {session} />
           <div class="timer-actions">
             <!-- Connect / Disconnect (#383) — RotorHazard only (a Mock has nothing to dial), and
                  usable with NO active event: the RD tests a URL where timers are configured. -->

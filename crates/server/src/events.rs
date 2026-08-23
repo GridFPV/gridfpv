@@ -1583,12 +1583,20 @@ impl EventRegistry {
 
         // Snapshot the candidate events (id + their rounds) and release the registry lock BEFORE
         // resolving/reading a log — `resolve` takes the same lock.
+        //
+        // Scoped to the **active** event on purpose. Only the active event's selection opens a
+        // connection (see the RH connection reconciler), so only its heats can be driven on this
+        // timer — and scanning every event that merely *lists* the timer meant one abandoned event
+        // holding a heat in `Unofficial` (raced, never finalized) refused every restart forever,
+        // naming a heat in an event the RD is not running and cannot find.
         let candidates: Vec<(EventId, Vec<RoundDef>)> = {
             let reg = self.read();
-            reg.events
-                .values()
+            reg.active_event
+                .as_ref()
+                .and_then(|id| reg.events.get(id))
                 .filter(|e| e.meta.timers.contains(timer))
                 .map(|e| (e.meta.id.clone(), e.meta.rounds.clone()))
+                .into_iter()
                 .collect()
         };
         for (event_id, rounds) in candidates {
