@@ -1011,15 +1011,14 @@ impl RotorHazardAdapter {
                         self.counts.deduped += 1;
                         continue;
                     }
-                    if !self.pending_snapshot_laps.contains_key(&key) {
+                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                        self.pending_snapshot_laps.entry(key)
+                    {
                         // First sighting — give the plugin its round to deliver.
-                        self.pending_snapshot_laps.insert(
-                            key,
-                            PendingLap {
-                                lap_time_stamp: lap.lap_time_stamp,
-                                callsign: callsign.clone(),
-                            },
-                        );
+                        slot.insert(PendingLap {
+                            lap_time_stamp: lap.lap_time_stamp,
+                            callsign: callsign.clone(),
+                        });
                         continue;
                     }
                     // Second sighting with the plugin still silent: a confirmed miss.

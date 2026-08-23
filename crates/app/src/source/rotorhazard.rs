@@ -554,12 +554,14 @@ fn drive(
         let dropped = maintain(
             &conn,
             &cancel,
-            &armed,
-            &tune,
-            &prepare,
-            &seat,
-            &restart,
-            &seated_heat,
+            ControlSlots {
+                armed: &armed,
+                tune: &tune,
+                prepare: &prepare,
+                seat: &seat,
+                restart: &restart,
+                seated_heat: &seated_heat,
+            },
         );
 
         // Stop any in-flight race and disconnect on the way out of this connection. `disconnect`
@@ -620,16 +622,34 @@ fn classify_plugin(hello: Option<PluginHello>) -> PluginPresence {
 /// armed heat's log, or discarding them while idle), stage a freshly-armed heat, and probe liveness
 /// when idle. Returns `true` if the link appears to have **dropped** (so the caller reconnects),
 /// `false` if it exited because of cancellation.
-fn maintain(
-    conn: &RotorHazardConnection,
-    cancel: &AtomicBool,
-    armed: &Mutex<Option<ArmedHeat>>,
-    tune: &Mutex<Option<Vec<(u64, u16)>>>,
-    prepare: &AtomicBool,
-    seat: &Mutex<Option<Vec<(u64, String)>>>,
-    restart: &AtomicBool,
-    seated_heat: &Mutex<Option<u64>>,
-) -> bool {
+/// The per-connection control slots the driver and the outside world share: everything the RD can
+/// ask of a live link. Bundled rather than passed loose because they travel together and always
+/// have — six of [`maintain`]'s arguments were these, which is both noisy and easy to transpose at
+/// a call site (they are mostly the same two or three types).
+struct ControlSlots<'a> {
+    /// The heat currently armed on this connection, if any.
+    armed: &'a Mutex<Option<ArmedHeat>>,
+    /// A pending channel assignment to push to the timer.
+    tune: &'a Mutex<Option<Vec<(u64, u16)>>>,
+    /// Set when the timer should be prepared for a heat.
+    prepare: &'a AtomicBool,
+    /// A pending seat → pilot binding to push before racing.
+    seat: &'a Mutex<Option<Vec<(u64, String)>>>,
+    /// Set when the RD has asked RotorHazard to restart (#386).
+    restart: &'a AtomicBool,
+    /// The heat whose seats are currently bound on the timer.
+    seated_heat: &'a Mutex<Option<u64>>,
+}
+
+fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlots<'_>) -> bool {
+    let ControlSlots {
+        armed,
+        tune,
+        prepare,
+        seat,
+        restart,
+        seated_heat,
+    } = slots;
     let mut last_activity = Instant::now();
     let mut probed_since_activity = false;
     let mut stage_deadline: Option<Instant> = None;

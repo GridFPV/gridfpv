@@ -157,6 +157,40 @@ pub fn run_mock_heat_until(
 ///
 /// `allow(dead_code)`: `common` is compiled into every engine `live` test binary and most use
 /// only [`run_mock_heat`].
+/// [`run_mock_heat_with_signal`], but the race is held open until the timer has produced at
+/// least `min_passes` crossings rather than stopping on the very first one.
+///
+/// Same rationale as [`run_mock_heat_until`]: stopping on the first crossing makes the pass
+/// count race the drain window, so a test that needs a *completed lap* (K passes give K-1 laps)
+/// passes or fails on luck. Any test asserting on lap counts must state how many crossings it
+/// needs.
+///
+/// `allow(dead_code)`: `common` is compiled into every engine `live` test binary.
+#[allow(dead_code)]
+pub fn run_mock_heat_with_signal_until(
+    port: u16,
+    heat: &str,
+    scenario: &[(usize, String)],
+    min_passes: usize,
+) -> Vec<Event> {
+    run_mock_heat_keeping(
+        port,
+        heat,
+        scenario,
+        |e| {
+            matches!(
+                e,
+                Event::Pass(_)
+                    | Event::SignalChunk(_)
+                    | Event::SignalThresholds(_)
+                    | Event::SignalHistory(_)
+                    | Event::CompetitorSeen { .. }
+            )
+        },
+        min_passes,
+    )
+}
+
 #[allow(dead_code)]
 pub fn run_mock_heat_with_signal(
     port: u16,

@@ -1483,7 +1483,7 @@ mod tests {
         });
         println!(
             "\nclean (first 144 ticks):\n{}",
-            &sparkline(&values(&clean)[..144])
+            sparkline(&values(&clean)[..144])
         );
         let noisy = plan_csv(&NodePlan {
             laps: (0..3)
@@ -1496,7 +1496,7 @@ mod tests {
         });
         println!(
             "noisy/marginal (first 144 ticks):\n{}",
-            &sparkline(&values(&noisy)[..144])
+            sparkline(&values(&noisy)[..144])
         );
     }
 }

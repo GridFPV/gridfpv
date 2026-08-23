@@ -33,7 +33,7 @@
 
 mod common;
 
-use common::run_mock_heat_with_signal;
+use common::run_mock_heat_with_signal_until;
 
 use gridfpv_engine::event::score_marshaled;
 use gridfpv_engine::scoring::WinCondition;
@@ -72,13 +72,16 @@ fn a_competitor_the_timer_never_detected_is_marshalable() {
     // The flying node uses the LOOPING `node_csv` (not a finite plan): RH reads the mock CSV
     // continuously from container start, decoupled from race start, so a finite plan's crossings
     // are all consumed during the harness's several-second settle/reset and the race itself sees
-    // a flat, already-exhausted stream. `ticks_per_lap: 2` over the 0.1s tick keeps laps landing
-    // inside the harness's short live window, exactly as `marshaling_live` does.
+    // a flat, already-exhausted stream. `ticks_per_lap: 20` (~2s laps) matches the cadence
+    // `marshaling_live` settled on: the old `2` (0.2s laps) made the pass count race the drain
+    // window, so this test's "the flying node completed a lap" assertion passed or failed on
+    // luck — it failed in the 2026-08-24 matrix run with exactly one pass (0 completed laps).
+    // Holding the race open for MIN_PASSES crossings is what makes it deterministic.
     let scenario = vec![
         (
             0usize,
             node_csv(&NodeCsv {
-                ticks_per_lap: 2,
+                ticks_per_lap: 20,
                 peak_rssi: 150,
                 baseline_rssi: 70,
                 seed: 0,
@@ -95,7 +98,10 @@ fn a_competitor_the_timer_never_detected_is_marshalable() {
         ),
     ];
 
-    let log = run_mock_heat_with_signal(PORT, HEAT, &scenario);
+    // Three crossings on the flying node ⇒ at least two completed laps, so the mixed-heat
+    // assertion below cannot be decided by the drain window.
+    const MIN_PASSES: usize = 3;
+    let log = run_mock_heat_with_signal_until(PORT, HEAT, &scenario, MIN_PASSES);
 
     // Sanity: the timer really did record nothing for the silent node. If RH detected a phantom
     // crossing on the flat stream the scenario is not exercising the bug, so fail loudly.
