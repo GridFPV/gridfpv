@@ -222,6 +222,101 @@ where
     bindings
 }
 
+/// Fold the log's heat lineups into the per-source [`CompetitorKey`]s they name (#388).
+///
+/// A heat's **lineup** ([`Event::HeatScheduled`]) is the authoritative "who was in this heat"
+/// set: it is known the moment the heat is built, before a single crossing is detected. The
+/// lap projection is keyed on `(adapter, competitor)` though, and the lineup carries only the
+/// bare source-local [`CompetitorRef`] — so this fold resolves each lineup ref to the timing
+/// source(s) it was actually seen on, over the *same* window the caller folds laps from.
+///
+/// Resolution, per lineup ref, in order:
+///
+/// 1. **Every adapter that named the ref** in the window — a [`Pass`], a signal fact
+///    ([`Event::SignalChunk`] / [`Event::SignalThresholds`] / [`Event::SignalHistory`]), a
+///    [`Event::CompetitorSeen`] / [`Event::CompetitorRegistered`], or a marshal's
+///    [`Event::LapInserted`]. A seated node streams RSSI whether or not it ever detects a
+///    crossing, so the silent-node case lands here and its key matches the one its
+///    [`signal_trace`] entry already carries.
+/// 2. Otherwise the window's **only** timing source, when exactly one is in evidence — a
+///    single-timer event (the overwhelmingly common case) still seats a ref that produced
+///    literally nothing.
+/// 3. Otherwise the lexicographically **first** adapter in evidence, so a multi-source window
+///    still yields one deterministic seat rather than dropping the competitor.
+///
+/// A window with no adapter in evidence at all (a bare `HeatScheduled` with nothing else)
+/// yields nothing for that ref: there is no source to address a correction to, so inventing
+/// an adapter id would only produce an unusable row. Pure and order-independent.
+pub fn lineup_keys<'a, I>(events: I) -> BTreeSet<CompetitorKey>
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    let mut lineup: BTreeSet<CompetitorRef> = BTreeSet::new();
+    // Every adapter each ref was named by, and every adapter in evidence at all.
+    let mut adapters_by_ref: BTreeMap<CompetitorRef, BTreeSet<AdapterId>> = BTreeMap::new();
+    let mut adapters: BTreeSet<AdapterId> = BTreeSet::new();
+
+    for event in events {
+        // The `(adapter, competitor)` pair this fact names, where it names one. A lifecycle
+        // fact names only its source; a lineup names only refs.
+        let named: Option<(&AdapterId, &CompetitorRef)> = match event {
+            Event::HeatScheduled { lineup: refs, .. } => {
+                lineup.extend(refs.iter().cloned());
+                None
+            }
+            Event::Pass(p) => Some((&p.adapter, &p.competitor)),
+            Event::SignalChunk(c) => Some((&c.adapter, &c.competitor)),
+            Event::SignalThresholds(t) => Some((&t.adapter, &t.competitor)),
+            Event::SignalHistory(h) => Some((&h.adapter, &h.competitor)),
+            Event::CompetitorSeen {
+                adapter,
+                competitor,
+            }
+            | Event::CompetitorRegistered {
+                adapter,
+                competitor,
+                ..
+            }
+            | Event::LapInserted {
+                adapter,
+                competitor,
+                ..
+            } => Some((adapter, competitor)),
+            Event::AdapterConnected { adapter }
+            | Event::AdapterDisconnected { adapter }
+            | Event::SessionStarted { adapter, .. }
+            | Event::SessionEnded { adapter, .. } => {
+                adapters.insert(adapter.clone());
+                None
+            }
+            _ => None,
+        };
+        if let Some((adapter, competitor)) = named {
+            adapters.insert(adapter.clone());
+            adapters_by_ref
+                .entry(competitor.clone())
+                .or_default()
+                .insert(adapter.clone());
+        }
+    }
+
+    lineup
+        .into_iter()
+        .flat_map(|competitor| {
+            let sources: Vec<AdapterId> = match adapters_by_ref.get(&competitor) {
+                Some(seen) => seen.iter().cloned().collect(),
+                // No fact ever named this ref: fall back to the window's sole (or first)
+                // source so a competitor who produced *nothing* is still marshalable.
+                None => adapters.iter().next().cloned().into_iter().collect(),
+            };
+            sources.into_iter().map(move |adapter| CompetitorKey {
+                adapter,
+                competitor: competitor.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Fold a sequence of events into the lap-list read model.
 ///
 /// Only [`Event::Pass`]es over the **lap gate** ([`is_lap_gate`]) contribute;
@@ -688,8 +783,21 @@ where
     // lives in `corrected_passes`; here we only project it into the lap-list view. Each
     // pass keeps the global offset that addresses it, so the derived laps carry their
     // `start_ref`/`end_ref` command targets.
-    let (surviving, voided) = corrected_and_voided_passes_with_floor(events, min_lap_micros);
+    //
+    // The window is walked twice (once for the lineup seed, once for the corrections fold),
+    // so materialise the pairs — they are borrowed `(offset, &Event)` handles and the window
+    // is per-heat, so this is a pointer copy, not the log.
+    let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
+    // #388 — SEED FROM THE LINEUP, not only from what the timer observed. A competitor the
+    // timer never detected (mis-tuned gate, dead VTX) must still appear, with zero laps, or
+    // the one pilot who most needs marshaling is the one who cannot be marshaled.
+    let seats = lineup_keys(pairs.iter().map(|(_, e)| *e));
+    let (surviving, voided) =
+        corrected_and_voided_passes_with_floor(pairs.iter().copied(), min_lap_micros);
     let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
+    for key in seats {
+        by_competitor.entry(key).or_default();
+    }
     for (offset, pass) in surviving {
         by_competitor
             .entry(CompetitorKey::from_pass(&pass))
@@ -2680,5 +2788,147 @@ mod marshaling_tests {
             "first positive delta (1_100 - 1_000), skipping the leading 0"
         );
         assert_eq!(trace.samples, vec![70, 150, 150, 71]);
+    }
+
+    // --- Lineup seeding: the zero-lap competitor (#388) --------------------------------------
+
+    /// Build a heat's `HeatScheduled` with the given lineup refs.
+    fn scheduled(heat: &str, lineup: &[&str]) -> Event {
+        Event::HeatScheduled {
+            heat: gridfpv_events::HeatId(heat.into()),
+            lineup: lineup.iter().map(|r| CompetitorRef((*r).into())).collect(),
+            class: None,
+            round: None,
+            frequencies: vec![],
+            label: None,
+        }
+    }
+
+    #[test]
+    fn a_lineup_competitor_with_no_passes_is_present_with_zero_laps() {
+        // The field failure (#388): node-1's gate never detected a crossing. Before the fix it
+        // vanished from the lap list entirely and could not be marshaled — which is exactly when
+        // marshaling matters most. Its RSSI still streamed, so it IS in the window.
+        let log = vec![
+            scheduled("q-1", &["node-0", "node-1"]),
+            pass("rh", "node-0", 0, Some(0)),
+            pass("rh", "node-0", 2_000_000, Some(1)),
+            chunk("rh", "node-1", 0, 100_000, &[70, 71, 70]),
+        ];
+        let list = lap_list_marshaled(tagged(&log));
+        let silent = list
+            .competitor(&key("rh", "node-1"))
+            .expect("the silent lineup competitor must be present");
+        assert!(silent.laps.is_empty(), "no detections => no laps");
+        assert!(silent.voided.is_empty());
+        // And its trace is right there, keyed identically — so the console can render it.
+        assert!(
+            signal_trace(&log)
+                .competitor(&key("rh", "node-1"))
+                .is_some(),
+            "the zero-lap competitor's trace must key to the same CompetitorKey"
+        );
+        // The competitor that DID fly is unchanged.
+        assert_eq!(laps_of(&list, "rh", "node-0"), vec![ld(1, 2_000_000)]);
+    }
+
+    #[test]
+    fn inserting_a_lap_on_a_zero_lap_competitor_builds_its_lap_list() {
+        // The recovery path: the RD reconstructs the missed race from the trace. Two inserts
+        // make one lap; the seeded entry becomes a real one rather than appearing from nowhere.
+        let mut log = vec![
+            scheduled("q-1", &["node-0", "node-1"]),
+            chunk("rh", "node-1", 0, 100_000, &[70, 150, 70]),
+        ];
+        assert_eq!(
+            lap_list_marshaled(tagged(&log))
+                .competitor(&key("rh", "node-1"))
+                .map(|c| c.laps.len()),
+            Some(0)
+        );
+        log.push(inserted("rh", "node-1", 1_000_000));
+        log.push(inserted("rh", "node-1", 4_000_000));
+        assert_eq!(
+            laps_of(&lap_list_marshaled(tagged(&log)), "rh", "node-1"),
+            vec![ld(1, 3_000_000)],
+            "the marshal's two inserted crossings are one recovered lap"
+        );
+    }
+
+    #[test]
+    fn a_lineup_competitor_seats_on_the_adapter_that_saw_it() {
+        // Two sources in the window; node-1 is only ever named by `rh-b`, so that is the seat
+        // its (empty) entry takes — not `rh-a` merely because it sorts first.
+        let log = vec![
+            scheduled("q-1", &["node-0", "node-1"]),
+            pass("rh-a", "node-0", 0, Some(0)),
+            Event::CompetitorSeen {
+                adapter: AdapterId("rh-b".into()),
+                competitor: CompetitorRef("node-1".into()),
+            },
+        ];
+        let list = lap_list_marshaled(tagged(&log));
+        assert!(list.competitor(&key("rh-b", "node-1")).is_some());
+        assert!(
+            list.competitor(&key("rh-a", "node-1")).is_none(),
+            "a competitor must not be invented on a source that never saw it"
+        );
+    }
+
+    #[test]
+    fn a_lineup_competitor_never_named_falls_back_to_the_only_source() {
+        // Nothing at all was heard from node-1 — not even RSSI. There is exactly one timer in
+        // evidence, so that is unambiguously its seat, and the RD can still insert its laps.
+        let log = vec![
+            scheduled("q-1", &["node-0", "node-1"]),
+            pass("rh", "node-0", 0, Some(0)),
+        ];
+        assert!(
+            lap_list_marshaled(tagged(&log))
+                .competitor(&key("rh", "node-1"))
+                .is_some_and(|c| c.laps.is_empty())
+        );
+    }
+
+    #[test]
+    fn a_lineup_with_no_source_in_evidence_seeds_nothing() {
+        // A bare `HeatScheduled` and nothing else: there is no adapter to address a correction
+        // to, so inventing a seat would only produce an unusable row.
+        let log = vec![scheduled("q-1", &["node-0"])];
+        assert!(lap_list_marshaled(tagged(&log)).competitors.is_empty());
+    }
+
+    #[test]
+    fn lineup_seeding_is_order_independent_and_idempotent() {
+        // The projection must be a pure fold: seeding a competitor that also has passes must
+        // not duplicate it, and folding twice must be identical.
+        let log = vec![
+            pass("rh", "node-0", 0, Some(0)),
+            scheduled("q-1", &["node-0", "node-1"]),
+            chunk("rh", "node-1", 0, 100_000, &[70]),
+            pass("rh", "node-0", 2_000_000, Some(1)),
+        ];
+        let once = lap_list_marshaled(tagged(&log));
+        assert_eq!(once, lap_list_marshaled(tagged(&log)));
+        assert_eq!(
+            once.competitors.len(),
+            2,
+            "node-0 is seeded AND has passes — one entry, not two: {once:?}"
+        );
+    }
+
+    #[test]
+    fn an_un_lined_up_competitor_still_appears_from_its_passes() {
+        // Seeding is additive: a competitor the timer saw but the lineup never named (a
+        // mis-seated node, a late re-seat) must not be dropped.
+        let log = vec![
+            scheduled("q-1", &["node-0"]),
+            pass("rh", "node-3", 0, Some(0)),
+            pass("rh", "node-3", 1_000_000, Some(1)),
+        ];
+        assert_eq!(
+            laps_of(&lap_list_marshaled(tagged(&log)), "rh", "node-3"),
+            vec![ld(1, 1_000_000)]
+        );
     }
 }
