@@ -126,6 +126,9 @@ fn marshaling_folds_corrections_over_a_real_heat_log() {
         competitor: competitor.clone(),
         // A timestamp on the source clock; structural-only, exact µs irrelevant.
         at: SourceTime::from_micros(voided_pass.at.micros + 1),
+        // Untagged: this single-heat log attributes positionally, the pre-tag behavior
+        // this test asserts (the insertion lands on the competitor's own key).
+        heat: None,
     });
     let inserted_list = lap_list_marshaled(tagged(&inserted_log));
     assert_eq!(
