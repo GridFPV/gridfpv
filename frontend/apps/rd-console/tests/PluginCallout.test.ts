@@ -1,7 +1,8 @@
 /**
- * Tests for the guided-install callout (#384): the install steps must name the **unzip** step and
+ * Tests for the guided-install callout. #384: the install steps must name the **unzip** step and
  * the exact final layout, and the download must report its outcome — success or failure — instead
- * of the old silent transient-anchor click.
+ * of the old silent transient-anchor click. #385: the guide must say *where* RotorHazard's
+ * `plugins/` directory is, and that it may not exist yet.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
@@ -20,6 +21,11 @@ const RH_MISSING: Timer = {
   available_channels: [],
   plugin: 'Missing'
 };
+
+/** Collapse markup wrapping so copy assertions aren't whitespace-sensitive. */
+function flat(text: string | null | undefined): string {
+  return (text ?? '').replace(/\s+/g, ' ');
+}
 
 /** Open the guided-install dialog from the warning chip. */
 async function openGuide() {
@@ -45,13 +51,32 @@ afterEach(() => {
 describe('PluginCallout install steps', () => {
   it('tells the RD to unzip, and names the exact final layout', async () => {
     await openGuide();
-    const steps = screen.getByRole('list').textContent ?? '';
+    const steps = flat(document.querySelector('ol.steps')?.textContent);
     expect(steps).toMatch(/unzip/i);
     // The thing that gets copied is the inner folder — not the zip, not the wrapper.
     expect(steps).toMatch(/wrapper folder/i);
     expect(steps).toMatch(/plugins\/gridfpv\//);
     expect(steps).toContain('__init__.py');
     expect(steps).toContain('manifest.json');
+  });
+
+  it('says where RotorHazard’s plugins/ folder is, and that it may not exist (#385)', async () => {
+    await openGuide();
+    const where = flat(document.querySelector('details.where')?.textContent);
+    // The usual location, flagged as a default rather than a guarantee.
+    expect(where).toContain('~/rh-data/plugins/');
+    expect(where).toMatch(/not a guarantee/i);
+    // The legacy in-place install, and how to find a vendor/custom one.
+    expect(where).toContain('<RotorHazard>/src/server/plugins/');
+    expect(where).toContain('config.json');
+    expect(where).toContain('Data path:');
+    // The actual field sticking point: there may be no folder to find.
+    expect(where).toMatch(/create it/i);
+    // RotorHazard's own guide, rather than restating it.
+    const link = document.querySelector<HTMLAnchorElement>('details.where a');
+    expect(link?.href).toBe(
+      'https://github.com/RotorHazard/RotorHazard/blob/v4.3.0/doc/Plugins.md'
+    );
   });
 });
 

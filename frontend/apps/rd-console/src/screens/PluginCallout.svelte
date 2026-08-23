@@ -95,12 +95,56 @@
             what you copy, not the zip and not the wrapper folder your unzipper may put around it.
           </li>
           <li>
-            Copy the <code>gridfpv</code> folder into RotorHazard's <code>plugins/</code> directory,
-            so you end up with <code>plugins/gridfpv/</code> holding <code>__init__.py</code> and
+            Copy the <code>gridfpv</code> folder into RotorHazard's <code>plugins/</code> directory
+            (usually <code>~/rh-data/plugins/</code> — see below), so you end up with
+            <code>plugins/gridfpv/</code> holding <code>__init__.py</code> and
             <code>manifest.json</code> <em>directly</em> inside it — no extra folder in between.
           </li>
           <li>Restart RotorHazard — the timer reconnects and the badge turns green.</li>
         </ol>
+        <!--
+          Where `plugins/` lives (#385). RotorHazard resolves its data dir through a six-step
+          cascade, so no single path is right for everyone — name the two common ones, say how to
+          find a custom one, and (the actual field sticking point) say the folder may not exist.
+        -->
+        <details class="where">
+          <summary>Where is RotorHazard's <code>plugins/</code> folder?</summary>
+          <p>
+            It lives in RotorHazard's <strong>data directory</strong>, which depends on how RH was
+            installed:
+          </p>
+          <ul>
+            <li>
+              <strong>Usually <code>~/rh-data/plugins/</code></strong> — on a Raspberry Pi that is
+              <code>/home/pi/rh-data/plugins/</code>. This is the typical default install, not a
+              guarantee.
+            </li>
+            <li>
+              <strong>Older, in-place installs:</strong>
+              <code>&lt;RotorHazard&gt;/src/server/plugins/</code>.
+            </li>
+            <li>
+              <strong>Custom or vendor timers</strong> (NuclearHazard and friends) sit somewhere
+              else again. Whatever the layout, it is the <code>plugins/</code> folder beside
+              RotorHazard's
+              <code>config.json</code> and <code>database.db</code> — and RH logs
+              <code>Data path: …</code> in its startup log.
+            </li>
+          </ul>
+          <p>
+            <strong>The folder often doesn't exist yet.</strong> RotorHazard only looks for it, and
+            a fresh install with no user plugins has none — if there's no <code>plugins/</code> in the
+            data directory, create it yourself.
+          </p>
+          <p>
+            RotorHazard's own guide:
+            <a
+              href="https://github.com/RotorHazard/RotorHazard/blob/v4.3.0/doc/Plugins.md"
+              target="_blank"
+              rel="noreferrer">doc/Plugins.md</a
+            >.
+          </p>
+        </details>
         {#if status}
           <p class="status" class:bad={status.tone === 'bad'} role="status">{status.message}</p>
         {/if}
@@ -143,6 +187,22 @@
   }
   .install-guide code {
     font-family: var(--font-mono, monospace);
+  }
+  .install-guide .where {
+    margin-top: 0.9rem;
+    font-size: 0.92em;
+  }
+  .install-guide .where summary {
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .install-guide .where p,
+  .install-guide .where ul {
+    margin: 0.5rem 0 0;
+  }
+  .install-guide .where ul {
+    padding-left: 1.25rem;
+    line-height: 1.6;
   }
   .install-guide .status {
     margin: 0.75rem 0 0;
