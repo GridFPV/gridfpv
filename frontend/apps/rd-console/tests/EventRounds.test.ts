@@ -1781,3 +1781,108 @@ describe('EventRounds — open-practice active-channels picker', () => {
     );
   });
 });
+
+/**
+ * Editing a round is refused while one of its heats is in progress (#387).
+ *
+ * The Director re-materializes a round's still-`Scheduled` heats when the round is saved, and so
+ * refuses the edit outright when any of the round's heats is Staged/Armed/Running/Unofficial or is
+ * the heat loaded on the timer. The console mirrors that **before** the RD types: at a timing table,
+ * filling in a form and then being rejected is worse than not being offered it.
+ */
+describe('EventRounds — a round with a heat in progress cannot be edited (#387)', () => {
+  function impls(heats: HeatSummary[]) {
+    return {
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => heats)
+    };
+  }
+  /** A heat of the `r1` round in the given phase. */
+  function heatIn(phase: HeatSummary['phase'], is_current = false): HeatSummary {
+    return { heat: 'q-1', lineup: ['p1', 'p2'], class: 'c1', round: 'r1', phase, is_current };
+  }
+  /** The round's Edit button, and the row it lives in. */
+  async function editButton() {
+    const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
+    await within(roundsCard).findByText('Qualifying R1');
+    return within(roundsCard).getByRole('button', { name: 'Edit' }) as HTMLButtonElement;
+  }
+
+  for (const phase of ['Staged', 'Armed', 'Running', 'Unofficial'] as const) {
+    it(`disables Edit while one of the round's heats is ${phase}`, async () => {
+      const { session } = makeTestSession({ ...impls([heatIn(phase)]), event: EVENT });
+      render(EventRounds, { session });
+
+      await waitFor(async () => expect((await editButton()).disabled).toBe(true));
+      // It names the heat by its FRIENDLY name and says what to do — never the raw id.
+      expect(
+        await screen.findByText(/Can’t edit while Qualifying R1 Heat 1 is in progress/)
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/q-1/)).toBeNull();
+    });
+  }
+
+  it('leaves Edit alive when the round has only scheduled heats', async () => {
+    const { session } = makeTestSession({ ...impls([heatIn('Scheduled')]), event: EVENT });
+    render(EventRounds, { session });
+
+    await waitFor(async () => expect((await editButton()).disabled).toBe(false));
+    expect(screen.queryByText(/is in progress/)).toBeNull();
+  });
+
+  it('leaves Edit alive when the round has RACED — the scoring freeze owns that, not this', async () => {
+    // `Final` is not "in progress": a raced round stays editable in the fields the freeze allows.
+    const { session } = makeTestSession({ ...impls([heatIn('Final')]), event: EVENT });
+    render(EventRounds, { session });
+
+    await waitFor(async () => expect((await editButton()).disabled).toBe(false));
+  });
+
+  it('disables Edit for a SCHEDULED heat that is loaded on the timer', async () => {
+    // A scheduled heat the RD has loaded in Live control is off limits too — its channels may
+    // already have been read off to the pilots on the line. Another heat has raced, so the
+    // `is_current` marker is a real load rather than the first-scheduled fallback.
+    const heats: HeatSummary[] = [
+      { ...heatIn('Final'), heat: 'q-0' },
+      { ...heatIn('Scheduled', true), heat: 'q-1' }
+    ];
+    const { session } = makeTestSession({ ...impls(heats), event: EVENT });
+    render(EventRounds, { session });
+
+    await waitFor(async () => expect((await editButton()).disabled).toBe(true));
+  });
+
+  it('does NOT disable Edit for the first-scheduled fallback in a fresh event', async () => {
+    // THE false-refusal guard. `current_heat` falls back to the first scheduled heat when nothing
+    // has ever been staged or selected, so a fresh event always reports a "current" heat that is
+    // not loaded on any timer. The Director's refusal deliberately ignores that fallback — treating
+    // it as a real load would refuse every round edit in a fresh event, including the open-practice
+    // channel edit #387 exists to make work.
+    const { session } = makeTestSession({ ...impls([heatIn('Scheduled', true)]), event: EVENT });
+    render(EventRounds, { session });
+
+    await waitFor(async () => expect((await editButton()).disabled).toBe(false));
+    expect(screen.queryByText(/is in progress/)).toBeNull();
+  });
+
+  it('warns on the EDIT form that saving rebuilds the round’s scheduled heats', async () => {
+    const { session } = makeTestSession({ ...impls([heatIn('Scheduled')]), event: EVENT });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await editButton());
+    const form = await screen.findByRole('form', { name: 'Edit round' });
+    // The side effect is stated before the RD types, and scoped: raced heats are left alone.
+    expect(within(form).getByText(/Saving rebuilds this round’s/)).toBeInTheDocument();
+    expect(within(form).getByText(/already raced are\s+left alone/)).toBeInTheDocument();
+  });
+
+  it('does not warn on the ADD form — a new round has no heats to rebuild', async () => {
+    const { session } = makeTestSession({ ...impls([]), event: EVENT });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    const form = await screen.findByRole('form', { name: 'Add round' });
+    expect(within(form).queryByText(/Saving rebuilds/)).toBeNull();
+  });
+});
