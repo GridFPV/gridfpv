@@ -909,6 +909,41 @@ mod tests {
         vec![CompetitorRef("Ace".into()), CompetitorRef("Bee".into())]
     }
 
+    /// #380: an `eprintln!` **from this module** must land in the Director's log file.
+    ///
+    /// This is the regression guard for the whole issue. The connect-failure diagnostic a few
+    /// hundred lines above — the `error_chain` line that tells a refused TCP connect apart
+    /// from a TLS fault — is a plain `eprintln!`, and on the shipped Windows GUI-subsystem
+    /// build stderr goes nowhere. It only reaches an RD because `crate::logging` shadows
+    /// `eprintln!` for every module declared after it in `lib.rs`, and `macro_rules!` scope is
+    /// *textual*: move that declaration below `pub mod source;`, or add a `use` that shadows
+    /// it back, and this test fails instead of the field session.
+    ///
+    /// It asserts against the real resolved log file (no env mutation — `std::env::set_var` is
+    /// unsafe in edition 2024 and this crate forbids unsafe), reading only the bytes appended
+    /// after the marker is written, so it is safe under a parallel test runner.
+    #[test]
+    fn an_eprintln_from_this_module_reaches_the_log_file() {
+        use std::io::{Seek, SeekFrom};
+
+        let path = crate::logging::init().expect("a log file always resolves");
+        let before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+        let marker = format!("gridfpv-380-marker-{}", std::process::id());
+        eprintln!("gridfpv: RotorHazard connect failed for {marker:?}: <error chain>");
+
+        let mut file = std::fs::File::open(path).expect("the log file is readable");
+        file.seek(SeekFrom::Start(before)).expect("seekable");
+        let mut tail = String::new();
+        std::io::Read::read_to_string(&mut file, &mut tail).expect("readable tail");
+
+        assert!(
+            tail.contains(&marker),
+            "the eprintln! did not reach {}; tail was {tail:?}",
+            path.display()
+        );
+    }
+
     #[test]
     fn remap_attributes_signal_chunk_to_the_lineup_pilot() {
         // A trace chunk on node-1 is re-attributed to lineup[1] and re-stamped with the adapter id,

@@ -24,6 +24,15 @@
 //! relative calls to the protocol API (`/snapshot/...`, `/control/...`) and opens the
 //! realtime WS — those only work if the page and the API share an origin, which they do
 //! when the window loads the Director directly.
+//!
+//! # Diagnostics (#380)
+//!
+//! `main.rs` sets `windows_subsystem = "windows"` on release builds, so the shipped Windows
+//! executable is a **GUI-subsystem process with no console**: stderr writes are discarded by
+//! the OS, and even `gridfpv-desktop.exe > log.txt 2>&1` produces an *empty file*. Every
+//! `eprintln!` below therefore goes through [`gridfpv_app::logging`], which opens and writes a
+//! real **log file** itself — see the `eprintln!` shadow declared at the top of this module,
+//! and [`gridfpv_app::logging`]'s own docs for why this is not `tauri-plugin-log`.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -31,11 +40,33 @@ use std::path::PathBuf;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::oneshot;
 
+/// Route this crate's diagnostics into the Director's always-on log file (#380).
+///
+/// `gridfpv_app` shadows `eprintln!` for its own modules; this shell is a separate crate, so
+/// it declares the same shadow at its crate root — otherwise the three most important lines
+/// the desktop app prints (which data dir it chose, the ready URL, and a Director that exited
+/// with an error) would keep vanishing into a nonexistent console on Windows. `macro_rules!`
+/// scope is textual: this must stay above every use below.
+macro_rules! eprintln {
+    ($($arg:tt)*) => { gridfpv_app::logging::record(::std::format_args!($($arg)*)) };
+}
+
 /// The Tauri application entry point, invoked by `main.rs` (and re-exported for the mobile
 /// `tauri::mobile_entry_point` shape, should a mobile shell ever be added).
 pub fn run() {
+    // Open the log file before ANYTHING else, so a failure during Tauri's own setup (or a
+    // panic — `logging` installs a hook that files the panic + backtrace) is still recorded.
+    // On a GUI-subsystem build this is the only record that survives.
+    let log_file = gridfpv_app::logging::init();
+    eprintln!(
+        "gridfpv-desktop: GridFPV {} starting — log file: {}",
+        env!("CARGO_PKG_VERSION"),
+        log_file
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unavailable — no writable log dir)".to_string())
+    );
+
     tauri::Builder::default()
-        .plugin(tauri_plugin_log_shim())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -120,12 +151,6 @@ pub fn run() {
 /// Owns the tokio runtime hosting the in-process Director; held in Tauri-managed state so it
 /// (and the serve task) live for the whole app lifetime.
 struct DirectorRuntime(#[allow(dead_code)] tokio::runtime::Runtime);
-
-/// The bundled-log plugin is optional; this returns a no-op shim plugin so the builder chain
-/// reads cleanly and a real logging plugin can slot in later without restructuring `setup`.
-fn tauri_plugin_log_shim() -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    tauri::plugin::Builder::new("gridfpv-noop").build()
-}
 
 /// Resolve the data directory for created events' SQLite files (created if needed).
 ///
