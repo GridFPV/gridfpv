@@ -2917,6 +2917,69 @@ mod marshaling_tests {
         );
     }
 
+    // --- Voiding the SOLE detection: the entry survives, emptied ------------------------------
+
+    #[test]
+    fn voiding_a_competitors_only_pass_leaves_it_present_with_zero_laps() {
+        // The contract the live marshaling e2es assert against: a void never makes a competitor
+        // VANISH. It empties the lap chain and leaves the removal record behind, so the RD can
+        // still see (and un-void) the ruling they just made. Deliberately NO `HeatScheduled`
+        // here, so the lineup seeding (#388) cannot be what keeps the entry alive: the removal
+        // record alone does it, and has since voids began carrying one.
+        let log = vec![pass("rh", "node-0", 1_000_000, Some(0)), voided(0)];
+        let list = lap_list_marshaled(tagged(&log));
+        let cl = list
+            .competitor(&key("rh", "node-0"))
+            .expect("voiding the only pass must not drop the competitor from the lap list");
+        assert!(cl.laps.is_empty(), "no surviving passes => no laps");
+        assert_eq!(
+            cl.voided.len(),
+            1,
+            "the void it stands on is the removal record: {cl:?}"
+        );
+        // And the corrected pass stream — the honest detection count — really is empty.
+        assert!(corrected_passes(tagged(&log)).is_empty());
+    }
+
+    #[test]
+    fn voiding_the_only_pass_of_a_lined_up_competitor_keeps_the_seeded_entry() {
+        // Same thing with the lineup present (the shape a real heat log has): the entry is
+        // doubly anchored — seeded from `HeatScheduled` AND carrying the removal record — and
+        // is still ONE entry, with zero laps.
+        let log = vec![
+            scheduled("q-1", &["node-0"]),
+            pass("rh", "node-0", 1_000_000, Some(0)),
+            voided(1),
+        ];
+        let list = lap_list_marshaled(tagged(&log));
+        assert_eq!(list.competitors.len(), 1, "one entry, not two: {list:?}");
+        let cl = list.competitor(&key("rh", "node-0")).expect("present");
+        assert!(cl.laps.is_empty());
+        assert_eq!(cl.voided.len(), 1);
+    }
+
+    #[test]
+    fn a_void_removes_exactly_one_detection_from_the_corrected_stream() {
+        // The invariant the live e2es measure, stated on the honest metric: the number of
+        // SURVIVING lap-gate passes drops by exactly one per void — at every count, including
+        // the 1 -> 0 edge. `laps.len() + 1` cannot express this (it reads 1 for an emptied
+        // entry), which is why the live tests must count corrected passes instead.
+        for n in 1..=4usize {
+            let mut log: Vec<Event> = (0..n)
+                .map(|i| pass("rh", "node-0", 1_000_000 * (i as i64 + 1), Some(i as u64)))
+                .collect();
+            let before = corrected_passes(tagged(&log)).len();
+            assert_eq!(before, n);
+            log.push(voided(0));
+            assert_eq!(
+                corrected_passes(tagged(&log)).len(),
+                n - 1,
+                "voiding one of {n} detections must leave {} ",
+                n - 1
+            );
+        }
+    }
+
     #[test]
     fn an_un_lined_up_competitor_still_appears_from_its_passes() {
         // Seeding is additive: a competitor the timer saw but the lineup never named (a

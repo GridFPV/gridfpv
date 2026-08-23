@@ -26,13 +26,15 @@
 //!
 //! # Determinism / tolerances
 //!
-//! RH's mock interface reads its CSV continuously (lap *timing* is not controllable) and
-//! the harness stops the heat on the first crossing, so — like every `*_live` test — the
-//! assertions are **structural / tolerant**: states reached, transition order, the change
-//! stream converging, "a void removes exactly one detection". Never exact µs and never an
-//! exact lap count (only `>= 1`). The transitions the *test itself* drives (the heat loop,
-//! the marshaling correction) are deterministic; only the RH-produced passes are timing-
-//! dependent, and those are asserted only by presence and by the re-fold delta.
+//! RH's mock interface reads its CSV continuously, so lap *timing* is not controllable and —
+//! like every `*_live` test — the assertions are **structural**: states reached, transition
+//! order, the change stream converging, "a void removes exactly one detection". Never exact µs.
+//!
+//! The pass *count*, though, is not left to chance. The heat runs a lap cadence far longer than
+//! the harness's stop-and-drain window and is held open until [`PASSES`] crossings have landed,
+//! so the same scenario yields the same detection count every run. It used to stop on the first
+//! crossing at a 0.2s cadence, which produced 1 pass on some runs and several on others; the
+//! marshaling assertion then branched on which, and only one of the two branches was right.
 //!
 //! Local-only class (needs Docker). DISTINCT RH port 5041 (engine full-event uses 5040).
 //! Run:
@@ -65,6 +67,10 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const RH_PORT: u16 = 5041;
 /// The CSV tick interval (seconds), matching the engine harness.
 const TICK: &str = "0.1";
+/// How many real crossings this e2e drives the heat for. [`run_rh_heat`] holds the race open
+/// until they have all landed, so the heat's detection count is this number rather than a race
+/// between the CSV cadence and the stop-and-drain window — see the determinism note above.
+const PASSES: usize = 4;
 /// The single heat this e2e drives.
 const HEAT: &str = "q-e2e-1";
 /// The registry event this e2e drives against. Every route is rooted under
@@ -148,19 +154,26 @@ async fn get_snapshot(addr: &str, path: &str) -> Snapshot {
     serde_json::from_str(body).expect("parse Snapshot")
 }
 
-/// GET a snapshot path and return only its HTTP status (for the post-void empty-scope case).
-async fn pilot_snapshot_status(addr: &str, path: &str) -> u16 {
+/// GET a snapshot path and return `(status, body)` WITHOUT asserting 200 — so the test can
+/// assert the status itself (the pilot scope's 200-vs-404 question after a marshaling void).
+async fn pilot_snapshot(addr: &str, path: &str) -> (u16, String) {
     let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
-    response
+    let status = response
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
-        .expect("a status code")
+        .expect("a status code");
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    (status, body)
 }
 
 /// Connect a `/stream` reader at `addr`, subscribing to `scope` from the snapshot `cursor`.
@@ -276,9 +289,10 @@ fn run_rh_heat(rh_url: &str) -> Vec<Event> {
         "RotorHazard never reached RACING"
     );
 
-    // Collect crossings; keep at least one pass.
-    let got_pass = wait_until(&conn, &mut live, Duration::from_secs(25), |evs| {
-        evs.iter().any(|e| matches!(e, Event::Pass(_)))
+    // Collect crossings; hold the race open until `PASSES` of them have landed, so the heat's
+    // pass count is what the scenario asked for and not whatever the poll/drain windows caught.
+    let got_passes = wait_until(&conn, &mut live, Duration::from_secs(60), |evs| {
+        evs.iter().filter(|e| matches!(e, Event::Pass(_))).count() >= PASSES
     });
 
     // Close the race, drain any final crossings.
@@ -288,8 +302,9 @@ fn run_rh_heat(rh_url: &str) -> Vec<Event> {
     conn.disconnect();
 
     assert!(
-        got_pass,
-        "no timer crossings were produced while the heat was running"
+        got_passes,
+        "the heat was held open for {PASSES} timer crossings and only {} arrived",
+        live.iter().filter(|e| matches!(e, Event::Pass(_))).count()
     );
 
     // Only `Pass`es are the heat's canonical race-engine observations.
@@ -305,12 +320,17 @@ fn run_rh_heat(rh_url: &str) -> Vec<Event> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker (spins up dockerized RotorHazard and drives a live heat through the server)"]
 async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
-    // One busy node so several real passes land in the live window (the harness stops the
-    // race shortly after the first crossing). `node-0` is the seat ref the adapter reports.
+    // One node at a ~2s lap cadence (`ticks_per_lap: 20` over the 0.1s tick), driven for exactly
+    // `PASSES` crossings. The cadence is deliberately much LONGER than the ~1s stop-and-drain
+    // window, so the race closes within one 250ms poll of the last crossing and the drain adds
+    // none: the heat yields the same detection count run after run. (It used to run
+    // `ticks_per_lap: 2` and stop on the FIRST crossing, which yielded 1 pass on some runs and a
+    // handful on others — and the marshaling assertion below then took a different branch
+    // depending on which.) `node-0` is the seat ref the adapter reports.
     let scenario = vec![(
         0usize,
         node_csv(&NodeCsv {
-            ticks_per_lap: 2,
+            ticks_per_lap: 20,
             peak_rssi: 180,
             baseline_rssi: 70,
             seed: 0,
@@ -403,7 +423,10 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
         .await
         .expect("RH driver thread");
     let pass_count = passes.len();
-    assert!(pass_count >= 1, "the real heat produced at least one pass");
+    assert_eq!(
+        pass_count, PASSES,
+        "the heat is driven for exactly {PASSES} real crossings"
+    );
     for pass in passes {
         state.append(pass, None).expect("append a real pass");
     }
@@ -411,8 +434,8 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     // Drain any change envelopes the passes produced (each pass that *completes* a lap
     // changes the live-state fold and emits one), then read the converged live state off a
     // fresh event-scope snapshot — the same projection the stream serves, so the snapshot
-    // and the stream agree (§2, §3). A single pass banks 0 completed laps, so the structural
-    // guarantee is that the live state still reflects this heat / pilot, Running.
+    // and the stream agree (§2, §3). The structural guarantee is that the live state still
+    // reflects this heat / pilot, Running, with the crossings banked.
     drain_envelopes(&mut stream).await;
     let folded_snap = get_snapshot(&addr, &format!("/events/{EVENT}/snapshot/event/{EVENT}")).await;
     let folded = match &folded_snap.body {
@@ -433,21 +456,28 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     );
 
     // === 5. The protocol client reads the pilot's lap list (snapshot scope). ===
-    // The pilot scope folds to a `LapList`; its detection count is the marshaling baseline.
+    // The pilot scope folds to a `LapList`; its lap chain is the marshaling baseline.
     let pilot_snap = get_snapshot(
         &addr,
         &format!("/events/{EVENT}/snapshot/pilot/{EVENT}/node-0"),
     )
     .await;
     let baseline = lap_list_of(&pilot_snap.body);
-    let baseline_detections = detection_count(&baseline);
-    assert!(
-        baseline_detections >= 1,
-        "the pilot has at least one real detection to marshal; got {baseline_detections}"
+    let baseline_laps = lap_count(&baseline);
+    assert_eq!(
+        baseline_laps,
+        PASSES - 1,
+        "{PASSES} real detections are {} laps",
+        PASSES - 1
+    );
+    assert_eq!(
+        voided_count(&baseline),
+        0,
+        "nothing has been marshaled yet, so the removal record is empty"
     );
     eprintln!(
         "server e2e: {pass_count} real passes ⇒ {live_laps} completed laps, \
-         {baseline_detections} detections"
+         {baseline_laps} lap-list laps"
     );
 
     // === 6. Marshaling correction: void one real detection via a control command. ===
@@ -485,30 +515,71 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     )
     .await;
 
-    if baseline_detections >= 2 {
-        // The void leaves at least one detection, so the pilot scope still folds to a
-        // non-empty lap list: the next envelope carries the re-folded value, one detection
-        // lighter — the client observes the marshaling correction as a fresh value (§9.2).
-        let marshaled = await_lap_list(&mut pilot_stream).await;
-        assert_eq!(
-            detection_count(&marshaled),
-            baseline_detections - 1,
-            "voiding one real detection re-folds the client's lap list down by exactly one"
-        );
-    } else {
-        // Voiding the pilot's *only* detection empties the lap list, so the pilot scope
-        // folds to nothing and the snapshot 404s. Assert the re-fold by re-reading the
-        // pilot snapshot, which must now report the scope as unknown (no laps left).
-        assert_eq!(
-            pilot_snapshot_status(
-                &addr,
-                &format!("/events/{EVENT}/snapshot/pilot/{EVENT}/node-0")
-            )
-            .await,
-            404,
-            "voiding the only detection re-folds the pilot's lap list to empty (scope 404s)"
-        );
+    // The next envelope carries the re-folded value, one detection lighter — the client
+    // observes the marshaling correction as a fresh value (§9.2).
+    let marshaled = await_lap_list(&mut pilot_stream).await;
+    assert_eq!(
+        lap_count(&marshaled),
+        baseline_laps - 1,
+        "voiding one real detection re-folds the client's lap list down by exactly one lap"
+    );
+    assert_eq!(
+        voided_count(&marshaled),
+        1,
+        "the voided pass rides along on the lap list's removal record"
+    );
+
+    // The pilot scope stays a KNOWN scope, and the snapshot keeps serving it: 200 with the
+    // shorter lap list, NOT a 404.
+    //
+    // This is the deliberate call on 200-vs-404 (this assertion used to expect 404 whenever the
+    // void emptied the pilot's laps). `UnknownScope` means "there is no such pilot in this
+    // event" — a routing answer. "This pilot is in the event and currently has no laps" is an
+    // empty result, not an unknown scope, and 404-ing it breaks the one case marshaling exists
+    // for: a pilot the timer never detected (or whose every detection the RD has just voided)
+    // is exactly who the console must open a lap list for to reconstruct their race (#388).
+    // A 404 there means the RD cannot reach the pilot they most need to marshal, and it would
+    // make the pilot scope flicker in and out of existence as rulings are applied and undone.
+    // The scope is bounded by the heat lineup, so it stays honestly 404 for a pilot who was
+    // never in the event at all.
+    let (status, body) = pilot_snapshot(
+        &addr,
+        &format!("/events/{EVENT}/snapshot/pilot/{EVENT}/node-0"),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "a scheduled pilot's scope is KNOWN even with laps voided away; got {status}: {body}"
+    );
+
+    // And it holds all the way down: voiding EVERY remaining detection leaves the pilot present
+    // with zero laps and the full removal record — served as 200, never 404.
+    for offset in remaining_pass_offsets(&state, void_offset) {
+        rd_command(
+            &addr,
+            &Command::VoidDetection {
+                target: LogRef(offset),
+            },
+            &rd,
+        )
+        .await;
     }
+    let emptied = get_snapshot(
+        &addr,
+        &format!("/events/{EVENT}/snapshot/pilot/{EVENT}/node-0"),
+    )
+    .await;
+    let emptied = lap_list_of(&emptied.body);
+    assert_eq!(
+        lap_count(&emptied),
+        0,
+        "every detection is voided, so no lap survives"
+    );
+    assert_eq!(
+        voided_count(&emptied),
+        PASSES,
+        "all {PASSES} voided passes are on the removal record, ready to be un-voided"
+    );
 
     // === 7. Auth gate: a control command without the RD token is rejected (401). ===
     let (status, _ack) = post_raw(&addr, &Command::ForceEnd { heat: heat.clone() }, None).await;
@@ -575,20 +646,47 @@ fn lap_list_of(body: &ProjectionBody) -> gridfpv_projection::LapList {
     }
 }
 
-/// Total detections (lap-gate passes) a corrected lap list holds: a competitor with `K`
-/// laps had `K + 1` detections, so summing `laps + 1` over present competitors counts
-/// detections. Enough to prove a void removed exactly one.
-fn detection_count(list: &gridfpv_projection::LapList) -> usize {
-    list.competitors.iter().map(|c| c.laps.len() + 1).sum()
+/// Completed laps across the lap list (a competitor with `K` surviving detections has `K - 1`).
+///
+/// This replaces an older `detection_count` that summed `laps.len() + 1` per competitor. That
+/// metric assumed a competitor is in the list *iff* it has at least one surviving detection,
+/// which is not true: an entry outlives its detections. A void leaves the removal record behind
+/// so the RD can un-void it, and a lineup seat is seeded from `HeatScheduled` (#388) — either
+/// keeps a competitor present with an empty lap chain, which `laps + 1` then miscounts as one
+/// phantom detection. Laps and the removal record are both directly observable on the wire, so
+/// the test asserts on those instead.
+fn lap_count(list: &gridfpv_projection::LapList) -> usize {
+    list.competitors.iter().map(|c| c.laps.len()).sum()
+}
+
+/// Gate passes on the lap list's **removal record** — the voided detections the RD can un-void.
+fn voided_count(list: &gridfpv_projection::LapList) -> usize {
+    list.competitors.iter().map(|c| c.voided.len()).sum()
 }
 
 /// The log offset of the first real `Pass` in the server's log (the marshaling target).
 fn first_pass_offset(state: &AppState) -> Option<u64> {
+    pass_offsets(state).first().copied()
+}
+
+/// Every real `Pass` offset in the server's log, in append order.
+fn pass_offsets(state: &AppState) -> Vec<u64> {
     let (events, _) = state.read_for_test();
     events
         .iter()
-        .position(|e| matches!(e, Event::Pass(_)))
-        .map(|i| i as u64)
+        .enumerate()
+        .filter(|(_, e)| matches!(e, Event::Pass(_)))
+        .map(|(i, _)| i as u64)
+        .collect()
+}
+
+/// Every real `Pass` offset except `already_voided` — the rest of the pilot's detections, so the
+/// test can void the lap list all the way down to empty.
+fn remaining_pass_offsets(state: &AppState, already_voided: u64) -> Vec<u64> {
+    pass_offsets(state)
+        .into_iter()
+        .filter(|o| *o != already_voided)
+        .collect()
 }
 
 // A small read accessor so the test can scan the server's log for a real pass offset. The

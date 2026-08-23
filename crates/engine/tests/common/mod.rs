@@ -113,7 +113,36 @@ fn wait_until(
 /// marshaling-evidence one uses [`run_mock_heat_with_signal`] instead.
 #[allow(dead_code)]
 pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec<Event> {
-    run_mock_heat_keeping(port, heat, scenario, |e| matches!(e, Event::Pass(_)))
+    run_mock_heat_keeping(port, heat, scenario, |e| matches!(e, Event::Pass(_)), 1)
+}
+
+/// [`run_mock_heat`], but the race is held open until the timer has produced at least
+/// `min_passes` crossings (rather than stopping on the very first one).
+///
+/// Why this exists: stopping on the first pass makes the heat's pass count a **race** between
+/// the CSV cadence and the harness's poll/drain windows — the same scenario yields 1 pass on one
+/// run and 5 on the next. Any assertion whose shape depends on "did we get 1 or ≥2 detections?"
+/// then passes or fails by luck. Waiting for a stated `min_passes` at a lap cadence slower than
+/// the ~1s stop-and-drain window makes the count reproducible: the race is closed within one
+/// poll tick (250ms) of the `min_passes`-th crossing, and the next crossing is a full lap away,
+/// so the drain adds none.
+///
+/// `allow(dead_code)`: `common` is compiled into every engine `live` test binary and most use
+/// the plain [`run_mock_heat`].
+#[allow(dead_code)]
+pub fn run_mock_heat_until(
+    port: u16,
+    heat: &str,
+    scenario: &[(usize, String)],
+    min_passes: usize,
+) -> Vec<Event> {
+    run_mock_heat_keeping(
+        port,
+        heat,
+        scenario,
+        |e| matches!(e, Event::Pass(_)),
+        min_passes,
+    )
 }
 
 /// [`run_mock_heat`], but the heat's **signal facts ride along** with its passes.
@@ -134,25 +163,33 @@ pub fn run_mock_heat_with_signal(
     heat: &str,
     scenario: &[(usize, String)],
 ) -> Vec<Event> {
-    run_mock_heat_keeping(port, heat, scenario, |e| {
-        matches!(
-            e,
-            Event::Pass(_)
-                | Event::SignalChunk(_)
-                | Event::SignalThresholds(_)
-                | Event::SignalHistory(_)
-                | Event::CompetitorSeen { .. }
-        )
-    })
+    run_mock_heat_keeping(
+        port,
+        heat,
+        scenario,
+        |e| {
+            matches!(
+                e,
+                Event::Pass(_)
+                    | Event::SignalChunk(_)
+                    | Event::SignalThresholds(_)
+                    | Event::SignalHistory(_)
+                    | Event::CompetitorSeen { .. }
+            )
+        },
+        1,
+    )
 }
 
 /// The shared harness behind [`run_mock_heat`] and [`run_mock_heat_with_signal`]: `keep` decides
-/// which of the adapter's live events are folded into the returned canonical log.
+/// which of the adapter's live events are folded into the returned canonical log, and
+/// `min_passes` is how many crossings the race is held open for (see [`run_mock_heat_until`]).
 fn run_mock_heat_keeping(
     port: u16,
     heat: &str,
     scenario: &[(usize, String)],
     keep: impl Fn(&Event) -> bool,
+    min_passes: usize,
 ) -> Vec<Event> {
     let heat = HeatId(heat.to_string());
     let lineup: Vec<CompetitorRef> = scenario
@@ -204,9 +241,11 @@ fn run_mock_heat_keeping(
     drive(&mut log, &heat, &mut state, HeatCommand::SkipCountdown);
     debug_assert_eq!(state, HeatState::Running);
 
-    // While Running, poll the timer crossings; keep at least one pass.
-    let got_pass = wait_until(&conn, &mut live, Duration::from_secs(25), |evs| {
-        evs.iter().any(|e| matches!(e, Event::Pass(_)))
+    // While Running, poll the timer crossings; hold the race open until `min_passes` have
+    // landed, so the heat's pass count is the scenario's choice and not a timing race.
+    let min_passes = min_passes.max(1);
+    let got_pass = wait_until(&conn, &mut live, Duration::from_secs(60), |evs| {
+        evs.iter().filter(|e| matches!(e, Event::Pass(_))).count() >= min_passes
     });
 
     // Close the race on RH, then drain any final crossings before finishing.
@@ -217,7 +256,8 @@ fn run_mock_heat_keeping(
 
     assert!(
         got_pass,
-        "no timer crossings were produced while the heat was running"
+        "the heat was held open for {min_passes} timer crossing(s) and only {} arrived",
+        live.iter().filter(|e| matches!(e, Event::Pass(_))).count()
     );
 
     // Interleave the live events `keep` selects into the log between Running and Finished, in
