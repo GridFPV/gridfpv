@@ -45,6 +45,7 @@ use crate::app::AppState;
 use crate::auth::TokenStore;
 use crate::classes::ClassDirectory;
 use crate::pilots::PilotDirectory;
+use crate::round_engine;
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::timers::{MOCK_TIMER_ID, TimerId, TimerRegistry};
 
@@ -1080,6 +1081,28 @@ struct Registry {
     active_event: Option<EventId>,
 }
 
+/// What a round's heats say about how far its config may still move (release-hardening; the
+/// in-progress refusal is #387) — the answer
+/// [`round_heat_facts`](EventRegistry::round_heat_facts) folds off the event's log in ONE pass.
+#[derive(Debug, Default)]
+struct RoundHeatFacts {
+    /// Whether ANY heat in the log is tagged with this round.
+    has_heats: bool,
+    /// Whether any of them has left `Scheduled` (staged / raced / scored). Scoring re-derives from
+    /// the round's CURRENT config on every read, so editing a raced round's scoring fields would
+    /// silently rewrite already-official results — [`EventRegistry::update_round`] rejects that.
+    raced: bool,
+    /// The **friendly name** of the first heat of this round that is *in progress* — staged, armed,
+    /// running, or unofficial, or still `Scheduled` but loaded on the timer. While one exists the
+    /// round cannot be edited at all (#387): re-materializing its heats would swap a lineup out
+    /// from under the timer, and re-tuning mid-heat is worse.
+    ///
+    /// It carries the **name**, not the id: it goes straight into an RD-facing refusal, and a raw
+    /// id must never reach a user (repo display rule). `Final` heats are deliberately absent — the
+    /// raced-freeze already covers them, so there is no gap between "in progress" and "raced".
+    in_progress: Option<String>,
+}
+
 impl EventRegistry {
     /// Build a registry seeded with the built-in Practice event, persisting created events
     /// under `data_dir` when given.
@@ -1481,38 +1504,53 @@ impl EventRegistry {
     /// bad class / format / dangling seeding source → [`RoundError::Invalid`] (400). A
     /// [`SeedingRule::FromRanking`] may not name **this** round as its own source. Written through to
     /// disk (issue #115).
-    /// The **freeze probe** for round config (release-hardening): fold the event's log and
-    /// report `(has_heats, raced)` for `round_id` — whether ANY heat is tagged with it, and
-    /// whether any such heat has left `Scheduled` (staged / raced / scored). Scoring re-derives
-    /// from the round's CURRENT config on every read, so editing a raced round's scoring fields
-    /// would silently rewrite already-official results — the callers below reject that.
-    fn round_heat_facts(&self, id: &EventId, round_id: &RoundId) -> (bool, bool) {
+    /// The **freeze / refusal probe** for round config: fold the event's log once and report the
+    /// [`RoundHeatFacts`] for `round_id`.
+    fn round_heat_facts(&self, id: &EventId, round_id: &RoundId) -> RoundHeatFacts {
+        use gridfpv_engine::heat::{HeatState, heat_state};
+
+        let mut facts = RoundHeatFacts::default();
         let Some(state) = self.resolve(id) else {
-            return (false, false);
+            return facts;
         };
         let Ok((events, _cursor)) = state.read() else {
-            return (false, false);
+            return facts;
         };
-        let mut has_heats = false;
-        let mut raced = false;
-        for event in &events {
-            if let gridfpv_events::Event::HeatScheduled {
-                heat,
-                round: Some(r),
-                ..
-            } = event
-            {
-                if r == round_id {
-                    has_heats = true;
-                    let heat_state = gridfpv_engine::heat::heat_state(&events, heat);
-                    if heat_state.is_some_and(|s| s != gridfpv_engine::heat::HeatState::Scheduled) {
-                        raced = true;
-                        break;
-                    }
-                }
+        // The round's own definition, for naming its heats the way the console does.
+        let round = self
+            .read()
+            .events
+            .get(id)
+            .and_then(|e| e.meta.rounds.iter().find(|r| &r.id == round_id).cloned());
+        let on_timer = round_engine::heat_on_timer(&events);
+        for heat in round_engine::scheduled_round_heats(&events, round_id) {
+            facts.has_heats = true;
+            let Some(heat_state) = heat_state(&events, &heat) else {
+                continue;
+            };
+            if heat_state != HeatState::Scheduled {
+                facts.raced = true;
+            }
+            let in_progress = match heat_state {
+                // Countdown begun / gate open / racing / passes recorded but not yet official.
+                HeatState::Staged
+                | HeatState::Armed
+                | HeatState::Running
+                | HeatState::Unofficial => true,
+                // Not begun — but if it is the heat the RD has loaded in Live control it may be
+                // on deck with its channels already read off, so it is off limits too.
+                HeatState::Scheduled => on_timer.as_ref() == Some(&heat),
+                // Raced: the freeze above owns it.
+                HeatState::Final => false,
+            };
+            if in_progress && facts.in_progress.is_none() {
+                facts.in_progress = Some(match &round {
+                    Some(round) => round_engine::heat_display_name(round, &events, &heat),
+                    None => heat.0.clone(),
+                });
             }
         }
-        (has_heats, raced)
+        facts
     }
 
     pub fn update_round(
@@ -1522,7 +1560,7 @@ impl EventRegistry {
         req: UpdateRoundReq,
     ) -> Result<RoundDef, RoundError> {
         // Probe the log BEFORE taking the registry write lock (the log has its own mutex).
-        let (_has_heats, raced) = self.round_heat_facts(id, round_id);
+        let facts = self.round_heat_facts(id, round_id);
         let mut reg = self.write();
         let directory = reg.classes.clone();
         let event = reg
@@ -1539,6 +1577,18 @@ impl EventRegistry {
         else {
             return Err(RoundError::RoundNotFound(round_id.0.clone()));
         };
+        // A round with a heat IN PROGRESS cannot be edited AT ALL (user decision, 2026-08-24,
+        // #387). Editing a round re-materializes its still-`Scheduled` heats below; doing that to a
+        // heat that is staged/armed/running — or one the RD has loaded in Live control — would swap
+        // its lineup and frequencies out from under the timer, and re-tuning a heat mid-race is
+        // worse. Refuse and name the heat instead. Once it reaches `Final` the raced-freeze below
+        // takes over, so there is no gap between "in progress" and "raced".
+        if let Some(heat) = &facts.in_progress {
+            return Err(RoundError::Invalid(format!(
+                "this round has a heat in progress ({heat}) — finalize or reset it before editing \
+                 the round"
+            )));
+        }
         let win_condition = req.win_condition.unwrap_or_else(default_win_condition);
         // As with add: an omitted channel mode defaults by the (new) format; an explicit value
         // overrides. The round is replaced wholesale, so the mode is re-derived each update.
@@ -1566,7 +1616,7 @@ impl EventRegistry {
         // rewrite a bracket chain. Still editable on a raced round: label, staging timer, start
         // procedure, grace window, protest window, time limit — and the `rounds` param (heats
         // per pilot), which only extends future fills.
-        if raced {
+        if facts.raced {
             let effective_channel_mode = channel_mode;
             let mut frozen: Vec<&str> = Vec::new();
             if req.format != existing.format {
@@ -1639,7 +1689,65 @@ impl EventRegistry {
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
+        let timers = reg.timers.clone();
+        // Release the registry write lock BEFORE touching the log: the command lock is always
+        // taken ahead of the log mutex, and no other write path holds the registry across either.
+        drop(reg);
+
+        // RE-MATERIALIZE the round's already-scheduled heats (#387). A scheduled heat baked in the
+        // lineup + frequencies the round's config produced when it was filled; without this the
+        // edit changes the round but not the heat it already made, and that heat races stale
+        // forever (the fill dedups by heat id, so re-filling never revisits it). Every heat this
+        // touches is still `Scheduled` — anything in progress was refused above, and a raced
+        // round's channel config is frozen — so nothing under way is rewritten.
+        self.rematerialize_round_heats(id, round_id, &meta, &timers);
         Ok(round)
+    }
+
+    /// Rewrite the round's still-`Scheduled` heats against its just-edited config (#387): append a
+    /// fresh [`Event::HeatScheduled`](gridfpv_events::Event::HeatScheduled) for each heat whose
+    /// lineup or channels the new config changes.
+    ///
+    /// Every by-id read of a heat (lineup, class, round, frequencies, label) takes its **most
+    /// recent** schedule, so the re-emitted event updates the heat in place rather than creating a
+    /// second one — and `heat_state` re-seeds it to `Scheduled`, which is where it already was.
+    ///
+    /// Best-effort by design: a round whose new config cannot be planned (an empty field, an
+    /// unassignable lineup) simply leaves its heats alone. The round edit itself has already been
+    /// validated and persisted; the RD's next fill surfaces any real problem.
+    fn rematerialize_round_heats(
+        &self,
+        id: &EventId,
+        round_id: &RoundId,
+        meta: &EventMeta,
+        timers: &TimerRegistry,
+    ) {
+        let Some(state) = self.resolve(id) else {
+            return;
+        };
+        // Read-check-append under the command lock, like every other validated write: the heats
+        // are re-planned off the log they are appended to, so nothing can stage a heat in between
+        // and have its lineup rewritten underneath it.
+        let _guard = state.command_guard();
+        let Ok((events, _cursor)) = state.read() else {
+            return;
+        };
+        let class = round_engine::round_class(meta, round_id);
+        for heat in round_engine::rematerialize_round_heats(meta, timers, round_id, &events) {
+            let _ = state.append(
+                gridfpv_events::Event::HeatScheduled {
+                    heat: heat.heat,
+                    lineup: heat.lineup,
+                    class: class.clone(),
+                    round: Some(round_id.clone()),
+                    frequencies: heat.frequencies,
+                    // The heat keeps whatever custom name it carried — a re-materialization is not
+                    // a rename.
+                    label: heat.label,
+                },
+                None,
+            );
+        }
     }
 
     /// Remove a **round** from an event (race redesign Slice 2a), returning the event's updated
@@ -1654,8 +1762,7 @@ impl EventRegistry {
         // their name, win condition, and scoring through the round), and a raced round's results
         // would lose their scoring config entirely. The log is append-only, so there is nothing
         // safe to "cascade" — the RD abandons a misconfigured round by just not filling it.
-        let (has_heats, _raced) = self.round_heat_facts(id, round_id);
-        if has_heats {
+        if self.round_heat_facts(id, round_id).has_heats {
             return Err(RoundError::Invalid(
                 "this round has scheduled heats — it can no longer be removed (leave it \
                  unfilled, or discard its heats and re-use it)"
@@ -2536,7 +2643,7 @@ fn short_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfpv_events::{CompetitorRef, Event, HeatId};
+    use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition};
 
     /// A name-only create request (the common one-click path) for the tests.
     /// Wrap bare pilot ids into channel-less [`MemberSlot`]s — the membership shape the registry now
@@ -3197,15 +3304,23 @@ mod tests {
                 None,
             )
             .unwrap();
-        state
-            .append(
-                Event::HeatStateChanged {
-                    heat: HeatId("q-1".into()),
-                    transition: HeatTransition::Running,
-                },
-                None,
-            )
-            .unwrap();
+        // Drive it all the way to Final: a heat that is merely *in progress* refuses the round
+        // edit outright (#387), so the raced-freeze this asserts is only reachable once finalized.
+        for transition in [
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: HeatId("q-1".into()),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
         let frozen_req = UpdateRoundReq {
             label: round.label.clone(),
             classes: round.classes.clone(),
@@ -3351,7 +3466,7 @@ mod tests {
             .add_round(&event.id, round_req("Qual", vec![open.clone()]))
             .unwrap();
 
-        // Race a heat under the round (Scheduled -> Running in the event's log).
+        // Race a heat under the round (Scheduled -> Final in the event's log).
         let state = reg.resolve(&event.id).unwrap();
         state
             .append(
@@ -3366,15 +3481,23 @@ mod tests {
                 None,
             )
             .unwrap();
-        state
-            .append(
-                Event::HeatStateChanged {
-                    heat: HeatId("q-1".into()),
-                    transition: HeatTransition::Running,
-                },
-                None,
-            )
-            .unwrap();
+        // Drive it all the way to Final: a heat that is merely *in progress* refuses the round
+        // edit outright (#387), so the raced-freeze this asserts is only reachable once finalized.
+        for transition in [
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: HeatId("q-1".into()),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
 
         let base = |label: &str| UpdateRoundReq {
             label: label.to_string(),
@@ -4212,5 +4335,372 @@ mod tests {
         assert!(restored.rounds.is_empty());
         assert!(restored.classes_membership.is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- Editing a round re-materializes its scheduled heats (#387) --------------------------
+
+    /// An open-practice round over `channels` — the round the #387 report is written against (its
+    /// heat's lineup *is* its channel set, so a channel edit must reach the already-filled heat).
+    fn practice_round(channels: &[usize]) -> NewRoundReq {
+        NewRoundReq {
+            label: "Practice".to_string(),
+            classes: vec![],
+            format: OpenPractice::NAME.to_string(),
+            params: BTreeMap::new(),
+            win_condition: None,
+            seeding: SeedingRule::AllChannels {
+                channels: channels.to_vec(),
+            },
+            time_limit_secs: None,
+            channel_mode: None,
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
+            protest_window: None,
+            min_lap_secs: None,
+        }
+    }
+
+    /// The same round as an **edit**, over a (possibly different) channel set.
+    fn practice_edit(label: &str, channels: &[usize]) -> UpdateRoundReq {
+        UpdateRoundReq {
+            label: label.to_string(),
+            classes: vec![],
+            format: OpenPractice::NAME.to_string(),
+            params: BTreeMap::new(),
+            win_condition: None,
+            seeding: SeedingRule::AllChannels {
+                channels: channels.to_vec(),
+            },
+            time_limit_secs: None,
+            channel_mode: None,
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
+            protest_window: None,
+            min_lap_secs: None,
+        }
+    }
+
+    /// Fill the round's next heat exactly as the control handler does, appending the tagged
+    /// `HeatScheduled`, and return its id.
+    fn fill_next_heat(reg: &EventRegistry, id: &EventId, round: &RoundId) -> HeatId {
+        let meta = reg.meta_of(id).unwrap();
+        let timers = reg.timers();
+        let state = reg.resolve(id).unwrap();
+        let (events, _) = state.read().unwrap();
+        match round_engine::fill_round(&meta, &timers, round, &events).unwrap() {
+            round_engine::FillOutcome::Scheduled {
+                heat,
+                lineup,
+                frequencies,
+                ..
+            } => {
+                let frequencies = match frequencies {
+                    Some(freqs) => freqs,
+                    None => round_engine::assign_for_event(&meta, &timers, &lineup).unwrap(),
+                };
+                state
+                    .append(
+                        Event::HeatScheduled {
+                            heat: heat.clone(),
+                            lineup,
+                            class: round_engine::round_class(&meta, round),
+                            round: Some(round.clone()),
+                            frequencies,
+                            label: None,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                heat
+            }
+            other => panic!("expected a scheduled heat, got {other:?}"),
+        }
+    }
+
+    /// A heat's currently-effective `(lineup, frequencies)` — its most recent `HeatScheduled`.
+    fn heat_now(
+        reg: &EventRegistry,
+        id: &EventId,
+        heat: &HeatId,
+    ) -> (Vec<CompetitorRef>, Vec<(CompetitorRef, u16)>) {
+        let (events, _) = reg.resolve(id).unwrap().read().unwrap();
+        let mut out = (Vec::new(), Vec::new());
+        for event in &events {
+            if let Event::HeatScheduled {
+                heat: h,
+                lineup,
+                frequencies,
+                ..
+            } = event
+            {
+                if h == heat {
+                    out = (lineup.clone(), frequencies.clone());
+                }
+            }
+        }
+        out
+    }
+
+    fn refs(names: &[&str]) -> Vec<CompetitorRef> {
+        names.iter().map(|n| CompetitorRef((*n).into())).collect()
+    }
+
+    #[test]
+    fn editing_a_round_rebuilds_its_scheduled_heat() {
+        // #387: a filled practice heat baked in the round's channels. Editing the round used to
+        // leave that heat untouched, so it raced the old channel set forever.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let round = reg.add_round(&created.id, practice_round(&[0, 1])).unwrap();
+        let heat = fill_next_heat(&reg, &created.id, &round.id);
+        assert_eq!(
+            heat_now(&reg, &created.id, &heat).0,
+            refs(&["node-0", "node-1"])
+        );
+
+        reg.update_round(
+            &created.id,
+            &round.id,
+            practice_edit("Practice", &[2, 3, 4]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            heat_now(&reg, &created.id, &heat).0,
+            refs(&["node-2", "node-3", "node-4"]),
+            "the scheduled heat now runs the round's new channels"
+        );
+    }
+
+    #[test]
+    fn editing_a_round_rebuilds_a_per_heat_heat_lineup_and_frequencies() {
+        // Not practice-specific: a normal (per-heat) round's scheduled heat is rebuilt the same
+        // way, channels re-assigned from the timer's pool.
+        let reg = EventRegistry::new(None).unwrap();
+        let class = reg
+            .classes()
+            .create(&crate::classes::CreateClassRequest {
+                name: "Open".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let created = reg.create(&req("Race Night")).unwrap();
+        reg.set_timers(&created.id, vec![TimerId(MOCK_TIMER_ID.into())])
+            .unwrap();
+        reg.set_classes(&created.id, vec![class.clone()]).unwrap();
+        let mut pilots: Vec<PilotId> = Vec::new();
+        for callsign in ["A", "B", "C"] {
+            pilots.push(
+                reg.pilots()
+                    .create(&crate::pilots::CreatePilotRequest {
+                        callsign: callsign.into(),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .id,
+            );
+        }
+        reg.set_class_membership(&created.id, class.clone(), slots(pilots[..2].to_vec()))
+            .unwrap();
+
+        let round = reg
+            .add_round(
+                &created.id,
+                NewRoundReq {
+                    label: "Qualifying".to_string(),
+                    classes: vec![class.clone()],
+                    format: "timed_qual".to_string(),
+                    params: BTreeMap::from([("rounds".to_string(), "1".to_string())]),
+                    win_condition: None,
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(120),
+                    channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                    min_lap_secs: None,
+                },
+            )
+            .unwrap();
+        let heat = fill_next_heat(&reg, &created.id, &round.id);
+        let (before_lineup, before_freqs) = heat_now(&reg, &created.id, &heat);
+        assert_eq!(before_lineup.len(), 2);
+        assert_eq!(before_freqs.len(), 2, "the mock timer assigns channels");
+
+        // A third pilot joins the class, then the round is re-saved (label-only change on the
+        // round itself — the field moved underneath it).
+        reg.set_class_membership(&created.id, class.clone(), slots(pilots.clone()))
+            .unwrap();
+        reg.update_round(
+            &created.id,
+            &round.id,
+            UpdateRoundReq {
+                label: "Qualifying".to_string(),
+                classes: vec![class],
+                format: "timed_qual".to_string(),
+                params: BTreeMap::from([("rounds".to_string(), "1".to_string())]),
+                win_condition: None,
+                seeding: SeedingRule::FromRoster,
+                time_limit_secs: Some(120),
+                channel_mode: Some(ChannelMode::PerHeat),
+                staging_timer_secs: None,
+                start_procedure: None,
+                grace_window: None,
+                protest_window: None,
+                min_lap_secs: None,
+            },
+        )
+        .unwrap();
+
+        let (after_lineup, after_freqs) = heat_now(&reg, &created.id, &heat);
+        assert_eq!(after_lineup.len(), 3, "the lineup was rebuilt");
+        assert_ne!(before_lineup, after_lineup);
+        assert_eq!(after_freqs.len(), 3, "channels were re-assigned for it");
+        assert_ne!(before_freqs, after_freqs);
+    }
+
+    #[test]
+    fn editing_a_round_leaves_a_raced_heat_untouched() {
+        // A raced round's channel config is frozen, and its heats keep exactly what they raced.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let round = reg.add_round(&created.id, practice_round(&[0, 1])).unwrap();
+        let heat = fill_next_heat(&reg, &created.id, &round.id);
+        let state = reg.resolve(&created.id).unwrap();
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: heat.clone(),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let before = heat_now(&reg, &created.id, &heat);
+
+        // The channels are frozen once raced — the edit is refused …
+        let err = reg
+            .update_round(&created.id, &round.id, practice_edit("Practice", &[5, 6]))
+            .unwrap_err();
+        assert!(
+            matches!(&err, RoundError::Invalid(msg) if msg.contains("raced heats")),
+            "expected the raced freeze, got {err:?}"
+        );
+        // … and an edit that IS allowed on a raced round (the label) leaves the heat alone.
+        reg.update_round(&created.id, &round.id, practice_edit("Renamed", &[0, 1]))
+            .unwrap();
+        assert_eq!(
+            heat_now(&reg, &created.id, &heat),
+            before,
+            "a raced heat is never re-materialized"
+        );
+    }
+
+    #[test]
+    fn editing_a_round_is_refused_while_one_of_its_heats_is_in_progress() {
+        // The binding rule (#387): staged / armed / running / unofficial all refuse the edit, and
+        // the refusal names the heat by its FRIENDLY name — never the raw id (repo display rule).
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let reg = EventRegistry::new(None).unwrap();
+            let created = reg.create(&req("Race Night")).unwrap();
+            let round = reg.add_round(&created.id, practice_round(&[0, 1])).unwrap();
+            let heat = fill_next_heat(&reg, &created.id, &round.id);
+            let state = reg.resolve(&created.id).unwrap();
+            for step in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: heat.clone(),
+                            transition: step,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if step == transition {
+                    break;
+                }
+            }
+
+            let before = heat_now(&reg, &created.id, &heat);
+            let err = reg
+                .update_round(&created.id, &round.id, practice_edit("Practice", &[4, 5]))
+                .unwrap_err();
+            let RoundError::Invalid(msg) = &err else {
+                panic!("expected a refusal for {transition:?}, got {err:?}");
+            };
+            assert!(
+                msg.contains("heat in progress") && msg.contains("Practice Heat"),
+                "the refusal must name the heat: {msg}"
+            );
+            assert!(
+                !msg.contains(&heat.0),
+                "the refusal must not leak the raw heat id: {msg}"
+            );
+            assert_eq!(
+                heat_now(&reg, &created.id, &heat),
+                before,
+                "a refused edit changes nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn editing_a_round_is_refused_while_a_scheduled_heat_is_loaded_on_the_timer() {
+        // Still `Scheduled`, but the RD has it up in Live control — it may be on deck with its
+        // channels already read off, so rewriting its lineup underneath is the silent swap the
+        // rule prevents.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let round = reg.add_round(&created.id, practice_round(&[0, 1])).unwrap();
+        let heat = fill_next_heat(&reg, &created.id, &round.id);
+        reg.resolve(&created.id)
+            .unwrap()
+            .append(Event::CurrentHeatSelected { heat: heat.clone() }, None)
+            .unwrap();
+
+        let err = reg
+            .update_round(&created.id, &round.id, practice_edit("Practice", &[4, 5]))
+            .unwrap_err();
+        assert!(
+            matches!(&err, RoundError::Invalid(msg) if msg.contains("Practice Heat")),
+            "expected the on-timer refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn editing_a_round_appends_nothing_when_the_heats_do_not_change() {
+        // A label-only edit must not churn the log with an identical re-schedule.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let round = reg.add_round(&created.id, practice_round(&[0, 1])).unwrap();
+        fill_next_heat(&reg, &created.id, &round.id);
+        let state = reg.resolve(&created.id).unwrap();
+        let before = state.read().unwrap().0.len();
+
+        reg.update_round(&created.id, &round.id, practice_edit("Renamed", &[0, 1]))
+            .unwrap();
+        assert_eq!(state.read().unwrap().0.len(), before);
     }
 }
