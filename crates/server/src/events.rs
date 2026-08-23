@@ -116,8 +116,8 @@ pub struct EventMeta {
     /// into the app-level [`TimerRegistry`](crate::timers::TimerRegistry). Additive
     /// (`#[serde(default)]`) so an event persisted before #73 reads back with an empty list; new
     /// events and Practice default to `["mock"]` (the built-in Mock) so they work out of the
-    /// box. The per-event source bridge runs the selected Sim timers; a selected RotorHazard is a
-    /// reserved no-op stub (2b / #65).
+    /// box. The per-event source bridge runs the selected Sim timers; a selected RotorHazard timer is
+    /// dialled by the RH connection reconciler instead (#65/#73), not by this bridge.
     #[serde(default)]
     pub timers: Vec<TimerId>,
     /// The **primary** timer among the selection (issue #112) — redundant timers at one gate, one
