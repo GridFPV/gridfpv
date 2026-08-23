@@ -445,6 +445,13 @@ pub fn router(registry: EventRegistry) -> Router {
         // delete are RD-gated. `DELETE` rejects the built-in Mock.
         .route("/timers", get(list_timers).post(create_timer))
         .route("/timers/{timer_id}", put(update_timer).delete(delete_timer))
+        // Manual **connect / disconnect** of a RotorHazard timer, independent of any event
+        // (issue #383): the Timers menu's "is this thing reachable?" control. Connections used to
+        // open only for the *active event's selected* timers, so verifying a URL (or the GridFPV
+        // plugin) meant creating and activating an event first. RD-gated, like every other timer
+        // write; the hold is explicit — it lasts until `disconnect`.
+        .route("/timers/{timer_id}/connect", post(connect_timer))
+        .route("/timers/{timer_id}/disconnect", post(disconnect_timer))
         // The downloadable GridFPV RotorHazard plugin bundle (D16, S1) the guided-install UX
         // offers when a timer's plugin is missing/incompatible. Open read: it's static, embedded
         // at build, and carries no event data — just the plugin folder to drop into RH's plugins/.
@@ -732,6 +739,64 @@ async fn update_timer(
         .update(&timer_id, &body)
         .map_err(|e| ProtocolError::new(ErrorCode::UnknownScope, e.to_string()))?;
     Ok(Json(timer))
+}
+
+/// `POST /timers/{timer_id}/connect` — hold a live connection to an RH timer, RD-gated (#383).
+///
+/// The Timers menu's **Connect**: it sets the timer's manual connection hold, and the connection
+/// reconciler dials it on its next tick **independent of any event** — so the RD can answer "is
+/// this URL right? does it have the plugin?" from the page where timers are configured, with no
+/// event created, activated, or selected. The connection publishes the usual `TimerStatus`
+/// (`Connecting` → `Connected` / `Error`) and `PluginPresence`, so the same badges tell the story.
+///
+/// The hold is **explicit** — it lasts until `disconnect`, which is what a diagnostic control
+/// should do; if an active event later selects the timer, the event's connection supersedes the
+/// manual one (no double connection) and the hold takes it back when the event lets go.
+///
+/// A Mock timer is a `400` (nothing to dial); an unknown id is a 404 (`UnknownScope`). Returns the
+/// updated [`Timer`].
+async fn connect_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<Json<Timer>, ProtocolError> {
+    set_manual_connect(&registry, &timer_id, true)
+}
+
+/// `POST /timers/{timer_id}/disconnect` — release a manually-held RH connection, RD-gated (#383).
+///
+/// The Timers menu's **Disconnect**: it clears the manual hold, and the reconciler drops the link
+/// on its next tick (leaving the timer `Disconnected`) — unless the active event also selects the
+/// timer, in which case the event-driven connection stays up, which is the point of holding the two
+/// inputs separately. An unknown id is a 404 (`UnknownScope`). Returns the updated [`Timer`].
+async fn disconnect_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<Json<Timer>, ProtocolError> {
+    set_manual_connect(&registry, &timer_id, false)
+}
+
+/// The shared body of [`connect_timer`] / [`disconnect_timer`]: flip the hold and map the registry
+/// error onto a typed protocol error — a genuinely unknown id is a 404, anything else (a Mock with
+/// nothing to dial) is a client `400`.
+fn set_manual_connect(
+    registry: &EventRegistry,
+    timer_id: &TimerId,
+    held: bool,
+) -> Result<Json<Timer>, ProtocolError> {
+    let timers = registry.timers();
+    timers
+        .set_manual_connect(timer_id, held)
+        .map(Json)
+        .map_err(|e| {
+            let code = if timers.exists(timer_id) {
+                ErrorCode::BadRequest
+            } else {
+                ErrorCode::UnknownScope
+            };
+            ProtocolError::new(code, e.to_string())
+        })
 }
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated (issue #73).
@@ -3580,6 +3645,70 @@ mod tests {
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         (status, bytes.to_vec())
+    }
+
+    /// `POST /timers/{id}/{connect|disconnect}` → status + parsed `Timer` (when the call succeeded).
+    async fn post_timer_connection(
+        registry: EventRegistry,
+        timer_id: &str,
+        action: &str,
+    ) -> (StatusCode, Option<Timer>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/timers/{timer_id}/{action}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice::<Timer>(&bytes).ok())
+    }
+
+    #[tokio::test]
+    async fn connect_and_disconnect_hold_a_timers_connection_without_an_event() {
+        // #383: the Timers menu's diagnostic control. No event is created, activated, or selects
+        // the timer — the hold alone is what the connection reconciler dials on.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+
+        let (status, timer) = post_timer_connection(registry.clone(), &rh.id.0, "connect").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(timer.unwrap().manual_connect);
+        assert_eq!(registry.timers().manual_connections(), vec![rh.id.clone()]);
+        // The hold is visible in the open `GET /timers` read, so a console can render Disconnect.
+        let (_, listed) = get_timers(registry.clone()).await;
+        assert!(listed.iter().any(|t| t.id == rh.id && t.manual_connect));
+
+        // Explicit lifetime: it stands until disconnect, which releases it.
+        let (status, timer) = post_timer_connection(registry.clone(), &rh.id.0, "disconnect").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!timer.unwrap().manual_connect);
+        assert!(registry.timers().manual_connections().is_empty());
+    }
+
+    #[tokio::test]
+    async fn connecting_a_mock_or_an_unknown_timer_is_rejected() {
+        // A Mock has nothing to dial (a client `400`); an unknown id is a 404.
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, _) = post_timer_connection(registry.clone(), "mock", "connect").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post_timer_connection(registry, "no-such-timer", "connect").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
