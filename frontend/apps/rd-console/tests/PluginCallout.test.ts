@@ -19,6 +19,7 @@ const RH_MISSING: Timer = {
   channel_capability: 'Flexible',
   node_count: 8,
   available_channels: [],
+  manual_connect: false,
   plugin: 'Missing'
 };
 

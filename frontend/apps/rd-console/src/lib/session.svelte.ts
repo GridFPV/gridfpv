@@ -47,6 +47,8 @@ import {
   createTimer,
   updateTimer,
   deleteTimer,
+  connectTimer,
+  disconnectTimer,
   setEventTimers,
   setPrimaryTimer,
   listPilots,
@@ -356,6 +358,8 @@ export class Session {
   #createTimerImpl: typeof createTimer;
   #updateTimerImpl: typeof updateTimer;
   #deleteTimerImpl: typeof deleteTimer;
+  #connectTimerImpl: typeof connectTimer;
+  #disconnectTimerImpl: typeof disconnectTimer;
   #setEventTimersImpl: typeof setEventTimers;
   #setPrimaryTimerImpl: typeof setPrimaryTimer;
   #listPilotsImpl: typeof listPilots;
@@ -396,6 +400,8 @@ export class Session {
     createTimerImpl?: typeof createTimer;
     updateTimerImpl?: typeof updateTimer;
     deleteTimerImpl?: typeof deleteTimer;
+    connectTimerImpl?: typeof connectTimer;
+    disconnectTimerImpl?: typeof disconnectTimer;
     setEventTimersImpl?: typeof setEventTimers;
     setPrimaryTimerImpl?: typeof setPrimaryTimer;
     listPilotsImpl?: typeof listPilots;
@@ -437,6 +443,8 @@ export class Session {
     this.#createTimerImpl = opts?.createTimerImpl ?? createTimer;
     this.#updateTimerImpl = opts?.updateTimerImpl ?? updateTimer;
     this.#deleteTimerImpl = opts?.deleteTimerImpl ?? deleteTimer;
+    this.#connectTimerImpl = opts?.connectTimerImpl ?? connectTimer;
+    this.#disconnectTimerImpl = opts?.disconnectTimerImpl ?? disconnectTimer;
     this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
     this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
     this.#listPilotsImpl = opts?.listPilotsImpl ?? listPilots;
@@ -695,6 +703,31 @@ export class Session {
       await this.#deleteTimerImpl(this.baseUrl, id, token);
       return true as const;
     });
+  }
+
+  /**
+   * **Hold** a live connection to a RotorHazard timer (`POST /timers/{id}/connect`) — issue #383.
+   *
+   * Deliberately **event-independent**: this is how the Timers screen answers "is this timer even
+   * reachable?" while an RD is setting up at a venue, before any event exists. The Director's
+   * reconciler dials the held timer on its next tick and publishes the same `status` /
+   * `plugin` the event-driven connection does, so the existing badges tell the story.
+   *
+   * Returns the updated {@link Timer}, `undefined` on a cancelled token prompt, or throws
+   * otherwise (the built-in Mock has nothing to dial and answers **400**).
+   */
+  connectTimer(id: TimerId): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#connectTimerImpl(this.baseUrl, id, token));
+  }
+
+  /**
+   * **Release** a manually-held RotorHazard connection (`POST /timers/{id}/disconnect`) — #383.
+   * The hold is explicit, so this is the only thing that clears it. If the active event also
+   * selects the timer its connection stays up; only the manual hold is released. Returns the
+   * updated {@link Timer}, `undefined` on a cancelled token prompt, or throws otherwise.
+   */
+  disconnectTimer(id: TimerId): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#disconnectTimerImpl(this.baseUrl, id, token));
   }
 
   /**

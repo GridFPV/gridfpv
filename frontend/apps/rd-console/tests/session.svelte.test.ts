@@ -566,7 +566,8 @@ describe('Session', () => {
       status: 'Ready',
       channel_capability: 'Flexible',
       node_count: 8,
-      available_channels: []
+      available_channels: [],
+      manual_connect: false
     };
 
     function timerSession(overrides?: SessionOverrides) {
@@ -601,7 +602,8 @@ describe('Session', () => {
         status: 'Ready',
         channel_capability: 'Flexible',
         node_count: 8,
-        available_channels: []
+        available_channels: [],
+        manual_connect: false
       };
       const createTimerImpl = vi.fn(async () => created);
       const session = timerSession({ createTimerImpl });
@@ -717,7 +719,8 @@ describe('Session', () => {
           status: 'Disconnected',
           channel_capability: 'Flexible',
           node_count: 8,
-          available_channels: []
+          available_channels: [],
+          manual_connect: false
         };
         const listTimersImpl = vi.fn(async () => [rh, MOCK_CONNECTED]); // registry order differs
         const session = timerSession({ listTimersImpl });

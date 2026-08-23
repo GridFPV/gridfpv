@@ -15,6 +15,8 @@ import type {
   createTimer,
   updateTimer,
   deleteTimer,
+  connectTimer,
+  disconnectTimer,
   setEventTimers,
   setPrimaryTimer,
   listPilots,
@@ -79,6 +81,9 @@ export interface TimerImpls {
   createTimerImpl?: typeof createTimer;
   updateTimerImpl?: typeof updateTimer;
   deleteTimerImpl?: typeof deleteTimer;
+  /** The manual connect/disconnect write seams (#383) — back the TimerManager connect tests. */
+  connectTimerImpl?: typeof connectTimer;
+  disconnectTimerImpl?: typeof disconnectTimer;
   setEventTimersImpl?: typeof setEventTimers;
   setPrimaryTimerImpl?: typeof setPrimaryTimer;
   /** The app-level pilot directory read (issue #74) — backs the hub + Pilots page tests. */
@@ -210,6 +215,8 @@ export function makeTestSession(
     createTimerImpl: opts?.createTimerImpl,
     updateTimerImpl: opts?.updateTimerImpl,
     deleteTimerImpl: opts?.deleteTimerImpl,
+    connectTimerImpl: opts?.connectTimerImpl,
+    disconnectTimerImpl: opts?.disconnectTimerImpl,
     setEventTimersImpl: opts?.setEventTimersImpl,
     setPrimaryTimerImpl: opts?.setPrimaryTimerImpl,
     // The pilots/heats directory reads default to an INERT SUCCESS (empty list), not the real
