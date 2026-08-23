@@ -41,7 +41,11 @@
   import {
     DEFAULT_MOCK_LAPS,
     DEFAULT_MOCK_LAP_MS,
+    connectActionLabel,
+    connectionHint,
     isBuiltInMock,
+    isConnectable,
+    isManuallyHeld,
     kindLabel,
     kindSummary,
     kindTag,
@@ -149,6 +153,102 @@
   async function reload() {
     await load();
     if (loadState.kind === 'ready') onchange?.(loadState.timers);
+  }
+
+  // ── Manual connect / disconnect (issue #383) ────────────────────────────────
+  // The RD's "is this timer even reachable?" control. It is deliberately usable **with no active
+  // event**: that is the whole point of #383 — setting up at a venue, the RD needs to know whether
+  // a URL is right and whether the plugin is installed *before* an event exists to select it for.
+  // `POST /timers/{id}/connect` sets a server-side hold and the Director's reconciler dials it on
+  // its next tick, publishing the same `status` + `plugin` the event-driven path does — so the
+  // StatusPill and PluginCallout already on the row are the readout; nothing new is needed there.
+
+  /**
+   * How often this screen re-reads `GET /timers` while a manual hold is up (#383).
+   *
+   * The session's own timer poll only runs **inside an event** ({@link Session.selectEvent} starts
+   * it), so outside one nothing would ever refresh `status` — the RD would press Connect and watch
+   * a pill that never moved. This screen therefore polls for itself whenever a hold exists, which
+   * is exactly the window where a moving status is the answer the RD is waiting for. Brisker than
+   * the session poll because the RD is actively watching this row.
+   */
+  const HOLD_POLL_MS = 1500;
+
+  /**
+   * Whether any timer is currently manually held — the screen self-polls while one is.
+   *
+   * Reads the loaded list (kept fresh by the poll below and by {@link applyTimer}) **and** the
+   * session's in-event list, so a hold another console placed still starts our poll.
+   */
+  const anyHeld = $derived(
+    (loadState.kind === 'ready' && loadState.timers.some(isManuallyHeld)) ||
+      session.timers.some(isManuallyHeld)
+  );
+
+  $effect(() => {
+    if (!anyHeld) return;
+    const handle = setInterval(() => void refreshQuietly(), HOLD_POLL_MS);
+    return () => clearInterval(handle);
+  });
+
+  /**
+   * Re-read the registry **without** flipping back to the loading state — a poll must not blank the
+   * list the RD is reading. A failed poll keeps the last good list; the next tick retries.
+   */
+  async function refreshQuietly() {
+    try {
+      const list = await session.listTimers();
+      if (loadState.kind === 'ready') loadState = { kind: 'ready', timers: list };
+      timers = list;
+    } catch {
+      /* keep the last good list; the next tick retries */
+    }
+  }
+
+  /** Fold one server-authoritative {@link Timer} back into the loaded list, in place. */
+  function applyTimer(updated: Timer) {
+    if (loadState.kind !== 'ready') return;
+    const next = loadState.timers.map((t) => (t.id === updated.id ? updated : t));
+    loadState = { kind: 'ready', timers: next };
+    timers = next;
+  }
+
+  /** The timer whose connect/disconnect call is in flight (its row's button shows the spinner). */
+  let connecting = $state<string | undefined>(undefined);
+
+  /**
+   * Toggle the manual connection hold on a timer. The response is the updated `Timer`, so the
+   * button flips immediately — `status` follows a tick later once the reconciler acts, which the
+   * hold poll above picks up.
+   */
+  async function toggleConnection(timer: Timer) {
+    if (connecting) return;
+    const held = isManuallyHeld(timer);
+    connecting = timer.id;
+    try {
+      const updated = held
+        ? await session.disconnectTimer(timer.id)
+        : await session.connectTimer(timer.id);
+      if (updated === undefined) {
+        // The RD cancelled the token prompt on a gated Director — the hold is unchanged.
+        toast.info(
+          `A control token is required to ${held ? 'disconnect' : 'connect'} a timer.`
+        );
+        return;
+      }
+      applyTimer(updated);
+      toast.success(
+        held ? `Disconnected “${updated.name}”.` : `Connecting to “${updated.name}”…`
+      );
+    } catch (err) {
+      // A Mock answers 400 (nothing to dial) — it should never reach here, since the control is
+      // only offered for a RotorHazard timer, but say something useful rather than raw HTTP.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/\b400\b/.test(msg)) toast.error(`“${timer.name}” has no connection to test.`);
+      else toast.error(msg);
+    } finally {
+      connecting = undefined;
+    }
   }
 
   // ── The add / edit dialog ──────────────────────────────────────────────────
@@ -438,10 +538,28 @@
               </span>
               <span class="channel-summary">{channelSummary(timer)}</span>
             </div>
+            <!-- The manual-hold readout (#383): only while a hold is up, and only when there is
+                 something to say beyond the pill — "Reachable", or what to check when it isn't. -->
+            {#if connectionHint(timer)}
+              <span class="connect-hint" role="status">{connectionHint(timer)}</span>
+            {/if}
           </div>
           <StatusPill status={timer.status} label={timer.status} size="sm" />
           <PluginCallout {timer} baseUrl={session.baseUrl} />
           <div class="timer-actions">
+            <!-- Connect / Disconnect (#383) — RotorHazard only (a Mock has nothing to dial), and
+                 usable with NO active event: the RD tests a URL where timers are configured. -->
+            {#if isConnectable(timer)}
+              <Button
+                variant={isManuallyHeld(timer) ? 'secondary' : 'primary'}
+                size="sm"
+                loading={connecting === timer.id}
+                title={`${connectActionLabel(timer)} “${timer.name}”`}
+                onclick={() => toggleConnection(timer)}
+              >
+                {connectActionLabel(timer)}
+              </Button>
+            {/if}
             <Button variant="ghost" size="sm" onclick={() => openEdit(timer)}>Edit</Button>
             {#if !isBuiltInMock(timer)}
               <Button
@@ -731,6 +849,13 @@
     display: flex;
     gap: var(--gf-space-2);
     flex-shrink: 0;
+  }
+  /* The manual-hold readout (#383) — sits under the row's config lines, sized like real data
+     (not chrome) because at a venue this sentence is what the RD is squinting at in sunlight. */
+  .connect-hint {
+    margin-top: 2px;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
   }
 
   .timer-form {

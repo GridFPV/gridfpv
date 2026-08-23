@@ -416,6 +416,61 @@ export async function updateTimer(
 }
 
 /**
+ * **Hold** a live connection to a RotorHazard timer (`POST /timers/{id}/connect`) — issue #383.
+ * RD-gated. The hold is independent of any event: the Director's connection reconciler dials the
+ * timer on its next tick whether or not an event exists, so the Timers screen can answer "is this
+ * URL right? does it have the plugin?" while an RD is setting up at a venue. The hold is explicit
+ * and lasts until {@link disconnectTimer}.
+ *
+ * The built-in **Mock has nothing to dial** and answers **400**; an unknown id answers **404**.
+ * Resolves to the updated {@link Timer} (its `manual_connect` now `true`), or rejects on a
+ * non-2xx / transport failure (the HTTP status is in the message for branching).
+ */
+export async function connectTimer(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return setTimerConnection(baseUrl, id, 'connect', token, options);
+}
+
+/**
+ * **Release** a manually-held RotorHazard connection (`POST /timers/{id}/disconnect`) — issue #383.
+ * RD-gated. Clears the hold; the reconciler drops the link on its next tick — unless the active
+ * event also selects the timer, in which case that connection stays up (the two inputs are held
+ * separately on purpose). An unknown id answers **404**. Resolves to the updated {@link Timer}
+ * (its `manual_connect` now `false`), or rejects on a non-2xx / transport failure.
+ */
+export async function disconnectTimer(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return setTimerConnection(baseUrl, id, 'disconnect', token, options);
+}
+
+/** The shared body of {@link connectTimer} / {@link disconnectTimer} — same shape, same errors. */
+async function setTimerConnection(
+  baseUrl: string,
+  id: TimerId,
+  action: 'connect' | 'disconnect',
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/${action}`,
+    { method: 'POST', headers }
+  );
+  if (!resp.ok) throw new Error(`POST /timers/${id}/${action} failed: HTTP ${resp.status}`);
+  return (await resp.json()) as Timer;
+}
+
+/**
  * Delete a timer (`DELETE /timers/{id}`) — issue #73. RD-gated. The built-in **Mock cannot be
  * deleted** (a **400**); an unknown id answers **404**. Resolves once the delete succeeds, or
  * rejects on a non-2xx / transport failure (the HTTP status is in the message for branching).

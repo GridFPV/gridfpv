@@ -268,6 +268,51 @@
     return 'running';
   }
 
+  // ── Editing a round is refused while one of its heats is in progress (#387) ──────────────────
+  // Saving a round now **re-materializes** its still-`Scheduled` heats under the edited config, so
+  // the Director refuses the edit outright when any of the round's heats is Staged/Armed/Running/
+  // Unofficial, or is the heat loaded on the timer — re-tuning a heat out from under the timer is
+  // worse than not editing. The console mirrors that rule so the control is dead **before** the RD
+  // types: at a timing table, filling in a form and then being rejected is worse than not being
+  // offered it.
+
+  /** The heat phases the Director treats as in progress (`events.rs::round_heat_facts`). */
+  const IN_PROGRESS_PHASES: HeatPhase[] = ['Staged', 'Armed', 'Running', 'Unofficial'];
+
+  /**
+   * Whether any heat in the **event** has ever left `Scheduled` — the guard that keeps the
+   * current-heat half of the rule honest.
+   *
+   * `LiveRaceState.current_heat` (and `HeatSummary.is_current`, which is derived from it) falls
+   * back to the **first scheduled heat** when nothing has ever been staged or explicitly selected,
+   * so a fresh event always reports a "current" heat that is not actually loaded on any timer. The
+   * server's refusal deliberately does NOT use that fallback (`round_engine::heat_on_timer`) —
+   * because treating it as a real load would refuse every round edit in a fresh event, including
+   * the open-practice channel edit #387 exists to make work. Requiring evidence that *something*
+   * has run is the closest client-side stand-in, and it errs the safe way: at worst the RD is
+   * offered an edit the server then refuses with a clear message (today's behaviour), never denied
+   * one the server would have allowed.
+   */
+  const someHeatHasRun = $derived(heats.some((h) => h.phase !== 'Scheduled'));
+
+  /**
+   * The heat blocking this round's edit, by **friendly name** (never a raw id — repo display rule),
+   * or `undefined` when the round is editable.
+   */
+  function editBlockedBy(round: RoundDef): string | undefined {
+    const rHeats = heatsByRound(round.id);
+    const live = session.liveState?.current_heat;
+    const blocking = rHeats.find((h) => {
+      if (IN_PROGRESS_PHASES.includes(h.phase)) return true;
+      // A still-`Scheduled` heat the RD has loaded in Live control is off limits too: its channels
+      // may already have been read off to the pilots on the line. `Final` is NOT — a raced round
+      // stays editable in the fields the scoring freeze allows.
+      if (h.phase !== 'Scheduled') return false;
+      return someHeatHasRun && (h.is_current || (live !== undefined && h.heat === live));
+    });
+    return blocking ? heatDisplayName(round, blocking) : undefined;
+  }
+
   // Fill a round's heats (#216). Deterministic formats (Time Trials, Round Robin, Multi-Main,
   // brackets) **generate all** their heats in one action (`mode: 'All'`); the dynamic Open Practice
   // single-steps (`'Next'`). The engine acks ok whether it appended heat(s) OR reported the round
@@ -1162,6 +1207,8 @@
     {#if rounds.length > 0}
       <ol class="round-list">
         {#each rounds as round, i (round.id)}
+          <!-- The heat (if any) whose progress makes this round un-editable (#387). -->
+          {@const blockedBy = editBlockedBy(round)}
           <li class="round-row">
             <span class="round-index" aria-hidden="true">{i + 1}</span>
             <div class="round-main">
@@ -1184,9 +1231,25 @@
                 {/if}
                 <span class="meta-chip">{seedSummary(round.seeding)}</span>
               </div>
+              <!-- Why Edit is dead, right under the round it belongs to (#387). -->
+              {#if blockedBy}
+                <p class="round-blocked" role="note">
+                  Can’t edit while {blockedBy} is in progress — finalize or reset it first.
+                </p>
+              {/if}
             </div>
             <div class="round-actions">
-              <Button variant="ghost" size="sm" onclick={() => openEdit(round)}>Edit</Button>
+              <!-- #387: dead while one of this round's heats is in progress, and it says which
+                   heat and what to do about it — the Director refuses this edit anyway. -->
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={blockedBy !== undefined}
+                title={blockedBy
+                  ? `${blockedBy} is in progress — finalize or reset it before editing this round.`
+                  : undefined}
+                onclick={() => openEdit(round)}>Edit</Button
+              >
               <Button variant="ghost" size="sm" onclick={() => remove(round)}>Remove</Button>
             </div>
           </li>
@@ -1390,6 +1453,19 @@
         submit();
       }}
     >
+      <!-- Saving an EDIT now has a visible side effect (#387): the Director re-materializes this
+             round's still-scheduled heats under the new config, so lineups and channel assignments
+             are rebuilt. Say so up front — an RD who has read channels off to pilots needs to know
+             before they save, not after. Raced heats are untouched, and the edit is refused
+             outright while a heat is in progress (the Edit button is dead in that case). -->
+      {#if editing}
+        <p class="form-note" role="note">
+          Saving rebuilds this round’s <strong>scheduled</strong> heats — their lineups and channel
+          assignments are re-derived from the round’s new settings. Heats that have already raced are
+          left alone.
+        </p>
+      {/if}
+
       <!-- Field order (Rounds form redesign item 2): Label first, then Format, then the remaining
              fields shown dynamically per the chosen format (`fields` ← `fieldsForFormat`). -->
       <Field label="Label" required>
@@ -1954,6 +2030,23 @@
     display: flex;
     gap: var(--gf-space-1);
     flex-shrink: 0;
+  }
+  /* Why this round's Edit is dead (#387) — under the round's own meta, beside the dead button. */
+  .round-blocked {
+    margin: var(--gf-space-1) 0 0;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+  }
+  /* The edit form's "this rebuilds your scheduled heats" heads-up (#387) — a real warning, sized
+     and toned like one, at the top of the form rather than buried next to a field. */
+  .form-note {
+    margin: 0;
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border-left: 3px solid var(--gf-warning, var(--gf-accent));
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
   }
 
   /* The round + build forms now render inside a modal Dialog (the Dialog supplies the title,
