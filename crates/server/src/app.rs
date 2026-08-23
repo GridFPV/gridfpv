@@ -452,6 +452,10 @@ pub fn router(registry: EventRegistry) -> Router {
         // write; the hold is explicit — it lasts until `disconnect`.
         .route("/timers/{timer_id}/connect", post(connect_timer))
         .route("/timers/{timer_id}/disconnect", post(disconnect_timer))
+        // **Restart** the RotorHazard server behind a timer (#386) — the guided plugin install's
+        // last step, so installing the plugin never requires opening RotorHazard's own web UI.
+        // RD-gated, and REFUSED outright while a race is in progress on the timer.
+        .route("/timers/{timer_id}/restart", post(restart_timer))
         // The downloadable GridFPV RotorHazard plugin bundle (D16, S1) the guided-install UX
         // offers when a timer's plugin is missing/incompatible. Open read: it's static, embedded
         // at build, and carries no event data — just the plugin folder to drop into RH's plugins/.
@@ -797,6 +801,62 @@ fn set_manual_connect(
             };
             ProtocolError::new(code, e.to_string())
         })
+}
+
+/// `POST /timers/{timer_id}/restart` — restart a RotorHazard timer's server, RD-gated (#386).
+///
+/// The guided plugin install's last step. RotorHazard imports plugins **once at startup**, so the
+/// `plugins/gridfpv/` folder the RD just dropped in is inert until RH re-executes; RH exposes that
+/// restart, unauthenticated, on the socket the Director is already holding
+/// (`restart_server`). Emitting it here means the whole install is three clicks inside GridFPV
+/// rather than a trip to RotorHazard's own web UI. **Only `restart_server` is wired** — its
+/// `shutdown_pi` / `reboot_pi` neighbours take the timing hardware down rather than bringing it
+/// back, and stay out of reach.
+///
+/// # The refusals
+///
+/// * **A race in progress on this timer → `400`.** Restarting RotorHazard mid-heat takes the RD's
+///   timing hardware down with the race on it, so this is gated on **heat phase**
+///   ([`EventRegistry::heat_in_progress_on_timer`]: `Staged`/`Armed`/`Running`/`Unofficial` in any
+///   event that selects the timer), not merely confirmed in the console. The refusal names the
+///   heat and the timer by their **friendly names** (repo display rule).
+/// * A **Mock**, or a timer that is **not connected**, is a `400` (nothing to restart, or no
+///   socket to emit on); an unknown id is a 404 (`UnknownScope`).
+///
+/// On success the request is parked on the timer registry and the connection reconciler emits it on
+/// its next tick; the updated [`Timer`] is returned, matching `connect`/`disconnect`. What follows
+/// is an **expected** drop → reconnect: the socket closes, the timer passes through
+/// `Disconnected`/`Error` for a few seconds, and the reconnect re-probes the plugin — which is what
+/// flips its `PluginPresence` from `Missing` to `Present`. The console presents that window as a
+/// restart in progress, not as a fault.
+async fn restart_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<Json<Timer>, ProtocolError> {
+    let timers = registry.timers();
+    // Resolve the timer first so the refusals below can name it, and so an unknown id is a clean
+    // 404 rather than a message about a timer that does not exist.
+    let timer = timers.get(&timer_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })?;
+    // The hard gate: never restart the timing hardware out from under a live race.
+    if let Some(heat) = registry.heat_in_progress_on_timer(&timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is running {} — finish or reset that heat before restarting the timer",
+                timer.name, heat
+            ),
+        ));
+    }
+    timers
+        .request_restart(&timer_id)
+        .map(Json)
+        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
 }
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated (issue #73).
@@ -3709,6 +3769,208 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = post_timer_connection(registry, "no-such-timer", "connect").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// A connected RotorHazard timer selected by Practice — the precondition every restart test
+    /// shares (#386): the Director only accepts a restart on a live connection, and the race-phase
+    /// refusal only looks at events that *select* the timer.
+    fn connected_rh_timer_selected_by_practice(registry: &EventRegistry) -> Timer {
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+        registry
+            .timers()
+            .set_status(&rh.id, crate::timers::TimerStatus::Connected);
+        registry
+            .set_timers(&EventId(PRACTICE_EVENT_ID.into()), vec![rh.id.clone()])
+            .expect("select the RH timer for Practice");
+        registry.timers().get(&rh.id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn restarting_a_connected_rh_timer_queues_the_restart_for_the_reconciler() {
+        // #386: the guided plugin install's last step. The route parks the request on the timer
+        // registry — the connection layer lives above this crate — and the reconciler drains it.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        let (status, timer) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(timer.unwrap().id, rh.id);
+        // Asking twice before the drain coalesces into ONE restart, not two.
+        let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            registry.timers().take_restart_requests(),
+            vec![rh.id.clone()]
+        );
+        // Drained exactly once: a second drain is empty (nothing is re-queued).
+        assert!(registry.timers().take_restart_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn restarting_a_timer_is_refused_while_a_race_is_in_progress_on_it() {
+        // The hard gate (#386): restarting RotorHazard takes the RD's timing hardware down, so it is
+        // refused on HEAT PHASE — not merely confirmed in the console. Each of the four in-progress
+        // phases must refuse, and the refusal must name the heat by its FRIENDLY name (CLAUDE.md).
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_practice(&registry);
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("q-1".into()),
+                        lineup: vec![CompetitorRef("A".into())],
+                        class: None,
+                        round: None,
+                        frequencies: vec![],
+                        label: Some("Qualifier Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("q-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let response = router(registry.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/timers/{}/restart", rh.id.0))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "a {transition:?} heat must refuse the restart"
+            );
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let err: ProtocolError = serde_json::from_slice(&bytes).unwrap();
+            // Names the heat AND the timer — never their raw ids.
+            assert!(
+                err.message.contains("Qualifier Heat 1"),
+                "the refusal must name the heat: {}",
+                err.message
+            );
+            assert!(
+                err.message.contains("Field RH"),
+                "the refusal must name the timer: {}",
+                err.message
+            );
+            assert!(
+                !err.message.contains(&rh.id.0),
+                "the refusal must not leak the raw timer id: {}",
+                err.message
+            );
+            // Nothing was queued: the refusal is a real refusal, not a confirm-and-fire.
+            assert!(registry.timers().take_restart_requests().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn restarting_is_allowed_once_the_heat_is_final_and_before_it_is_staged() {
+        // The bookends of the in-progress window: a `Scheduled` heat has not begun and a `Final` one
+        // is done, so neither blocks the plugin install's restart.
+        let (registry, state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("q-1".into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
+        assert_eq!(status, StatusCode::OK, "a Scheduled heat has not begun");
+        let _ = registry.timers().take_restart_requests();
+
+        for t in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: HeatId("q-1".into()),
+                        transition: t,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
+        assert_eq!(status, StatusCode::OK, "a Final heat is done racing");
+    }
+
+    #[tokio::test]
+    async fn restarting_a_mock_an_unknown_or_a_disconnected_timer_is_rejected() {
+        // A Mock has no timing server to restart and an unknown id is a 404 — mirroring
+        // connect/disconnect. A configured-but-not-connected RH timer is also a 400: there is no
+        // socket to emit `restart_server` on, and a request is never held over for a future connect.
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, _) = post_timer_connection(registry.clone(), "mock", "restart").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post_timer_connection(registry.clone(), "no-such-timer", "restart").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+        let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(registry.timers().take_restart_requests().is_empty());
     }
 
     #[tokio::test]

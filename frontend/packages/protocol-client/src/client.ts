@@ -451,6 +451,55 @@ export async function disconnectTimer(
   return setTimerConnection(baseUrl, id, 'disconnect', token, options);
 }
 
+/**
+ * Restart a RotorHazard timer's server (`POST /timers/{id}/restart`) — issue #386.
+ *
+ * The guided plugin install's last step: RotorHazard imports plugins **once at startup**, so the
+ * `plugins/gridfpv/` folder the RD just dropped in stays inert until RH re-executes. The Director
+ * emits RotorHazard's `restart_server` on the socket it already holds, so the whole install stays
+ * inside GridFPV. RD-gated.
+ *
+ * The Director **refuses** (a **400**) while a race is in progress on the timer — the message names
+ * the heat — and for a Mock or a timer that is not connected; an unknown id answers **404**.
+ * Resolves to the {@link Timer}, or rejects on a non-2xx / transport failure (the HTTP status is in
+ * the message so callers can branch).
+ *
+ * What follows a success is an **expected** drop → reconnect: RotorHazard re-executes, the timer
+ * passes through `Disconnected`/`Error` for a few seconds, and the Director's reconnect re-probes
+ * the plugin — which is what flips `plugin` from `Missing` to `Present`. That window is a restart in
+ * progress, not a fault, and the console presents it as such.
+ */
+export async function restartTimer(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/restart`,
+    { method: 'POST', headers }
+  );
+  if (!resp.ok) {
+    // The Director's typed refusal body carries the reason (a heat in progress, a timer that isn't
+    // connected) already phrased for the RD, naming the heat and the timer by their FRIENDLY names.
+    // Throw that verbatim rather than wrapping it in a `POST /timers/{id}/…` line — the raw timer id
+    // must never reach a user (repo display rule). Only the no-body case falls back to the status.
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof body === 'object' && body !== null && 'message' in body
+          ? String((body as { message: unknown }).message)
+          : ''
+      )
+      .catch(() => '');
+    throw new Error(detail || `The Director refused the restart (HTTP ${resp.status}).`);
+  }
+  return (await resp.json()) as Timer;
+}
+
 /** The shared body of {@link connectTimer} / {@link disconnectTimer} — same shape, same errors. */
 async function setTimerConnection(
   baseUrl: string,

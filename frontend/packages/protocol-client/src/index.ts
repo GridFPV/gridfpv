@@ -25,6 +25,7 @@ export {
   deleteTimer,
   connectTimer,
   disconnectTimer,
+  restartTimer,
   setEventTimers,
   setPrimaryTimer,
   listPilots,

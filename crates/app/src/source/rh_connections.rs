@@ -166,6 +166,31 @@ impl RhConnections {
         }
     }
 
+    /// **Restart the RotorHazard server** behind `timer`'s live connection (#386) — the guided
+    /// plugin install's last step, so the RD never leaves GridFPV to press Restart in RotorHazard's
+    /// own web UI.
+    ///
+    /// Keyed on the **timer**, not a `(claimant, timer)` pair: the RD is restarting a piece of
+    /// hardware, and it holds exactly one connection whichever claim opened it (the event's, or a
+    /// manual hold — see the module docs). Whichever one is live is the one that carries the emit,
+    /// so this scans the map by timer id rather than guessing the claimant.
+    ///
+    /// Returns whether a live connection was found to restart. `false` means the timer is not
+    /// connected right now — nothing was emitted, and nothing will be: a restart is not queued for
+    /// a future connection (the RD asked to restart *this* live timer, and a request that lands
+    /// minutes later on a reconnect would be a surprise).
+    pub fn restart(&self, timer: &TimerId) -> bool {
+        let map = self.inner.lock().expect("rh-connections lock poisoned");
+        let mut found = false;
+        for (key, live) in map.iter() {
+            if &key.1 == timer {
+                live.conn.restart();
+                found = true;
+            }
+        }
+        found
+    }
+
     /// Reconcile the live set against `wanted` ([`wanted_connections`]: the active event's selected
     /// RH timers plus the manually-held ones, each with its url) by applying [`plan`]: open a
     /// connection for any wanted pair not yet live *or whose URL changed under it* (#382), and
@@ -369,6 +394,23 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                 ticker.tick().await;
                 let wanted = wanted_connections(&registry, &timers);
                 connections.reconcile(&wanted, &timers);
+                // Carry any **restart requests** (#386) from the timer registry — where the
+                // RD-gated route parks them, the server crate having no handle on this set — onto
+                // the live connections. Drained here rather than handed over directly for the same
+                // reason a manual hold is a registry flag: the server crate is *below* this one,
+                // so the registry is the one seam both sides already share.
+                for timer in timers.take_restart_requests() {
+                    if !connections.restart(&timer) {
+                        // The connection went away between the route accepting the request and this
+                        // tick (a deselect, a URL edit, a drop). Nothing to restart, and nothing is
+                        // queued for a future connection — say so rather than fail silently.
+                        let name = timers.get(&timer).map(|t| t.name);
+                        eprintln!(
+                            "gridfpv: no live RotorHazard connection to restart for {:?}",
+                            name.as_deref().unwrap_or("that timer")
+                        );
+                    }
+                }
             }
         })
     };
@@ -411,6 +453,31 @@ mod tests {
 
     /// The **manual** half of a [`ConnKey`]: the RD holds the timer with no event at all (#383).
     const MANUAL: Option<EventId> = None;
+
+    #[test]
+    fn a_restart_request_with_no_live_connection_is_reported_not_swallowed() {
+        // #386: the RD asked to restart a timer that has since gone away (deselected, URL edited,
+        // link dropped). There is nothing to emit on and nothing is queued for a future connection —
+        // `restart` says so, which is what lets the reconciler log it rather than fail silently.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        let connections = RhConnections::new();
+        assert!(!connections.restart(&rh));
+    }
+
+    #[test]
+    fn restart_requests_drain_exactly_once_and_coalesce() {
+        // The registry is the seam the RD-gated route and the (higher-layer) connection reconciler
+        // share; the reconciler drains it each tick. Asking twice before a drain is one restart, and
+        // a drained request is never handed out again.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
+        timers.request_restart(&rh).expect("connected RH timer");
+        timers.request_restart(&rh).expect("coalesces");
+        assert_eq!(timers.take_restart_requests(), vec![rh.clone()]);
+        assert!(timers.take_restart_requests().is_empty());
+    }
 
     #[test]
     fn an_unchanged_url_leaves_a_healthy_connection_alone() {

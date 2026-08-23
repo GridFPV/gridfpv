@@ -171,6 +171,8 @@ const FULL_TARGETS: &[LiveTarget] = &[
     // The Director's RH-connect e2e (#65, #73): the per-event bridge connects dockerized RH,
     // drives status to Connected, and feeds real passes into the event log.
     ("gridfpv-app", "rh_connect_live", true),
+    // #386 — restarting RH from Grid must really re-exec it, and must be refused mid-heat.
+    ("gridfpv-app", "rh_restart_live", true),
 ];
 
 /// The **targeted** subset the secondary matrix legs run: the lap-ingestion-critical
