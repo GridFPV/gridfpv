@@ -1944,6 +1944,7 @@ mod tests {
             node_count,
             available_channels: available,
             plugin: None,
+            manual_connect: false,
         }
     }
 

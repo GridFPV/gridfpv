@@ -152,7 +152,8 @@ impl ChannelCapability {
 ///
 /// These dynamic states are **not persisted** (`timers.json` always restores a timer's resting
 /// status from its kind — see [`Timer::status_for`]); they are live, in-memory, and reset to
-/// `Configured` whenever the RH timer is reconfigured.
+/// `Configured` whenever the RH timer's kind/config **actually changes** (a no-op edit leaves the
+/// live state alone — see [`TimerRegistry::update`] and #382).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum TimerStatus {
@@ -247,6 +248,24 @@ pub struct Timer {
     #[serde(default)]
     #[ts(optional)]
     pub plugin: Option<PluginPresence>,
+    /// Whether the Race Director is **manually holding a connection** to this (RotorHazard) timer,
+    /// independent of any event (issue #383).
+    ///
+    /// A timer only ever connected when the *active event* selected it, so "is this timer even
+    /// reachable?" — the question the Timers menu exists to answer — could not be asked without
+    /// first creating and activating an event. `POST /timers/{id}/connect` sets this hold and
+    /// `POST /timers/{id}/disconnect` clears it; the connection reconciler unions the held timers
+    /// with the active event's selection, so a held timer dials and publishes the same
+    /// [`TimerStatus`] and [`PluginPresence`] the event-driven path does.
+    ///
+    /// **Lifetime: explicit.** The hold persists until the RD disconnects — this is a diagnostic
+    /// control, and a "test connection" that silently expired would be worse than useless at a
+    /// venue. It is deliberately *not* dropped when an active event takes the timer over: the event
+    /// connection simply supersedes it, and when the event lets go the manual hold takes the timer
+    /// back. Live and **in-memory only**, like [`status`](Timer::status) — it round-trips on the
+    /// wire but a restart comes back with no holds. Additive: defaults to `false`.
+    #[serde(default)]
+    pub manual_connect: bool,
 }
 
 /// The `serde(default)` provider for [`Timer::node_count`] (a function because serde defaults must
@@ -403,6 +422,7 @@ impl TimerRegistry {
             node_count: DEFAULT_NODE_COUNT,
             available_channels: crate::channels::RACEBAND_MHZ.to_vec(),
             plugin: None,
+            manual_connect: false,
         };
         timers.insert(sim.id.clone(), sim);
 
@@ -416,8 +436,11 @@ impl TimerRegistry {
                 for mut timer in restored {
                     // Keep the derived status authoritative (never trust a persisted status), and
                     // reset the live plugin-presence — it is re-probed on connect, never restored.
+                    // The manual-connection hold (#383) is live too: a restart comes back holding
+                    // nothing, so booting never silently dials a timer the RD last poked at.
                     timer.status = Timer::status_for(&timer.kind);
                     timer.plugin = None;
+                    timer.manual_connect = false;
                     timers.insert(timer.id.clone(), timer);
                 }
             }
@@ -476,6 +499,7 @@ impl TimerRegistry {
             node_count: request.node_count.unwrap_or(DEFAULT_NODE_COUNT),
             available_channels: request.available_channels.clone().unwrap_or_default(),
             plugin: None,
+            manual_connect: false,
         };
         reg.timers.insert(id, timer.clone());
         reg.persist()?;
@@ -500,10 +524,18 @@ impl TimerRegistry {
             }
         }
         if let Some(kind) = &request.kind {
-            timer.kind = kind.clone();
-            timer.status = Timer::status_for(kind);
-            // A reconfigured timer (new URL/kind) must be re-probed: drop any stale plugin state.
-            timer.plugin = None;
+            // Only a **real** kind/config change resets the live state (#382). A reconfigured timer
+            // (new URL/kind) must be re-probed — the reconciler notices the change and supersedes +
+            // reopens the connection, which republishes `Connecting → Connected` and re-runs the
+            // plugin probe. A *no-op* edit (the same kind resubmitted, e.g. a rename PUT that
+            // echoes the kind back) changes nothing for the reconciler, so nothing would ever
+            // republish: wiping here would strand a live `Connected`+`Present` timer at the resting
+            // `Configured` with no plugin, permanently, until a restart.
+            if timer.kind != *kind {
+                timer.kind = kind.clone();
+                timer.status = Timer::status_for(kind);
+                timer.plugin = None;
+            }
         }
         if let Some(capability) = &request.channel_capability {
             timer.channel_capability = capability.clone();
@@ -542,9 +574,55 @@ impl TimerRegistry {
         }
     }
 
+    /// Set (or clear) a timer's **manual connection hold** (issue #383), returning the updated
+    /// [`Timer`].
+    ///
+    /// The Timers menu's Connect / Disconnect: it asks the connection reconciler to hold a live
+    /// link to this RotorHazard timer **independent of any event**, so "is this timer reachable,
+    /// and does it have the GridFPV plugin?" can be answered where the timer is configured — before
+    /// any event exists. The reconciler unions the held timers with the active event's selection on
+    /// its next tick, and the timer then publishes the same [`TimerStatus`] / [`PluginPresence`] the
+    /// event-driven path does.
+    ///
+    /// Only a [`Rotorhazard`](TimerKind::Rotorhazard) timer can be held — a Mock has nothing to
+    /// dial (that is a [`TimerError`], which the route reports as a `400`), as is an unknown id.
+    /// The hold is **in-memory only**, like [`set_status`](Self::set_status): nothing is persisted,
+    /// so it does not survive a restart and does not dirty `timers.json`.
+    pub fn set_manual_connect(&self, id: &TimerId, held: bool) -> Result<Timer, TimerError> {
+        let mut reg = self.write();
+        let timer = reg
+            .timers
+            .get_mut(id)
+            .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
+        if held && !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
+            return Err(TimerError(format!(
+                "{:?} is not a RotorHazard timer — there is nothing to connect to",
+                timer.name
+            )));
+        }
+        timer.manual_connect = held;
+        Ok(timer.clone())
+    }
+
+    /// The RotorHazard timers the RD is **manually holding a connection to** (issue #383) — the
+    /// connection reconciler's second input, unioned with the active event's selection.
+    ///
+    /// Filtered to `Rotorhazard` kinds: a hold set before the timer's kind was edited to a Mock
+    /// goes dormant rather than asking the reconciler to dial something that cannot be dialled.
+    pub fn manual_connections(&self) -> Vec<TimerId> {
+        self.read()
+            .timers
+            .values()
+            .filter(|t| t.manual_connect && matches!(t.kind, TimerKind::Rotorhazard { .. }))
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
     /// Delete a timer (issue #73). The built-in **Mock cannot be deleted** (it is always
     /// present); attempting to is a [`TimerError`]. An unknown id is also an error. The registry
-    /// is **persisted** on success.
+    /// is **persisted** on success. A manual connection hold (#383) dies with the timer — the
+    /// reconciler stops seeing it in [`manual_connections`](Self::manual_connections) and drops the
+    /// link on its next tick.
     pub fn delete(&self, id: &TimerId) -> Result<(), TimerError> {
         if id.0 == MOCK_TIMER_ID {
             return Err(TimerError(
@@ -941,6 +1019,74 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_real_kind_change_resets_live_state_but_a_no_op_edit_does_not() {
+        // #382: the reset exists so a reconfigured timer is re-dialled + re-probed. It must fire
+        // ONLY on a genuine change — the reconciler is what republishes the live values, and it
+        // sees nothing to do when the kind is unchanged, so wiping on a no-op edit strands the
+        // timer at `Configured` with no plugin **permanently**.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&rh_req("Field RH", "http://rh.local:5000"))
+            .unwrap();
+        reg.set_status(&rh.id, TimerStatus::Connected);
+        reg.set_plugin(
+            &rh.id,
+            PluginPresence::Present {
+                plugin_version: "0.1.0".into(),
+                rhapi_version: "1.4".into(),
+                capabilities: vec!["hello".into()],
+            },
+        );
+
+        // A rename that echoes the SAME kind back leaves the live status + plugin alone.
+        reg.update(
+            &rh.id,
+            &UpdateTimerRequest {
+                name: Some("Field RH (north)".into()),
+                kind: Some(TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let got = reg.get(&rh.id).unwrap();
+        assert_eq!(got.name, "Field RH (north)");
+        assert_eq!(got.status, TimerStatus::Connected);
+        assert!(got.plugin.is_some(), "a no-op edit must not drop the probe");
+
+        // A real URL edit DOES reset both — the connection is about to be superseded and re-probed.
+        reg.update(
+            &rh.id,
+            &UpdateTimerRequest {
+                kind: Some(TimerKind::Rotorhazard {
+                    url: "http://rh-new.local:5000".into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let got = reg.get(&rh.id).unwrap();
+        assert_eq!(got.status, TimerStatus::Configured);
+        assert!(got.plugin.is_none());
+
+        // A kind change to Mock rests at `Ready`, likewise re-probed from scratch.
+        reg.set_status(&rh.id, TimerStatus::Connected);
+        reg.update(
+            &rh.id,
+            &UpdateTimerRequest {
+                kind: Some(TimerKind::Mock {
+                    laps: 3,
+                    lap_ms: 2000,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.get(&rh.id).unwrap().status, TimerStatus::Ready);
     }
 
     #[test]
