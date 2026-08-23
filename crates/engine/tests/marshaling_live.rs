@@ -126,8 +126,10 @@ fn marshaling_folds_corrections_over_a_real_heat_log() {
         competitor: competitor.clone(),
         // A timestamp on the source clock; structural-only, exact µs irrelevant.
         at: SourceTime::from_micros(voided_pass.at.micros + 1),
-        // Untagged: this single-heat log attributes positionally, the pre-tag behavior
-        // this test asserts (the insertion lands on the competitor's own key).
+        // Untagged: this fold is over the heat's own log, so there is no other heat to
+        // route it away from (the field is additive — a real console insert carries the
+        // marshaled heat so a later heat cannot absorb it). Positional attribution is
+        // exactly what this test asserts: the insertion lands on the competitor's own key.
         heat: None,
     });
     let inserted_list = lap_list_marshaled(tagged(&inserted_log));

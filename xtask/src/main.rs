@@ -181,6 +181,8 @@ fn live() -> bool {
     let heat_live = target("gridfpv-engine", "heat_live", true);
     let scoring_live = target("gridfpv-engine", "scoring_live", true);
     let marshaling_live = target("gridfpv-engine", "marshaling_live", true);
+    // #388 — a seated node the timer never detected must still be marshalable.
+    let zero_lap_live = target("gridfpv-engine", "zero_lap_marshaling_live", true);
     let format_live = target("gridfpv-engine", "format_live", true);
     let timed_qual_live = target("gridfpv-engine", "timed_qual_live", true);
     let zippyq_live = target("gridfpv-engine", "zippyq_live", true);
@@ -195,6 +197,7 @@ fn live() -> bool {
         && heat_live
         && scoring_live
         && marshaling_live
+        && zero_lap_live
         && format_live
         && timed_qual_live
         && zippyq_live

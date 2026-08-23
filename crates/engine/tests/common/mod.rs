@@ -108,7 +108,52 @@ fn wait_until(
 ///
 /// Timing is tolerant: it waits for RH to reach `RACING` and for at least one pass,
 /// but never asserts exact lap times. The [`RhContainer`] is torn down on return.
+///
+/// `allow(dead_code)`: `common` is compiled into every engine `live` test binary, and the
+/// marshaling-evidence one uses [`run_mock_heat_with_signal`] instead.
+#[allow(dead_code)]
 pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec<Event> {
+    run_mock_heat_keeping(port, heat, scenario, |e| matches!(e, Event::Pass(_)))
+}
+
+/// [`run_mock_heat`], but the heat's **signal facts ride along** with its passes.
+///
+/// The default harness keeps only `Pass`es — adapter bookkeeping is not part of the heat's
+/// canonical race-engine log. The marshaling surfaces need more than that: the RSSI trace is the
+/// *evidence* an RD reconstructs a mis-detected race from (#388), and it flows per seated node
+/// whether or not that node ever produced a crossing. This variant keeps
+/// [`Event::SignalChunk`] / [`Event::SignalThresholds`] / [`Event::SignalHistory`] and
+/// [`Event::CompetitorSeen`] alongside the passes, so a test can fold the same window the
+/// server's marshaling projections do.
+///
+/// `allow(dead_code)`: `common` is compiled into every engine `live` test binary and most use
+/// only [`run_mock_heat`].
+#[allow(dead_code)]
+pub fn run_mock_heat_with_signal(
+    port: u16,
+    heat: &str,
+    scenario: &[(usize, String)],
+) -> Vec<Event> {
+    run_mock_heat_keeping(port, heat, scenario, |e| {
+        matches!(
+            e,
+            Event::Pass(_)
+                | Event::SignalChunk(_)
+                | Event::SignalThresholds(_)
+                | Event::SignalHistory(_)
+                | Event::CompetitorSeen { .. }
+        )
+    })
+}
+
+/// The shared harness behind [`run_mock_heat`] and [`run_mock_heat_with_signal`]: `keep` decides
+/// which of the adapter's live events are folded into the returned canonical log.
+fn run_mock_heat_keeping(
+    port: u16,
+    heat: &str,
+    scenario: &[(usize, String)],
+    keep: impl Fn(&Event) -> bool,
+) -> Vec<Event> {
     let heat = HeatId(heat.to_string());
     let lineup: Vec<CompetitorRef> = scenario
         .iter()
@@ -175,10 +220,11 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
         "no timer crossings were produced while the heat was running"
     );
 
-    // Interleave the live passes into the log between Running and Finished, in the
-    // order RH reported them. Only `Pass`es are folded in — lifecycle/`CompetitorSeen`
-    // are adapter bookkeeping, not part of the heat's canonical race-engine log.
-    log.extend(live.into_iter().filter(|e| matches!(e, Event::Pass(_))));
+    // Interleave the live events `keep` selects into the log between Running and Finished, in
+    // the order RH reported them. By default that is `Pass`es only — lifecycle/`CompetitorSeen`
+    // are adapter bookkeeping, not part of the heat's canonical race-engine log — but the
+    // marshaling harness also keeps the signal facts (see `run_mock_heat_with_signal`).
+    log.extend(live.into_iter().filter(|e| keep(e)));
 
     // Close the heat loop: ForceEnd (Running -> Unofficial) then Finalize. ForceEnd stands in for
     // the runtime auto-complete here (the harness has already stopped the RH race).
