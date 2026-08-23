@@ -2,8 +2,9 @@
 # for capturing fixtures, live integration tests (#25), and iterating on the GridFPV
 # RH plugin (D16, docs/rotorhazard-plugin.html).
 #
-# Built from source at RotorHazard v4.4.0 (see Dockerfile) — the floor for the GridFPV
-# plugin (RHAPI 1.3 / RH v4.3.0+). It boots 8 simulated (mock) nodes; MockInterface
+# Built from source (see Dockerfile) at RotorHazard v4.4.0 by default, or any version
+# `RH_VERSION` names — v4.3.0 being the GridFPV plugin's floor (RHAPI 1.3 / RH v4.3.0+,
+# D16) and what field timers run. It boots 8 simulated (mock) nodes; MockInterface
 # reads an emulated RSSI stream from mock_data_{N}.csv (MOCK_NODE_SIGNAL=1), so node
 # RSSI/history is non-zero and laps record through RH's genuine detection pipeline.
 #
@@ -11,13 +12,24 @@
 #   #   server + Socket.IO on http://localhost:5000
 #   docker compose -f docker/rotorhazard/docker-compose.yml down
 #
+# Another RH version (e.g. the v4.3.0 floor, D16) — same file, one env var:
+#
+#   RH_VERSION=4.3.0 docker compose -f docker/rotorhazard/docker-compose.yml up -d --build
+#
+# which builds/uses `gridfpv-rotorhazard:4.3.0`. The live matrix (`cargo xtask live`) builds
+# the same per-version images through the testkit rather than through compose.
+#
 # To iterate on the plugin, uncomment the bind mount below (or use the test harness:
 # `cargo xtask rh-mock feed --plugin`, `cargo xtask rh-mock plugin-check`).
 services:
   rotorhazard:
     build:
       context: .
-    image: gridfpv-rotorhazard:4.4.0
+      args:
+        # Bare `x.y.z` in the env (matching the image tag and `cargo xtask live --rh`),
+        # `vX.Y.Z` on the wire (the git tag the Dockerfile clones).
+        RH_VERSION: "v${RH_VERSION:-4.4.0}"
+    image: "gridfpv-rotorhazard:${RH_VERSION:-4.4.0}"
     container_name: gridfpv-rh
     ports:
       - "5000:5000"   # HTTP + Socket.IO

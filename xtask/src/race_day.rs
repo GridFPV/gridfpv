@@ -23,8 +23,13 @@ use std::time::{Duration, Instant};
 const RACE_CONTAINER: &str = "gridfpv-race-rh";
 /// Default host port — matches the timer URL the deploy guide configures in the Director.
 const DEFAULT_PORT: u16 = 5055;
-/// The RH harness image (built from `docker/rotorhazard/`); same tag the testkit uses.
-const RH_IMAGE: &str = "gridfpv-rotorhazard:4.4.0";
+/// The RH harness image (built from `docker/rotorhazard/`) — resolved through the testkit so
+/// this can't drift from the tag the live harness builds. Race-day drives the Director by hand,
+/// so it always uses the default RotorHazard version; the version × plugin sweep is
+/// `cargo xtask live`'s job.
+fn rh_image() -> String {
+    gridfpv_testkit::rh_image_for(gridfpv_testkit::DEFAULT_RH_VERSION)
+}
 
 const SCENARIOS: &[(&str, &str)] = &[
     (
@@ -145,22 +150,11 @@ fn print_menu() {
     println!("\nEach watches the race state and emulates every heat you Start in the Director.");
 }
 
-/// Build the RH harness image if it isn't present locally (same as the testkit's auto-build).
-fn ensure_image(root: &Path) -> bool {
-    let present = Command::new("docker")
-        .args(["image", "inspect", RH_IMAGE])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if present {
-        return true;
-    }
-    let context = root.join("docker/rotorhazard");
-    println!("\x1b[1mBuilding {RH_IMAGE}\x1b[0m (first run only; ~1–2 min)…");
-    run_ok(
-        "docker",
-        &["build", "-t", RH_IMAGE, context.to_str().unwrap()],
-    )
+/// Build the RH harness image if it isn't present locally — the testkit's own auto-build, so
+/// there is exactly one place that knows how to build it (tag, build-arg, and context alike).
+fn ensure_image(_root: &Path) -> bool {
+    gridfpv_testkit::ensure_rh_image(gridfpv_testkit::DEFAULT_RH_VERSION);
+    true
 }
 
 /// Ensure the race RH container is running with BOTH plugins mounted (and no `mock_data` CSV, so the
@@ -202,7 +196,7 @@ fn ensure_container(root: &Path, container: &str, port: u16) -> bool {
             &mount(&gridfpv, "gridfpv"),
             "-v",
             &mount(&mock, "gridfpv_mock"),
-            RH_IMAGE,
+            &rh_image(),
         ],
     );
     if !ok {
