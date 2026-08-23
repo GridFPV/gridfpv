@@ -192,6 +192,10 @@ fn live() -> bool {
     // The Director's RH-connect e2e (#65, #73): the per-event bridge connects dockerized RH,
     // drives status to Connected, and feeds real passes into the event log.
     let rh_connect = target("gridfpv-app", "rh_connect_live", true);
+    // #386 — restart a dockerized RotorHazard from the Director's own route and assert it
+    // re-executes, the Director reconnects, and the reconnect re-probes the plugin (plus the
+    // race-in-progress refusal, which must never reach RotorHazard).
+    let rh_restart = target("gridfpv-app", "rh_restart_live", true);
     ws && live_rh
         && signal
         && heat_live
@@ -204,6 +208,7 @@ fn live() -> bool {
         && multiclass_live
         && server_e2e
         && rh_connect
+        && rh_restart
 }
 
 /// `cargo xtask version <x.y.z[-pre.N]>` — set the product version in every file that

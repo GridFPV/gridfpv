@@ -47,6 +47,7 @@ import {
   createTimer,
   updateTimer,
   deleteTimer,
+  restartTimer,
   setEventTimers,
   setPrimaryTimer,
   listPilots,
@@ -356,6 +357,7 @@ export class Session {
   #createTimerImpl: typeof createTimer;
   #updateTimerImpl: typeof updateTimer;
   #deleteTimerImpl: typeof deleteTimer;
+  #restartTimerImpl: typeof restartTimer;
   #setEventTimersImpl: typeof setEventTimers;
   #setPrimaryTimerImpl: typeof setPrimaryTimer;
   #listPilotsImpl: typeof listPilots;
@@ -396,6 +398,7 @@ export class Session {
     createTimerImpl?: typeof createTimer;
     updateTimerImpl?: typeof updateTimer;
     deleteTimerImpl?: typeof deleteTimer;
+    restartTimerImpl?: typeof restartTimer;
     setEventTimersImpl?: typeof setEventTimers;
     setPrimaryTimerImpl?: typeof setPrimaryTimer;
     listPilotsImpl?: typeof listPilots;
@@ -437,6 +440,7 @@ export class Session {
     this.#createTimerImpl = opts?.createTimerImpl ?? createTimer;
     this.#updateTimerImpl = opts?.updateTimerImpl ?? updateTimer;
     this.#deleteTimerImpl = opts?.deleteTimerImpl ?? deleteTimer;
+    this.#restartTimerImpl = opts?.restartTimerImpl ?? restartTimer;
     this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
     this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
     this.#listPilotsImpl = opts?.listPilotsImpl ?? listPilots;
@@ -695,6 +699,17 @@ export class Session {
       await this.#deleteTimerImpl(this.baseUrl, id, token);
       return true as const;
     });
+  }
+
+  /**
+   * Restart a RotorHazard timer's server (`POST /timers/{id}/restart`) — the guided plugin
+   * install's last step (#386), so installing the plugin never means opening RotorHazard's own web
+   * UI. Resolves to the {@link Timer}, `undefined` on a cancelled token prompt, or throws on any
+   * other failure — including the Director's **refusal while a race is in progress on the timer**
+   * (a 400 whose message names the heat), which the caller surfaces verbatim.
+   */
+  restartTimer(id: TimerId): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#restartTimerImpl(this.baseUrl, id, token));
   }
 
   /**

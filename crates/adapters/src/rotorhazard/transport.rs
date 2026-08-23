@@ -903,6 +903,35 @@ impl RotorHazardConnection {
             .emit("load_data", json!({ "load_types": ["node_data"] }))
     }
 
+    /// **Restart the RotorHazard server** — re-execute its process so it re-imports its plugins
+    /// (#386).
+    ///
+    /// RotorHazard imports every plugin **once, at startup**, so a freshly-dropped-in
+    /// `plugins/gridfpv/` does nothing until the server restarts. RH exposes that restart on the
+    /// socket we already hold — `@SOCKET_IO.on('restart_server')` / `on_restart_server()`
+    /// ("Re-execute the current process"), v4.4.0 `server.py:1881`, identical on v4.3.0. It carries
+    /// **no authentication**: the `@requires_auth` decorators in that file guard Flask HTTP routes,
+    /// not this socket handler. So the Director can complete the guided plugin install without the
+    /// RD ever opening RotorHazard's web UI.
+    ///
+    /// **Deliberately the only power control we wire.** `server.py` exposes `shutdown_pi` and
+    /// `reboot_pi` right beside this one; both take the RD's timing hardware *down* rather than
+    /// bringing it back, so they stay out of reach and must not be added here.
+    ///
+    /// The emit is fire-and-forget: RH re-execs immediately, so the socket drops within a moment
+    /// and the connection's `close` handler flips [`is_alive`](Self::is_alive) to `false`. The
+    /// persistent driver then reconnects with backoff and **re-probes the plugin on the new
+    /// connection**, which is what flips a timer's plugin presence `Missing → Present` with no
+    /// further plumbing. An `Ok` here means only that the emit was accepted, never that RH came
+    /// back — the reconnect loop is the source of truth for that.
+    ///
+    /// Restarting mid-race is destructive (it takes the timing hardware down with the race on it),
+    /// so callers **must** gate this on heat phase; this layer only moves the bytes.
+    pub fn restart_server(&self) -> Result<(), rust_socketio::Error> {
+        // 0-arg server handler: emit with no payload args.
+        self.client.emit("restart_server", Payload::Text(vec![]))
+    }
+
     /// Disconnect from the server, **returning the adapter** so the persistent driver can carry its
     /// dedup / `last_race_status` into the next connection (#105). Reusing the adapter is what keeps
     /// a mid-race reconnect from double-counting: RotorHazard re-sends the full `current_laps`

@@ -1081,6 +1081,23 @@ struct Registry {
     active_event: Option<EventId>,
 }
 
+/// Whether a heat in `state` means **a race is under way on the timer** — the shared refusal
+/// predicate behind both the round-edit freeze (#387) and the timer restart (#386).
+///
+/// The four phases a race actually occupies: the countdown has begun (`Staged`), the gate is open
+/// (`Armed`), pilots are flying (`Running`), or passes are recorded but not yet official
+/// (`Unofficial`). `Scheduled` is not begun and `Final` is done, so neither is in progress —
+/// callers that need to be stricter than "a race is under way" (the round-edit freeze also refuses
+/// a `Scheduled` heat the RD has *loaded* in Live control, whose channels may already have been
+/// read off) layer that on top rather than widening this.
+fn is_racing_phase(state: gridfpv_engine::heat::HeatState) -> bool {
+    use gridfpv_engine::heat::HeatState;
+    matches!(
+        state,
+        HeatState::Staged | HeatState::Armed | HeatState::Running | HeatState::Unofficial
+    )
+}
+
 /// What a round's heats say about how far its config may still move (release-hardening; the
 /// in-progress refusal is #387) — the answer
 /// [`round_heat_facts`](EventRegistry::round_heat_facts) folds off the event's log in ONE pass.
@@ -1531,18 +1548,12 @@ impl EventRegistry {
             if heat_state != HeatState::Scheduled {
                 facts.raced = true;
             }
-            let in_progress = match heat_state {
-                // Countdown begun / gate open / racing / passes recorded but not yet official.
-                HeatState::Staged
-                | HeatState::Armed
-                | HeatState::Running
-                | HeatState::Unofficial => true,
-                // Not begun — but if it is the heat the RD has loaded in Live control it may be
-                // on deck with its channels already read off, so it is off limits too.
-                HeatState::Scheduled => on_timer.as_ref() == Some(&heat),
-                // Raced: the freeze above owns it.
-                HeatState::Final => false,
-            };
+            // Countdown begun / gate open / racing / passes recorded but not yet official — plus,
+            // stricter than [`is_racing_phase`], a still-`Scheduled` heat the RD has loaded in Live
+            // control: it may be on deck with its channels already read off, so it is off limits to
+            // a round edit too.
+            let in_progress = is_racing_phase(heat_state)
+                || (heat_state == HeatState::Scheduled && on_timer.as_ref() == Some(&heat));
             if in_progress && facts.in_progress.is_none() {
                 facts.in_progress = Some(match &round {
                     Some(round) => round_engine::heat_display_name(round, &events, &heat),
@@ -1551,6 +1562,81 @@ impl EventRegistry {
             }
         }
         facts
+    }
+
+    /// The **friendly name** of a heat that is *in progress* on `timer` right now (#386), or `None`
+    /// when no race is under way on it — the refusal probe behind restarting a RotorHazard timer.
+    ///
+    /// Restarting RotorHazard re-executes the RD's timing hardware, so it must be refused outright
+    /// while a race is on it, not merely confirmed. "On it" is any event that **selects** this
+    /// timer (not just the active one: a heat can be driven through a non-active event's bridge),
+    /// and "in progress" is [`is_racing_phase`] — the same `Staged`/`Armed`/`Running`/`Unofficial`
+    /// set the round-edit freeze refuses on.
+    ///
+    /// Returns the heat's **name**, never its id: it goes straight into an RD-facing refusal (repo
+    /// display rule). A heat tagged to a round is named the way the console names it
+    /// ([`round_engine::heat_display_name`]); an untagged free-text heat falls back to its RD-typed
+    /// label, and a heat with neither to the generic "a heat" — a raw id is never emitted.
+    pub fn heat_in_progress_on_timer(&self, timer: &TimerId) -> Option<String> {
+        use gridfpv_engine::heat::heat_state;
+        use gridfpv_events::Event;
+
+        // Snapshot the candidate events (id + their rounds) and release the registry lock BEFORE
+        // resolving/reading a log — `resolve` takes the same lock.
+        let candidates: Vec<(EventId, Vec<RoundDef>)> = {
+            let reg = self.read();
+            reg.events
+                .values()
+                .filter(|e| e.meta.timers.contains(timer))
+                .map(|e| (e.meta.id.clone(), e.meta.rounds.clone()))
+                .collect()
+        };
+        for (event_id, rounds) in candidates {
+            let Some(state) = self.resolve(&event_id) else {
+                continue;
+            };
+            let Ok((events, _cursor)) = state.read() else {
+                continue;
+            };
+            // Every heat the log ever scheduled, with the round it was tagged to, in first-scheduled
+            // order (a re-schedule of the same id must not be considered twice).
+            let mut heats: Vec<(gridfpv_events::HeatId, Option<RoundId>)> = Vec::new();
+            for event in &events {
+                if let Event::HeatScheduled { heat, round, .. } = event {
+                    if !heats.iter().any(|(h, _)| h == heat) {
+                        heats.push((heat.clone(), round.clone()));
+                    }
+                }
+            }
+            for (heat, round_id) in heats {
+                if !heat_state(&events, &heat).is_some_and(is_racing_phase) {
+                    continue;
+                }
+                let round = round_id
+                    .as_ref()
+                    .and_then(|r| rounds.iter().find(|def| &def.id == r));
+                return Some(match round {
+                    Some(round) => round_engine::heat_display_name(round, &events, &heat),
+                    // Untagged (a free-text heat): its RD-typed label if it has one, else a generic
+                    // phrase. Never the raw id.
+                    None => events
+                        .iter()
+                        .rev()
+                        .find_map(|e| match e {
+                            Event::HeatScheduled {
+                                heat: h,
+                                label: Some(label),
+                                ..
+                            } if h == &heat && !label.trim().is_empty() => {
+                                Some(label.trim().to_string())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "a heat".to_string()),
+                });
+            }
+        }
+        None
     }
 
     pub fn update_round(
