@@ -345,7 +345,9 @@ pub enum FillStop {
     Blocked,
 }
 
-/// A heat a command **created**, identified for the caller (#395).
+/// A heat a command **put in front of the RD**, identified for the caller (#395, #401) — the
+/// heat a [`FillRound`](Command::FillRound) scheduled, or the one an [`Advance`](Command::Advance)
+/// loaded (whether it generated that heat or found it already on deck).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct ScheduledHeat {
@@ -391,6 +393,66 @@ pub struct FillRoundOutcome {
     pub detail: String,
 }
 
+/// What a [`Command::Advance`] **did** with the next heat (#401).
+///
+/// Every value here is a **success** — `Advance` recorded its `Final -> Advanced` transition in
+/// all of them; they differ in whether Live control moved on, and if not, why. Externally tagged,
+/// so it maps to a TS string-union
+/// (`"LoadedOnDeck" | "Generated" | "RoundComplete" | "AwaitingResult" | "Blocked" | "Untagged"`).
+///
+/// The "nothing to advance to" values are stated **positively**, never inferred from an absent
+/// [`AdvanceOutcome::loaded`]: inferring a no-op from an absence is precisely the bug (#395, #401)
+/// this type exists to end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum AdvanceStop {
+    /// Loaded the heat that was **already on deck** — the next still-`Scheduled` heat existed and
+    /// Live control now follows it. [`loaded`](AdvanceOutcome::loaded) names it.
+    LoadedOnDeck,
+    /// **Generated** the next heat for the advanced heat's round (one generator draw, the same
+    /// single-step path [`FillMode::Next`] uses) and loaded that.
+    /// [`loaded`](AdvanceOutcome::loaded) names it.
+    Generated,
+    /// **Nothing to advance to**: the round is finished — every heat its format wants exists.
+    /// The routine end-of-round state, and the one that used to arrive as a bare `{"ok":true}`.
+    RoundComplete,
+    /// **Nothing to advance to**: the round's next heat is already scheduled and awaiting its
+    /// result. Not finished — come back after scoring the outstanding heat.
+    AwaitingResult,
+    /// **Nothing to advance to**: the round's format **refuses this field** and cannot draw a heat
+    /// for it at all (#394) — Head-to-Head with a single pilot.
+    /// [`detail`](AdvanceOutcome::detail) carries the shortfall.
+    Blocked,
+    /// **Nothing to advance to**: the advanced heat belongs to **no round** (a manually built,
+    /// untagged heat), so there is no generator to draw from — and nothing was on deck either.
+    Untagged,
+}
+
+/// What a [`Command::Advance`] actually **did** (#401).
+///
+/// `Advance` is two steps, not one: it records the heat's `Final -> Advanced` transition *and*
+/// loads the next heat to run. Only the first always happens, and a bare `{"ok":true}` reported
+/// all three second steps identically — loaded the on-deck heat, generated one, found nothing.
+/// That is the same defect #395 fixed for [`FillRound`](Command::FillRound), and worse in
+/// practice: "nothing to advance to" is a *routine* end-of-round state rather than a
+/// misconfiguration, so the ambiguous ack was hit on every round rather than rarely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct AdvanceOutcome {
+    /// The heat Live control is now on, when the advance loaded one — `null` for every
+    /// "nothing to advance to" [`stopped`](Self::stopped).
+    ///
+    /// Always serialized, `null` included, and never the thing a caller reads to learn that
+    /// nothing happened: [`stopped`](Self::stopped) says that outright.
+    pub loaded: Option<ScheduledHeat>,
+    /// What the advance did with the next heat — the machine-readable discriminator, always
+    /// present.
+    pub stopped: AdvanceStop,
+    /// The same thing in one RD-facing sentence, naming the advanced heat, the loaded heat and
+    /// the round by their **friendly names** (never an id). Safe to show verbatim.
+    pub detail: String,
+}
+
 /// What a command **did**, for the commands whose useful result is the effect rather than the
 /// acceptance (#395).
 ///
@@ -403,6 +465,8 @@ pub struct FillRoundOutcome {
 pub enum CommandOutcome {
     /// The result of a [`Command::FillRound`].
     FillRound(FillRoundOutcome),
+    /// The result of a [`Command::Advance`] (#401).
+    Advance(AdvanceOutcome),
 }
 
 /// The acknowledgement of a [`Command`] (protocol.html §5): commands up,
@@ -418,7 +482,8 @@ pub enum CommandOutcome {
 /// `ok` answers *"was the command accepted?"* — which for some commands is not the question the
 /// caller is actually asking. `FillRound`'s "did nothing" is a routine, expected result, not an
 /// error, so it acks ok; a caller then has no way to tell it from a fill that scheduled a heat
-/// (#395). [`outcome`](Self::outcome) carries **what the command did** for those commands, and
+/// (#395), and `Advance`'s "nothing to advance to" is the same shape, hit far more often (#401).
+/// [`outcome`](Self::outcome) carries **what the command did** for those commands, and
 /// is absent for the ones where acceptance *is* the whole answer — so it is purely additive:
 /// every existing client keeps parsing every ack unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -430,9 +495,9 @@ pub struct CommandAck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<ProtocolError>,
-    /// **What the command did**, for the commands whose effect is the useful answer — currently
-    /// [`FillRound`](Command::FillRound). `None` for every other command (and for a failure,
-    /// where `error` is the answer).
+    /// **What the command did**, for the commands whose effect is the useful answer —
+    /// [`FillRound`](Command::FillRound) (#395) and [`Advance`](Command::Advance) (#401). `None`
+    /// for every other command (and for a failure, where `error` is the answer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub outcome: Option<CommandOutcome>,

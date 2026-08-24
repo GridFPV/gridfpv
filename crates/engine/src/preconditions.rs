@@ -29,6 +29,29 @@
 //! An **empty** field is deliberately not a shortfall: the fill path rejects it earlier and more
 //! specifically (there is no round to run at all, for any format), so declaring it here too
 //! would only produce a second, vaguer message for the same condition.
+//!
+//! # Why `Complete` is still one word (#401)
+//!
+//! The #394/#395 audit noted that `Complete` now carries three meanings: genuine completion
+//! (`open_practice`, the demo formats), the precondition failure this module answers out-of-band,
+//! and **"done *for now*, awaiting an RD request"** (`zippyq`). Splitting
+//! [`GeneratorStep`](crate::format::GeneratorStep) was weighed again while making `Advance` say
+//! what it did (#401) and deliberately **not** done, because the third meaning is not reachable:
+//!
+//! - `zippyq` is shelved (#218) — registered so persisted rounds still load, never offered for a
+//!   new round;
+//! - and the server has no `request_round` plumbing at all. Its fill path builds a **fresh**
+//!   generator from the log on every draw, so a `zippyq` round's pending queue is always empty and
+//!   its `Complete` is, from the server's side, indistinguishable from — and as durable as —
+//!   genuine completion. "The round is complete" is the true statement there today;
+//! - `RollingDemo`/`KnockoutDemo` are test fixtures, not in
+//!   [`FormatRegistry::standard`](crate::format::FormatRegistry::standard).
+//!
+//! So the split would widen the `Generator` contract — every implementor, `schedule.rs`,
+//! `event.rs` and their tests — to distinguish a state no caller can produce, and would buy
+//! `Advance`'s message nothing. The variant belongs with the command that makes it reachable: when
+//! ZippyQ's "queue another round" request is built, that is when `Complete` must stop meaning two
+//! things, and this note is the marker for it.
 
 use std::fmt;
 

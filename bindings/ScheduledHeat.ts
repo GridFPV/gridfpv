@@ -3,7 +3,9 @@ import type { CompetitorRef } from "./CompetitorRef";
 import type { HeatId } from "./HeatId";
 
 /**
- * A heat a command **created**, identified for the caller (#395).
+ * A heat a command **put in front of the RD**, identified for the caller (#395, #401) — the
+ * heat a [`FillRound`](Command::FillRound) scheduled, or the one an [`Advance`](Command::Advance)
+ * loaded (whether it generated that heat or found it already on deck).
  */
 export type ScheduledHeat = { 
 /**

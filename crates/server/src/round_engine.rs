@@ -1719,6 +1719,20 @@ pub fn rematerialize_round_heats(
     out
 }
 
+/// The lineup, channel assignment and RD-typed label a heat was **last scheduled** with — the
+/// public read of [`logged_schedule`], for a caller that has to describe a heat already in the log
+/// rather than one it just drew (the `Advance` ack names the heat it loaded, #401).
+pub fn logged_heat_schedule(
+    events: &[Event],
+    heat: &HeatId,
+) -> (
+    Vec<CompetitorRef>,
+    Vec<(CompetitorRef, u16)>,
+    Option<String>,
+) {
+    logged_schedule(events, heat)
+}
+
 /// A heat's currently-effective schedule — `(lineup, frequencies, label)` from its **most recent**
 /// [`Event::HeatScheduled`], the same "latest wins" rule the live heat list folds by.
 fn logged_schedule(
