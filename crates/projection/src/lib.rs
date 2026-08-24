@@ -34,9 +34,7 @@ pub mod recalc;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gridfpv_events::{
-    AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SignalHistory, SourceTime,
-};
+use gridfpv_events::{AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SourceTime};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -1147,11 +1145,32 @@ impl SignalTraceView {
 ///   They **append** to the competitor's running buffer in log order, reconstructing the stream
 ///   exactly.
 /// - [`Event::SignalHistory`] — the *dense, full-fidelity* per-tick history RotorHazard records,
-///   pulled from the request-driven `current_marshal_data` at heat end. When a competitor has **any**
-///   dense history, it **supersedes** the coarse chunk samples entirely: the view carries the dense
-///   trace, not the streaming approximation. Multiple histories for one competitor are last-writer-
-///   wins (a re-pull replaces the earlier one). With no dense history the coarse chunks stand, so a
-///   heat that ended before the pull (or a non-RH source) is unchanged.
+///   pulled from the request-driven `current_marshal_data` at heat end, or streamed live by the
+///   GridFPV plugin. When a competitor has **any** dense history, it **supersedes** the coarse chunk
+///   samples entirely: the view carries the dense trace, not the streaming approximation. With no
+///   dense history the coarse chunks stand, so a heat that ended before the pull (or a non-RH
+///   source) is unchanged.
+///
+/// # Dense histories are **offset-folded**, not last-writer-wins (#392)
+///
+/// A dense history is not necessarily a whole trace: the live plugin path streams it in slices, each
+/// stamped with the sample offset it starts at ([`SignalHistory::base`]), so the per-tick cost does
+/// not grow with heat length. The fold applies each one by that offset:
+///
+/// - `base == 0` — a **full snapshot**: replaces the competitor's dense trace. The post-race pull
+///   and the plugin's end-of-race flush both send one, so a finished heat's trace is whole however
+///   the live stream went, and a re-pull still supersedes what came before (the old behavior).
+/// - `base ==` the trace's current length — a **contiguous append**: the slice extends the trace.
+/// - anything else — **out of sync**: the slice is *skipped*. It cannot be placed without leaving a
+///   gap or a duplicate in the middle of the marshaling evidence, and a trace with a silent hole in
+///   it is worse than a short one. The next full snapshot resynchronises. (Reachable only from a
+///   truncated window or a log that lost events — the adapter emits a contiguous stream per heat and
+///   warns when the plugin's own slices stop lining up.)
+///
+/// An empty history is inert either way: it carries no evidence, so it must not blank out a trace.
+///
+/// A pre-#392 log carries no offsets at all; they read back as `base = 0`, i.e. whole snapshots that
+/// replace — which is exactly the last-writer-wins rule those logs were written under.
 ///
 /// Because the dense history carries an **explicit per-sample time** (not a uniform cadence), the
 /// view's uniform `from`/`period_micros` grid is derived from those times: `from` is the first
@@ -1167,6 +1186,8 @@ impl SignalTraceView {
 ///
 /// `events` is the heat's window (the server scopes it before folding, exactly as the lap/audit
 /// projections do); the fold itself is window-agnostic, so it is equally correct over the full log.
+///
+/// [`SignalHistory::base`]: gridfpv_events::SignalHistory::base
 pub fn signal_trace<'a, I>(events: I) -> SignalTraceView
 where
     I: IntoIterator<Item = &'a Event>,
@@ -1178,9 +1199,11 @@ where
         samples: Vec<u16>,
         enter: Option<u16>,
         exit: Option<u16>,
-        /// The dense history that supersedes the coarse `samples`/`from`/`period_micros`, if any has
-        /// been seen (last writer wins). When present it is resolved into the trace at emit time.
-        dense: Option<SignalHistory>,
+        /// The dense trace that supersedes the coarse `samples`/`from`/`period_micros`, as
+        /// `(times, rssi)` — assembled from the competitor's [`Event::SignalHistory`] slices by
+        /// their `base` offset. `None` until one lands; when present it is resolved into the
+        /// emitted trace at the end.
+        dense: Option<(Vec<i64>, Vec<u16>)>,
     }
     impl Acc {
         fn empty() -> Self {
@@ -1217,11 +1240,25 @@ where
                     competitor: history.competitor.clone(),
                 };
                 let acc = by_competitor.entry(key).or_insert_with(Acc::empty);
-                // Prefer-dense: the dense history supersedes the coarse chunks. Last writer wins, so
-                // a re-pull replaces the earlier history. An empty history is ignored (it carries no
-                // evidence, so it must not blank out the coarse trace).
+                // Prefer-dense: the dense history supersedes the coarse chunks. It arrives as
+                // offset-stamped slices (#392), so place each one by its `base` — replace at 0,
+                // append at the current length, skip anything else rather than corrupt the trace.
+                // An empty history is ignored either way (it carries no evidence, so it must not
+                // blank out the coarse trace).
                 if !history.rssi.is_empty() {
-                    acc.dense = Some(history.clone());
+                    match (history.base, acc.dense.as_mut()) {
+                        // A full snapshot replaces whatever the competitor's trace held.
+                        (0, _) => {
+                            acc.dense = Some((history.times.clone(), history.rssi.clone()));
+                        }
+                        // A slice that continues the trace extends it.
+                        (base, Some((times, rssi))) if base == times.len() as u64 => {
+                            times.extend_from_slice(&history.times);
+                            rssi.extend_from_slice(&history.rssi);
+                        }
+                        // Out of sync — see the fold's docs. Skipped, not spliced.
+                        _ => {}
+                    }
                 }
             }
             Event::SignalThresholds(t) => {
@@ -1247,9 +1284,9 @@ where
                 // `times` are carried too so a renderer can plot each sample at its real instant — RH's
                 // history is bursty, so the uniform grid alone badly compresses the trace.
                 let (from, period_micros, samples, times) = match acc.dense {
-                    Some(history) => {
-                        let (from, period_micros, samples) = dense_trace_grid(&history);
-                        (from, period_micros, samples, Some(history.times))
+                    Some((dense_times, dense_rssi)) => {
+                        let (from, period_micros) = dense_trace_grid(&dense_times);
+                        (from, period_micros, dense_rssi, Some(dense_times))
                     }
                     None => (acc.from, acc.period_micros, acc.samples, None),
                 };
@@ -1267,25 +1304,25 @@ where
     }
 }
 
-/// Resolve a dense [`SignalHistory`] into the `(from, period_micros, samples)` the uniform-grid
-/// [`CompetitorTrace`] carries, preserving the native samples verbatim (no resampling).
+/// Resolve an assembled dense trace's sample `times` into the uniform `(from, period_micros)` grid
+/// the [`CompetitorTrace`] carries alongside them. The samples themselves are passed through
+/// verbatim by the caller — native ADC counts, no resampling.
 ///
 /// `from` is the first sample's instant; `period_micros` is the first **positive** inter-sample
-/// delta (RH samples at a near-fixed rate, so this anchors the grid the renderer draws on). The
-/// `samples` are the dense RSSI vector unchanged. A dense history can legitimately repeat a timestamp
-/// — e.g. a peak reported at the same first/last time, so `history_times` reads `[t, t, …]` — so the
-/// grid skips zero/negative deltas to avoid a degenerate period of `0`; it falls back to `0` only
-/// when every delta is non-positive (a single distinct time, including a single-sample history).
-fn dense_trace_grid(history: &SignalHistory) -> (Option<SourceTime>, u32, Vec<u16>) {
-    let from = history.times.first().copied().map(SourceTime::from_micros);
-    let period_micros = history
-        .times
+/// delta (RH samples at a near-fixed rate, so this anchors the grid the renderer draws on). A dense
+/// history can legitimately repeat a timestamp — e.g. a peak reported at the same first/last time,
+/// so `history_times` reads `[t, t, …]` — so the grid skips zero/negative deltas to avoid a
+/// degenerate period of `0`; it falls back to `0` only when every delta is non-positive (a single
+/// distinct time, including a single-sample history).
+fn dense_trace_grid(times: &[i64]) -> (Option<SourceTime>, u32) {
+    let from = times.first().copied().map(SourceTime::from_micros);
+    let period_micros = times
         .windows(2)
         .map(|w| w[1] - w[0])
         .find(|&d| d > 0)
         .unwrap_or(0)
         .clamp(0, u32::MAX as i64) as u32;
-    (from, period_micros, history.rssi.clone())
+    (from, period_micros)
 }
 
 #[cfg(test)]
@@ -1569,7 +1606,7 @@ mod tests {
 #[cfg(test)]
 mod marshaling_tests {
     use super::*;
-    use gridfpv_events::{GateIndex, HeatId, LogRef, Penalty};
+    use gridfpv_events::{GateIndex, HeatId, LogRef, Penalty, SignalHistory};
 
     /// Build a lap-gate pass event.
     fn pass(adapter: &str, competitor: &str, at: i64, sequence: Option<u64>) -> Event {
@@ -2673,12 +2710,25 @@ mod marshaling_tests {
         assert_eq!(signal_trace(&log), signal_trace(&log));
     }
 
+    /// A dense history **snapshot** (`base = 0`) — a whole trace, which replaces.
     fn history(adapter: &str, competitor: &str, times: &[i64], rssi: &[u16]) -> Event {
+        history_at(adapter, competitor, 0, times, rssi)
+    }
+
+    /// A dense history **slice** starting at sample `base` — the live plugin's incremental shape.
+    fn history_at(
+        adapter: &str,
+        competitor: &str,
+        base: u64,
+        times: &[i64],
+        rssi: &[u16],
+    ) -> Event {
         Event::SignalHistory(SignalHistory {
             adapter: AdapterId(adapter.into()),
             competitor: CompetitorRef(competitor.into()),
             times: times.to_vec(),
             rssi: rssi.to_vec(),
+            base,
         })
     }
 
@@ -2736,7 +2786,9 @@ mod marshaling_tests {
 
     #[test]
     fn dense_history_last_writer_wins() {
-        // Two pulls for one competitor: the later dense history replaces the earlier one.
+        // Two pulls for one competitor: the later dense history replaces the earlier one. Both are
+        // snapshots (`base = 0`) — which is also how a pre-#392 log, carrying no offsets at all,
+        // reads back, so those logs keep folding under exactly the rule they were written with.
         let log = vec![
             history("rh", "node-0", &[0, 100_000], &[70, 150]),
             history("rh", "node-0", &[0, 50_000, 100_000], &[70, 88, 150]),
@@ -2744,6 +2796,73 @@ mod marshaling_tests {
         let trace = &signal_trace(&log).competitors[0];
         assert_eq!(trace.samples, vec![70, 88, 150]);
         assert_eq!(trace.period_micros, 50_000);
+    }
+
+    #[test]
+    fn dense_history_slices_append_at_their_base() {
+        // #392: the live plugin path streams the dense trace in slices, each stamped with the sample
+        // offset it starts at. Contiguous slices APPEND, so the folded trace is the whole run even
+        // though no single event ever carried it.
+        let log = vec![
+            history_at("rh", "node-0", 0, &[0, 50_000], &[70, 88]),
+            history_at("rh", "node-0", 2, &[100_000, 150_000], &[150, 149]),
+            history_at("rh", "node-0", 4, &[200_000], &[71]),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 88, 150, 149, 71]);
+        assert_eq!(
+            trace.times.as_deref(),
+            Some([0, 50_000, 100_000, 150_000, 200_000].as_slice())
+        );
+        assert_eq!(trace.from, Some(SourceTime::from_micros(0)));
+        assert_eq!(trace.period_micros, 50_000);
+    }
+
+    #[test]
+    fn dense_history_out_of_sync_slice_is_skipped_not_spliced() {
+        // A slice that neither restates the trace (base 0) nor continues it (base == len) cannot be
+        // placed without leaving a gap or a duplicate mid-trace. It is dropped, and the trace stands
+        // exactly as the contiguous slices left it — a short trace, never a corrupt one.
+        let log = vec![
+            history_at("rh", "node-0", 0, &[0, 50_000], &[70, 88]),
+            // Gap: samples 2..4 never arrived, so this one starts past the end of the trace.
+            history_at("rh", "node-0", 4, &[200_000], &[71]),
+            // ...and one that would re-apply samples already held.
+            history_at("rh", "node-0", 1, &[50_000, 100_000], &[88, 150]),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 88]);
+        assert_eq!(trace.times.as_deref(), Some([0, 50_000].as_slice()));
+
+        // A slice arriving with no trace to append to (a window that lost the opening snapshot) is
+        // the same case: skipped, leaving the competitor on its coarse evidence.
+        let orphan = vec![
+            chunk("rh", "node-0", 0, 100_000, &[60, 61]),
+            history_at("rh", "node-0", 7, &[350_000], &[71]),
+        ];
+        let trace = &signal_trace(&orphan).competitors[0];
+        assert_eq!(trace.samples, vec![60, 61]);
+        assert_eq!(trace.times, None);
+    }
+
+    #[test]
+    fn end_of_race_snapshot_resyncs_a_desynced_trace() {
+        // The safety net the skip rule leans on: the plugin's end-of-race flush (and the post-race
+        // `current_marshal_data` pull) send `base = 0`, so however the live stream went, the
+        // finished heat's marshaling trace is the full-fidelity one.
+        let log = vec![
+            history_at("rh", "node-0", 0, &[0, 50_000], &[70, 88]),
+            history_at("rh", "node-0", 4, &[200_000], &[71]), // out of sync, skipped
+            history_at(
+                "rh",
+                "node-0",
+                0,
+                &[0, 50_000, 100_000, 150_000, 200_000],
+                &[70, 88, 150, 149, 71],
+            ),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 88, 150, 149, 71]);
     }
 
     #[test]
