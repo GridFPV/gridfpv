@@ -271,26 +271,30 @@ stateDiagram-v2
       elapsed running time reaches the limit, independent of any win condition.</dd>
     </dl>
 
-    <h2>6. Open practice — a lifecycle with un-logged laps</h2>
+    <h2>6. Open practice — an ordinary lifecycle that is never scored</h2>
     <p>
       Open practice is the casual format: a round is <strong>one open heat over the active
       channels</strong> (<code>node-{i}</code> seats, not pilots), seeded by
-      <code>AllChannels { channels }</code>. Its lifecycle is the same six-phase FSM, with two
-      deliberate differences:
+      <code>AllChannels { channels }</code>. Its lifecycle is the same six-phase FSM, driven by the
+      same logged facts:
     </p>
     <div class="principle">
-      <p><span class="name">The session is logged; the laps are not.</span> The heat's
-      <code>HeatScheduled</code> and its start/stop <code>HeatStateChanged</code> transitions
-      <em>are</em> recorded — so the durable log carries the session boundaries — but the
-      practice passes are <strong>in-memory only</strong>, keyed per channel, never appended to
-      the log. The source bridge routes an open-practice heat's passes into a live accumulator
-      instead of the event log; the served live state takes its phase/clock from the real log and
-      splices the non-logged per-channel laps over it (so phase can never drift from the log).</p>
+      <p><span class="name">Everything is logged — practice is not a special path.</span> The
+      heat's <code>HeatScheduled</code>, its start/stop <code>HeatStateChanged</code> transitions
+      <em>and its passes</em> are all appended to the durable log, exactly as for a qualifying heat
+      (each pass stamped with the heat it was flown in). The live state, lap list, marshaling and
+      audit trail are the same folds every format uses; there is no accumulator and no overlay.
+      A <code>Restart</code> drops the run's laps through the ordinary rule — the heat window starts
+      past its latest reset. (This reverses the earlier "laps are in-memory only" decision; see
+      <a href="decisions.html#d5">D5</a>.)</p>
     </div>
     <p>
-      Open practice does <strong>no scoring</strong> — there is no win condition (the round
-      stores an inert one that is never consulted). The heat is <strong>auto-created</strong> on
-      round creation, and ends either when its optional <code>time_limit_secs</code> elapses (the
+      Open practice does <strong>no scoring</strong> — that is its one and only difference. There is
+      no win condition (a round created without one stores an inert <code>BestLap</code>, which by
+      construction ends no heat), and a practice round never appears in results, standings or
+      rankings; that exclusion lives in a single predicate
+      (<code>crates/server/src/open_practice.rs</code>). The heat is <strong>auto-created</strong>
+      on round creation, and ends either when its optional <code>time_limit_secs</code> elapses (the
       runtime auto-advances <code>Running → Unofficial</code>) or when the RD presses
       <code>ForceEnd</code>.
     </p>

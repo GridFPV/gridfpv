@@ -260,9 +260,11 @@ stateDiagram-v2
       and the cross-flight qualifying ranking: the qualifying generator
       (<code>timed_qual</code>) ranks each pilot on their best flight under that same condition
       (<code>BestLap</code> → fastest lap, <code>BestConsecutive</code> → fastest N-lap window,
-      <code>Timed</code> → most laps). <strong>Open Practice does no scoring</strong>, so its
-      round stores an inert win condition that is never consulted — it ends on a time limit or
-      the RD's <code>ForceEnd</code>.</p>
+      <code>Timed</code> → most laps). <strong>Open Practice does no scoring</strong> — it is
+      excluded from results, standings and rankings (<a href="decisions.html#d5">D5</a>), and a
+      practice round created without a win condition stores the inert <code>BestLap</code> default,
+      which by construction ends no heat, so it ends on a time limit or the RD's
+      <code>ForceEnd</code>.</p>
     </div>
     <h3>Penalties, disqualification &amp; heat-void</h3>
     <p>

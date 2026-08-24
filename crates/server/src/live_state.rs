@@ -364,7 +364,7 @@ fn live_state_core(
         on_deck: on_deck(events, &current_heat),
         // Timing is set by [`with_heat_timing`] from the *stored* log (which carries the
         // `recorded_at` server timestamps the bare `Event` slice lacks). The plain fold over
-        // `&[Event]` — the open-practice synthetic path and the unit tests — leaves it `None`.
+        // `&[Event]` (the unit tests, and any caller that has no stored log) leaves it `None`.
         race_started_at: None,
         race_ended_at: None,
         staged_at: None,
@@ -729,25 +729,6 @@ fn running_order_by_completion(
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => std::cmp::Ordering::Equal,
                 }
-            })
-            .then_with(|| a.competitor.cmp(&b.competitor))
-    });
-    order.into_iter().map(|p| p.competitor.clone()).collect()
-}
-
-/// Rank by lap count with the last-lap **duration** tie-break — the legacy proxy, kept for
-/// the open-practice per-channel board (whose in-memory laps carry durations, not global
-/// completion instants). The real heat overlay uses [`running_order_by_completion`].
-pub(crate) fn running_order(progress: &[PilotProgress]) -> Vec<CompetitorRef> {
-    let mut order: Vec<&PilotProgress> = progress.iter().collect();
-    order.sort_by(|a, b| {
-        b.laps_completed
-            .cmp(&a.laps_completed)
-            .then_with(|| match (a.last_lap_micros, b.last_lap_micros) {
-                (Some(x), Some(y)) => x.cmp(&y),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
             })
             .then_with(|| a.competitor.cmp(&b.competitor))
     });

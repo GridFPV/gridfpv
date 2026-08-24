@@ -11,7 +11,7 @@
     <header class="masthead">
       <p class="brand">GridFPV</p>
       <h1>Live State &amp; the Race Clock</h1>
-      <p class="doc-kind">Internal design doc · how a log frame becomes the live projection, the server-authoritative clock, and the open-practice overlay</p>
+      <p class="doc-kind">Internal design doc · how a log frame becomes the live projection and the server-authoritative clock</p>
     </header>
 
     <p class="lead">
@@ -20,9 +20,9 @@
       its phase, the lineup, per-pilot lap progress, the running order, and the on-deck heat. This
       doc ties together three things earlier docs treat separately: how the live state is a
       <strong>pure fold of the event log</strong>, how its <strong>race clock anchors to
-      server-time log timestamps</strong> (not a client wall-clock), and how the
-      <strong>open-practice overlay</strong> composes non-logged per-channel laps on top of the
-      log fold without ever letting phase or clock drift.
+      server-time log timestamps</strong> (not a client wall-clock), and why <strong>every format
+      — open practice included — reaches the stream through that one fold</strong>, with no
+      overlay and no second lap path.
     </p>
 
     <div class="callout">
@@ -196,9 +196,9 @@ sequenceDiagram
     <p>
       The read and realtime paths reuse the <em>same</em> fold helpers, so a snapshot and the stream
       can never disagree. The snapshot handler reads the stored log, folds the live state, attaches
-      the clock, merges the open-practice overlay (§4), and returns the body with the cursor the
-      stream resumes from. The stream handler walks the log forward, re-folding the scope on each new
-      offset and emitting a fresh-value envelope whenever the folded body changes.
+      the clock, and returns the body with the cursor the stream resumes from. The stream handler
+      walks the log forward, re-folding the scope on each new offset and emitting a fresh-value
+      envelope whenever the folded body changes.
     </p>
     <div class="principle">
       <p><span class="name">The resume cursor is the log length; the per-stream sequence is its own
@@ -223,116 +223,89 @@ sequenceDiagram
       (<a href="protocol.html">Protocol</a> §3, §9.2).
     </p>
     <div class="principle">
-      <p><span class="name">The per-offset walk folds the pure log; the overlay is spliced last.</span>
-      The change-stream engine re-folds the <em>pure</em> log on each offset so every logged change —
-      including phase transitions and the clock instants — produces an envelope. When an
-      open-practice heat is active it then folds the current prefix and splices the per-channel laps
-      on top, emitting that laps-spliced fresh value if it differs (§4). Both the snapshot and stream
+      <p><span class="name">One folded body per logged offset — nothing else.</span>
+      The change-stream engine re-folds the log on each offset so every logged change — including
+      phase transitions and the clock instants — produces an envelope, and an offset that leaves the
+      folded body unchanged produces none. There is no out-of-band re-snapshot: every format,
+      open practice included, reaches the stream the same way (§4). Both the snapshot and stream
       anchor the clock with <code>with_heat_timing</code> from the stored log, so the clock basis is
       identical everywhere.</p>
     </div>
 
-    <h2>4. The open-practice overlay composes with the log fold</h2>
+    <h2>4. Open practice folds the log like everything else</h2>
     <p>
       Open practice is casual flying: a round is one open heat over the active <strong>channels</strong>
-      (<code>node-{i}</code> seats), and each channel's laps are shown live but
-      <strong>deliberately never logged</strong>. The session itself <em>is</em> recorded — the heat's
-      <code>HeatScheduled</code> plus its start/stop <code>HeatStateChanged</code> are in the log — but
-      the practice <em>passes</em> are not. So the durable log carries the session boundaries and
-      <strong>zero <code>Pass</code> events</strong> for an open-practice heat; the source bridge routes
-      those passes into an in-memory accumulator (<code>OpenPracticeLive</code>) instead of
-      <code>AppState::append</code>.
+      (<code>node-{i}</code> seats). Its laps used to be <strong>in-memory only</strong>, held in an
+      <code>OpenPracticeLive</code> accumulator and spliced onto the log fold by a
+      <code>merge_into</code> overlay. That is gone (see <a href="decisions.html#d5">D5</a>, reversed
+      2026-08-24): a practice heat's passes are appended to the durable log by
+      <code>AppState::append</code> like any other heat's, stamped with the heat, and the live state
+      is a <strong>pure fold of the log</strong> at every scope.
     </p>
     <div class="principle">
-      <p><span class="name">Phase &amp; clock from the log; laps from the overlay.</span> The served
-      live state is the log fold (truthful <code>current_heat</code>, <code>phase</code>, lineup,
-      on-deck, and the server-time clock) with the in-memory per-channel laps
-      <strong>merged on top</strong>. <code>merge_into</code> splices the accumulator's
-      <code>laps_completed</code> / <code>last_lap_micros</code> onto the matching <code>progress</code>
-      rows and recomputes the running order — only when the overlay's heat <em>is</em> the log's current
-      heat (a guard so a stale overlay can never bleed laps onto a different heat). Phase and clock
-      therefore <strong>cannot drift</strong> — they are always the log's.</p>
+      <p><span class="name">Phase, clock <em>and</em> laps from the log.</span> There is nothing to
+      splice: <code>current_heat</code>, <code>phase</code>, lineup, on-deck, the per-channel
+      <code>laps_completed</code> / <code>last_lap_micros</code>, the running order and the
+      server-time clock all come out of the one fold. A practice seat is simply an unbound
+      competitor, so its <code>pilot</code> is naturally <code>None</code> — unbound never meant
+      unlogged. A <code>Restart</code> returns the heat to <code>Scheduled</code> and the heat window
+      starts past that reset, so the run's laps drop by the same rule that clears an aborted
+      qualifying run.</p>
     </div>
     <div class="callout">
       <p>
-        <strong>Why laps-only, and not a synthetic live state.</strong> An earlier design served a
-        <em>fully synthetic</em> <code>LiveRaceState</code> (its own <code>Running</code> start plus a
-        shadow transition list) in place of the log fold — and it drifted: a <code>Restart</code>
-        resetting the heat to <code>Scheduled</code> was never reflected (the console kept rendering
-        <code>Unofficial</code>/<code>Final</code> buttons, and <code>Restart</code> then errored), and
-        recomputing the synthetic slice reset the clock basis (a ~0.104 s clock bump after the time
-        limit fired). Making the overlay <em>laps-only</em> over a log-authoritative base removes both
-        failure modes.
+        <strong>Why the overlay went.</strong> It was already a retreat: an even earlier design served
+        a <em>fully synthetic</em> <code>LiveRaceState</code> in place of the log fold, and it drifted
+        (a <code>Restart</code> was never reflected, and recomputing the synthetic slice bumped the
+        clock), so phase and clock were moved back onto the log, leaving a laps-only overlay. The
+        overlay's remaining cost was <strong>#396</strong>: because its laps could not reach the
+        stream through the fold, the engine emitted an extra spliced re-snapshot after each
+        per-offset walk, so the "last emitted" value alternated between the pure-log body and the
+        laps-spliced body — and <em>every</em> append, a mere <code>SignalHistory</code> chunk
+        included, pushed two fresh <code>LiveRaceState</code> envelopes carrying the newest lap. The
+        console re-announced that lap each time. Logging the passes removes the alternation, and with
+        it the repeats.
       </p>
     </div>
-    <p>
-      The laps come from the <em>same</em> lap fold — no second lap definition. The accumulator
-      synthesizes an event slice (the heat's <code>HeatScheduled</code> over the channels, a
-      <code>Running</code> base, then the accumulated lap-gate passes) and runs it through
-      <code>live_state</code>; only the per-channel <code>progress</code> is read off that slice, and a
-      channel is just an unbound competitor so its <code>pilot</code> is naturally <code>None</code>.
-      The slice's own phase is ignored — the served phase is always the log's.
-    </p>
-    <div class="principle">
-      <p><span class="name">Every mutation and every clear wakes <code>/stream</code>.</span> The
-      non-logged laps never reach the log's append-notify, so the bridge calls the same
-      append-notify (<code>wake_streams</code> / the accumulator's record/begin/clear) a real append
-      would. A parked stream re-folds and pushes a fresh-value envelope on each lap; when the
-      accumulator clears the re-fold is overlay-free and the console settles immediately back onto the
-      bare log state — no stale frame.</p>
-    </div>
-    <p>
-      The accumulator's lifecycle is tied to the heat loop: it <strong>begins</strong> when an
-      open-practice heat goes <code>Running</code> (over the heat's <code>node-{i}</code> channels,
-      clearing any prior practice), keeps accumulating <strong>through <code>Unofficial</code></strong>
-      (so laps stay visible after the time limit fires), and is <strong>cleared</strong> on a terminal /
-      abort / restart transition or when a new heat or round takes over. Across a <code>Restart</code>
-      the heat returns to <code>Scheduled</code> in the log and the bridge clears the accumulator, so
-      the merge of an empty accumulator onto the <code>Scheduled</code> base is the bare log state —
-      no stale <code>Unofficial</code>, laps cleared.
-    </p>
 
     <pre class="mermaid">
 flowchart TB
   subgraph LOG["Event log (durable)"]
     sched["HeatScheduled (open-practice heat)"]
     trans["HeatStateChanged&lt;br/&gt;Running · Finished · Restarted&lt;br/&gt;(recorded_at = clock anchor)"]
+    pass["Pass (per channel, heat-stamped)&lt;br/&gt;logged like every other format"]
   end
-  acc[("OpenPracticeLive&lt;br/&gt;in-memory per-channel passes&lt;br/&gt;NEVER logged")]
-  base["live_state + with_heat_timing&lt;br/&gt;phase · clock · lineup (from LOG)"]
-  merged["merge_into&lt;br/&gt;splice per-channel laps + running order"]
-  stream["/stream fresh-value envelope"]
+  base["live_state + with_heat_timing&lt;br/&gt;phase · clock · lineup · laps (all from LOG)"]
+  stream["/stream fresh-value envelope&lt;br/&gt;(only when the folded body changes)"]
 
   sched --> base
   trans --> base
-  base --> merged
-  acc -->|laps only| merged
-  acc -.->|every record / clear| wake["wake_streams (notify)"]
-  trans -.->|append-notify| wake
-  wake --> stream
-  merged --> stream
+  pass --> base
+  trans -.->|append-notify| wake["parked streams re-fold"]
+  pass -.->|append-notify| wake
+  wake --> base
+  base --> stream
 
   classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
   class trans sot;
-  style acc stroke-dasharray: 6 4;
+  class pass sot;
     </pre>
 
     <div class="sim-note">
-      <p><span class="label">IRL</span>The race clock anchors to the staged-and-armed lifecycle; the
-      open-practice overlay is a sim-flavored, casual mode, but the same log-authoritative phase/clock
-      apply to a hardware practice heat over RotorHazard channels.</p>
-      <p><span class="label">Sim</span>Open practice is the common case — channels are sim seats,
-      passes accumulate in memory, and the session boundaries (not the laps) are all the durable log
-      keeps.</p>
+      <p><span class="label">IRL</span>The race clock anchors to the staged-and-armed lifecycle; a
+      hardware practice heat over RotorHazard channels logs its passes and folds its clock exactly as
+      a qualifying heat does.</p>
+      <p><span class="label">Sim</span>Open practice is the common case — channels are sim seats, and
+      their passes are durable log facts like everyone else's.</p>
     </div>
 
     <h2>5. Putting it together</h2>
     <p>
       A frame's journey, end to end: a runtime/control input appends a <code>HeatStateChanged</code>;
       the append choke point stamps its server-time <code>recorded_at</code> and wakes every parked
-      stream. The fold reads the stored log, derives the live state purely, anchors the race clock to
-      the transition instants, and (for an active open-practice heat) splices the in-memory per-channel
-      laps on top. The snapshot serves that body with the log-length cursor; the stream serves the same
+      stream. The fold reads the stored log, derives the live state purely, and anchors the race clock
+      to the transition instants — for every format, open practice included. The snapshot serves that
+      body with the log-length cursor; the stream serves the same
       body as fresh-value envelopes keyed by a per-stream sequence. The whole thing is replay-deterministic
       because every input — the RD commands, the runtime clock — is a <strong>logged</strong> event with
       a reproducible timestamp, so a recorded session folds the exact same live state and the exact same

@@ -195,13 +195,6 @@ pub struct AppState {
     ///
     /// [`ControlAuth`]: crate::control_handler::ControlAuth
     tokens: TokenStore,
-    /// The event's **open-practice live accumulator** (open-practice format, Slice 1): the
-    /// per-channel, in-memory (NOT logged) laps for an active open-practice heat. The source bridge
-    /// writes the heat's passes here instead of the log; the `/stream` live-state fold overlays its
-    /// computed [`LiveRaceState`](crate::live_state::LiveRaceState) so the non-logged laps still
-    /// drive the live view. `None` when no open-practice heat is active. Shared per the `AppState`'s
-    /// `Arc`s, so the bridge and the stream see the one cell.
-    open_practice: crate::open_practice::OpenPracticeLive,
     /// The **command serialization lock** (release-hardening): every validated write — a control
     /// command's validate→append, and each runtime driver's checked auto-append — holds this for
     /// the whole read-check-append sequence, so a ruling can never land on a heat that went Final
@@ -221,7 +214,6 @@ impl AppState {
             log: Arc::new(Mutex::new(log)),
             appended: Arc::new(Notify::new()),
             tokens: TokenStore::new(),
-            open_practice: crate::open_practice::OpenPracticeLive::new(),
             commands: Arc::new(Mutex::new(())),
         }
     }
@@ -260,7 +252,6 @@ impl AppState {
             log,
             appended: Arc::new(Notify::new()),
             tokens: TokenStore::new(),
-            open_practice: crate::open_practice::OpenPracticeLive::new(),
             commands: Arc::new(Mutex::new(())),
         }
     }
@@ -275,7 +266,6 @@ impl AppState {
             log: Arc::new(Mutex::new(log)),
             appended: Arc::new(Notify::new()),
             tokens,
-            open_practice: crate::open_practice::OpenPracticeLive::new(),
             commands: Arc::new(Mutex::new(())),
         }
     }
@@ -336,26 +326,6 @@ impl AppState {
     /// on between log reads (see the type docs).
     pub(crate) fn appended(&self) -> Arc<Notify> {
         Arc::clone(&self.appended)
-    }
-
-    /// The event's **open-practice live accumulator** (open-practice format, Slice 1) — the shared
-    /// per-channel, in-memory (NOT logged) lap store. The source bridge writes an open-practice
-    /// heat's passes here (via [`OpenPracticeLive::record`](crate::open_practice::OpenPracticeLive::record));
-    /// the `/stream` live-state fold overlays its computed live state. Cloning shares the one cell.
-    pub fn open_practice(&self) -> crate::open_practice::OpenPracticeLive {
-        self.open_practice.clone()
-    }
-
-    /// **Wake every subscribed change stream** without appending to the log — the non-log push the
-    /// open-practice live delivery uses (open-practice format, Slice 1).
-    ///
-    /// An open-practice heat's laps are accumulated in memory (not logged), so they never reach the
-    /// log's append-notify; after mutating the [`open_practice`](Self::open_practice) accumulator the
-    /// bridge calls this so a parked stream re-folds and pushes a fresh-value
-    /// [`LiveRaceState`](crate::live_state::LiveRaceState) envelope reflecting the new per-channel
-    /// laps — reusing the exact same wakeup `append` uses, just without a log write.
-    pub fn wake_streams(&self) {
-        self.appended.notify_waiters();
     }
 
     /// Read the whole log into a `Vec<Event>` plus the resume [`Cursor`] (the log length
@@ -1478,6 +1448,12 @@ async fn round_ranking(
                 format!("no round with id {:?} in this event", round_id.0),
             )
         })?;
+    // Open practice is EXCLUDED from ranking — the one and only way a practice round differs from
+    // any other (`crate::open_practice`). Its laps are on the log like everyone else's; they simply
+    // never place anybody.
+    if crate::open_practice::excluded_from_scoring(round) {
+        return Ok(Json(Vec::new()));
+    }
     let (events, _cursor) = state.read()?;
     let ranking = round_engine::round_ranking(&meta, round, &events).map_err(fill_error)?;
     Ok(Json(ranking))
@@ -1512,6 +1488,10 @@ async fn round_standings(
                 format!("no round with id {:?} in this event", round_id.0),
             )
         })?;
+    // Open practice is EXCLUDED from standings (`crate::open_practice`) — see `round_ranking`.
+    if crate::open_practice::excluded_from_scoring(round) {
+        return Ok(Json(Vec::new()));
+    }
     let (events, _cursor) = state.read()?;
     let standings = round_engine::round_standings(&meta, round, &events).map_err(fill_error)?;
     Ok(Json(standings))
@@ -1537,6 +1517,10 @@ async fn class_standings(
         )
     })?;
     let (events, _cursor) = state.read()?;
+    // Open practice is EXCLUDED from standings (`crate::open_practice`): the class join folds a
+    // meta with every excluded round already removed, so a practice round can never contribute
+    // points, laps or a best lap — nor a points adjustment ruled on one of its heats.
+    let meta = crate::open_practice::scoring_meta(&meta);
     let standings = round_engine::class_standings(&meta, &class_id, &events).map_err(fill_error)?;
     Ok(Json(standings))
 }
@@ -1781,16 +1765,11 @@ async fn snapshot_event(
     let state = resolve_event(&registry, &event_id)?;
     let (stored, cursor) = state.read_stored()?;
     let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
-    // Open-practice overlay (open-practice format, Slice 1): the live state's phase/clock are always
-    // the **real log's** (folded here as for any heat); while an open-practice heat is active its
-    // per-channel laps are in memory (NOT logged), so the accumulator splices those laps onto the log
-    // base — "snapshot first, then subscribe" stays correct (the `/stream` fold applies the same
-    // merge), so a client renders the live per-channel laps immediately atop a truthful phase/clock.
+    // A pure fold of the log — every format, open practice included (D5, reversed 2026-08-24):
+    // practice laps are ordinary `Pass` events, so there is no overlay to splice.
     // `with_heat_timing` folds the current heat's server-authoritative race-start/end instants
     // (#62 follow-up) from the stored log's `recorded_at` so the clock is consistent everywhere.
-    let body = state
-        .open_practice()
-        .merge_into(with_heat_timing(live_state(&events), &stored));
+    let body = with_heat_timing(live_state(&events), &stored);
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(body),
@@ -1937,14 +1916,12 @@ async fn snapshot_heat(
 
     let body = match query.projection {
         HeatProjection::Live => {
-            // Open-practice overlay (open-practice format, Slice 1): fold the heat's real log window
-            // for a truthful phase/clock, then — when this *is* the active open-practice heat — splice
-            // its in-memory (NOT logged) per-channel laps on top. `merge_into` guards on the heat
-            // matching the accumulator's, so a non-op heat folds its log window unchanged.
-            ProjectionBody::LiveRaceState(state.open_practice().merge_into(with_heat_timing(
+            // A pure fold of the heat's log window — every format, open practice included (D5,
+            // reversed 2026-08-24): practice passes are logged like anyone else's, no overlay.
+            ProjectionBody::LiveRaceState(with_heat_timing(
                 live_state_over_with_floor(&heat_offsets, min_lap_micros),
                 &stored,
-            )))
+            ))
         }
         HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled_with_floor(
             heat_offsets.iter().map(|(o, e)| (*o, e)),
@@ -1961,11 +1938,21 @@ async fn snapshot_heat(
             ))
         }
         HeatProjection::Result => {
+            // Open practice is EXCLUDED from results (`crate::open_practice`) — the one and only
+            // way a practice heat differs from any other. Its laps ARE on the log (and its lap
+            // list, live state and audit trail all read them); they just never score a placement,
+            // so this projection is empty rather than a ranked board nobody should read.
+            if crate::open_practice::heat_excluded_from_scoring(round_def.as_ref()) {
+                return Ok(Json(Snapshot {
+                    cursor,
+                    body: ProjectionBody::HeatResult(Default::default()),
+                }));
+            }
             // Score under the heat's ROUND win condition (#45), mirroring
             // `round_engine::completed_heats`: resolve the heat's round from its
             // `HeatScheduled` tag, then look its `RoundDef::win_condition` up in the event
-            // meta. A heat with no associated round (an ad-hoc / open-practice heat) falls
-            // back to a neutral best-lap qualifying rule, so an un-tagged heat is unchanged.
+            // meta. A heat with no associated round (an ad-hoc / sim heat) falls back to a
+            // neutral best-lap qualifying rule, so an un-tagged heat is unchanged.
             let win_condition = round_def
                 .as_ref()
                 .map(|r| r.win_condition)

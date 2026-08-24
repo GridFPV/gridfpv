@@ -126,8 +126,8 @@
         <div class="doc-title"><a href="decisions.html">Decisions</a></div>
         <div class="doc-desc">
           The running record of settled design decisions and their rationale (ADR-style) —
-          the heat lifecycle and phase naming, the Abort/Restart off-ramps, ephemeral
-          open-practice laps, the qualifying metric, grace defaults, and more. Why the
+          the heat lifecycle and phase naming, the Abort/Restart off-ramps, why open-practice
+          laps are logged but never scored, the qualifying metric, grace defaults, and more. Why the
           system is the way it is.
         </div>
       </li>
@@ -210,7 +210,8 @@
         <div class="doc-desc">
           How the live race state is folded from the log, the server-time-authoritative race
           clock (anchored to logged transition timestamps; header and HUD agree, exact frozen
-          duration), and the open-practice laps-only overlay composed onto the log fold.
+          duration), and why every format — open practice included — reaches the stream through
+          that one fold.
         </div>
       </li>
       <li>

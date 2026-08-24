@@ -114,28 +114,79 @@
       fixed countdown or external arm-trigger is an additive variant.</dd>
     </dl>
 
-    <h2>D5 · Open-practice laps are ephemeral; the session is logged</h2>
+    <h2 id="d5">D5 · Open practice is an ordinary format that is never scored
+      <span class="tag optional">reversed 2026-08-24</span></h2>
     <dl class="entities">
       <dt>Context</dt>
       <dd>Open practice is casual flying over the active channels — pilots come and go and nobody
-      is scoring. Recording every practice pass would bloat the durable log with data nobody
-      adjudicates, yet the session boundaries are worth keeping.</dd>
+      is scoring. The question was whether "nobody is scoring" also means "do not record": should a
+      practice pass become a durable fact like every other format's, or live only in memory?</dd>
       <dt>Decision</dt>
       <dd>An open-practice round is <strong>one open heat over the active channels</strong>
       (<code>node-{i}</code> seats, seeded by <code>AllChannels { channels }</code>), and is
-      <strong>auto-created</strong>. The session <em>is</em> logged (the heat's
-      <code>HeatScheduled</code> and its start/stop transitions), but the per-channel
-      <strong>laps are in-memory only, never appended</strong>. A live accumulator holds them and
-      the served live state takes its phase/clock from the real log, splicing the non-logged laps
-      over it. There is no win condition (an inert one is stored, never consulted); an optional
-      <code>time_limit_secs</code> auto-ends the heat (<code>Running → Unofficial</code>), else the
-      RD <code>ForceEnd</code>s.</dd>
+      <strong>auto-created</strong>. It then behaves <strong>exactly like every other round</strong>:
+      its passes are appended to the durable log as ordinary <code>Pass</code> events stamped with
+      the heat, and the live state, lap list, marshaling, audit trail and crossing tones all fold
+      that log through the same projections every format uses. There is no accumulator, no overlay
+      and no second lap path.
+      <br><br>
+      The <strong>one and only</strong> difference is a scoring exclusion: <strong>a practice round
+      never reaches results, standings or rankings</strong>. That rule lives in exactly one place —
+      <code>crates/server/src/open_practice.rs</code> (<code>excluded_from_scoring</code> /
+      <code>scoring_meta</code>) — consulted by the round-ranking, round-standings and
+      class-standings routes and by the heat <code>result</code> projection. Nothing else in the
+      server branches on the format.
+      <br><br>
+      Unchanged from the original decision: the seats stay <strong>unbound</strong> (no pilot
+      binding — logging never required one); there is no win condition (a round created without one
+      stores the inert <code>BestLap</code> default, which by construction ends no heat); and an
+      optional <code>time_limit_secs</code> auto-ends the heat
+      (<code>Running → Unofficial</code>), else the RD <code>ForceEnd</code>s.</dd>
       <dt>Rationale</dt>
-      <dd>The durable log stays lean — it carries the session boundaries and zero practice passes —
-      while pilots still see live laps. Keying laps by channel (not pilot) fits practice, where seats
-      are unbound. Driving phase/clock from the real log (not a synthetic one) avoids the drift bug an
-      earlier fully-synthetic live state had — a <code>Restart</code> or a time-limit end is always
-      reflected because the phase is the log's.</dd>
+      <dd>One lap path. Practice laps are facts about what happened on track, and treating them as
+      facts is what makes them survive a reload, be marshalable, be audited, and drive the console
+      through the same fold as a qualifying heat — for free, rather than needing a second
+      implementation of each. "Not scored" is a display/scoring policy and belongs in one
+      greppable predicate; it is not a reason to refuse to write the event down.</dd>
+      <dt>Reversed (2026-08-24) — this decision previously said the opposite (#398)</dt>
+      <dd>D5 originally ruled that practice laps were <strong>in-memory only, never appended</strong>,
+      held in an <code>OpenPracticeLive</code> accumulator and spliced onto the log-folded live state
+      by a <code>merge_into</code> overlay. Its stated rationale was log bloat: "recording every
+      practice pass would bloat the durable log … the durable log stays lean — it carries the session
+      boundaries and zero practice passes".
+      <br><br>
+      <strong>Measurement on real hardware killed that rationale.</strong> One actual open-practice
+      heat, 2026-08-24:
+      <ul>
+        <li><code>SignalHistory</code> + <code>SignalChunk</code>: <strong>57 events,
+        41,413&nbsp;bytes</strong>;</li>
+        <li><code>Pass</code> (the events D5 refused to write): <strong>0 events, ~288&nbsp;bytes</strong>
+        had they been written.</li>
+      </ul>
+      Practice already logged roughly <strong>144× more signal than the passes it declined to
+      log</strong>. Scaled up, eight pilots practising for an hour at 30-second laps is ≈960 passes
+      ≈ <strong>138&nbsp;KB</strong> — less than the <strong>228&nbsp;KB</strong> of RSSI trace a
+      single 40-second timed-qualifying heat wrote in the same session. The log was never lean; the
+      passes were a rounding error against what practice already stored.
+      <br><br>
+      The special path also <em>cost</em> more than it saved. Because the accumulator's laps could
+      not reach the stream through the log fold, <code>ws.rs</code> emitted an extra overlay
+      re-snapshot after each per-offset walk — so the stream's "last emitted value" alternated
+      between the pure-log body (no laps) and the laps-spliced body, and <em>every</em> append,
+      including a mere <code>SignalHistory</code> chunk, differed from the previous value twice over
+      and pushed two fresh <code>LiveRaceState</code> envelopes carrying the newest lap. That is
+      <strong>#396</strong>, the repeated lap callouts seen only in practice. And every live-state
+      feature — marshaling, results, audit, crossing tones — needed a second implementation against
+      the overlay. Deleting the overlay removes all of it by construction.
+      <br><br>
+      D5's second reason — that keying laps by channel rather than pilot "fits practice, where seats
+      are unbound" — was orthogonal, not an argument for ephemerality: the adapter already emits
+      practice passes as <code>CompetitorRef("node-N")</code>, and logging seat-keyed passes is what
+      the durable path does natively. <em>Unbound</em> never implied <em>ephemeral</em>.
+      <br><br>
+      Note that D5's own rationale already recorded one retreat from the special path: an earlier
+      fully-synthetic live state drifted from the real heat, so phase and clock had to be moved back
+      onto the real log, leaving a laps-only overlay. This change finishes that retreat.</dd>
     </dl>
 
     <h2>D6 · The win condition <em>is</em> the qualifying metric (unified) — <em>implemented</em></h2>

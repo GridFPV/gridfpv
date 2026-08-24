@@ -704,8 +704,10 @@ pub fn rank_by<K: Ord + Clone>(rows: Vec<(CompetitorRef, K)>) -> Vec<RankEntry> 
 /// `node-{i}` [`CompetitorRef`]s (the seat handles the timer emits passes for). The generator emits
 /// a single heat lining up those channels, then declares the format
 /// [`Complete`](GeneratorStep::Complete) — there is no advancement, no ranking aggregation, no
-/// second heat. Laps are tracked **per channel, live and in memory** (not logged) by the Director's
-/// open-practice accumulator; this generator only decides the one heat that runs.
+/// second heat. Laps are logged as ordinary `Pass` events like every other format's and folded by
+/// the same projections; practice's *only* difference is that it never reaches results, standings
+/// or rankings (the Director's `open_practice` module owns that one rule). This generator only
+/// decides the one heat that runs.
 ///
 /// The field comes in via [`FormatConfig::field`] (the active channels, in node order). An empty
 /// field still emits the (empty) heat then completes — the server's field builder is what rejects
