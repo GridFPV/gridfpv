@@ -496,7 +496,9 @@ fn resolve_seeding(
         }
         // Open practice (open-practice format): the field is the active **channels**, each node
         // index laid out as a `node-{i}` competitor ref (the timer-seat handle) in the given order.
-        // No pilots, no membership — laps are tracked per channel live in memory (not logged).
+        // No pilots, no membership — the field is the channels themselves, so laps land on
+        // `node-{i}` seats rather than pilots. They ARE logged like any other format (D5 reversed
+        // 2026-08-24, #398); practice is excluded from scoring, not from the log.
         SeedingRule::AllChannels { channels } => Ok(channels
             .iter()
             .map(|i| CompetitorRef(format!("node-{i}")))
@@ -615,10 +617,16 @@ fn aggregate_rankings(rankings: &[Vec<RankEntry>]) -> Vec<RankEntry> {
 /// Whether `round` is an **open-practice** round (open-practice format): `format ==
 /// "open_practice"` with [`SeedingRule::AllChannels`] seeding (race redesign open-practice Slice 1).
 ///
-/// The source bridge resolves a running heat's round through this so it routes the heat's passes to
-/// the in-memory per-channel accumulator (not the log); the field builder lays the channels out as
+/// Used by `add_round`'s auto-fill and by `fill_round`; the field builder lays the channels out as
 /// `node-{i}` refs. The format name *and* the seeding are both checked so a mis-tagged round (one or
 /// the other but not both) is treated as a normal round, never half-open-practice.
+///
+/// **The source bridge no longer calls this.** It used to, to route a practice heat's passes into an
+/// in-memory accumulator instead of the log — that path was deleted when D5 was reversed
+/// (2026-08-24, #398) and practice became an ordinary logged format. The scoring exclusion that
+/// replaced it lives in `open_practice::excluded_from_scoring`, which keys on the **format alone**
+/// and is deliberately more inclusive than this predicate, so a half-tagged round still cannot be
+/// scored even though it is not treated as practice here.
 pub fn is_open_practice(round: &RoundDef) -> bool {
     round.format == gridfpv_engine::format::OpenPractice::NAME
         && matches!(round.seeding, SeedingRule::AllChannels { .. })
