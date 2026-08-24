@@ -32,16 +32,17 @@
   } from '@gridfpv/types';
   import { channelLabel, nodeChannelLabel, nodeIndexOf } from '../lib/channels.js';
   import { createCompetitorNameResolver } from '../lib/competitorName.js';
-  import { heatDisplayName, heatNameById } from '../lib/heats.js';
+  import { heatDisplayName, heatNameById, isOpenPracticeRound } from '../lib/heats.js';
   import {
-    ACTION_ORDER,
     actionDescription,
-    commandForAction,
+    actionsForKind,
+    commandsForAction,
     isActionLegal,
     actionLabel,
     isDestructive,
     primaryAction,
-    type HeatAction
+    type HeatAction,
+    type HeatKind
   } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
   import { useRaceClock } from '../lib/raceClock.svelte.js';
@@ -58,7 +59,6 @@
   const live = $derived<LiveRaceState | undefined>(session.liveState);
   const phase = $derived(live?.phase ?? 'Scheduled');
   const heat = $derived<HeatId | undefined>(live?.current_heat);
-  const primary = $derived(primaryAction(phase));
   // Role-gate the heat transitions (marshaling Slice 5, mirroring Slice 3): the RD commits; a
   // read-only pilot session sees the live race + lifecycle but the transition controls (Finalize /
   // Revert / …) are hidden — the Director is the enforced boundary, this reflects it client-side.
@@ -284,8 +284,14 @@
   // seat). Rather than the pilot-keyed channels/heat-sheet panels, this heat reads as a per-channel
   // practice board — each row a channel (resolved `node-{i}` → the primary timer's
   // `available_channels[i]` → catalog label) with its laps, last lap, and best lap.
-  const OPEN_PRACTICE = 'open_practice';
-  const isOpenPractice = $derived(currentRound?.format === OPEN_PRACTICE);
+  const isOpenPractice = $derived(currentRound ? isOpenPracticeRound(currentRound) : false);
+  // The transition model's second axis (#393): an open-practice heat is scored by nobody, so it
+  // drops the result-ceremony verbs (Finalize / Advance / Revert) and its `Restart` is spelled
+  // "Run again". Everything else about the heat loop — phases, commands, the engine — is identical.
+  const heatKind = $derived<HeatKind>(isOpenPractice ? 'Practice' : 'Competition');
+  // The obvious next step for this heat: `Finalize` at the end of a competition run, `Run again`
+  // (Restart) at the end of a practice one. Declared here, with the kind it depends on.
+  const primary = $derived(primaryAction(phase, heatKind));
   // The primary timer (its `available_channels` resolve each `node-{i}` seat to a channel label).
   const availableChannels = $derived<number[]>(session.primaryTimer?.available_channels ?? []);
 
@@ -300,15 +306,17 @@
   }
   // Best lap isn't carried on the live stream (`PilotProgress` is laps + last lap), so the board
   // tracks it client-side: the min `last_lap_micros` observed per channel over the run. It resets
-  // whenever the heat changes (a fresh practice run / Reset starts a clean board — the backend
-  // clears its in-memory laps on the new heat, and this mirrors that).
+  // whenever the heat changes, and a "Run again" (Restart) re-windows the heat's laps to the new
+  // run — see the reset below, which mirrors that so the board's best lap is this run's best lap.
   let bestByRef = $state<Map<CompetitorRef, number>>(new Map());
   let bestForHeat = $state<HeatId | undefined>(undefined);
   $effect(() => {
-    // On a heat change, wipe the accumulated bests (matches the backend clearing its lap store).
-    if (heat !== bestForHeat) {
+    // On a heat change — or a "Run again", which re-stages the SAME heat — wipe the accumulated
+    // bests. `Restart` windows the heat's laps past the reset server-side (`heat_window_offsets`),
+    // so the board must start the new run clean too rather than carrying the last run's best.
+    if (heat !== bestForHeat || phase === 'Scheduled') {
       bestForHeat = heat;
-      bestByRef = new Map();
+      if (bestByRef.size > 0) bestByRef = new Map();
     }
     if (!isOpenPractice) return;
     let changed = false;
@@ -350,25 +358,15 @@
     return rows.sort((a, b) => a.node - b.node);
   }
 
-  // ── Reset / new practice run (open-practice Slice 2) ──────────────────────────────────────────
-  // A fresh run re-fills the open-practice round to mint a new heat, which clears the backend's
-  // in-memory laps (per the format) — wiping the board between practice sessions. The new heat
-  // arrives on the live stream; the best-lap tracker resets on the heat change (above).
-  let resetting = $state(false);
-  async function startFreshRun() {
-    const roundId = currentRound?.id;
-    if (!roundId || resetting) return;
-    resetting = true;
-    try {
-      const ack = await session.fillRound(roundId);
-      if (!ack.ok) return; // The error banner surfaces session.lastCommandError.
-      toast.success('Fresh practice run — board cleared.');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      resetting = false;
-    }
-  }
+  // ── Going again (#393) ────────────────────────────────────────────────────────────────────────
+  // There is deliberately no second "new run" control here. The board used to carry one that
+  // re-filled the round, on the pre-#398 theory that a fresh heat was how you cleared the
+  // in-memory laps — but an open-practice round has exactly ONE heat, ever (`OpenPractice::next`
+  // completes after it), so once the run had ended that fill scheduled nothing and still acked ok:
+  // a button that reported success and did not clear the board. Re-running practice is the
+  // transition row's **Run again** (the `Restart` command), which re-stages the one heat and
+  // windows the previous run's laps away — one obvious action, in the place every other heat
+  // action lives.
 
   // ── Staging countdown (heat-lifecycle Slice 3) ───────────────────────────────────────────────
   // While the heat is Staged, count down from the round's staging window. Informational only — no
@@ -461,11 +459,17 @@
     // Unlock the audio context on this user gesture (autoplay policy) so the later race-go tone is
     // audible — every transition click counts, well before the heat reaches Running.
     audio.resume();
-    const ack = await session.send(commandForAction(action, heat));
+    // Almost every action is one command; practice's "Run again" from an auto-finalized heat is two
+    // (re-open, then reset), so the screen walks the sequence and stops on the first failure — the
+    // error banner surfaces it, and a half-applied sequence leaves the heat where the engine put it.
+    for (const command of commandsForAction(action, heat, phase, heatKind)) {
+      const ack = await session.send(command);
+      if (!ack.ok) return;
+    }
     // Finalizing locks in the heat result; pull it so the Results screen has it to show. The
     // live stream only carries `LiveRaceState`, so the scored `HeatResult` is a separate
     // heat-scope fetch (`?projection=result`).
-    if (ack.ok && action === 'Finalize') {
+    if (action === 'Finalize') {
       await session.fetchHeatResult(heat);
     }
   }
@@ -611,7 +615,20 @@
     </div>
   {/if}
 
-  {#if heat && (phase === 'Unofficial' || phase === 'Final')}
+  {#if heat && isOpenPractice && (phase === 'Unofficial' || phase === 'Final')}
+    <!-- Practice has no result lifecycle (#393): nothing is provisional, nothing becomes official,
+         and there is no protest window to count down. The run simply ended — its laps are on the
+         log and on the board below — and the next step is Run again. -->
+    <div class="lifecycle" role="status" aria-label="Practice run">
+      <span class="lifecycle-dot" aria-hidden="true"></span>
+      <div class="lifecycle-copy">
+        <span class="lifecycle-title">Run complete</span>
+        <span class="lifecycle-sub"
+          >Practice isn’t scored — review the board, then Run again when you’re ready.</span
+        >
+      </div>
+    </div>
+  {:else if heat && (phase === 'Unofficial' || phase === 'Final')}
     <!-- Provisional → official lifecycle (marshaling Slice 5). Provisional (Unofficial): correctable;
          when a protest window is armed, count down to the auto-official deadline; the RD can finalize
          early via the Finalize transition below. Official (Final): the result is locked (Revert
@@ -666,16 +683,18 @@
     <div class="controls" role="group" aria-label="Heat transitions">
       <span class="controls-label">Transitions</span>
       <div class="controls-row">
-        {#each ACTION_ORDER as action (action)}
-          {@const legal = isActionLegal(phase, action)}
+        <!-- Only the actions this KIND of heat can ever use (#393): a practice heat never draws the
+             ceremony verbs at all, since a greyed-out Finalize still reads as the thing to do next. -->
+        {#each actionsForKind(heatKind) as action (action)}
+          {@const legal = isActionLegal(phase, action, heatKind)}
           <ConfirmButton
             onconfirm={() => fire(action)}
             confirm={isDestructive(action)}
             disabled={!legal || !heat}
             variant={action === primary ? 'primary' : isDestructive(action) ? 'danger' : 'default'}
-            title={actionDescription(action)}
+            title={actionDescription(action, heatKind)}
           >
-            <span class="action-btn">{actionLabel(action)}</span>
+            <span class="action-btn">{actionLabel(action, heatKind)}</span>
           </ConfirmButton>
         {/each}
       </div>
@@ -687,23 +706,12 @@
          (`node-{i}` → the timer's available channel), each with its laps + last/best lap. The
          pilot-keyed channels/heat-sheet/standing panels are replaced by this practice board. -->
     <Card title="Practice board">
-      {#snippet actions()}
-        <Button
-          variant="secondary"
-          size="sm"
-          onclick={startFreshRun}
-          loading={resetting}
-          disabled={!heat || resetting}
-          title="Mint a fresh open-practice heat — clears the live board"
-        >
-          New run · clear board
-        </Button>
-      {/snippet}
-
       {#if !heat}
         <p class="empty pad">— no practice heat on the timer —</p>
       {:else if channelRows.length === 0}
-        <p class="empty pad">No active channels — fill the round to start a practice run.</p>
+        <p class="empty pad">
+          No active channels — pick some on the round in Rounds &amp; Heats, then stage the heat.
+        </p>
       {:else}
         <ul class="practice-board" aria-label="Per-channel practice board">
           {#each channelRows as row (row.ref)}
