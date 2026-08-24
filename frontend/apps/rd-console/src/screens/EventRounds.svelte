@@ -315,9 +315,14 @@
 
   // Fill a round's heats (#216). Deterministic formats (Time Trials, Round Robin, Multi-Main,
   // brackets) **generate all** their heats in one action (`mode: 'All'`); the dynamic Open Practice
-  // single-steps (`'Next'`). The engine acks ok whether it appended heat(s) OR reported the round
-  // complete / its outstanding heat unscored, so compare the round's heat count before and after to
-  // tell the RD what happened, then refetch once after the (possibly batched) fill.
+  // single-steps (`'Next'`).
+  //
+  // What happened comes from the ack's `outcome` (#395), not from counting heats before and after.
+  // The old count-diff could only ever say "nothing appeared" and had to guess at the cause — which
+  // is how a Head-to-Head round refusing a single-pilot field (#394) got reported as "the round is
+  // complete" on a round where nothing had raced. The server knows which of the three it is, so it
+  // says so, and `detail` is the RD-facing sentence it wrote (already naming the round and heats by
+  // their friendly names).
   // Open-ended round: "Heats per pilot" set to 0 (Time Trials / Round Robin). Instead of a fixed
   // set, the round generates the next heat on demand forever — so it single-steps ('Next') like
   // Open Practice rather than generating all at once (which would never terminate).
@@ -328,22 +333,22 @@
   async function fillRound(round: RoundDef) {
     if (fillingRound) return;
     fillingRound = round.id;
-    const before = heatsByRound(round.id).length;
     const generateAll = isDeterministicRound(round) && !isOpenEndedRound(round);
     try {
       const ack = await session.fillRound(round.id, generateAll ? 'All' : 'Next');
       if (!ack.ok) return; // The error banner / toast surfaces session.lastCommandError.
       await refreshHeats();
-      const after = heatsByRound(round.id).length;
-      const added = after - before;
-      if (added > 0) {
-        toast.success(
-          generateAll
-            ? `${round.label}: ${added} ${added === 1 ? 'heat' : 'heats'} generated.`
-            : `Heat added to ${round.label}.`
-        );
+      const fill =
+        ack.outcome && 'FillRound' in ack.outcome ? ack.outcome.FillRound : undefined;
+      if (!fill) return; // A server too old to report the outcome: the refreshed list is the tell.
+      if (fill.scheduled.length > 0) {
+        toast.success(fill.detail);
+      } else if (fill.stopped === 'Blocked') {
+        // The round can never fill as configured — the RD has to change something, so this is not
+        // a passing "nothing happened" note. `detail` says exactly what to change.
+        toast.warn(fill.detail);
       } else {
-        toast.info(`${round.label}: no new heat — the round is complete or awaiting a score.`);
+        toast.info(fill.detail);
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));

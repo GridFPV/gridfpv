@@ -110,7 +110,9 @@ use gridfpv_engine::heat::{self, HeatCommand};
 use gridfpv_events::{Event, HeatId, HeatTransition, LogRef};
 
 use crate::app::{AppState, resolve_event};
-use crate::control::{Command, CommandAck, FillMode};
+use crate::control::{
+    Command, CommandAck, CommandOutcome, FillMode, FillRoundOutcome, FillStop, ScheduledHeat,
+};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::EventRegistry;
 use crate::scope::EventId;
@@ -578,11 +580,18 @@ const MAX_FILL_ALL_HEATS: usize = 1_000;
 /// the next heat, append the tagged [`Event::HeatScheduled`]. Returns whether a heat was
 /// appended (so the `All` loop knows to draw again) or the round reached a terminal/no-op state,
 /// or a failed ack to surface verbatim.
+///
+/// Both non-error arms carry **what happened**, not just that something did: the caller turns
+/// them into the ack's [`FillRoundOutcome`] so a no-op fill is distinguishable from a productive
+/// one from the response alone (#395).
 enum FillStep {
-    /// A heat was appended — re-fold and draw the next (the `All` loop continues here).
-    Appended,
-    /// `Complete`/`AlreadyScheduled` — nothing to append now; the round's done for this command.
-    Terminal,
+    /// A heat was appended — re-fold and draw the next (the `All` loop continues here). Carries
+    /// the heat it scheduled, named, for the outcome.
+    Appended(ScheduledHeat),
+    /// Nothing to append now; the round is done for this command. Carries **why** — finished,
+    /// awaiting an outstanding heat's result, or refused for this field (#394) — plus the
+    /// refusal's reason when there is one.
+    Terminal(FillStop, Option<String>),
     /// A fill or append error; carries the ack to return as-is.
     Failed(CommandAck),
 }
@@ -660,6 +669,19 @@ fn fill_round_once(
                     return FillStep::Failed(CommandAck::failed(err));
                 }
             }
+            // The heat's FRIENDLY name for the ack (repo display rule: a raw heat id must never
+            // reach a user). Resolved against the pre-append log, where the new heat is the next
+            // position in the round — exactly the "‹Round› Heat N" the console will show.
+            let name = match meta.rounds.iter().find(|def| &def.id == round) {
+                Some(def) => round_engine::heat_display_name(def, &events, &heat),
+                None => heat.0.clone(),
+            };
+            let scheduled = ScheduledHeat {
+                heat: heat.clone(),
+                name,
+                lineup: lineup.clone(),
+                frequencies: frequencies.clone(),
+            };
             let event = Event::HeatScheduled {
                 heat,
                 lineup,
@@ -670,12 +692,16 @@ fn fill_round_once(
                 label: None,
             };
             match state.append(event, None) {
-                Ok(_offset) => FillStep::Appended,
+                Ok(_offset) => FillStep::Appended(scheduled),
                 Err(err) => FillStep::Failed(CommandAck::failed(err)),
             }
         }
-        // Complete / AlreadyScheduled: nothing to append, a successful terminal state.
-        Ok(FillOutcome::Complete) | Ok(FillOutcome::AlreadyScheduled) => FillStep::Terminal,
+        // Nothing to append — three distinct successful terminal states, kept distinct all the
+        // way to the wire (#395): the round is finished, it is waiting on an outstanding heat's
+        // result, or its format refuses this field entirely (#394).
+        Ok(FillOutcome::Complete) => FillStep::Terminal(FillStop::Complete, None),
+        Ok(FillOutcome::AlreadyScheduled) => FillStep::Terminal(FillStop::AwaitingResult, None),
+        Ok(FillOutcome::Blocked { reason }) => FillStep::Terminal(FillStop::Blocked, Some(reason)),
         Err(err @ FillError::UnknownRound(_)) => FillStep::Failed(CommandAck::failed(
             ProtocolError::new(ErrorCode::UnknownScope, err.to_string()),
         )),
@@ -721,10 +747,25 @@ pub fn apply_fill_round(
         ));
     };
 
+    // The round's FRIENDLY label frames every message this command produces (repo display rule);
+    // a round id only appears if the round somehow is not in meta, which the fill itself then
+    // rejects as `UnknownScope`.
+    let label = meta
+        .rounds
+        .iter()
+        .find(|def| def.id == round)
+        .map_or_else(|| round.0.clone(), |def| def.label.clone());
+
     match mode {
         // The original single-step fill — one generator draw, at most one heat appended.
         FillMode::Next => match fill_round_once(registry, &meta, state, &round) {
-            FillStep::Appended | FillStep::Terminal => CommandAck::ok(),
+            FillStep::Appended(heat) => {
+                let detail = format!("{label}: scheduled {}.", heat.name);
+                fill_ack(vec![heat], FillStop::SingleStep, detail)
+            }
+            FillStep::Terminal(stop, reason) => {
+                fill_ack(Vec::new(), stop, no_heat(&label, stop, reason))
+            }
             FillStep::Failed(ack) => ack,
         },
         // Iterate the single step until the round is terminal, capped defensively.
@@ -745,10 +786,27 @@ pub fn apply_fill_round(
                     ));
                 }
             }
+            let mut scheduled: Vec<ScheduledHeat> = Vec::new();
             for _ in 0..MAX_FILL_ALL_HEATS {
                 match fill_round_once(registry, &meta, state, &round) {
-                    FillStep::Appended => continue,
-                    FillStep::Terminal => return CommandAck::ok(),
+                    FillStep::Appended(heat) => {
+                        scheduled.push(heat);
+                        continue;
+                    }
+                    FillStep::Terminal(stop, reason) => {
+                        // The heats drawn on the way are the answer when there are any; the stop
+                        // reason is the answer when there are none.
+                        let detail = if scheduled.is_empty() {
+                            no_heat(&label, stop, reason)
+                        } else {
+                            let n = scheduled.len();
+                            format!(
+                                "{label}: generated {n} {}.",
+                                if n == 1 { "heat" } else { "heats" }
+                            )
+                        };
+                        return fill_ack(scheduled, stop, detail);
+                    }
                     FillStep::Failed(ack) => return ack,
                 }
             }
@@ -768,6 +826,40 @@ pub fn apply_fill_round(
                 ),
             ))
         }
+    }
+}
+
+/// Pack a fill's effect into the ack (#395): what it scheduled, why it stopped, and the sentence
+/// an RD can read. Always `ok` — every [`FillStop`] is a success; they differ in what to do next.
+fn fill_ack(scheduled: Vec<ScheduledHeat>, stopped: FillStop, detail: String) -> CommandAck {
+    CommandAck::ok_with(CommandOutcome::FillRound(FillRoundOutcome {
+        scheduled,
+        stopped,
+        detail,
+    }))
+}
+
+/// The RD-facing sentence for a fill that scheduled **nothing** — the case that used to arrive as
+/// a bare `{"ok":true}` and send people looking downstream for a bug that was not there.
+///
+/// Each reason says what to do next, and the [`Blocked`](FillStop::Blocked) one carries the
+/// generator's own words (#394) rather than guessing. `round` is the round's friendly label.
+fn no_heat(round: &str, stopped: FillStop, reason: Option<String>) -> String {
+    match stopped {
+        FillStop::Blocked => match reason {
+            // e.g. "Head-to-Head needs at least 2 pilots in the field — this round has 1. …"
+            Some(reason) => format!("{round}: no heat generated — {reason}"),
+            None => {
+                format!("{round}: no heat generated — the round's format cannot race this field.")
+            }
+        },
+        FillStop::AwaitingResult => {
+            format!("{round}: no new heat — its outstanding heat has not been scored yet.")
+        }
+        FillStop::Complete => format!("{round}: no new heat — the round is complete."),
+        // Unreachable: a single-step fill that scheduled nothing reports one of the reasons
+        // above, never the mode's own contract. Worded so it is still honest if it ever lands.
+        FillStop::SingleStep => format!("{round}: no new heat."),
     }
 }
 
@@ -836,7 +928,7 @@ fn apply_advance(
             // One generator draw (the `FillMode::Next` step). It either appends the next heat or
             // reports the round terminal (nothing to schedule).
             match fill_round_once(registry, &meta, state, &round) {
-                FillStep::Appended => {
+                FillStep::Appended(_) => {
                     // A heat was just scheduled in this round; on_deck now finds it. Select it.
                     let next = {
                         let (events, _cursor) = match state.read() {
@@ -849,8 +941,13 @@ fn apply_advance(
                         return select_next_heat(state, next);
                     }
                 }
-                // Round complete / already-scheduled-elsewhere: nothing more to load.
-                FillStep::Terminal => {}
+                // Round complete / awaiting a result / refused for this field: nothing more to
+                // load. NOTE (#395 audit): `Advance` has the same defect `FillRound` just had —
+                // it acks a bare ok whether it loaded the next heat, generated one, or found
+                // nothing to advance to, and the reason is dropped right here. Surfacing it is a
+                // `CommandOutcome::Advance` variant away; left out of this change deliberately
+                // so the fix stays the one the issue describes.
+                FillStep::Terminal(_stop, _reason) => {}
                 // A generator/append error: surface it verbatim (the Advanced transition stands).
                 FillStep::Failed(ack) => return ack,
             }
@@ -3500,6 +3597,202 @@ mod tests {
         assert_eq!(ack.error.unwrap().code, ErrorCode::UnknownScope);
         let (events, _) = state.read().unwrap();
         assert!(events.is_empty(), "a rejected FillRound appends nothing");
+    }
+
+    // --- #395: the ack must say what the fill DID, not just that it was accepted -------------
+
+    /// Build an event over a class with `pilots` and one round of `format` labelled `label`.
+    /// Returns the registry, the event id, and the round id — enough to issue a `FillRound` and
+    /// read its ack.
+    #[cfg(test)]
+    fn event_with_round(
+        label: &str,
+        format: &str,
+        pilots: &[&str],
+    ) -> (EventRegistry, EventId, gridfpv_events::RoundId) {
+        use crate::classes::CreateClassRequest;
+        use crate::events::{
+            ChannelMode, CreateEventRequest, MemberSlot, NewRoundReq, SeedingRule,
+        };
+        use crate::pilots::CreatePilotRequest;
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let registry = EventRegistry::new(None).unwrap();
+        let class = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Open".into(),
+                source: Default::default(),
+                reference: None,
+                description: None,
+            })
+            .unwrap()
+            .id;
+        let pilot_ids: Vec<_> = pilots
+            .iter()
+            .map(|cs| {
+                registry
+                    .pilots()
+                    .create(&CreatePilotRequest {
+                        callsign: (*cs).into(),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        let event = registry
+            .create(&CreateEventRequest {
+                name: "E".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap()
+            .id;
+        registry.set_classes(&event, vec![class.clone()]).unwrap();
+        registry
+            .set_class_membership(
+                &event,
+                class.clone(),
+                pilot_ids.into_iter().map(MemberSlot::new).collect(),
+            )
+            .unwrap();
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    label: label.into(),
+                    classes: vec![class],
+                    format: format.into(),
+                    params: BTreeMap::from([("rounds".into(), "1".into())]),
+                    win_condition: Some(WinCondition::FirstToLaps { n: 1 }),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(60),
+                    channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                    min_lap_secs: None,
+                },
+            )
+            .unwrap();
+        (registry, EventId(event.0.clone()), round.id)
+    }
+
+    /// Issue a single-step `FillRound` and return the outcome the ack carries.
+    #[cfg(test)]
+    fn fill_next(
+        registry: &EventRegistry,
+        event: &EventId,
+        round: &gridfpv_events::RoundId,
+    ) -> crate::control::FillRoundOutcome {
+        let state = registry.resolve(event).unwrap();
+        let ack = apply_command_in_event(
+            registry,
+            event,
+            &state,
+            Command::FillRound {
+                round: round.clone(),
+                mode: FillMode::Next,
+            },
+        );
+        assert!(ack.ok, "FillRound rejected: {ack:?}");
+        match ack.outcome {
+            Some(CommandOutcome::FillRound(outcome)) => outcome,
+            other => panic!("FillRound must report its outcome, got {other:?}"),
+        }
+    }
+
+    /// The bug, stated as the assertion that was impossible before (#395): a fill that scheduled
+    /// a heat and a fill that scheduled nothing must be told apart **from the response alone** —
+    /// no diffing the event log afterwards.
+    ///
+    /// Both used to answer a byte-identical `{"ok":true}`, which is what sent an API caller
+    /// hunting downstream through the log, the projection and the read routes for a bug that was
+    /// never there.
+    #[test]
+    fn a_productive_fill_and_a_no_op_fill_are_distinguishable_from_the_ack() {
+        // Productive: two pilots, head-to-head, nothing scheduled yet → one heat drawn.
+        let (registry, event, round) = event_with_round("Test Round", "head_to_head", &["a", "b"]);
+        let drew = fill_next(&registry, &event, &round);
+        assert_eq!(drew.stopped, FillStop::SingleStep);
+        assert_eq!(drew.scheduled.len(), 1, "{drew:?}");
+        // The heat is identified BOTH ways: a wire handle to address it with, and the friendly
+        // name a message prints (repo display rule — a raw heat id must never reach a user).
+        let heat = &drew.scheduled[0];
+        assert_eq!(heat.name, "Test Round Heat 1", "{heat:?}");
+        assert_eq!(heat.lineup.len(), 2);
+        assert!(!heat.heat.0.is_empty());
+        assert!(drew.detail.contains("Test Round Heat 1"), "{}", drew.detail);
+
+        // No-op: fill again with the drawn heat still unscored → nothing appended, and the ack
+        // says WHY rather than repeating the previous answer verbatim.
+        let waited = fill_next(&registry, &event, &round);
+        assert_eq!(waited.stopped, FillStop::AwaitingResult);
+        assert!(waited.scheduled.is_empty(), "{waited:?}");
+        assert!(
+            waited.detail.contains("not been scored"),
+            "the no-op must name its cause: {}",
+            waited.detail
+        );
+
+        // The two acks are different values — the property the issue asks for, asserted directly.
+        assert_ne!(drew, waited);
+    }
+
+    /// #394 + #395 together, which is how they were hit: a one-pilot head-to-head fill acks ok,
+    /// schedules nothing, and the ack **names the real reason** instead of the round being
+    /// "complete or awaiting a score" on a round where nothing has raced.
+    #[test]
+    fn a_one_pilot_head_to_head_fill_acks_the_shortfall_not_completion() {
+        let (registry, event, round) = event_with_round("Test Round", "head_to_head", &["solo"]);
+        let blocked = fill_next(&registry, &event, &round);
+
+        assert_eq!(blocked.stopped, FillStop::Blocked);
+        assert!(blocked.scheduled.is_empty(), "{blocked:?}");
+        // The sentence an RD reads: the round by its LABEL (never its id), the shortfall, and the
+        // format that fits a solo pilot.
+        let detail = &blocked.detail;
+        assert!(detail.starts_with("Test Round:"), "{detail}");
+        assert!(detail.contains("Head-to-Head"), "{detail}");
+        assert!(detail.contains("at least 2"), "{detail}");
+        assert!(detail.contains("has 1"), "{detail}");
+        assert!(detail.contains("timed_qual"), "{detail}");
+        assert!(
+            !detail.contains("complete"),
+            "the round is NOT complete: {detail}"
+        );
+        assert!(
+            !detail.contains(round.0.as_str()),
+            "no raw round id: {detail}"
+        );
+
+        // And nothing was appended — the ack is the only place this was ever visible.
+        let state = registry.resolve(&event).unwrap();
+        let (events, _) = state.read().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::HeatScheduled { .. })),
+            "a blocked fill schedules nothing"
+        );
+    }
+
+    /// The ack stays **additive**: a command with no interesting effect omits `outcome` entirely,
+    /// so its wire form is byte-identical to before and every existing client keeps parsing.
+    #[test]
+    fn an_ordinary_ack_carries_no_outcome_and_serializes_unchanged() {
+        let ok = serde_json::to_string(&CommandAck::ok()).unwrap();
+        assert_eq!(ok, r#"{"ok":true}"#);
+        let failed = CommandAck::failed(ProtocolError::new(ErrorCode::BadRequest, "nope"));
+        assert!(
+            !serde_json::to_string(&failed).unwrap().contains("outcome"),
+            "a failure's answer is `error`, not an outcome"
+        );
     }
 
     /// Build an event selecting one timer (created from `req`) over a class with `pilots`, plus a
