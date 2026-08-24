@@ -7,22 +7,39 @@
    *
    *  - **Round** — that round's `roundRanking`, rendered as a standings table. A time-trial
    *    (`timed_qual`) round shows the richer per-pilot standings (Best lap + the win-condition metric).
+   *  - **Heat** — one scored heat's `HeatResult.places` (#56 / #77): position, pilot, laps, the
+   *    deciding metric, best lap. This is the **only** view that can show adjudication outcomes: a
+   *    `Placement.disqualified` pilot is ranked after every finisher, and a `HeatResult.voided` heat
+   *    is nullified, and neither fact exists on `RoundStanding` / `ClassStanding`. Before this view
+   *    the engine applied both and the RD was never told, so the ordering changed with no visible
+   *    cause. Needs no protocol change — the heat-level types already carry it.
    *  - **Per-class standings** — the season-join `classStandings` per event class.
    *
-   * The selector lists each round (by label), then one entry per event class. It **defaults to the
-   * current phase**: the latest scored round, else per-class.
+   * The selector lists each round (by label) followed by that round's scored heats, then one entry
+   * per event class. It **defaults to the current phase**: the latest scored round, else per-class.
    *
    * Friendly names everywhere — competitor refs resolve to callsigns (never the raw ref). The legacy
    * event-level projections (a `RankEntry[]` → `StandingsTable`) are kept below as an "Event
    * projection" section; export is a lossless JSON download of whichever projections are present.
    */
-  import { StandingsTable, Button, Card, Select, formatMicros, toast } from '@gridfpv/components';
+  import {
+    StandingsTable,
+    Badge,
+    Banner,
+    Button,
+    Card,
+    Select,
+    formatMetric,
+    formatMicros,
+    toast
+  } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
     Class,
     ClassId,
     ClassStanding,
     CompetitorRef,
+    HeatId,
     HeatResult,
     HeatSummary,
     Pilot,
@@ -34,6 +51,7 @@
   } from '@gridfpv/types';
   import { buildResultsExport, downloadJson, toExportJson } from '../lib/results.js';
   import { isTimedQualFormat } from '../lib/formats.js';
+  import { heatNameById } from '../lib/heats.js';
   import { createCompetitorNameResolver } from '../lib/competitorName.js';
   import { channelLabel, nodeIndexOf } from '../lib/channels.js';
   import type { AuditPrefilter } from '../lib/auditFilter.svelte.js';
@@ -186,21 +204,58 @@
   const heatsByRound = (id: RoundId): HeatSummary[] => heats.filter((h) => h.round === id);
 
   // --- The view selector --------------------------------------------------------------------------
-  // The pickable views, in order: each round (by label), then one per-class entry per event class.
+  // The pickable views, in order: each round (by label) followed by that round's SCORED heats (#56 /
+  // #77 — the per-heat results view), then one per-class entry per event class.
+  //
+  // The per-heat entries ride the SAME selector rather than a second panel stacked under the
+  // standings: the screen shows exactly one view at a time, which is the structure the Results screen
+  // already has and the thing #358 (declutter Marshaling) asks us not to repeat here. A heat is
+  // listed once it is `Final` — that is the phase at which a result is scored and the marshaling
+  // rulings (DQ / void) are baked into it, and it matches what `defaultViewValue` already treats as
+  // "scored".
   type ViewOption =
     | { value: string; label: string; kind: 'round'; round: RoundDef }
+    | { value: string; label: string; kind: 'heat'; heatId: HeatId; round: RoundDef }
     | { value: string; label: string; kind: 'class'; classId: ClassId };
 
   const viewOptions = $derived.by<ViewOption[]>(() => {
     const opts: ViewOption[] = [];
     for (const round of rounds) {
       opts.push({ value: `round:${round.id}`, label: round.label, kind: 'round', round });
+      for (const heat of heatsByRound(round.id)) {
+        if (heat.phase !== 'Final') continue;
+        opts.push({
+          value: `heat:${heat.heat}`,
+          // The FRIENDLY heat name through the shared resolver — "Qualifying Heat 2" / "A-Main" /
+          // the RD's custom label, never the raw heat id (CLAUDE.md).
+          label: heatNameById(heat.heat, heats, rounds),
+          kind: 'heat',
+          heatId: heat.heat,
+          round
+        });
+      }
     }
     for (const cls of eventClasses) {
       opts.push({ value: `class:${cls.id}`, label: cls.name, kind: 'class', classId: cls.id });
     }
     return opts;
   });
+
+  type RoundOption = Extract<ViewOption, { kind: 'round' }>;
+  type HeatOption = Extract<ViewOption, { kind: 'heat' }>;
+  type ClassOption = Extract<ViewOption, { kind: 'class' }>;
+
+  /** The heat entries belonging to `roundId`, for the selector's per-round `<optgroup>`. */
+  const heatOptionsFor = (roundId: RoundId): HeatOption[] =>
+    viewOptions.filter((o): o is HeatOption => o.kind === 'heat' && o.round.id === roundId);
+  /** The round entries, in order (each renders its own option + its heats' optgroup). */
+  const roundOptions = $derived<RoundOption[]>(
+    viewOptions.filter((o): o is RoundOption => o.kind === 'round')
+  );
+  /** The per-class entries, rendered after every round. */
+  const classOptions = $derived<ClassOption[]>(
+    viewOptions.filter((o): o is ClassOption => o.kind === 'class')
+  );
 
   let selectedView = $state('');
   const currentView = $derived<ViewOption | undefined>(
@@ -374,6 +429,71 @@
       });
   });
 
+  // --- Per-heat results (#56 / #77) -------------------------------------------------------------
+  // The scored result for the selected heat. `HeatResult` is NOT on the live read stream (which only
+  // carries `LiveRaceState`) — it is a separate heat-scope snapshot read, so the view fetches it.
+  //
+  // The fetched result is kept in LOCAL state rather than read off `session.heatResult`: the session
+  // drops that field whenever the live current heat moves off the heat it was fetched for
+  // (`#dropStaleHeatResult`, which keeps the JSON export honest), and an RD reading a *past* heat's
+  // result must not have the table blank itself out from under them on the next stream tick.
+  const heatViewId = $derived.by<HeatId | undefined>(() =>
+    currentView?.kind === 'heat' ? currentView.heatId : undefined
+  );
+  let heatRows = $state<HeatResult | undefined>(undefined);
+  let heatLoading = $state(false);
+  let heatError = $state(false);
+  // Latest-wins guard — see `rankingSeq`.
+  let heatSeq = 0;
+  $effect(() => {
+    if (!session) return;
+    const hid = heatViewId;
+    // Re-read on a live advance (a Revert + re-Finalize re-scores the heat) and on an explicit retry.
+    void session.liveState;
+    void reloadNonce;
+    const seq = ++heatSeq;
+    if (!hid) {
+      heatRows = undefined;
+      return;
+    }
+    heatLoading = true;
+    heatError = false;
+    session
+      .fetchHeatResult(hid)
+      .then((res) => {
+        if (seq !== heatSeq) return;
+        heatRows = res;
+        // A `Final` heat has a scored result; `undefined` back means the read failed (or the body
+        // was malformed), which is a load error, not an empty heat.
+        heatError = res === undefined;
+      })
+      .catch(() => {
+        if (seq !== heatSeq) return;
+        heatRows = undefined;
+        heatError = true;
+      })
+      .finally(() => {
+        if (seq === heatSeq) heatLoading = false;
+      });
+  });
+
+  /**
+   * The deciding-metric column for the per-heat table: its header, or `undefined` when the metric is
+   * the competitor's best lap (which the dedicated Best-lap column already shows, so a second
+   * identical column would be noise). The win condition is heat-wide, so the first placement decides.
+   */
+  const heatMetricHeader = $derived.by<string | undefined>(() => {
+    const m = heatRows?.places[0]?.metric;
+    if (!m) return undefined;
+    if ('BestConsecutiveMicros' in m) return 'Best consec';
+    if ('LastLapAt' in m) return 'Finished';
+    if ('ReachedAt' in m) return 'Reached';
+    return undefined;
+  });
+
+  /** Whether any placement in the shown heat carries a disqualification (drives the table footnote). */
+  const heatHasDq = $derived<boolean>(!!heatRows?.places.some((p) => p.disqualified));
+
   const roundLabelFor = (id: RoundId): string => rounds.find((r) => r.id === id)?.label ?? '—';
 
   // Export the CURRENT views with FRIENDLY names baked in (P1-2): competitor refs → callsigns and
@@ -410,15 +530,34 @@
       </div>
     {/if}
     <Card
-      title={currentView?.kind === 'round' ? `${currentView.label} standings` : 'Standings'}
+      title={currentView?.kind === 'round'
+        ? `${currentView.label} standings`
+        : currentView?.kind === 'heat'
+          ? currentView.label
+          : 'Standings'}
       subtitle={currentView?.kind === 'class'
         ? "Per-class season standings, aggregated across the class's rounds."
-        : undefined}
+        : currentView?.kind === 'heat'
+          ? 'Placements for this heat, as scored.'
+          : undefined}
     >
       {#snippet actions()}
         {#if viewOptions.length > 1}
+          <!-- One selector, one view. Each round is followed by an optgroup of its own SCORED heats,
+               so the per-heat result sits directly under the round it belongs to. -->
           <Select bind:value={selectedView} aria-label="Results view">
-            {#each viewOptions as opt (opt.value)}
+            {#each roundOptions as opt (opt.value)}
+              <option value={opt.value}>{opt.label}</option>
+              {@const heatOpts = heatOptionsFor(opt.round.id)}
+              {#if heatOpts.length > 0}
+                <optgroup label={`${opt.label} heats`}>
+                  {#each heatOpts as h (h.value)}
+                    <option value={h.value}>{h.label}</option>
+                  {/each}
+                </optgroup>
+              {/if}
+            {/each}
+            {#each classOptions as opt (opt.value)}
               <option value={opt.value}>{opt.label}</option>
             {/each}
           </Select>
@@ -452,6 +591,18 @@
           </p>
         {:else}
           {@render rankTable(`${currentView.label} standings`, rankingRows)}
+        {/if}
+      {:else if currentView?.kind === 'heat'}
+        {#if heatLoading && !heatRows}
+          <p class="empty" role="status">Loading result…</p>
+        {:else if heatError || !heatRows}
+          {@render loadError()}
+        {:else if heatRows.places.length === 0}
+          <p class="empty" role="status">
+            <strong>{currentView.label}</strong> was scored with no placements — nothing to show.
+          </p>
+        {:else}
+          {@render heatTable(currentView.label, heatRows)}
         {/if}
       {:else if currentView?.kind === 'class'}
         {#if classLoading && classRows.length === 0}
@@ -546,6 +697,64 @@
       {/each}
     </tbody>
   </table>
+{/snippet}
+
+{#snippet heatTable(label: string, result: HeatResult)}
+  <!-- The per-heat placement table (#56 / #77). The engine models penalties fully — a DQ is ranked
+       after every non-DQ competitor, and a voided heat is nullified — and this is where the RD is
+       told so. Without it the ordering changes with no visible cause and the results just look wrong. -->
+  <div class="heat-result">
+    {#if result.voided}
+      <!-- A nullified heat must NOT read as a normal result: say so before the table, not after. -->
+      <Banner tone="warn" title="Heat voided">
+        This heat was voided by adjudication — it does not count toward the round or class
+        standings. The on-track order below is kept for reference only.
+      </Banner>
+    {/if}
+    <table class="standings" class:voided={result.voided} aria-label={`${label} results`}>
+      <thead>
+        <tr>
+          <th scope="col" class="pos">Pos</th>
+          <th scope="col" class="pilot">Pilot</th>
+          <th scope="col" class="num">Laps</th>
+          {#if heatMetricHeader}
+            <th scope="col" class="num">{heatMetricHeader}</th>
+          {/if}
+          <th scope="col" class="num">Best lap</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each result.places as place (place.competitor.adapter + '/' + place.competitor.competitor)}
+          {@const ref = place.competitor.competitor}
+          <tr class:dq={place.disqualified}>
+            <td class="pos"><span class="badge">{place.position}</span></td>
+            <td class="pilot">
+              <!-- The callsign through the SHARED resolver — never the raw ref / `node-0`. -->
+              <span class="name">{resolveName(ref)}</span>
+              {#if place.disqualified}
+                <!-- WHY this pilot is ranked last, not merely THAT they are. -->
+                <Badge tone="danger" variant="solid">DQ</Badge>
+                <span class="dq-why">Disqualified — ranked after every finisher</span>
+              {/if}
+              {@render auditLink(ref)}
+            </td>
+            <td class="num">{place.laps}</td>
+            {#if heatMetricHeader}
+              <td class="num">{formatMetric(place.metric)}</td>
+            {/if}
+            <td class="num">{formatMicros(place.best_lap_micros)}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+    {#if heatHasDq}
+      <p class="footnote">
+        <strong>DQ</strong> — disqualified by a marshaling ruling. A disqualified pilot is placed
+        after every pilot who finished, whatever their on-track result. Open the pilot's
+        <em>audit</em> to see the ruling behind it.
+      </p>
+    {/if}
+  </div>
 {/snippet}
 
 {#snippet ttTable(label: string, rows: RoundStanding[])}
@@ -669,6 +878,47 @@
   .audit-link:focus-visible {
     outline: none;
     box-shadow: var(--gf-focus-ring);
+  }
+  /* --- Per-heat results (#56 / #77) --- */
+  .heat-result {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-4);
+  }
+  /* A voided heat is nullified — dim the whole table so it never reads as a standing result. The
+     Banner above carries the actual statement; this is the supporting visual cue, not the message. */
+  .standings.voided tbody {
+    opacity: 0.6;
+  }
+  /* A DQ'd row is de-emphasised (it scored nothing) but stays legible — the RD still needs to read
+     the laps and times behind the ruling. */
+  .standings tbody tr.dq .name {
+    color: var(--gf-text-secondary);
+  }
+  .standings tbody tr.dq .num {
+    color: var(--gf-text-muted);
+  }
+  .standings .pilot .name {
+    margin-right: var(--gf-space-2);
+  }
+  /* The inline reason next to the DQ chip — the "why", spelled out rather than left to the badge. */
+  .dq-why {
+    margin-left: var(--gf-space-2);
+    color: var(--gf-danger, var(--gf-text-secondary));
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-normal);
+    letter-spacing: normal;
+    text-transform: none;
+    white-space: nowrap;
+  }
+  .footnote {
+    margin: 0;
+    color: var(--gf-text-secondary);
+    font-size: var(--gf-font-size-xs);
+    line-height: 1.5;
+  }
+  .footnote strong {
+    color: var(--gf-text);
   }
   .standings .pos {
     width: 2.75em;

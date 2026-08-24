@@ -5,6 +5,7 @@ import type {
   Class,
   ClassStandings,
   EventMeta,
+  HeatResult,
   HeatSummary,
   Pilot,
   RankEntry,
@@ -176,13 +177,26 @@ describe('Results — phase-aware views (round / per-class selector)', () => {
 
     const select = (await screen.findByLabelText('Results view')) as HTMLSelectElement;
     const options = within(select).getAllByRole('option') as HTMLOptionElement[];
-    // Order: each round (by label), then the class.
+    // Order: each round (by label), immediately followed by that round's SCORED heats (the per-heat
+    // results view, #56 / #77), then the class. Each heat reads by its FRIENDLY name.
     expect(options.map((o) => o.textContent?.trim())).toEqual([
       'Qualifying',
+      'Qualifying Heat 1',
       'Pro — Final',
+      'Pro — Final Heat 1',
       'Open'
     ]);
-    expect(options.map((o) => o.value)).toEqual(['round:r1', 'round:b1', 'class:c1']);
+    expect(options.map((o) => o.value)).toEqual([
+      'round:r1',
+      'heat:r1-h1',
+      'round:b1',
+      'heat:b1-h1',
+      'class:c1'
+    ]);
+    // A round's heats sit in an optgroup titled for the round, so the grouping is visible too.
+    expect(
+      Array.from(select.querySelectorAll('optgroup')).map((g) => g.getAttribute('label'))
+    ).toEqual(['Qualifying heats', 'Pro — Final heats']);
     // Both rounds have scored heats, so the default selection is the latest scored round.
     await waitFor(() => expect(select.value).toBe('round:b1'));
   });
@@ -507,5 +521,182 @@ describe('Results — event-level projections (kept from #56)', () => {
   it('offers an export action', () => {
     render(Results, { heatResult });
     expect(screen.getByRole('button', { name: 'Export JSON' })).toBeInTheDocument();
+  });
+});
+
+// ── Per-heat results (#56 / #77) ────────────────────────────────────────────────────────────────
+// The engine models penalties fully — a DQ is ranked after every non-DQ competitor and a voided
+// heat is nullified — but until this view NO console file consumed `Placement.disqualified` or
+// `HeatResult.voided`, so the ordering changed with no visible cause. These lock the display.
+
+/** A clean two-pilot heat: no DQ, not voided. Best-lap metric → the metric column is suppressed. */
+const CLEAN_HEAT_RESULT: HeatResult = {
+  places: [
+    {
+      competitor: { adapter: 'rh-1', competitor: 'p1' },
+      position: 1,
+      laps: 3,
+      metric: { BestLapMicros: 41_250_000 },
+      best_lap_micros: 41_250_000
+    },
+    {
+      competitor: { adapter: 'rh-1', competitor: 'p2' },
+      position: 2,
+      laps: 3,
+      metric: { BestLapMicros: 42_100_000 },
+      best_lap_micros: 42_100_000
+    }
+  ]
+};
+
+/**
+ * A heat where the DQ is the ONLY explanation for the order: AceOne flew more laps (5 v 4) and a
+ * faster best lap, and is still placed second. Without the reason on screen this reads as a bug.
+ */
+const DQ_HEAT_RESULT: HeatResult = {
+  places: [
+    {
+      competitor: { adapter: 'rh-1', competitor: 'p2' },
+      position: 1,
+      laps: 4,
+      metric: { BestConsecutiveMicros: 45_000_000 },
+      best_lap_micros: 41_000_000
+    },
+    {
+      competitor: { adapter: 'rh-1', competitor: 'p1' },
+      position: 2,
+      laps: 5,
+      metric: { BestConsecutiveMicros: 44_000_000 },
+      best_lap_micros: 39_000_000,
+      disqualified: true
+    }
+  ]
+};
+
+/** Build a session whose `r1-h1` heat-scope result read serves `result`, and select that heat. */
+async function renderHeatView(result: HeatResult): Promise<HTMLElement> {
+  const { session } = makeTestSession({
+    event: { ...EVENT, rounds: [QUAL] },
+    listClassesImpl: vi.fn(async () => [OPEN]),
+    listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+    listHeatsImpl: vi.fn(async () => [QUAL_HEAT]),
+    roundRankingImpl: rankingImpl,
+    classStandingsImpl: vi.fn(async () => STANDINGS),
+    heatFetches: { 'r1-h1': { result } }
+  });
+  render(Results, { session });
+  const select = (await screen.findByLabelText('Results view')) as HTMLSelectElement;
+  await waitFor(() => expect(select.value).toBe('round:r1'));
+  await fireEvent.change(select, { target: { value: 'heat:r1-h1' } });
+  // The table is labelled by the heat's FRIENDLY name, never its raw `r1-h1` id.
+  return (await screen.findByLabelText('Qualifying Heat 1 results')) as HTMLElement;
+}
+
+describe('Results — per-heat results view (#56 / #77)', () => {
+  it('renders a clean heat unchanged: placements by callsign, laps and best lap, no DQ or void marking', async () => {
+    const table = await renderHeatView(CLEAN_HEAT_RESULT);
+
+    const aceRow = within(table).getByText('AceOne').closest('tr') as HTMLElement;
+    expect(within(aceRow).getByText('1')).toBeInTheDocument(); // position
+    expect(within(aceRow).getByText('3')).toBeInTheDocument(); // laps
+    expect(within(aceRow).getByText('41.250')).toBeInTheDocument(); // best lap, µs → S.mmm
+    expect(within(table).getByText('Bolt')).toBeInTheDocument();
+
+    // A clean heat carries no penalty furniture at all.
+    expect(within(table).queryByText('DQ')).toBeNull();
+    expect(screen.queryByText(/Disqualified/i)).toBeNull();
+    expect(screen.queryByText(/voided/i)).toBeNull();
+    // The Best-lap metric is already its own column, so no duplicate metric column is added.
+    const headers = within(table)
+      .getAllByRole('columnheader')
+      .map((h) => h.textContent?.trim());
+    expect(headers).toEqual(['Pos', 'Pilot', 'Laps', 'Best lap']);
+    // The raw competitor refs never reach the screen (CLAUDE.md).
+    expect(within(table).queryByText('p1')).toBeNull();
+    expect(within(table).queryByText('p2')).toBeNull();
+  });
+
+  it('shows a disqualified pilot by callsign WITH a visible reason, not just a worse position', async () => {
+    const table = await renderHeatView(DQ_HEAT_RESULT);
+
+    // The DQ'd pilot reads by CALLSIGN, never the raw ref.
+    const aceRow = within(table).getByText('AceOne').closest('tr') as HTMLElement;
+    expect(within(table).queryByText('p1')).toBeNull();
+
+    // …is marked as disqualified…
+    expect(within(aceRow).getByText('DQ')).toBeInTheDocument();
+    // …and the WHY is on screen, not merely the fact that they placed last.
+    expect(
+      within(aceRow).getByText(/Disqualified — ranked after every finisher/i)
+    ).toBeInTheDocument();
+    // The footnote spells out the rule and points at the ruling behind it.
+    expect(screen.getByText(/disqualified by a marshaling ruling/i)).toBeInTheDocument();
+
+    // The on-track numbers stay readable — the RD must still see what was flown.
+    expect(within(aceRow).getByText('5')).toBeInTheDocument(); // laps
+    expect(within(aceRow).getByText('39.000')).toBeInTheDocument(); // best lap
+    // The non-DQ winner carries no marking.
+    const boltRow = within(table).getByText('Bolt').closest('tr') as HTMLElement;
+    expect(within(boltRow).queryByText('DQ')).toBeNull();
+
+    // A non-best-lap win condition adds its deciding-metric column.
+    const headers = within(table)
+      .getAllByRole('columnheader')
+      .map((h) => h.textContent?.trim());
+    expect(headers).toEqual(['Pos', 'Pilot', 'Laps', 'Best consec', 'Best lap']);
+    expect(within(aceRow).getByText('44.000')).toBeInTheDocument();
+  });
+
+  it('marks a voided heat so it cannot read as a normal result', async () => {
+    const table = await renderHeatView({ ...CLEAN_HEAT_RESULT, voided: true });
+
+    // An alert-level banner states it plainly, before the table.
+    const banner = screen.getByRole('alert');
+    expect(banner).toHaveTextContent(/Heat voided/i);
+    expect(banner).toHaveTextContent(/does not count toward the round or class standings/i);
+    // The placements are still shown for reference, and still by callsign.
+    expect(within(table).getByText('AceOne')).toBeInTheDocument();
+    expect(within(table).getByText('Bolt')).toBeInTheDocument();
+  });
+
+  it('surfaces a failed per-heat result read as an error with a retry, not an empty heat', async () => {
+    const { session } = makeTestSession({
+      event: { ...EVENT, rounds: [QUAL] },
+      listClassesImpl: vi.fn(async () => [OPEN]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [QUAL_HEAT]),
+      roundRankingImpl: rankingImpl,
+      classStandingsImpl: vi.fn(async () => STANDINGS)
+      // No `heatFetches` seed → the heat-scope read fails.
+    });
+    render(Results, { session });
+    const select = (await screen.findByLabelText('Results view')) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('round:r1'));
+    await fireEvent.change(select, { target: { value: 'heat:r1-h1' } });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Couldn't load the standings/i);
+    expect(within(alert).getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('lists only SCORED heats — an unfinalized heat has no result to show', async () => {
+    const { session } = makeTestSession({
+      event: { ...EVENT, rounds: [QUAL] },
+      listClassesImpl: vi.fn(async () => [OPEN]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [
+        QUAL_HEAT,
+        { ...QUAL_HEAT, heat: 'r1-h2', phase: 'Running' as const }
+      ]),
+      roundRankingImpl: rankingImpl,
+      classStandingsImpl: vi.fn(async () => STANDINGS)
+    });
+    render(Results, { session });
+    const select = (await screen.findByLabelText('Results view')) as HTMLSelectElement;
+    const values = (within(select).getAllByRole('option') as HTMLOptionElement[]).map(
+      (o) => o.value
+    );
+    expect(values).toContain('heat:r1-h1');
+    expect(values).not.toContain('heat:r1-h2');
   });
 });
