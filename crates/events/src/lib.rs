@@ -202,6 +202,15 @@ pub struct SignalThresholds {
 /// projection **prefers** this dense history over the coarse [`SignalChunk`] samples for a
 /// competitor when both are present (the dense trace supersedes the streaming approximation).
 ///
+/// # Whole trace or slice — [`base`](SignalHistory::base) says which (#392)
+///
+/// The GridFPV plugin streams this trace **live**, every 0.5 s, so a `SignalHistory` is not always a
+/// whole trace: [`base`](SignalHistory::base) is the sample offset its `times`/`rssi` start at, and
+/// the fold replaces at `0`, appends at the trace's current length, and skips anything else. Sending
+/// the accumulated whole on every tick made the per-tick cost grow with heat length (O(n) per tick,
+/// O(n²) per heat, per seat): it flooded the heat's log and re-woke every projection subscriber
+/// twice a second with nothing new in hand (#392).
+///
 /// # Why explicit per-sample times (not a uniform cadence)
 ///
 /// [`SignalChunk`] assumes a fixed `period_micros` because the live stream emits on a regular
@@ -225,6 +234,24 @@ pub struct SignalHistory {
     pub times: Vec<i64>,
     /// The dense per-tick RSSI samples (filtered ADC counts), parallel to `times`.
     pub rssi: Vec<u16>,
+    /// The index of this event's **first** sample within the competitor's full trace — the offset
+    /// the fold applies `times`/`rssi` at (#392). Named for the plugin's own `gridfpv_signal` field,
+    /// whose semantics it carries onto the canonical wire unchanged.
+    ///
+    /// - `base == 0` — a **full snapshot**: it *replaces* the competitor's trace. The post-race
+    ///   `current_marshal_data` pull, the `race_details` fold and the plugin's end-of-race flush
+    ///   each send one, so a finished heat's marshaling trace is always whole.
+    /// - `base ==` the trace's current length — a **contiguous append**: `times`/`rssi` extend it.
+    ///   This is the live path, and it is what keeps the per-tick cost independent of heat length.
+    /// - anything else — **out of sync**: the fold skips the event rather than splice a gap or a
+    ///   duplicate into the trace. The next full snapshot resynchronises it.
+    ///
+    /// Additive on the wire: `#[serde(default)]` reads a pre-#392 log — which only ever carried
+    /// whole traces — back as `base = 0`, i.e. exactly the replace semantics it was written with.
+    /// Renders as TS `number` (a sample count, bounded far below 2^53), not a `bigint`.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub base: u64,
 }
 
 /// A gate crossing — the one observation everything else derives from.
@@ -1302,6 +1329,15 @@ mod tests {
                 competitor: CompetitorRef("node-0".into()),
                 times: vec![0, 50_000, 100_000, 150_000],
                 rssi: vec![70, 88, 150, 71],
+                base: 0,
+            }),
+            // The same fact as a live slice: `base` is the sample offset it starts at (#392).
+            Event::SignalHistory(SignalHistory {
+                adapter: AdapterId("rotorhazard".into()),
+                competitor: CompetitorRef("node-0".into()),
+                times: vec![200_000, 250_000],
+                rssi: vec![90, 71],
+                base: 4,
             }),
         ];
         for event in events {
@@ -1343,6 +1379,35 @@ mod tests {
                 rssi: vec![60, 120, 61],
             })
         );
+    }
+
+    #[test]
+    fn legacy_signal_history_without_base_reads_back_as_a_full_snapshot() {
+        // `base` is additive (#392). A history written before it existed was always the competitor's
+        // whole trace, folded last-writer-wins — and `base = 0` is exactly that rule, so an old log
+        // replays unchanged rather than being mistaken for a slice.
+        let legacy = r#"{"SignalHistory":{"adapter":"rotorhazard","competitor":"node-0","times":[0,50000],"rssi":[70,88]}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(legacy).unwrap(),
+            Event::SignalHistory(SignalHistory {
+                adapter: AdapterId("rotorhazard".into()),
+                competitor: CompetitorRef("node-0".into()),
+                times: vec![0, 50_000],
+                rssi: vec![70, 88],
+                base: 0,
+            })
+        );
+        // And the field goes out on the wire as a plain number, so an older consumer that ignores
+        // unknown keys still parses a slice-shaped history.
+        let json = serde_json::to_string(&Event::SignalHistory(SignalHistory {
+            adapter: AdapterId("rotorhazard".into()),
+            competitor: CompetitorRef("node-0".into()),
+            times: vec![100_000],
+            rssi: vec![150],
+            base: 2,
+        }))
+        .unwrap();
+        assert!(json.contains(r#""base":2"#), "{json}");
     }
 
     #[test]

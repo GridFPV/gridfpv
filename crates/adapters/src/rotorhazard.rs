@@ -764,8 +764,9 @@ pub struct RotorHazardAdapter {
     /// One-shot latch so an un-advertised plugin's `gridfpv_pass` flood logs once per adapter, not
     /// once per lap.
     warned_unadvertised_pass: bool,
-    /// One-shot latch for the dense-trace growth warning (see [`DENSE_TRACE_WARN_SAMPLES`]).
-    warned_dense_trace: bool,
+    /// One-shot latch so a plugin whose dense slices stop lining up with the accumulator warns once
+    /// per race, not once per broadcast (see [`translate_grid_signal`](Self::translate_grid_signal)).
+    warned_dense_desync: bool,
     /// Per-seat pilot callsign, learned from `current_laps` (which carries each node's pilot, with
     /// or without laps, from the moment a heat is staged). It names the seat in
     /// [`Event::CompetitorSeen`] and in the fallback warning whichever stream mints the pass — the
@@ -802,15 +803,6 @@ pub struct PilotRaceRequest {
 /// (marshaling.html §4) — the capture is faithful to *what RH streams*, which is one aggregate
 /// sample per emit, not the detector's internal per-tick history.
 pub const DEFAULT_NODE_DATA_PERIOD_MICROS: u32 = 100_000;
-
-/// Per-seat dense-trace length past which the adapter warns once (#389 field diagnostics).
-///
-/// The plugin streams the dense history incrementally, but the adapter re-emits the whole
-/// accumulated trace each time it grows, so the per-tick cost rises with heat length. A long heat
-/// on a full field can push this into the range where the socket callback thread — the same thread
-/// that parses `current_laps` — spends most of its time copying signal. Mock heats never get near
-/// it, which is why nothing in the harness ever said so.
-const DENSE_TRACE_WARN_SAMPLES: usize = 20_000;
 
 impl RotorHazardAdapter {
     /// A RotorHazard adapter with the default id (`"rotorhazard"`).
@@ -849,7 +841,7 @@ impl RotorHazardAdapter {
             pass_warning: None,
             counts: PassCounts::default(),
             warned_unadvertised_pass: false,
-            warned_dense_trace: false,
+            warned_dense_desync: false,
             seat_callsign: std::collections::HashMap::new(),
         }
     }
@@ -1216,7 +1208,7 @@ impl RotorHazardAdapter {
                 // builds a fresh trace. (`live_signal_active` persists — once the plugin is
                 // streaming, it streams every heat.)
                 self.dense_accum.clear();
-                self.warned_dense_trace = false;
+                self.warned_dense_desync = false;
                 self.pending_pilotrace_requests.clear();
                 self.pilotrace_start_time.clear();
                 out.push(Event::SessionStarted {
@@ -1454,6 +1446,8 @@ impl RotorHazardAdapter {
             competitor: seat_ref(node_index),
             times,
             rssi,
+            // A pulled history is the seat's whole run, so it replaces whatever the fold holds.
+            base: 0,
         }));
     }
 
@@ -1534,10 +1528,26 @@ impl RotorHazardAdapter {
     /// race-relative via `race_start`). Seeing any broadcast marks [`live_signal_active`], which
     /// suppresses the redundant post-race pull on the DONE edge.
     ///
-    /// The plugin re-sends the full window each tick; the per-node grown-length check
-    /// ([`last_history_len`](Self::last_history_len)) keeps the log to ~one dense fact per crossing
-    /// rather than one per broadcast. The live coarse trace still comes from `node_data` until the
-    /// first dense history supersedes it in the projection.
+    /// # The emitted event carries the **slice**, not the accumulator (#392)
+    ///
+    /// The accumulator is the adapter's own working state — what it needs to recognise the next
+    /// slice as contiguous. The event carries only the new samples, stamped with the
+    /// [`base`](SignalHistory::base) offset they belong at, and the projection folds them the same
+    /// way this function does: replace at `0`, append at the current length, skip anything else.
+    ///
+    /// A `base == 0` snapshot — the plugin's opening tick and its end-of-race flush — is always
+    /// passed on, even when it only restates what the slices already delivered. That snapshot is the
+    /// stream's resync point, and it is worth nothing unless it is in the *log*: a heat window that
+    /// missed a slice can recover from a snapshot inside it and from nothing else. It costs one O(n)
+    /// event per seat per heat, which is not per-tick cost.
+    ///
+    /// This is the whole of #392. Emitting the accumulated whole on every tick cost O(n) per tick
+    /// and O(n^2) per heat per seat: at the plugin's 2 Hz the heat's log took two copies of the
+    /// race-to-date trace every second, which woke `/stream` with an unchanged projection twice a
+    /// second (the console replaying the last lap) and saturated the single `rust_socketio` callback
+    /// thread that also parses `current_laps`. **The invariant: one tick's cost must not grow with
+    /// heat length.** The live coarse trace still comes from `node_data` until the first dense
+    /// history supersedes it in the projection.
     fn translate_grid_signal(&mut self, sig: RawGridSignal, out: &mut Vec<Event>) {
         if !self.signal_capture {
             return;
@@ -1550,8 +1560,10 @@ impl RotorHazardAdapter {
             }
             // Dense history (S2.1, incremental): convert this slice to race-relative µs and apply it
             // to the per-node accumulator — REPLACE on a full snapshot (`base == 0`), APPEND when it
-            // continues the accumulator (`base == len`), else skip an out-of-sync slice. Emit the
-            // accumulated trace only when it actually changed, so a redundant final flush is a no-op.
+            // continues the accumulator (`base == len`), else skip an out-of-sync slice. What goes
+            // on the wire is the slice that was applied, at its offset — never the accumulator
+            // (#392) — and only when it actually changed something, so a redundant final flush of an
+            // already-complete trace stays a no-op.
             let Some(start) = sig.race_start else {
                 continue;
             };
@@ -1564,39 +1576,51 @@ impl RotorHazardAdapter {
                 rssi.push(node.history_values[i].round().clamp(0.0, u16::MAX as f64) as u16);
             }
             let acc = self.dense_accum.entry(node_index).or_default();
-            let changed = if node.base == 0 {
-                if acc.0 != times || acc.1 != rssi {
-                    *acc = (times, rssi);
-                    !acc.0.is_empty()
-                } else {
-                    false
-                }
+            let emit = if node.base == 0 {
+                // A full snapshot: the plugin's first tick of a race, and its end-of-race flush.
+                // Replace the accumulator and put it on the wire whenever it carries samples —
+                // including a flush that only restates what the slices already delivered.
+                //
+                // A delta stream is worth exactly what its resync points are worth, and the resync
+                // point has to be **in the log**. The accumulator says what the *adapter* took; the
+                // heat's log is a separate, durable artifact, and a fold over a window that missed
+                // any slice can only recover from a snapshot inside that window. So the flush always
+                // lands: one O(n) event per seat per heat, never per tick — which is the invariant
+                // that matters, and what makes the marshaling trace self-sufficient (#392).
+                *acc = (times.clone(), rssi.clone());
+                (!times.is_empty()).then_some((0, times, rssi))
             } else if node.base == acc.0.len() && n > 0 {
-                acc.0.extend(times);
-                acc.1.extend(rssi);
-                true
+                // The hot path: a contiguous slice. Extend the accumulator and emit *just the new
+                // samples*, at the offset they start from — O(slice), never O(trace).
+                let base = acc.0.len() as u64;
+                acc.0.extend_from_slice(&times);
+                acc.1.extend_from_slice(&rssi);
+                Some((base, times, rssi))
             } else {
-                false // out-of-sync slice; wait for the next full snapshot to resync
-            };
-            if changed {
-                // The accumulated trace is re-emitted in full whenever it grows, so a very long
-                // dense run costs O(n) per plugin tick. That is invisible on the mock harness
-                // (short heats, few samples) and was one of #389's suspects in the field, so say
-                // it out loud once per race rather than degrade silently.
-                if acc.0.len() > DENSE_TRACE_WARN_SAMPLES && !self.warned_dense_trace {
-                    self.warned_dense_trace = true;
+                // Out of sync: the slice neither restates the trace nor continues it, so applying it
+                // would splice a gap or a duplicate into the marshaling evidence. Drop it and wait
+                // for the next full snapshot to resync — but say so, because a plugin that keeps
+                // missing leaves the live trace running on the end-of-race flush alone.
+                if !self.warned_dense_desync {
+                    self.warned_dense_desync = true;
                     crate::diag!(
-                        "gridfpv: rotorhazard: the plugin's dense signal trace has passed {} \
-                         samples on one seat; each further tick re-emits the whole trace, so \
-                         ingest cost is growing with heat length (#389 diagnostics)",
-                        DENSE_TRACE_WARN_SAMPLES,
+                        "gridfpv: rotorhazard: the plugin's dense signal slice for seat {} starts \
+                         at sample {} but this seat's trace holds {} — skipping it until a full \
+                         snapshot resyncs the trace (#392)",
+                        node_index,
+                        node.base,
+                        acc.0.len(),
                     );
                 }
+                None
+            };
+            if let Some((base, times, rssi)) = emit {
                 out.push(Event::SignalHistory(SignalHistory {
                     adapter: self.id.clone(),
                     competitor: seat_ref(node_index),
-                    times: acc.0.clone(),
-                    rssi: acc.1.clone(),
+                    times,
+                    rssi,
+                    base,
                 }));
             }
         }
@@ -2577,25 +2601,28 @@ mod tests {
             "first snapshot emits thresholds"
         );
 
-        // An APPEND slice (base == current length 2) extends the accumulator; the emitted history is
-        // the FULL accumulated trace, and unchanged thresholds are not re-emitted.
+        assert_eq!(histories(&first)[0].base, 0, "a snapshot lands at offset 0");
+
+        // An APPEND slice (base == current length 2) extends the accumulator, and the emitted event
+        // carries ONLY the new sample, stamped with the offset it belongs at (#392) — not the
+        // accumulated trace. Unchanged thresholds are not re-emitted.
         let appended = a.translate(grid_signal(0.0, 0, 2, 90.0, 80.0, &[0.3], &[71.0]));
+        assert_eq!(histories(&appended).len(), 1, "an append emits the slice");
+        assert_eq!(histories(&appended)[0].rssi, vec![71]);
+        assert_eq!(histories(&appended)[0].times, vec![300_000]);
         assert_eq!(
-            histories(&appended).len(),
-            1,
-            "an append emits the grown trace"
-        );
-        assert_eq!(histories(&appended)[0].rssi, vec![70, 150, 71]);
-        assert_eq!(
-            histories(&appended)[0].times,
-            vec![100_000, 200_000, 300_000]
+            histories(&appended)[0].base,
+            2,
+            "the slice carries the offset the fold must place it at"
         );
         assert!(
             thresholds(&appended).is_empty(),
             "unchanged thresholds are not re-emitted"
         );
 
-        // A redundant full snapshot identical to the accumulator (e.g. the final flush) is a no-op.
+        // A full snapshot restating the accumulated trace — the plugin's end-of-race flush — still
+        // lands, at `base = 0`. It is the log's resync point, so suppressing it because the ADAPTER
+        // already holds those samples would disarm the delta stream's only safety net (#392).
         let resent = a.translate(grid_signal(
             0.0,
             0,
@@ -2605,10 +2632,13 @@ mod tests {
             &[0.1, 0.2, 0.3],
             &[70.0, 150.0, 71.0],
         ));
-        assert!(
-            histories(&resent).is_empty(),
-            "an identical full snapshot emits nothing"
+        assert_eq!(
+            histories(&resent).len(),
+            1,
+            "the end-of-race flush lands as a full snapshot"
         );
+        assert_eq!(histories(&resent)[0].base, 0);
+        assert_eq!(histories(&resent)[0].rssi, vec![70, 150, 71]);
 
         // An out-of-sync append (base != length, no replace) is skipped, not mis-appended.
         let desync = a.translate(grid_signal(0.0, 0, 99, 90.0, 80.0, &[9.9], &[123.0]));
@@ -2616,6 +2646,116 @@ mod tests {
             histories(&desync).is_empty(),
             "an out-of-sync slice is skipped"
         );
+
+        // The slices the adapter emitted fold back into the whole trace — the accumulator's job is
+        // to recognise contiguity, the projection's is to reassemble.
+        let log: Vec<Event> = first.into_iter().chain(appended).chain(resent).collect();
+        let trace = gridfpv_projection::signal_trace(&log)
+            .competitor(&gridfpv_projection::CompetitorKey {
+                adapter: AdapterId(DEFAULT_ADAPTER_ID.into()),
+                competitor: CompetitorRef("node-0".into()),
+            })
+            .expect("node-0 trace")
+            .clone();
+        assert_eq!(trace.samples, vec![70, 150, 71]);
+        assert_eq!(
+            trace.times.as_deref(),
+            Some([100_000, 200_000, 300_000].as_slice())
+        );
+    }
+
+    #[test]
+    fn a_long_heat_does_not_grow_the_emitted_history(/* #392 */) {
+        // The regression that reached the field. The plugin broadcasts at 2 Hz for the whole heat,
+        // so the adapter re-emitting its accumulated trace each tick cost O(n) per tick and O(n^2)
+        // per heat, per seat — two copies of the race-to-date trace appended to the heat's log every
+        // second, waking `/stream` with a projection that had nothing new in it (the console
+        // repeating the last lap), and saturating the socket callback thread that also parses
+        // `current_laps`. Every mock heat in the harness is ~10-20s, which is exactly why nothing
+        // caught it; this is that heat made long, and cheap.
+        //
+        // THE INVARIANT: one tick's emitted payload must not grow with heat length.
+        const TICKS: usize = 400; // 400 broadcasts at 2 Hz = a ~3.5 minute heat
+        const PER_TICK: usize = 25; // 25 dense samples per broadcast (~50 Hz detector sampling)
+
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        let mut log: Vec<Event> = Vec::new();
+        let mut base = 0usize;
+        for tick in 0..TICKS {
+            let times: Vec<f64> = (0..PER_TICK).map(|i| (base + i) as f64 * 0.02).collect();
+            let values: Vec<f64> = (0..PER_TICK)
+                .map(|i| 70.0 + ((base + i) % 90) as f64)
+                .collect();
+            let events = a.translate(grid_signal(0.0, 0, base, 90.0, 80.0, &times, &values));
+            let hs = histories(&events);
+            assert_eq!(hs.len(), 1, "tick {tick} must emit exactly one history");
+            assert_eq!(
+                hs[0].rssi.len(),
+                PER_TICK,
+                "tick {tick} emitted {} samples for a {PER_TICK}-sample slice — the payload is \
+                 growing with heat length (#392)",
+                hs[0].rssi.len(),
+            );
+            assert_eq!(hs[0].times.len(), PER_TICK);
+            assert_eq!(hs[0].base, base as u64);
+            log.extend(events);
+            base += PER_TICK;
+        }
+
+        // Linear in the heat's samples, not quadratic. Under the old behavior this sum was
+        // TICKS*(TICKS+1)/2*PER_TICK ≈ 2,005,000 samples for the 10,000 the heat actually recorded.
+        let emitted: usize = histories(&log).iter().map(|h| h.rssi.len()).sum();
+        assert_eq!(
+            emitted,
+            TICKS * PER_TICK,
+            "the log must carry each dense sample exactly once"
+        );
+
+        // ...and the trace the marshal reviews is still every one of those samples, in order.
+        let trace = gridfpv_projection::signal_trace(&log)
+            .competitor(&gridfpv_projection::CompetitorKey {
+                adapter: AdapterId("rh".into()),
+                competitor: CompetitorRef("node-0".into()),
+            })
+            .expect("node-0 trace")
+            .clone();
+        assert_eq!(trace.samples.len(), TICKS * PER_TICK);
+        assert_eq!(trace.from, Some(SourceTime::from_micros(0)));
+        assert_eq!(
+            trace.times.as_ref().and_then(|t| t.last()).copied(),
+            Some(((TICKS * PER_TICK - 1) as f64 * 0.02 * 1_000_000.0) as i64),
+        );
+
+        // The plugin's end-of-race flush (`base = 0`, the whole trace) guarantees a complete
+        // marshaling trace however the live stream went. It lands as ONE full-trace event — the
+        // resync point the log needs — which is O(n) once per heat, not the O(n)-per-tick this test
+        // exists to keep out.
+        let flush_times: Vec<f64> = (0..TICKS * PER_TICK).map(|i| i as f64 * 0.02).collect();
+        let flush_values: Vec<f64> = (0..TICKS * PER_TICK)
+            .map(|i| 70.0 + (i % 90) as f64)
+            .collect();
+        let flush = a.translate(grid_signal(
+            0.0,
+            0,
+            0,
+            90.0,
+            80.0,
+            &flush_times,
+            &flush_values,
+        ));
+        assert_eq!(
+            histories(&flush).len(),
+            1,
+            "the end-of-race flush must land as a full snapshot"
+        );
+        assert_eq!(histories(&flush)[0].base, 0);
+        assert_eq!(histories(&flush)[0].rssi.len(), TICKS * PER_TICK);
+
+        // The whole heat therefore costs the log two copies of the trace — the slices, plus the one
+        // closing snapshot — where it used to cost TICKS/2 of them.
+        log.extend(flush);
+        let total: usize = histories(&log).iter().map(|h| h.rssi.len()).sum();
+        assert_eq!(total, 2 * TICKS * PER_TICK);
     }
 
     #[test]
