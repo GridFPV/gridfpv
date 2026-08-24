@@ -111,7 +111,8 @@ use gridfpv_events::{Event, HeatId, HeatTransition, LogRef};
 
 use crate::app::{AppState, resolve_event};
 use crate::control::{
-    Command, CommandAck, CommandOutcome, FillMode, FillRoundOutcome, FillStop, ScheduledHeat,
+    AdvanceOutcome, AdvanceStop, Command, CommandAck, CommandOutcome, FillMode, FillRoundOutcome,
+    FillStop, ScheduledHeat,
 };
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::EventRegistry;
@@ -880,6 +881,14 @@ fn no_heat(round: &str, stopped: FillStop, reason: Option<String>) -> String {
 ///
 /// Each step is its own append; a generated heat plus the selection are two events, which is why
 /// this lives on the event-aware path (it needs the registry/meta to draw, like `FillRound`).
+///
+/// **Which of those three happened is now in the ack** (#401), as
+/// [`CommandOutcome::Advance`](crate::control::CommandOutcome::Advance). It used to be nowhere: all
+/// three acked a bare `{"ok":true}`, so "Advance loaded the next heat" and "Advance had nothing to
+/// load" were byte-identical — the same defect #395 fixed for `FillRound`, and hit far more often,
+/// because "nothing to advance to" is the routine end of every round rather than a
+/// misconfiguration. The ack now names the heat it loaded, or says **positively** that there was
+/// none and why ([`AdvanceStop`]).
 fn apply_advance(
     registry: &EventRegistry,
     event_id: &EventId,
@@ -899,75 +908,183 @@ fn apply_advance(
         return CommandAck::failed(err);
     }
 
+    // `None` only for an event that vanished between dispatch and here (the caller resolved it to
+    // get this far). Without meta there are no round defs, so nothing can be named or generated —
+    // folded into "no round to advance within" below rather than unwrapped.
+    let meta = registry.meta_of(event_id);
+
+    let (events, _cursor) = match state.read() {
+        Ok(read) => read,
+        Err(err) => return CommandAck::failed(err),
+    };
+    // The advanced heat's FRIENDLY name frames every sentence this command produces (repo display
+    // rule); a raw id only surfaces if the heat resolves to no round and carries no label.
+    let from = logged_heat_name(meta.as_ref(), &events, &heat);
+
     // 2. Pick the next heat to run. The advanced heat is now `Final` (not `Scheduled`), so
     //    `on_deck` against it is exactly "the next still-`Scheduled` heat" — the heat to load.
-    let next = {
-        let (events, _cursor) = match state.read() {
-            Ok(read) => read,
-            Err(err) => return CommandAck::failed(err),
-        };
-        crate::live_state::on_deck(&events, &heat)
-    };
-
-    if let Some(next) = next {
+    if let Some(next) = crate::live_state::on_deck(&events, &heat) {
         // A next heat is already scheduled — follow Live control to it.
-        return select_next_heat(state, next);
+        let loaded = describe_logged_heat(meta.as_ref(), &events, &next);
+        let detail = format!(
+            "Advanced {from}: loaded {}, the heat already on deck.",
+            loaded.name
+        );
+        return match select_next_heat(state, next) {
+            Ok(()) => advance_ack(Some(loaded), AdvanceStop::LoadedOnDeck, detail),
+            Err(err) => CommandAck::failed(err),
+        };
     }
 
     // Nothing is on deck: ask the advanced heat's round generator for the next heat (a round
     // mid-fill), then select whatever it scheduled. An untagged heat has no round to draw from.
-    let round = {
-        let (events, _cursor) = match state.read() {
-            Ok(read) => read,
-            Err(err) => return CommandAck::failed(err),
-        };
-        crate::live_state::round_of_heat(&events, &heat)
+    let round = crate::live_state::round_of_heat(&events, &heat);
+    let (Some(round), Some(meta)) = (round, meta) else {
+        // Stated positively (#401): there was no generator to ask, which is a different answer
+        // from "the round is complete" — a distinction the bare ok could not make at all.
+        return advance_ack(
+            None,
+            AdvanceStop::Untagged,
+            format!(
+                "Advanced {from}: nothing to advance to — it is not part of a round, so there is \
+                 no next heat to generate, and none is on deck."
+            ),
+        );
     };
-    if let Some(round) = round {
-        if let Some(meta) = registry.meta_of(event_id) {
-            // One generator draw (the `FillMode::Next` step). It either appends the next heat or
-            // reports the round terminal (nothing to schedule).
-            match fill_round_once(registry, &meta, state, &round) {
-                FillStep::Appended(_) => {
-                    // A heat was just scheduled in this round; on_deck now finds it. Select it.
-                    let next = {
-                        let (events, _cursor) = match state.read() {
-                            Ok(read) => read,
-                            Err(err) => return CommandAck::failed(err),
-                        };
-                        crate::live_state::on_deck(&events, &heat)
-                    };
-                    if let Some(next) = next {
-                        return select_next_heat(state, next);
-                    }
-                }
-                // Round complete / awaiting a result / refused for this field: nothing more to
-                // load. NOTE (#395 audit): `Advance` has the same defect `FillRound` just had —
-                // it acks a bare ok whether it loaded the next heat, generated one, or found
-                // nothing to advance to, and the reason is dropped right here. Surfacing it is a
-                // `CommandOutcome::Advance` variant away; left out of this change deliberately
-                // so the fix stays the one the issue describes.
-                FillStep::Terminal(_stop, _reason) => {}
-                // A generator/append error: surface it verbatim (the Advanced transition stands).
-                FillStep::Failed(ack) => return ack,
+    // The round's FRIENDLY label, like every other RD-facing sentence (repo display rule).
+    let round_label = meta
+        .rounds
+        .iter()
+        .find(|def| def.id == round)
+        .map_or_else(|| round.0.clone(), |def| def.label.clone());
+
+    // One generator draw (the `FillMode::Next` step). It either appends the next heat or reports
+    // the round terminal (nothing to schedule).
+    match fill_round_once(registry, &meta, state, &round) {
+        // A heat was just scheduled in this round — and it is by construction the only still-
+        // `Scheduled` heat (nothing was on deck a moment ago), so select it directly.
+        FillStep::Appended(generated) => {
+            let detail = format!("Advanced {from}: generated and loaded {}.", generated.name);
+            match select_next_heat(state, generated.heat.clone()) {
+                Ok(()) => advance_ack(Some(generated), AdvanceStop::Generated, detail),
+                Err(err) => CommandAck::failed(err),
             }
         }
+        // Round complete / awaiting a result / refused for this field: nothing more to load. The
+        // reason used to be discarded right here (#401) and the ack said only `ok:true`; it now
+        // rides out on the outcome, in the generator's own words for a refusal (#394).
+        FillStep::Terminal(stop, reason) => {
+            let (stopped, detail) = nothing_to_advance_to(&from, &round_label, stop, reason);
+            advance_ack(None, stopped, detail)
+        }
+        // A generator/append error: surface it verbatim (the Advanced transition stands).
+        FillStep::Failed(ack) => ack,
     }
+}
 
-    // The round is genuinely complete (or the heat was untagged and nothing is on deck): the heat
-    // stays `Advanced`, a clean terminal. Ack ok — Advance succeeded, there was just no next heat.
-    CommandAck::ok()
+/// Pack an advance's effect into the ack (#401): the heat it loaded (if any), what it did, and the
+/// sentence an RD can read. Always `ok` — every [`AdvanceStop`] is a success (the `Advanced`
+/// transition was recorded in all of them); they differ in what the RD has to do next.
+fn advance_ack(loaded: Option<ScheduledHeat>, stopped: AdvanceStop, detail: String) -> CommandAck {
+    CommandAck::ok_with(CommandOutcome::Advance(AdvanceOutcome {
+        loaded,
+        stopped,
+        detail,
+    }))
+}
+
+/// The discriminator and RD-facing sentence for an advance that loaded **nothing** — the case that
+/// used to arrive as a bare `{"ok":true}` at the end of every single round.
+///
+/// Reuses the fill path's own [`FillStop`] as the source of truth for *why* the generator had
+/// nothing, so the two commands cannot drift into telling the RD different stories about the same
+/// round. `from` is the advanced heat's friendly name, `round` its round's label.
+fn nothing_to_advance_to(
+    from: &str,
+    round: &str,
+    stopped: FillStop,
+    reason: Option<String>,
+) -> (AdvanceStop, String) {
+    match stopped {
+        FillStop::Blocked => (
+            AdvanceStop::Blocked,
+            match reason {
+                // e.g. "Head-to-Head needs at least 2 pilots in the field — this round has 1. …"
+                Some(reason) => format!("Advanced {from}: nothing to advance to — {reason}"),
+                None => format!(
+                    "Advanced {from}: nothing to advance to — {round}'s format cannot race this \
+                     field."
+                ),
+            },
+        ),
+        FillStop::AwaitingResult => (
+            AdvanceStop::AwaitingResult,
+            format!(
+                "Advanced {from}: nothing to advance to — {round}'s outstanding heat has not been \
+                 scored yet."
+            ),
+        ),
+        // `SingleStep` is `FillMode::Next`'s own contract, never a terminal state
+        // `fill_round_once` reports, so only `Complete` reaches here in practice. It is grouped
+        // rather than panicked on, and the sentence is worded to stay true either way.
+        FillStop::Complete | FillStop::SingleStep => (
+            AdvanceStop::RoundComplete,
+            format!("Advanced {from}: nothing to advance to — {round} is complete."),
+        ),
+    }
+}
+
+/// Describe a heat **already in the log** for an ack's outcome (#401) — its friendly name, plus the
+/// lineup and channels it was last scheduled with, so a caller learns what it was moved onto
+/// without a second round-trip. The same shape a freshly generated heat reports.
+fn describe_logged_heat(
+    meta: Option<&crate::events::EventMeta>,
+    events: &[Event],
+    heat: &HeatId,
+) -> ScheduledHeat {
+    let (lineup, frequencies, _label) = crate::round_engine::logged_heat_schedule(events, heat);
+    ScheduledHeat {
+        heat: heat.clone(),
+        name: logged_heat_name(meta, events, heat),
+        lineup,
+        frequencies,
+    }
+}
+
+/// The **friendly display name** of a heat already in the log (repo display rule: a raw heat id
+/// must never reach a user).
+///
+/// Goes through [`round_engine::heat_display_name`](crate::round_engine::heat_display_name) — the
+/// server-side twin of the console's `heatNameById` — whenever the heat resolves to a round. A
+/// manually built, untagged heat has no round to name it within, so its RD-typed label stands in;
+/// the raw id is the last resort the display rule allows, and only when the heat has neither.
+fn logged_heat_name(
+    meta: Option<&crate::events::EventMeta>,
+    events: &[Event],
+    heat: &HeatId,
+) -> String {
+    if let (Some(meta), Some(round)) = (meta, crate::live_state::round_of_heat(events, heat)) {
+        if let Some(def) = meta.rounds.iter().find(|def| def.id == round) {
+            return crate::round_engine::heat_display_name(def, events, heat);
+        }
+    }
+    let (_, _, label) = crate::round_engine::logged_heat_schedule(events, heat);
+    match label.map(|label| label.trim().to_string()) {
+        Some(label) if !label.is_empty() => label,
+        _ => heat.0.clone(),
+    }
 }
 
 /// Append a [`Event::CurrentHeatSelected`] to move Live control onto `next`, the same selection the
 /// RD's manual "select heat" records — so the `current_heat` fold follows it. The heat is one we
 /// just derived from the log (on-deck / freshly generated), so it is known-scheduled; no further
 /// validation needed.
-fn select_next_heat(state: &AppState, next: HeatId) -> CommandAck {
-    match state.append(Event::CurrentHeatSelected { heat: next }, None) {
-        Ok(_offset) => CommandAck::ok(),
-        Err(err) => CommandAck::failed(err),
-    }
+///
+/// Hands back the append error rather than an ack: the caller pairs a successful selection with the
+/// outcome describing *which* heat it loaded (#401).
+fn select_next_heat(state: &AppState, next: HeatId) -> Result<(), ProtocolError> {
+    state.append(Event::CurrentHeatSelected { heat: next }, None)?;
+    Ok(())
 }
 
 /// Validate a [`Command`] against the current log and, on success, append the event(s) it
@@ -4889,6 +5006,292 @@ mod tests {
             before,
             "a rejected Advance appends nothing (no transition, no selection)"
         );
+    }
+
+    // --- #401: the ack must say what the Advance DID, not just that it was accepted ----------
+
+    /// Advance `heat` through the control path and return the outcome the ack carries. Panics if
+    /// the command was rejected or reported no outcome — every accepted `Advance` must report one.
+    #[cfg(test)]
+    fn advance_outcome(
+        registry: &EventRegistry,
+        event_id: &EventId,
+        state: &AppState,
+        heat: &HeatId,
+    ) -> crate::control::AdvanceOutcome {
+        let ack = apply_command_in_event(
+            registry,
+            event_id,
+            state,
+            Command::Advance { heat: heat.clone() },
+        );
+        assert!(ack.ok, "Advance rejected: {ack:?}");
+        match ack.outcome {
+            Some(CommandOutcome::Advance(outcome)) => outcome,
+            other => panic!("Advance must report its outcome, got {other:?}"),
+        }
+    }
+
+    /// The bug, stated as the assertion that was impossible before (#401): the **three** things an
+    /// `Advance` can do — load the heat already on deck, generate the next one, find nothing to
+    /// advance to — must be told apart **from the ack alone**.
+    ///
+    /// All three used to answer a byte-identical `{"ok":true}`. The third is the routine end of
+    /// every round, so the ambiguity was not a rare misconfiguration but the normal case.
+    #[test]
+    fn the_three_advance_outcomes_are_distinguishable_from_the_ack_alone() {
+        // A round whose two heats are BOTH pre-scheduled: advancing heat 1 loads the on-deck
+        // heat 2, and advancing heat 2 finds nothing.
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::All,
+                },
+            )
+            .ok
+        );
+        let heats = heat_ids_in_round(&state, &round);
+        let (heat1, heat2) = (heats[0].clone(), heats[1].clone());
+
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+        let loaded = advance_outcome(&registry, &event_id, &state, &heat1);
+        drive_heat_to_final(&registry, &event_id, &state, &heat2);
+        let nothing = advance_outcome(&registry, &event_id, &state, &heat2);
+
+        // A second, identically-seeded round taken down the generate path instead: only heat 1 is
+        // filled, so advancing it has to DRAW heat 2 rather than find it.
+        let (gen_registry, gen_event, gen_round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let gen_state = gen_registry.resolve(&gen_event).unwrap();
+        assert!(
+            apply_command_in_event(
+                &gen_registry,
+                &gen_event,
+                &gen_state,
+                Command::FillRound {
+                    round: gen_round.clone(),
+                    mode: FillMode::Next,
+                },
+            )
+            .ok
+        );
+        let gen_heat1 = heat_ids_in_round(&gen_state, &gen_round)[0].clone();
+        drive_heat_to_final(&gen_registry, &gen_event, &gen_state, &gen_heat1);
+        let generated = advance_outcome(&gen_registry, &gen_event, &gen_state, &gen_heat1);
+
+        // Each says positively what it did — no two alike, and none of them inferred from what is
+        // missing.
+        assert_eq!(loaded.stopped, AdvanceStop::LoadedOnDeck);
+        assert_eq!(generated.stopped, AdvanceStop::Generated);
+        assert_eq!(nothing.stopped, AdvanceStop::RoundComplete);
+        assert_ne!(loaded.stopped, generated.stopped);
+        assert_ne!(loaded.stopped, nothing.stopped);
+        assert_ne!(generated.stopped, nothing.stopped);
+    }
+
+    /// The on-deck case **names the heat it loaded** — by its friendly name, never a raw id
+    /// (repo display rule) — and hands back the wire handle alongside it.
+    #[test]
+    fn advance_to_an_on_deck_heat_names_the_heat_it_loaded() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::All,
+                },
+            )
+            .ok
+        );
+        let heats = heat_ids_in_round(&state, &round);
+        let (heat1, heat2) = (heats[0].clone(), heats[1].clone());
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+
+        let outcome = advance_outcome(&registry, &event_id, &state, &heat1);
+        assert_eq!(outcome.stopped, AdvanceStop::LoadedOnDeck);
+        let loaded = outcome.loaded.expect("the on-deck heat is named");
+        assert_eq!(loaded.heat, heat2, "the wire handle addresses the heat");
+        assert_eq!(loaded.name, "Round Robin Heat 2", "{loaded:?}");
+        assert_eq!(loaded.lineup.len(), 2, "the lineup it was scheduled with");
+        // The sentence an RD reads: both heats by friendly name, no raw id anywhere in it.
+        let detail = &outcome.detail;
+        assert!(detail.contains("Round Robin Heat 1"), "{detail}");
+        assert!(detail.contains("Round Robin Heat 2"), "{detail}");
+        assert!(detail.contains("on deck"), "{detail}");
+        assert!(
+            !detail.contains(heat1.0.as_str()),
+            "no raw heat id: {detail}"
+        );
+        assert!(
+            !detail.contains(heat2.0.as_str()),
+            "no raw heat id: {detail}"
+        );
+    }
+
+    /// The generate case says it **generated** the heat (not merely that one was loaded) and names
+    /// it — the distinction between "the RD's fill already covered this" and "Advance drew it".
+    #[test]
+    fn advance_that_generates_the_next_heat_names_what_it_drew() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::Next,
+                },
+            )
+            .ok
+        );
+        let heat1 = heat_ids_in_round(&state, &round)[0].clone();
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+
+        let outcome = advance_outcome(&registry, &event_id, &state, &heat1);
+        assert_eq!(outcome.stopped, AdvanceStop::Generated);
+        let drawn = outcome.loaded.expect("the generated heat is named");
+        assert_eq!(drawn.name, "Round Robin Heat 2", "{drawn:?}");
+        // It really is the heat the log gained, and the one Live control now sits on.
+        let heats = heat_ids_in_round(&state, &round);
+        assert_eq!(heats.len(), 2, "Advance drew the next heat");
+        assert_eq!(drawn.heat, heats[1]);
+        assert_eq!(current_heat_of(&state), Some(drawn.heat.clone()));
+        assert!(
+            outcome
+                .detail
+                .contains("generated and loaded Round Robin Heat 2"),
+            "{}",
+            outcome.detail
+        );
+    }
+
+    /// The case the issue calls out as worst: "nothing to advance to" is the **routine** end of a
+    /// round, and it must be stated positively — the reason in the ack, not inferred from a
+    /// missing field (the exact shape of the original bug).
+    #[test]
+    fn advance_with_nothing_to_advance_to_says_so_and_says_why() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::All,
+                },
+            )
+            .ok
+        );
+        let heats = heat_ids_in_round(&state, &round);
+        let (heat1, heat2) = (heats[0].clone(), heats[1].clone());
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+        advance_outcome(&registry, &event_id, &state, &heat1);
+        drive_heat_to_final(&registry, &event_id, &state, &heat2);
+
+        let outcome = advance_outcome(&registry, &event_id, &state, &heat2);
+        // Positively stated: the discriminator IS the answer. `loaded` being empty is a
+        // consequence, never the signal a caller has to read.
+        assert_eq!(outcome.stopped, AdvanceStop::RoundComplete);
+        assert!(outcome.loaded.is_none(), "{outcome:?}");
+        let detail = &outcome.detail;
+        assert!(detail.contains("nothing to advance to"), "{detail}");
+        // Named by their friendly names — the round by its LABEL, the heat by its display name.
+        assert!(detail.contains("Round Robin Heat 2"), "{detail}");
+        assert!(detail.contains("Round Robin is complete"), "{detail}");
+        assert!(
+            !detail.contains(round.0.as_str()),
+            "no raw round id: {detail}"
+        );
+        assert!(
+            !detail.contains(heat2.0.as_str()),
+            "no raw heat id: {detail}"
+        );
+        // And "nothing to advance to" is still an ok — the `Advanced` transition happened.
+        assert_eq!(
+            heat_state(&state, &heat2),
+            Some(gridfpv_engine::heat::HeatState::Final)
+        );
+    }
+
+    /// A manually built, **untagged** heat has no round to draw from — a different answer from
+    /// "the round is complete", and one the bare ok could not distinguish at all.
+    #[test]
+    fn advance_on_an_untagged_heat_reports_that_it_has_no_round() {
+        use gridfpv_events::CompetitorRef;
+
+        let (registry, event_id, _round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        let heat = HeatId("free-1".into());
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::ScheduleHeat {
+                    heat: heat.clone(),
+                    lineup: vec![
+                        CompetitorRef("node-0".into()),
+                        CompetitorRef("node-1".into())
+                    ],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
+                    label: Some("Grudge Match".into()),
+                },
+            )
+            .ok
+        );
+        drive_heat_to_final(&registry, &event_id, &state, &heat);
+
+        let outcome = advance_outcome(&registry, &event_id, &state, &heat);
+        assert_eq!(outcome.stopped, AdvanceStop::Untagged);
+        assert!(outcome.loaded.is_none(), "{outcome:?}");
+        // Even here the heat is named the way the RD named it, not by its id (display rule).
+        let detail = &outcome.detail;
+        assert!(detail.contains("Grudge Match"), "{detail}");
+        assert!(detail.contains("not part of a round"), "{detail}");
+        assert!(!detail.contains("free-1"), "no raw heat id: {detail}");
+    }
+
+    /// The additive property #395 established, re-checked with `Advance` in the enum: a command
+    /// whose acceptance IS the whole answer still acks a byte-identical bare `{"ok":true}`.
+    #[test]
+    fn a_command_with_nothing_to_report_still_acks_a_bare_ok() {
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.clone(),
+                mode: FillMode::Next,
+            },
+        );
+        let heat = heat_ids_in_round(&state, &round)[0].clone();
+        let ack = apply_command_in_event(&registry, &event_id, &state, Command::Stage { heat });
+        assert!(ack.ok);
+        assert_eq!(serde_json::to_string(&ack).unwrap(), r#"{"ok":true}"#);
     }
 
     /// Wire-compat (#216): an older `FillRound` payload with **no `mode`** deserializes to the

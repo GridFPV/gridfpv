@@ -16,7 +16,8 @@ import type { ProtocolError } from "./ProtocolError";
  * `ok` answers *"was the command accepted?"* — which for some commands is not the question the
  * caller is actually asking. `FillRound`'s "did nothing" is a routine, expected result, not an
  * error, so it acks ok; a caller then has no way to tell it from a fill that scheduled a heat
- * (#395). [`outcome`](Self::outcome) carries **what the command did** for those commands, and
+ * (#395), and `Advance`'s "nothing to advance to" is the same shape, hit far more often (#401).
+ * [`outcome`](Self::outcome) carries **what the command did** for those commands, and
  * is absent for the ones where acceptance *is* the whole answer — so it is purely additive:
  * every existing client keeps parsing every ack unchanged.
  */
@@ -30,8 +31,8 @@ ok: boolean,
  */
 error?: ProtocolError, 
 /**
- * **What the command did**, for the commands whose effect is the useful answer — currently
- * [`FillRound`](Command::FillRound). `None` for every other command (and for a failure,
- * where `error` is the answer).
+ * **What the command did**, for the commands whose effect is the useful answer —
+ * [`FillRound`](Command::FillRound) (#395) and [`Advance`](Command::Advance) (#401). `None`
+ * for every other command (and for a failure, where `error` is the answer).
  */
 outcome?: CommandOutcome, };
