@@ -149,11 +149,6 @@ pub struct PassSink {
     gate: Option<ActiveSourceGate>,
     /// The timer this sink feeds for; appends pass the gate only while it is the active source.
     timer: Option<TimerId>,
-    /// The **open-practice** heat this sink feeds, if any (open-practice format, Slice 1). When set,
-    /// the sink routes passes into the event's in-memory per-channel accumulator (NOT the log) and
-    /// wakes `/stream` to push the fresh per-channel live state — so an open-practice session's
-    /// passes are *never* appended to the durable log (only its `HeatScheduled` + start/stop are).
-    open_practice: Option<HeatId>,
     /// The heat this sink feeds — **stamped onto every appended pass** (`Pass::heat`), so pass
     /// attribution is by tag, not log position (a heat-span event landing mid-race can no longer
     /// steal the running heat's laps). The bridge sets it when it builds a Running heat's sinks;
@@ -170,7 +165,6 @@ impl PassSink {
             adapter,
             gate: None,
             timer: None,
-            open_practice: None,
             heat: None,
         }
     }
@@ -188,18 +182,8 @@ impl PassSink {
             adapter,
             gate: Some(gate),
             timer: Some(timer),
-            open_practice: None,
             heat: None,
         }
-    }
-
-    /// Mark this sink as feeding the **open-practice** `heat` (open-practice format, Slice 1):
-    /// passes are routed into the event's in-memory per-channel accumulator and `/stream` is woken,
-    /// rather than appended to the log. Builder style — applied to a gated/plain sink for an
-    /// open-practice heat so its laps are tracked live but never logged.
-    pub fn for_open_practice(mut self, heat: HeatId) -> Self {
-        self.open_practice = Some(heat);
-        self
     }
 
     /// Bind this sink to the heat it feeds: every appended pass is stamped `Pass::heat` so the
@@ -242,14 +226,6 @@ impl PassSink {
             signal: None,
             heat: self.heat.clone(),
         };
-        // Open practice (open-practice format, Slice 1): route the pass into the in-memory
-        // per-channel accumulator and wake `/stream` — it is **never** appended to the log.
-        if self.open_practice.is_some() {
-            if self.state.open_practice().record(pass) {
-                self.state.wake_streams();
-            }
-            return Ok(());
-        }
         self.state
             .append(Event::Pass(pass), None)
             .map_err(|e| SourceError(format!("{e:?}")))?;
@@ -267,16 +243,6 @@ impl PassSink {
         // The connection stays live (hot standby) — only its appends are gated here.
         if !self.feeds() {
             return Ok(());
-        }
-        // Open practice (open-practice format, Slice 1): a lap-gate pass from a live RH source is
-        // routed into the in-memory accumulator (not logged); any non-pass event still appends.
-        if self.open_practice.is_some() {
-            if let Event::Pass(pass) = event {
-                if pass.gate.is_lap_gate() && self.state.open_practice().record(pass) {
-                    self.state.wake_streams();
-                }
-                return Ok(());
-            }
         }
         // Stamp the sink's heat onto the pass (tag attribution — see `for_heat`): the adapter
         // built the pass without one; the sink is the component that knows which heat it feeds.
@@ -964,17 +930,6 @@ fn handle_transition(
             if lineup.is_empty() {
                 return;
             }
-            // Open practice (open-practice format, Slice 1): an open-practice heat's passes are
-            // tracked **in memory, per channel — never logged**. Begin the accumulator over the
-            // heat's channel lineup (this also clears any prior open-practice state, e.g. a
-            // superseded heat) and mark each source's sink so its passes route there + wake
-            // `/stream`. A non-open-practice heat leaves the accumulator untouched.
-            let open_practice = is_open_practice_heat(state, registry, event_id, &heat);
-            if open_practice {
-                state.open_practice().begin(heat.clone(), lineup.clone());
-                // Push the cleared/initial live state so a subscriber sees the fresh empty heat.
-                state.wake_streams();
-            }
             // Issue #112: the **active-source gate** — only the active source's passes feed the log
             // (the primary while healthy, else the first healthy alternate). All selected timers
             // still run (hot standby); the gate drops a non-active source's passes. It is seeded
@@ -989,12 +944,8 @@ fn handle_transition(
             let sources = selected_sources(registry, timers, event_id);
             let mut handles = Vec::with_capacity(sources.len());
             for (timer_id, source) in sources {
-                let mut sink =
-                    PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id)
-                        .for_heat(heat.clone());
-                if open_practice {
-                    sink = sink.for_open_practice(heat.clone());
-                }
+                let sink = PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id)
+                    .for_heat(heat.clone());
                 let run = HeatRun {
                     heat: heat.clone(),
                     lineup: lineup.clone(),
@@ -1014,16 +965,13 @@ fn handle_transition(
             let armed_rh = {
                 let mut armed = Vec::new();
                 for timer_id in selected_rh_timers(registry, timers, event_id) {
-                    let mut sink = PassSink::gated(
+                    let sink = PassSink::gated(
                         state.clone(),
                         adapter.clone(),
                         gate.clone(),
                         timer_id.clone(),
                     )
                     .for_heat(heat.clone());
-                    if open_practice {
-                        sink = sink.for_open_practice(heat.clone());
-                    }
                     if connections.arm_heat(event_id, &timer_id, lineup.clone(), sink) {
                         armed.push(timer_id);
                     }
@@ -1074,25 +1022,6 @@ fn handle_transition(
                         );
                     }
                 }
-            }
-            // Open practice (open-practice format, Slice 1): **clear on stop**. Drop the in-memory
-            // per-channel accumulator when the open-practice heat reaches a terminal / abort / restart
-            // transition, then wake `/stream` so it re-folds the now-overlay-free log state (the
-            // console settles back onto the bare log — no stale laps frame). The `Finished`
-            // (Running → Unofficial) step is *kept* so the RD still sees the final practice laps
-            // before finalizing; the true terminals below clear it. A new heat/round becoming active
-            // also clears it (via `begin`).
-            //
-            // The overlay is **laps-only** now: the heat's phase/clock are always the real log's
-            // (this same `HeatStateChanged` was already appended and woke the stream), so the served
-            // phase follows the log to `Unofficial` here and to `Scheduled` on a `Restart` with no
-            // shadow-tracking. We therefore only need to clear the laps on the terminals and wake.
-            if state.open_practice().is_active(&heat)
-                && !matches!(transition, HeatTransition::Finished)
-                && state.open_practice().clear()
-            {
-                // Wake-on-clear: re-fold without the overlay so the laps drop immediately.
-                state.wake_streams();
             }
             // Auto-official timer (marshaling Slice 5): the two transitions that land the heat in
             // `Unofficial` — `Finished` (race-end) and `Reverted` (a finalized result re-opened) —
@@ -1476,27 +1405,6 @@ fn default_sim_win_condition() -> gridfpv_engine::scoring::WinCondition {
     }
 }
 
-/// Whether `heat` is an **open-practice** heat (open-practice format, Slice 1): its most-recent
-/// `HeatScheduled.round` resolves to a round that [`is_open_practice`](gridfpv_server::round_engine::is_open_practice).
-///
-/// The bridge uses this on a `Running` transition to decide whether to route the heat's passes into
-/// the in-memory per-channel accumulator (open practice) rather than the log. A heat with no round
-/// tag, or a round that is not open-practice, returns `false` (the normal logged path).
-fn is_open_practice_heat(
-    state: &AppState,
-    registry: &EventRegistry,
-    event_id: &EventId,
-    heat: &HeatId,
-) -> bool {
-    let Some(round_id) = round_of_heat(state, heat) else {
-        return false;
-    };
-    registry
-        .rounds_of(event_id)
-        .and_then(|rounds| rounds.into_iter().find(|r| r.id == round_id))
-        .is_some_and(|r| gridfpv_server::round_engine::is_open_practice(&r))
-}
-
 /// The `RoundId` tag on `heat`'s most-recent `HeatScheduled`, if any.
 fn round_of_heat(state: &AppState, heat: &HeatId) -> Option<gridfpv_events::RoundId> {
     let stored = state.log().lock().ok()?.read_all().ok()?;
@@ -1655,12 +1563,15 @@ fn spawn_start_driver(
 ///
 /// **Open-practice time limit (open-practice refinement):** when the round carries a
 /// [`time_limit_secs`](gridfpv_server::events::RoundDef::time_limit_secs), the driver auto-ends the
-/// heat once its elapsed running time reaches the limit — **independent of the win condition** (an
-/// open-practice heat does no scoring and its passes are never logged, so the win-condition path
-/// never fires for it; the time limit is the only end condition). The elapsed clock starts when the
-/// heat enters `Running` (this driver's spawn), so it is the same deterministic, logged transition
-/// the other autos key off — a 1-hour practice ends itself an hour after Start. With no limit set,
-/// only the win-condition path can fire (the RD ends an open practice manually).
+/// heat once its elapsed running time reaches the limit — **independent of the win condition**. A
+/// practice round created without one stores the inert
+/// [`default_win_condition`](gridfpv_server::events::default_win_condition) (`BestLap`), which by
+/// construction never ends a heat, so the time limit is in practice its only automatic end. The
+/// elapsed clock starts when the heat enters `Running` (this driver's spawn), so it is the same
+/// deterministic, logged transition the other autos key off — a 1-hour practice ends itself an hour
+/// after Start. With no limit set, only the win-condition path can fire (the RD ends an open
+/// practice manually). Nothing here branches on the format: practice runs the same driver as every
+/// other round, over the same logged passes.
 fn spawn_completion_driver(
     state: &AppState,
     registry: &EventRegistry,
@@ -1668,13 +1579,14 @@ fn spawn_completion_driver(
     heat: HeatId,
 ) -> JoinHandle<()> {
     let config = heat_clock_config(state, registry, event_id, &heat);
-    // The Timed window, for the wall-clock fallback below. Open practice is EXCLUDED: its round
-    // stores an inert default win condition that must never be consulted — its `time_limit_secs`
-    // is the only end condition (the branch above).
+    // The Timed window, for the wall-clock fallback below. Every format goes through the same
+    // branch — open practice included (D5, reversed 2026-08-24). A practice round created without
+    // a win condition stores the inert `default_win_condition` (`BestLap`), which is not `Timed`,
+    // so no window is armed and its `time_limit_secs` / the RD's `ForceEnd` remain its only end
+    // conditions; a practice round that *was* given a real win condition now honours it, like any
+    // other round.
     let timed_window = match config.win_condition {
-        gridfpv_engine::scoring::WinCondition::Timed { window_micros }
-            if !is_open_practice_heat(state, registry, event_id, &heat) =>
-        {
+        gridfpv_engine::scoring::WinCondition::Timed { window_micros } => {
             Some(Duration::from_micros(window_micros.max(0) as u64))
         }
         _ => None,
@@ -1705,9 +1617,9 @@ fn spawn_completion_driver(
         loop {
             ticker.tick().await;
             // Time-limit auto-end (open-practice refinement): once the elapsed running time reaches
-            // the practice duration, close the heat regardless of any win condition or passes — the
-            // only end condition for an open-practice heat (whose passes are never logged, so the
-            // win-condition branch below never fires for it). Logged like the other autos.
+            // the round's duration, close the heat regardless of any win condition or passes. For a
+            // practice round created with no win condition (the inert `BestLap`, which never ends a
+            // heat) this is its only automatic end. Logged like the other autos.
             if let Some(limit) = time_limit {
                 if running_since.elapsed() >= limit {
                     if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
@@ -2603,40 +2515,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_practice_laps_are_in_memory_not_logged_and_drive_live_state() {
-        // An open-practice heat's passes go to the in-memory per-channel accumulator, NOT the log:
-        // the log carries the heat's HeatScheduled + start/stop and ZERO Pass events, while the live
-        // state shows per-channel laps with no pilot bound; the accumulator clears on stop.
+    async fn open_practice_laps_are_logged_like_every_other_format_and_drive_live_state() {
+        // D5, reversed (#398): an open-practice heat's passes are appended to the **durable log**
+        // exactly like any other format's — stamped with the heat — and the ordinary log fold is
+        // what shows the per-channel laps. There is no accumulator and no overlay.
         let laps = 3u32;
         let registry = fast_registry(laps, 1);
         let round = add_open_practice_round(&registry, vec![0, 1]);
         let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = start_open_practice_heat(&state, &round, &[0, 1]);
-        let op = state.open_practice();
 
-        // Wait until both channels have accumulated their laps in memory (holeshot + `laps`).
+        // Wait until the LOG-derived live state shows both channels' laps (holeshot + `laps`).
+        let target = heat.clone();
         timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(ls) = op.live_state() {
-                    if ls.progress.len() == 2
-                        && ls.progress.iter().all(|p| p.laps_completed >= laps)
-                    {
-                        return;
-                    }
+                let ls = gridfpv_server::live_state::live_state(&read_all_events(&state));
+                if ls.current_heat.as_ref() == Some(&target)
+                    && ls.progress.len() == 2
+                    && ls.progress.iter().all(|p| p.laps_completed >= laps)
+                {
+                    return;
                 }
                 sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("the open-practice accumulator should fill from the sim");
+        .expect("the log fold should show the practice laps");
 
-        // (a) The LOG has the heat's HeatScheduled + start/stop, but ZERO Pass events.
+        // (a) The passes really are on the durable log, tagged with the practice heat.
         let events = read_all_events(&state);
-        assert_eq!(
-            count_passes(&events),
-            0,
-            "an open-practice heat appends NO Pass events to the log"
+        assert!(
+            count_passes(&events) > 0,
+            "an open-practice heat appends its Pass events to the log like any other heat"
+        );
+        assert!(
+            events.iter().all(|e| match e {
+                Event::Pass(p) => p.heat.as_ref() == Some(&heat),
+                _ => true,
+            }),
+            "every practice pass is stamped with the heat it was flown in"
         );
         assert!(
             events
@@ -2644,25 +2562,17 @@ mod tests {
                 .any(|e| matches!(e, Event::HeatScheduled { round: Some(r), .. } if *r == round)),
             "the heat's HeatScheduled (the session) is logged"
         );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                Event::HeatStateChanged {
-                    transition: HeatTransition::Running,
-                    ..
-                }
-            )),
-            "the session start is logged"
-        );
 
-        // (b) The live state shows per-channel laps, each channel unbound (pilot: None).
-        let ls = op.live_state().expect("an active open-practice live state");
+        // (b) The live state shows per-channel laps, each channel unbound (pilot: None) — practice
+        // seats need no pilot binding for their laps to be logged and folded.
+        let ls = gridfpv_server::live_state::live_state(&events);
         assert_eq!(ls.progress.len(), 2);
         assert!(ls.progress.iter().all(|p| p.pilot.is_none()));
         assert!(ls.progress.iter().all(|p| p.laps_completed >= laps));
         assert_eq!(ls.current_heat, Some(heat.clone()));
 
-        // (c) Clear on stop: a terminal transition drops the accumulator.
+        // (c) A reset drops the run's laps through the SAME rule every format uses — the heat window
+        // starts past its latest `Aborted`/`Restarted`/`Discarded` — not through a special clear.
         state
             .append(
                 Event::HeatStateChanged {
@@ -2672,19 +2582,13 @@ mod tests {
                 None,
             )
             .unwrap();
-        timeout(Duration::from_secs(5), async {
-            loop {
-                if op.live_state().is_none() {
-                    return;
-                }
-                sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the accumulator should clear on the terminal transition");
-
-        // Still no Pass events ever reached the log.
-        assert_eq!(count_passes(&read_all_events(&state)), 0);
+        let after_reset = gridfpv_server::live_state::live_state(&read_all_events(&state));
+        assert!(
+            after_reset.progress.iter().all(|p| p.laps_completed == 0),
+            "an Abort resets the practice lap counts, exactly as it does for a qualifying heat"
+        );
+        // The passes themselves stay on the log — a reset windows them out, it does not erase them.
+        assert!(count_passes(&read_all_events(&state)) > 0);
         bridge.abort();
     }
 
@@ -2692,9 +2596,9 @@ mod tests {
     async fn open_practice_time_limit_auto_ends_the_running_heat() {
         // Open-practice refinement: an open-practice round with **no win condition** but a
         // `time_limit_secs` auto-ends its running heat (Running → Unofficial / a `Finished`
-        // transition) once the elapsed running time reaches the limit — independent of any win
-        // condition, and even though an open-practice heat logs NO passes (so the win-condition path
-        // never fires). The completion driver's time-limit branch is the only end condition here.
+        // transition) once the elapsed running time reaches the limit. Its passes ARE logged
+        // (D5, reversed) — the win-condition path stays silent because the stored inert
+        // `default_win_condition` (`BestLap`) has no end criterion, not because the log is empty.
         let registry = fast_registry(3, 1);
         // A 1s practice duration (the minimum the seconds field allows): short enough for a test,
         // long enough that we can assert it does NOT fire immediately.
@@ -2742,8 +2646,9 @@ mod tests {
             finished, 1,
             "the time limit auto-appends exactly one Finished (Running → Unofficial)"
         );
-        // No passes were ever logged for the open-practice heat (the time limit, not scoring, ended it).
-        assert_eq!(count_passes(&events), 0);
+        // The practice heat's passes ARE on the log — the time limit, not an empty log, is what
+        // ended it (the inert `BestLap` win condition never fires).
+        assert!(count_passes(&events) > 0);
         bridge.abort();
     }
 

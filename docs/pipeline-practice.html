@@ -76,23 +76,27 @@
       </p>
     </div>
 
-    <h3>Hot-lap board — per channel, in-memory</h3>
+    <h3>Hot-lap board — per channel, logged like any other heat</h3>
     <ul>
       <li>Live control renders a <strong>per-channel practice board</strong> in place of the usual
         pilot panels: one row per active channel showing the <strong>node seat</strong>, its resolved
         channel label, <strong>laps</strong>, <strong>last lap</strong>, and <strong>best lap</strong>
         (best tracked client-side across the run).</li>
-      <li>Practice laps are <strong>held in memory, not appended to the log</strong> — they are cleared
-        when the heat changes (a <em>&ldquo;New run · clear board&rdquo;</em> action mints a fresh heat
-        and resets the board). Practice never feeds seeding; the board is feedback, not a result.</li>
+      <li>Practice laps are <strong>appended to the durable log like every other format's</strong>
+        (<a href="decisions.html#d5">D5</a>, reversed 2026-08-24) — they survive a reload, are
+        marshalable, and fold through the same projections. The board clears when the heat changes
+        (a <em>&ldquo;New run · clear board&rdquo;</em> action mints a fresh heat and resets the
+        board). What practice does <em>not</em> do is score: it never reaches results, standings,
+        rankings or seeding. The board is feedback, not a result.</li>
     </ul>
 
     <h3>Warm-up &amp; the heat loop</h3>
     <ul>
       <li>Shake out gear; confirm the right seat and frequency before it counts.</li>
-      <li>The open-practice heat still runs the shared heat lifecycle
-        (<code>schedule → stage → arm → race → land</code>), but it scores nothing and persists
-        nothing (see the <a href="event-pipeline.html">event pipeline</a> overview).</li>
+      <li>The open-practice heat runs the shared heat lifecycle
+        (<code>schedule → stage → arm → race → land</code>) and persists its laps like any other
+        heat; the one difference is that it scores nothing (see the
+        <a href="event-pipeline.html">event pipeline</a> overview).</li>
     </ul>
 
     <h2>Sim vs IRL</h2>
@@ -115,9 +119,9 @@
       <dt>Open-practice heat (auto-created)</dt>
       <dd>one heat whose competitor refs are the active channels (<code>node-i</code>); carries no
       channel assignment (the channels <em>are</em> the seats) and is not scored.</dd>
-      <dt>Per-channel practice board (in-memory)</dt>
-      <dd>per active channel: laps, last lap, and best lap — held in memory and cleared on heat change;
-      never logged, never linked to seeding.</dd>
+      <dt>Per-channel practice board</dt>
+      <dd>per active channel: laps, last lap, and best lap — folded from the heat's logged passes and
+      cleared on heat change; durable, but never linked to scoring or seeding.</dd>
     </dl>
     <p>Reuses the primary timer's <strong>channels</strong> (its node seats and
     <a href="channel-model.html">available channels</a>) and the <strong>track</strong> from
@@ -129,9 +133,11 @@
         phase with modes.</span> What shipped is the single channel-seated free-fly run; the
         three-mode model (rolling / scheduled / free-fly) and the shared rolling-queue engine were
         <strong>not built</strong> (ZippyQ rolling fills + PWA self-register are post-v0.4).</li>
-      <li><span class="resolved">Resolved — practice-lap persistence: in-memory, discardable.</span>
-        Open-practice laps live in memory and are cleared on heat change; they are not appended to the
-        log and never seed qualifying.</li>
+      <li><span class="resolved">Resolved — practice-lap persistence: durable, like every other
+        format.</span> Open-practice passes are appended to the event log and survive a restart
+        (<a href="decisions.html#d5">D5</a>, reversed 2026-08-24 — the earlier "in-memory,
+        discardable" answer rested on a log-bloat premise that measurement disproved). They still
+        never score and never seed qualifying.</li>
       <li><span class="resolved">Resolved — hot-lap board scope: per channel.</span> The board is keyed
         by the active channel / node seat, not by pilot or class (there is no roster in open practice).</li>
       <li><span class="q">Presence feedback.</span> Does practice presence feed Setup's

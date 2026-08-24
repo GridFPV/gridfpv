@@ -31,8 +31,8 @@
         engines that derive them (<a href="race-engine.html">Race Engine</a>,
         <a href="cloud.html">Cloud &amp; Season</a>) — nor the timing vocabulary
         (<a href="timer-adapters.html">Timer Adapters</a>). The live race-state projection, its
-        server-time race clock, and the open-practice overlay get their own deep-dive in
-        <a href="live-state-clock.html">Live State &amp; the Race Clock</a>. It defers the cross-event registry
+        server-time race clock get their own deep-dive in <a href="live-state-clock.html">Live
+        State &amp; the Race Clock</a>. It defers the cross-event registry
         and account model to <a href="cloud.html">Cloud &amp; Season</a>, and the overlay
         catalogue to <a href="streaming.html">Streaming</a>. Trust boundaries are fixed in
         <a href="architecture.html">Architecture</a> §9; the wire mechanics are decided here.
@@ -66,8 +66,8 @@
       <a href="race-engine.html">Race Engine</a> §2), the active pilots and their live lap progress,
       the running order, the on-deck heat, and the <strong>server-authoritative race clock</strong>
       (<code>race_started_at</code> / <code>race_ended_at</code>). The latency-sensitive core every
-      overlay and spectator watches. Its full fold, the clock model, and the open-practice overlay
-      are the subject of <a href="live-state-clock.html">Live State &amp; the Race Clock</a>.</dd>
+      overlay and spectator watches. Its full fold and the clock model are the subject of
+      <a href="live-state-clock.html">Live State &amp; the Race Clock</a>.</dd>
       <dt>Lap lists</dt>
       <dd>Per-pilot, per-heat laps and splits, already folding marshaling adjudications (void,
       insert, adjust). What the engine derives, not what the timer reported.</dd>

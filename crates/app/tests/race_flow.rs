@@ -1329,15 +1329,13 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         "the time limit auto-ends the practice exactly once"
     );
 
-    // (d) Live-state desync fix — the **served** live state's phase/clock are the REAL log's at every
-    // step, with the per-channel laps spliced on top (laps-only overlay). The console renders phase →
-    // buttons and the clock from this served state, so it must follow the log exactly — never a stale
-    // synthetic phase. We fetch the served heat snapshot (the same merge the `/stream` fold applies).
+    // (d) The **served** live state is a plain fold of the log at every step — practice is an
+    // ordinary format (D5, reversed): phase, clock and laps all come from logged facts, so the
+    // console's phase → buttons and clock follow the log exactly.
     //
-    // The time limit has driven the LOG to `Unofficial` (asserted above). The served live state must
-    // therefore read `Unofficial` (so the console clock freezes at the duration — no synthetic-start
-    // bump), while the non-logged per-channel laps stay visible (the accumulator holds them through
-    // `Unofficial`; only a true terminal / abort / restart clears them).
+    // The time limit has driven the LOG to `Unofficial` (asserted above), so the served live state
+    // reads `Unofficial` (the console clock freezes at the duration) with the per-channel rows
+    // still visible.
     let served_live = |heat: &HeatId| {
         let app = app.clone();
         let event = event.clone();
@@ -1379,10 +1377,11 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
     );
 
     // (e) Restart → Scheduled: the RD restarts the closed practice. The engine resets the heat to
-    // `Scheduled` (a full reset, like Abort; the RD re-Stages); the bridge clears the accumulator
-    // (wake-on-clear). The served live state must then read **`Scheduled`** with the laps cleared —
-    // never a stale `Unofficial` (the bug: the console kept rendering `Unofficial`/Final buttons and
-    // `Restart` then errored "illegal … in state Staged").
+    // `Scheduled` (a full reset, like Abort; the RD re-Stages), and the heat window starts past that
+    // reset — the same rule that drops an aborted qualifying run's laps. The served live state must
+    // then read **`Scheduled`** with the laps cleared — never a stale `Unofficial` (the bug: the
+    // console kept rendering `Unofficial`/Final buttons and `Restart` then errored "illegal … in
+    // state Staged").
     control_ok(
         &app,
         &event,
@@ -1397,17 +1396,6 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         }
     })
     .await;
-
-    // The accumulator clears one bridge poll after it observes the restart; wait for it to settle.
-    let practice_overlay = registry.resolve(&event).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while practice_overlay.open_practice().is_active(&heat) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the open-practice accumulator never cleared after Restart"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
 
     let scheduled = served_live(&heat).await;
     assert_eq!(
@@ -1494,6 +1482,278 @@ async fn two_open_practice_rounds_in_one_event_get_distinct_heats_e2e() {
     );
     assert_eq!(heat_a.0, format!("{}-heat", round_a.id.0));
     assert_eq!(heat_b.0, format!("{}-heat", round_b.id.0));
+}
+
+/// **#398 (D5, reversed) — practice is an ordinary format that is simply never scored.**
+///
+/// Two halves, one run:
+///
+/// 1. **Logged and durable.** An open-practice heat's laps are appended to the event log as plain
+///    `Pass` events stamped with the heat, and they are still there after the Director restarts
+///    over the same data dir (a real SQLite reload, not a re-fold of memory).
+/// 2. **Never scored.** With the practice heat *finalized* — the state that makes every other
+///    round's heat count — the round's ranking and standings are empty, the class standings are
+///    empty, and the heat's `result` projection places nobody. Only `crate::open_practice`'s
+///    exclusion stands between the logged laps and the scoreboard, so this is what pins it.
+#[tokio::test]
+async fn open_practice_laps_are_logged_and_durable_but_never_scored_e2e() {
+    let dir = std::env::temp_dir().join(format!(
+        "gridfpv-practice-durable-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let registry = EventRegistry::new(Some(dir.clone())).unwrap();
+    registry
+        .timers()
+        .update(
+            &TimerId(MOCK_TIMER_ID.to_string()),
+            &UpdateTimerRequest {
+                name: None,
+                kind: Some(TimerKind::Mock { laps: 3, lap_ms: 1 }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let token = registry.tokens().issue_rd_token();
+    let _bridge = spawn_registry_bridge(
+        registry.clone(),
+        SourceConfig::Sim(SimSource::new(3, Duration::from_millis(1))),
+        AdapterId(SIM_ADAPTER.to_string()),
+    );
+    std::mem::forget(_bridge);
+    let app = build_app(registry.clone(), &no_assets());
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/events",
+        Some(&token),
+        Some(serde_json::json!({ "name": "Durable Practice" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create event: {body}");
+    let event_meta: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let event = EventId(event_meta["id"].as_str().unwrap().to_string());
+    assert!(
+        event_meta["persistent"].as_bool().unwrap_or(false),
+        "the event must have a durable SQLite log for the reload half of this test"
+    );
+
+    // A class the event selects, so the class-standings surface has something to answer for.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/classes",
+        Some(&token),
+        Some(serde_json::json!({ "name": "Open" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create class: {body}");
+    let created_class: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let class = ClassId(created_class["id"].as_str().unwrap().to_string());
+    control_put(
+        &app,
+        &format!("/events/{}/classes", event.0),
+        &token,
+        serde_json::json!({ "ids": [class.0] }),
+    )
+    .await;
+
+    // An open-practice round over two channels with a 1s duration, so the runtime closes it.
+    let round: RoundDef = add_round(
+        &app,
+        &event,
+        &token,
+        NewRoundReq {
+            label: "Open Practice".into(),
+            classes: vec![],
+            format: "open_practice".into(),
+            params: BTreeMap::new(),
+            win_condition: None,
+            time_limit_secs: Some(1),
+            seeding: SeedingRule::AllChannels {
+                channels: vec![0, 1],
+            },
+            channel_mode: None,
+            staging_timer_secs: None,
+            start_procedure: Some(StartProcedure::RandomizedDelay {
+                min_delay_ms: 0,
+                max_delay_ms: 1,
+                tone: None,
+            }),
+            grace_window: None,
+            protest_window: None,
+            min_lap_secs: None,
+        },
+    )
+    .await;
+    let state = registry.resolve(&event).unwrap();
+    let (heat, _class, _lineup) =
+        round_heat(&read_log(&state), &round.id.0).expect("the auto-created open-practice heat");
+
+    control_put(
+        &app,
+        "/active-event",
+        &token,
+        serde_json::json!({ "id": event.0 }),
+    )
+    .await;
+    control_ok(&app, &event, &token, &Command::Stage { heat: heat.clone() }).await;
+    control_ok(&app, &event, &token, &Command::Start { heat: heat.clone() }).await;
+
+    // (1) The practice passes land on the DURABLE log, stamped with the practice heat.
+    wait_until(&state, Duration::from_secs(6), |events| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Pass(p) if p.gate.is_lap_gate()))
+            .count()
+            >= 4
+    })
+    .await;
+    let logged_passes = |events: &[Event]| {
+        let heat = heat.clone();
+        events
+            .iter()
+            .filter(move |e| {
+                matches!(e, Event::Pass(p)
+                    if p.gate.is_lap_gate() && p.heat.as_ref() == Some(&heat))
+            })
+            .count()
+    };
+    assert!(
+        logged_passes(&read_log(&state)) > 0,
+        "an open-practice heat appends its laps to the durable log, tagged with the heat"
+    );
+
+    // Close and finalize the practice — the state that makes every other format's heat count.
+    let target = heat.clone();
+    wait_until(&state, Duration::from_secs(6), move |events| {
+        heat_state_of(events, &target) == Some(gridfpv_engine::heat::HeatState::Unofficial)
+    })
+    .await;
+    control_ok(
+        &app,
+        &event,
+        &token,
+        &Command::Finalize { heat: heat.clone() },
+    )
+    .await;
+    let target = heat.clone();
+    wait_until(&state, Duration::from_secs(3), move |events| {
+        heat_state_of(events, &target) == Some(gridfpv_engine::heat::HeatState::Final)
+    })
+    .await;
+
+    // (2) Finalized and logged — yet nothing reaches results, standings or rankings.
+    let (status, body) = call(
+        &app,
+        "GET",
+        &format!("/events/{}/rounds/{}/ranking", event.0, round.id.0),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "round ranking: {body}");
+    let ranking: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        ranking.as_array().map(Vec::len),
+        Some(0),
+        "a practice round ranks nobody, even with a finalized heat full of logged laps"
+    );
+
+    let (status, body) = call(
+        &app,
+        "GET",
+        &format!("/events/{}/rounds/{}/standings", event.0, round.id.0),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "round standings: {body}");
+    let standings: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        standings.as_array().map(Vec::len),
+        Some(0),
+        "a practice round has no standings rows"
+    );
+
+    let (status, body) = call(
+        &app,
+        "GET",
+        &format!("/events/{}/classes/{}/standings", event.0, class.0),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "class standings: {body}");
+    let class_standings: gridfpv_server::round_engine::ClassStandings =
+        serde_json::from_str(&body).unwrap();
+    assert!(
+        class_standings.standings.is_empty(),
+        "a practice round contributes no points, laps or best lap to a class"
+    );
+
+    let (status, body) = call(
+        &app,
+        "GET",
+        &format!(
+            "/events/{}/snapshot/heat/{}?projection=result",
+            event.0, heat.0
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "heat result: {body}");
+    let snap: gridfpv_server::snapshot::Snapshot = serde_json::from_str(&body).unwrap();
+    match snap.body {
+        gridfpv_server::snapshot::ProjectionBody::HeatResult(result) => assert!(
+            result.places.is_empty(),
+            "a practice heat's result projection places nobody"
+        ),
+        other => panic!("expected a HeatResult body, got {other:?}"),
+    }
+
+    // The laps are nonetheless still readable as laps — excluded from *scoring*, not erased.
+    let (status, body) = call(
+        &app,
+        "GET",
+        &format!(
+            "/events/{}/snapshot/heat/{}?projection=laps",
+            event.0, heat.0
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "heat laps: {body}");
+    let snap: gridfpv_server::snapshot::Snapshot = serde_json::from_str(&body).unwrap();
+    match snap.body {
+        gridfpv_server::snapshot::ProjectionBody::LapList(laps) => assert!(
+            !laps.competitors.is_empty(),
+            "the practice laps are still served as a lap list"
+        ),
+        other => panic!("expected a LapList body, got {other:?}"),
+    }
+
+    // (3) Reload: a fresh Director over the SAME data dir still has every practice pass.
+    let before_reload = logged_passes(&read_log(&state));
+    assert!(before_reload > 0);
+    drop(state);
+    let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+    let reloaded_state = reopened
+        .resolve(&event)
+        .expect("the event is restored from its SQLite log");
+    assert_eq!(
+        logged_passes(&read_log(&reloaded_state)),
+        before_reload,
+        "a practice heat's laps survive a Director restart — they are durable facts, not memory"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// `POST …/rounds` asserted ok, returning the created [`RoundDef`].

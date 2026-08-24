@@ -648,8 +648,10 @@ pub enum SeedingRule {
     /// Seed from a set of active **channels** rather than pilots — the **open-practice** seeding
     /// (open-practice format). The field builder lays each node index out as a `node-{i}`
     /// [`CompetitorRef`](gridfpv_events::CompetitorRef) (the timer-seat handle the timer emits
-    /// passes for), and the one open heat runs over those channels with per-channel laps tracked
-    /// **live in memory, not logged**. An open-practice round is `format: "open_practice"` +
+    /// passes for), and the one open heat runs over those channels. Those seats are **unbound** (no
+    /// pilot registration) — which is fine: their laps are appended to the durable log like every
+    /// other format's (D5, reversed — see [`crate::open_practice`]); practice's only difference is
+    /// that it is never scored. An open-practice round is `format: "open_practice"` +
     /// `seeding: AllChannels { channels }`; its [`classes`](RoundDef::classes) may be empty (it is
     /// not a class round). Additive variant — pre-existing rounds (`FromRoster`/`FromRanking`) read
     /// back unchanged.
