@@ -68,3 +68,63 @@ export function isBuiltInMock(timer: Timer): boolean {
 export function isTimerConnected(timer: Timer): boolean {
   return timer.status === 'Connected' || timer.status === 'Ready';
 }
+
+/**
+ * Whether this timer has a connection the RD can **manually hold** (issue #383).
+ *
+ * Only a **RotorHazard** timer does: it is the one that dials something over the network, and so
+ * the only one where "is this URL right? is it reachable? does it have the plugin?" is a question
+ * worth asking. The built-in Mock needs nothing external (the Director answers its `connect` with
+ * a **400**), so the control is not offered for it at all rather than offered and then rejected. An
+ * unknown (newer-Director) kind is likewise left alone — this console can't reason about it.
+ */
+export function isConnectable(timer: Timer): boolean {
+  return kindTag(timer.kind) === 'Rotorhazard';
+}
+
+/** Whether the RD is currently **holding** a manual connection to this timer (#383). */
+export function isManuallyHeld(timer: Timer): boolean {
+  return isConnectable(timer) && timer.manual_connect === true;
+}
+
+/**
+ * The **label** for the connect control, driven by the server-authoritative `manual_connect` hold
+ * rather than by `status` (issue #383).
+ *
+ * `status` is the *result* of a hold and moves on its own (`Connecting` → `Connected` →
+ * `Disconnected` on a drop, and the dialer retries behind that). Keying the button off it would
+ * make the control flicker between "Connect" and "Disconnect" while the Director retries a bad
+ * URL — exactly the moment the RD needs a stable thing to press. The hold is the RD's *intent* and
+ * changes only when they press the button, so that is what the button reflects.
+ */
+export function connectActionLabel(timer: Timer): 'Connect' | 'Disconnect' {
+  return isManuallyHeld(timer) ? 'Disconnect' : 'Connect';
+}
+
+/**
+ * A short plain-language reading of a **manually held** RotorHazard timer's status (#383) — the
+ * one-liner under the row while the RD is testing a timer at a venue, phrased as the question they
+ * are actually asking ("is it reachable?") rather than as the enum.
+ *
+ * `undefined` when there is nothing to add (no hold, or a timer that can't be held): the row's
+ * existing `StatusPill` and plugin badge already carry the state, and this only adds the sentence
+ * that turns a status into an instruction.
+ */
+export function connectionHint(timer: Timer): string | undefined {
+  if (!isManuallyHeld(timer)) return undefined;
+  switch (timer.status) {
+    // `Configured` is the resting status a just-held timer still reads until the reconciler's next
+    // tick picks it up — to the RD that is indistinguishable from "connecting", so say so.
+    case 'Configured':
+    case 'Connecting':
+      return 'Connecting…';
+    case 'Connected':
+      return 'Reachable — this timer is answering.';
+    case 'Error':
+      return 'Could not reach this timer. Check the URL, and that RotorHazard is running.';
+    case 'Disconnected':
+      return 'The connection dropped. Retrying…';
+    default:
+      return undefined;
+  }
+}

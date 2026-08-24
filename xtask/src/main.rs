@@ -18,11 +18,25 @@ fn run(program: &str, args: &[&str]) -> bool {
 
 /// Like [`run`], but with extra environment variables set for the child process.
 fn run_env(program: &str, args: &[&str], env: &[(&str, &Path)]) -> bool {
+    let vars: Vec<(&str, Option<String>)> = env
+        .iter()
+        .map(|(k, v)| (*k, Some(v.display().to_string())))
+        .collect();
+    run_vars(program, args, &vars)
+}
+
+/// Like [`run_env`], but each variable may be `None` to **unset** it for the child.
+/// Unsetting matters for the live matrix: "no plugin" means the child `cargo test` must
+/// not see `GRIDFPV_RH_PLUGIN` at all, even if the invoking shell exported it.
+fn run_vars(program: &str, args: &[&str], env: &[(&str, Option<String>)]) -> bool {
     println!("\n\x1b[1m$ {program} {}\x1b[0m", args.join(" "));
     let mut cmd = Command::new(program);
     cmd.args(args);
     for (key, value) in env {
-        cmd.env(key, value);
+        match value {
+            Some(value) => cmd.env(key, value),
+            None => cmd.env_remove(key),
+        };
     }
     match cmd.status() {
         Ok(status) => status.success(),
@@ -130,27 +144,290 @@ fn gen_check() -> bool {
     clean
 }
 
-/// `cargo xtask live` — the local-only integration test class.
+/// A live target: `(package, test binary, is `#[ignore]`d)`.
+type LiveTarget = (&'static str, &'static str, bool);
+
+/// The **full** live suite — every live target we have. Run against the primary
+/// configuration (current-stable RH *with* the plugin).
+const FULL_TARGETS: &[LiveTarget] = &[
+    // No container needed (in-process mock WS server).
+    ("gridfpv-adapters", "velocidrone_ws", false),
+    // Each spins up + tears down its own disposable RotorHazard.
+    ("gridfpv-adapters", "rh_live", true),
+    ("gridfpv-adapters", "rh_signal", true),
+    // The engine's mock-RH e2e tests: each drives a full heat through the shared
+    // harness on its own port (#29 heat loop, #30 scoring, #31 marshaling).
+    ("gridfpv-engine", "heat_live", true),
+    ("gridfpv-engine", "scoring_live", true),
+    ("gridfpv-engine", "marshaling_live", true),
+    // #388 — a seated node the timer never detected must still be marshalable.
+    ("gridfpv-engine", "zero_lap_marshaling_live", true),
+    ("gridfpv-engine", "format_live", true),
+    ("gridfpv-engine", "timed_qual_live", true),
+    ("gridfpv-engine", "zippyq_live", true),
+    ("gridfpv-engine", "multiclass_live", true),
+    // The protocol server's mock-RH e2e: full event → server log → protocol client (#47).
+    ("gridfpv-server", "full_event_live", true),
+    // The Director's RH-connect e2e (#65, #73): the per-event bridge connects dockerized RH,
+    // drives status to Connected, and feeds real passes into the event log.
+    ("gridfpv-app", "rh_connect_live", true),
+    // #386 — restarting RH from Grid must really re-exec it, and must be refused mid-heat.
+    ("gridfpv-app", "rh_restart_live", true),
+];
+
+/// The **targeted** subset the secondary matrix legs run: the lap-ingestion-critical
+/// targets. Each drives a real dockerized RotorHazard through a real race and asserts on
+/// the passes that came back out — so "RH recorded laps but Grid ingested none" (#389)
+/// fails them, in whichever version × plugin combination it happens in:
+///
+/// - `heat_live` — adapter → engine: a heat is only `Final` with crossings collected
+///   while it was live; the harness asserts at least one `Pass` came through.
+/// - `scoring_live` — the ingested passes must fold into laps and a ranked result, so a
+///   *partial* ingest (some laps dropped) fails too, not just a total blackout.
+/// - `gridfpv-server`'s `full_event_live` — the whole spine: RH → adapter → engine →
+///   event log → protocol client, over a full multi-heat event.
+///
+/// Running the full suite four times would cost ~4× the wall clock for near-duplicate
+/// coverage; these three are what actually discriminate between the plugin's pass path
+/// and stock RH's `current_laps` snapshot path.
+const INGEST_TARGETS: &[LiveTarget] = &[
+    ("gridfpv-engine", "heat_live", true),
+    ("gridfpv-engine", "scoring_live", true),
+    ("gridfpv-server", "full_event_live", true),
+];
+
+/// How much of the live suite a matrix leg runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Coverage {
+    /// Every target in [`FULL_TARGETS`].
+    Full,
+    /// The lap-ingestion-critical [`INGEST_TARGETS`].
+    Targeted,
+}
+
+impl Coverage {
+    fn targets(self) -> &'static [LiveTarget] {
+        match self {
+            Coverage::Full => FULL_TARGETS,
+            Coverage::Targeted => INGEST_TARGETS,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Coverage::Full => "full",
+            Coverage::Targeted => "targeted",
+        }
+    }
+}
+
+/// One leg of the RotorHazard version × plugin matrix.
+struct LiveConfig {
+    /// RotorHazard version the containers run (image `gridfpv-rotorhazard:<rh>`).
+    rh: String,
+    /// Whether the GridFPV plugin is mounted into the container.
+    plugin: bool,
+    coverage: Coverage,
+}
+
+impl LiveConfig {
+    fn label(&self) -> String {
+        format!(
+            "RH {} {} plugin ({})",
+            self.rh,
+            if self.plugin { "+" } else { "—" },
+            self.coverage.label()
+        )
+    }
+
+    /// The command that reproduces exactly this leg on its own.
+    fn command(&self) -> String {
+        format!(
+            "cargo xtask live --rh {}{} --{}",
+            self.rh,
+            if self.plugin { "" } else { " --no-plugin" },
+            self.coverage.label()
+        )
+    }
+}
+
+/// The default matrix `cargo xtask live` runs with no arguments: **targeted × 4, full on
+/// one**. The current stable with the plugin keeps the full suite (today's behaviour,
+/// unchanged); the other three legs run the ingestion-critical subset.
+///
+/// Why these four: before #389 the suite only ever ran one configuration — current-stable
+/// RH *with* the plugin — so the stock `current_laps` path had **no** live coverage at all
+/// and the two ingest paths were never contrasted. A plugin-only lap-ingestion regression
+/// therefore reached the field green. The floor (RHAPI 1.3 / RH v4.3.0+, D16) is what the
+/// field timer runs, so it is covered on both paths too.
+fn default_matrix() -> Vec<LiveConfig> {
+    let stable = gridfpv_testkit::DEFAULT_RH_VERSION.to_string();
+    let floor = gridfpv_testkit::FLOOR_RH_VERSION.to_string();
+    vec![
+        LiveConfig {
+            rh: stable.clone(),
+            plugin: true,
+            coverage: Coverage::Full,
+        },
+        LiveConfig {
+            rh: stable,
+            plugin: false,
+            coverage: Coverage::Targeted,
+        },
+        LiveConfig {
+            rh: floor.clone(),
+            plugin: true,
+            coverage: Coverage::Targeted,
+        },
+        LiveConfig {
+            rh: floor,
+            plugin: false,
+            coverage: Coverage::Targeted,
+        },
+    ]
+}
+
+/// `cargo xtask live` — the local-only integration test class, run as a **RotorHazard
+/// version × plugin matrix**.
 ///
 /// Container-dependent tests don't belong in the shared CI pipeline (flaky,
 /// resource-limited). These run the `live` feature: the WebSocket mock-server test
 /// (no container) and the dockerized-RotorHazard tests (`rh_live` via `simulate_lap`
 /// and `rh_signal` via emulated `mock_data` RSSI streams). Each container test spins
 /// up and tears down its own disposable RotorHazard, so no external state is needed —
-/// just Docker. `--include-ignored` runs the `#[ignore]`d container tests too.
-fn live() -> bool {
-    // Boot every live RotorHazard against the GridFPV plugin (S0+): the testkit's
-    // RhContainer mounts the dir named by `GRIDFPV_RH_PLUGIN` into the container's
-    // user `plugins/gridfpv`. The plugin is additive — at S0 it's a load-only
-    // placeholder, so the socket-path live tests behave identically — and this lets
-    // later slices iterate on the plugin in-container under the live suite. Set on the
-    // child `cargo test` process (env, not a process-global set_var, which is unsafe
-    // under this crate's `#![forbid(unsafe_code)]`).
-    let plugin_dir = workspace_root().join("plugins/gridfpv");
+/// just Docker. `--ignored` runs the `#[ignore]`d container tests too.
+///
+/// Bare `cargo xtask live` runs the whole [`default_matrix`] — still one command. Flags
+/// pin a single configuration instead (e.g. `cargo xtask live --rh 4.3.0 --no-plugin`),
+/// which is how you reproduce one leg while debugging:
+///
+/// - `--rh <version>` — RotorHazard version (repeatable); default the current stable.
+/// - `--plugin` / `--no-plugin` — mount the GridFPV plugin, or run stock RH; default on.
+/// - `--full` / `--targeted` — override how much of the suite that leg runs; the default
+///   matches what the matrix gives that configuration.
+fn live(args: &[String]) -> bool {
+    let mut versions: Vec<String> = Vec::new();
+    let mut plugin: Option<bool> = None;
+    let mut coverage: Option<Coverage> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--rh" => match iter.next() {
+                Some(v) => versions.push(v.trim_start_matches('v').to_string()),
+                None => {
+                    eprintln!("--rh needs a version, e.g. --rh 4.3.0");
+                    return false;
+                }
+            },
+            "--plugin" => plugin = Some(true),
+            "--no-plugin" => plugin = Some(false),
+            "--full" => coverage = Some(Coverage::Full),
+            "--targeted" | "--subset" => coverage = Some(Coverage::Targeted),
+            other => {
+                eprintln!("unknown `live` flag: {other}");
+                eprintln!(
+                    "usage: cargo xtask live [--rh <version>]… [--plugin|--no-plugin] [--full|--targeted]"
+                );
+                return false;
+            }
+        }
+    }
 
-    // Run each target sequentially so at most one RotorHazard container exists at a
-    // time (cargo runs separate test binaries in parallel otherwise).
-    let target = |package: &str, name: &str, ignored: bool| {
+    // No selector at all = the full matrix (the one-command default).
+    let configs: Vec<LiveConfig> = if versions.is_empty() && plugin.is_none() && coverage.is_none()
+    {
+        default_matrix()
+    } else {
+        if versions.is_empty() {
+            versions.push(gridfpv_testkit::DEFAULT_RH_VERSION.to_string());
+        }
+        let plugin = plugin.unwrap_or(true);
+        versions
+            .into_iter()
+            .map(|rh| {
+                // Default coverage mirrors the matrix: the primary config gets the full
+                // suite, every other configuration the ingestion-critical subset.
+                let default = if plugin && rh == gridfpv_testkit::DEFAULT_RH_VERSION {
+                    Coverage::Full
+                } else {
+                    Coverage::Targeted
+                };
+                LiveConfig {
+                    rh,
+                    plugin,
+                    coverage: coverage.unwrap_or(default),
+                }
+            })
+            .collect()
+    };
+
+    // Build every image the run needs up front, so a first-run image build (a few minutes:
+    // it clones RH and pip-installs) fails fast and doesn't land in the middle of a leg.
+    let mut built: Vec<&str> = Vec::new();
+    for config in &configs {
+        if !built.contains(&config.rh.as_str()) {
+            gridfpv_testkit::ensure_rh_image(&config.rh);
+            built.push(&config.rh);
+        }
+    }
+
+    let started = std::time::Instant::now();
+    let mut results: Vec<(String, bool, std::time::Duration)> = Vec::new();
+    for config in &configs {
+        println!(
+            "\n\x1b[1m═══ live matrix: {} ═══\x1b[0m\n    {}",
+            config.label(),
+            config.command()
+        );
+        let leg = std::time::Instant::now();
+        results.push((config.label(), run_config(config), leg.elapsed()));
+    }
+
+    println!("\n\x1b[1m═══ live matrix summary ═══\x1b[0m");
+    for (label, ok, elapsed) in &results {
+        println!(
+            "  {} {label} ({:.0}s)",
+            if *ok {
+                "\x1b[32mPASS\x1b[0m"
+            } else {
+                "\x1b[31mFAIL\x1b[0m"
+            },
+            elapsed.as_secs_f64()
+        );
+    }
+    println!("  total {:.0}s", started.elapsed().as_secs_f64());
+    results.iter().all(|(_, ok, _)| *ok)
+}
+
+/// Run one matrix leg: every target of its coverage, sequentially, against the leg's
+/// RotorHazard version and plugin setting.
+///
+/// The whole configuration reaches the containers through the child `cargo test`'s
+/// environment (env on the child, not a process-global `set_var`, which is unsafe under
+/// this crate's `#![forbid(unsafe_code)]`):
+///
+/// - `GRIDFPV_RH_VERSION` picks the harness image (`gridfpv-rotorhazard:<version>`).
+/// - `GRIDFPV_RH_PLUGIN` names the host plugin dir the testkit's `RhContainer` mounts into
+///   the container's user `plugins/gridfpv`. **Unset** on the no-plugin legs — that is
+///   exactly "stock RH", the `current_laps` snapshot path.
+///
+/// Every target runs even after one fails, so a leg reports its whole picture rather than
+/// stopping at the first red. Targets run one at a time so at most one RotorHazard
+/// container exists at any moment (cargo would otherwise run test binaries in parallel).
+fn run_config(config: &LiveConfig) -> bool {
+    let plugin_dir = config.plugin.then(|| {
+        workspace_root()
+            .join("plugins/gridfpv")
+            .display()
+            .to_string()
+    });
+    let env: Vec<(&str, Option<String>)> = vec![
+        (gridfpv_testkit::RH_VERSION_ENV, Some(config.rh.clone())),
+        (gridfpv_testkit::PLUGIN_ENV, plugin_dir),
+    ];
+
+    let mut ok = true;
+    for (package, name, ignored) in config.coverage.targets() {
         let mut args = vec![
             "test",
             "-p",
@@ -162,56 +439,12 @@ fn live() -> bool {
             "--",
             "--nocapture",
         ];
-        if ignored {
+        if *ignored {
             args.push("--ignored");
         }
-        run_env(
-            "cargo",
-            &args,
-            &[(gridfpv_testkit::PLUGIN_ENV, &plugin_dir)],
-        )
-    };
-    // No container needed (in-process mock WS server).
-    let ws = target("gridfpv-adapters", "velocidrone_ws", false);
-    // Each spins up + tears down its own disposable RotorHazard.
-    let live_rh = target("gridfpv-adapters", "rh_live", true);
-    let signal = target("gridfpv-adapters", "rh_signal", true);
-    // The engine's mock-RH e2e tests: each drives a full heat through the shared
-    // harness on its own port (#29 heat loop, #30 scoring, #31 marshaling).
-    let heat_live = target("gridfpv-engine", "heat_live", true);
-    let scoring_live = target("gridfpv-engine", "scoring_live", true);
-    let marshaling_live = target("gridfpv-engine", "marshaling_live", true);
-    let format_live = target("gridfpv-engine", "format_live", true);
-    let timed_qual_live = target("gridfpv-engine", "timed_qual_live", true);
-    let single_elim_live = target("gridfpv-engine", "single_elim_live", true);
-    let zippyq_live = target("gridfpv-engine", "zippyq_live", true);
-    let multiclass_live = target("gridfpv-engine", "multiclass_live", true);
-    let full_event_live = target("gridfpv-engine", "full_event_live", true);
-    // Additional format generators (#68 double-elim, #69 round-robin, #70 multi-main).
-    let double_elim_live = target("gridfpv-engine", "double_elim_live", true);
-    let round_robin_live = target("gridfpv-engine", "round_robin_live", true);
-    let multi_main_live = target("gridfpv-engine", "multi_main_live", true);
-    // The protocol server's mock-RH e2e: full event → server log → protocol client (#47).
-    let server_e2e = target("gridfpv-server", "full_event_live", true);
-    // The Director's RH-connect e2e (#65, #73): the per-event bridge connects dockerized RH,
-    // drives status to Connected, and feeds real passes into the event log.
-    let rh_connect = target("gridfpv-app", "rh_connect_live", true);
-    ws && live_rh
-        && signal
-        && heat_live
-        && scoring_live
-        && marshaling_live
-        && format_live
-        && timed_qual_live
-        && single_elim_live
-        && zippyq_live
-        && multiclass_live
-        && full_event_live
-        && double_elim_live
-        && round_robin_live
-        && multi_main_live
-        && server_e2e
-        && rh_connect
+        ok &= run_vars("cargo", &args, &env);
+    }
+    ok
 }
 
 /// `cargo xtask version <x.y.z[-pre.N]>` — set the product version in every file that
@@ -300,7 +533,8 @@ fn main() {
         "test" => test(),
         "gen" => generate(),
         "ci" => fmt() && lint() && test() && gen_check(),
-        "live" => live(),
+        // The RotorHazard version × plugin live matrix; bare `live` runs all four legs.
+        "live" => live(&args[1..]),
         // The interactive RotorHazard mock-signal harness (marshaling testing). Needs Docker to
         // `feed`; `dump`/`list` are plain HTTP/std. See `rh_mock.rs`.
         "rh-mock" => rh_mock::run(&args[1..]),

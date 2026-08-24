@@ -23,7 +23,7 @@ id: TimerId,
  */
 name: string, 
 /**
- * The kind + config: a [`TimerKind::Mock`] or a reserved [`TimerKind::Rotorhazard`].
+ * The kind + config: a [`TimerKind::Mock`] or a [`TimerKind::Rotorhazard`].
  */
 kind: TimerKind, 
 /**
@@ -56,4 +56,23 @@ available_channels: Array<number>,
  * `None` on load/reconfigure and driven by the connect-time handshake probe. Additive on the
  * wire (`#[ts(optional)]`): an older console (or a test fixture) omits it.
  */
-plugin?: PluginPresence, };
+plugin?: PluginPresence, 
+/**
+ * Whether the Race Director is **manually holding a connection** to this (RotorHazard) timer,
+ * independent of any event (issue #383).
+ *
+ * A timer only ever connected when the *active event* selected it, so "is this timer even
+ * reachable?" — the question the Timers menu exists to answer — could not be asked without
+ * first creating and activating an event. `POST /timers/{id}/connect` sets this hold and
+ * `POST /timers/{id}/disconnect` clears it; the connection reconciler unions the held timers
+ * with the active event's selection, so a held timer dials and publishes the same
+ * [`TimerStatus`] and [`PluginPresence`] the event-driven path does.
+ *
+ * **Lifetime: explicit.** The hold persists until the RD disconnects — this is a diagnostic
+ * control, and a "test connection" that silently expired would be worse than useless at a
+ * venue. It is deliberately *not* dropped when an active event takes the timer over: the event
+ * connection simply supersedes it, and when the event lets go the manual hold takes the timer
+ * back. Live and **in-memory only**, like [`status`](Timer::status) — it round-trips on the
+ * wire but a restart comes back with no holds. Additive: defaults to `false`.
+ */
+manual_connect: boolean, };

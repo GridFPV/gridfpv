@@ -21,7 +21,8 @@ const MOCK: Timer = {
   status: 'Ready',
   channel_capability: 'Flexible',
   node_count: 8,
-  available_channels: []
+  available_channels: [],
+  manual_connect: false
 };
 const RH: Timer = {
   id: 'rh-1',
@@ -30,7 +31,8 @@ const RH: Timer = {
   status: 'Configured',
   channel_capability: 'Flexible',
   node_count: 8,
-  available_channels: []
+  available_channels: [],
+  manual_connect: false
 };
 
 describe('TimersPage (app-level timer registry)', () => {
@@ -57,7 +59,8 @@ describe('TimersPage (app-level timer registry)', () => {
       status: 'Ready',
       channel_capability: 'Flexible',
       node_count: 8,
-      available_channels: []
+      available_channels: [],
+      manual_connect: false
     };
     let calls = 0;
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));
@@ -130,7 +133,8 @@ describe('TimersPage (app-level timer registry)', () => {
       status: 'Ready',
       channel_capability: 'Flexible',
       node_count: 6,
-      available_channels: [5658, 5800, 5685]
+      available_channels: [5658, 5800, 5685],
+      manual_connect: false
     };
     let calls = 0;
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));
@@ -186,7 +190,8 @@ describe('TimersPage (app-level timer registry)', () => {
       status: 'Configured',
       channel_capability: { Fixed: { channels: [5658, 5695] } },
       node_count: 2,
-      available_channels: [5658]
+      available_channels: [5658],
+      manual_connect: false
     };
     const listTimersImpl = vi.fn(async () => [MOCK, fixed]);
     const updateTimerImpl = vi.fn(async () => fixed);
@@ -238,5 +243,113 @@ describe('TimersPage (app-level timer registry)', () => {
 
     await waitFor(() => expect(deleteTimerImpl).toHaveBeenCalledTimes(1));
     expect(deleteTimerImpl).toHaveBeenCalledWith('http://d.local', 'rh-1', 'tok');
+  });
+});
+
+/**
+ * Manual **Connect / Disconnect** on the Timers screen (issue #383).
+ *
+ * The premise of #383 is that this works with **no active event**. Before it, a timer only ever
+ * dialed when the *active event* selected it, so "is this timer even reachable?" — the question
+ * the Timers screen exists to answer — could not be asked without first creating and activating an
+ * event. `makeTestSession({ noEnter: true })` is therefore load-bearing in every test here: it
+ * leaves the session outside any event, exactly as an RD setting up at a venue would be.
+ */
+describe('Timers screen — manual connect / disconnect (#383, no active event)', () => {
+  /** The RH timer, with the manual hold and status a given test wants. */
+  function rhWith(manual_connect: boolean, status: Timer['status'] = 'Configured'): Timer {
+    return { ...RH, manual_connect, status };
+  }
+
+  it('offers Connect on a RotorHazard row with NO event, and holds the connection', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWith(false)]);
+    const connectTimerImpl = vi.fn(async () => rhWith(true, 'Connecting'));
+    const { session } = makeTestSession({ noEnter: true, listTimersImpl, connectTimerImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Track RH');
+    // No event was ever entered — the session's own timer poll never started.
+    expect(session.timers).toEqual([]);
+
+    const list = screen.getByRole('list', { name: 'Configured timers' });
+    const rhRow = within(list).getAllByRole('listitem')[1];
+    await fireEvent.click(within(rhRow).getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => expect(connectTimerImpl).toHaveBeenCalledTimes(1));
+    expect(connectTimerImpl).toHaveBeenCalledWith('http://d.local', 'rh-1', 'tok');
+    // The server's answer is folded straight back in, so the control flips at once rather than
+    // waiting a reconciler tick — and the row starts reading the hold out loud.
+    await waitFor(() =>
+      expect(within(rhRow).getByRole('button', { name: 'Disconnect' })).toBeInTheDocument()
+    );
+    expect(within(rhRow).getByText('Connecting…')).toBeInTheDocument();
+  });
+
+  it('does NOT offer the control on the built-in Mock — it has nothing to dial', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWith(false)]);
+    const { session } = makeTestSession({ noEnter: true, listTimersImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Mock');
+    const list = screen.getByRole('list', { name: 'Configured timers' });
+    const [mockRow, rhRow] = within(list).getAllByRole('listitem');
+    // The Director answers a Mock's connect with a 400; better to not offer it than to be rejected.
+    expect(within(mockRow).queryByRole('button', { name: 'Connect' })).toBeNull();
+    expect(within(rhRow).getByRole('button', { name: 'Connect' })).toBeInTheDocument();
+  });
+
+  it('releases the hold on Disconnect', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWith(true, 'Connected')]);
+    const disconnectTimerImpl = vi.fn(async () => rhWith(false, 'Disconnected'));
+    const { session } = makeTestSession({ noEnter: true, listTimersImpl, disconnectTimerImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Track RH');
+    const list = screen.getByRole('list', { name: 'Configured timers' });
+    const rhRow = within(list).getAllByRole('listitem')[1];
+    // A standing hold reads "Reachable" and offers the release, not another Connect.
+    expect(within(rhRow).getByText(/Reachable/)).toBeInTheDocument();
+
+    await fireEvent.click(within(rhRow).getByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(disconnectTimerImpl).toHaveBeenCalledTimes(1));
+    expect(disconnectTimerImpl).toHaveBeenCalledWith('http://d.local', 'rh-1', 'tok');
+    await waitFor(() =>
+      expect(within(rhRow).getByRole('button', { name: 'Connect' })).toBeInTheDocument()
+    );
+    // Hold released ⇒ nothing more to narrate; the StatusPill carries it from here.
+    expect(within(rhRow).queryByText(/Reachable/)).toBeNull();
+  });
+
+  it('keeps re-reading the registry while a hold is up, with no event poll running', async () => {
+    // THE regression this guards: the session's timer poll only runs inside an event, so with no
+    // event nothing would refresh `status` — the RD would press Connect and watch a pill that never
+    // moved. The screen must poll for itself while a hold exists.
+    let status: Timer['status'] = 'Connecting';
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWith(true, status)]);
+    const { session } = makeTestSession({ noEnter: true, listTimersImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Track RH');
+    const list = screen.getByRole('list', { name: 'Configured timers' });
+    const rhRow = within(list).getAllByRole('listitem')[1];
+    expect(within(rhRow).getByText('Connecting…')).toBeInTheDocument();
+
+    // The Director's reconciler gets the connection up; only a re-read can show that.
+    status = 'Connected';
+    await waitFor(() => expect(within(rhRow).getByText(/Reachable/)).toBeInTheDocument(), {
+      timeout: 5000
+    });
+    expect(listTimersImpl.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('does not poll when nothing is held — an idle Timers screen stays quiet', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWith(false)]);
+    const { session } = makeTestSession({ noEnter: true, listTimersImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Track RH');
+    const calls = listTimersImpl.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(listTimersImpl.mock.calls.length).toBe(calls);
   });
 });

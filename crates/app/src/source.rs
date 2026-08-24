@@ -479,7 +479,7 @@ pub const REGISTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// [`EventMeta::timers`](gridfpv_server::events::EventMeta::timers) selection live (resolving each
 /// id through the app-level [`TimerRegistry`]) when a heat starts. A selected **Mock** timer runs
 /// the synthetic emission with *that timer's* `laps`/`lap_ms`; a selected **RotorHazard** timer is
-/// a no-op stub (2b / #65 connects it). The built-in Mock's config comes from the env
+/// not driven by the sim bridge — the RH connection reconciler dials it (#65/#73). The built-in Mock's config comes from the env
 /// defaults seeded into the timer registry.
 ///
 /// This spawner seeds a bridge for every event present at startup (Practice + any already-loaded
@@ -554,7 +554,7 @@ pub fn spawn_registry_bridge(
 /// On a `Running` transition the bridge reads the event's current
 /// [`EventMeta::timers`](gridfpv_server::events::EventMeta::timers) selection from `registry`,
 /// resolves each id through `timers`, and builds the [`LapSource`] for it (a Sim timer's
-/// `laps`/`lap_ms`; a RotorHazard timer is skipped as a no-op stub). Exposed (crate-internal) so
+/// `laps`/`lap_ms`; a RotorHazard timer is skipped here — its passes come from the real adapter). Exposed (crate-internal) so
 /// the test harness can run it directly against an in-memory [`AppState`].
 pub(crate) async fn run_bridge(
     state: AppState,
@@ -2289,8 +2289,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_event_selecting_only_rotorhazard_emits_nothing() {
-        // RotorHazard is a reserved no-op stub in this slice (#73): an event whose ONLY selected
-        // timer is RotorHazard must emit no synthetic passes when its heat runs.
+        // The SIM bridge never speaks for a RotorHazard timer: an event whose ONLY selected timer
+        // is RotorHazard must emit no *synthetic* passes when its heat runs — its real passes arrive
+        // through the RH adapter connection instead (#65/#73).
         use gridfpv_server::timers::CreateTimerRequest;
         let registry = EventRegistry::new(None).unwrap();
         let rh = registry

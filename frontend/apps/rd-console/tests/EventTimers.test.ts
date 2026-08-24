@@ -12,7 +12,8 @@ const MOCK: Timer = {
   status: 'Ready',
   channel_capability: 'Flexible',
   node_count: 8,
-  available_channels: []
+  available_channels: [],
+  manual_connect: false
 };
 const RH: Timer = {
   id: 'rh-1',
@@ -21,7 +22,8 @@ const RH: Timer = {
   status: 'Configured',
   channel_capability: 'Flexible',
   node_count: 8,
-  available_channels: []
+  available_channels: [],
+  manual_connect: false
 };
 
 /** A created event selecting only the Mock timer (so its checkbox seeds checked). */
@@ -147,7 +149,8 @@ describe('EventTimers (in-event CRUD + selection)', () => {
       status: 'Ready',
       channel_capability: 'Flexible',
       node_count: 8,
-      available_channels: []
+      available_channels: [],
+      manual_connect: false
     };
     let calls = 0;
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));

@@ -1,7 +1,7 @@
 /**
  * Format identity + friendly-name + per-format field shaping (Rounds form redesign).
  *
- * The engine's `FormatRegistry` keys (`open_practice`, `double_elim`, …) are the wire values stored
+ * The engine's `FormatRegistry` keys (`open_practice`, `head_to_head`, `timed_qual`, …) are the wire values stored
  * on a {@link RoundDef.format}; they are not human-readable. This module is the single source of
  * truth that maps each key to a friendly label and decides **which fields the Rounds create/edit
  * form shows for that format**, so the form is field-driven rather than a wall of every control.

@@ -108,7 +108,123 @@ fn wait_until(
 ///
 /// Timing is tolerant: it waits for RH to reach `RACING` and for at least one pass,
 /// but never asserts exact lap times. The [`RhContainer`] is torn down on return.
+///
+/// `allow(dead_code)`: `common` is compiled into every engine `live` test binary, and the
+/// marshaling-evidence one uses [`run_mock_heat_with_signal`] instead.
+#[allow(dead_code)]
 pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec<Event> {
+    run_mock_heat_keeping(port, heat, scenario, |e| matches!(e, Event::Pass(_)), 1)
+}
+
+/// [`run_mock_heat`], but the race is held open until the timer has produced at least
+/// `min_passes` crossings (rather than stopping on the very first one).
+///
+/// Why this exists: stopping on the first pass makes the heat's pass count a **race** between
+/// the CSV cadence and the harness's poll/drain windows — the same scenario yields 1 pass on one
+/// run and 5 on the next. Any assertion whose shape depends on "did we get 1 or ≥2 detections?"
+/// then passes or fails by luck. Waiting for a stated `min_passes` at a lap cadence slower than
+/// the ~1s stop-and-drain window makes the count reproducible: the race is closed within one
+/// poll tick (250ms) of the `min_passes`-th crossing, and the next crossing is a full lap away,
+/// so the drain adds none.
+///
+/// `allow(dead_code)`: `common` is compiled into every engine `live` test binary and most use
+/// the plain [`run_mock_heat`].
+#[allow(dead_code)]
+pub fn run_mock_heat_until(
+    port: u16,
+    heat: &str,
+    scenario: &[(usize, String)],
+    min_passes: usize,
+) -> Vec<Event> {
+    run_mock_heat_keeping(
+        port,
+        heat,
+        scenario,
+        |e| matches!(e, Event::Pass(_)),
+        min_passes,
+    )
+}
+
+/// [`run_mock_heat`], but the heat's **signal facts ride along** with its passes.
+///
+/// The default harness keeps only `Pass`es — adapter bookkeeping is not part of the heat's
+/// canonical race-engine log. The marshaling surfaces need more than that: the RSSI trace is the
+/// *evidence* an RD reconstructs a mis-detected race from (#388), and it flows per seated node
+/// whether or not that node ever produced a crossing. This variant keeps
+/// [`Event::SignalChunk`] / [`Event::SignalThresholds`] / [`Event::SignalHistory`] and
+/// [`Event::CompetitorSeen`] alongside the passes, so a test can fold the same window the
+/// server's marshaling projections do.
+///
+/// `allow(dead_code)`: `common` is compiled into every engine `live` test binary and most use
+/// only [`run_mock_heat`].
+/// [`run_mock_heat_with_signal`], but the race is held open until the timer has produced at
+/// least `min_passes` crossings rather than stopping on the very first one.
+///
+/// Same rationale as [`run_mock_heat_until`]: stopping on the first crossing makes the pass
+/// count race the drain window, so a test that needs a *completed lap* (K passes give K-1 laps)
+/// passes or fails on luck. Any test asserting on lap counts must state how many crossings it
+/// needs.
+///
+/// `allow(dead_code)`: `common` is compiled into every engine `live` test binary.
+#[allow(dead_code)]
+pub fn run_mock_heat_with_signal_until(
+    port: u16,
+    heat: &str,
+    scenario: &[(usize, String)],
+    min_passes: usize,
+) -> Vec<Event> {
+    run_mock_heat_keeping(
+        port,
+        heat,
+        scenario,
+        |e| {
+            matches!(
+                e,
+                Event::Pass(_)
+                    | Event::SignalChunk(_)
+                    | Event::SignalThresholds(_)
+                    | Event::SignalHistory(_)
+                    | Event::CompetitorSeen { .. }
+            )
+        },
+        min_passes,
+    )
+}
+
+#[allow(dead_code)]
+pub fn run_mock_heat_with_signal(
+    port: u16,
+    heat: &str,
+    scenario: &[(usize, String)],
+) -> Vec<Event> {
+    run_mock_heat_keeping(
+        port,
+        heat,
+        scenario,
+        |e| {
+            matches!(
+                e,
+                Event::Pass(_)
+                    | Event::SignalChunk(_)
+                    | Event::SignalThresholds(_)
+                    | Event::SignalHistory(_)
+                    | Event::CompetitorSeen { .. }
+            )
+        },
+        1,
+    )
+}
+
+/// The shared harness behind [`run_mock_heat`] and [`run_mock_heat_with_signal`]: `keep` decides
+/// which of the adapter's live events are folded into the returned canonical log, and
+/// `min_passes` is how many crossings the race is held open for (see [`run_mock_heat_until`]).
+fn run_mock_heat_keeping(
+    port: u16,
+    heat: &str,
+    scenario: &[(usize, String)],
+    keep: impl Fn(&Event) -> bool,
+    min_passes: usize,
+) -> Vec<Event> {
     let heat = HeatId(heat.to_string());
     let lineup: Vec<CompetitorRef> = scenario
         .iter()
@@ -159,9 +275,11 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
     drive(&mut log, &heat, &mut state, HeatCommand::SkipCountdown);
     debug_assert_eq!(state, HeatState::Running);
 
-    // While Running, poll the timer crossings; keep at least one pass.
-    let got_pass = wait_until(&conn, &mut live, Duration::from_secs(25), |evs| {
-        evs.iter().any(|e| matches!(e, Event::Pass(_)))
+    // While Running, poll the timer crossings; hold the race open until `min_passes` have
+    // landed, so the heat's pass count is the scenario's choice and not a timing race.
+    let min_passes = min_passes.max(1);
+    let got_pass = wait_until(&conn, &mut live, Duration::from_secs(60), |evs| {
+        evs.iter().filter(|e| matches!(e, Event::Pass(_))).count() >= min_passes
     });
 
     // Close the race on RH, then drain any final crossings before finishing.
@@ -172,13 +290,15 @@ pub fn run_mock_heat(port: u16, heat: &str, scenario: &[(usize, String)]) -> Vec
 
     assert!(
         got_pass,
-        "no timer crossings were produced while the heat was running"
+        "the heat was held open for {min_passes} timer crossing(s) and only {} arrived",
+        live.iter().filter(|e| matches!(e, Event::Pass(_))).count()
     );
 
-    // Interleave the live passes into the log between Running and Finished, in the
-    // order RH reported them. Only `Pass`es are folded in — lifecycle/`CompetitorSeen`
-    // are adapter bookkeeping, not part of the heat's canonical race-engine log.
-    log.extend(live.into_iter().filter(|e| matches!(e, Event::Pass(_))));
+    // Interleave the live events `keep` selects into the log between Running and Finished, in
+    // the order RH reported them. By default that is `Pass`es only — lifecycle/`CompetitorSeen`
+    // are adapter bookkeeping, not part of the heat's canonical race-engine log — but the
+    // marshaling harness also keeps the signal facts (see `run_mock_heat_with_signal`).
+    log.extend(live.into_iter().filter(|e| keep(e)));
 
     // Close the heat loop: ForceEnd (Running -> Unofficial) then Finalize. ForceEnd stands in for
     // the runtime auto-complete here (the harness has already stopped the RH race).

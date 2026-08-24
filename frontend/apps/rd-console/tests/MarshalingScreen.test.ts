@@ -8,7 +8,8 @@ import type {
   HeatSummary,
   LapList,
   LiveRaceState,
-  RoundDef
+  RoundDef,
+  SignalTraceView
 } from '@gridfpv/types';
 import { toasts } from '@gridfpv/components';
 import Marshaling from '../src/screens/Marshaling.svelte';
@@ -1644,5 +1645,106 @@ describe('Marshaling (Slice 3)', () => {
     expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Void heat' })).toBeNull();
     expect(screen.queryByLabelText('Reverse ruling')).toBeNull();
+  });
+
+  // ── The pilot the timer never detected (#388) ────────────────────────────────────────────────
+  //
+  // The lap list used to be derived purely from observed passes, so a competitor with ZERO
+  // detections was absent from the projection entirely — and this screen, which keys its rows off
+  // the lap list, had nothing to render. Zero laps is precisely when marshaling matters most (a
+  // mis-tuned gate means the whole race must be rebuilt by hand from the RSSI trace), so the
+  // projection now seeds the list from the heat's LINEUP. These assert the screen does the right
+  // thing with such an entry: names it, shows its evidence, and addresses its insert correctly.
+  describe('a competitor the timer never detected (#388)', () => {
+    // A node-seeded heat on a SECOND timer: the zero-lap seat is `node-0` bound durably to
+    // Maverick, and its lap-list entry carries its own adapter (`rh-2`, not the default `rh-1`).
+    const ZERO_LAPS: LapList = {
+      competitors: [
+        { competitor: { adapter: 'rh-2', competitor: 'node-0' }, laps: [] },
+        {
+          competitor: { adapter: 'rh-2', competitor: 'node-1' },
+          laps: [
+            { number: 1, duration_micros: 40_000_000, at: 40_000_000, start_ref: 10, end_ref: 12 }
+          ]
+        }
+      ]
+    };
+    // The RSSI that streamed all along for the undetected seat — the evidence the RD rebuilds from.
+    const ZERO_TRACE: SignalTraceView = {
+      competitors: [
+        {
+          competitor: { adapter: 'rh-2', competitor: 'node-0' },
+          from: 0,
+          period_micros: 1_000_000,
+          samples: Array.from({ length: 60 }, (_, i) => 70 + (i % 5)),
+          enter: 110,
+          exit: 95
+        }
+      ]
+    };
+    const ZERO_LIVE: LiveRaceState = {
+      current_heat: 'q1-heat',
+      phase: 'Unofficial',
+      active_pilots: ['node-0', 'node-1'],
+      progress: [
+        { competitor: 'node-0', pilot: 'maverick-4d9rp8', laps_completed: 0 },
+        { competitor: 'node-1', laps_completed: 1, last_lap_micros: 40_000_000 }
+      ],
+      running_order: ['node-1', 'node-0']
+    };
+    const ZERO_PILOTS = [{ id: 'maverick-4d9rp8', callsign: 'Maverick', vtx_types: [] }];
+
+    function session0() {
+      return makeTestSession({
+        live: ZERO_LIVE,
+        heatLive: ZERO_LIVE,
+        laps: ZERO_LAPS,
+        signal: ZERO_TRACE,
+        listPilotsImpl: vi.fn(async () => ZERO_PILOTS as unknown as never),
+        listChannelsImpl: vi.fn(async () => [])
+      });
+    }
+
+    it('lists the zero-lap pilot BY CALLSIGN and renders its trace + empty lap box', async () => {
+      const { session } = session0();
+      render(Marshaling, { session });
+
+      // It is in the marshal-pilot picker at all (the regression: it used to be missing), and
+      // labelled by callsign — never the raw "node-0" seat (the friendly-name rule).
+      const picker = screen.getByLabelText('Marshal pilot') as HTMLSelectElement;
+      await waitFor(() =>
+        expect(Array.from(picker.options).map((o) => o.textContent?.trim())).toContain('Maverick')
+      );
+      const opt = Array.from(picker.options).find((o) => o.textContent?.trim() === 'Maverick')!;
+      expect(opt.value).toBe('node-0');
+      expect(Array.from(picker.options).map((o) => o.textContent?.trim())).not.toContain('node-0');
+
+      // Shown, it renders an empty lap box under its callsign — and the RSSI graph, so the RD can
+      // read the missed crossings off the evidence.
+      await fireEvent.change(picker, { target: { value: 'node-0' } });
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
+      );
+      expect(screen.getByText('No laps yet.')).toBeInTheDocument();
+      expect(screen.getByLabelText('RSSI signal graph')).toBeInTheDocument();
+    });
+
+    it('addresses the recovered lap to the seat’s OWN timing source', async () => {
+      const { session, sendSpy } = session0();
+      render(Marshaling, { session });
+
+      await fireEvent.change(screen.getByLabelText('Marshal pilot'), {
+        target: { value: 'node-0' }
+      });
+      await fireEvent.click(screen.getByRole('button', { name: '+ Add lap' }));
+      await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '9.5' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+      // `rh-2` — the adapter the seat's own lap-list entry carries. Sending the console's default
+      // `rh-1` would key the insert to a DIFFERENT competitor and split the pilot in two.
+      expect(sendSpy).toHaveBeenCalledWith({
+        InsertLap: { adapter: 'rh-2', competitor: 'node-0', at: 9_500_000, heat: 'q1-heat' }
+      });
+    });
   });
 });

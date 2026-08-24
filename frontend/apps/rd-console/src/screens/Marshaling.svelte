@@ -389,11 +389,30 @@
   // Role-gated by `canControl` like every other correction (the parent only renders these when the
   // session may control; the Director re-checks).
 
+  /**
+   * The timing source a competitor's corrections must be addressed to.
+   *
+   * The projection keys laps on `(adapter, competitor)`, so an insert sent under the wrong
+   * adapter lands on a DIFFERENT competitor and splits the pilot into two lap-list entries.
+   * Read the real source off the heat's own projections — the lap list first (every competitor
+   * in the heat's lineup is there, including one the timer never detected, #388), then the
+   * signal trace — and fall back to the `adapter` prop only when neither knows the ref (a sim
+   * heat with no trace and no passes).
+   */
+  function adapterFor(competitor: CompetitorRef): string {
+    const fromLaps = laps?.competitors.find((c) => c.competitor.competitor === competitor);
+    if (fromLaps) return fromLaps.competitor.adapter;
+    const fromTrace = signalTrace?.competitors.find((c) => c.competitor.competitor === competitor);
+    return fromTrace?.competitor.adapter ?? adapter;
+  }
+
   /** Add a lap for a competitor at an exact source-clock time (µs) — the graph's button path. */
   function insertLap(competitor: CompetitorRef, at: number): Promise<void> {
     return submitCorrection(async () => {
       if (!canControl || resultLocked || !heat) return;
-      const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at), heat));
+      const ack = await session.send(
+        insertLapCommand(adapterFor(competitor), competitor, Math.round(at), heat)
+      );
       if (ack.ok) await afterCorrection();
     });
   }

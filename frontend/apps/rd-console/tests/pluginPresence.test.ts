@@ -16,6 +16,7 @@ function rhTimer(plugin: Timer['plugin']): Timer {
     channel_capability: 'Flexible',
     node_count: 8,
     available_channels: [],
+    manual_connect: false,
     plugin
   };
 }
@@ -29,7 +30,8 @@ describe('pluginView', () => {
       status: 'Ready',
       channel_capability: 'Flexible',
       node_count: 8,
-      available_channels: []
+      available_channels: [],
+      manual_connect: false
     };
     expect(pluginView(mock)).toBeNull();
   });

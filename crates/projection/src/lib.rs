@@ -34,9 +34,7 @@ pub mod recalc;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gridfpv_events::{
-    AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SignalHistory, SourceTime,
-};
+use gridfpv_events::{AdapterId, CompetitorRef, Event, HeatId, LogRef, Pass, PilotId, SourceTime};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -220,6 +218,101 @@ where
         }
     }
     bindings
+}
+
+/// Fold the log's heat lineups into the per-source [`CompetitorKey`]s they name (#388).
+///
+/// A heat's **lineup** ([`Event::HeatScheduled`]) is the authoritative "who was in this heat"
+/// set: it is known the moment the heat is built, before a single crossing is detected. The
+/// lap projection is keyed on `(adapter, competitor)` though, and the lineup carries only the
+/// bare source-local [`CompetitorRef`] — so this fold resolves each lineup ref to the timing
+/// source(s) it was actually seen on, over the *same* window the caller folds laps from.
+///
+/// Resolution, per lineup ref, in order:
+///
+/// 1. **Every adapter that named the ref** in the window — a [`Pass`], a signal fact
+///    ([`Event::SignalChunk`] / [`Event::SignalThresholds`] / [`Event::SignalHistory`]), a
+///    [`Event::CompetitorSeen`] / [`Event::CompetitorRegistered`], or a marshal's
+///    [`Event::LapInserted`]. A seated node streams RSSI whether or not it ever detects a
+///    crossing, so the silent-node case lands here and its key matches the one its
+///    [`signal_trace`] entry already carries.
+/// 2. Otherwise the window's **only** timing source, when exactly one is in evidence — a
+///    single-timer event (the overwhelmingly common case) still seats a ref that produced
+///    literally nothing.
+/// 3. Otherwise the lexicographically **first** adapter in evidence, so a multi-source window
+///    still yields one deterministic seat rather than dropping the competitor.
+///
+/// A window with no adapter in evidence at all (a bare `HeatScheduled` with nothing else)
+/// yields nothing for that ref: there is no source to address a correction to, so inventing
+/// an adapter id would only produce an unusable row. Pure and order-independent.
+pub fn lineup_keys<'a, I>(events: I) -> BTreeSet<CompetitorKey>
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    let mut lineup: BTreeSet<CompetitorRef> = BTreeSet::new();
+    // Every adapter each ref was named by, and every adapter in evidence at all.
+    let mut adapters_by_ref: BTreeMap<CompetitorRef, BTreeSet<AdapterId>> = BTreeMap::new();
+    let mut adapters: BTreeSet<AdapterId> = BTreeSet::new();
+
+    for event in events {
+        // The `(adapter, competitor)` pair this fact names, where it names one. A lifecycle
+        // fact names only its source; a lineup names only refs.
+        let named: Option<(&AdapterId, &CompetitorRef)> = match event {
+            Event::HeatScheduled { lineup: refs, .. } => {
+                lineup.extend(refs.iter().cloned());
+                None
+            }
+            Event::Pass(p) => Some((&p.adapter, &p.competitor)),
+            Event::SignalChunk(c) => Some((&c.adapter, &c.competitor)),
+            Event::SignalThresholds(t) => Some((&t.adapter, &t.competitor)),
+            Event::SignalHistory(h) => Some((&h.adapter, &h.competitor)),
+            Event::CompetitorSeen {
+                adapter,
+                competitor,
+            }
+            | Event::CompetitorRegistered {
+                adapter,
+                competitor,
+                ..
+            }
+            | Event::LapInserted {
+                adapter,
+                competitor,
+                ..
+            } => Some((adapter, competitor)),
+            Event::AdapterConnected { adapter }
+            | Event::AdapterDisconnected { adapter }
+            | Event::SessionStarted { adapter, .. }
+            | Event::SessionEnded { adapter, .. } => {
+                adapters.insert(adapter.clone());
+                None
+            }
+            _ => None,
+        };
+        if let Some((adapter, competitor)) = named {
+            adapters.insert(adapter.clone());
+            adapters_by_ref
+                .entry(competitor.clone())
+                .or_default()
+                .insert(adapter.clone());
+        }
+    }
+
+    lineup
+        .into_iter()
+        .flat_map(|competitor| {
+            let sources: Vec<AdapterId> = match adapters_by_ref.get(&competitor) {
+                Some(seen) => seen.iter().cloned().collect(),
+                // No fact ever named this ref: fall back to the window's sole (or first)
+                // source so a competitor who produced *nothing* is still marshalable.
+                None => adapters.iter().next().cloned().into_iter().collect(),
+            };
+            sources.into_iter().map(move |adapter| CompetitorKey {
+                adapter,
+                competitor: competitor.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Fold a sequence of events into the lap-list read model.
@@ -688,8 +781,21 @@ where
     // lives in `corrected_passes`; here we only project it into the lap-list view. Each
     // pass keeps the global offset that addresses it, so the derived laps carry their
     // `start_ref`/`end_ref` command targets.
-    let (surviving, voided) = corrected_and_voided_passes_with_floor(events, min_lap_micros);
+    //
+    // The window is walked twice (once for the lineup seed, once for the corrections fold),
+    // so materialise the pairs — they are borrowed `(offset, &Event)` handles and the window
+    // is per-heat, so this is a pointer copy, not the log.
+    let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
+    // #388 — SEED FROM THE LINEUP, not only from what the timer observed. A competitor the
+    // timer never detected (mis-tuned gate, dead VTX) must still appear, with zero laps, or
+    // the one pilot who most needs marshaling is the one who cannot be marshaled.
+    let seats = lineup_keys(pairs.iter().map(|(_, e)| *e));
+    let (surviving, voided) =
+        corrected_and_voided_passes_with_floor(pairs.iter().copied(), min_lap_micros);
     let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
+    for key in seats {
+        by_competitor.entry(key).or_default();
+    }
     for (offset, pass) in surviving {
         by_competitor
             .entry(CompetitorKey::from_pass(&pass))
@@ -1039,11 +1145,32 @@ impl SignalTraceView {
 ///   They **append** to the competitor's running buffer in log order, reconstructing the stream
 ///   exactly.
 /// - [`Event::SignalHistory`] — the *dense, full-fidelity* per-tick history RotorHazard records,
-///   pulled from the request-driven `current_marshal_data` at heat end. When a competitor has **any**
-///   dense history, it **supersedes** the coarse chunk samples entirely: the view carries the dense
-///   trace, not the streaming approximation. Multiple histories for one competitor are last-writer-
-///   wins (a re-pull replaces the earlier one). With no dense history the coarse chunks stand, so a
-///   heat that ended before the pull (or a non-RH source) is unchanged.
+///   pulled from the request-driven `current_marshal_data` at heat end, or streamed live by the
+///   GridFPV plugin. When a competitor has **any** dense history, it **supersedes** the coarse chunk
+///   samples entirely: the view carries the dense trace, not the streaming approximation. With no
+///   dense history the coarse chunks stand, so a heat that ended before the pull (or a non-RH
+///   source) is unchanged.
+///
+/// # Dense histories are **offset-folded**, not last-writer-wins (#392)
+///
+/// A dense history is not necessarily a whole trace: the live plugin path streams it in slices, each
+/// stamped with the sample offset it starts at ([`SignalHistory::base`]), so the per-tick cost does
+/// not grow with heat length. The fold applies each one by that offset:
+///
+/// - `base == 0` — a **full snapshot**: replaces the competitor's dense trace. The post-race pull
+///   and the plugin's end-of-race flush both send one, so a finished heat's trace is whole however
+///   the live stream went, and a re-pull still supersedes what came before (the old behavior).
+/// - `base ==` the trace's current length — a **contiguous append**: the slice extends the trace.
+/// - anything else — **out of sync**: the slice is *skipped*. It cannot be placed without leaving a
+///   gap or a duplicate in the middle of the marshaling evidence, and a trace with a silent hole in
+///   it is worse than a short one. The next full snapshot resynchronises. (Reachable only from a
+///   truncated window or a log that lost events — the adapter emits a contiguous stream per heat and
+///   warns when the plugin's own slices stop lining up.)
+///
+/// An empty history is inert either way: it carries no evidence, so it must not blank out a trace.
+///
+/// A pre-#392 log carries no offsets at all; they read back as `base = 0`, i.e. whole snapshots that
+/// replace — which is exactly the last-writer-wins rule those logs were written under.
 ///
 /// Because the dense history carries an **explicit per-sample time** (not a uniform cadence), the
 /// view's uniform `from`/`period_micros` grid is derived from those times: `from` is the first
@@ -1059,6 +1186,8 @@ impl SignalTraceView {
 ///
 /// `events` is the heat's window (the server scopes it before folding, exactly as the lap/audit
 /// projections do); the fold itself is window-agnostic, so it is equally correct over the full log.
+///
+/// [`SignalHistory::base`]: gridfpv_events::SignalHistory::base
 pub fn signal_trace<'a, I>(events: I) -> SignalTraceView
 where
     I: IntoIterator<Item = &'a Event>,
@@ -1070,9 +1199,11 @@ where
         samples: Vec<u16>,
         enter: Option<u16>,
         exit: Option<u16>,
-        /// The dense history that supersedes the coarse `samples`/`from`/`period_micros`, if any has
-        /// been seen (last writer wins). When present it is resolved into the trace at emit time.
-        dense: Option<SignalHistory>,
+        /// The dense trace that supersedes the coarse `samples`/`from`/`period_micros`, as
+        /// `(times, rssi)` — assembled from the competitor's [`Event::SignalHistory`] slices by
+        /// their `base` offset. `None` until one lands; when present it is resolved into the
+        /// emitted trace at the end.
+        dense: Option<(Vec<i64>, Vec<u16>)>,
     }
     impl Acc {
         fn empty() -> Self {
@@ -1109,11 +1240,25 @@ where
                     competitor: history.competitor.clone(),
                 };
                 let acc = by_competitor.entry(key).or_insert_with(Acc::empty);
-                // Prefer-dense: the dense history supersedes the coarse chunks. Last writer wins, so
-                // a re-pull replaces the earlier history. An empty history is ignored (it carries no
-                // evidence, so it must not blank out the coarse trace).
+                // Prefer-dense: the dense history supersedes the coarse chunks. It arrives as
+                // offset-stamped slices (#392), so place each one by its `base` — replace at 0,
+                // append at the current length, skip anything else rather than corrupt the trace.
+                // An empty history is ignored either way (it carries no evidence, so it must not
+                // blank out the coarse trace).
                 if !history.rssi.is_empty() {
-                    acc.dense = Some(history.clone());
+                    match (history.base, acc.dense.as_mut()) {
+                        // A full snapshot replaces whatever the competitor's trace held.
+                        (0, _) => {
+                            acc.dense = Some((history.times.clone(), history.rssi.clone()));
+                        }
+                        // A slice that continues the trace extends it.
+                        (base, Some((times, rssi))) if base == times.len() as u64 => {
+                            times.extend_from_slice(&history.times);
+                            rssi.extend_from_slice(&history.rssi);
+                        }
+                        // Out of sync — see the fold's docs. Skipped, not spliced.
+                        _ => {}
+                    }
                 }
             }
             Event::SignalThresholds(t) => {
@@ -1139,9 +1284,9 @@ where
                 // `times` are carried too so a renderer can plot each sample at its real instant — RH's
                 // history is bursty, so the uniform grid alone badly compresses the trace.
                 let (from, period_micros, samples, times) = match acc.dense {
-                    Some(history) => {
-                        let (from, period_micros, samples) = dense_trace_grid(&history);
-                        (from, period_micros, samples, Some(history.times))
+                    Some((dense_times, dense_rssi)) => {
+                        let (from, period_micros) = dense_trace_grid(&dense_times);
+                        (from, period_micros, dense_rssi, Some(dense_times))
                     }
                     None => (acc.from, acc.period_micros, acc.samples, None),
                 };
@@ -1159,25 +1304,25 @@ where
     }
 }
 
-/// Resolve a dense [`SignalHistory`] into the `(from, period_micros, samples)` the uniform-grid
-/// [`CompetitorTrace`] carries, preserving the native samples verbatim (no resampling).
+/// Resolve an assembled dense trace's sample `times` into the uniform `(from, period_micros)` grid
+/// the [`CompetitorTrace`] carries alongside them. The samples themselves are passed through
+/// verbatim by the caller — native ADC counts, no resampling.
 ///
 /// `from` is the first sample's instant; `period_micros` is the first **positive** inter-sample
-/// delta (RH samples at a near-fixed rate, so this anchors the grid the renderer draws on). The
-/// `samples` are the dense RSSI vector unchanged. A dense history can legitimately repeat a timestamp
-/// — e.g. a peak reported at the same first/last time, so `history_times` reads `[t, t, …]` — so the
-/// grid skips zero/negative deltas to avoid a degenerate period of `0`; it falls back to `0` only
-/// when every delta is non-positive (a single distinct time, including a single-sample history).
-fn dense_trace_grid(history: &SignalHistory) -> (Option<SourceTime>, u32, Vec<u16>) {
-    let from = history.times.first().copied().map(SourceTime::from_micros);
-    let period_micros = history
-        .times
+/// delta (RH samples at a near-fixed rate, so this anchors the grid the renderer draws on). A dense
+/// history can legitimately repeat a timestamp — e.g. a peak reported at the same first/last time,
+/// so `history_times` reads `[t, t, …]` — so the grid skips zero/negative deltas to avoid a
+/// degenerate period of `0`; it falls back to `0` only when every delta is non-positive (a single
+/// distinct time, including a single-sample history).
+fn dense_trace_grid(times: &[i64]) -> (Option<SourceTime>, u32) {
+    let from = times.first().copied().map(SourceTime::from_micros);
+    let period_micros = times
         .windows(2)
         .map(|w| w[1] - w[0])
         .find(|&d| d > 0)
         .unwrap_or(0)
         .clamp(0, u32::MAX as i64) as u32;
-    (from, period_micros, history.rssi.clone())
+    (from, period_micros)
 }
 
 #[cfg(test)]
@@ -1461,7 +1606,7 @@ mod tests {
 #[cfg(test)]
 mod marshaling_tests {
     use super::*;
-    use gridfpv_events::{GateIndex, HeatId, LogRef, Penalty};
+    use gridfpv_events::{GateIndex, HeatId, LogRef, Penalty, SignalHistory};
 
     /// Build a lap-gate pass event.
     fn pass(adapter: &str, competitor: &str, at: i64, sequence: Option<u64>) -> Event {
@@ -2565,12 +2710,25 @@ mod marshaling_tests {
         assert_eq!(signal_trace(&log), signal_trace(&log));
     }
 
+    /// A dense history **snapshot** (`base = 0`) — a whole trace, which replaces.
     fn history(adapter: &str, competitor: &str, times: &[i64], rssi: &[u16]) -> Event {
+        history_at(adapter, competitor, 0, times, rssi)
+    }
+
+    /// A dense history **slice** starting at sample `base` — the live plugin's incremental shape.
+    fn history_at(
+        adapter: &str,
+        competitor: &str,
+        base: u64,
+        times: &[i64],
+        rssi: &[u16],
+    ) -> Event {
         Event::SignalHistory(SignalHistory {
             adapter: AdapterId(adapter.into()),
             competitor: CompetitorRef(competitor.into()),
             times: times.to_vec(),
             rssi: rssi.to_vec(),
+            base,
         })
     }
 
@@ -2628,7 +2786,9 @@ mod marshaling_tests {
 
     #[test]
     fn dense_history_last_writer_wins() {
-        // Two pulls for one competitor: the later dense history replaces the earlier one.
+        // Two pulls for one competitor: the later dense history replaces the earlier one. Both are
+        // snapshots (`base = 0`) — which is also how a pre-#392 log, carrying no offsets at all,
+        // reads back, so those logs keep folding under exactly the rule they were written with.
         let log = vec![
             history("rh", "node-0", &[0, 100_000], &[70, 150]),
             history("rh", "node-0", &[0, 50_000, 100_000], &[70, 88, 150]),
@@ -2636,6 +2796,73 @@ mod marshaling_tests {
         let trace = &signal_trace(&log).competitors[0];
         assert_eq!(trace.samples, vec![70, 88, 150]);
         assert_eq!(trace.period_micros, 50_000);
+    }
+
+    #[test]
+    fn dense_history_slices_append_at_their_base() {
+        // #392: the live plugin path streams the dense trace in slices, each stamped with the sample
+        // offset it starts at. Contiguous slices APPEND, so the folded trace is the whole run even
+        // though no single event ever carried it.
+        let log = vec![
+            history_at("rh", "node-0", 0, &[0, 50_000], &[70, 88]),
+            history_at("rh", "node-0", 2, &[100_000, 150_000], &[150, 149]),
+            history_at("rh", "node-0", 4, &[200_000], &[71]),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 88, 150, 149, 71]);
+        assert_eq!(
+            trace.times.as_deref(),
+            Some([0, 50_000, 100_000, 150_000, 200_000].as_slice())
+        );
+        assert_eq!(trace.from, Some(SourceTime::from_micros(0)));
+        assert_eq!(trace.period_micros, 50_000);
+    }
+
+    #[test]
+    fn dense_history_out_of_sync_slice_is_skipped_not_spliced() {
+        // A slice that neither restates the trace (base 0) nor continues it (base == len) cannot be
+        // placed without leaving a gap or a duplicate mid-trace. It is dropped, and the trace stands
+        // exactly as the contiguous slices left it — a short trace, never a corrupt one.
+        let log = vec![
+            history_at("rh", "node-0", 0, &[0, 50_000], &[70, 88]),
+            // Gap: samples 2..4 never arrived, so this one starts past the end of the trace.
+            history_at("rh", "node-0", 4, &[200_000], &[71]),
+            // ...and one that would re-apply samples already held.
+            history_at("rh", "node-0", 1, &[50_000, 100_000], &[88, 150]),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 88]);
+        assert_eq!(trace.times.as_deref(), Some([0, 50_000].as_slice()));
+
+        // A slice arriving with no trace to append to (a window that lost the opening snapshot) is
+        // the same case: skipped, leaving the competitor on its coarse evidence.
+        let orphan = vec![
+            chunk("rh", "node-0", 0, 100_000, &[60, 61]),
+            history_at("rh", "node-0", 7, &[350_000], &[71]),
+        ];
+        let trace = &signal_trace(&orphan).competitors[0];
+        assert_eq!(trace.samples, vec![60, 61]);
+        assert_eq!(trace.times, None);
+    }
+
+    #[test]
+    fn end_of_race_snapshot_resyncs_a_desynced_trace() {
+        // The safety net the skip rule leans on: the plugin's end-of-race flush (and the post-race
+        // `current_marshal_data` pull) send `base = 0`, so however the live stream went, the
+        // finished heat's marshaling trace is the full-fidelity one.
+        let log = vec![
+            history_at("rh", "node-0", 0, &[0, 50_000], &[70, 88]),
+            history_at("rh", "node-0", 4, &[200_000], &[71]), // out of sync, skipped
+            history_at(
+                "rh",
+                "node-0",
+                0,
+                &[0, 50_000, 100_000, 150_000, 200_000],
+                &[70, 88, 150, 149, 71],
+            ),
+        ];
+        let trace = &signal_trace(&log).competitors[0];
+        assert_eq!(trace.samples, vec![70, 88, 150, 149, 71]);
     }
 
     #[test]
@@ -2680,5 +2907,210 @@ mod marshaling_tests {
             "first positive delta (1_100 - 1_000), skipping the leading 0"
         );
         assert_eq!(trace.samples, vec![70, 150, 150, 71]);
+    }
+
+    // --- Lineup seeding: the zero-lap competitor (#388) --------------------------------------
+
+    /// Build a heat's `HeatScheduled` with the given lineup refs.
+    fn scheduled(heat: &str, lineup: &[&str]) -> Event {
+        Event::HeatScheduled {
+            heat: gridfpv_events::HeatId(heat.into()),
+            lineup: lineup.iter().map(|r| CompetitorRef((*r).into())).collect(),
+            class: None,
+            round: None,
+            frequencies: vec![],
+            label: None,
+        }
+    }
+
+    #[test]
+    fn a_lineup_competitor_with_no_passes_is_present_with_zero_laps() {
+        // The field failure (#388): node-1's gate never detected a crossing. Before the fix it
+        // vanished from the lap list entirely and could not be marshaled — which is exactly when
+        // marshaling matters most. Its RSSI still streamed, so it IS in the window.
+        let log = vec![
+            scheduled("q-1", &["node-0", "node-1"]),
+            pass("rh", "node-0", 0, Some(0)),
+            pass("rh", "node-0", 2_000_000, Some(1)),
+            chunk("rh", "node-1", 0, 100_000, &[70, 71, 70]),
+        ];
+        let list = lap_list_marshaled(tagged(&log));
+        let silent = list
+            .competitor(&key("rh", "node-1"))
+            .expect("the silent lineup competitor must be present");
+        assert!(silent.laps.is_empty(), "no detections => no laps");
+        assert!(silent.voided.is_empty());
+        // And its trace is right there, keyed identically — so the console can render it.
+        assert!(
+            signal_trace(&log)
+                .competitor(&key("rh", "node-1"))
+                .is_some(),
+            "the zero-lap competitor's trace must key to the same CompetitorKey"
+        );
+        // The competitor that DID fly is unchanged.
+        assert_eq!(laps_of(&list, "rh", "node-0"), vec![ld(1, 2_000_000)]);
+    }
+
+    #[test]
+    fn inserting_a_lap_on_a_zero_lap_competitor_builds_its_lap_list() {
+        // The recovery path: the RD reconstructs the missed race from the trace. Two inserts
+        // make one lap; the seeded entry becomes a real one rather than appearing from nowhere.
+        let mut log = vec![
+            scheduled("q-1", &["node-0", "node-1"]),
+            chunk("rh", "node-1", 0, 100_000, &[70, 150, 70]),
+        ];
+        assert_eq!(
+            lap_list_marshaled(tagged(&log))
+                .competitor(&key("rh", "node-1"))
+                .map(|c| c.laps.len()),
+            Some(0)
+        );
+        log.push(inserted("rh", "node-1", 1_000_000));
+        log.push(inserted("rh", "node-1", 4_000_000));
+        assert_eq!(
+            laps_of(&lap_list_marshaled(tagged(&log)), "rh", "node-1"),
+            vec![ld(1, 3_000_000)],
+            "the marshal's two inserted crossings are one recovered lap"
+        );
+    }
+
+    #[test]
+    fn a_lineup_competitor_seats_on_the_adapter_that_saw_it() {
+        // Two sources in the window; node-1 is only ever named by `rh-b`, so that is the seat
+        // its (empty) entry takes — not `rh-a` merely because it sorts first.
+        let log = vec![
+            scheduled("q-1", &["node-0", "node-1"]),
+            pass("rh-a", "node-0", 0, Some(0)),
+            Event::CompetitorSeen {
+                adapter: AdapterId("rh-b".into()),
+                competitor: CompetitorRef("node-1".into()),
+            },
+        ];
+        let list = lap_list_marshaled(tagged(&log));
+        assert!(list.competitor(&key("rh-b", "node-1")).is_some());
+        assert!(
+            list.competitor(&key("rh-a", "node-1")).is_none(),
+            "a competitor must not be invented on a source that never saw it"
+        );
+    }
+
+    #[test]
+    fn a_lineup_competitor_never_named_falls_back_to_the_only_source() {
+        // Nothing at all was heard from node-1 — not even RSSI. There is exactly one timer in
+        // evidence, so that is unambiguously its seat, and the RD can still insert its laps.
+        let log = vec![
+            scheduled("q-1", &["node-0", "node-1"]),
+            pass("rh", "node-0", 0, Some(0)),
+        ];
+        assert!(
+            lap_list_marshaled(tagged(&log))
+                .competitor(&key("rh", "node-1"))
+                .is_some_and(|c| c.laps.is_empty())
+        );
+    }
+
+    #[test]
+    fn a_lineup_with_no_source_in_evidence_seeds_nothing() {
+        // A bare `HeatScheduled` and nothing else: there is no adapter to address a correction
+        // to, so inventing a seat would only produce an unusable row.
+        let log = vec![scheduled("q-1", &["node-0"])];
+        assert!(lap_list_marshaled(tagged(&log)).competitors.is_empty());
+    }
+
+    #[test]
+    fn lineup_seeding_is_order_independent_and_idempotent() {
+        // The projection must be a pure fold: seeding a competitor that also has passes must
+        // not duplicate it, and folding twice must be identical.
+        let log = vec![
+            pass("rh", "node-0", 0, Some(0)),
+            scheduled("q-1", &["node-0", "node-1"]),
+            chunk("rh", "node-1", 0, 100_000, &[70]),
+            pass("rh", "node-0", 2_000_000, Some(1)),
+        ];
+        let once = lap_list_marshaled(tagged(&log));
+        assert_eq!(once, lap_list_marshaled(tagged(&log)));
+        assert_eq!(
+            once.competitors.len(),
+            2,
+            "node-0 is seeded AND has passes — one entry, not two: {once:?}"
+        );
+    }
+
+    // --- Voiding the SOLE detection: the entry survives, emptied ------------------------------
+
+    #[test]
+    fn voiding_a_competitors_only_pass_leaves_it_present_with_zero_laps() {
+        // The contract the live marshaling e2es assert against: a void never makes a competitor
+        // VANISH. It empties the lap chain and leaves the removal record behind, so the RD can
+        // still see (and un-void) the ruling they just made. Deliberately NO `HeatScheduled`
+        // here, so the lineup seeding (#388) cannot be what keeps the entry alive: the removal
+        // record alone does it, and has since voids began carrying one.
+        let log = vec![pass("rh", "node-0", 1_000_000, Some(0)), voided(0)];
+        let list = lap_list_marshaled(tagged(&log));
+        let cl = list
+            .competitor(&key("rh", "node-0"))
+            .expect("voiding the only pass must not drop the competitor from the lap list");
+        assert!(cl.laps.is_empty(), "no surviving passes => no laps");
+        assert_eq!(
+            cl.voided.len(),
+            1,
+            "the void it stands on is the removal record: {cl:?}"
+        );
+        // And the corrected pass stream — the honest detection count — really is empty.
+        assert!(corrected_passes(tagged(&log)).is_empty());
+    }
+
+    #[test]
+    fn voiding_the_only_pass_of_a_lined_up_competitor_keeps_the_seeded_entry() {
+        // Same thing with the lineup present (the shape a real heat log has): the entry is
+        // doubly anchored — seeded from `HeatScheduled` AND carrying the removal record — and
+        // is still ONE entry, with zero laps.
+        let log = vec![
+            scheduled("q-1", &["node-0"]),
+            pass("rh", "node-0", 1_000_000, Some(0)),
+            voided(1),
+        ];
+        let list = lap_list_marshaled(tagged(&log));
+        assert_eq!(list.competitors.len(), 1, "one entry, not two: {list:?}");
+        let cl = list.competitor(&key("rh", "node-0")).expect("present");
+        assert!(cl.laps.is_empty());
+        assert_eq!(cl.voided.len(), 1);
+    }
+
+    #[test]
+    fn a_void_removes_exactly_one_detection_from_the_corrected_stream() {
+        // The invariant the live e2es measure, stated on the honest metric: the number of
+        // SURVIVING lap-gate passes drops by exactly one per void — at every count, including
+        // the 1 -> 0 edge. `laps.len() + 1` cannot express this (it reads 1 for an emptied
+        // entry), which is why the live tests must count corrected passes instead.
+        for n in 1..=4usize {
+            let mut log: Vec<Event> = (0..n)
+                .map(|i| pass("rh", "node-0", 1_000_000 * (i as i64 + 1), Some(i as u64)))
+                .collect();
+            let before = corrected_passes(tagged(&log)).len();
+            assert_eq!(before, n);
+            log.push(voided(0));
+            assert_eq!(
+                corrected_passes(tagged(&log)).len(),
+                n - 1,
+                "voiding one of {n} detections must leave {} ",
+                n - 1
+            );
+        }
+    }
+
+    #[test]
+    fn an_un_lined_up_competitor_still_appears_from_its_passes() {
+        // Seeding is additive: a competitor the timer saw but the lineup never named (a
+        // mis-seated node, a late re-seat) must not be dropped.
+        let log = vec![
+            scheduled("q-1", &["node-0"]),
+            pass("rh", "node-3", 0, Some(0)),
+            pass("rh", "node-3", 1_000_000, Some(1)),
+        ];
+        assert_eq!(
+            laps_of(&lap_list_marshaled(tagged(&log)), "rh", "node-3"),
+            vec![ld(1, 1_000_000)]
+        );
     }
 }
