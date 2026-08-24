@@ -231,15 +231,11 @@
         : await session.connectTimer(timer.id);
       if (updated === undefined) {
         // The RD cancelled the token prompt on a gated Director — the hold is unchanged.
-        toast.info(
-          `A control token is required to ${held ? 'disconnect' : 'connect'} a timer.`
-        );
+        toast.info(`A control token is required to ${held ? 'disconnect' : 'connect'} a timer.`);
         return;
       }
       applyTimer(updated);
-      toast.success(
-        held ? `Disconnected “${updated.name}”.` : `Connecting to “${updated.name}”…`
-      );
+      toast.success(held ? `Disconnected “${updated.name}”.` : `Connecting to “${updated.name}”…`);
     } catch (err) {
       // A Mock answers 400 (nothing to dial) — it should never reach here, since the control is
       // only offered for a RotorHazard timer, but say something useful rather than raw HTTP.

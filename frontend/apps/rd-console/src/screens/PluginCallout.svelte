@@ -187,10 +187,9 @@
             <code>manifest.json</code> <em>directly</em> inside it — no extra folder in between.
           </li>
           <li>
-            Restart RotorHazard with <strong>Restart timer</strong> below — no need to open
-            RotorHazard's own web interface. It drops off for a few seconds, reconnects by itself,
-            and the badge turns green. (Restarting is refused while a race is staged, armed or
-            running.)
+            Restart RotorHazard with <strong>Restart timer</strong> below — no need to open RotorHazard's
+            own web interface. It drops off for a few seconds, reconnects by itself, and the badge turns
+            green. (Restarting is refused while a race is staged, armed or running.)
           </li>
         </ol>
         <!--

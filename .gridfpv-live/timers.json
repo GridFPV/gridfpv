@@ -1,0 +1,61 @@
+[
+  {
+    "id": "mock",
+    "name": "Mock",
+    "kind": {
+      "Mock": {
+        "laps": 5,
+        "lap_ms": 2500
+      }
+    },
+    "status": "Ready",
+    "channel_capability": "Flexible",
+    "node_count": 8,
+    "available_channels": [
+      5658,
+      5695,
+      5732,
+      5769,
+      5806,
+      5843,
+      5880,
+      5917
+    ],
+    "plugin": null,
+    "manual_connect": false
+  },
+  {
+    "id": "nuclearhazard-3q41w8",
+    "name": "NuclearHazard",
+    "kind": {
+      "Rotorhazard": {
+        "url": "http://192.168.37.10:5000"
+      }
+    },
+    "status": "Connected",
+    "channel_capability": "Flexible",
+    "node_count": 8,
+    "available_channels": [
+      5658,
+      5695,
+      5732,
+      5769,
+      5806,
+      5843,
+      5880,
+      5917
+    ],
+    "plugin": {
+      "Present": {
+        "plugin_version": "0.1.0",
+        "rhapi_version": "1.3",
+        "capabilities": [
+          "hello",
+          "live_signal",
+          "live_pass"
+        ]
+      }
+    },
+    "manual_connect": true
+  }
+]

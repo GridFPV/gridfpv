@@ -1460,9 +1460,8 @@
              outright while a heat is in progress (the Edit button is dead in that case). -->
       {#if editing}
         <p class="form-note" role="note">
-          Saving rebuilds this round’s <strong>scheduled</strong> heats — their lineups and channel
-          assignments are re-derived from the round’s new settings. Heats that have already raced are
-          left alone.
+          Saving rebuilds this round’s <strong>scheduled</strong> heats — their lineups and channel assignments
+          are re-derived from the round’s new settings. Heats that have already raced are left alone.
         </p>
       {/if}
 

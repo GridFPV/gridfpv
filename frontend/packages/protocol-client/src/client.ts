@@ -478,10 +478,10 @@ export async function restartTimer(
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/restart`,
-    { method: 'POST', headers }
-  );
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/restart`, {
+    method: 'POST',
+    headers
+  });
   if (!resp.ok) {
     // The Director's typed refusal body carries the reason (a heat in progress, a timer that isn't
     // connected) already phrased for the RD, naming the heat and the timer by their FRIENDLY names.
@@ -511,10 +511,10 @@ async function setTimerConnection(
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/${action}`,
-    { method: 'POST', headers }
-  );
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/${action}`, {
+    method: 'POST',
+    headers
+  });
   if (!resp.ok) {
     // Prefer the Director's typed refusal: it is already phrased for the RD and names the timer by
     // its FRIENDLY name. The old message interpolated the raw timer id, and `TimerManager`'s catch
