@@ -45,56 +45,126 @@ use super::{
 use crate::Adapter;
 use gridfpv_events::Event;
 
-/// Decode a RotorHazard socket event (`event` name + its payload) into a [`Raw`].
+/// What one RotorHazard socket frame decoded to — see [`decode_socket`].
 ///
-/// Returns `None` for events we don't translate, or payloads that don't match the
-/// expected shape — the transport simply ignores those.
-pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
-    // RotorHazard wraps each emit's data in a one-element array.
+/// The three cases are deliberately distinct (#400). Collapsing "we don't translate this event"
+/// and "we *do* translate it but could not read this payload" into one `None` is what let schema
+/// drift — a RotorHazard or plugin version whose shapes moved — look exactly like a gate that
+/// stopped detecting: the frames arrived, the laps didn't, and nothing anywhere said why.
+#[derive(Debug)]
+pub enum Decoded {
+    /// A frame we translate, decoded into its [`Raw`].
+    Translated(Raw),
+    /// An event this adapter does not translate. RotorHazard broadcasts plenty of them; ignoring
+    /// these is normal and is *not* counted.
+    Untranslated,
+    /// A frame for an event we DO translate whose payload did not match the expected shape. The
+    /// frame is dropped — but loudly: the transport reports it to
+    /// [`RotorHazardAdapter::note_malformed_frame`].
+    Malformed {
+        /// The serde error (or shape problem), for the diagnostic line.
+        detail: String,
+    },
+}
+
+/// Decode a RotorHazard socket event (`event` name + its payload) into a [`Decoded`].
+///
+/// RotorHazard wraps each emit's data in a one-element array; we decode the first element into the
+/// matching `Raw` variant. A decode failure on an event we translate is a *reportable* drop, not a
+/// shrug — see [`Decoded`].
+pub fn decode_socket(event: &str, payload: &Payload) -> Decoded {
+    // Unknown event first: a payload we would never have read cannot be "malformed".
+    if !translates(event) {
+        return Decoded::Untranslated;
+    }
     let value = match payload {
-        Payload::Text(values) => values.first()?.clone(),
-        _ => return None,
+        Payload::Text(values) => match values.first() {
+            Some(value) => value.clone(),
+            // A known event carrying no data at all: RotorHazard always wraps a payload, so this
+            // is a wire-shape fault like any other decode failure.
+            None => {
+                return Decoded::Malformed {
+                    detail: "empty payload array".to_string(),
+                };
+            }
+        },
+        // Binary / legacy-string payloads: RotorHazard sends JSON for every event we translate,
+        // so this is drift too, not an event we chose to skip.
+        other => {
+            return Decoded::Malformed {
+                detail: format!("non-JSON payload ({})", payload_kind(other)),
+            };
+        }
     };
+    /// Decode `value` into `$t`, mapping a serde error onto [`Decoded::Malformed`].
+    macro_rules! decode {
+        ($t:ty, $variant:expr) => {
+            match serde_json::from_value::<$t>(value) {
+                Ok(decoded) => Decoded::Translated($variant(decoded)),
+                Err(error) => Decoded::Malformed {
+                    detail: error.to_string(),
+                },
+            }
+        };
+    }
     match event {
-        "race_status" => serde_json::from_value::<RawRaceStatus>(value)
-            .ok()
-            .map(Raw::RaceStatus),
-        "current_laps" => serde_json::from_value::<RawCurrentLaps>(value)
-            .ok()
-            .map(Raw::CurrentLaps),
-        "pass_record" => serde_json::from_value::<RawPassRecord>(value)
-            .ok()
-            .map(Raw::PassRecord),
-        "node_data" => serde_json::from_value::<RawNodeData>(value)
-            .ok()
-            .map(Raw::NodeData),
-        "enter_and_exit_at_levels" => serde_json::from_value::<RawEnterExitLevels>(value)
-            .ok()
-            .map(Raw::EnterExitLevels),
-        "current_marshal_data" => serde_json::from_value::<RawMarshalData>(value)
-            .ok()
-            .map(Raw::MarshalData),
-        "race_list" => serde_json::from_value::<RawRaceList>(value)
-            .ok()
-            .map(Raw::RaceList),
-        "race_details" => serde_json::from_value::<RawRaceDetails>(value)
-            .ok()
-            .map(Raw::RaceDetails),
-        "heat_data" => serde_json::from_value::<RawHeatData>(value)
-            .ok()
-            .map(Raw::HeatData),
-        "pilot_data" => serde_json::from_value::<RawPilotData>(value)
-            .ok()
-            .map(Raw::PilotData),
+        "race_status" => decode!(RawRaceStatus, Raw::RaceStatus),
+        "current_laps" => decode!(RawCurrentLaps, Raw::CurrentLaps),
+        "pass_record" => decode!(RawPassRecord, Raw::PassRecord),
+        "node_data" => decode!(RawNodeData, Raw::NodeData),
+        "enter_and_exit_at_levels" => decode!(RawEnterExitLevels, Raw::EnterExitLevels),
+        "current_marshal_data" => decode!(RawMarshalData, Raw::MarshalData),
+        "race_list" => decode!(RawRaceList, Raw::RaceList),
+        "race_details" => decode!(RawRaceDetails, Raw::RaceDetails),
+        "heat_data" => decode!(RawHeatData, Raw::HeatData),
+        "pilot_data" => decode!(RawPilotData, Raw::PilotData),
         // The GridFPV plugin's live signal push (D16, Slice 2). Absent on a stock RH.
-        "gridfpv_signal" => serde_json::from_value::<RawGridSignal>(value)
-            .ok()
-            .map(Raw::GridSignal),
+        "gridfpv_signal" => decode!(RawGridSignal, Raw::GridSignal),
         // The GridFPV plugin's native per-node pass (D16, Slice 3). Absent on a stock RH.
-        "gridfpv_pass" => serde_json::from_value::<RawGridPass>(value)
-            .ok()
-            .map(Raw::GridPass),
-        _ => None,
+        "gridfpv_pass" => decode!(RawGridPass, Raw::GridPass),
+        // Unreachable: `translates` above is the same list. Kept total rather than panicking.
+        _ => Decoded::Untranslated,
+    }
+}
+
+/// Whether `event` is one this adapter translates — the single list [`decode_socket`] keys both
+/// its "not ours" shortcut and its decode table off.
+fn translates(event: &str) -> bool {
+    matches!(
+        event,
+        "race_status"
+            | "current_laps"
+            | "pass_record"
+            | "node_data"
+            | "enter_and_exit_at_levels"
+            | "current_marshal_data"
+            | "race_list"
+            | "race_details"
+            | "heat_data"
+            | "pilot_data"
+            | "gridfpv_signal"
+            | "gridfpv_pass"
+    )
+}
+
+/// A short name for a non-`Text` payload, for the malformed-frame diagnostic.
+fn payload_kind(payload: &Payload) -> &'static str {
+    match payload {
+        Payload::Text(_) => "text",
+        Payload::Binary(_) => "binary",
+        _ => "unrecognized",
+    }
+}
+
+/// Decode a RotorHazard socket event into a [`Raw`], or `None` when it is not one we translate
+/// **or** its payload did not decode.
+///
+/// Prefer [`decode_socket`]: this wrapper cannot tell those two apart, and treating them alike is
+/// #400's diagnosability gap. Kept for callers that only want the happy path.
+pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
+    match decode_socket(event, payload) {
+        Decoded::Translated(raw) => Some(raw),
+        Decoded::Untranslated | Decoded::Malformed { .. } => None,
     }
 }
 
@@ -187,15 +257,22 @@ impl RotorHazardConnection {
     /// RotorHazard socket stream through `adapter`.
     pub fn connect(url: &str, adapter: RotorHazardAdapter) -> Result<Self, rust_socketio::Error> {
         let adapter = Arc::new(Mutex::new(adapter));
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         // Fresh link, fresh pass-source decision (#389). The adapter is REUSED across reconnects
         // (the #105 fix), so a stale `live_pass` would survive a plugin being uninstalled and leave
         // the adapter waiting for passes that can no longer come. Start from "no plugin has
         // spoken" — `current_laps` — and let this connection's `gridfpv_hello_ack` re-earn it.
-        adapter
+        //
+        // This is exactly the mid-race-reconnect path of #400: the reused adapter may still be
+        // holding laps `current_laps` reported while the plugin was quiet, and the switch mints
+        // them. The sink exists first so those laps go straight onto it instead of being dropped.
+        let carried = adapter
             .lock()
             .expect("adapter lock")
             .set_plugin_live_pass(false);
-        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        if !carried.is_empty() {
+            events.lock().expect("event sink lock").extend(carried);
+        }
         // Starts alive; flipped to `false` by the `close`/`error` reserved-event handlers below.
         let alive = Arc::new(AtomicBool::new(true));
         // The newest savable heat id, stashed by the `heat_data` handler and drained by the driver
@@ -246,7 +323,22 @@ impl RotorHazardConnection {
                         }
                     }
                 }
-                if let Some(raw) = raw_from_socket(name, &payload) {
+                let raw = match decode_socket(name, &payload) {
+                    Decoded::Translated(raw) => Some(raw),
+                    // Not ours — RotorHazard broadcasts plenty we don't translate. Normal.
+                    Decoded::Untranslated => None,
+                    // Ours, but unreadable: the frame is dropped either way, so at minimum say
+                    // so and count it (#400). Silently swallowing this made a plugin/RH version
+                    // skew look identical to a gate that stopped detecting.
+                    Decoded::Malformed { detail } => {
+                        adapter
+                            .lock()
+                            .expect("adapter lock")
+                            .note_malformed_frame(name, &detail);
+                        None
+                    }
+                };
+                if let Some(raw) = raw {
                     let (translated, request_marshal, pilotrace_requests, heat_ids) = {
                         let mut a = adapter.lock().unwrap();
                         let translated = a.translate(raw);
@@ -458,13 +550,19 @@ impl RotorHazardConnection {
             .on("gridfpv_hello_ack", {
                 let hello = hello.clone();
                 let adapter = adapter.clone();
+                let sink = events.clone();
                 move |payload: Payload, _client: RawClient| {
                     if let Some(parsed) = parse_hello(&payload) {
                         let live_pass = parsed.advertises(CAP_LIVE_PASS);
-                        adapter
+                        // The switch mints any laps held for the plugin instead of dropping them
+                        // (#400) — forward them to the same sink the frame handlers feed.
+                        let carried = adapter
                             .lock()
                             .expect("adapter lock")
                             .set_plugin_live_pass(live_pass);
+                        if !carried.is_empty() {
+                            sink.lock().expect("event sink lock").extend(carried);
+                        }
                         if !live_pass {
                             crate::diag!(
                                 "gridfpv: rotorhazard: the GridFPV plugin (v{}) did not advertise \
@@ -950,5 +1048,77 @@ impl RotorHazardConnection {
             Ok(mutex) => mutex.into_inner().expect("adapter mutex poisoned"),
             Err(shared) => shared.lock().expect("adapter mutex poisoned").clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(value: serde_json::Value) -> Payload {
+        Payload::Text(vec![value])
+    }
+
+    /// An event we don't translate is not a fault — RotorHazard broadcasts plenty. It must stay
+    /// distinct from a frame we *do* translate but could not read (#400).
+    #[test]
+    fn an_unknown_event_is_untranslated_not_malformed() {
+        assert!(matches!(
+            decode_socket("some_other_rh_event", &text(json!({ "anything": 1 }))),
+            Decoded::Untranslated
+        ));
+    }
+
+    #[test]
+    fn a_well_formed_frame_translates() {
+        assert!(matches!(
+            decode_socket("race_status", &text(json!({ "race_status": 1 }))),
+            Decoded::Translated(Raw::RaceStatus(RawRaceStatus { race_status: 1, .. }))
+        ));
+    }
+
+    /// Schema drift on an event we translate: the frame is dropped either way, but it must be
+    /// *reportable*. Swallowing it is what made a plugin/RH version skew look exactly like a gate
+    /// that stopped detecting (#400).
+    #[test]
+    fn schema_drift_on_a_translated_event_is_malformed() {
+        // `current_laps` without its `current` key — the shape a version skew produces.
+        let Decoded::Malformed { detail } =
+            decode_socket("current_laps", &text(json!({ "laps": [] })))
+        else {
+            panic!("a payload we cannot read must be reported, not silently skipped");
+        };
+        assert!(!detail.is_empty(), "the decode error names the drift");
+        // The compatibility wrapper still just says "nothing to translate".
+        assert!(raw_from_socket("current_laps", &text(json!({ "laps": [] }))).is_none());
+    }
+
+    #[test]
+    fn an_empty_or_non_json_payload_on_a_translated_event_is_malformed() {
+        assert!(matches!(
+            decode_socket("node_data", &Payload::Text(vec![])),
+            Decoded::Malformed { .. }
+        ));
+        assert!(matches!(
+            decode_socket("node_data", &Payload::Binary(vec![0u8, 1].into())),
+            Decoded::Malformed { .. }
+        ));
+        // ...but the same payloads on an event we never read stay untranslated.
+        assert!(matches!(
+            decode_socket("whatever", &Payload::Text(vec![])),
+            Decoded::Untranslated
+        ));
+    }
+
+    /// The transport's half of the contract: a frame it drops lands on the adapter's counter, so
+    /// the heat summary can say "laps may be missing, and here is why".
+    #[test]
+    fn a_malformed_frame_is_reported_to_the_adapter() {
+        let mut adapter = RotorHazardAdapter::new();
+        let Decoded::Malformed { detail } = decode_socket("current_laps", &text(json!({}))) else {
+            panic!("expected a malformed frame");
+        };
+        adapter.note_malformed_frame("current_laps", &detail);
+        assert_eq!(adapter.counts.malformed_frames, 1);
     }
 }
