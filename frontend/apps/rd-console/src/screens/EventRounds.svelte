@@ -338,8 +338,7 @@
       const ack = await session.fillRound(round.id, generateAll ? 'All' : 'Next');
       if (!ack.ok) return; // The error banner / toast surfaces session.lastCommandError.
       await refreshHeats();
-      const fill =
-        ack.outcome && 'FillRound' in ack.outcome ? ack.outcome.FillRound : undefined;
+      const fill = ack.outcome && 'FillRound' in ack.outcome ? ack.outcome.FillRound : undefined;
       if (!fill) return; // A server too old to report the outcome: the refreshed list is the tell.
       if (fill.scheduled.length > 0) {
         toast.success(fill.detail);
