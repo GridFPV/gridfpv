@@ -674,8 +674,15 @@ fn fill_round_once(
                 Err(err) => FillStep::Failed(CommandAck::failed(err)),
             }
         }
-        // Complete / AlreadyScheduled: nothing to append, a successful terminal state.
-        Ok(FillOutcome::Complete) | Ok(FillOutcome::AlreadyScheduled) => FillStep::Terminal,
+        // Complete / AlreadyScheduled / Blocked: nothing to append, a successful terminal state.
+        //
+        // `Blocked` (#394) is a refusal, not a completion — the round's format cannot race this
+        // field at all — and it is flattened into the same `Terminal` here, so the ack still
+        // cannot tell an RD which of the three happened. That is the *other half* of the same
+        // bug (#395): the reason exists now, and the control path still discards it.
+        Ok(FillOutcome::Complete)
+        | Ok(FillOutcome::AlreadyScheduled)
+        | Ok(FillOutcome::Blocked { .. }) => FillStep::Terminal,
         Err(err @ FillError::UnknownRound(_)) => FillStep::Failed(CommandAck::failed(
             ProtocolError::new(ErrorCode::UnknownScope, err.to_string()),
         )),

@@ -98,6 +98,23 @@ pub enum FillOutcome {
     /// [`GeneratorStep::Complete`](gridfpv_engine::format::GeneratorStep::Complete). No
     /// heat is appended; the round's final ranking is available via [`round_ranking`].
     Complete,
+    /// The round's format **refuses this field** and can never draw a heat for it as configured
+    /// (#394) — Head-to-Head handed a single pilot is the case that prompted this. No heat is
+    /// appended and the round is *not* finished: nothing has raced and nothing can until the RD
+    /// changes something (add a pilot, or pick a format that fits the field).
+    ///
+    /// A typed ok, not an error: the round is legally configured and the refusal is the
+    /// generator behaving correctly. What makes it a *distinct* outcome from
+    /// [`Complete`](FillOutcome::Complete) is that "everything raced" and "nothing can race" are
+    /// opposite states that were previously reported with the same word — see
+    /// [`gridfpv_engine::preconditions`].
+    Blocked {
+        /// The RD-facing reason, from
+        /// [`FieldShortfall`](gridfpv_engine::preconditions::FieldShortfall) — names the format,
+        /// its requirement, the round's actual field, and a format that would fit. Carries no
+        /// round/heat/pilot id; the caller frames it with the round's friendly label.
+        reason: String,
+    },
     /// Every heat the generator wants right now is **already scheduled** and awaiting its
     /// `Finalize`. No new heat is appended and the round is *not* finished — the RD just needs
     /// to drive the outstanding heat before the next one can be drawn. A typed ok, not an
@@ -1318,9 +1335,48 @@ pub fn fill_round(
     // Mode-aware heat formation (race redesign Slice 7a). A **static** round (time-trial / qual)
     // forms channel-balanced heats off each member's fixed channel; a **per-heat** round (brackets)
     // runs the format generator's heats and lets the handler first-fit channels (the prior path).
-    match round.channel_mode {
-        ChannelMode::Static => fill_round_static(meta, timers, round, events),
-        ChannelMode::PerHeat => fill_round_per_heat(meta, round, round_id, events),
+    let outcome = match round.channel_mode {
+        ChannelMode::Static => fill_round_static(meta, timers, round, events)?,
+        ChannelMode::PerHeat => fill_round_per_heat(meta, round, round_id, events)?,
+    };
+    Ok(diagnose_complete(meta, round, round_id, events, outcome))
+}
+
+/// Tell a `Complete` that means "everything raced" apart from one that means "this format
+/// refuses this field" (#394), promoting the latter to [`FillOutcome::Blocked`] with its reason.
+///
+/// A generator has only `Run`/`Complete` to answer with, so a refusal arrives here indelibly
+/// stamped "complete". The one thing that separates the two, from outside the generator, is
+/// **history**: a round that genuinely completed scheduled heats along the way. A round that
+/// reports complete having **never scheduled a heat** did not finish — it never started, and if
+/// its format also declares a field precondition this round fails, that precondition is the
+/// reason. Both conditions are required: "no heats yet" alone is also how a legitimately empty
+/// format behaves, and a declared shortfall alone would mis-explain a round that raced its heats
+/// before a pilot was dropped from the field.
+///
+/// One insertion point for both channel modes, deliberately — a refusal must not be reportable
+/// on one path and generic on the other.
+fn diagnose_complete(
+    meta: &EventMeta,
+    round: &RoundDef,
+    round_id: &RoundId,
+    events: &[Event],
+    outcome: FillOutcome,
+) -> FillOutcome {
+    if outcome != FillOutcome::Complete || !scheduled_round_heats(events, round_id).is_empty() {
+        return outcome;
+    }
+    // The field is resolved (not assumed) so the count in the message is the one this round
+    // would actually race. An unresolvable field is a `FillError` on its own terms, already
+    // reported by the fill above — never silently reinterpreted as a shortfall here.
+    let Ok(field) = round_field(meta, round, events) else {
+        return outcome;
+    };
+    match gridfpv_engine::preconditions::field_shortfall(&round.format, field.len()) {
+        Some(shortfall) => FillOutcome::Blocked {
+            reason: shortfall.to_string(),
+        },
+        None => outcome,
     }
 }
 
@@ -2615,6 +2671,85 @@ mod tests {
         ranking.iter().map(|e| e.competitor.0.clone()).collect()
     }
 
+    // --- #394: a refusal must not masquerade as a completion --------------------------------
+
+    /// The bug, end to end at the fill path: a Head-to-Head round with a **single pilot** filled
+    /// as `Complete`, which every layer above renders as "the round is complete or awaiting a
+    /// score" — on a round where nothing has raced. It now comes back `Blocked`, carrying the
+    /// shortfall in words.
+    #[test]
+    fn one_pilot_head_to_head_fill_is_blocked_and_names_the_shortfall() {
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 1 });
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["Solo"])]);
+
+        let outcome = fill_round(&meta, &no_timers(), &round.id, &[]).unwrap();
+        let FillOutcome::Blocked { reason } = outcome else {
+            panic!("a one-pilot head-to-head round must not report Complete, got {outcome:?}");
+        };
+        // What the RD needs to act: the format, its requirement, their actual field, and the
+        // format that would fit a solo pilot.
+        assert!(reason.contains("Head-to-Head"), "{reason}");
+        assert!(reason.contains("at least 2"), "{reason}");
+        assert!(reason.contains("has 1"), "{reason}");
+        assert!(reason.contains("timed_qual"), "{reason}");
+        // The message is RD-facing: no raw round id leaks into it (repo display rule).
+        assert!(
+            !reason.contains("h2h"),
+            "no raw round id in the reason: {reason}"
+        );
+    }
+
+    /// The other side of the same coin — the refusal must not swallow a genuine completion. Two
+    /// pilots fill normally, and once their heat is scored the round reports `Complete`, not
+    /// `Blocked`.
+    #[test]
+    fn a_two_pilot_head_to_head_round_still_fills_and_then_completes() {
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 1 });
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+
+        assert!(
+            matches!(
+                fill_round(&meta, &no_timers(), &round.id, &[]).unwrap(),
+                FillOutcome::Scheduled { .. }
+            ),
+            "two pilots is a raceable head-to-head field"
+        );
+
+        let log = scored_heat(
+            "h2h-h2h-h0",
+            "h2h",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        assert_eq!(
+            fill_round(&meta, &no_timers(), &round.id, &log).unwrap(),
+            FillOutcome::Complete,
+            "a round that raced its heats is finished, not blocked"
+        );
+    }
+
+    /// A round that DID schedule heats is finished, never "blocked", even if its field has since
+    /// shrunk below the format's minimum — the shortfall only explains a round that never
+    /// started. This is the guard that keeps `Blocked` meaning "nothing has raced and nothing
+    /// can" rather than becoming a second, wrong label for a completed round.
+    #[test]
+    fn a_round_that_already_raced_reports_complete_even_if_its_field_shrank() {
+        let round = h2h_round("h2h", "open", WinCondition::FirstToLaps { n: 1 });
+        // Membership is down to one pilot, but the log shows the round already scheduled + scored
+        // a heat back when it had two.
+        let meta = meta_with(vec![round.clone()], vec![member("open", &["A"])]);
+        let log = scored_heat(
+            "h2h-h2h-h0",
+            "h2h",
+            "open",
+            &[("A", &[0, 1_000_000]), ("B", &[0, 2_000_000])],
+        );
+        assert_eq!(
+            fill_round(&meta, &no_timers(), &round.id, &log).unwrap(),
+            FillOutcome::Complete
+        );
+    }
+
     #[test]
     fn dq_sinks_the_pilot_in_round_ranking_standings_and_class_standings() {
         // FirstToLaps head-to-head: A reaches lap 1 first (on-track winner), B second. A DQ on A
@@ -3267,7 +3402,8 @@ mod tests {
                     "the draw is recorded once, not per heat"
                 );
             }
-            FillOutcome::Complete | FillOutcome::AlreadyScheduled => {}
+            FillOutcome::Complete | FillOutcome::AlreadyScheduled | FillOutcome::Blocked { .. } => {
+            }
         }
         // …while the NOT-yet-filled sibling resolves live and sees the adjudicated carry.
         assert_eq!(
