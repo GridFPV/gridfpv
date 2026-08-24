@@ -322,6 +322,89 @@ pub enum FillMode {
     All,
 }
 
+/// Why a [`Command::FillRound`] stopped drawing heats (#395).
+///
+/// Every value here is a **success**; they differ in what the RD has to do next, which is
+/// exactly what `ok: true` alone could not say. Externally tagged, so it maps to a TS
+/// string-union (`"SingleStep" | "Complete" | "AwaitingResult" | "Blocked"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum FillStop {
+    /// [`FillMode::Next`] drew its **one** heat and stopped there — the mode's contract, not a
+    /// limit reached. Always paired with exactly one scheduled heat, and the round's own state
+    /// (finished? waiting?) is simply not known: asking would have meant drawing again.
+    SingleStep,
+    /// The round is **finished**: every heat its format wants exists. Nothing more to do.
+    Complete,
+    /// The next heat is **already scheduled** and awaiting its result — the RD drives the
+    /// outstanding heat before another can be drawn. Not finished; come back after scoring.
+    AwaitingResult,
+    /// The round's format **refuses this field** and cannot draw a heat for it at all (#394) —
+    /// Head-to-Head with a single pilot. Nothing has raced and nothing can until the RD changes
+    /// the round: [`detail`](FillRoundOutcome::detail) says what to change.
+    Blocked,
+}
+
+/// A heat a command **created**, identified for the caller (#395).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ScheduledHeat {
+    /// The heat's id — a **wire handle**, for addressing it in follow-up commands. Never shown
+    /// to a user; [`name`](Self::name) is what a message prints (repo display rule).
+    pub heat: HeatId,
+    /// The heat's **friendly display name** ("Test Round Heat 1", "A-Main", "Practice Heat"),
+    /// resolved server-side by the same convention the console uses.
+    pub name: String,
+    /// Who is racing in it, in the generator's seeding order.
+    pub lineup: Vec<CompetitorRef>,
+    /// The per-pilot channel assignment in raw MHz, as logged on the heat. Empty when the round
+    /// assigns none (open practice, or no timer channels to hand out).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frequencies: Vec<(CompetitorRef, u16)>,
+}
+
+/// What a [`Command::FillRound`] actually **did** (#395).
+///
+/// The scheduling commands' useful answer is their *effect*, not their acceptance: a fill that
+/// appended nothing — round finished, outstanding heat unscored, field too small for the format
+/// — was reported byte-identically to one that scheduled a heat. That is not merely unhelpful,
+/// it actively misleads: `ok: true` reads as "the thing you asked for happened", so a caller
+/// debugging an empty log searches downstream through the projection and the read routes, all of
+/// which are working correctly. Both halves are here, so nobody has to diff the event log to
+/// find out which happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct FillRoundOutcome {
+    /// The heats this fill scheduled, in append order — one for
+    /// [`FillMode::Next`](FillMode::Next), zero or more for [`All`](FillMode::All). **Empty
+    /// means the fill appended nothing**, and [`stopped`](Self::stopped) says why.
+    ///
+    /// Always serialized, empty included: "this fill scheduled nothing" is the very signal this
+    /// type exists to carry, and omitting the field would leave a caller inferring it from an
+    /// absence again — the exact shape of the bug (#395).
+    #[serde(default)]
+    pub scheduled: Vec<ScheduledHeat>,
+    /// Why the fill stopped drawing — the machine-readable discriminator.
+    pub stopped: FillStop,
+    /// The same thing in one RD-facing sentence, naming the round by its **label** and any heat
+    /// by its friendly name (never an id). Safe to show verbatim.
+    pub detail: String,
+}
+
+/// What a command **did**, for the commands whose useful result is the effect rather than the
+/// acceptance (#395).
+///
+/// Externally tagged and keyed by command, so each command's outcome is its own shape and a new
+/// one is an additive variant. Rides along in [`CommandAck::outcome`], which is optional — a
+/// command with nothing interesting to report (a transition either happened or was rejected)
+/// omits it entirely and its ack is byte-identical to before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum CommandOutcome {
+    /// The result of a [`Command::FillRound`].
+    FillRound(FillRoundOutcome),
+}
+
 /// The acknowledgement of a [`Command`] (protocol.html §5): commands up,
 /// acknowledgements down.
 ///
@@ -331,6 +414,13 @@ pub enum FillMode {
 /// `None`. (The resulting projection state flows back separately as
 /// [`ChangeEnvelope`](crate::stream::ChangeEnvelope)s on the read stream, not in the
 /// ack.)
+///
+/// `ok` answers *"was the command accepted?"* — which for some commands is not the question the
+/// caller is actually asking. `FillRound`'s "did nothing" is a routine, expected result, not an
+/// error, so it acks ok; a caller then has no way to tell it from a fill that scheduled a heat
+/// (#395). [`outcome`](Self::outcome) carries **what the command did** for those commands, and
+/// is absent for the ones where acceptance *is* the whole answer — so it is purely additive:
+/// every existing client keeps parsing every ack unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct CommandAck {
@@ -340,14 +430,30 @@ pub struct CommandAck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<ProtocolError>,
+    /// **What the command did**, for the commands whose effect is the useful answer — currently
+    /// [`FillRound`](Command::FillRound). `None` for every other command (and for a failure,
+    /// where `error` is the answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub outcome: Option<CommandOutcome>,
 }
 
 impl CommandAck {
-    /// A successful acknowledgement.
+    /// A successful acknowledgement, reporting acceptance only.
     pub fn ok() -> Self {
         Self {
             ok: true,
             error: None,
+            outcome: None,
+        }
+    }
+
+    /// A successful acknowledgement that also reports **what the command did**.
+    pub fn ok_with(outcome: CommandOutcome) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            outcome: Some(outcome),
         }
     }
 
@@ -356,6 +462,7 @@ impl CommandAck {
         Self {
             ok: false,
             error: Some(error),
+            outcome: None,
         }
     }
 }
