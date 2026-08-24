@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { HeatPhase } from '@gridfpv/types';
 import {
   ACTION_ORDER,
+  CEREMONY_ACTIONS,
+  actionDescription,
+  actionsForKind,
   commandForAction,
+  commandsForAction,
   actionLabel,
   isActionLegal,
   isDestructive,
@@ -135,5 +139,75 @@ describe('transitions: action → Command', () => {
       const cmd = commandForAction(action, 'heat-7');
       expect(cmd).toEqual({ [action]: { heat: 'heat-7' } });
     }
+  });
+});
+
+// ── Practice: "Run again", never the ceremony verbs (#393) ────────────────────────────────────
+//
+// An open-practice heat has no result — post-#398 its laps are ordinary logged `Pass` events, but
+// the round is excluded from scoring, so `Finalize`/`Advance`/`Revert` ask the RD to adjudicate
+// something that does not exist. Practice drops all three and gets one obvious end-of-run action.
+
+describe('transitions: practice drops the ceremony and gets "Run again" (#393)', () => {
+  it('never renders Finalize / Advance / Revert for a practice heat, in any phase', () => {
+    const rendered = actionsForKind('Practice');
+    for (const ceremony of CEREMONY_ACTIONS) {
+      expect(rendered).not.toContain(ceremony);
+      for (const p of PHASES) expect(isActionLegal(p, ceremony, 'Practice')).toBe(false);
+    }
+    // The competition heat is untouched — it still renders and uses all three.
+    expect(actionsForKind('Competition')).toEqual([...ACTION_ORDER]);
+    expect(isActionLegal('Unofficial', 'Finalize', 'Competition')).toBe(true);
+    expect(isActionLegal('Final', 'Advance', 'Competition')).toBe(true);
+    expect(isActionLegal('Final', 'Revert', 'Competition')).toBe(true);
+  });
+
+  it('offers exactly Run again + Discard at the end of a practice run, Run again primary', () => {
+    expect(legalActions('Unofficial', 'Practice')).toEqual(['Restart', 'Discard']);
+    expect(primaryAction('Unofficial', 'Practice')).toBe('Restart');
+    // The label is the whole point: the same command, named for practice rather than adjudication.
+    expect(actionLabel('Restart', 'Practice')).toBe('Run again');
+    expect(actionLabel('Restart')).toBe('Restart');
+    expect(actionDescription('Restart', 'Practice')).toMatch(/run practice again/i);
+  });
+
+  it('leaves the forward path to the line identical — only the end of the run changes', () => {
+    for (const p of ['Scheduled', 'Staged', 'Armed', 'Running'] as HeatPhase[]) {
+      expect(legalActions(p, 'Practice')).toEqual(legalActions(p, 'Competition'));
+      expect(primaryAction(p, 'Practice')).toBe(primaryAction(p, 'Competition'));
+    }
+  });
+
+  it('never strands a practice heat at Final: Run again re-opens it, then resets', () => {
+    // Unreachable through the console now (no Finalize button), but an armed protest window
+    // auto-finalizes any heat. Restart from Final is illegal in the engine, so the console sends
+    // the re-open itself rather than making the RD spell `Revert`.
+    expect(legalActions('Final', 'Practice')).toEqual(['Restart', 'Discard']);
+    expect(primaryAction('Final', 'Practice')).toBe('Restart');
+    expect(commandsForAction('Restart', 'p-1', 'Final', 'Practice')).toEqual([
+      { Revert: { heat: 'p-1' } },
+      { Restart: { heat: 'p-1' } }
+    ]);
+  });
+
+  it('is one command everywhere else — commandsForAction wraps commandForAction', () => {
+    for (const p of PHASES) {
+      for (const action of ACTION_ORDER) {
+        for (const kind of ['Competition', 'Practice'] as const) {
+          if (kind === 'Practice' && action === 'Restart' && p === 'Final') continue;
+          expect(commandsForAction(action, 'heat-7', p, kind)).toEqual([
+            commandForAction(action, 'heat-7')
+          ]);
+        }
+      }
+    }
+  });
+
+  it('defaults to the competition model when no kind is given (every existing caller)', () => {
+    for (const p of PHASES) {
+      expect(legalActions(p)).toEqual(legalActions(p, 'Competition'));
+      expect(primaryAction(p)).toBe(primaryAction(p, 'Competition'));
+    }
+    expect(actionsForKind()).toEqual([...ACTION_ORDER]);
   });
 });

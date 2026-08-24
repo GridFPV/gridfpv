@@ -1105,18 +1105,14 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
     expect(within(r1).getByText('25.000')).toBeInTheDocument();
   });
 
-  it('the New run control fills the open-practice round to clear the board', async () => {
-    const { session, sendSpy } = renderBoard();
+  it('carries no second "new run" control — Run again is the one way to go again (#393)', () => {
+    // The board used to offer a fill-based "New run · clear board". An open-practice round has
+    // exactly ONE heat ever (`OpenPractice::next` completes after it), so once the run had ended
+    // that fill scheduled nothing and still acked ok — a button that claimed success and cleared
+    // nothing. Re-running is the transition row's Run again.
+    const { session } = renderBoard();
     render(LiveRaceControl, { session });
-
-    const reset = await screen.findByRole('button', { name: /New run/ });
-    await fireEvent.click(reset);
-
-    await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
-    // Open practice single-steps — the New run fills its one channel heat (mode 'Next', #216).
-    expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
-      FillRound: { round: 'rp', mode: 'Next' }
-    });
+    expect(screen.queryByRole('button', { name: /New run/ })).toBeNull();
   });
 
   it('does not show the pilot-keyed panels for an open-practice heat', async () => {
@@ -1126,6 +1122,89 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
     // The normal Heat sheet / Live standing panels are replaced by the practice board.
     expect(screen.queryByText('Heat sheet')).not.toBeInTheDocument();
     expect(screen.queryByText('Live standing')).not.toBeInTheDocument();
+  });
+});
+
+// ── Practice ends with "Run again", not competition ceremony (#393) ────────────────────────────
+
+describe('LiveRaceControl — practice runs again instead of being adjudicated (#393)', () => {
+  const opLiveAt = (phase: LiveRaceState['phase']) => ({ ...opLive, phase }) as LiveRaceState;
+
+  function renderPractice(phase: LiveRaceState['phase']) {
+    return makeTestSession({
+      event: OP_EVENT,
+      live: opLiveAt(phase),
+      listHeatsImpl: vi.fn(async () => [{ ...OP_HEAT, phase }]),
+      listChannelsImpl: vi.fn(async () => OP_CATALOG),
+      listTimersImpl: vi.fn(async () => [OP_TIMER])
+    });
+  }
+
+  it('offers Run again at the end of a practice run and NONE of the ceremony verbs', async () => {
+    const { session } = renderPractice('Unofficial');
+    render(LiveRaceControl, { session });
+
+    // The one obvious action, enabled. (`Restart` under a name that describes practice.)
+    const again = (await screen.findByRole('button', { name: 'Run again' })) as HTMLButtonElement;
+    expect(again.disabled).toBe(false);
+    // Practice has no result to make official — the verbs are ABSENT, not merely disabled.
+    for (const ceremony of ['Finalize', 'Advance', 'Revert']) {
+      expect(screen.queryByRole('button', { name: ceremony })).toBeNull();
+    }
+    // `Restart` is never spelled that way for practice.
+    expect(screen.queryByRole('button', { name: 'Restart' })).toBeNull();
+    // Discard stays — abandoning the session is still a real thing to want.
+    expect((screen.getByRole('button', { name: 'Discard' }) as HTMLButtonElement).disabled).toBe(
+      false
+    );
+  });
+
+  it('Run again fires the Restart command (same transition, practice name)', async () => {
+    const { session, sendSpy } = renderPractice('Unofficial');
+    render(LiveRaceControl, { session });
+
+    // Restart is destructive — it throws the run away — so it still confirms once.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Run again' }));
+    expect(sendSpy).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(sendSpy).toHaveBeenCalledWith({ Restart: { heat: 'practice-1' } });
+  });
+
+  it('replaces the provisional/official lifecycle copy with the practice run one', async () => {
+    const { session } = renderPractice('Unofficial');
+    render(LiveRaceControl, { session });
+
+    expect(await screen.findByText('Run complete')).toBeInTheDocument();
+    // No adjudication language: nothing is provisional and nothing becomes official.
+    expect(screen.queryByText('Provisional')).toBeNull();
+    expect(screen.queryByText('Official')).toBeNull();
+  });
+
+  it('never strands a practice heat at Final: Run again re-opens it, then resets', async () => {
+    // Reachable when the round carries an armed protest window (the runtime auto-finalizes).
+    const { session, sendSpy } = renderPractice('Final');
+    render(LiveRaceControl, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Run again' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(2));
+    expect(sendSpy.mock.calls.map((c) => c[0])).toEqual([
+      { Revert: { heat: 'practice-1' } },
+      { Restart: { heat: 'practice-1' } }
+    ]);
+  });
+
+  it("leaves a NON-practice heat's actions exactly as they were", () => {
+    const { session } = makeTestSession({ live: liveAt('Unofficial') });
+    render(LiveRaceControl, { session });
+    const btn = (label: string) => screen.getByRole('button', { name: label }) as HTMLButtonElement;
+    // The competition lifecycle is untouched: Finalize primary, Restart still called Restart.
+    expect(btn('Finalize').disabled).toBe(false);
+    expect(btn('Restart').disabled).toBe(false);
+    expect(btn('Discard').disabled).toBe(false);
+    expect(btn('Advance').disabled).toBe(true);
+    expect(btn('Revert').disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Run again' })).toBeNull();
   });
 });
 
