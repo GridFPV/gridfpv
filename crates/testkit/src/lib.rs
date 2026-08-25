@@ -67,6 +67,14 @@ pub struct NodeCsv {
     /// RH_UPDATE_INTERVAL`. At a realistic ~50–100 Hz sample rate (10–20 ms/tick) a lap is many
     /// dozens of ticks, so the default is far denser than the old square-wave `6`. Smaller =
     /// faster laps. See [`DEFAULT_TICKS_PER_LAP`].
+    ///
+    /// **Pick a value that divides [`TOTAL_TICKS`] evenly.** RotorHazard's mock interface loops the
+    /// CSV at EOF, so a cadence that does not divide the file leaves a short remainder before the
+    /// wrap — which RH records as a genuine, *very fast* crossing. Measured while building the
+    /// multi-round e2e: `ticks_per_lap: 16` against `TOTAL_TICKS = 600` produced a 0.8 s lap on a
+    /// 1.6 s cadence, while 12 / 20 / 24 wrapped clean. One stray fast lap is enough to invert a
+    /// best-lap ranking, so a test asserting on lap *times* can fail on the wrap rather than on
+    /// anything it meant to test.
     pub ticks_per_lap: usize,
     /// The lap's **peak** RSSI: the height of the bell at the gate crossing (kept valid: 1..=999).
     /// Lap-to-lap variation nudges this a few units per lap; the noise floor jitters it per sample.
