@@ -28,7 +28,7 @@ import type { Session } from './session.svelte.js';
 import { RaceAudioPlayer } from './raceAudio.js';
 import { CalloutQueue, lapCalloutText } from './callouts.js';
 import { useEndOfRaceTones } from './endTones.svelte.js';
-import { useLapCallouts } from './lapCallouts.svelte.js';
+import { useCrossingTones, useLapCallouts } from './lapCallouts.svelte.js';
 import { createCompetitorNameResolver } from './competitorName.js';
 import { channelLabel } from './channels.js';
 import { fixedEndWindowMicros } from './raceWindow.js';
@@ -179,7 +179,27 @@ export function mountRaceDayAudio(session: Session): RaceDayAudio {
     }
   );
 
-  // ── Lap callouts (informational layer — mute-scoped) ──────────────────────────────────────
+  // ── Crossing tones (informational layer — mute-scoped) ────────────────────────────────────
+  // The TONE half, and the whole of #397: one pip per gate CROSSING — holeshot, counted lap, and
+  // a pass the min-lap floor rejected alike — where the console used to pip only per recorded
+  // *lap* and so was silent for exactly the crossings an RD most needs to hear. A pip on a seat
+  // nobody is flying is the point, not a bug: that is how a too-sensitive gate becomes audible.
+  //
+  // Novelty is the crossing's `pass_ref`, never the arrival of a frame (see the detector); the
+  // player self-gates on the callouts mute, so the mute has one owner and cannot drift.
+  useCrossingTones(
+    () => session.currentEvent?.id,
+    () => phase,
+    () => live?.crossings,
+    () => audio.playCrossingBeep()
+  );
+
+  // ── Spoken lap callouts (informational layer — mute-scoped) ────────────────────────────────
+  // The VOICE half, still driven by recorded laps: a lap number and a lap time are the payload
+  // of a callout, and a holeshot or a rejected pass has neither to say. So the tone fires per
+  // crossing and the speech per lap — no crossing is both pipped twice and no lap is spoken
+  // twice. (The pip that used to fire from here moved to the crossing feed above; leaving it
+  // would double-pip every counted lap.)
   useLapCallouts(
     () => phase,
     () => heat,
@@ -187,7 +207,6 @@ export function mountRaceDayAudio(session: Session): RaceDayAudio {
     () => live?.progress,
     (crossing) => {
       if (audio.muted) return;
-      audio.playCrossingBeep();
       const name = competitorName(crossing.ref);
       callouts.enqueue({
         text: lapCalloutText(

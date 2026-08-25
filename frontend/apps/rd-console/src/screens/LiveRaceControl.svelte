@@ -546,9 +546,11 @@
       </div>
     {/if}
 
-    <!-- The "Callouts" toggle mutes ONLY the informational layer (crossing pips + spoken lap
+    <!-- The "Callouts" toggle mutes ONLY the informational layer (the per-CROSSING pips — #397:
+         every crossing including the holeshot and a floor-rejected pass — plus the spoken lap
          callouts). The procedure tones — start tone, end-of-race countdown, race-end buzzer — are
-         always on and have no toggle (the old "Tone on/off" switch is gone). -->
+         always on and have no toggle (the old "Tone on/off" switch is gone). Per-tone enable /
+         volume is #193's sounds panel, not this one switch. -->
     <div class="audio-tools">
       <button
         type="button"
@@ -556,8 +558,8 @@
         onclick={toggleMute}
         aria-pressed={muted}
         title={muted
-          ? 'Lap callouts muted — click to unmute. Race tones (start / countdown / end) always sound.'
-          : 'Lap callouts on — click to mute. Race tones (start / countdown / end) always sound.'}
+          ? 'Crossing tones and lap callouts muted — click to unmute. Race tones (start / countdown / end) always sound.'
+          : 'Crossing tones and lap callouts on — click to mute. Race tones (start / countdown / end) always sound.'}
       >
         <span class="mute-icon" aria-hidden="true">{muted ? '🔇' : '🔊'}</span>
         <span class="mute-text">{muted ? 'Callouts off' : 'Callouts on'}</span>
