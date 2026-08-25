@@ -1,0 +1,100 @@
+<div aria-label="RSSI signal graph" class="rssi-graph svelte-yswcj0">
+<div class="legend svelte-yswcj0">
+<span class="swatch sample svelte-yswcj0">
+</span> Signal (streaming cadence) 
+<span class="swatch enter svelte-yswcj0">
+</span> Enter 
+<span class="swatch exit svelte-yswcj0">
+</span> Exit 
+<span class="swatch band svelte-yswcj0">
+</span> Detection window 
+<span class="swatch marker svelte-yswcj0">
+</span> Lap pass 
+<span class="swatch preview svelte-yswcj0">
+</span> Preview pass (uncommitted) 
+<span class="cadence-note svelte-yswcj0">Streaming-cadence trace — one sample per timer emit, not RotorHazard's dense marshal history.
+</span>
+</div> 
+<figure aria-label="RSSI for Maverick" class="trace svelte-yswcj0">
+<figcaption class="svelte-yswcj0">
+<span class="who svelte-yswcj0">Maverick
+</span> 
+<span class="meta svelte-yswcj0">91 samples · enter 118 · exit 88
+</span> 
+<span aria-label="Zoom for Maverick" class="zoom-controls svelte-yswcj0" role="group">
+<button aria-label="Zoom in" class="svelte-yswcj0" title="Zoom in (or scroll on the plot)" type="button">+
+</button> 
+<button aria-label="Zoom out" class="svelte-yswcj0" disabled="" title="Zoom out" type="button">−
+</button> 
+<button aria-label="Reset zoom" class="svelte-yswcj0" disabled="" title="Show the whole trace" type="button">Fit
+</button> 
+</span>
+</figcaption> 
+<svg aria-label="RSSI trace for Maverick with 2 lap markers" class="plot svelte-yswcj0" preserveAspectRatio="none" role="img" viewBox="0 0 1000 220">
+<defs>
+<clipPath id="rssi-plot-clip-0">
+<rect height="192" width="984" x="8" y="10">
+</rect>
+</clipPath>
+</defs>
+<rect class="frame svelte-yswcj0" fill="none" height="192" width="984" x="8" y="10">
+</rect>
+<g clip-path="url(#rssi-plot-clip-0)">
+<rect class="crossing svelte-yswcj0" height="192" width="54.666666666666686" x="445.3333333333333" y="10">
+</rect>
+<rect class="crossing svelte-yswcj0" height="192" width="54.66666666666663" x="882.6666666666666" y="10">
+</rect>
+<line class="enter-line svelte-yswcj0" x1="8" x2="992" y1="60.6162402669633" y2="60.6162402669633">
+</line>
+<line class="exit-line svelte-yswcj0" x1="8" x2="992" y1="140.70522803114574" y2="140.70522803114574">
+</line>
+<polyline class="signal svelte-yswcj0" points="8.0,188.8 18.9,186.1 29.9,183.4 40.8,188.8 51.7,186.1 62.7,183.4 73.6,188.8 84.5,186.1 95.5,183.4 106.4,188.8 117.3,186.1 128.3,183.4 139.2,188.8 150.1,186.1 161.1,183.4 172.0,188.8 182.9,186.1 193.9,183.4 204.8,188.8 215.7,186.1 226.7,183.4 237.6,188.8 248.5,186.1 259.5,183.4 270.4,188.8 281.3,186.1 292.3,183.4 303.2,188.8 314.1,186.1 325.1,183.4 336.0,188.8 346.9,186.1 357.9,183.4 368.8,188.8 379.7,186.1 390.7,183.4 401.6,188.8 412.5,154.1 423.5,119.3 434.4,92.7 445.3,57.9 456.3,23.2 467.2,60.6 478.1,90.0 489.1,119.3 500.0,156.7 510.9,186.1 521.9,183.4 532.8,188.8 543.7,186.1 554.7,183.4 565.6,188.8 576.5,186.1 587.5,183.4 598.4,188.8 609.3,186.1 620.3,183.4 631.2,188.8 642.1,186.1 653.1,183.4 664.0,188.8 674.9,186.1 685.9,183.4 696.8,188.8 707.7,186.1 718.7,183.4 729.6,188.8 740.5,186.1 751.5,183.4 762.4,188.8 773.3,186.1 784.3,183.4 795.2,188.8 806.1,186.1 817.1,183.4 828.0,188.8 838.9,186.1 849.9,151.4 860.8,124.7 871.7,90.0 882.7,55.3 893.6,28.6 904.5,57.9 915.5,87.3 926.4,124.7 937.3,154.1 948.3,183.4 959.2,188.8 970.1,186.1 981.1,183.4 992.0,188.8 992.0,188.8">
+</polyline>
+<g aria-label="Lap 1 at 41.000 — select" aria-pressed="true" class="marker svelte-yswcj0 selected" role="button" tabindex="0">
+<line class="hit svelte-yswcj0" x1="456.26666666666665" x2="456.26666666666665" y1="10" y2="202">
+</line>
+<line class="rule svelte-yswcj0" x1="456.26666666666665" x2="456.26666666666665" y1="10" y2="202">
+</line>
+<text class="label svelte-yswcj0" x="459.26666666666665" y="20">1
+</text>
+</g>
+<g aria-label="Lap 2 at 40.500 — select" aria-pressed="false" class="marker svelte-yswcj0 removed" role="button" tabindex="0">
+<line class="hit svelte-yswcj0" x1="899.0666666666667" x2="899.0666666666667" y1="10" y2="202">
+</line>
+<line class="rule svelte-yswcj0" x1="899.0666666666667" x2="899.0666666666667" y1="10" y2="202">
+</line>
+<text class="label svelte-yswcj0" x="902.0666666666667" y="20">2
+</text>
+</g>
+<g aria-hidden="true" class="preview-added svelte-yswcj0">
+<line class="svelte-yswcj0" x1="336" x2="336" y1="10" y2="202">
+</line>
+<text class="label svelte-yswcj0" x="339" y="198">+
+</text>
+</g>
+<g aria-hidden="true" class="preview-added svelte-yswcj0">
+<line class="svelte-yswcj0" x1="664" x2="664" y1="10" y2="202">
+</line>
+<text class="label svelte-yswcj0" x="667" y="198">+
+</text>
+</g>
+</g>
+<g aria-label="Enter threshold for Maverick" aria-orientation="vertical" aria-valuemax="137" aria-valuemin="65" aria-valuenow="118" class="th-handle enter svelte-yswcj0" role="slider" tabindex="0">
+<line class="grab svelte-yswcj0" x1="8" x2="992" y1="60.6162402669633" y2="60.6162402669633">
+</line>
+<rect class="knob svelte-yswcj0" height="12" rx="3" width="30" x="962" y="54.6162402669633">
+</rect>
+<text class="knob-label svelte-yswcj0" x="966" y="64.1162402669633">EN
+</text>
+</g>
+<g aria-label="Exit threshold for Maverick" aria-orientation="vertical" aria-valuemax="137" aria-valuemin="65" aria-valuenow="88" class="th-handle exit svelte-yswcj0" role="slider" tabindex="0">
+<line class="grab svelte-yswcj0" x1="8" x2="992" y1="140.70522803114574" y2="140.70522803114574">
+</line>
+<rect class="knob svelte-yswcj0" height="12" rx="3" width="30" x="962" y="134.70522803114574">
+</rect>
+<text class="knob-label svelte-yswcj0" x="966" y="144.20522803114574">EX
+</text>
+</g>
+</svg>
+</figure>
+</div>

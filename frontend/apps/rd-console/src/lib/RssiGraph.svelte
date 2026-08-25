@@ -1,65 +1,109 @@
 <script lang="ts">
   /**
-   * RssiGraph (#55, Marshaling Slice 4) — the **signal-as-evidence** layer on top of the
-   * lap-level Marshaling UI. For a RotorHazard heat that captured a trace, it renders the
-   * per-competitor RSSI-vs-time graph the marshal reviews against, so they can see *why* the
-   * timer called (or missed) a lap (marshaling.html §3.2).
+   * RssiGraph — the RSSI-vs-time plot, in two modes.
    *
-   * The graph itself stays display-only by default. The RotorHazard-style "Recalculate with
-   * draggable thresholds" (marshaling.html §5) is now opt-in via the tuning props: when the
-   * parent supplies `onthresholds`, the enter/exit lines grow draggable (and keyboard-nudgeable)
-   * handles that emit the tuned levels back up; `tuned` overrides the drawn levels for one
-   * competitor while the marshal adjusts; and `preview` draws the re-detection diff — hollow
-   * dashed markers for passes the new levels would ADD, and a struck/dimmed restyle on official
-   * lap markers the new levels would REMOVE. The graph still re-derives nothing and commits
-   * nothing — the parent runs the detection (`redetect.ts`) and sends the commands on an
-   * explicit Commit. Without the new props the behavior is exactly the old display-only graph.
+   * **`mode="review"` (#55, Marshaling Slice 4)** — the *signal-as-evidence* layer on top of the
+   * lap-level Marshaling UI. For a finished RotorHazard heat that captured a trace, it renders the
+   * per-competitor graph the marshal reviews against, so they can see *why* the timer called (or
+   * missed) a lap (marshaling.html §3.2): a static dense trace on a race-relative axis, lap markers
+   * that select in both directions with the lap list, and a zoom/pan view.
    *
-   * What it draws, per competitor trace ([`CompetitorTrace`]):
-   *   • the **sample line** — the streaming-cadence RSSI samples placed on the source clock
-   *     (sample `i` at `from + i·period_micros`);
-   *   • the **enter / exit threshold lines** — horizontal, the levels the timer detected against;
-   *   • the **lap markers** — verticals at each lap's gate-pass time (`Lap.at`, the closing pass's
-   *     source-clock instant, which shares the trace's clock). Clicking a marker **selects that lap**
-   *     in the Slice-3 action surface; the parent's lap-list selection highlights the same marker
-   *     (two-way) — same commands, no re-detection.
+   * **`mode="live"` (#355)** — the tuning view, over a timer's heartbeat: the same plot per NODE,
+   * drawn against a rolling window pinned to the newest sample. No laps, no lap-relative axis, no
+   * zoom (the window *is* the zoom). What it is for is the **crossing band**: a shaded region that
+   * opens the moment the signal rises past `enter` and closes when it falls back past `exit`, the
+   * still-open one running to now — RotorHazard's own tuning page in the same visual language as
+   * marshaling's detection windows, because it is literally the same code
+   * ({@link crossingWindows}).
    *
-   * Fidelity caveat made visible (Slice 1): the samples are **one per RH `node_data` emit** at the
-   * streaming cadence, NOT RH's dense per-tick marshal history — a legend note says so, so the
-   * coarse line is never mistaken for the realtime detector's signal.
+   * The modes differ in exactly four things — the axis source, whether laps exist, whether the view
+   * zooms, and the chrome copy — and all four are resolved ONCE, at the boundary, into `chrome` and
+   * {@link viewOf}. Nothing below that boundary asks which mode it is in.
+   *
+   * Shared by both, and the reason this is one component rather than two:
+   *   • the **enter / exit threshold lines** and their draggable, keyboard-nudgeable handles — the
+   *     RotorHazard-style live tuning (marshaling.html §5). Opt-in via `onthresholds`: when the
+   *     parent supplies it the lines grow handles that emit the tuned levels back up, and `tuned`
+   *     overrides the drawn levels for one competitor/node while the operator adjusts. The graph
+   *     re-derives nothing and commits nothing — the parent runs the detection (`redetect.ts`) or
+   *     the calibration write, on an explicit action.
+   *   • the **crossing / detection band** rendering (above);
+   *   • the axis + value projections, downsampling, hover crosshair and readout, and all styling.
+   *
+   * Review-only on top of that: the **lap markers** — verticals at each lap's gate-pass time
+   * (`Lap.at`, the closing pass's source-clock instant, which shares the trace's clock). Clicking a
+   * marker **selects that lap** in the Slice-3 action surface; the parent's lap-list selection
+   * highlights the same marker (two-way). Plus `preview`, the re-detection diff — hollow dashed
+   * markers for passes the new levels would ADD, and a struck/dimmed restyle on official lap markers
+   * the new levels would REMOVE. Without the tuning props the behavior is exactly the old
+   * display-only graph.
+   *
+   * Fidelity caveat made visible (Slice 1): in review the samples are **one per RH `node_data`
+   * emit** at the streaming cadence, NOT RH's dense per-tick marshal history — a legend note says
+   * so, so the coarse line is never mistaken for the realtime detector's signal.
    *
    * Readable on a sunlit laptop (the field-readability bar): a dark panel, high-contrast strokes,
    * and big hit targets for the markers.
    */
   import type { CompetitorTrace, Lap, LapList, CompetitorRef } from '@gridfpv/types';
   import { formatMicros } from '@gridfpv/components';
+  import {
+    W,
+    H,
+    PAD_L,
+    PAD_R,
+    PAD_T,
+    plotW,
+    plotH,
+    crossingWindows,
+    pointerX,
+    polyline,
+    rollingSpanOf,
+    rssiAt,
+    spanOf,
+    timeAt,
+    valueFromPointer,
+    valueRange,
+    xOf,
+    yOf,
+    type Range,
+    type Span
+  } from './rssiGraph.js';
+
+  /** The live window a tuning operator wants by default: long enough to hold a whole gate pass. */
+  const DEFAULT_LIVE_WINDOW_MICROS = 15_000_000;
 
   let {
     trace,
     laps,
-    selected,
+    selected = null,
     onselect,
     onaddlap,
     canControl = false,
     nameFor = (r) => r,
     onthresholds,
     tuned,
-    preview
+    preview,
+    mode = 'review',
+    windowMicros = DEFAULT_LIVE_WINDOW_MICROS
   }: {
-    /** The captured trace for the heat — one entry per competitor that produced signal facts. */
-    trace: { competitors: CompetitorTrace[] };
-    /** The heat's lap list (the same one the lap-list selection drives), for the markers. */
-    laps: LapList | undefined;
-    /** The currently-selected lap (mirrors the parent's selection), or `null`. */
-    selected: { competitor: CompetitorRef; lap: Lap } | null;
-    /** Emit the lap a marker click selects (two-way with the lap-list selection). */
-    onselect: (competitor: CompetitorRef, lap: Lap) => void;
     /**
-     * Add a brand-new lap for a competitor at a source-clock time (the cursor's race-relative
-     * instant). Wired ONLY to the explicit, labelled "Add lap here" button in the cursor readout
-     * below the plot — never to a bare click on the trace: stray clicks (and the click the browser
-     * synthesizes when a threshold drag ends inside the svg) must not plant phantom laps.
-     * Optional: when absent (or when `canControl` is false) the graph is review-only.
+     * The traces to plot — in review, one entry per competitor that produced signal facts during
+     * the heat; in live, one entry per timer NODE, holding the rolling sample buffer.
+     */
+    trace: { competitors: CompetitorTrace[] };
+    /** REVIEW ONLY. The heat's lap list (the same one the lap-list selection drives), for the markers. */
+    laps?: LapList;
+    /** REVIEW ONLY. The currently-selected lap (mirrors the parent's selection), or `null`. */
+    selected?: { competitor: CompetitorRef; lap: Lap } | null;
+    /** REVIEW ONLY. Emit the lap a marker click selects (two-way with the lap-list selection). */
+    onselect?: (competitor: CompetitorRef, lap: Lap) => void;
+    /**
+     * REVIEW ONLY. Add a brand-new lap for a competitor at a source-clock time (the cursor's
+     * race-relative instant). Wired ONLY to the explicit, labelled "Add lap here" button in the
+     * cursor readout below the plot — never to a bare click on the trace: stray clicks (and the
+     * click the browser synthesizes when a threshold drag ends inside the svg) must not plant
+     * phantom laps. Optional: when absent (or when `canControl` is false) the graph is review-only.
      */
     onaddlap?: (competitor: CompetitorRef, at: number) => void;
     /**
@@ -69,46 +113,45 @@
      */
     canControl?: boolean;
     /**
-     * Resolve a competitor ref to its human-facing display name (the callsign), so the trace label
-     * and aria-labels read as the pilot, not the raw ref. Defaults to identity so callers/tests that
-     * don't pass a resolver keep showing the ref unchanged.
+     * Resolve a competitor ref — or, in live mode, a node seat — to its human-facing display name,
+     * so the trace label and aria-labels read as the pilot/seat, not the raw ref. Defaults to
+     * identity so callers/tests that don't pass a resolver keep showing the ref unchanged.
      */
     nameFor?: (ref: CompetitorRef) => string;
     /**
-     * Enables live threshold tuning (the RH-style "Recalculate"): when supplied, the enter/exit
-     * lines get draggable, keyboard-nudgeable handles that emit the adjusted levels. Emitted per
-     * competitor — the parent owns the tuned values and feeds them back via `tuned`.
+     * Enables live threshold tuning (the RH-style "Recalculate", and the live tuning page's
+     * calibration): when supplied, the enter/exit lines get draggable, keyboard-nudgeable handles
+     * that emit the adjusted levels. Emitted per competitor/node — the parent owns the tuned values
+     * and feeds them back via `tuned`.
      */
     onthresholds?: (competitor: CompetitorRef, enter: number, exit: number) => void;
     /**
-     * The live tuned levels for ONE competitor (two-way with the parent's tuning inputs): while
-     * present, this competitor's threshold lines/handles draw at these levels instead of the
-     * trace's recorded ones. Other competitors keep their recorded levels.
+     * The live tuned levels for ONE competitor/node (two-way with the parent's tuning inputs): while
+     * present, this trace's threshold lines/handles — and its crossing band — draw at these levels
+     * instead of the recorded ones. Other traces keep their recorded levels.
      */
     tuned?: { competitor: CompetitorRef; enter: number; exit: number };
     /**
-     * The re-detection preview diff for ONE competitor: `added` pass times (µs) draw as hollow
-     * dashed candidate markers; official lap markers whose closing pass ref is in `removedRefs`
-     * restyle struck/dimmed (they would be voided on commit). Preview only — nothing commits.
+     * REVIEW ONLY. The re-detection preview diff for ONE competitor: `added` pass times (µs) draw as
+     * hollow dashed candidate markers; official lap markers whose closing pass ref is in
+     * `removedRefs` restyle struck/dimmed (they would be voided on commit). Preview only — nothing
+     * commits.
      */
     preview?: { competitor: CompetitorRef; added: number[]; removedRefs: number[] };
+    /**
+     * Which graph this is: `review` (a finished heat, marshaling) or `live` (a rolling window over
+     * a timer's heartbeat, tuning). See the component doc — this is read in exactly two places.
+     */
+    mode?: 'review' | 'live';
+    /** LIVE ONLY. How much of the recent past the rolling window shows (µs). */
+    windowMicros?: number;
   } = $props();
 
-  // Plot geometry. A fixed viewBox keeps the SVG crisp at any rendered size; strokes are in
-  // user units. Left/bottom gutters leave room for the axis labels.
-  const W = 1000;
-  const H = 220;
-  const PAD_L = 8;
-  const PAD_R = 8;
-  const PAD_T = 10;
-  const PAD_B = 18;
-  const plotW = W - PAD_L - PAD_R;
-  const plotH = H - PAD_T - PAD_B;
-
-  // Cap the points we actually draw — a long heat at the streaming cadence can be thousands of
-  // samples; more than one point per horizontal pixel is invisible. Downsample for the canvas
-  // only (the raw `trace` keeps full fidelity); we stride-pick rather than average to keep peaks.
-  const MAX_POINTS = 1200;
+  /** The empty preview — live mode never previews a re-detection, so it shares one instance. */
+  const NO_PREVIEW: { added: number[]; removedRefs: Set<number> } = {
+    added: [],
+    removedRefs: new Set()
+  };
 
   /** The laps for a given competitor, in order (empty if none / no lap list). */
   function lapsFor(ref: CompetitorRef): Lap[] {
@@ -116,36 +159,8 @@
   }
 
   /**
-   * A sample's source-clock time (µs). Dense traces carry the **actual** per-sample `times` (RH's
-   * marshal history is bursty — clustered around each crossing — so the uniform `from + i·period`
-   * grid badly compresses it); the coarse streaming path has no `times`, so its exact uniform grid
-   * is used instead.
-   */
-  function sampleTimeOf(t: CompetitorTrace, i: number): number {
-    const explicit = t.times?.[i];
-    return explicit ?? (t.from ?? 0) + i * t.period_micros;
-  }
-
-  /**
-   * A trace's plotted source-clock span — the first to the last sample's real instant — **widened to
-   * include every lap's pass time** so every lap still lands inside the plot and gets a marker. Using
-   * the real sample times (not the uniform grid) keeps the signal spanning its true duration, so it
-   * lines up with the lap markers instead of compressing into the left. Falls back to a unit span.
-   */
-  function spanOf(t: CompetitorTrace, laps: Lap[] = []): { from: number; to: number } {
-    const n = t.samples.length;
-    let from = n > 0 ? sampleTimeOf(t, 0) : (t.from ?? 0);
-    let to = n > 1 ? sampleTimeOf(t, n - 1) : from + 1;
-    for (const lap of laps) {
-      if (lap.at < from) from = lap.at;
-      if (lap.at > to) to = lap.at;
-    }
-    return { from, to };
-  }
-
-  /**
    * The enter/exit levels a trace is DRAWN (and its crossing windows shaded) against: the live
-   * `tuned` values while this competitor is being adjusted, else the trace's recorded thresholds.
+   * `tuned` values while this competitor/node is being adjusted, else its recorded thresholds.
    */
   function effectiveThresholds(t: CompetitorTrace): {
     enter: number | undefined;
@@ -156,108 +171,117 @@
     return { enter: t.enter, exit: t.exit };
   }
 
-  /** RSSI value range for a trace, padded so the thresholds and peaks aren't flush to the edge. */
-  function valueRange(
-    t: CompetitorTrace,
-    enter: number | undefined = t.enter,
-    exit: number | undefined = t.exit
-  ): { lo: number; hi: number } {
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const v of t.samples) {
-      if (v < lo) lo = v;
-      if (v > hi) hi = v;
-    }
-    for (const th of [t.enter, t.exit, enter, exit]) {
-      if (th != null) {
-        if (th < lo) lo = th;
-        if (th > hi) hi = th;
-      }
-    }
-    if (!isFinite(lo) || !isFinite(hi)) return { lo: 0, hi: 1 };
-    if (lo === hi) {
-      lo -= 1;
-      hi += 1;
-    }
-    const pad = (hi - lo) * 0.08;
-    return { lo: lo - pad, hi: hi + pad };
+  /** The preview diff for a competitor (empty when the preview prop targets someone else). */
+  function previewFor(ref: CompetitorRef): { added: number[]; removedRefs: Set<number> } {
+    if (!preview || preview.competitor !== ref) return NO_PREVIEW;
+    return { added: preview.added, removedRefs: new Set(preview.removedRefs) };
   }
 
-  /** Project a source-clock time onto the plot's X (user units). */
-  function xOf(time: number, span: { from: number; to: number }): number {
-    const w = span.to - span.from || 1;
-    return PAD_L + ((time - span.from) / w) * plotW;
-  }
+  // ── THE MODE BOUNDARY ─────────────────────────────────────────────────────────────────────────
+  // `mode` is read here and nowhere else. Everything downstream — the markup, the pointer handlers,
+  // the zoom state — reads the resolved `chrome` (mode-level copy) and `TraceView` (per-trace
+  // geometry and data) instead, so no render path ever branches on which graph this is.
 
-  /** Project an RSSI value onto the plot's Y (user units; higher value = higher on screen). */
-  function yOf(value: number, range: { lo: number; hi: number }): number {
-    const h = range.hi - range.lo || 1;
-    return PAD_T + plotH - ((value - range.lo) / h) * plotH;
-  }
-
-  /** The downsampled sample polyline as an SVG points string. */
-  function polyline(
-    t: CompetitorTrace,
-    span: { from: number; to: number },
-    range: { lo: number; hi: number }
-  ): string {
-    const n = t.samples.length;
-    if (n === 0) return '';
-    // Only the samples inside the (possibly zoomed) span, plus one neighbor each side so the
-    // line enters/exits the frame — this is what makes zooming reveal detail: the downsampling
-    // budget is spent on the visible window, not the whole capture.
-    let lo = 0;
-    while (lo < n - 1 && sampleTimeOf(t, lo + 1) < span.from) lo++;
-    let hi = n - 1;
-    while (hi > 0 && sampleTimeOf(t, hi - 1) > span.to) hi--;
-    const visible = hi - lo + 1;
-    const stride = visible > MAX_POINTS ? Math.ceil(visible / MAX_POINTS) : 1;
-    const pts: string[] = [];
-    for (let i = lo; i <= hi; i += stride) {
-      pts.push(
-        `${xOf(sampleTimeOf(t, i), span).toFixed(1)},${yOf(t.samples[i], range).toFixed(1)}`
-      );
-    }
-    // Always include the last visible sample so the line reaches the end of the span.
-    pts.push(
-      `${xOf(sampleTimeOf(t, hi), span).toFixed(1)},${yOf(t.samples[hi], range).toFixed(1)}`
-    );
-    return pts.join(' ');
-  }
-
-  /**
-   * The time windows the lap-detection engine "sees" a crossing, replaying the timer's own
-   * enter→exit hysteresis over the captured samples: a window OPENS at the first sample that rises
-   * to/above `enter` and CLOSES at the first subsequent sample that falls to/below `exit` (one window
-   * per detected pass). A window still open at the trace end extends to the last sample. Empty unless
-   * both levels are present. Display-only — this visualises what the detector saw (at the tuned
-   * levels while adjusting), it does not re-detect or change any lap.
-   */
-  function crossingWindows(
-    t: CompetitorTrace,
-    enter: number | undefined = t.enter,
-    exit: number | undefined = t.exit
-  ): { from: number; to: number }[] {
-    if (enter == null || exit == null) return [];
-    const n = t.samples.length;
-    const out: { from: number; to: number }[] = [];
-    let inCrossing = false;
-    let start = 0;
-    for (let i = 0; i < n; i++) {
-      const v = t.samples[i];
-      const time = sampleTimeOf(t, i);
-      if (!inCrossing) {
-        if (v >= enter) {
-          inCrossing = true;
-          start = time;
+  /** The mode-level copy: legend wording and the empty state. */
+  const chrome = $derived(
+    mode === 'live'
+      ? {
+          signal: 'Signal (live)',
+          showLaps: false,
+          note: "Live signal — a rolling window of the timer's heartbeat, not a recorded trace.",
+          empty: 'No signal from this node yet.'
         }
-      } else if (v <= exit) {
-        out.push({ from: start, to: time });
-        inCrossing = false;
-      }
+      : {
+          signal: 'Signal (streaming cadence)',
+          showLaps: true,
+          note: "Streaming-cadence trace — one sample per timer emit, not RotorHazard's dense marshal history.",
+          empty: 'No samples captured for this node.'
+        }
+  );
+
+  /** Everything one trace's rendering needs, with every mode difference already resolved out. */
+  type TraceView = {
+    /** The competitor ref (review) or node seat (live) this trace belongs to. */
+    ref: CompetitorRef;
+    /** Its human-facing name — never the raw ref (project rule: friendly names only). */
+    who: string;
+    /** The plot's accessible label. */
+    plotLabel: string;
+    /** The lap markers to draw — always empty in live. */
+    laps: Lap[];
+    /** The whole drawable extent (zoom is clamped inside it). */
+    fullSpan: Span;
+    /** The extent actually drawn: the zoom window in review, the rolling window in live. */
+    span: Span;
+    /** Whether `span` is currently narrower than `fullSpan`. */
+    zoomed: boolean;
+    /** Whether the wheel / drag-pan / zoom buttons act at all. */
+    zoomable: boolean;
+    /** Whether the explicit "Add lap here" affordance is offered. */
+    canAdd: boolean;
+    /** The value extent, padded. */
+    range: Range;
+    /** The levels drawn against (tuned while adjusting, else recorded). */
+    th: { enter: number | undefined; exit: number | undefined };
+    /** The detection / crossing bands — the SAME hysteresis replay in both modes. */
+    windows: Span[];
+    /** The re-detection preview diff — always empty in live. */
+    preview: { added: number[]; removedRefs: Set<number> };
+    /** Render a source-clock instant on this mode's axis. */
+    label: (micros: number) => string;
+  };
+
+  function viewOf(ct: CompetitorTrace): TraceView {
+    const ref = ct.competitor.competitor;
+    const who = nameFor(ref);
+    const th = effectiveThresholds(ct);
+    const shared = {
+      ref,
+      who,
+      range: valueRange(ct, th.enter, th.exit),
+      th,
+      windows: crossingWindows(ct, th.enter, th.exit)
+    };
+    if (mode === 'live') {
+      // A rolling window pinned to the newest sample. No laps, no preview, no add-lap — and no
+      // zoom: the window IS the zoom, and panning an axis that is moving under you fights the
+      // operator rather than helping them.
+      const span = rollingSpanOf(ct, windowMicros);
+      return {
+        ...shared,
+        plotLabel: `Live RSSI for ${who}`,
+        laps: [],
+        fullSpan: span,
+        span,
+        zoomed: false,
+        zoomable: false,
+        canAdd: false,
+        preview: NO_PREVIEW,
+        // Seconds behind the leading edge — the only axis that means anything while the window
+        // slides. `0.0` is now.
+        label: (micros) => `-${((span.to - micros) / 1_000_000).toFixed(1)}`
+      };
     }
-    if (inCrossing && n > 0) out.push({ from: start, to: sampleTimeOf(t, n - 1) });
-    return out;
+    const compLaps = lapsFor(ref);
+    const fullSpan = spanOf(
+      ct,
+      compLaps.map((l) => l.at)
+    );
+    const span = viewSpanOf(ref, fullSpan);
+    return {
+      ...shared,
+      plotLabel: `RSSI trace for ${who} with ${compLaps.length} lap markers`,
+      laps: compLaps,
+      fullSpan,
+      span,
+      zoomed: span.from > fullSpan.from || span.to < fullSpan.to,
+      zoomable: true,
+      canAdd: canControl && onaddlap != null,
+      preview: previewFor(ref),
+      // Race-relative seconds (`S.mmm`; ≥60s rolls to `M:SS.mmm`) — the axis the samples and lap
+      // markers already live on.
+      label: (micros) => formatMicros(Math.round(micros))
+    };
   }
 
   function isSelected(ref: CompetitorRef, lap: Lap): boolean {
@@ -265,81 +289,36 @@
   }
 
   // ── Hover crosshair + time/RSSI readout ───────────────────────────────────────────────────────
-  // As the marshal moves over a trace we show a vertical guide at the cursor and read out the exact
-  // race-relative time + the RSSI sample there — the "where exactly is this?" the lap-add needs. The
-  // cursor is tracked per-competitor (`ref`) so each trace owns its own crosshair.
+  // As the operator moves over a trace we show a vertical guide at the cursor and read out the exact
+  // time + the RSSI sample there — the "where exactly is this?" the lap-add needs, and the "what is
+  // the floor actually sitting at?" tuning needs. The cursor is tracked per-trace (`ref`) so each
+  // plot owns its own crosshair.
   let hover = $state<{ ref: CompetitorRef; x: number; time: number; rssi: number } | null>(null);
 
-  /** Invert {@link xOf}: a plot X (user units) back to a source-clock time, clamped to the span. */
-  function timeAt(x: number, span: { from: number; to: number }): number {
-    const w = span.to - span.from || 1;
-    const frac = Math.min(1, Math.max(0, (x - PAD_L) / plotW));
-    return span.from + frac * w;
-  }
-
-  /** The RSSI sample nearest a source-clock time. For a dense trace (explicit, non-uniform `times`)
-   *  it scans for the closest instant; for the coarse uniform grid it indexes by `from`/`period`. */
-  function rssiAt(t: CompetitorTrace, time: number): number {
-    const n = t.samples.length;
-    if (n === 0) return 0;
-    if (t.times) {
-      let best = 0;
-      let bestDist = Infinity;
-      for (let i = 0; i < n; i++) {
-        const d = Math.abs(t.times[i] - time);
-        if (d < bestDist) {
-          bestDist = d;
-          best = i;
-        }
-      }
-      return t.samples[best];
-    }
-    const from = t.from ?? 0;
-    const i = Math.min(n - 1, Math.max(0, Math.round((time - from) / (t.period_micros || 1))));
-    return t.samples[i];
-  }
-
-  /**
-   * Format a source-clock microsecond instant as race-relative seconds (`S.mmm`) — the same axis the
-   * samples + lap markers live on. Reuses {@link formatMicros} (≥60s rolls to `M:SS.mmm`).
-   */
-  function formatTime(micros: number): string {
-    return formatMicros(Math.round(micros));
-  }
-
-  /** Map a mouse event to the plot's user-unit X (the SVG is stretched to its rendered box). */
-  function pointerX(e: MouseEvent, svg: SVGSVGElement): number {
-    const rect = svg.getBoundingClientRect();
-    if (rect.width === 0) return PAD_L;
-    return ((e.clientX - rect.left) / rect.width) * W;
-  }
-
-  function onHover(e: MouseEvent, ct: CompetitorTrace, span: { from: number; to: number }): void {
+  function onHover(e: MouseEvent, ct: CompetitorTrace, v: TraceView): void {
     const svg = e.currentTarget as SVGSVGElement;
     const px = pointerX(e, svg);
     const x = Math.min(PAD_L + plotW, Math.max(PAD_L, px));
-    const time = timeAt(x, span);
-    hover = { ref: ct.competitor.competitor, x, time, rssi: rssiAt(ct, time) };
+    const time = timeAt(x, v.span);
+    hover = { ref: v.ref, x, time, rssi: rssiAt(ct, time) };
   }
 
   function clearHover(): void {
     hover = null;
   }
 
-  // ── Time-axis zoom & pan ──────────────────────────────────────────────────────────────────────
+  // ── Time-axis zoom & pan (review) ─────────────────────────────────────────────────────────────
   // Wheel over a trace zooms around the cursor's instant; when zoomed, dragging the plot pans and
   // the −/+/reset buttons in the caption do the same without a wheel. Pure VIEW state — zooming
   // narrows the span every projection already takes, so markers, windows, thresholds, hover and
   // the add-lap readout all follow for free. One trace zooms at a time (keyed by competitor).
+  // Inert wherever `zoomable` is false (a live window has its own, moving, axis).
   const MIN_ZOOM_WINDOW_MICROS = 250_000; // never tighter than 0.25s — samples stay meaningful
   const WHEEL_ZOOM_FACTOR = 0.8; // one notch in → 80% of the window
   let zoom = $state<{ ref: CompetitorRef; from: number; to: number } | null>(null);
 
   /** The span a trace is DRAWN against: the zoom window (clamped inside the full span), else all. */
-  function viewSpanOf(
-    ref: CompetitorRef,
-    full: { from: number; to: number }
-  ): { from: number; to: number } {
+  function viewSpanOf(ref: CompetitorRef, full: Span): Span {
     if (!zoom || zoom.ref !== ref) return full;
     const fullW = full.to - full.from || 1;
     const w = Math.min(zoom.to - zoom.from, fullW);
@@ -349,12 +328,7 @@
   }
 
   /** Set (or clear) the zoom window: a window at/above the full span resets to unzoomed. */
-  function setZoom(
-    ref: CompetitorRef,
-    full: { from: number; to: number },
-    from: number,
-    width: number
-  ): void {
+  function setZoom(ref: CompetitorRef, full: Span, from: number, width: number): void {
     const fullW = full.to - full.from || 1;
     if (width >= fullW) {
       zoom = null;
@@ -366,12 +340,7 @@
   }
 
   /** Zoom by `factor` keeping `focusTime` at the same on-screen fraction (wheel-at-cursor). */
-  function zoomAt(
-    ref: CompetitorRef,
-    full: { from: number; to: number },
-    focusTime: number,
-    factor: number
-  ): void {
+  function zoomAt(ref: CompetitorRef, full: Span, focusTime: number, factor: number): void {
     const view = viewSpanOf(ref, full);
     const curW = view.to - view.from || 1;
     const width = curW * factor;
@@ -380,23 +349,18 @@
   }
 
   /** The caption buttons: zoom in/out around the current view's center. */
-  function zoomStep(ref: CompetitorRef, full: { from: number; to: number }, factor: number): void {
-    const view = viewSpanOf(ref, full);
-    zoomAt(ref, full, (view.from + view.to) / 2, factor);
+  function zoomStep(v: TraceView, factor: number): void {
+    if (!v.zoomable) return;
+    zoomAt(v.ref, v.fullSpan, (v.span.from + v.span.to) / 2, factor);
   }
 
-  function onWheel(e: WheelEvent, ct: CompetitorTrace, full: { from: number; to: number }): void {
+  function onWheel(e: WheelEvent, v: TraceView): void {
+    if (!v.zoomable) return;
     e.preventDefault();
     const svg = e.currentTarget as SVGSVGElement;
-    const view = viewSpanOf(ct.competitor.competitor, full);
     const x = Math.min(PAD_L + plotW, Math.max(PAD_L, pointerX(e, svg)));
-    const focus = timeAt(x, view);
-    zoomAt(
-      ct.competitor.competitor,
-      full,
-      focus,
-      e.deltaY > 0 ? 1 / WHEEL_ZOOM_FACTOR : WHEEL_ZOOM_FACTOR
-    );
+    const focus = timeAt(x, v.span);
+    zoomAt(v.ref, v.fullSpan, focus, e.deltaY > 0 ? 1 / WHEEL_ZOOM_FACTOR : WHEEL_ZOOM_FACTOR);
   }
 
   // Drag-to-pan while zoomed. Starts on the svg background (the threshold handles stop
@@ -407,14 +371,14 @@
   const PAN_START_UNITS = 4;
   let panning = $state<{ ref: CompetitorRef; lastX: number; engaged: boolean } | null>(null);
 
-  function startPan(e: PointerEvent, ref: CompetitorRef): void {
-    if (!zoom || zoom.ref !== ref) return;
+  function startPan(e: PointerEvent, v: TraceView): void {
+    if (!v.zoomable || !zoom || zoom.ref !== v.ref) return;
     const x = pointerX(e, e.currentTarget as SVGSVGElement);
     if (!Number.isFinite(x)) return; // ditto — never seed a drag from a coordinate-less event
-    panning = { ref, lastX: x, engaged: false };
+    panning = { ref: v.ref, lastX: x, engaged: false };
   }
 
-  function movePan(e: PointerEvent, full: { from: number; to: number }): void {
+  function movePan(e: PointerEvent, v: TraceView): void {
     if (!panning || !zoom || zoom.ref !== panning.ref) return;
     const svg = e.currentTarget as SVGSVGElement;
     const x = pointerX(e, svg);
@@ -429,9 +393,9 @@
     }
     if (dx === 0) return;
     panning = { ...panning, lastX: x };
-    const view = viewSpanOf(panning.ref, full);
+    const view = viewSpanOf(panning.ref, v.fullSpan);
     const dt = (dx / plotW) * (view.to - view.from);
-    setZoom(panning.ref, full, view.from - dt, view.to - view.from);
+    setZoom(panning.ref, v.fullSpan, view.from - dt, view.to - view.from);
   }
 
   function endPan(): void {
@@ -444,22 +408,13 @@
   // 2026-07-03). The ONLY add path is the explicit "Add lap here" button in the cursor readout
   // below the plot.
 
-  // ── Draggable enter/exit threshold handles (the RH-style live tuning) ─────────────────────────
-  // Only wired when `onthresholds` is supplied. A pointer drag on a threshold handle maps the
+  // ── Draggable enter/exit threshold handles (the RH-style tuning) ──────────────────────────────
+  // Shared by both modes — the marshal re-detecting a finished heat and the RD calibrating a live
+  // timer drag the same handle. Only wired when `onthresholds` is supplied. A pointer drag maps the
   // pointer's Y back to an RSSI level and emits BOTH levels (the dragged one replaced) so the
   // parent's tuning state stays a single (enter, exit) pair. Arrow keys nudge ±1 for keyboard
-  // access. All preview-only — the graph never re-detects or sends anything itself.
+  // access. The graph never re-detects, calibrates or sends anything itself.
   let dragging = $state<{ ref: CompetitorRef; which: 'enter' | 'exit' } | null>(null);
-
-  /** Invert {@link yOf}: a pointer event's Y back to an RSSI level (rounded — RSSI is integral). */
-  function valueFromPointer(e: PointerEvent, range: { lo: number; hi: number }): number {
-    const svg = (e.currentTarget as Element).closest('svg');
-    if (!svg) return range.lo;
-    const rect = svg.getBoundingClientRect();
-    const y = rect.height === 0 ? PAD_T : ((e.clientY - rect.top) / rect.height) * H;
-    const frac = Math.min(1, Math.max(0, (PAD_T + plotH - y) / plotH));
-    return Math.round(range.lo + frac * (range.hi - range.lo));
-  }
 
   /** Emit the tuned pair with one level replaced by `value`. */
   function emitThreshold(ct: CompetitorTrace, which: 'enter' | 'exit', value: number): void {
@@ -484,7 +439,7 @@
     e: PointerEvent,
     ct: CompetitorTrace,
     which: 'enter' | 'exit',
-    range: { lo: number; hi: number }
+    range: Range
   ): void {
     if (!dragging || dragging.ref !== ct.competitor.competitor || dragging.which !== which) return;
     emitThreshold(ct, which, valueFromPointer(e, range));
@@ -504,97 +459,84 @@
     if (current == null) return;
     emitThreshold(ct, which, current + delta);
   }
-
-  /** The preview diff for a competitor (empty when the preview prop targets someone else). */
-  function previewFor(ref: CompetitorRef): { added: number[]; removedRefs: Set<number> } {
-    if (!preview || preview.competitor !== ref) return { added: [], removedRefs: new Set() };
-    return { added: preview.added, removedRefs: new Set(preview.removedRefs) };
-  }
 </script>
 
 <div class="rssi-graph" aria-label="RSSI signal graph">
   <div class="legend">
-    <span class="swatch sample"></span> Signal (streaming cadence)
+    <span class="swatch sample"></span>
+    {chrome.signal}
     <span class="swatch enter"></span> Enter
     <span class="swatch exit"></span> Exit
     <span class="swatch band"></span> Detection window
-    <span class="swatch marker"></span> Lap pass
+    {#if chrome.showLaps}
+      <span class="swatch marker"></span> Lap pass
+    {/if}
     {#if preview}
       <span class="swatch preview"></span> Preview pass (uncommitted)
     {/if}
-    <span class="cadence-note"
-      >Streaming-cadence trace — one sample per timer emit, not RotorHazard's dense marshal history.</span
-    >
+    <span class="cadence-note">{chrome.note}</span>
   </div>
 
   {#each trace.competitors as ct, traceIndex (ct.competitor.adapter + '/' + ct.competitor.competitor)}
-    {@const ref = ct.competitor.competitor}
-    {@const compLaps = lapsFor(ref)}
-    {@const fullSpan = spanOf(ct, compLaps)}
-    {@const span = viewSpanOf(ref, fullSpan)}
-    {@const zoomed = span.from > fullSpan.from || span.to < fullSpan.to}
-    {@const th = effectiveThresholds(ct)}
-    {@const range = valueRange(ct, th.enter, th.exit)}
-    {@const who = nameFor(ref)}
-    {@const pv = previewFor(ref)}
-    <figure class="trace" aria-label={`RSSI for ${who}`}>
+    {@const v = viewOf(ct)}
+    <figure class="trace" aria-label={`RSSI for ${v.who}`}>
       <figcaption>
-        <span class="who">{who}</span>
+        <span class="who">{v.who}</span>
         <span class="meta">
           {ct.samples.length} samples
-          {#if th.enter != null}· enter {th.enter}{/if}
-          {#if th.exit != null}· exit {th.exit}{/if}
+          {#if v.th.enter != null}· enter {v.th.enter}{/if}
+          {#if v.th.exit != null}· exit {v.th.exit}{/if}
         </span>
-        {#if ct.samples.length > 0}
-          <span class="zoom-controls" role="group" aria-label={`Zoom for ${who}`}>
+        {#if v.zoomable && ct.samples.length > 0}
+          <span class="zoom-controls" role="group" aria-label={`Zoom for ${v.who}`}>
             <button
               type="button"
-              onclick={() => zoomStep(ref, fullSpan, WHEEL_ZOOM_FACTOR)}
+              onclick={() => zoomStep(v, WHEEL_ZOOM_FACTOR)}
               title="Zoom in (or scroll on the plot)"
               aria-label="Zoom in">+</button
             >
             <button
               type="button"
-              onclick={() => zoomStep(ref, fullSpan, 1 / WHEEL_ZOOM_FACTOR)}
-              disabled={!zoomed}
+              onclick={() => zoomStep(v, 1 / WHEEL_ZOOM_FACTOR)}
+              disabled={!v.zoomed}
               title="Zoom out"
               aria-label="Zoom out">−</button
             >
             <button
               type="button"
               onclick={() => (zoom = null)}
-              disabled={!zoomed}
+              disabled={!v.zoomed}
               title="Show the whole trace"
               aria-label="Reset zoom">Fit</button
             >
-            {#if zoomed}
+            {#if v.zoomed}
               <span class="zoom-note"
-                >{formatTime(span.from)}–{formatTime(span.to)}s · drag to pan</span
+                >{v.label(v.span.from)}–{v.label(v.span.to)}s · drag to pan</span
               >
             {/if}
           </span>
         {/if}
       </figcaption>
       {#if ct.samples.length === 0}
-        <p class="empty">No samples captured for this node.</p>
+        <p class="empty">{chrome.empty}</p>
       {:else}
-        {@const isHover = hover != null && hover.ref === ref}
+        {@const isHover = hover != null && hover.ref === v.ref}
         <!-- The pointer handlers drive the hover crosshair/readout ONLY — the svg itself carries no
              click action (a bare click must never mutate; see the add-lap note in the script). The
              accessible, deliberate add path is the labelled "Add lap here" DOM button below the
              plot, so the SVG stays a non-interactive `role="img"` figure. -->
         <svg
           class="plot"
-          class:panning={panning?.ref === ref && panning?.engaged}
+          class:panning={panning?.ref === v.ref && panning?.engaged}
           viewBox={`0 0 ${W} ${H}`}
           preserveAspectRatio="none"
           role="img"
-          aria-label={`RSSI trace for ${who} with ${compLaps.length} lap markers`}
-          onmousemove={(e: MouseEvent) => onHover(e, ct, span)}
+          aria-label={v.plotLabel}
+          onmousemove={(e: MouseEvent) => onHover(e, ct, v)}
           onmouseleave={clearHover}
-          onwheel={(e: WheelEvent) => onWheel(e, ct, fullSpan)}
-          onpointerdown={(e: PointerEvent) => startPan(e, ref)}
-          onpointermove={(e: PointerEvent) => movePan(e, fullSpan)}
+          onwheel={(e: WheelEvent) => onWheel(e, v)}
+          onpointerdown={(e: PointerEvent) => startPan(e, v)}
+          onpointermove={(e: PointerEvent) => movePan(e, v)}
           onpointerup={endPan}
           onpointercancel={endPan}
         >
@@ -608,13 +550,16 @@
           <!-- Plot frame -->
           <rect class="frame" x={PAD_L} y={PAD_T} width={plotW} height={plotH} fill="none" />
           <g clip-path={`url(#rssi-plot-clip-${traceIndex})`}>
-            <!-- Detection windows: one shaded vertical region per crossing the engine sees — from the
+            <!-- Detection / crossing bands: one shaded vertical region per crossing — from the
                sample that rises above `enter` to the one that falls below `exit` (the timer's
-               hysteresis). Drawn behind the signal so the trace reads on top; lets the marshal see
-               exactly what the lap-detection engine registered as a pass. -->
-            {#each crossingWindows(ct, th.enter, th.exit) as cw (cw.from)}
-              {@const x1 = xOf(cw.from, span)}
-              {@const x2 = xOf(cw.to, span)}
+               hysteresis), the still-open one running to the newest sample. Drawn behind the signal
+               so the trace reads on top. In review it shows the marshal exactly what the
+               lap-detection engine registered as a pass; live, it is the band that opens as the
+               craft arrives and closes as it leaves — the direct answer to "do my thresholds
+               actually bracket the pass?". -->
+            {#each v.windows as cw (cw.from)}
+              {@const x1 = xOf(cw.from, v.span)}
+              {@const x2 = xOf(cw.to, v.span)}
               <rect class="crossing" x={x1} y={PAD_T} width={Math.max(1, x2 - x1)} height={plotH} />
             {/each}
 
@@ -622,34 +567,35 @@
                render at the END of the svg (painted last = TOPMOST) so a dense heat's lap
                markers can never sit over the grab bands and eat the pointer — dead handles on
                lap-heavy pilots were exactly the bug (live 2026-07-03). -->
-            {#if th.enter != null}
-              {@const y = yOf(th.enter, range)}
+            {#if v.th.enter != null}
+              {@const y = yOf(v.th.enter, v.range)}
               <line class="enter-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
             {/if}
-            {#if th.exit != null}
-              {@const y = yOf(th.exit, range)}
+            {#if v.th.exit != null}
+              {@const y = yOf(v.th.exit, v.range)}
               <line class="exit-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
             {/if}
 
             <!-- The sample line -->
-            <polyline class="signal" points={polyline(ct, span, range)} />
+            <polyline class="signal" points={polyline(ct, v.span, v.range)} />
 
-            <!-- Lap markers (vertical) at each lap's gate-pass time -->
-            {#each compLaps as lap (lap.end_ref)}
-              {@const x = xOf(lap.at, span)}
+            <!-- Lap markers (vertical) at each lap's gate-pass time. Review only — `v.laps` is
+               empty in live, so the whole block disappears without a mode check. -->
+            {#each v.laps as lap (lap.end_ref)}
+              {@const x = xOf(lap.at, v.span)}
               <g
                 class="marker"
-                class:selected={isSelected(ref, lap)}
-                class:removed={pv.removedRefs.has(lap.end_ref)}
+                class:selected={isSelected(v.ref, lap)}
+                class:removed={v.preview.removedRefs.has(lap.end_ref)}
                 role="button"
                 tabindex="0"
-                aria-pressed={isSelected(ref, lap)}
+                aria-pressed={isSelected(v.ref, lap)}
                 aria-label={`Lap ${lap.number} at ${formatMicros(lap.duration_micros)} — select`}
-                onclick={() => onselect(ref, lap)}
+                onclick={() => onselect?.(v.ref, lap)}
                 onkeydown={(e: KeyboardEvent) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    onselect(ref, lap);
+                    onselect?.(v.ref, lap);
                   }
                 }}
               >
@@ -662,9 +608,9 @@
 
             <!-- PREVIEW pass markers: hollow/dashed candidates the tuned thresholds would ADD.
                Distinct from the solid official lap markers; non-interactive (commit is explicit,
-               in the parent's tuning panel). -->
-            {#each pv.added as t (t)}
-              {@const x = xOf(t, span)}
+               in the parent's tuning panel). Review only — empty in live. -->
+            {#each v.preview.added as t (t)}
+              {@const x = xOf(t, v.span)}
               <g class="preview-added" aria-hidden="true">
                 <line x1={x} y1={PAD_T} x2={x} y2={PAD_T + plotH} />
                 <text class="label" x={x + 3} y={PAD_T + plotH - 4}>+</text>
@@ -674,19 +620,19 @@
 
           <!-- Draggable threshold handles — LAST in paint order (topmost), so nothing (signal
                line, lap markers, preview markers) can intercept their pointer events. -->
-          {#if onthresholds && th.enter != null}
-            {@const y = yOf(th.enter, range)}
+          {#if onthresholds && v.th.enter != null}
+            {@const y = yOf(v.th.enter, v.range)}
             <g
               class="th-handle enter"
               role="slider"
               tabindex="0"
-              aria-label={`Enter threshold for ${who}`}
+              aria-label={`Enter threshold for ${v.who}`}
               aria-orientation="vertical"
-              aria-valuenow={th.enter}
-              aria-valuemin={Math.floor(range.lo)}
-              aria-valuemax={Math.ceil(range.hi)}
+              aria-valuenow={v.th.enter}
+              aria-valuemin={Math.floor(v.range.lo)}
+              aria-valuemax={Math.ceil(v.range.hi)}
               onpointerdown={(e: PointerEvent) => startThresholdDrag(e, ct, 'enter')}
-              onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'enter', range)}
+              onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'enter', v.range)}
               onpointerup={endThresholdDrag}
               onpointercancel={endThresholdDrag}
               onkeydown={(e: KeyboardEvent) => nudgeThreshold(e, ct, 'enter')}
@@ -697,19 +643,19 @@
               <text class="knob-label" x={W - PAD_R - 26} y={y + 3.5}>EN</text>
             </g>
           {/if}
-          {#if onthresholds && th.exit != null}
-            {@const y = yOf(th.exit, range)}
+          {#if onthresholds && v.th.exit != null}
+            {@const y = yOf(v.th.exit, v.range)}
             <g
               class="th-handle exit"
               role="slider"
               tabindex="0"
-              aria-label={`Exit threshold for ${who}`}
+              aria-label={`Exit threshold for ${v.who}`}
               aria-orientation="vertical"
-              aria-valuenow={th.exit}
-              aria-valuemin={Math.floor(range.lo)}
-              aria-valuemax={Math.ceil(range.hi)}
+              aria-valuenow={v.th.exit}
+              aria-valuemin={Math.floor(v.range.lo)}
+              aria-valuemax={Math.ceil(v.range.hi)}
               onpointerdown={(e: PointerEvent) => startThresholdDrag(e, ct, 'exit')}
-              onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'exit', range)}
+              onpointermove={(e: PointerEvent) => moveThresholdDrag(e, ct, 'exit', v.range)}
               onpointerup={endThresholdDrag}
               onpointercancel={endThresholdDrag}
               onkeydown={(e: KeyboardEvent) => nudgeThreshold(e, ct, 'exit')}
@@ -721,7 +667,7 @@
           {/if}
 
           <!-- Hover crosshair + time/RSSI readout: a vertical guide at the cursor, with a small
-               dark, high-contrast chip reading the exact race-relative time + RSSI there. -->
+               dark, high-contrast chip reading the exact time + RSSI there. -->
           {#if isHover && hover}
             {@const hx = hover.x}
             {@const flip = hx > PAD_L + plotW * 0.62}
@@ -732,10 +678,10 @@
               transform={`translate(${flip ? hx - 122 : hx + 6}, ${PAD_T + 4})`}
             >
               <rect class="readout-bg" x="0" y="0" width="116" height="34" rx="4" />
-              <text class="readout-time" x="6" y="14">t {formatTime(hover.time)}s</text>
+              <text class="readout-time" x="6" y="14">t {v.label(hover.time)}s</text>
               <text class="readout-rssi" x="6" y="28">rssi {Math.round(hover.rssi)}</text>
             </g>
-            {#if canControl && onaddlap}
+            {#if v.canAdd}
               <!-- The add affordance is the real, labelled "Add lap here" button in the readout
                    BELOW the plot (clicking the trace itself never adds); this hint points at it. -->
               <text class="add-hint" x={flip ? hx - 6 : hx + 6} y={PAD_T + plotH - 6}
@@ -744,15 +690,15 @@
             {/if}
           {/if}
         </svg>
-        {#if canControl && onaddlap && isHover && hover}
+        {#if v.canAdd && isHover && hover}
           <p class="cursor-readout" aria-live="polite">
-            Cursor: <strong>{formatTime(hover.time)}s</strong> · RSSI
+            Cursor: <strong>{v.label(hover.time)}s</strong> · RSSI
             <strong>{Math.round(hover.rssi)}</strong>
             <button
               type="button"
               class="add-here"
-              onclick={() => onaddlap?.(ref, Math.round(hover!.time))}
-              aria-label={`Add lap for ${who} at ${formatTime(hover.time)} seconds`}
+              onclick={() => onaddlap?.(v.ref, Math.round(hover!.time))}
+              aria-label={`Add lap for ${v.who} at ${v.label(hover.time)} seconds`}
               >Add lap here</button
             >
           </p>
