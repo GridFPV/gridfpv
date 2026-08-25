@@ -435,6 +435,7 @@ pub fn router(registry: EventRegistry) -> Router {
         // both reads the snapshot and renews the subscription lease (the first call starts it);
         // the `stop` is for promptness on view close, not for correctness.
         .route("/timers/{timer_id}/signal", get(timer_signal))
+        .route("/timers/{timer_id}/calibration", post(calibrate_timer))
         .route("/timers/{timer_id}/signal/stop", post(stop_timer_signal))
         // The downloadable GridFPV RotorHazard plugin bundle (D16, S1) the guided-install UX
         // offers when a timer's plugin is missing/incompatible. Open read: it's static, embedded
@@ -876,6 +877,87 @@ async fn timer_signal(
     let timer = signal_capable_timer(&timers, &timer_id)?;
     let _ = timer;
     Ok(Json(timers.signal(&timer_id)))
+}
+
+/// `POST /timers/{timer_id}/calibration` — set one node's enter/exit thresholds, RD-gated (#355).
+///
+/// The **write** half of the Tune page, and the thing that turns it from a diagnostic into a
+/// repair. Body is a [`CalibrationRequest`]: a node, and whichever of `enter_at` / `exit_at`
+/// actually moved. There is no Apply button on the page, so this is called per adjustment (on
+/// pointer-up, on blur) rather than once per session — which is also why every refusal below is
+/// re-checked on **every** write and not once at page load.
+///
+/// # This acknowledges a dispatch. It is not a readback.
+///
+/// RotorHazard does not echo a level set: `on_set_enter_at_level` / `on_set_exit_at_level` call
+/// straight into `calibration.py`, which writes the profile, pushes to the hardware and fires an
+/// internal `Evt` — and emits nothing back (identical on v4.3.0 and v4.4.0). So a `200` here means
+/// the write was accepted and queued onto the live socket, and **nothing more**. Answering with a
+/// synthesised readback would report success for a write that may never have reached the detector,
+/// which is precisely the failure this page exists to diagnose.
+///
+/// **The console confirms by poll.** The Director asks RotorHazard to re-broadcast
+/// `enter_and_exit_at_levels` immediately after each write; that arrives on the same socket that
+/// feeds [`timer_signal`], so the value comes back as [`NodeSignal::enter_at`] /
+/// [`NodeSignal::exit_at`] on the next `GET /timers/{id}/signal`. A threshold that never comes back
+/// holding the value the RD sent is a write that did not land, and the page must say so.
+///
+/// # The refusals
+///
+/// * A **Mock** → `400`: it has no radio, so there is nothing to calibrate.
+/// * A **race in progress on this timer** → `400`, gated on heat phase
+///   ([`EventRegistry::heat_in_progress_on_timer`]: `Staged`/`Armed`/`Running`/`Unofficial` in the
+///   active event), exactly as [`restart_timer`] is. Moving a detection threshold under a live race
+///   changes what counts as a lap while it is being counted.
+/// * A timer that is **not connected**, a `node` beyond the timer's width, or a body carrying
+///   **neither** threshold → `400` from the registry.
+/// * An unknown id → 404 (`UnknownScope`).
+///
+/// Every refusal names the timer by its **friendly name** (repo display rule).
+///
+/// Levels are **clamped** server-side to `RSSI_MIN..=RSSI_MAX`, never trusted from the client: a
+/// `0` is falsy to RotorHazard and would silently no-op while looking accepted.
+async fn calibrate_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+    Json(request): Json<crate::timers::CalibrationRequest>,
+) -> Result<Json<crate::timers::CalibrationDispatch>, ProtocolError> {
+    let timers = registry.timers();
+    // Resolve first so the refusals can name the timer, and so an unknown id is a clean 404 rather
+    // than a message about a timer that does not exist.
+    let timer = timers.get(&timer_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })?;
+    // Kind before phase, for the same reason [`restart_timer`] does it: the built-in Mock is in
+    // every event's default selection, so gating on the heat first would answer a Mock with "… is
+    // running Heat 1", which is both wrong and actionable-looking.
+    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is not a RotorHazard timer — there is no detector to calibrate",
+                timer.name
+            ),
+        ));
+    }
+    // The hard gate: never move a detection threshold under a live race.
+    if let Some(heat) = registry.heat_in_progress_on_timer(&timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is running {} — finish or reset that heat before changing its thresholds",
+                timer.name, heat
+            ),
+        ));
+    }
+    timers
+        .request_calibration(&timer_id, &request)
+        .map(Json)
+        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
 }
 
 /// `POST /timers/{timer_id}/signal/stop` — end the timer's tuning stream now, RD-gated (#355 S2a).
@@ -2380,6 +2462,7 @@ mod tests {
     use gridfpv_events::{AdapterId, GateIndex, HeatTransition, LogRef, Pass};
     use gridfpv_projection::CompetitorKey;
     use http_body_util::BodyExt;
+    use serde_json::json;
     use tower::ServiceExt;
 
     use crate::snapshot::HeatPhase;
@@ -4272,6 +4355,325 @@ mod tests {
         let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(registry.timers().take_restart_requests().is_empty());
+    }
+
+    /// `POST /timers/{id}/calibration` with a raw JSON body → status + raw bytes.
+    async fn post_calibration(
+        registry: EventRegistry,
+        timer_id: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, Vec<u8>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/timers/{timer_id}/calibration"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    /// The refusal message from a failed calibration call.
+    fn refusal(bytes: &[u8]) -> String {
+        serde_json::from_slice::<ProtocolError>(bytes)
+            .expect("a ProtocolError body")
+            .message
+    }
+
+    #[tokio::test]
+    async fn calibrating_a_connected_rh_timer_queues_the_write_and_records_it_as_grid_config() {
+        // #355: the write half of the Tune page. The route parks the write on the timer registry —
+        // the connection layer lives above this crate — and the reconciler drains it onto the live
+        // socket. D27: the accepted value is ALSO recorded on the timer, because a threshold the RD
+        // set is GridFPV's config; the timer is only where it is applied.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 2, "enter_at": 96 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::CalibrationDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.timer, rh.id);
+        assert_eq!(dispatch.node, 2);
+        assert_eq!(dispatch.enter_at, Some(96));
+        // The threshold that was NOT sent stays absent — the route never invents the other half.
+        assert_eq!(dispatch.exit_at, None);
+
+        // D27: GridFPV holds the value itself, not merely the timer.
+        assert_eq!(
+            registry.timers().calibration(&rh.id),
+            vec![crate::timers::NodeCalibration {
+                node: 2,
+                enter_at: Some(96),
+                exit_at: None,
+            }]
+        );
+
+        // The queue drains EXACTLY ONCE.
+        let drained = registry.timers().take_calibration_requests();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].timer, rh.id);
+        assert_eq!(drained[0].node, 2);
+        assert_eq!(drained[0].enter_at, Some(96));
+        assert!(
+            registry.timers().take_calibration_requests().is_empty(),
+            "a second drain is empty — nothing is re-queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_writes_to_one_node_coalesce_to_the_latest_value_per_threshold() {
+        // The page writes on interaction end, so a drag that lands twice before the reconciler's
+        // next tick must apply the LATEST value once — never replay a stale one after it. Enter and
+        // exit are independent: writing one must not clear the other.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        for enter in [80, 90, 101] {
+            let (status, _) = post_calibration(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "enter_at": enter }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, _) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "exit_at": 77 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // A different node is its own entry, not a coalesce target.
+        let (status, _) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 3, "enter_at": 55 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let drained = registry.timers().take_calibration_requests();
+        assert_eq!(drained.len(), 2, "one entry per node, not one per write");
+        assert_eq!(drained[0].node, 0);
+        assert_eq!(drained[0].enter_at, Some(101), "the latest enter wins");
+        assert_eq!(
+            drained[0].exit_at,
+            Some(77),
+            "the exit is carried alongside"
+        );
+        assert_eq!(drained[1].node, 3);
+        assert!(registry.timers().take_calibration_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn calibration_levels_are_clamped_server_side() {
+        // Never trust the client for a value that reaches timing hardware. `0` is the dangerous one:
+        // RotorHazard's `calibration.py` tests the level for truthiness, so a `0` is read as "re-read
+        // it off the node" and the old threshold silently survives while the write looks accepted.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 1, "enter_at": 0, "exit_at": 9_999 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::CalibrationDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.enter_at, Some(crate::timers::RSSI_MIN));
+        assert_eq!(dispatch.exit_at, Some(crate::timers::RSSI_MAX));
+
+        // The clamp happens ONCE, before both the record and the queue — so neither can hold a
+        // value the other does not.
+        let drained = registry.timers().take_calibration_requests();
+        assert_eq!(drained[0].enter_at, Some(crate::timers::RSSI_MIN));
+        assert_eq!(drained[0].exit_at, Some(crate::timers::RSSI_MAX));
+        assert_eq!(
+            registry.timers().calibration(&rh.id),
+            vec![crate::timers::NodeCalibration {
+                node: 1,
+                enter_at: Some(crate::timers::RSSI_MIN),
+                exit_at: Some(crate::timers::RSSI_MAX),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn calibrating_is_refused_while_a_race_is_in_progress_on_the_timer() {
+        // The hard gate (#355, and the same one #386 uses): moving a detection threshold under a
+        // live race changes what counts as a lap while it is being counted. Gated on HEAT PHASE, and
+        // the refusal names the heat and the timer by their FRIENDLY names (CLAUDE.md).
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_practice(&registry);
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("q-1".into()),
+                        lineup: vec![CompetitorRef("A".into())],
+                        class: None,
+                        round: None,
+                        frequencies: vec![],
+                        label: Some("Qualifier Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("q-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let (status, bytes) = post_calibration(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "enter_at": 90 }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "a {transition:?} heat must refuse the calibration write"
+            );
+            let message = refusal(&bytes);
+            assert!(
+                message.contains("Qualifier Heat 1"),
+                "the refusal must name the heat: {message}"
+            );
+            assert!(
+                message.contains("Field RH"),
+                "the refusal must name the timer: {message}"
+            );
+            assert!(
+                !message.contains(&rh.id.0),
+                "the refusal must not leak the raw timer id: {message}"
+            );
+            // A real refusal, not a confirm-and-fire — and nothing was recorded as config either.
+            assert!(registry.timers().take_calibration_requests().is_empty());
+            assert!(registry.timers().calibration(&rh.id).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn calibrating_a_mock_an_unknown_or_a_disconnected_timer_is_rejected() {
+        // A Mock has no radio to calibrate; an unknown id is a 404 (never a message about a timer
+        // that does not exist); a configured-but-not-connected RH timer is a 400 — there is no socket
+        // to emit on, and a threshold is never held over for a future connection.
+        let (registry, _state, _) = state_with(vec![]);
+
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            "mock",
+            json!({ "node": 0, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Mock") && message.contains("not a RotorHazard timer"),
+            "the Mock refusal must name the timer and say why: {message}"
+        );
+
+        let (status, _) = post_calibration(
+            registry.clone(),
+            "no-such-timer",
+            json!({ "node": 0, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Field RH") && message.contains("not connected"),
+            "the disconnected refusal must name the timer: {message}"
+        );
+        assert!(registry.timers().take_calibration_requests().is_empty());
+        assert!(registry.timers().calibration(&rh.id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_calibration_write_with_no_threshold_or_an_unknown_node_is_refused() {
+        // "I asked for nothing and it worked" is the shape of every silent calibration failure, so an
+        // empty write is a refusal rather than a no-op success. A node beyond the timer's width is
+        // refused too: RotorHazard's `calibration.py` drops an out-of-range seat index with nothing
+        // but a log line, which would look exactly like a successful write that did nothing.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        let (status, bytes) =
+            post_calibration(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refusal(&bytes).contains("no threshold given"),
+            "the empty-write refusal must say what is missing"
+        );
+
+        let node_count = registry.timers().get(&rh.id).unwrap().node_count;
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": node_count, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Field RH"),
+            "the refusal must name the timer: {message}"
+        );
+        assert!(registry.timers().take_calibration_requests().is_empty());
     }
 
     #[tokio::test]

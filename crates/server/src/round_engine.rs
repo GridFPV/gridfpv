@@ -2023,6 +2023,7 @@ mod tests {
             available_channels: available,
             plugin: None,
             manual_connect: false,
+            calibration: Vec::new(),
         }
     }
 

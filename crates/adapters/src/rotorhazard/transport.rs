@@ -1592,6 +1592,51 @@ impl RotorHazardConnection {
         )
     }
 
+    /// **Set node `node`'s enter threshold** to `level` (#355) — the calibration write.
+    ///
+    /// Emits RotorHazard's `set_enter_at_level` handler with `{ node, enter_at_level }`, where
+    /// `node` is the 0-based seat index. **Verified identical on v4.3.0 and v4.4.0**
+    /// (`server.py::on_set_enter_at_level`): same event name, same two payload keys; v4.4.0 only
+    /// adds an `int(… or 0)` coercion around the value. It carries **no authentication** — the
+    /// `@requires_auth` decorators in that file guard Flask HTTP routes, not socket handlers — so
+    /// the Director can calibrate on the socket it is already holding, with no plugin involved.
+    ///
+    /// The handler runs `calibration.py::set_enter_at_level`, which writes the active profile's
+    /// `enter_ats`, **pushes the level to the timing hardware** (`interface.set_enter_at_level`),
+    /// and fires `Evt.ENTER_AT_LEVEL_SET`.
+    ///
+    /// ## Two traps this exists to avoid
+    ///
+    /// * **`level` must never be `0`.** `calibration.py` tests the value for *truthiness*, so a `0`
+    ///   is read as "re-read the level off the node" and the old threshold survives — while the
+    ///   write looks perfectly successful. Callers clamp to a minimum of 1 (`RSSI_MIN`).
+    /// * **RotorHazard does not echo this.** The handler emits nothing at all, so an `Ok` here means
+    ///   only that the emit was accepted. [`request_thresholds`](Self::request_thresholds) is the
+    ///   readback, and the caller fires it after a write so the confirming
+    ///   `enter_and_exit_at_levels` broadcast lands on this socket.
+    ///
+    /// Callers **must** gate this on heat phase — a threshold that moves mid-race changes what
+    /// counts as a lap while it is being counted. This layer only moves the bytes.
+    pub fn set_enter_at_level(&self, node: u64, level: u32) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "set_enter_at_level",
+            json!({ "node": node, "enter_at_level": level }),
+        )
+    }
+
+    /// **Set node `node`'s exit threshold** to `level` (#355) — the twin of
+    /// [`set_enter_at_level`](Self::set_enter_at_level), and everything said there applies here.
+    ///
+    /// Emits `set_exit_at_level` with `{ node, exit_at_level }` (`server.py::on_set_exit_at_level`,
+    /// identical on v4.3.0 and v4.4.0). `0` is falsy to `calibration.py` and silently re-reads the
+    /// node's own level instead of setting one; there is no echo, so confirmation is by readback.
+    pub fn set_exit_at_level(&self, node: u64, level: u32) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "set_exit_at_level",
+            json!({ "node": node, "exit_at_level": level }),
+        )
+    }
+
     /// Set RotorHazard's **minimum lap time** (general setting `MIN_LAP_TIME`, in **seconds**) —
     /// a driving helper so the sim/test harness does not trip RH's "Pass record under lap
     /// minimum" filter.
@@ -1615,9 +1660,25 @@ impl RotorHazardConnection {
         self.client.emit("stop_race", Payload::Text(vec![]))
     }
 
-    /// Re-request the per-node enter/exit detection thresholds (`load_data` /
-    /// `enter_and_exit_at_levels`) — a driving helper so a test can re-capture thresholds after
-    /// draining the connect-time burst.
+    /// **Re-request the per-node enter/exit detection thresholds** — `load_data` with
+    /// `{"load_types": ["enter_and_exit_at_levels"]}`, which RotorHazard answers with an
+    /// `enter_and_exit_at_levels` emit addressed to this socket (`nobroadcast`).
+    ///
+    /// This is the **calibration readback** (#355), not merely a test helper. Neither
+    /// `set_enter_at_level` nor `set_exit_at_level` echoes, so the only way to learn whether a write
+    /// landed is to ask: the driver fires this immediately after a calibration emit, the adapter
+    /// parses the reply into the per-node thresholds, and the Tune page sees the value come back on
+    /// its next `GET /timers/{id}/signal` poll.
+    ///
+    /// ⚠️ It reads **RotorHazard's active profile row**, not the node. `RHUI.emit_enter_and_exit_at_levels`
+    /// serialises `profile.enter_ats` / `profile.exit_ats`, and `calibration.py` writes that row
+    /// *before* `interface.set_enter_at_level` — which then drops the value if
+    /// `Node.is_valid_rssi` rejects it. So the readback confirms "RotorHazard took it", which is one
+    /// step short of "the detector holds it"; keeping the level inside the valid range is what
+    /// closes the gap.
+    ///
+    /// Also used as a driving helper so a test can re-capture thresholds after draining the
+    /// connect-time burst.
     pub fn request_thresholds(&self) -> Result<(), rust_socketio::Error> {
         self.client.emit(
             "load_data",

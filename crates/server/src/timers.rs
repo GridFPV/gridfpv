@@ -300,6 +300,54 @@ impl SelectionRefusal {
     }
 }
 
+/// The lowest enter/exit threshold a calibration write may carry (#355).
+///
+/// **Not `0`.** RotorHazard's `calibration.py` tests the incoming level for *truthiness*
+/// (`if not enter_at_level:`), so a `0` means "ignore me and read the level back off the node"
+/// rather than "set the level to zero" — identical on v4.3.0 and v4.4.0. A typed `0` would
+/// therefore be accepted, answered with a success, and silently change nothing: the #403 failure
+/// class this page exists to diagnose. The console clamps to this too; the Director clamps again
+/// because a value that reaches timing hardware is never the client's to decide.
+pub const RSSI_MIN: u32 = 1;
+
+/// The highest enter/exit threshold a calibration write may carry (#355) — RSSI on RotorHazard is
+/// a filtered 8-bit ADC count, so `255` is the top of the domain.
+///
+/// ⚠️ **RotorHazard's own hardware gate is one count tighter.** `Node.is_valid_rssi` is
+/// `value > 0 and value < max_rssi_value`, and `max_rssi_value` is `255` on any node at API level
+/// ≥ 18 — so a literal `255` writes the *profile* row and is then dropped by
+/// `RHInterface.set_enter_at_level` without ever reaching the node. The readback
+/// (`enter_and_exit_at_levels`) is served from that profile row, so it would confirm a value the
+/// detector does not hold. `255` is a useless threshold in practice (nothing ever reaches full
+/// scale), so this matches the console's agreed domain rather than silently disagreeing with it —
+/// but the console's own ceiling wants lowering to `254`.
+pub const RSSI_MAX: u32 = 255;
+
+/// One node's **GridFPV-owned** enter/exit calibration (#355, D27).
+///
+/// D27: *"GridFPV is the sole system of record for configuration"* — a threshold the RD sets is
+/// GridFPV's value, and the timer is merely where it takes effect. So an accepted calibration write
+/// is recorded here, on the [`Timer`], and persisted with it; the level that comes back from the
+/// timer on `GET /timers/{id}/signal` is **evidence about the timer**, never the store.
+///
+/// Each threshold is independently optional because the console writes only the one the RD actually
+/// moved: a node whose exit has been tuned and whose enter has not holds `exit_at: Some, enter_at:
+/// None`, which is the truth rather than a fabricated pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NodeCalibration {
+    /// The node's index on the timer, `0`-based (RotorHazard's `seat_index`).
+    pub node: u32,
+    /// The enter threshold GridFPV has set on this node, or `None` if it never has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub enter_at: Option<u32>,
+    /// The exit threshold GridFPV has set on this node, or `None` if it never has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_at: Option<u32>,
+}
+
 /// One configured timer in the application-level registry (issue #73).
 ///
 /// The wire shape `GET /timers` returns and the on-disk shape `timers.json` persists: a stable
@@ -359,6 +407,24 @@ pub struct Timer {
     /// wire but a restart comes back with no holds. Additive: defaults to `false`.
     #[serde(default)]
     pub manual_connect: bool,
+    /// The per-node enter/exit thresholds **GridFPV has set** on this timer (#355, D27), in node
+    /// order, one entry per node that has ever been calibrated from the Tune page.
+    ///
+    /// **This is the config; the timer is where it is applied.** D27's test — *"delete everything
+    /// GridFPV put on the timer, and it must rebuild identically from GridFPV's own state"* — is
+    /// why this is a persisted field on `Timer` rather than something read back off RotorHazard.
+    /// A threshold read from the timer is evidence about the timer, never an input to a decision.
+    ///
+    /// Written by [`TimerRegistry::request_calibration`] at the moment a write is **accepted**,
+    /// which is deliberately before the emit has landed: the record is of what GridFPV decided,
+    /// not of what the hardware was observed to do (that is what `GET /timers/{id}/signal` is
+    /// for). Additive on the wire and on disk — an older `timers.json` restores with none.
+    ///
+    /// ⚠️ **Not yet re-applied on reconnect.** D27 also asks that a timer coming back with
+    /// different values be pushed back to GridFPV's, with a drift notice rather than a silent
+    /// overwrite; that half is not built (see [`TimerRegistry::request_calibration`]).
+    #[serde(default)]
+    pub calibration: Vec<NodeCalibration>,
 }
 
 /// The `serde(default)` provider for [`Timer::node_count`] (a function because serde defaults must
@@ -490,6 +556,79 @@ pub struct SetPrimaryTimerRequest {
     pub id: Option<TimerId>,
 }
 
+/// The body of `POST /timers/{timer_id}/calibration` (#355) — set one node's detection thresholds.
+///
+/// **Only the threshold that changed is sent.** The Tune page writes on interaction end, per
+/// threshold, so a slider release carries exactly one of the two; both absent is a refusal rather
+/// than a no-op success, because "I asked for nothing and it worked" is the shape of every silent
+/// calibration failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct CalibrationRequest {
+    /// The node to calibrate, `0`-based — RotorHazard's `seat_index`, and the same index
+    /// [`NodeSignal::node`] carries.
+    pub node: u32,
+    /// The new **enter** threshold, or absent to leave it alone. Clamped to
+    /// [`RSSI_MIN`]..=[`RSSI_MAX`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub enter_at: Option<u32>,
+    /// The new **exit** threshold, or absent to leave it alone. Clamped to
+    /// [`RSSI_MIN`]..=[`RSSI_MAX`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_at: Option<u32>,
+}
+
+/// The answer to `POST /timers/{timer_id}/calibration` (#355): **what was dispatched**, after
+/// clamping — never a readback.
+///
+/// RotorHazard does not echo `set_enter_at_level` / `set_exit_at_level` (verified on v4.3.0 and
+/// v4.4.0: neither handler emits, and `calibration.py` only triggers an internal `Evt`), so there
+/// is nothing synchronous to answer with. Reporting the requested value under a readback's name
+/// would claim success for a write that may never have reached the detector — the exact failure
+/// this page exists to catch — so the field names deliberately match the **request**, not
+/// [`NodeSignal`].
+///
+/// **Confirmation is by poll.** The Director asks RotorHazard to re-broadcast
+/// `enter_and_exit_at_levels` right after the write, which arrives on the same socket that feeds
+/// `GET /timers/{id}/signal`; the console confirms by seeing [`NodeSignal::enter_at`] /
+/// [`NodeSignal::exit_at`] come back holding the value it sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct CalibrationDispatch {
+    /// The timer the write was dispatched to.
+    pub timer: TimerId,
+    /// The node it addresses, `0`-based.
+    pub node: u32,
+    /// The clamped **enter** threshold that was queued, or absent if the request did not carry one.
+    /// May differ from what was asked for — that is the clamp, and it is worth showing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub enter_at: Option<u32>,
+    /// The clamped **exit** threshold that was queued, or absent if the request did not carry one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_at: Option<u32>,
+}
+
+/// One queued calibration write, as the connection reconciler drains it (#355).
+///
+/// The internal twin of [`CalibrationDispatch`] with the timer it belongs to: the queue is a
+/// hand-off across the crate boundary (the live sockets live in `gridfpv-app`, *above* this
+/// crate), exactly like `restart_requests`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCalibration {
+    /// Which timer to write to.
+    pub timer: TimerId,
+    /// The node, `0`-based.
+    pub node: u32,
+    /// The clamped enter threshold to emit, if any.
+    pub enter_at: Option<u32>,
+    /// The clamped exit threshold to emit, if any.
+    pub exit_at: Option<u32>,
+}
+
 /// The application-level registry of all configured timers (issue #73).
 ///
 /// Maps each [`TimerId`] to its [`Timer`]. A built-in **Mock** ([`MOCK_TIMER_ID`]) is always
@@ -532,6 +671,23 @@ struct Registry {
     /// connection. In-memory only, and never persisted: a Director restart must not re-fire an
     /// RD's restart from a previous session.
     restart_requests: Vec<TimerId>,
+    /// **Pending calibration writes** (#355), in request order — enter/exit thresholds the RD set
+    /// on the Tune page that have not yet been emitted onto a live socket.
+    ///
+    /// The same hand-off queue `restart_requests` is, for the same layering reason: the live
+    /// sockets live in `gridfpv-app`, *above* this crate, so the RD-gated route here cannot emit.
+    /// The reconciler drains it exactly once
+    /// ([`TimerRegistry::take_calibration_requests`]) and fires the emits.
+    ///
+    /// **Coalesced per `(timer, node)`, last write wins per threshold.** A slider dragged twice
+    /// before a drain should put the *latest* value on the timer, not replay a stale one after it —
+    /// and a node whose enter and exit both moved in the same tick travels as one entry carrying
+    /// both. This queue is only the in-flight buffer; the durable record of what GridFPV decided is
+    /// [`Timer::calibration`], written at accept time (D27).
+    ///
+    /// In-memory only, and never persisted: a Director restart must not replay an RD's tuning from
+    /// a previous session onto whatever timer happens to be plugged in now.
+    calibration_requests: Vec<PendingCalibration>,
 }
 
 // -------------------------------------------------------------------------------------------
@@ -854,6 +1010,7 @@ impl TimerRegistry {
             available_channels: crate::channels::RACEBAND_MHZ.to_vec(),
             plugin: None,
             manual_connect: false,
+            calibration: Vec::new(),
         };
         timers.insert(sim.id.clone(), sim);
 
@@ -882,6 +1039,7 @@ impl TimerRegistry {
                 timers,
                 data_dir,
                 restart_requests: Vec::new(),
+                calibration_requests: Vec::new(),
             })),
             signal: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -936,6 +1094,7 @@ impl TimerRegistry {
             available_channels: request.available_channels.clone().unwrap_or_default(),
             plugin: None,
             manual_connect: false,
+            calibration: Vec::new(),
         };
         reg.timers.insert(id, timer.clone());
         reg.persist()?;
@@ -1107,6 +1266,165 @@ impl TimerRegistry {
         std::mem::take(&mut self.write().restart_requests)
     }
 
+    /// **Set a node's enter/exit detection thresholds** on `id` (#355), returning what was
+    /// dispatched.
+    ///
+    /// The write half of the Tune page. The RD moves a slider, releases it, and the value goes to
+    /// the timer — there is no Apply button, so this runs per adjustment rather than once per
+    /// session.
+    ///
+    /// # D27: this is GridFPV's value, applied to the timer
+    ///
+    /// *"GridFPV owns every config and every record; a timer is controlled, never consulted."* The
+    /// accepted (clamped) thresholds are recorded on [`Timer::calibration`] and **persisted** here,
+    /// at accept time — that record is the system of record. What RotorHazard later reports on
+    /// `GET /timers/{id}/signal` is evidence about the timer, and is never adopted as truth.
+    ///
+    /// ⚠️ **The re-apply half of D27 is not built.** A timer that comes back holding different
+    /// levels (the RD tuned in RH's own UI, a profile switch, a restore) is not pushed back to
+    /// GridFPV's values on reconnect, because doing that silently would overwrite deliberate
+    /// RH-side work with no way for the RD to see it happen — D27 asks for a **drift notice**, and
+    /// there is no surface for one yet. Until then `Timer::calibration` is a faithful record of
+    /// what GridFPV set, and rebuilding a wiped timer from it is a manual re-tune.
+    ///
+    /// # Clamping
+    ///
+    /// Each supplied level is clamped to [`RSSI_MIN`]..=[`RSSI_MAX`] — **not** validated and
+    /// rejected. The console clamps at its own state already, so anything out of range here is a
+    /// bug or a hand-rolled client, and the dangerous value is `0`: RotorHazard reads it as falsy
+    /// and re-reads the level off the node instead of setting it, which looks exactly like success.
+    /// The returned [`CalibrationDispatch`] carries the clamped values, so a caller can see what
+    /// actually went out.
+    ///
+    /// # Refused
+    ///
+    /// A [`TimerError`] (which the route reports as a `400`) for an unknown id, a non-RotorHazard
+    /// timer (a Mock has no radio to calibrate), a timer that is **not connected** (there is no
+    /// socket to emit on, and a threshold is not held over for a future connection), a `node`
+    /// beyond the timer's width, and a request carrying **neither** threshold.
+    ///
+    /// The **race-phase refusal** — never move a detection threshold under a live race — is not
+    /// here: it needs the event log, so it lives in the route
+    /// (`EventRegistry::heat_in_progress_on_timer`), exactly as it does for
+    /// [`request_restart`](Self::request_restart).
+    pub fn request_calibration(
+        &self,
+        id: &TimerId,
+        request: &CalibrationRequest,
+    ) -> Result<CalibrationDispatch, TimerError> {
+        let enter_at = request.enter_at.map(clamp_level);
+        let exit_at = request.exit_at.map(clamp_level);
+        if enter_at.is_none() && exit_at.is_none() {
+            return Err(TimerError(
+                "no threshold given — a calibration write must carry an enter or an exit level"
+                    .to_string(),
+            ));
+        }
+
+        let mut reg = self.write();
+        let timer = reg
+            .timers
+            .get_mut(id)
+            .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
+        if !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
+            return Err(TimerError(format!(
+                "{:?} is not a RotorHazard timer — there is no detector to calibrate",
+                timer.name
+            )));
+        }
+        if timer.status != TimerStatus::Connected {
+            return Err(TimerError(format!(
+                "{:?} is not connected — connect it before setting its thresholds",
+                timer.name
+            )));
+        }
+        if request.node >= timer.node_count {
+            return Err(TimerError(format!(
+                "{:?} has {} nodes — there is no node {} to calibrate",
+                timer.name,
+                timer.node_count,
+                // Display the node the way the page labels it (1-based), per the repo display rule.
+                request.node + 1
+            )));
+        }
+
+        // D27: record GridFPV's value first — the store, not the timer, is where this lives.
+        match timer
+            .calibration
+            .iter_mut()
+            .find(|c| c.node == request.node)
+        {
+            Some(existing) => {
+                if enter_at.is_some() {
+                    existing.enter_at = enter_at;
+                }
+                if exit_at.is_some() {
+                    existing.exit_at = exit_at;
+                }
+            }
+            None => {
+                timer.calibration.push(NodeCalibration {
+                    node: request.node,
+                    enter_at,
+                    exit_at,
+                });
+                timer.calibration.sort_by_key(|c| c.node);
+            }
+        }
+
+        // Then queue the *application* of it. Coalesced per (timer, node): a drag that lands twice
+        // before a drain applies the latest value once, rather than replaying a stale one after it.
+        match reg
+            .calibration_requests
+            .iter_mut()
+            .find(|p| &p.timer == id && p.node == request.node)
+        {
+            Some(pending) => {
+                if enter_at.is_some() {
+                    pending.enter_at = enter_at;
+                }
+                if exit_at.is_some() {
+                    pending.exit_at = exit_at;
+                }
+            }
+            None => reg.calibration_requests.push(PendingCalibration {
+                timer: id.clone(),
+                node: request.node,
+                enter_at,
+                exit_at,
+            }),
+        }
+        reg.persist()?;
+
+        Ok(CalibrationDispatch {
+            timer: id.clone(),
+            node: request.node,
+            enter_at,
+            exit_at,
+        })
+    }
+
+    /// Take every pending calibration write (#355), leaving the queue empty — the connection
+    /// reconciler's drain, and the twin of [`take_restart_requests`](Self::take_restart_requests).
+    ///
+    /// Each write is handed out **exactly once**: if no live connection is found for it the write
+    /// is dropped (and logged), never re-queued. The RD sees that on the page as a threshold that
+    /// never comes back confirmed, which is the honest outcome — the durable record of the value
+    /// stays on [`Timer::calibration`] regardless.
+    pub fn take_calibration_requests(&self) -> Vec<PendingCalibration> {
+        std::mem::take(&mut self.write().calibration_requests)
+    }
+
+    /// The per-node thresholds GridFPV holds for `id` (#355, D27) — its own record, never a
+    /// readback. Empty for an unknown timer.
+    pub fn calibration(&self, id: &TimerId) -> Vec<NodeCalibration> {
+        self.read()
+            .timers
+            .get(id)
+            .map(|t| t.calibration.clone())
+            .unwrap_or_default()
+    }
+
     /// **Read the timer's live tuning signal and renew its lease** (#355 S2a) — the whole of
     /// `GET /timers/{id}/signal`, and the only thing that keeps the stream alive.
     ///
@@ -1230,6 +1548,16 @@ impl Registry {
         std::fs::write(timers_path(dir), json)
             .map_err(|e| TimerError(format!("could not persist timers: {e}")))
     }
+}
+
+/// Clamp one calibration level into [`RSSI_MIN`]..=[`RSSI_MAX`] (#355).
+///
+/// The **server-side** half of the console's `clampLevel`. It exists even though the page already
+/// clamps because this value reaches timing hardware: `0` is the one that matters, since
+/// RotorHazard reads a falsy level as "re-read it off the node" and silently keeps the old
+/// threshold while answering as though the write succeeded.
+fn clamp_level(level: u32) -> u32 {
+    level.clamp(RSSI_MIN, RSSI_MAX)
 }
 
 /// The file the timer set is persisted to under `dir`: `<dir>/timers.json`.
