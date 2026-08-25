@@ -16,14 +16,23 @@
  *   - `#/classes`            → the Classes page
  *   - `#/events`             → the Events page (the picker)
  *   - `#/timers`             → the Timers page
+ *   - `#/timers/<id>/tune`   → the **Tune** page for one timer (#355) — the only *parameterised*
+ *                              route, and the reason this scheme grew a third `Route` kind
  *   - `#/event/<tab>`        → the in-event workspace on `<tab>`
  *                              (tab ∈ classes-roster | rounds | live | marshaling | results | audit | timers)
+ *
+ * **Why tuning is a page with an id in its URL (#355):** tuning a gate is a two-location activity —
+ * set a threshold, walk to the gate, wave a quad through, walk back, read the graph. The console is
+ * served over the LAN, so a *linkable* tune view lets the RD open it on a phone at the gate instead
+ * of walking back for every adjustment. A modal has no URL, so that case is simply unavailable.
  *
  * The active event itself is **app-wide server state** (the Director's active event, #90), so the
  * hash only restores *which tab* of the workspace — not *which* event. The workspace always shows
  * the Director's active event; an `#/event/<tab>` hash with no active event reconciles to the
  * Events page rather than rendering a broken workspace (see {@link reconcileRoute}).
  */
+
+import type { TimerId } from '@gridfpv/types';
 
 /** The app-level pages shown when no event is selected. */
 export type AppPage = 'home' | 'events' | 'timers' | 'pilots' | 'classes';
@@ -43,7 +52,15 @@ export type WorkspaceTab =
  * the pure view-intent the hash encodes; reconciliation against the live active event happens in
  * {@link reconcileRoute}.
  */
-export type Route = { kind: 'page'; page: AppPage } | { kind: 'workspace'; tab: WorkspaceTab };
+export type Route =
+  | { kind: 'page'; page: AppPage }
+  | { kind: 'workspace'; tab: WorkspaceTab }
+  /**
+   * The **Tune** page for one timer (#355), `#/timers/<id>/tune`. The first parameterised route:
+   * it carries the {@link TimerId} it is tuning, so the view survives a reload and can be opened
+   * on a second device. App-level (no event required) — a timer is tuned before an event exists.
+   */
+  | { kind: 'tune'; timer: TimerId };
 
 export const WORKSPACE_TABS: readonly WorkspaceTab[] = [
   'classes-roster',
@@ -66,13 +83,18 @@ export const DEFAULT_ROUTE: Route = { kind: 'page', page: 'home' };
  * (the hub), so a stale or hand-edited URL never wedges the shell.
  */
 export function parseHash(hash: string): Route {
-  // Strip a leading '#', then a leading '/', then any trailing '/'. Lower-case for tolerance.
-  const s = hash.replace(/^#/, '').replace(/^\//, '').replace(/\/$/, '').toLowerCase();
+  // Strip a leading '#', then a leading '/', then any trailing '/'.
+  const s = hash.replace(/^#/, '').replace(/^\//, '').replace(/\/$/, '');
   if (s === '') return DEFAULT_ROUTE;
 
+  // Only the *keyword* segments are lower-cased (tolerance for a hand-typed URL). A parameter
+  // segment — the tune route's timer id — keeps its case verbatim, so the route round-trips the id
+  // the registry actually holds rather than a mangled one.
   const segments = s.split('/');
-  if (segments[0] === 'event') {
-    const tab = segments[1];
+  const head = segments[0].toLowerCase();
+
+  if (head === 'event') {
+    const tab = segments[1]?.toLowerCase();
     if (tab && (WORKSPACE_TABS as readonly string[]).includes(tab)) {
       return { kind: 'workspace', tab: tab as WorkspaceTab };
     }
@@ -80,8 +102,24 @@ export function parseHash(hash: string): Route {
     return { kind: 'workspace', tab: 'live' };
   }
 
-  if ((APP_PAGES as readonly string[]).includes(segments[0])) {
-    return { kind: 'page', page: segments[0] as AppPage };
+  // `#/timers/<id>/tune` — the parameterised tune route (#355). It nests under the Timers page
+  // deliberately: that is where it is entered from, and it makes the Home › Timers › Tune trail
+  // honest. A malformed variant (`#/timers/<id>`, or an empty id) degrades to the Timers page
+  // rather than the hub — the RD asked for something timer-shaped, so land them on timers.
+  if (head === 'timers' && segments.length >= 3) {
+    if (segments[2].toLowerCase() !== 'tune') return { kind: 'page', page: 'timers' };
+    let timer = segments[1];
+    try {
+      timer = decodeURIComponent(timer);
+    } catch {
+      // A hand-mangled `%` escape — take the segment verbatim rather than throwing out of a parse.
+    }
+    if (timer === '') return { kind: 'page', page: 'timers' };
+    return { kind: 'tune', timer };
+  }
+
+  if ((APP_PAGES as readonly string[]).includes(head)) {
+    return { kind: 'page', page: head as AppPage };
   }
 
   return DEFAULT_ROUTE;
@@ -94,24 +132,40 @@ export function parseHash(hash: string): Route {
  */
 export function formatHash(route: Route): string {
   if (route.kind === 'workspace') return `#/event/${route.tab}`;
+  if (route.kind === 'tune') return `#/timers/${encodeURIComponent(route.timer)}/tune`;
   if (route.page === 'home') return '#/';
   return `#/${route.page}`;
 }
 
 /**
  * Reconcile a parsed {@link Route} against whether an event is currently active (the Director's
- * active event, server state). This is the **graceful reconciliation** the IA needs:
+ * active event, server state) and, for the parameterised tune route, whether its timer still
+ * exists. This is the **graceful reconciliation** the IA needs:
  *
  *   - A `workspace` route with **no active event** → fall back to the Events page (`#/events`),
  *     since there is no event to show — never render a broken workspace.
+ *   - A `tune` route whose timer is **not in the registry** → fall back to the Timers page. Only
+ *     applied once the registry is known (see `timerKnown`).
  *   - A `page` route with an **active event** is fine as-is: the user explicitly navigated to a
  *     top-level page (e.g. via the breadcrumb) even though an event is active, so honour it. This
  *     includes the hub: an empty/hub hash stays on the hub even when an event is active — the hash
  *     is authoritative, so being outside an event survives a reload.
  */
-export function reconcileRoute(route: Route, hasActiveEvent: boolean): Route {
+export function reconcileRoute(
+  route: Route,
+  hasActiveEvent: boolean,
+  timerKnown?: (timer: TimerId) => boolean
+): Route {
   if (route.kind === 'workspace' && !hasActiveEvent) {
     return { kind: 'page', page: 'events' };
+  }
+  // A tune route names a timer that may be gone (removed since the link was made / bookmarked, or a
+  // hand-edited id). Fall back to the Timers page — the surface that can explain the absence and
+  // offer another timer — never a tune view over nothing. `timerKnown` is deliberately OPTIONAL and
+  // its absence means "not known yet": before the registry has loaded we must NOT bounce, or every
+  // deep link would flash through Timers on its way in.
+  if (route.kind === 'tune' && timerKnown && !timerKnown(route.timer)) {
+    return { kind: 'page', page: 'timers' };
   }
   return route;
 }
@@ -130,6 +184,10 @@ export function reconcileRoute(route: Route, hasActiveEvent: boolean): Route {
  * This is just the parse composed with {@link reconcileRoute}; there is no longer a special hub →
  * workspace resume branch.
  */
-export function resolveInitialRoute(hash: string, hasActiveEvent: boolean): Route {
-  return reconcileRoute(parseHash(hash), hasActiveEvent);
+export function resolveInitialRoute(
+  hash: string,
+  hasActiveEvent: boolean,
+  timerKnown?: (timer: TimerId) => boolean
+): Route {
+  return reconcileRoute(parseHash(hash), hasActiveEvent, timerKnown);
 }

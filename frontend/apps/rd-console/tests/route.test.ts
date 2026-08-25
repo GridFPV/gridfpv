@@ -48,6 +48,33 @@ describe('parseHash', () => {
     expect(parseHash('#/foo/bar')).toEqual(DEFAULT_ROUTE);
   });
 
+  // The tune route (#355) is the scheme's first PARAMETERISED route — it carries a timer id, so
+  // the RD can open the tuning view on a phone at the gate instead of walking back to the laptop.
+  it('parses the parameterised tune route', () => {
+    expect(parseHash('#/timers/rh-1/tune')).toEqual({ kind: 'tune', timer: 'rh-1' });
+    expect(parseHash('#/timers/mock/tune/')).toEqual({ kind: 'tune', timer: 'mock' });
+  });
+
+  it('keeps the timer id verbatim while still lower-casing the keyword segments', () => {
+    // Only `timers`/`tune` are keywords; the id is a wire handle and must round-trip EXACTLY, or a
+    // deep link resolves to a timer that isn't in the registry.
+    expect(parseHash('#/TIMERS/RH-Alpha/TUNE')).toEqual({ kind: 'tune', timer: 'RH-Alpha' });
+  });
+
+  it('decodes an escaped timer id', () => {
+    expect(parseHash('#/timers/rh%2Fone/tune')).toEqual({ kind: 'tune', timer: 'rh/one' });
+  });
+
+  it('degrades a malformed tune hash to the Timers page, not the hub', () => {
+    // The RD asked for something timer-shaped — land them on timers rather than the hub.
+    expect(parseHash('#/timers/rh-1/nope')).toEqual({ kind: 'page', page: 'timers' });
+    expect(parseHash('#/timers//tune')).toEqual({ kind: 'page', page: 'timers' });
+  });
+
+  it('still parses the bare Timers page', () => {
+    expect(parseHash('#/timers')).toEqual({ kind: 'page', page: 'timers' });
+  });
+
   it('defaults a tab-less / unknown-tab workspace hash to the live tab', () => {
     expect(parseHash('#/event')).toEqual({ kind: 'workspace', tab: 'live' });
     expect(parseHash('#/event/nope')).toEqual({ kind: 'workspace', tab: 'live' });
@@ -63,6 +90,11 @@ describe('formatHash', () => {
     expect(formatHash({ kind: 'page', page: 'pilots' })).toBe('#/pilots');
     expect(formatHash({ kind: 'workspace', tab: 'classes-roster' })).toBe('#/event/classes-roster');
   });
+
+  it('formats the tune route under the Timers page, escaping the id', () => {
+    expect(formatHash({ kind: 'tune', timer: 'rh-1' })).toBe('#/timers/rh-1/tune');
+    expect(formatHash({ kind: 'tune', timer: 'rh/one' })).toBe('#/timers/rh%2Fone/tune');
+  });
 });
 
 describe('round-trip (format → parse)', () => {
@@ -71,7 +103,11 @@ describe('round-trip (format → parse)', () => {
     { kind: 'page', page: 'pilots' },
     { kind: 'page', page: 'events' },
     { kind: 'page', page: 'timers' },
-    ...WORKSPACE_TABS.map((tab) => ({ kind: 'workspace', tab }) as Route)
+    ...WORKSPACE_TABS.map((tab) => ({ kind: 'workspace', tab }) as Route),
+    { kind: 'tune', timer: 'rh-1' },
+    { kind: 'tune', timer: 'mock' },
+    // An id with characters the hash would otherwise eat, to prove the escape round-trips.
+    { kind: 'tune', timer: 'rh/one two' }
   ];
   for (const route of routes) {
     it(`round-trips ${JSON.stringify(route)}`, () => {
@@ -97,6 +133,35 @@ describe('reconcileRoute', () => {
       kind: 'page',
       page: 'events'
     });
+  });
+
+  // The tune route is app-level: a timer is tuned before an event exists, and the RD may open it
+  // from a phone with no event entered. So the active event must not affect it either way.
+  it('keeps a tune route regardless of the active event', () => {
+    const r: Route = { kind: 'tune', timer: 'rh-1' };
+    expect(reconcileRoute(r, true)).toEqual(r);
+    expect(reconcileRoute(r, false)).toEqual(r);
+  });
+
+  it('keeps a tune route whose timer is in the registry', () => {
+    const r: Route = { kind: 'tune', timer: 'rh-1' };
+    expect(reconcileRoute(r, false, (id) => id === 'rh-1')).toEqual(r);
+  });
+
+  it('falls a tune route back to the Timers page when the timer is gone', () => {
+    // A bookmarked link to a removed timer, or a hand-edited id: never render a tune view over
+    // nothing — land on the surface that can explain the absence and offer another timer.
+    expect(reconcileRoute({ kind: 'tune', timer: 'ghost' }, false, () => false)).toEqual({
+      kind: 'page',
+      page: 'timers'
+    });
+  });
+
+  it('does NOT bounce a tune route while the registry is still unknown', () => {
+    // `timerKnown` absent means "not loaded yet". Bouncing here would flash every deep link
+    // through the Timers page on its way in.
+    const r: Route = { kind: 'tune', timer: 'rh-1' };
+    expect(reconcileRoute(r, false)).toEqual(r);
   });
 });
 
