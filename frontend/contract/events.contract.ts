@@ -1629,7 +1629,13 @@ describe('race Slice 3a: FillRound (round-driven engine)', () => {
     // FillRound draws the field from the class membership and schedules the first heat.
     const ack = await control(eventId, { FillRound: { round: roundId } }, TOKEN);
     expect(ack.status).toBe(200);
-    expect(ack.body).toEqual({ ok: true });
+    expect(ack.body.ok).toBe(true);
+    // #395: the ack now reports WHAT it did, not merely that it was accepted — a fill that
+    // schedules nothing used to be indistinguishable from one that scheduled a heat. Assert the
+    // productive outcome positively rather than pinning the whole envelope, which would break
+    // again on the next additive field.
+    expect(ack.body.outcome?.FillRound?.stopped).toBe('SingleStep');
+    expect(ack.body.outcome?.FillRound?.scheduled).toHaveLength(1);
 
     // The class snapshot now resolves (the round-tagged heat folded into the class scope).
     const classSnap = await fetch(
