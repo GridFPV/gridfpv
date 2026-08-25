@@ -105,7 +105,7 @@ use crate::events::{
     SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{
-    HeatSummary, heat_summaries, live_state, live_state_over, live_state_over_with_floor,
+    HeatSummary, heat_summaries, live_state_over_with_floor, live_state_with_floor,
     with_heat_timing,
 };
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
@@ -1807,7 +1807,13 @@ async fn snapshot_event(
     // practice laps are ordinary `Pass` events, so there is no overlay to splice.
     // `with_heat_timing` folds the current heat's server-authoritative race-start/end instants
     // (#62 follow-up) from the stored log's `recorded_at` so the clock is consistent everywhere.
-    let body = with_heat_timing(live_state(&events), &stored);
+    //
+    // The D26 min-lap floor is resolved from registry meta for the heat this fold reports as
+    // current (#409). It is NOT in the log, so a pure-log fold cannot see it — and without it the
+    // event scope counted an echo pass the heat scope's lap list suppressed.
+    let rounds = registry.rounds_of(&event_id).unwrap_or_default();
+    let floor = live_fold_floor(&events, &rounds);
+    let body = with_heat_timing(live_state_with_floor(&events, floor), &stored);
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(body),
@@ -1831,10 +1837,16 @@ async fn snapshot_class(
     let class_offsets = class_window_offsets(&events, &class);
     // The window's `current_heat` resolves which heat is on the timer; its timing is folded
     // from the *full* stored log (the heat's transition instants live there with `recorded_at`).
+    //
+    // The D26 floor is resolved over the WINDOW, not the whole log (#409): the class fold picks
+    // its current heat from the filtered slice, so that is the heat whose round owns the floor.
+    let window_events: Vec<Event> = class_offsets.iter().map(|(_, e)| e.clone()).collect();
+    let rounds = registry.rounds_of(&event_id).unwrap_or_default();
+    let floor = live_fold_floor(&window_events, &rounds);
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(with_heat_timing(
-            live_state_over(&class_offsets),
+            live_state_over_with_floor(&class_offsets, floor),
             &stored,
         )),
     }))
@@ -1850,7 +1862,7 @@ async fn snapshot_class(
 /// [`heat_window_offsets`] uses to scope a single heat, generalized to a set of heats. So a
 /// class's live state folds only its own heats and passes, with no other class's racing bleeding
 /// in. Carries each event's GLOBAL append offset — the class-scope live fold
-/// feeds these to [`live_state_over`] so marshaling adjudications (global `LogRef` targets)
+/// feeds these to [`live_state_over_with_floor`] so marshaling adjudications (global `LogRef` targets)
 /// resolve inside the filtered view (the same #55 rule as `heat_window_offsets`).
 pub(crate) fn class_window_offsets(events: &[Event], class: &ClassId) -> Vec<(u64, Event)> {
     // The heat ids tagged with this class (a `HeatScheduled` whose `class` equals `class`).
@@ -1935,21 +1947,11 @@ async fn snapshot_heat(
     // the win condition (#45) and the min-lap floor (D26 — the floor must reach the laps,
     // live, and result folds identically, or the lap list and the score disagree about a
     // suppressed pass). A heat with no round (ad-hoc) keeps the neutral defaults.
-    let round_def = events
-        .iter()
-        .find_map(|e| match e {
-            Event::HeatScheduled {
-                heat: h,
-                round: Some(round),
-                ..
-            } if *h == heat => Some(round.clone()),
-            _ => None,
-        })
-        .and_then(|round_id| {
-            registry
-                .meta_of(&event_id)
-                .and_then(|meta| meta.rounds.iter().find(|r| r.id == round_id).cloned())
-        });
+    // Through the SHARED resolver every live surface uses (`round_def_of_heat` /
+    // `live_fold_floor`, #409), so the heat scope and the event/class scopes can never resolve
+    // a different round — or a different floor — for the same heat.
+    let rounds = registry.rounds_of(&event_id).unwrap_or_default();
+    let round_def = round_def_of_heat(&events, &heat, &rounds);
     let min_lap_micros = min_lap_micros_of(round_def.as_ref());
 
     let body = match query.projection {
@@ -2227,6 +2229,39 @@ pub(crate) fn min_lap_micros_of(round: Option<&crate::events::RoundDef>) -> Opti
         .and_then(|r| r.min_lap_secs)
         .filter(|s| *s > 0)
         .map(|s| s as i64 * 1_000_000)
+}
+
+/// The [`RoundDef`](crate::events::RoundDef) a heat was scheduled under, resolved against
+/// `rounds` (the event's CURRENT registry meta) — `None` for an untagged / ad-hoc heat, or a
+/// round that has since been removed.
+///
+/// The round tag is read off the log with [`round_of_heat`] (the heat's *latest*
+/// `HeatScheduled`, so a re-materialized heat resolves against the schedule that stands), and
+/// the config is read from registry meta, which is where `min_lap_secs` and the win condition
+/// live. One helper so every scope resolves "which round is this heat's" identically.
+pub(crate) fn round_def_of_heat(
+    events: &[Event],
+    heat: &HeatId,
+    rounds: &[crate::events::RoundDef],
+) -> Option<crate::events::RoundDef> {
+    let round_id = crate::live_state::round_of_heat(events, heat)?;
+    rounds.iter().find(|r| r.id == round_id).cloned()
+}
+
+/// The **min-lap floor** (D26) that applies to a live fold over `events` — the floor of the
+/// round owning the heat that fold will report as current.
+///
+/// This is the one resolver every live surface goes through: the event- and class-scope
+/// snapshots, and the change stream's per-prefix fold (#409). It deliberately takes the *same*
+/// event slice the fold consumes — for the class scope that is the class's filtered window, not
+/// the whole log — because [`live_state_core`](crate::live_state) picks its current heat from
+/// that slice, and a floor resolved against a different heat is worse than no floor at all.
+///
+/// A heat with no round, or a round with no `min_lap_secs`, yields `None` — D26's "0/absent =
+/// off, so pre-existing rounds keep bit-identical results".
+pub(crate) fn live_fold_floor(events: &[Event], rounds: &[crate::events::RoundDef]) -> Option<i64> {
+    let heat = crate::live_state::current_heat(events)?;
+    min_lap_micros_of(round_def_of_heat(events, &heat, rounds).as_ref())
 }
 
 /// Render a [`ProtocolError`] as an HTTP error response (protocol.html §9.8): the JSON

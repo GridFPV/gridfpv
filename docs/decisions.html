@@ -834,6 +834,18 @@
       upstream device. Folding the floor once, beneath every projection, keeps the lap list
       and the score incapable of disagreeing; recording everything keeps the evidence; the
       marshal override keeps a whoop track's genuine 2-second laps scoreable.</dd>
+      <dt>Enforced by</dt>
+      <dd><code>crates/server/tests/min_lap_floor_conformance.rs</code> — one test that IS this
+      decision: over a single log carrying a genuine sub-floor echo pass, it reads the lap count
+      off every surface that reports one (the lap list; live state at event, class and heat scope,
+      over both the HTTP snapshot and the WebSocket change stream; the scored heat result; the
+      round standings) and asserts they are the same number. "Applied identically" was
+      <em>false</em> on every live fold for as long as the floor lived only in registry meta
+      (#409): a pure-log fold cannot see <code>min_lap_secs</code>, so each of them counted the
+      echo the lap list had suppressed. Every one of those folds now resolves the floor through
+      <code>app::live_fold_floor</code> — the stream re-resolving it <em>per prefix</em>, since
+      the current heat (and so the round that owns the floor) moves as the log crosses into the
+      next round.</dd>
     </dl>
 
     <h2 id="d27">D27 · GridFPV owns every config and every record; a timer is controlled, never consulted</h2>
@@ -876,8 +888,11 @@
       reports has a small, honest interface, while one that also decides has an unbounded one.
       <br><br>
       This generalises D26 rather than replacing it — D26 remains the specific, and hardest-won,
-      case. (D26's own claim that the floor is "applied identically in the lap list, the live view,
-      and every scoring path" is currently <em>false</em> on the push path: see #409.)</dd>
+      case. (D26's claim that the floor is "applied identically in the lap list, the live view, and
+      every scoring path" was <em>false</em> on the push path — the change stream and the
+      event/class snapshots folded the log with no floor at all — until #409 plumbed it through
+      every live fold. It is now true, and D26's <em>Enforced by</em> names the conformance test
+      that keeps it true.)</dd>
     </dl>
 
     <footer class="doc-footer">
