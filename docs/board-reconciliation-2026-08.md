@@ -505,3 +505,77 @@ workflow where a DQ most needs to be visible. Left for a decision rather than gu
 What the engine does today is correct and unchanged: a DQ'd competitor is ranked below every
 non-DQ competitor, and a voided heat is nullified. The defect is purely that the RD is never
 *told* — the ordering changes with no visible cause.
+
+---
+
+# Session log — 2026-08-25: matrix green, #355 slices land
+
+## The matrix is green on `v0.4-355-397`
+
+`cargo xtask live` — **24 green, 0 failed**, all four legs (RH 4.4.0 / 4.3.0 × plugin /
+no-plugin). This is the first full-matrix green since the four-leg matrix was introduced for
+#389, and it is on the branch carrying the #397 and #355 work rather than on `devel`.
+
+## Merged to the branch
+
+- **#397** — complete: the crossing feed plus tones, firing on `Armed` as well as `Running`.
+- **#355 slice 1** — `RssiGraph` generalised into review + live modes (1071 → 1017 lines,
+  with the pure half extracted to `lib/rssiGraph.ts`).
+- **#355 slice 2a** — the tune telemetry pipeline and the leased `GET /timers/{id}/signal`.
+- **#355 slice 2b** — the per-timer Tune page at `#/timers/<id>/tune`.
+- **#409** — the min-lap floor applies on every live fold; D26 is now enforced by a
+  nine-surface conformance test.
+
+## Two real gaps found on merging 2b — both being fixed
+
+Slice 2b was written while 2a was unmerged, and the two do not meet.
+
+**1. The wire types were fabricated.** `tuning.ts` hand-declared `TimerSignal` /
+`TimerSignalNode`, and **every field name is wrong** against what 2a actually shipped:
+`current_rssi`→`rssi`, `enter_at_level`→`enter_at`, `crossing_flag`→`crossing`, per-node
+`from`/`period_micros`→ a shared top-level `sample_micros`. The page would have rendered
+every readout as `undefined` against a live Director.
+
+All five gates passed green on this. They are structurally unable to catch it: `tsc` cannot
+tell a fabricated interface from a real one, the tests used fixtures shaped like the
+fabrication, and the contract suite never exercised the signal endpoint. Filed as **#410**
+with a proposed guard (barrel-completeness check + contract coverage), because the incentive
+to guess a shape recurs on every slice built against an unmerged sibling.
+
+Underneath it: `TimerSignal`/`NodeSignal` were generated into `bindings/` but never added to
+the `@gridfpv/types` barrel, so they were **not importable** even by an author who wanted to
+do the right thing. That is the actual cause and is fixed with the symptom.
+
+**2. The write endpoint does not exist.** 2b invented `POST /timers/{id}/calibration` and a
+`CalibrationReadback` type. The real routes are `connect`, `disconnect`, `restart`, `signal`,
+`signal/stop` — there is no way to set a threshold at all, so the page is read-only and #355
+is unfinished. The adapter declares `Capability::Calibration` and *reads* thresholds, but
+nothing ever writes one.
+
+Being built now on the restart (#386) pattern: registry queue → drained in
+`rh_connections.rs` → socket.io emit in `transport.rs`, gated on connected + RotorHazard +
+no heat in progress. **Confirmation is by poll, not by response** — RotorHazard does not echo
+a level set synchronously, it broadcasts `enter_and_exit_at_levels`, which already flows back
+as `NodeSignal.enter_at`/`exit_at`. A synchronous fake readback would report success for a
+write that never landed, which is precisely the failure this page exists to diagnose.
+
+Also corrected: the write goes through `@gridfpv/protocol-client` + the session token, not a
+bare `fetch`. The route is behind `ControlAuth`, so a bare POST would 401 on any gated
+Director — including the RD's real one.
+
+## #406 in flight
+
+`RawCurrentLaps.lap_number` is typed `u64`, so RotorHazard's `-1` late-lap marker fails
+**the entire frame** rather than the one lap. Measured: `undecodable_frames=4,
+rh_deleted_laps=0`. The consequence is that #400's deleted-lap counter — added specifically
+to make #403 visible — never fires, and the malformed-frame counter fires instead, pointing
+a field diagnosis at "schema drift" instead of "RotorHazard stopped counting".
+
+Only affects the legacy fallback path (#405's owned format means RH never declares a winner
+and never emits `-1`). That is *why* it is worth fixing: the fallback is what runs when
+something has already gone wrong, and it is the path whose diagnostics we most need to trust.
+
+## Still open, still needing your input
+
+**#402** (practice channels), **#407** (RH min-lap filter + RHAPI audit), **#408**
+(`EventOutcome` unserved), **#410** (the guard above — which of the three options).
