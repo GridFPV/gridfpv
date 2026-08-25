@@ -3,6 +3,7 @@ import type { CompetitorRef } from "./CompetitorRef";
 import type { HeatId } from "./HeatId";
 import type { HeatPhase } from "./HeatPhase";
 import type { LifecycleState } from "./LifecycleState";
+import type { LiveCrossing } from "./LiveCrossing";
 import type { PilotProgress } from "./PilotProgress";
 
 /**
@@ -96,4 +97,26 @@ tone_at?: number,
  * heat's phase + the logged [`HeatFinalizing`](gridfpv_events::Event::HeatFinalizing) deadline,
  * so it folds deterministically like the rest of this projection.
  */
-lifecycle?: LifecycleState, };
+lifecycle?: LifecycleState, 
+/**
+ * The current heat's recent **gate crossings, each with its disposition** (#397) — the live
+ * feed a console announces from, in ascending `pass_ref` (append-offset) order.
+ *
+ * `progress` reports *laps*, and laps are derived (`passes.windows(2)`), so a lap-derived
+ * consumer is structurally blind to most crossings: the **holeshot** closes no lap, and a
+ * crossing **rejected under the round's min-lap floor** is auto-voided in the projection and
+ * reaches no live consumer at all. This field carries the crossings themselves, so "the gate
+ * saw nothing" and "the gate saw something that did not count" stop being the same silence.
+ *
+ * **Idempotency (the hard requirement).** Every entry carries a stable
+ * [`pass_ref`](LiveCrossing::pass_ref) — the crossing's global append offset — and the feed is
+ * ordered by it. A consumer holds a single high-water mark and acts on `pass_ref >` it, so
+ * a re-pushed or re-snapshotted `LiveRaceState` (or a resubscribe, or a scope change) can
+ * never look like new crossings. Receipt of a frame means nothing; identity is everything.
+ *
+ * **Bounded** to the most recent [`MAX_LIVE_CROSSINGS`] entries — see that constant for why
+ * dropping the *oldest* is the one truncation that leaves the high-water mark sound.
+ *
+ * Additive: absent on the wire when empty, so older payloads round-trip.
+ */
+crossings?: Array<LiveCrossing>, };

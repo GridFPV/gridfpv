@@ -147,6 +147,25 @@ fn translates(event: &str) -> bool {
     )
 }
 
+/// Everything one socket-frame handler writes through, cloned once per registered event.
+///
+/// `rust_socketio` wants an owned closure per event and there are a dozen of them, so this bundles
+/// the four shared cells (and the tune-telemetry tap) rather than repeating them at every `.on`.
+#[derive(Clone)]
+struct FrameCtx {
+    /// The pure translator every decoded frame is folded through.
+    adapter: Arc<Mutex<RotorHazardAdapter>>,
+    /// Where the canonical [`Event`]s accumulate until the driver drains them.
+    sink: Arc<Mutex<Vec<Event>>>,
+    /// The newest configured heat id learned from a `heat_data` response.
+    savable_heat: Arc<Mutex<Option<u64>>>,
+    /// RotorHazard's current race-format id, learned from the `race_status` stream.
+    current_format: Arc<Mutex<Option<i64>>>,
+    /// The tune-telemetry tap (#355 S2a) — **read-only from the event path's point of view**: it
+    /// is written to, never read back into a [`Raw`], and nothing it holds can become an `Event`.
+    tap: SignalTap,
+}
+
 /// A short name for a non-`Text` payload, for the malformed-frame diagnostic.
 fn payload_kind(payload: &Payload) -> &'static str {
     match payload {
@@ -165,6 +184,337 @@ pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
     match decode_socket(event, payload) {
         Decoded::Translated(raw) => Some(raw),
         Decoded::Untranslated | Decoded::Malformed { .. } => None,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tune telemetry (#355, slice 2a) — the ephemeral per-node signal tap.
+// ---------------------------------------------------------------------------------------------
+
+/// The widest per-node store a tuning snapshot will ever hold.
+///
+/// RotorHazard tops out at 8 seats today. The cap is not about RH: it bounds the store against a
+/// drifting/hostile frame whose arrays claim hundreds of nodes, so "cost per tick is O(nodes)"
+/// stays a fact rather than a hope.
+const MAX_TUNE_NODES: usize = 64;
+
+/// A RotorHazard `heartbeat` frame (`BaseHardwareInterface.get_heartbeat_json`, 10 Hz from boot).
+///
+/// **Deliberately not a [`Raw`] variant, and deliberately private.** `Raw` is the *only* input to
+/// [`RotorHazardAdapter::translate`], which is the *only* thing that mints an [`Event`] — so
+/// keeping the heartbeat out of `Raw` is what makes "heartbeat data can never become a
+/// `SignalChunk`, a `SignalHistory`, or reach a log" a **structural** guarantee rather than a
+/// convention a later refactor can quietly break. There is no function anywhere that takes a
+/// `RawHeartbeat` and returns an `Event`, and none can be written without first adding a `Raw`
+/// variant on purpose.
+///
+/// `crossing_flag` is read as raw JSON because RotorHazard builds have wired it both as a bool and
+/// as a 0/1 int; see [`truthy`].
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct RawHeartbeat {
+    /// Per-node live RSSI (filtered ADC counts), array index = node index.
+    #[serde(default)]
+    current_rssi: Vec<f32>,
+    /// Per-node tuned frequency in MHz; `0` on an untuned node.
+    #[serde(default)]
+    frequency: Vec<i64>,
+    /// Per-node detector loop time in microseconds — the "is this timer keeping up?" readout.
+    #[serde(default)]
+    loop_time: Vec<i64>,
+    /// Per-node crossing state at this heartbeat (bool on stock RH; some builds send 0/1).
+    #[serde(default)]
+    crossing_flag: Vec<serde_json::Value>,
+}
+
+/// A RotorHazard `node_crossing_change` frame: one node's crossing **edge**.
+///
+/// Not a [`Raw`] variant either, for the same structural reason as [`RawHeartbeat`].
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RawNodeCrossing {
+    /// Which node transitioned.
+    node_index: usize,
+    /// The new crossing state (bool, or 0/1 on some builds — see [`truthy`]).
+    #[serde(default)]
+    crossing_flag: serde_json::Value,
+}
+
+/// Read a RotorHazard crossing flag that may be wired as a bool **or** as a 0/1 number.
+fn truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|v| v != 0.0),
+        _ => false,
+    }
+}
+
+/// What happened to a tune-telemetry frame — the observable that makes the pre-parse gate
+/// *testable* rather than merely intended.
+///
+/// [`Gated`](TapOutcome::Gated) is returned **before the payload is looked at**, so a test that
+/// feeds a deliberately unreadable payload with the subscription closed and gets `Gated` (rather
+/// than [`Unreadable`](TapOutcome::Unreadable)) has proved the parse never ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapOutcome {
+    /// No subscription is open: the frame was dropped **without being deserialized**.
+    Gated,
+    /// The frame was deserialized and folded into the per-node store.
+    Folded,
+    /// A subscription is open but the payload did not match the expected shape. Dropped quietly —
+    /// unlike the [`Raw`] frames, nothing downstream depends on this, so a drifting heartbeat costs
+    /// a blank readout, not a missing lap.
+    Unreadable,
+}
+
+/// Fold a `heartbeat` frame into `tap`, **checking the subscription gate before parsing**.
+///
+/// The order of the two statements below is the whole point of this function existing separately
+/// from its `.on("heartbeat", …)` closure: `capturing()` is a relaxed load on a cold `bool`, and it
+/// stands in front of a `from_value` that allocates four `Vec`s — ten times a second, a hundred
+/// with RotorHazard's frequency scanner on, on the single socket callback thread that also parses
+/// `current_laps` (#392).
+fn tap_heartbeat(tap: &SignalTap, payload: &Payload) -> TapOutcome {
+    if !tap.capturing() {
+        return TapOutcome::Gated;
+    }
+    match first_text(payload).and_then(|v| serde_json::from_value::<RawHeartbeat>(v).ok()) {
+        Some(hb) => {
+            tap.note_heartbeat(&hb);
+            TapOutcome::Folded
+        }
+        None => TapOutcome::Unreadable,
+    }
+}
+
+/// Fold a `node_crossing_change` edge into `tap`, gated before parsing exactly as
+/// [`tap_heartbeat`] is.
+fn tap_crossing(tap: &SignalTap, payload: &Payload) -> TapOutcome {
+    if !tap.capturing() {
+        return TapOutcome::Gated;
+    }
+    match first_text(payload).and_then(|v| serde_json::from_value::<RawNodeCrossing>(v).ok()) {
+        Some(change) => {
+            tap.note_crossing(&change);
+            TapOutcome::Folded
+        }
+        None => TapOutcome::Unreadable,
+    }
+}
+
+/// The first element of a Socket.IO text payload (RotorHazard wraps every emit in a one-element
+/// array), cloned out for deserialization.
+fn first_text(payload: &Payload) -> Option<serde_json::Value> {
+    match payload {
+        Payload::Text(values) => values.first().cloned(),
+        _ => None,
+    }
+}
+
+/// The **latest** signal readings for one RotorHazard node — last-value-wins, no history.
+///
+/// Everything a tuning UI shows for a node, in one flat record. Nothing here is a lap, a pass or
+/// an event: it is a live readout, overwritten on the next frame and forgotten when the
+/// [`SignalTap`]'s subscription lapses.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeTick {
+    /// Whether RotorHazard has ever reported this node. An **unseated** node still reports — "is
+    /// this node even alive?" is half the diagnostic, so a tuning snapshot must include it.
+    pub seen: bool,
+    /// Live RSSI from the newest `heartbeat` (filtered ADC counts).
+    pub rssi: Option<f32>,
+    /// The node's tuned frequency in MHz; `None` when RotorHazard reports `0` (untuned).
+    pub frequency_mhz: Option<u16>,
+    /// The detector's loop time in microseconds.
+    pub loop_time_micros: Option<u32>,
+    /// The crossing state as of the newest frame (heartbeat level, or a `node_crossing_change` edge).
+    pub crossing: bool,
+    /// **Sticky**: any crossing observed since the last [`SignalTap::take`]. The Director decimates
+    /// to ~5 Hz, so a crossing that opens and closes between two samples would otherwise vanish;
+    /// this is what carries the edge through the decimation.
+    pub crossed: bool,
+    /// `node_data.node_peak_rssi` — the node's running peak.
+    pub node_peak_rssi: Option<f32>,
+    /// `node_data.node_nadir_rssi` — the node's running nadir.
+    pub node_nadir_rssi: Option<f32>,
+    /// `node_data.pass_peak_rssi` — the peak of the most recent pass.
+    pub pass_peak_rssi: Option<f32>,
+    /// `node_data.pass_nadir_rssi` — the nadir of the most recent pass.
+    pub pass_nadir_rssi: Option<f32>,
+    /// `node_data.debug_pass_count` — how many passes this node has detected.
+    pub pass_count: Option<u32>,
+    /// The node's enter threshold, from `enter_and_exit_at_levels`.
+    pub enter_at: Option<f32>,
+    /// The node's exit threshold, from `enter_and_exit_at_levels`.
+    pub exit_at: Option<f32>,
+}
+
+/// The **on-demand, in-memory** per-node signal tap the Tune page's telemetry is read from (#355).
+///
+/// Two pieces, both load-bearing:
+///
+/// * **A relaxed atomic gate** ([`capturing`](Self::capturing)). `rust_socketio` binds every
+///   handler at `ClientBuilder` time, so the `heartbeat` handler is *always* registered and there
+///   is no "unsubscribe" to reach for. The gate is therefore checked **before** the frame is
+///   deserialized — a `load(Relaxed)` on a cold `bool` in front of a `serde_json::from_value` that
+///   allocates four `Vec`s, ten times a second, on the single socket callback thread that also
+///   parses `current_laps`. That thread is the #392 hazard, and it is the whole reason the gate is
+///   here rather than an `if wanted { … }` after the parse.
+/// * **A bounded, last-value-wins store.** One [`NodeTick`] per node, overwritten in place. There
+///   is no ring here: the *history* is the Director's business (it decimates onto its own
+///   cadence), so the transport's cost per frame is O(nodes) and independent of how long the Tune
+///   page has been open.
+///
+/// Nothing in this type produces an [`Event`]. See [`RawHeartbeat`] for why that is structural.
+#[derive(Clone, Default)]
+pub struct SignalTap {
+    /// The pre-parse subscription gate. Relaxed throughout: it guards no other memory, and a frame
+    /// landing on either side of the flip is equally correct.
+    capture: Arc<AtomicBool>,
+    /// Latest reading per node index. Grows to the widest array a frame has reported, capped at
+    /// [`MAX_TUNE_NODES`].
+    nodes: Arc<Mutex<Vec<NodeTick>>>,
+}
+
+impl SignalTap {
+    /// Whether a subscription is currently open — the check every gated handler makes **first**.
+    pub fn capturing(&self) -> bool {
+        self.capture.load(Ordering::Relaxed)
+    }
+
+    /// Open or close the subscription, returning the **previous** state so a caller can act on the
+    /// edge. Closing empties the store: a lapsed Tune page must leave nothing behind.
+    fn set_capturing(&self, on: bool) -> bool {
+        let was = self.capture.swap(on, Ordering::Relaxed);
+        if was && !on {
+            self.nodes.lock().expect("signal-tap lock").clear();
+        }
+        was
+    }
+
+    /// The current per-node readings, clearing the sticky [`NodeTick::crossed`] flags so the next
+    /// read reports only crossings seen since this one.
+    fn take(&self) -> Vec<NodeTick> {
+        let mut nodes = self.nodes.lock().expect("signal-tap lock");
+        let snapshot = nodes.clone();
+        for node in nodes.iter_mut() {
+            node.crossed = false;
+        }
+        snapshot
+    }
+
+    /// Widen the store to `len` nodes (capped), returning the guard to write through.
+    fn widen(&self, len: usize) -> std::sync::MutexGuard<'_, Vec<NodeTick>> {
+        let mut nodes = self.nodes.lock().expect("signal-tap lock");
+        let want = len.min(MAX_TUNE_NODES);
+        if nodes.len() < want {
+            nodes.resize(want, NodeTick::default());
+        }
+        nodes
+    }
+
+    /// Fold a `heartbeat` frame in. Called **only** when [`capturing`](Self::capturing) is true.
+    fn note_heartbeat(&self, hb: &RawHeartbeat) {
+        let len = hb
+            .current_rssi
+            .len()
+            .max(hb.frequency.len())
+            .max(hb.loop_time.len())
+            .max(hb.crossing_flag.len());
+        let mut nodes = self.widen(len);
+        for (index, node) in nodes.iter_mut().enumerate() {
+            let mut touched = false;
+            if let Some(&rssi) = hb.current_rssi.get(index) {
+                node.rssi = Some(rssi);
+                touched = true;
+            }
+            if let Some(&mhz) = hb.frequency.get(index) {
+                // RotorHazard reports `0` for a node tuned to nothing; that is an absence, not a
+                // 0 MHz channel, and the panel must be able to say so.
+                node.frequency_mhz = u16::try_from(mhz).ok().filter(|mhz| *mhz != 0);
+                touched = true;
+            }
+            if let Some(&loop_time) = hb.loop_time.get(index) {
+                node.loop_time_micros = u32::try_from(loop_time).ok();
+                touched = true;
+            }
+            if let Some(flag) = hb.crossing_flag.get(index) {
+                let crossing = truthy(flag);
+                node.crossing = crossing;
+                node.crossed |= crossing;
+                touched = true;
+            }
+            node.seen |= touched;
+        }
+    }
+
+    /// Fold a `node_crossing_change` edge in. Called only while capturing.
+    fn note_crossing(&self, change: &RawNodeCrossing) {
+        if change.node_index >= MAX_TUNE_NODES {
+            return;
+        }
+        let mut nodes = self.widen(change.node_index + 1);
+        if let Some(node) = nodes.get_mut(change.node_index) {
+            let crossing = truthy(&change.crossing_flag);
+            node.crossing = crossing;
+            node.crossed |= crossing;
+            node.seen = true;
+        }
+    }
+
+    /// Fold a `node_data` frame's peak / nadir / pass-count readouts in.
+    ///
+    /// `heartbeat` carries **only** rssi / frequency / loop-time / crossing, so every peak, nadir
+    /// and pass count a tuning panel shows comes from here. Both feeds are needed; neither is a
+    /// subset of the other. The frame is parsed regardless (it is a [`Raw`] the adapter already
+    /// translates), so this adds no parse — only the fold, which is itself gated.
+    fn note_node_data(&self, data: &RawNodeData) {
+        let len = data
+            .node_peak_rssi
+            .len()
+            .max(data.node_nadir_rssi.len())
+            .max(data.pass_peak_rssi.len())
+            .max(data.pass_nadir_rssi.len())
+            .max(data.debug_pass_count.len());
+        let mut nodes = self.widen(len);
+        for (index, node) in nodes.iter_mut().enumerate() {
+            let mut touched = false;
+            for (slot, source) in [
+                (&mut node.node_peak_rssi, &data.node_peak_rssi),
+                (&mut node.node_nadir_rssi, &data.node_nadir_rssi),
+                (&mut node.pass_peak_rssi, &data.pass_peak_rssi),
+                (&mut node.pass_nadir_rssi, &data.pass_nadir_rssi),
+            ] {
+                if let Some(&value) = source.get(index) {
+                    *slot = Some(value);
+                    touched = true;
+                }
+            }
+            if let Some(&count) = data.debug_pass_count.get(index) {
+                node.pass_count = u32::try_from(count).ok();
+                touched = true;
+            }
+            node.seen |= touched;
+        }
+    }
+
+    /// Fold an `enter_and_exit_at_levels` frame's per-node thresholds in.
+    ///
+    /// Tuning needs these with **no event and no armed heat**, which is exactly what the app
+    /// layer's lineup remap cannot provide (it drops every node outside the armed heat), so the
+    /// tap reads them straight off the wire.
+    fn note_levels(&self, levels: &RawEnterExitLevels) {
+        let len = levels
+            .enter_at_levels
+            .len()
+            .max(levels.exit_at_levels.len());
+        let mut nodes = self.widen(len);
+        for (index, node) in nodes.iter_mut().enumerate() {
+            if let Some(&enter) = levels.enter_at_levels.get(index) {
+                node.enter_at = Some(enter);
+            }
+            if let Some(&exit) = levels.exit_at_levels.get(index) {
+                node.exit_at = Some(exit);
+            }
+        }
     }
 }
 
@@ -349,6 +699,14 @@ pub struct RotorHazardConnection {
     /// by [`prepare_instant_start`](Self::prepare_instant_start) to decide whether Grid selects
     /// its own format row or falls back to mutating the race director's.
     owned_format: Arc<Mutex<OwnedFormat>>,
+    /// The **tune-telemetry tap** (#355 S2a): the gate the `heartbeat` / `node_crossing_change`
+    /// handlers check before parsing, plus the bounded last-value-wins per-node store they and the
+    /// `node_data` / `enter_and_exit_at_levels` handlers write into.
+    ///
+    /// Deliberately parallel to — and disjoint from — the `events` sink. Nothing in here is an
+    /// [`Event`], nothing in here reaches a log, and nothing in here survives
+    /// [`set_signal_capture(false)`](Self::set_signal_capture).
+    tap: SignalTap,
 }
 
 impl RotorHazardConnection {
@@ -386,6 +744,17 @@ impl RotorHazardConnection {
         // Fresh link, fresh owned-format state: nothing is assumed neutralised until THIS socket's
         // plugin says so (see `OwnedFormat`).
         let owned_format: Arc<Mutex<OwnedFormat>> = Arc::new(Mutex::new(OwnedFormat::default()));
+        // The tune-telemetry tap (#355 S2a), closed. A fresh link starts NOT capturing: the Tune
+        // page's lease is what opens it, and a reconnect under a still-open lease is re-opened by
+        // the driver's next tick (which re-reads the lease and re-warms the store).
+        let tap = SignalTap::default();
+        let ctx = FrameCtx {
+            adapter: adapter.clone(),
+            sink: events.clone(),
+            savable_heat: savable_heat.clone(),
+            current_format: current_format.clone(),
+            tap: tap.clone(),
+        };
 
         // `rust_socketio`'s reserved events: on a dropped socket the poll loop fires `error`
         // (the engine.io read failed) and, on a clean disconnect packet, `close`. Either way the
@@ -403,11 +772,14 @@ impl RotorHazardConnection {
         // `history_times` trace — which the `current_marshal_data` handler below feeds back through the
         // same adapter as `SignalHistory`. Driving the request from the `race_status` callback keeps
         // all wire IO in the transport while the trigger stays in the pure translator.
-        let handler = |name: &'static str,
-                       adapter: Arc<Mutex<RotorHazardAdapter>>,
-                       sink: Arc<Mutex<Vec<Event>>>,
-                       savable_heat: Arc<Mutex<Option<u64>>>,
-                       current_format: Arc<Mutex<Option<i64>>>| {
+        let handler = |name: &'static str, ctx: FrameCtx| {
+            let FrameCtx {
+                adapter,
+                sink,
+                savable_heat,
+                current_format,
+                tap,
+            } = ctx;
             move |payload: Payload, client: RawClient| {
                 // Learn the current race-format id from the `race_status` stream (it carries
                 // `race_format_id`). `prepare_instant_start` zeroes that format's staging delays so
@@ -441,6 +813,20 @@ impl RotorHazardConnection {
                     }
                 };
                 if let Some(raw) = raw {
+                    // Tune telemetry (#355 S2a). These two frames are decoded *anyway* — they are
+                    // `Raw`s the adapter translates — so the tap adds no parse here, only the
+                    // O(nodes) fold, and that stays behind the same subscription gate as the
+                    // heartbeat so an idle timer pays nothing. `node_data` carries every peak /
+                    // nadir / pass-count readout (the heartbeat carries none of them); the levels
+                    // carry the thresholds the tuning graph draws its handles at, which the app
+                    // layer's lineup remap cannot supply because tuning has no armed heat.
+                    if tap.capturing() {
+                        match &raw {
+                            Raw::NodeData(data) => tap.note_node_data(data),
+                            Raw::EnterExitLevels(levels) => tap.note_levels(levels),
+                            _ => {}
+                        }
+                    }
                     let (translated, request_marshal, pilotrace_requests, heat_ids) = {
                         let mut a = adapter.lock().unwrap();
                         let translated = a.translate(raw);
@@ -518,130 +904,22 @@ impl RotorHazardConnection {
             .reconnect(false)
             .on("error", drop_handler(alive.clone()))
             .on("close", drop_handler(alive.clone()))
-            .on(
-                "race_status",
-                handler(
-                    "race_status",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "current_laps",
-                handler(
-                    "current_laps",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "node_data",
-                handler(
-                    "node_data",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "pass_record",
-                handler(
-                    "pass_record",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "enter_and_exit_at_levels",
-                handler(
-                    "enter_and_exit_at_levels",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "current_marshal_data",
-                handler(
-                    "current_marshal_data",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "race_list",
-                handler(
-                    "race_list",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "race_details",
-                handler(
-                    "race_details",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "heat_data",
-                handler(
-                    "heat_data",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "pilot_data",
-                handler(
-                    "pilot_data",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
+            .on("race_status", handler("race_status", ctx.clone()))
+            .on("current_laps", handler("current_laps", ctx.clone()))
+            .on("node_data", handler("node_data", ctx.clone()))
+            .on("pass_record", handler("pass_record", ctx.clone()))
+            .on("enter_and_exit_at_levels", handler("enter_and_exit_at_levels", ctx.clone()))
+            .on("current_marshal_data", handler("current_marshal_data", ctx.clone()))
+            .on("race_list", handler("race_list", ctx.clone()))
+            .on("race_details", handler("race_details", ctx.clone()))
+            .on("heat_data", handler("heat_data", ctx.clone()))
+            .on("pilot_data", handler("pilot_data", ctx.clone()))
             // The GridFPV plugin's live signal push (D16, S2): folds straight through the same
             // translator as the RH-native signal events (→ SignalThresholds/SignalHistory).
-            .on(
-                "gridfpv_signal",
-                handler(
-                    "gridfpv_signal",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
+            .on("gridfpv_signal", handler("gridfpv_signal", ctx.clone()))
             // The GridFPV plugin's native per-node pass (D16, S3): folds to a Pass, deduped with
             // the current_laps path.
-            .on(
-                "gridfpv_pass",
-                handler(
-                    "gridfpv_pass",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
+            .on("gridfpv_pass", handler("gridfpv_pass", ctx.clone()))
             // The GridFPV plugin's handshake reply (D16, S1): a plugin-equipped RH answers our
             // `gridfpv_hello` (emitted below) with `gridfpv_hello_ack`. Stash it for the driver.
             // It also carries the plugin's capabilities, which is where the **pass source** is
@@ -649,6 +927,33 @@ impl RotorHazardConnection {
             // `current_laps` becomes a checked backstop; absent ⇒ `current_laps` mints them and
             // plugin passes are ignored. Declared here, not inferred from whichever stream happens
             // to arrive first.
+            // ---------------------------------------------------------------------------------
+            // Tune telemetry (#355 S2a): the two frames NOTHING else in this adapter consumes.
+            //
+            // Both handlers are bound here, unconditionally, because `rust_socketio` binds at
+            // `ClientBuilder` time and there is no way to attach one later — so the subscription
+            // is expressed as a **gate inside** the handler, checked BEFORE the payload is
+            // deserialized. `heartbeat` runs at 10 Hz from RotorHazard's boot (and at 100 Hz when
+            // RH's own frequency scanner is on), on the same single socket callback thread that
+            // parses `current_laps`; paying a `from_value` + four `Vec` allocations per tick for a
+            // Tune page nobody has open is precisely the #392 hazard. The relaxed load in front of
+            // it is the cheapest thing that can stand there.
+            .on("heartbeat", {
+                let tap = tap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    // The gate lives inside `tap_heartbeat`, ahead of the parse — see there.
+                    tap_heartbeat(&tap, &payload);
+                }
+            })
+            // Crossing **edges**. The heartbeat's `crossing_flag` is a level sampled at 10 Hz and
+            // the Director decimates below that, so a short crossing can fall between two samples;
+            // these edges are what make the crossing lamp honest. Same pre-parse gate.
+            .on("node_crossing_change", {
+                let tap = tap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    tap_crossing(&tap, &payload);
+                }
+            })
             .on("gridfpv_hello_ack", {
                 let hello = hello.clone();
                 let adapter = adapter.clone();
@@ -799,7 +1104,43 @@ impl RotorHazardConnection {
             current_format,
             hello,
             owned_format,
+            tap,
         })
+    }
+
+    /// Open or close the **tune-telemetry subscription** on this link (#355 S2a), returning `true`
+    /// when this call *opened* it (the rising edge).
+    ///
+    /// This is the only way the gate moves. Called from the driver thread on every maintain tick
+    /// with the current state of the Tune page's TTL lease, so:
+    ///
+    /// * a closed tab, a crashed browser or a lost network stops the stream when the lease lapses —
+    ///   there is no flag left set forever by a client that never said goodbye;
+    /// * a reconnect under a still-open lease re-opens by itself on the next tick.
+    ///
+    /// On the rising edge it asks RotorHazard to re-send the two frames that are **not** periodic
+    /// enough to wait for: `node_data`'s peak/nadir/count readouts and the enter/exit thresholds
+    /// the tuning graph draws its handles at. Without that, a Tune page opened long after connect
+    /// would show blank readouts until RH happened to re-broadcast. Best-effort: a failed emit on a
+    /// dying link just means the first snapshot carries rssi only.
+    pub fn set_signal_capture(&self, on: bool) -> bool {
+        let was = self.tap.set_capturing(on);
+        let rising = on && !was;
+        if rising {
+            let _ = self.client.emit(
+                "load_data",
+                json!({ "load_types": ["node_data", "enter_and_exit_at_levels"] }),
+            );
+        }
+        rising
+    }
+
+    /// The latest per-node readings, clearing the sticky crossing flags (see [`NodeTick::crossed`]).
+    ///
+    /// Bounded by construction: one [`NodeTick`] per node and nothing else, so the cost is
+    /// O(nodes) however long the Tune page has been open. Empty while the subscription is closed.
+    pub fn take_signal(&self) -> Vec<NodeTick> {
+        self.tap.take()
     }
 
     /// Take (and clear) the newest savable heat id learned from a `heat_data` response, if any.
@@ -1251,6 +1592,51 @@ impl RotorHazardConnection {
         )
     }
 
+    /// **Set node `node`'s enter threshold** to `level` (#355) — the calibration write.
+    ///
+    /// Emits RotorHazard's `set_enter_at_level` handler with `{ node, enter_at_level }`, where
+    /// `node` is the 0-based seat index. **Verified identical on v4.3.0 and v4.4.0**
+    /// (`server.py::on_set_enter_at_level`): same event name, same two payload keys; v4.4.0 only
+    /// adds an `int(… or 0)` coercion around the value. It carries **no authentication** — the
+    /// `@requires_auth` decorators in that file guard Flask HTTP routes, not socket handlers — so
+    /// the Director can calibrate on the socket it is already holding, with no plugin involved.
+    ///
+    /// The handler runs `calibration.py::set_enter_at_level`, which writes the active profile's
+    /// `enter_ats`, **pushes the level to the timing hardware** (`interface.set_enter_at_level`),
+    /// and fires `Evt.ENTER_AT_LEVEL_SET`.
+    ///
+    /// ## Two traps this exists to avoid
+    ///
+    /// * **`level` must never be `0`.** `calibration.py` tests the value for *truthiness*, so a `0`
+    ///   is read as "re-read the level off the node" and the old threshold survives — while the
+    ///   write looks perfectly successful. Callers clamp to a minimum of 1 (`RSSI_MIN`).
+    /// * **RotorHazard does not echo this.** The handler emits nothing at all, so an `Ok` here means
+    ///   only that the emit was accepted. [`request_thresholds`](Self::request_thresholds) is the
+    ///   readback, and the caller fires it after a write so the confirming
+    ///   `enter_and_exit_at_levels` broadcast lands on this socket.
+    ///
+    /// Callers **must** gate this on heat phase — a threshold that moves mid-race changes what
+    /// counts as a lap while it is being counted. This layer only moves the bytes.
+    pub fn set_enter_at_level(&self, node: u64, level: u32) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "set_enter_at_level",
+            json!({ "node": node, "enter_at_level": level }),
+        )
+    }
+
+    /// **Set node `node`'s exit threshold** to `level` (#355) — the twin of
+    /// [`set_enter_at_level`](Self::set_enter_at_level), and everything said there applies here.
+    ///
+    /// Emits `set_exit_at_level` with `{ node, exit_at_level }` (`server.py::on_set_exit_at_level`,
+    /// identical on v4.3.0 and v4.4.0). `0` is falsy to `calibration.py` and silently re-reads the
+    /// node's own level instead of setting one; there is no echo, so confirmation is by readback.
+    pub fn set_exit_at_level(&self, node: u64, level: u32) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "set_exit_at_level",
+            json!({ "node": node, "exit_at_level": level }),
+        )
+    }
+
     /// Set RotorHazard's **minimum lap time** (general setting `MIN_LAP_TIME`, in **seconds**) —
     /// a driving helper so the sim/test harness does not trip RH's "Pass record under lap
     /// minimum" filter.
@@ -1274,9 +1660,25 @@ impl RotorHazardConnection {
         self.client.emit("stop_race", Payload::Text(vec![]))
     }
 
-    /// Re-request the per-node enter/exit detection thresholds (`load_data` /
-    /// `enter_and_exit_at_levels`) — a driving helper so a test can re-capture thresholds after
-    /// draining the connect-time burst.
+    /// **Re-request the per-node enter/exit detection thresholds** — `load_data` with
+    /// `{"load_types": ["enter_and_exit_at_levels"]}`, which RotorHazard answers with an
+    /// `enter_and_exit_at_levels` emit addressed to this socket (`nobroadcast`).
+    ///
+    /// This is the **calibration readback** (#355), not merely a test helper. Neither
+    /// `set_enter_at_level` nor `set_exit_at_level` echoes, so the only way to learn whether a write
+    /// landed is to ask: the driver fires this immediately after a calibration emit, the adapter
+    /// parses the reply into the per-node thresholds, and the Tune page sees the value come back on
+    /// its next `GET /timers/{id}/signal` poll.
+    ///
+    /// ⚠️ It reads **RotorHazard's active profile row**, not the node. `RHUI.emit_enter_and_exit_at_levels`
+    /// serialises `profile.enter_ats` / `profile.exit_ats`, and `calibration.py` writes that row
+    /// *before* `interface.set_enter_at_level` — which then drops the value if
+    /// `Node.is_valid_rssi` rejects it. So the readback confirms "RotorHazard took it", which is one
+    /// step short of "the detector holds it"; keeping the level inside the valid range is what
+    /// closes the gap.
+    ///
+    /// Also used as a driving helper so a test can re-capture thresholds after draining the
+    /// connect-time burst.
     pub fn request_thresholds(&self) -> Result<(), rust_socketio::Error> {
         self.client.emit(
             "load_data",
@@ -1416,6 +1818,211 @@ mod tests {
         Payload::Text(vec![value])
     }
 
+    /// A stock RotorHazard 4.3.0 heartbeat, as it arrives at idle with no race running.
+    fn heartbeat(rssi: [f32; 4], crossing: [bool; 4]) -> Payload {
+        text(json!({
+            "current_rssi": rssi,
+            "frequency": [5658, 5695, 5760, 0],
+            "loop_time": [1200, 1180, 1210, 1195],
+            "crossing_flag": crossing,
+        }))
+    }
+
+    /// The gate is checked **before** the payload is parsed — the #392 hazard, structurally.
+    ///
+    /// The proof is the outcome on an *unreadable* payload with the subscription closed: a parse
+    /// that ran would report `Unreadable`. Reporting `Gated` can only mean the deserializer was
+    /// never reached. That is the property that matters, because the cost being avoided is the
+    /// parse itself (10–100 frames/sec on the socket callback thread), not the fold after it.
+    #[test]
+    fn the_subscription_gate_is_checked_before_the_payload_is_parsed() {
+        let tap = SignalTap::default();
+        // Closed subscription, a payload no `RawHeartbeat` could ever come out of.
+        let garbage = text(json!("not an object at all"));
+        assert_eq!(tap_heartbeat(&tap, &garbage), TapOutcome::Gated);
+        assert_eq!(tap_crossing(&tap, &garbage), TapOutcome::Gated);
+        // A perfectly good heartbeat is dropped just as early, and leaves nothing behind.
+        assert_eq!(
+            tap_heartbeat(&tap, &heartbeat([40.0, 41.0, 42.0, 43.0], [false; 4])),
+            TapOutcome::Gated
+        );
+        assert!(tap.take().is_empty(), "a closed tap stores nothing");
+
+        // Open the subscription: now — and only now — the same garbage reaches the parser and is
+        // reported as what it is.
+        tap.set_capturing(true);
+        assert_eq!(tap_heartbeat(&tap, &garbage), TapOutcome::Unreadable);
+        assert_eq!(
+            tap_heartbeat(&tap, &heartbeat([40.0, 41.0, 42.0, 43.0], [false; 4])),
+            TapOutcome::Folded
+        );
+        assert_eq!(tap.take().len(), 4);
+    }
+
+    /// Closing the subscription leaves nothing behind: a lapsed Tune page must not keep a node's
+    /// last RSSI alive in memory, and must not have it reappear if the page comes back.
+    #[test]
+    fn closing_the_subscription_empties_the_store() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        tap_heartbeat(&tap, &heartbeat([40.0, 41.0, 42.0, 43.0], [false; 4]));
+        assert_eq!(tap.take().len(), 4);
+        assert!(
+            tap.set_capturing(false),
+            "the gate reports its previous state"
+        );
+        assert!(tap.take().is_empty());
+        assert!(
+            !tap.set_capturing(true),
+            "and reports the rising edge as such"
+        );
+        assert!(tap.take().is_empty(), "a reopened tap starts from nothing");
+    }
+
+    /// **Both feeds surface.** `get_heartbeat_json` carries only rssi / frequency / loop-time /
+    /// crossing; every peak, nadir and pass count a tuning panel shows comes from `node_data`, and
+    /// the thresholds from `enter_and_exit_at_levels`. A snapshot missing either half cannot answer
+    /// the question the RD is asking, so all three must land on the same [`NodeTick`].
+    #[test]
+    fn both_rotorhazard_feeds_land_on_the_same_node() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        tap_heartbeat(
+            &tap,
+            &heartbeat([48.0, 12.0, 0.0, 0.0], [true, false, false, false]),
+        );
+        tap.note_node_data(&RawNodeData {
+            pass_peak_rssi: vec![118.0, 0.0, 0.0, 0.0],
+            node_peak_rssi: vec![132.0, 0.0, 0.0, 0.0],
+            node_nadir_rssi: vec![12.0, 0.0, 0.0, 0.0],
+            pass_nadir_rssi: vec![41.0, 0.0, 0.0, 0.0],
+            debug_pass_count: vec![7, 0, 0, 0],
+        });
+        tap.note_levels(&RawEnterExitLevels {
+            enter_at_levels: vec![90.0, 90.0, 90.0, 90.0],
+            exit_at_levels: vec![80.0, 80.0, 80.0, 80.0],
+        });
+
+        let nodes = tap.take();
+        let first = &nodes[0];
+        // The heartbeat half.
+        assert_eq!(first.rssi, Some(48.0));
+        assert_eq!(first.frequency_mhz, Some(5658));
+        assert_eq!(first.loop_time_micros, Some(1200));
+        assert!(first.crossing);
+        // The `node_data` half — none of which the heartbeat carries.
+        assert_eq!(first.node_peak_rssi, Some(132.0));
+        assert_eq!(first.node_nadir_rssi, Some(12.0));
+        assert_eq!(first.pass_peak_rssi, Some(118.0));
+        assert_eq!(first.pass_nadir_rssi, Some(41.0));
+        assert_eq!(first.pass_count, Some(7));
+        // The thresholds the tuning graph draws its handles at.
+        assert_eq!(first.enter_at, Some(90.0));
+        assert_eq!(first.exit_at, Some(80.0));
+    }
+
+    /// **Every node the timer reports, including ones no heat has seated.** "Is this node even
+    /// alive?" is half the diagnostic a mistuned timer needs, and the tap is the layer that must
+    /// not filter — the app layer's lineup remap drops off-lineup nodes, which is exactly why tune
+    /// telemetry does not go through it.
+    #[test]
+    fn unseated_nodes_are_reported_too() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        // Four nodes; only the first two are tuned to anything and only the first has any signal.
+        tap_heartbeat(
+            &tap,
+            &heartbeat([48.0, 11.0, 9.0, 8.0], [true, false, false, false]),
+        );
+
+        let nodes = tap.take();
+        assert_eq!(
+            nodes.len(),
+            4,
+            "no node is filtered out of a tuning snapshot"
+        );
+        assert!(
+            nodes.iter().all(|n| n.seen),
+            "every reported node is marked seen"
+        );
+        // Node 3 is untuned — RotorHazard reports 0 MHz, which is an absence, not a channel.
+        assert_eq!(nodes[3].frequency_mhz, None);
+        assert_eq!(nodes[3].rssi, Some(8.0));
+    }
+
+    /// A crossing that opens and closes between two Director samples must still light the lamp.
+    /// The level (`crossing`) is last-value-wins; the edge (`crossed`) is sticky until read.
+    #[test]
+    fn a_crossing_between_samples_survives_as_a_sticky_edge() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        // Open and close within one sample interval.
+        tap_crossing(
+            &tap,
+            &text(json!({ "node_index": 1, "crossing_flag": true })),
+        );
+        tap_crossing(
+            &tap,
+            &text(json!({ "node_index": 1, "crossing_flag": false })),
+        );
+
+        let nodes = tap.take();
+        assert!(!nodes[1].crossing, "the level is back down");
+        assert!(nodes[1].crossed, "but the edge is not lost");
+        // Reading clears it: the next snapshot reports only what happened since.
+        let nodes = tap.take();
+        assert!(!nodes[1].crossed);
+    }
+
+    /// Some RotorHazard builds wire the crossing flag as a 0/1 int rather than a bool.
+    #[test]
+    fn a_numeric_crossing_flag_reads_the_same_as_a_bool() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        tap_crossing(&tap, &text(json!({ "node_index": 0, "crossing_flag": 1 })));
+        assert!(tap.take()[0].crossing);
+        tap_crossing(&tap, &text(json!({ "node_index": 0, "crossing_flag": 0 })));
+        assert!(!tap.take()[0].crossing);
+    }
+
+    /// The per-node store is bounded by [`MAX_TUNE_NODES`], so a drifting or hostile frame cannot
+    /// make "cost per tick is O(nodes)" untrue.
+    #[test]
+    fn the_node_store_is_capped() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        let wide: Vec<f32> = (0..10_000).map(|i| i as f32).collect();
+        tap.note_heartbeat(&RawHeartbeat {
+            current_rssi: wide,
+            ..Default::default()
+        });
+        assert_eq!(tap.take().len(), MAX_TUNE_NODES);
+        // An out-of-range crossing edge is dropped rather than widening the store.
+        tap_crossing(
+            &tap,
+            &text(json!({ "node_index": 9_999, "crossing_flag": true })),
+        );
+        assert_eq!(tap.take().len(), MAX_TUNE_NODES);
+    }
+
+    /// Neither tune-telemetry frame is a [`Raw`], which is what makes "heartbeat data can never
+    /// become an `Event`" structural rather than conventional: `translate` takes a `Raw` and there
+    /// is no `Raw` to build from a heartbeat.
+    #[test]
+    fn the_tune_telemetry_frames_are_not_translatable_events() {
+        assert!(matches!(
+            decode_socket("heartbeat", &heartbeat([1.0; 4], [false; 4])),
+            Decoded::Untranslated
+        ));
+        assert!(matches!(
+            decode_socket(
+                "node_crossing_change",
+                &text(json!({ "node_index": 0, "crossing_flag": true }))
+            ),
+            Decoded::Untranslated
+        ));
+    }
+
     /// An event we don't translate is not a fault — RotorHazard broadcasts plenty. It must stay
     /// distinct from a frame we *do* translate but could not read (#400).
     #[test]
@@ -1465,6 +2072,58 @@ mod tests {
             decode_socket("whatever", &Payload::Text(vec![])),
             Decoded::Untranslated
         ));
+    }
+
+    /// A `-1` lap number is RotorHazard talking, not drift: once it declares a winner it numbers
+    /// every later crossing `-1` (*recorded, but not counted*). Typing that field `u64` made serde
+    /// fail the **whole `current_laps` frame**, so the valid laps beside it were thrown away too
+    /// and the loss was charged to the malformed-frame counter — "schema drift", pointing an RD at
+    /// a plugin-version mismatch, when the real fault was the timer still refereeing (#406).
+    #[test]
+    fn a_negative_lap_number_decodes_and_keeps_the_rest_of_its_frame() {
+        // The frame as RotorHazard 4.4 sends it with a lap-count win condition in force.
+        let frame = text(json!({
+            "current": { "node_index": [{
+                "pilot": { "callsign": "ZIP" },
+                "laps": [
+                    { "lap_index": 0, "lap_number": 0, "lap_time_stamp": 0.0, "late_lap": false },
+                    { "lap_index": 1, "lap_number": 1, "lap_time_stamp": 31000.0, "late_lap": false },
+                    // RotorHazard declared the pilot finished here and stopped counting.
+                    { "lap_index": 2, "lap_number": -1, "lap_time_stamp": 62000.0,
+                      "late_lap": true, "deleted": true },
+                ],
+            }] }
+        }));
+
+        let Decoded::Translated(raw) = decode_socket("current_laps", &frame) else {
+            panic!(
+                "a `-1` lap number must decode: it is RotorHazard's own value, not drift (#406)"
+            );
+        };
+
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: 1,
+            race_heat_id: Some(1),
+        }));
+        let events = adapter.translate(raw);
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, gridfpv_events::Event::Pass(_)))
+                .count(),
+            2,
+            "the two counted laps in the frame survive — that is the regression"
+        );
+        assert_eq!(
+            adapter.counts.uncounted, 1,
+            "and the uncounted crossing is counted as one"
+        );
+        assert_eq!(
+            adapter.counts.malformed_frames, 0,
+            "nothing about this frame is malformed"
+        );
     }
 
     /// The transport's half of the contract: a frame it drops lands on the adapter's counter, so

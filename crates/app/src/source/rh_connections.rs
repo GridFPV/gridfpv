@@ -41,7 +41,7 @@ use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
-use super::rotorhazard::RhConnection;
+use super::rotorhazard::{CalibrationWrite, RhConnection};
 
 /// How often the reconciler polls the active event + its selected timers to sync the live set.
 pub const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
@@ -185,6 +185,32 @@ impl RhConnections {
         for (key, live) in map.iter() {
             if &key.1 == timer {
                 live.conn.restart();
+                found = true;
+            }
+        }
+        found
+    }
+
+    /// **Set a node's enter/exit detection thresholds** on `timer`'s live connection (#355) — the
+    /// Tune page's write, carried onto the socket the Director is already holding.
+    ///
+    /// Keyed on the **timer** for the same reason [`restart`](Self::restart) is: the RD is
+    /// calibrating a piece of hardware, and it holds exactly one connection whichever claim opened
+    /// it (the active event's, or a manual hold). Tuning happens from the Timers menu with no event
+    /// necessarily active at all, so the manual-hold key is the *common* case here, not the exotic
+    /// one.
+    ///
+    /// Returns whether a live connection was found. `false` means the timer is not connected right
+    /// now — nothing was emitted, and nothing is queued for a future connection: a threshold that
+    /// landed minutes later on a reconnect would move a detector nobody asked to move. GridFPV's own
+    /// record of the value is unaffected (`Timer::calibration`, D27); it is the *application* of it
+    /// that was lost, and the RD sees that as a level that never comes back confirmed.
+    pub fn calibrate(&self, timer: &TimerId, write: CalibrationWrite) -> bool {
+        let map = self.inner.lock().expect("rh-connections lock poisoned");
+        let mut found = false;
+        for (key, live) in map.iter() {
+            if &key.1 == timer {
+                live.conn.calibrate(write);
                 found = true;
             }
         }
@@ -411,6 +437,33 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                         );
                     }
                 }
+                // …and any **calibration writes** (#355) the Tune page parked on the registry: the
+                // RD moved an enter/exit threshold and it goes onto the live socket now. Same seam
+                // and same drain-exactly-once discipline as the restart above.
+                for write in timers.take_calibration_requests() {
+                    let landed = connections.calibrate(
+                        &write.timer,
+                        CalibrationWrite {
+                            node: u64::from(write.node),
+                            enter_at: write.enter_at,
+                            exit_at: write.exit_at,
+                            during_open_practice: write.during_open_practice,
+                        },
+                    );
+                    if !landed {
+                        // The connection went away between the route accepting the write and this
+                        // tick. Nothing is queued for a future connection — a threshold arriving
+                        // minutes later would move a detector nobody asked to move — so say so
+                        // rather than fail silently. The RD sees it as a level that never comes
+                        // back confirmed on the page.
+                        let name = timers.get(&write.timer).map(|t| t.name);
+                        eprintln!(
+                            "gridfpv: no live RotorHazard connection to calibrate node {} on {:?}",
+                            write.node + 1,
+                            name.as_deref().unwrap_or("that timer")
+                        );
+                    }
+                }
             }
         })
     };
@@ -421,7 +474,7 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
 mod tests {
     use super::*;
     use gridfpv_server::events::PRACTICE_EVENT_ID;
-    use gridfpv_server::timers::{CreateTimerRequest, UpdateTimerRequest};
+    use gridfpv_server::timers::{CalibrationRequest, CreateTimerRequest, UpdateTimerRequest};
 
     const OLD_URL: &str = "http://rh-old.local:5000";
     const NEW_URL: &str = "http://rh-new.local:5000";
@@ -463,6 +516,72 @@ mod tests {
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let connections = RhConnections::new();
         assert!(!connections.restart(&rh));
+    }
+
+    #[test]
+    fn a_calibration_write_with_no_live_connection_is_reported_not_swallowed() {
+        // #355: the RD moved a threshold on a timer that has since gone away (deselected, URL
+        // edited, link dropped). There is nothing to emit on and nothing is queued for a future
+        // connection — a threshold landing minutes later would move a detector nobody asked to
+        // move — so `calibrate` says so, which is what lets the reconciler log it rather than fail
+        // silently. On the page it shows as a level that never comes back confirmed.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        let connections = RhConnections::new();
+        assert!(!connections.calibrate(
+            &rh,
+            CalibrationWrite {
+                node: 0,
+                enter_at: Some(96),
+                exit_at: None,
+                during_open_practice: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn calibration_writes_drain_exactly_once_and_coalesce_per_node() {
+        // The registry is the seam the RD-gated route and the (higher-layer) connection reconciler
+        // share, exactly as it is for a restart; the reconciler drains it each tick. Several writes
+        // to one node before a drain apply the LATEST value once — a stale threshold replayed after
+        // a fresh one would leave the timer detecting against a value the page is no longer showing.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
+
+        for enter in [80, 96] {
+            timers
+                .request_calibration(
+                    &rh,
+                    &CalibrationRequest {
+                        node: 1,
+                        enter_at: Some(enter),
+                        exit_at: None,
+                    },
+                    false,
+                )
+                .expect("connected RH timer");
+        }
+        timers
+            .request_calibration(
+                &rh,
+                &CalibrationRequest {
+                    node: 1,
+                    enter_at: None,
+                    exit_at: Some(70),
+                },
+                false,
+            )
+            .expect("the exit half is independent of the enter half");
+
+        let drained = timers.take_calibration_requests();
+        assert_eq!(drained.len(), 1, "one entry per node, not one per write");
+        assert_eq!(drained[0].enter_at, Some(96));
+        assert_eq!(drained[0].exit_at, Some(70));
+        assert!(
+            timers.take_calibration_requests().is_empty(),
+            "drained exactly once — nothing is re-queued"
+        );
     }
 
     #[test]

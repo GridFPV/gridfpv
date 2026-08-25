@@ -35,6 +35,7 @@
   import TimersPage from './screens/TimersPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
+  import TunePage from './screens/TunePage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
   import EventSetupWizard from './screens/EventSetupWizard.svelte';
   import EventTimers from './screens/EventTimers.svelte';
@@ -45,6 +46,7 @@
   import Results from './screens/Results.svelte';
   import EventAudit from './screens/EventAudit.svelte';
   import { openAudit } from './lib/auditFilter.svelte.js';
+  import type { Timer } from '@gridfpv/types';
   import {
     parseHash,
     formatHash,
@@ -96,6 +98,8 @@
   // Page navigations (hub cards, breadcrumbs, page "Home" crumbs).
   const goPage = (page: AppPage) => navigate({ kind: 'page', page });
   const goHome = () => goPage('home');
+  /** Open the per-timer Tune page (#355) — the parameterised route, entered from a timer row. */
+  const goTune = (timer: string) => navigate({ kind: 'tune', timer });
   // The workspace's app-route concept is "Events" (where event entry/switch happens).
   const route$page = $derived(route.kind === 'page' ? route.page : 'home');
 
@@ -103,8 +107,37 @@
   // route from the hash. Reconcile against the live active event so a workspace hash with no event
   // doesn't render a broken workspace.
   function onHashChange() {
-    route = reconcileRoute(parseHash(location.hash), !!session.currentEvent);
+    route = reconcileRoute(parseHash(location.hash), !!session.currentEvent, timerKnown);
   }
+
+  // ── The tune route's timer (#355) ───────────────────────────────────────────────────────────
+  // `#/timers/<id>/tune` is the first route that names an entity, so the shell has to resolve it
+  // before it can render: the Tune page takes a `Timer`, not an id (a page that only knew the id
+  // could not put a name in its own title without re-deriving one). The registry is read lazily —
+  // only a tune route needs it — and a link to a timer that has since been removed reconciles to
+  // the Timers page rather than rendering a tune view over nothing.
+  let tuneTimers = $state<Timer[] | undefined>(undefined);
+  const timerKnown = (id: string) => tuneTimers?.some((t) => t.id === id) ?? true;
+  const tuneTimer = $derived.by(() => {
+    if (route.kind !== 'tune') return undefined;
+    const id = route.timer;
+    return tuneTimers?.find((t) => t.id === id);
+  });
+
+  $effect(() => {
+    if (route.kind !== 'tune' || tuneTimers !== undefined) return;
+    void session
+      .listTimers()
+      .then((list) => (tuneTimers = list))
+      .catch(() => (tuneTimers = []));
+  });
+
+  // Once the registry is known, a tune route naming a timer that is gone falls back to Timers.
+  $effect(() => {
+    if (route.kind !== 'tune' || tuneTimers === undefined) return;
+    const next = reconcileRoute(route, !!session.currentEvent, timerKnown);
+    if (next !== route) navigate(next);
+  });
 
   // The lazy token prompt: register a provider that opens the TokenDialog and resolves
   // with the entered token (or undefined if cancelled). This is the only auth surface left.
@@ -258,6 +291,20 @@
       <span>Resuming…</span>
     </div>
   </div>
+{:else if route.kind === 'tune'}
+  <!-- The per-timer Tune page (#355): app-level, no event required — a timer is tuned before an
+       event exists, and the RD may have the page open on a phone at the gate. -->
+  <div class="gridfpv-root gridfpv-dense">
+    {#if tuneTimer}
+      <TunePage {session} timer={tuneTimer} onhome={goHome} ontimers={() => goPage('timers')} />
+    {:else}
+      <!-- Resolving the registry (or bouncing to Timers because the timer is gone). -->
+      <div class="resume-loading" role="status">
+        <span class="resume-spinner" aria-hidden="true"></span>
+        <span>Resuming…</span>
+      </div>
+    {/if}
+  </div>
 {:else if route.kind === 'page'}
   <!-- App-level routes (#118): the home hub, or one of its three pages. The view is driven by the
        hash, not just `session.currentEvent` — an explicit page hash (e.g. `#/pilots`) shows that
@@ -275,7 +322,7 @@
     {:else if route$page === 'events'}
       <EventPicker {session} onhome={goHome} onsetup={() => (pendingWizard = true)} />
     {:else if route$page === 'timers'}
-      <TimersPage {session} onhome={goHome} />
+      <TimersPage {session} onhome={goHome} ontune={goTune} />
     {:else if route$page === 'pilots'}
       <PilotsPage {session} onhome={goHome} />
     {:else if route$page === 'classes'}

@@ -111,7 +111,13 @@ pub struct ChangeEnvelope {
 #[ts(export, export_to = "bindings/")]
 pub enum StreamMessage {
     /// One ordered, sequenced projection change to apply (the common case).
-    Change(ChangeEnvelope),
+    ///
+    /// **Boxed** so the enum is a pointer rather than a whole projection body: an envelope
+    /// carries a `LiveRaceState`, which is a wide struct that only ever grows as the live view
+    /// gains fields (the #397 crossing feed being the latest), and every non-`Change` frame would
+    /// otherwise pay that width too. Serde is transparent through the `Box` and ts-rs renders it as
+    /// the inner type, so the wire shape and the TS binding are unchanged.
+    Change(Box<ChangeEnvelope>),
     /// The resume cursor the client presented is older than the server's retained
     /// window: the gap cannot be replayed, so the client must fetch a fresh snapshot and
     /// resubscribe from its new cursor (protocol.html §3). The carried
@@ -170,11 +176,11 @@ mod tests {
     fn stream_message_variants_round_trip() {
         use crate::error::{ErrorCode, ProtocolError};
 
-        let change = StreamMessage::Change(ChangeEnvelope {
+        let change = StreamMessage::Change(Box::new(ChangeEnvelope {
             sequence: Cursor::new(1),
             projection: ProjectionKind::LiveRaceState,
             change: Change::FreshValue(ProjectionBody::LiveRaceState(LiveRaceState::default())),
-        });
+        }));
         let json = serde_json::to_string(&change).unwrap();
         assert_eq!(
             serde_json::from_str::<StreamMessage>(&json).unwrap(),

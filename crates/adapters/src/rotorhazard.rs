@@ -41,8 +41,11 @@
 //!   *numeric* ms duration (the pretty string moved to `lap_time_formatted`) and laps
 //!   now carry `source` and `deleted` inline. The adapter only reads `lap_number` and
 //!   `lap_time_stamp` (both stable); it parses `lap_time` permissively (string *or*
-//!   number) and **skips `deleted` laps** — counting each one and naming the first, so a lap an
-//!   RD deleted in RotorHazard's own UI is distinguishable from one that never happened (#400).
+//!   number) and **skips laps RotorHazard did not count** — the ones it flags `deleted`, and the
+//!   ones it stops numbering (`lap_number: -1`, its late-lap path once a win condition or lap cap
+//!   declared the seat finished; see [`RawLapNumber`]). Each is counted and the first of each named,
+//!   so a lap an RD deleted in RotorHazard's own UI, a seat RotorHazard stopped counting, and a lap
+//!   that never happened are three distinguishable things (#400, #406).
 //!   It diffs each snapshot against what it has already emitted per node and emits a [`Pass`]
 //!   only for the *new* laps.
 //! - **`pass_record`** — [`Raw::PassRecord`]. Fires once per crossing:
@@ -264,9 +267,11 @@ pub struct RawLap {
     /// Position within this node's lap table (RotorHazard `lap_index`). Advisory.
     #[serde(default)]
     pub lap_index: Option<i64>,
-    /// Per-node monotonic lap counter (RotorHazard `lap_number`). `0` is the
-    /// holeshot. Carried through as the pass `sequence` and the dedup key.
-    pub lap_number: u64,
+    /// Per-node lap counter (RotorHazard `lap_number`). `0` is the holeshot — but RotorHazard
+    /// also uses this field to say *recorded, not counted* (`-1`), so it is a
+    /// [`RawLapNumber`], not a number. Only a [counted](RawLapNumber::counted) one becomes the
+    /// pass `sequence` and the dedup key.
+    pub lap_number: RawLapNumber,
     /// The lap duration in milliseconds (RotorHazard `lap_raw`). Advisory only — the
     /// engine derives laps from the pass stream — so it is carried for reference.
     /// Present on RH ≤ 4.0; **renamed to a numeric `lap_time`** on RH 4.3+/4.4 (see
@@ -293,6 +298,65 @@ pub struct RawLap {
     pub deleted: Option<bool>,
 }
 
+/// RotorHazard's per-node `lap_number` — which is **not always a lap count**.
+///
+/// A stock RotorHazard numbers a seat's crossings `0, 1, 2, …` (`0` is the holeshot). But once it
+/// declares that seat finished — a win condition, or a lap cap — `RHRace.py` numbers every later
+/// crossing **`-1`**: RotorHazard's own way of saying *recorded, but not counted*. It is a real
+/// value on the wire, not drift.
+///
+/// Typing the field `u64` made that value fail serde, which failed the **whole `current_laps`
+/// frame** — losing the valid laps sitting beside it and charging the loss to the malformed-frame
+/// counter instead of the deleted/uncounted one. The diagnostic then said "schema drift" (a
+/// plugin/RH version mismatch) where the truth was "RotorHazard stopped counting" — two very
+/// different field fixes (#406).
+///
+/// Modelling the negative explicitly keeps the frame decodable **and** keeps a non-lap out of the
+/// pass path by construction: [`counted`](Self::counted) is the only way to a lap number, so an
+/// uncounted crossing cannot become a [`Pass`] by omission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "i64", into = "i64")]
+pub enum RawLapNumber {
+    /// A lap RotorHazard counted: its per-node monotonic number, `0` = holeshot.
+    Counted(u64),
+    /// A crossing RotorHazard recorded but did **not** count as a lap, carrying the value exactly
+    /// as RotorHazard sent it (`-1` in every build we have seen). Never mints a [`Pass`].
+    Uncounted(i64),
+}
+
+impl RawLapNumber {
+    /// The lap's number when RotorHazard counted it; `None` for a crossing it recorded but did not
+    /// count. The only route to a pass `sequence`/dedup key, so a `-1` cannot become one.
+    pub fn counted(self) -> Option<u64> {
+        match self {
+            Self::Counted(number) => Some(number),
+            Self::Uncounted(_) => None,
+        }
+    }
+
+    /// The value exactly as RotorHazard sent it — for diagnostics, which should quote the timer
+    /// rather than paraphrase it.
+    pub fn raw(self) -> i64 {
+        match self {
+            // Round-trips exactly: `Counted` only ever holds a value that arrived as an `i64`.
+            Self::Counted(number) => number as i64,
+            Self::Uncounted(number) => number,
+        }
+    }
+}
+
+impl From<i64> for RawLapNumber {
+    fn from(number: i64) -> Self {
+        u64::try_from(number).map_or(Self::Uncounted(number), Self::Counted)
+    }
+}
+
+impl From<RawLapNumber> for i64 {
+    fn from(number: RawLapNumber) -> Self {
+        number.raw()
+    }
+}
+
 /// A RotorHazard `pass_record` (see [`Raw::PassRecord`]). Advisory cross-check only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawPassRecord {
@@ -314,7 +378,7 @@ pub struct RawPassRecord {
 /// `current_marshal_data`, which a live translator does not subscribe to). So the trace this
 /// adapter captures samples `node_peak_rssi` at the `node_data` emit cadence — see
 /// [`SignalChunk`](gridfpv_events::SignalChunk)'s fidelity bound.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RawNodeData {
     /// Per-node peak RSSI of the most recent pass (array index = node index). This is
     /// the per-pass RSSI source for a [`Pass`]'s [`SignalContext`]; `0` under mock nodes.
@@ -326,6 +390,19 @@ pub struct RawNodeData {
     /// payloads (defaults empty), in which case the trace falls back to `pass_peak_rssi`.
     #[serde(default)]
     pub node_peak_rssi: Vec<f32>,
+    /// Per-node **current** nadir RSSI (the node's running noise floor). Read by the tune
+    /// telemetry tap only (#355): `heartbeat` does not carry it, and it is what tells an RD
+    /// whether an enter threshold is set above the noise or inside it.
+    #[serde(default)]
+    pub node_nadir_rssi: Vec<f32>,
+    /// Per-node nadir RSSI of the most recent pass. Tune telemetry only (#355).
+    #[serde(default)]
+    pub pass_nadir_rssi: Vec<f32>,
+    /// Per-node count of passes the detector has recorded (`debug_pass_count`). Tune telemetry
+    /// only (#355) — the "did this gate see anything at all?" counter, which is the question a
+    /// zero-lap heat leaves an RD unable to answer.
+    #[serde(default)]
+    pub debug_pass_count: Vec<i64>,
 }
 
 /// A RotorHazard `enter_and_exit_at_levels` message (`RHUI.emit_enter_and_exit_at_levels`):
@@ -589,8 +666,11 @@ pub struct RawGridSignalNode {
 pub struct RawGridPass {
     /// Zero-based node/seat index the lap was recorded on.
     pub node_index: usize,
-    /// Per-node monotonic lap counter (`0` is the holeshot) — the pass `sequence` + dedup key.
-    pub lap_number: u64,
+    /// Per-node lap counter (`0` is the holeshot) — the pass `sequence` + dedup key. The plugin
+    /// forwards RotorHazard's own `lap.lap_number` verbatim, so a finished seat's *recorded but not
+    /// counted* `-1` reaches this atom exactly as it reaches `current_laps`: same
+    /// [`RawLapNumber`], same disposition, same frame-killing `u64` before #406.
+    pub lap_number: RawLapNumber,
     /// Crossing time in cumulative milliseconds since race start (same unit as `current_laps`).
     pub lap_time_stamp: f64,
     /// The pass's peak RSSI, if RH reported one — becomes the [`Pass`]'s [`SignalContext`].
@@ -774,15 +854,21 @@ pub struct RotorHazardAdapter {
     /// One-shot latch so a plugin whose dense slices stop lining up with the accumulator warns once
     /// per race, not once per broadcast (see [`translate_grid_signal`](Self::translate_grid_signal)).
     warned_dense_desync: bool,
-    /// `(node_index, lap_number)` of every RotorHazard-**deleted** lap already counted this race.
-    /// `current_laps` is a full snapshot, so a deleted lap reappears in every later one; without
-    /// this the counter would climb with the snapshot rate instead of with the deletions. Reset
-    /// each race.
-    deleted_laps: std::collections::HashSet<(usize, u64)>,
+    /// Every crossing this race that RotorHazard reported but did **not** count as a lap — the
+    /// ones it flagged `deleted` and the ones it stopped numbering (`-1`) — already counted, so it
+    /// is counted once. `current_laps` is a full snapshot, so a skipped crossing reappears in every
+    /// later one; without this the counters would climb with the snapshot rate instead of with the
+    /// skips. Shared by both pass paths (see [`LapKey`]) so a crossing the plugin forwarded and the
+    /// snapshot repeated is one skip, not two. Reset each race.
+    skipped_laps: std::collections::HashSet<(usize, LapKey)>,
     /// One-shot latch so a marshaled heat announces the *first* deleted lap and then just counts
     /// the rest — a deletion pass over a whole field is one operator action, not N incidents.
     /// Reset each race.
     warned_deleted_lap: bool,
+    /// One-shot latch so a seat RotorHazard has stopped counting announces the *first* uncounted
+    /// crossing and then just counts the rest — every later crossing of that heat carries `-1`, so
+    /// this is one race-format fault, not N incidents (#406). Reset each race.
+    warned_uncounted_lap: bool,
     /// One-shot latch so an undecodable socket frame (schema drift) says so once per race rather
     /// than once per frame — `node_data` alone arrives ~10 Hz, so a per-frame line would bury the
     /// log it is meant to make readable. Reset each race.
@@ -793,6 +879,32 @@ pub struct RotorHazardAdapter {
     /// plugin's `gridfpv_pass` atom carries no pilot, and announcing a raw `node-N` where a
     /// callsign is known is the friendly-name leak the project rules forbid.
     seat_callsign: std::collections::HashMap<usize, String>,
+}
+
+/// Identity of one crossing inside a node's lap table, stable across snapshots *and* across
+/// RotorHazard giving up on numbering.
+///
+/// A counted lap is identified by its lap number. An uncounted one cannot be: RotorHazard numbers
+/// **every** crossing after a seat finishes `-1`, so the number identifies the whole tail rather
+/// than a crossing — keying on it would count four lost crossings as one. `lap_time_stamp` is the
+/// per-crossing identity RotorHazard does keep, and it is byte-identical in every re-send of the
+/// snapshot (and in the plugin's atom for the same crossing), so its bits are the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LapKey {
+    /// A lap RotorHazard numbered: that number.
+    Counted(u64),
+    /// A crossing RotorHazard did not number: the raw bits of its `lap_time_stamp`.
+    Uncounted(u64),
+}
+
+impl LapKey {
+    /// The key for a lap with this number and crossing time.
+    fn new(lap_number: RawLapNumber, lap_time_stamp: f64) -> Self {
+        match lap_number.counted() {
+            Some(number) => Self::Counted(number),
+            None => Self::Uncounted(lap_time_stamp.to_bits()),
+        }
+    }
 }
 
 /// Per-race ingest counters for the pass path (#389 field diagnostics).
@@ -812,6 +924,14 @@ struct PassCounts {
     /// forever. Zero on a heat nobody marshaled; non-zero is the trace of an RD deleting a lap in
     /// RotorHazard's own UI, which used to leave none at all on the Grid side (#400).
     deleted: u64,
+    /// Crossings RotorHazard reported with **no lap number** (`lap_number: -1` — *recorded, but
+    /// not counted*) and this adapter therefore skips — counted once per crossing, keyed on its
+    /// timestamp, because RotorHazard gives every one of them the same `-1`. Non-zero means the
+    /// timer declared a seat finished and stopped counting its laps (a win condition or lap cap
+    /// still in force — #403), which is a different fault from an RD deleting a lap by hand and a
+    /// different fault again from schema drift. Before #406 this was invisible: the negative failed
+    /// the whole frame and landed in `malformed_frames` instead.
+    uncounted: u64,
     /// Socket frames for an event we *do* translate that could not be decoded — schema drift
     /// (a RotorHazard or plugin version we don't match) or a malformed payload. Reported by the
     /// transport via [`RotorHazardAdapter::note_malformed_frame`]. Non-zero means laps may be
@@ -872,8 +992,9 @@ impl RotorHazardAdapter {
             counts: PassCounts::default(),
             warned_unadvertised_pass: false,
             warned_dense_desync: false,
-            deleted_laps: std::collections::HashSet::new(),
+            skipped_laps: std::collections::HashSet::new(),
             warned_deleted_lap: false,
+            warned_uncounted_lap: false,
             warned_malformed_frame: false,
             seat_callsign: std::collections::HashMap::new(),
         }
@@ -1102,29 +1223,17 @@ impl RotorHazardAdapter {
             };
 
             for lap in node.laps {
-                // RH 4.3+/4.4 may carry deleted laps inline (older RH pre-filtered them);
-                // never mint a pass for one. Skipping it *silently* is what made an RD deleting a
-                // lap in RotorHazard's own UI indistinguishable from a gate that stopped detecting
-                // (#400), so leave a trace: name the first one and count them all into the
-                // per-heat summary. Counted once per `(node, lap)` — the snapshot re-sends a
-                // deleted lap in every later frame.
-                if lap.deleted == Some(true) {
-                    if self.deleted_laps.insert((node_index, lap.lap_number)) {
-                        self.counts.deleted += 1;
-                        if !self.warned_deleted_lap {
-                            self.warned_deleted_lap = true;
-                            let who = self.seat_name(node_index, callsign.as_deref());
-                            crate::diag!(
-                                "gridfpv: rotorhazard: RotorHazard reports lap {} for {who} as \
-                                 DELETED — not minting a pass for it. Further deletions this heat \
-                                 are counted in the heat pass summary (#400).",
-                                lap.lap_number,
-                            );
-                        }
-                    }
+                // RotorHazard has two ways of saying "I recorded this crossing and it is not a
+                // lap": it flags the lap `deleted`, or it stops numbering and sends `-1`. Neither
+                // may mint a pass — but both are evidence, and skipping them silently is what made
+                // a marshaled heat and a dead gate look identical (#400/#406). `minted_lap_number`
+                // counts and names them; `None` means this crossing is not ours to mint.
+                let Some(lap_number) =
+                    self.minted_lap_number(node_index, &lap, callsign.as_deref())
+                else {
                     continue;
-                }
-                let key = (node_index, lap.lap_number);
+                };
+                let key = (node_index, lap_number);
 
                 // --- the plugin is authoritative: this snapshot only checks it ---------------
                 if self.pass_source() == PassSource::Plugin {
@@ -1154,7 +1263,7 @@ impl RotorHazardAdapter {
                         }
                     }
                     // Second sighting with the plugin still silent: a confirmed miss.
-                    self.engage_pass_fallback(node_index, lap.lap_number, callsign.as_deref());
+                    self.engage_pass_fallback(node_index, lap_number, callsign.as_deref());
                     self.flush_pending_snapshot_laps(out);
                     // This lap was among the flushed pending set, so it is already out.
                     continue;
@@ -1163,12 +1272,85 @@ impl RotorHazardAdapter {
                 // --- `current_laps` is authoritative: mint the pass -------------------------
                 self.emit_snapshot_pass(
                     node_index,
-                    lap.lap_number,
+                    lap_number,
                     lap.lap_time_stamp,
                     callsign.as_deref(),
                     out,
                 );
             }
+        }
+    }
+
+    /// The lap number Grid will mint this `current_laps` lap under — or `None` when RotorHazard
+    /// recorded the crossing without counting it as a lap, in which case the skip is counted here
+    /// (once per crossing) and the first of each kind is named.
+    ///
+    /// Two dispositions, deliberately counted apart because they call for different field fixes:
+    ///
+    /// - **`deleted: true`** — usually an RD deleting a lap in RotorHazard's own UI (#400).
+    /// - **an uncounted `lap_number`** (`-1`) — RotorHazard declared the seat finished and stopped
+    ///   counting: a win condition or lap cap is still in force on the race format (#403). RH sets
+    ///   *both* fields on such a crossing, so the number is checked first: `deleted` alone would
+    ///   report an operator action where the truth is a race-format fault, and sending an RD to
+    ///   look for a marshaling mistake is exactly the wrong-cause diagnosis #406 is about.
+    fn minted_lap_number(
+        &mut self,
+        node_index: usize,
+        lap: &RawLap,
+        callsign: Option<&str>,
+    ) -> Option<u64> {
+        match lap.lap_number.counted() {
+            Some(number) if lap.deleted != Some(true) => Some(number),
+            counted => {
+                // Counted once per crossing: `current_laps` is a full snapshot, so it re-sends
+                // every skipped crossing in every later frame for the rest of the race.
+                if self
+                    .skipped_laps
+                    .insert((node_index, LapKey::new(lap.lap_number, lap.lap_time_stamp)))
+                {
+                    if counted.is_none() {
+                        self.note_uncounted_crossing(node_index, lap.lap_number, callsign);
+                    } else {
+                        self.counts.deleted += 1;
+                        if !self.warned_deleted_lap {
+                            self.warned_deleted_lap = true;
+                            let who = self.seat_name(node_index, callsign);
+                            crate::diag!(
+                                "gridfpv: rotorhazard: RotorHazard reports lap {} for {who} as \
+                                 DELETED — not minting a pass for it. Further deletions this heat \
+                                 are counted in the heat pass summary (#400).",
+                                lap.lap_number.raw(),
+                            );
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Count a crossing RotorHazard recorded but did not number (`-1`), and name the first one of
+    /// the race. The caller has already established that this crossing has not been counted before.
+    fn note_uncounted_crossing(
+        &mut self,
+        node_index: usize,
+        lap_number: RawLapNumber,
+        callsign: Option<&str>,
+    ) {
+        self.counts.uncounted += 1;
+        if !self.warned_uncounted_lap {
+            self.warned_uncounted_lap = true;
+            let who = self.seat_name(node_index, callsign);
+            crate::diag!(
+                "gridfpv: rotorhazard: RotorHazard recorded a crossing for {who} but numbered it \
+                 {} — it has STOPPED COUNTING laps for that seat, so this is not a lap and no pass \
+                 is minted. That is the timer refereeing: a win condition or lap cap on the active \
+                 race format declared the pilot finished, and RotorHazard numbers every later \
+                 crossing -1 (#403). Fix the race format — Grid's own format neutralises all of it \
+                 (#405). This is NOT a dead gate and NOT schema drift. Further uncounted crossings \
+                 this heat are counted in the heat pass summary (#406).",
+                lap_number.raw(),
+            );
         }
     }
 
@@ -1328,8 +1510,9 @@ impl RotorHazardAdapter {
                 self.pending_snapshot_laps.clear();
                 self.pass_fallback_engaged = false;
                 self.counts = PassCounts::default();
-                self.deleted_laps.clear();
+                self.skipped_laps.clear();
                 self.warned_deleted_lap = false;
+                self.warned_uncounted_lap = false;
                 self.warned_malformed_frame = false;
                 // Marshaling Slice 1: a fresh race resets the trace's time base so each heat's
                 // captured chunks start at source-time 0 — deterministic and heat-local.
@@ -1384,13 +1567,14 @@ impl RotorHazardAdapter {
                     crate::diag!(
                         "gridfpv: rotorhazard: heat pass summary — source={:?}, plugin={}, \
                          current_laps={}, deduped={}, ignored_plugin_passes={}, \
-                         rh_deleted_laps={}, undecodable_frames={}",
+                         rh_deleted_laps={}, rh_uncounted_laps={}, undecodable_frames={}",
                         self.pass_source(),
                         self.counts.plugin,
                         self.counts.snapshot,
                         self.counts.deduped,
                         self.counts.ignored_plugin,
                         self.counts.deleted,
+                        self.counts.uncounted,
                         self.counts.malformed_frames,
                     );
                 }
@@ -1792,12 +1976,25 @@ impl RotorHazardAdapter {
         }
 
         let node_index = p.node_index;
+        // The plugin forwards RotorHazard's lap number verbatim, so a seat RotorHazard has
+        // declared finished reaches us here as `-1` too — *recorded, but not counted*. It is not a
+        // lap and must not become a pass; count it and move on. Keyed on the crossing time in the
+        // same set the snapshot path uses, so the snapshot repeating this crossing (it will, for
+        // the rest of the race) is the same skip, counted once.
+        let Some(lap_number) = p.lap_number.counted() else {
+            if self
+                .skipped_laps
+                .insert((node_index, LapKey::new(p.lap_number, p.lap_time_stamp)))
+            {
+                self.note_uncounted_crossing(node_index, p.lap_number, None);
+            }
+            return;
+        };
         let competitor = seat_ref(node_index);
         // Record what the authoritative source actually produced — this is what lets a
         // `current_laps` lap be recognised as a genuine miss rather than a duplicate.
-        self.plugin_passes.insert((node_index, p.lap_number));
-        self.pending_snapshot_laps
-            .remove(&(node_index, p.lap_number));
+        self.plugin_passes.insert((node_index, lap_number));
+        self.pending_snapshot_laps.remove(&(node_index, lap_number));
         let signal = p.peak_rssi.map(|rssi| SignalContext {
             rssi_peak: Some(rssi as f32),
         });
@@ -1805,7 +2002,7 @@ impl RotorHazardAdapter {
             adapter: self.id.clone(),
             competitor: competitor.clone(),
             at: Self::lap_stamp_to_source_time(p.lap_time_stamp),
-            sequence: Some(p.lap_number),
+            sequence: Some(lap_number),
             gate: GateIndex::LAP,
             signal,
             // The adapter doesn't know the heat; the bridge sink stamps it at append.
@@ -1909,12 +2106,27 @@ mod tests {
     fn lap(lap_number: u64, lap_time_stamp: f64) -> RawLap {
         RawLap {
             lap_index: Some(lap_number as i64),
-            lap_number,
+            lap_number: RawLapNumber::Counted(lap_number),
             lap_raw: None,
             lap_time: None,
             lap_time_stamp,
             late_lap: false,
             deleted: None,
+        }
+    }
+
+    /// A crossing RotorHazard recorded but did not count — the shape `RHRace.py` emits once a win
+    /// condition or lap cap declares the seat finished: no lap number (`-1`), flagged late, and
+    /// (on RH 4.3+/4.4, which carries them inline) `deleted`.
+    fn uncounted_lap(lap_time_stamp: f64) -> RawLap {
+        RawLap {
+            lap_index: None,
+            lap_number: RawLapNumber::Uncounted(-1),
+            lap_raw: None,
+            lap_time: None,
+            lap_time_stamp,
+            late_lap: true,
+            deleted: Some(true),
         }
     }
 
@@ -2047,6 +2259,7 @@ mod tests {
         adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![201.5, 0.0],
             node_peak_rssi: vec![201.5, 0.0],
+            ..Default::default()
         }));
         let events = adapter.translate(snapshot(0, 0, vec![lap(0, 1_000.0)]));
         let pass = events
@@ -2082,6 +2295,7 @@ mod tests {
         let idle = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![70.0, 60.0],
             node_peak_rssi: vec![70.0, 60.0],
+            ..Default::default()
         }));
         assert!(chunks(&idle).is_empty(), "no trace before the race starts");
 
@@ -2093,10 +2307,12 @@ mod tests {
         let t0 = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![150.0, 120.0],
             node_peak_rssi: vec![150.0, 120.0],
+            ..Default::default()
         }));
         let t1 = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![151.0, 121.0],
             node_peak_rssi: vec![151.0, 121.0],
+            ..Default::default()
         }));
 
         // One chunk per node per tick, sampling node_peak_rssi, anchored on the per-node index.
@@ -2123,6 +2339,7 @@ mod tests {
         let after = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![70.0, 60.0],
             node_peak_rssi: vec![70.0, 60.0],
+            ..Default::default()
         }));
         assert!(chunks(&after).is_empty(), "no trace after the race ends");
     }
@@ -2138,6 +2355,7 @@ mod tests {
         let t = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![88.0],
             node_peak_rssi: vec![],
+            ..Default::default()
         }));
         let c = chunks(&t);
         assert_eq!(c.len(), 1);
@@ -2154,6 +2372,7 @@ mod tests {
         adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![100.0],
             node_peak_rssi: vec![100.0],
+            ..Default::default()
         }));
         adapter.translate(Raw::RaceStatus(RawRaceStatus {
             race_status: race_status::DONE,
@@ -2167,6 +2386,7 @@ mod tests {
         let t = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![100.0],
             node_peak_rssi: vec![100.0],
+            ..Default::default()
         }));
         assert_eq!(chunks(&t)[0].from, SourceTime::from_micros(0));
     }
@@ -2927,7 +3147,7 @@ mod tests {
         // A native plugin pass for node 0, lap 1.
         let evs = a.translate(Raw::GridPass(RawGridPass {
             node_index: 0,
-            lap_number: 1,
+            lap_number: RawLapNumber::Counted(1),
             lap_time_stamp: 1500.0,
             peak_rssi: Some(180.0),
         }));
@@ -3051,7 +3271,7 @@ mod tests {
     fn grid_pass(node_index: usize, lap_number: u64, lap_time_stamp: f64) -> Raw {
         Raw::GridPass(RawGridPass {
             node_index,
-            lap_number,
+            lap_number: RawLapNumber::Counted(lap_number),
             lap_time_stamp,
             peak_rssi: Some(180.0),
         })
@@ -3412,6 +3632,175 @@ mod tests {
         }));
         start_race(&mut a);
         assert_eq!(a.counts.deleted, 0, "the next heat starts clean");
+    }
+
+    /// RotorHazard's `-1` is a value, not drift: it decodes, and it round-trips back to the same
+    /// integer so a recorded frame still replays byte-for-byte (#406).
+    #[test]
+    fn a_lap_number_carries_rotorhazards_own_value_either_way() {
+        use serde_json::json;
+
+        assert_eq!(
+            serde_json::from_value::<RawLapNumber>(json!(0)).unwrap(),
+            RawLapNumber::Counted(0),
+            "0 is the holeshot, not a sentinel"
+        );
+        assert_eq!(
+            serde_json::from_value::<RawLapNumber>(json!(-1)).unwrap(),
+            RawLapNumber::Uncounted(-1),
+            "a negative lap number decodes instead of failing its frame"
+        );
+        assert_eq!(
+            serde_json::to_value(RawLapNumber::Counted(3)).unwrap(),
+            json!(3)
+        );
+        assert_eq!(
+            serde_json::to_value(RawLapNumber::Uncounted(-1)).unwrap(),
+            json!(-1)
+        );
+
+        // Only a counted lap yields a number — the `-1` cannot reach a pass `sequence` by omission.
+        assert_eq!(RawLapNumber::Counted(3).counted(), Some(3));
+        assert_eq!(RawLapNumber::Uncounted(-1).counted(), None);
+        assert_eq!(RawLapNumber::Uncounted(-1).raw(), -1);
+    }
+
+    /// #403's field shape: RotorHazard declared the seat finished and numbered every later crossing
+    /// `-1`. The whole snapshot used to die on that negative — valid laps included — and the loss
+    /// was charged to the malformed-frame counter, so the diagnostic said "schema drift" where the
+    /// truth was "the timer stopped counting" (#406).
+    #[test]
+    fn an_uncounted_lap_does_not_take_its_frame_down_with_it() {
+        // Decoded from the wire, not hand-built: the bug was in the *deserialisation*, so the test
+        // has to start where RotorHazard does. This is the frame RH 4.4 sends with a lap-count win
+        // condition in force — two counted laps, then a crossing it recorded and did not count.
+        let frame: RawCurrentLaps = serde_json::from_value(serde_json::json!({
+            "current": { "node_index": [{
+                "pilot": { "callsign": "ZIP" },
+                "laps": [
+                    { "lap_index": 0, "lap_number": 0, "lap_time_stamp": 900.0,
+                      "late_lap": false },
+                    { "lap_index": 1, "lap_number": 1, "lap_time_stamp": 1500.0,
+                      "late_lap": false },
+                    { "lap_index": 2, "lap_number": -1, "lap_time_stamp": 2100.0,
+                      "late_lap": true, "deleted": true },
+                ],
+            }] }
+        }))
+        .expect("a `-1` lap number is RotorHazard's own value, not schema drift (#406)");
+
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        start_race(&mut a);
+
+        let evs = a.translate(Raw::CurrentLaps(frame));
+
+        assert_eq!(
+            passes(&evs),
+            2,
+            "the valid laps beside the `-1` still mint passes"
+        );
+        let sequences: Vec<_> = evs
+            .iter()
+            .filter_map(|e| match e {
+                Event::Pass(p) => Some(p.sequence),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sequences,
+            vec![Some(0), Some(1)],
+            "the uncounted crossing is not among them: RotorHazard said it did not count it"
+        );
+        assert_eq!(a.counts.snapshot, 2);
+        assert_eq!(
+            a.counts.uncounted, 1,
+            "the `-1` lands on the uncounted counter — the timer is still refereeing (#403)"
+        );
+        assert_eq!(
+            a.counts.deleted, 0,
+            "and not on the deleted counter, though RH flags both: `deleted` alone would send an \
+             RD hunting a marshaling mistake that never happened"
+        );
+        assert_eq!(
+            a.counts.malformed_frames, 0,
+            "a `-1` is RotorHazard's own wire value, not a version skew"
+        );
+    }
+
+    /// RotorHazard numbers *every* crossing after the winner `-1`, so the number names the whole
+    /// tail rather than a crossing. The skip is keyed on the crossing instead — four lost crossings
+    /// must count four, and a re-sent snapshot must still count one.
+    #[test]
+    fn each_uncounted_crossing_is_counted_once_however_often_the_snapshot_repeats_it() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        start_race(&mut a);
+
+        let first = vec![lap(0, 900.0), uncounted_lap(2100.0)];
+        a.translate(snapshot(0, 0, first.clone()));
+        a.translate(snapshot(0, 0, first.clone()));
+        a.translate(snapshot(0, 0, first));
+        assert_eq!(
+            a.counts.uncounted, 1,
+            "one crossing, however many snapshots carry it"
+        );
+
+        // The pilot keeps flying and RotorHazard keeps not counting: same `-1`, new crossing.
+        a.translate(snapshot(
+            0,
+            0,
+            vec![lap(0, 900.0), uncounted_lap(2100.0), uncounted_lap(2700.0)],
+        ));
+        assert_eq!(
+            a.counts.uncounted, 2,
+            "the second lost crossing is its own count — keying on `-1` would have hidden it"
+        );
+
+        // Per race, like every other pass counter.
+        a.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::DONE,
+            race_heat_id: Some(1),
+        }));
+        start_race(&mut a);
+        assert_eq!(a.counts.uncounted, 0, "the next heat starts clean");
+    }
+
+    /// The plugin reads `lap.lap_number` off RotorHazard's own atom and forwards it verbatim, so a
+    /// finished seat's `-1` arrives on the native pass path too — same hole, same verdict (#406).
+    #[test]
+    fn an_uncounted_plugin_pass_is_not_a_pass() {
+        let mut a = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        advertise_live_pass(&mut a, true);
+        start_race(&mut a);
+
+        let evs = a.translate(Raw::GridPass(RawGridPass {
+            node_index: 0,
+            lap_number: RawLapNumber::Uncounted(-1),
+            lap_time_stamp: 2100.0,
+            peak_rssi: Some(180.0),
+        }));
+        assert_eq!(
+            passes(&evs),
+            0,
+            "RotorHazard did not count it, so neither do we"
+        );
+        assert_eq!(a.counts.plugin, 0);
+        assert_eq!(a.counts.uncounted, 1);
+        assert!(
+            a.plugin_passes.is_empty(),
+            "a non-lap must not be recorded as a lap the plugin delivered"
+        );
+
+        // The snapshot repeats the same crossing for the rest of the race. Both paths key the skip
+        // on the crossing, so it stays one skip.
+        a.translate(snapshot(0, 0, vec![uncounted_lap(2100.0)]));
+        assert_eq!(
+            a.counts.uncounted, 1,
+            "one crossing, one skip — whichever stream reported it"
+        );
+        assert!(
+            a.pending_snapshot_laps.is_empty(),
+            "and it is never held as a lap the plugin owes us"
+        );
     }
 
     /// A socket frame the transport could not decode (schema drift) is counted and announced

@@ -19,6 +19,7 @@
 
 import type {
   ActiveEvent,
+  CalibrationRequest,
   ChangeEnvelope,
   ChannelCatalogEntry,
   Class,
@@ -50,6 +51,7 @@ import type {
   SubscribeRequest,
   Timer,
   TimerId,
+  TimerSignal,
   UpdateClassRequest,
   UpdatePilotRequest,
   UpdateRoundReq,
@@ -498,6 +500,127 @@ export async function restartTimer(
     throw new Error(detail || `The Director refused the restart (HTTP ${resp.status}).`);
   }
   return (await resp.json()) as Timer;
+}
+
+/**
+ * Read a timer's **live tuning signal** (`GET /timers/{id}/signal`) — issue #355.
+ *
+ * **The call is the subscription.** The Director streams a timer's telemetry only while somebody is
+ * looking at it: the first call opens the stream and *every* call renews a short lease on it
+ * (`SIGNAL_LEASE`). Stop calling and the stream stops by itself — which is what makes a closed tab,
+ * a crashed browser or a dropped network safe, and why nothing here has to say goodbye. A caller
+ * that wants the plot to keep moving must therefore poll well inside that lease, not merely inside
+ * it; see the Tune page's `holdsLease`.
+ *
+ * RD-gated (a token-gated Director answers **401** without one). A Mock is a **400** — it has no
+ * signal to read — and an unknown id a **404**. Pass `options.signal` to abandon a poll in flight.
+ *
+ * Nothing this touches is an event or a log: it is a bounded in-memory window that exists only
+ * while an RD is watching it.
+ */
+export async function timerSignal(
+  baseUrl: string,
+  id: TimerId,
+  options: { token?: string; fetch?: FetchLike; signal?: AbortSignal } = {}
+): Promise<TimerSignal> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/signal`, {
+    headers,
+    signal: options.signal
+  });
+  if (!resp.ok) {
+    // The Director's refusal ("Track RH is a simulated timer and has no signal to read") is already
+    // phrased for the RD and names the timer by its FRIENDLY name — surface it rather than a
+    // `GET /timers/{id}/…` line carrying the raw id (repo display rule).
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof body === 'object' && body !== null && 'message' in body
+          ? String((body as { message: unknown }).message)
+          : ''
+      )
+      .catch(() => '');
+    throw new Error(detail || `The timer's signal feed answered HTTP ${resp.status}.`);
+  }
+  return (await resp.json()) as TimerSignal;
+}
+
+/**
+ * End a timer's tuning stream now (`POST /timers/{id}/signal/stop`) — issue #355.
+ *
+ * The lease {@link timerSignal} renews already guarantees the stream stops on its own; this makes
+ * it stop *promptly*, the moment the RD closes the Tune view, instead of seconds later with the
+ * timer still parsing telemetry nobody is reading. Idempotent, and harmless on a timer that was
+ * never streaming. RD-gated; an unknown id answers **404**.
+ */
+export async function stopTimerSignal(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/signal/stop`,
+    { method: 'POST', headers }
+  );
+  if (!resp.ok)
+    throw new Error(`The Director could not stop the signal feed (HTTP ${resp.status}).`);
+}
+
+/**
+ * Set a node's enter/exit detection thresholds (`POST /timers/{id}/calibration`) — issue #355.
+ *
+ * The write half of the Tune page. RD-gated exactly like {@link restartTimer}, so a token-gated
+ * Director answers **401** without one — which is a different failure from "the timer refused" and
+ * has to reach the RD as one.
+ *
+ * **The response is deliberately not read.** RotorHazard does not echo a level set synchronously;
+ * it broadcasts `enter_and_exit_at_levels`, which surfaces as `NodeSignal.enter_at` / `exit_at` on
+ * a later `GET /timers/{id}/signal`. The route answers with what it *dispatched*, which is not a
+ * readback and must never be treated as one — so nothing here consumes it, and a resolved promise
+ * means *accepted*, never *applied*. The caller confirms by polling the feed it is already reading.
+ *
+ * The Director **refuses** (a **400**) for a Mock, a timer that is not connected, or a node the
+ * timer does not have; an unknown id answers **404**. Rejects on any non-2xx / transport failure.
+ */
+export async function setCalibration(
+  baseUrl: string,
+  id: TimerId,
+  request: CalibrationRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'content-type': 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/calibration`,
+    { method: 'POST', headers, body: JSON.stringify(request) }
+  );
+  if (!resp.ok) {
+    // Same rule as `restartTimer`: the Director's typed refusal is already phrased for the RD and
+    // names the timer and the heat by their FRIENDLY names ("a heat is running on Track RH — finish
+    // it before tuning"). Throw it verbatim rather than wrapping it in a `POST /timers/{id}/…`
+    // line, because a raw timer id must never reach a user (repo display rule). Only the no-body
+    // case falls back to the status.
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof body === 'object' && body !== null && 'message' in body
+          ? String((body as { message: unknown }).message)
+          : ''
+      )
+      .catch(() => '');
+    throw new Error(detail || `The Director refused the change (HTTP ${resp.status}).`);
+  }
 }
 
 /** The shared body of {@link connectTimer} / {@link disconnectTimer} — same shape, same errors. */

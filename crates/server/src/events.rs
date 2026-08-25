@@ -1580,6 +1580,49 @@ impl EventRegistry {
     /// ([`round_engine::heat_display_name`]); an untagged free-text heat falls back to its RD-typed
     /// label, and a heat with neither to the generic "a heat" — a raw id is never emitted.
     pub fn heat_in_progress_on_timer(&self, timer: &TimerId) -> Option<String> {
+        self.in_progress_on_timer(timer, false)
+    }
+
+    /// The **friendly name** of a *scored* heat in progress on `timer` right now (#355), or `None`
+    /// when nothing scored is under way on it — the refusal probe behind a **calibration write**.
+    ///
+    /// The same scan as [`heat_in_progress_on_timer`](Self::heat_in_progress_on_timer), with one
+    /// heat kind stepped over: an **open-practice** heat does not block a threshold change.
+    ///
+    /// # Why calibration and restart gate differently
+    ///
+    /// They have different blast radii. Restarting RotorHazard takes the timing hardware down and
+    /// destroys the session it is running, practice included — so [`heat_in_progress_on_timer`]
+    /// refuses on *any* racing heat. Nudging a detection threshold does not: the only thing at risk
+    /// is the adjudication of the laps being recorded, and an open-practice round is **excluded from
+    /// scoring** (#398), so there is no result to protect.
+    ///
+    /// And refusing here would break the page's whole workflow. #355's requirement is *"I want to
+    /// slide the slider and then test right away"* — which is a pilot in the air on a practice heat
+    /// while the RD adjusts. Refuse during practice and an RD can only tune an idle gate, wave a
+    /// quad through by hand, and walk back: exactly the unusable RotorHazard-UI loop this page was
+    /// built to replace. A competition heat stays refused, absolutely.
+    ///
+    /// **Practice-ness is [`open_practice::excluded_from_scoring`] and nothing else** — the same
+    /// predicate the scoring surfaces consult, deliberately reused rather than re-derived, so this
+    /// gate and the scoring exclusion cannot drift apart. A heat with no round at all (an ad-hoc /
+    /// free-text heat) is **not** excluded and so still refuses, matching
+    /// [`open_practice::heat_excluded_from_scoring`]'s neutral fallback.
+    ///
+    /// [`open_practice::excluded_from_scoring`]: crate::open_practice::excluded_from_scoring
+    /// [`open_practice::heat_excluded_from_scoring`]: crate::open_practice::heat_excluded_from_scoring
+    pub fn scored_heat_in_progress_on_timer(&self, timer: &TimerId) -> Option<String> {
+        self.in_progress_on_timer(timer, true)
+    }
+
+    /// The shared scan behind [`heat_in_progress_on_timer`](Self::heat_in_progress_on_timer) and
+    /// [`scored_heat_in_progress_on_timer`](Self::scored_heat_in_progress_on_timer).
+    ///
+    /// One implementation on purpose: two copies of "which heat is racing on this timer" would
+    /// drift, and the difference between the two callers is a single predicate. With `scored_only`,
+    /// a heat whose round is excluded from scoring is stepped over as though it were not racing at
+    /// all — so a practice heat running with nothing else yields `None`.
+    fn in_progress_on_timer(&self, timer: &TimerId, scored_only: bool) -> Option<String> {
         use gridfpv_engine::heat::heat_state;
         use gridfpv_events::Event;
 
@@ -1625,6 +1668,13 @@ impl EventRegistry {
                 let round = round_id
                     .as_ref()
                     .and_then(|r| rounds.iter().find(|def| &def.id == r));
+                // A calibration write is allowed to land under an OPEN PRACTICE heat (#355, #398):
+                // practice is excluded from scoring, so there is no result for a moved threshold to
+                // corrupt — and practice is the moment an RD actually wants to tune, pilots in the
+                // air. Step over it and keep scanning; anything scored still refuses.
+                if scored_only && crate::open_practice::heat_excluded_from_scoring(round) {
+                    continue;
+                }
                 return Some(match round {
                     Some(round) => round_engine::heat_display_name(round, &events, &heat),
                     // Untagged (a free-text heat): its RD-typed label if it has one, else a generic

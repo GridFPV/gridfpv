@@ -1,0 +1,459 @@
+/**
+ * Unit tests for the pure half of the Tune page (#355, slice 2b) — `src/lib/tuning.ts`.
+ *
+ * The component test (`TunePage.test.ts`) proves the three editors stay locked to one value through
+ * the DOM; this pins the rules that guarantee they *can*: the single clamp, the write gate, the
+ * poll-driven confirmation, and the label that keeps a raw seat/frequency off the screen.
+ *
+ * ## The fixtures are built from the GENERATED types, on purpose
+ *
+ * `TimerSignal` / `NodeSignal` are imported from `@gridfpv/types` and the builders below are typed
+ * as them with no casts, so every field name here is checked against the ts-rs bindings generated
+ * from `crates/server/src/timers.rs`. That is the whole point: this module previously tested
+ * against a hand-declared guess at the wire shape in which *every* field name was wrong, and the
+ * suite passed green on a page that would have rendered `undefined` at every readout. A fixture
+ * that can drift from the wire is worse than no fixture, because it manufactures confidence.
+ */
+import { describe, expect, it } from 'vitest';
+import type { ChannelCatalogEntry, NodeSignal, TimerSignal } from '@gridfpv/types';
+import {
+  CONFIRM_TIMEOUT_MS,
+  RSSI_MAX,
+  RSSI_MIN,
+  SIGNAL_LEASE_MS,
+  SIGNAL_POLL_MS,
+  adoptReported,
+  clampLevel,
+  foldPolled,
+  holdsLease,
+  isParsableLevel,
+  markSent,
+  nodeCountOf,
+  nodeTraceOf,
+  nodeTuneLabel,
+  phaseLabel,
+  phaseTone,
+  plottable,
+  readoutsOf,
+  seedThreshold,
+  writeGate,
+  type ThresholdState
+} from '../src/lib/tuning.js';
+
+const CATALOG: ChannelCatalogEntry[] = [
+  { band: 'Raceband', channel: 'R1', mhz: 5658 },
+  { band: 'Raceband', channel: 'R7', mhz: 5880 },
+  { band: 'Fatshark', channel: 'F4', mhz: 5800 }
+];
+
+/**
+ * One node, defaulting to a node the timer HAS reported (`seen`). The three non-optional fields —
+ * `node`, `seat`, `seen`, `crossing`, `crossed_recently`, `samples` — are spelled out because the
+ * wire always carries them; everything else is `Option` on the Rust side and absent here unless a
+ * test is about it.
+ */
+function node(over: Partial<NodeSignal> = {}): NodeSignal {
+  return {
+    node: 0,
+    seat: 'node-0',
+    seen: true,
+    crossing: false,
+    crossed_recently: false,
+    samples: [],
+    ...over
+  };
+}
+
+/** One poll of `GET /timers/{id}/signal`: a live lease, a shared time base, and some nodes. */
+function snapshot(over: Partial<TimerSignal> = {}): TimerSignal {
+  const nodes = over.nodes ?? [node()];
+  return {
+    timer: 'rh-1',
+    streaming: true,
+    lease_ms_remaining: SIGNAL_LEASE_MS,
+    period_micros: 200_000,
+    // The time base is SHARED across every node — one axis, not one per node.
+    sample_micros: nodes[0]?.samples.map((_, i) => i * 200_000) ?? [],
+    ...over,
+    nodes
+  };
+}
+
+describe('clampLevel — the ONE clamp, at the state', () => {
+  it('rounds to an integer (RSSI is an ADC count, not a fraction)', () => {
+    // The whole reason this lives in one place: if each control rounded for itself the box could
+    // hold 90.4 while the slider sat at 90 and the graph drew a third position.
+    expect(clampLevel(90.4)).toBe(90);
+    expect(clampLevel(90.5)).toBe(91);
+    expect(clampLevel('90.6')).toBe(91);
+  });
+
+  it('clamps the minimum to 1, never 0', () => {
+    // RotorHazard's calibration.py tests `enter_at_level` for truthiness, so a 0 is read as "go
+    // read the level off the node" — a typed 0 would look accepted and silently no-op.
+    expect(clampLevel(0)).toBe(RSSI_MIN);
+    expect(clampLevel('0')).toBe(1);
+    expect(clampLevel(-40)).toBe(1);
+  });
+
+  it('clamps the maximum to 254, NOT the 8-bit 255', () => {
+    // `Node.is_valid_rssi` is `value > 0 and value < 255` — a STRICT `<`, verified in RH v4.3.0 and
+    // v4.4.0. A literal 255 writes the profile row, is silently dropped before the detector, and
+    // then comes back CONFIRMED, because RH broadcasts the profile rather than the node. A
+    // threshold reading "On timer" that is not on the timer is the worst thing this page can do.
+    expect(RSSI_MAX).toBe(254);
+    expect(clampLevel(999)).toBe(254);
+    expect(clampLevel(255)).toBe(254);
+    expect(clampLevel(254)).toBe(254);
+  });
+
+  it('clamps both ends away, because both look accepted and neither is', () => {
+    // The two failures are the same failure: RH takes the value, does nothing with it, and reports
+    // success. 0 is falsy so `calibration.py` re-reads off the node; 255 fails `is_valid_rssi`.
+    expect(clampLevel(0)).toBe(RSSI_MIN);
+    expect(clampLevel(255)).toBe(RSSI_MAX);
+  });
+
+  it('resolves un-parseable input to the fallback rather than NaN', () => {
+    // A NaN in the state would poison all three views of it at once.
+    expect(clampLevel('')).toBe(RSSI_MIN);
+    expect(clampLevel('abc', 88)).toBe(88);
+    expect(clampLevel(undefined, 42)).toBe(42);
+    expect(clampLevel(NaN, 42)).toBe(42);
+  });
+
+  it('is idempotent — clamping a clamped value changes nothing', () => {
+    for (const raw of [-5, 0, 0.4, 90.5, 254.6, 1e6]) {
+      expect(clampLevel(clampLevel(raw))).toBe(clampLevel(raw));
+    }
+  });
+});
+
+describe('isParsableLevel', () => {
+  it('rejects the half-typed / emptied box so the state is left alone', () => {
+    expect(isParsableLevel('')).toBe(false);
+    expect(isParsableLevel('   ')).toBe(false);
+    expect(isParsableLevel('-')).toBe(false);
+    expect(isParsableLevel('abc')).toBe(false);
+  });
+
+  it('accepts anything numeric', () => {
+    expect(isParsableLevel('0')).toBe(true);
+    expect(isParsableLevel('90')).toBe(true);
+    expect(isParsableLevel(' 90.5 ')).toBe(true);
+  });
+});
+
+describe('writeGate — practice only, checked per write', () => {
+  it('allows a write with no heat on the timer (the ordinary case)', () => {
+    expect(writeGate(undefined, undefined).allowed).toBe(true);
+    expect(writeGate('Scheduled', undefined).allowed).toBe(true);
+  });
+
+  it('allows a write while an OPEN PRACTICE heat is running', () => {
+    // Practice is excluded from scoring (#398) — there is no result to corrupt, and pilots in the
+    // air is the natural moment to tune.
+    expect(writeGate('Running', 'practice').allowed).toBe(true);
+  });
+
+  it('refuses a write while a COMPETITION heat is running, and says why', () => {
+    const gate = writeGate('Running', 'competition');
+    expect(gate.allowed).toBe(false);
+    expect(gate.allowed === false && gate.reason).toMatch(/competition heat is running/i);
+  });
+
+  it('allows a write in every non-Running phase, even a competition heat', () => {
+    // Staged/Armed are pre-race and Unofficial/Final are past it: in none of those is the detector
+    // deciding laps that count right now.
+    for (const phase of ['Scheduled', 'Staged', 'Armed', 'Unofficial', 'Final'] as const) {
+      expect(writeGate(phase, 'competition').allowed).toBe(true);
+    }
+  });
+});
+
+describe('seedThreshold / adoptReported', () => {
+  it('seeds at rest from the level the timer reports', () => {
+    expect(seedThreshold(90)).toEqual({ value: 90, confirmed: 90, phase: 'confirmed' });
+  });
+
+  it('clamps a bad reported level like any other input', () => {
+    expect(seedThreshold(0)).toEqual({ value: 1, confirmed: 1, phase: 'confirmed' });
+  });
+
+  it('follows the hardware when the threshold is at rest (the RD tuned in RH’s own UI)', () => {
+    const atRest: ThresholdState = { value: 90, confirmed: 90, phase: 'confirmed' };
+    expect(adoptReported(atRest, 104)).toEqual({ value: 104, confirmed: 104, phase: 'confirmed' });
+  });
+
+  it('leaves a threshold the RD is adjusting alone', () => {
+    // The next poll must never yank a value out from under a drag, an in-flight write, or a
+    // failure the RD has not read yet.
+    for (const phase of ['pending', 'sent', 'mismatch', 'failed', 'refused'] as const) {
+      const busy: ThresholdState = { value: 120, confirmed: 90, phase };
+      expect(adoptReported(busy, 104)).toBe(busy);
+    }
+  });
+
+  it('is a no-op when the hardware already agrees', () => {
+    const state: ThresholdState = { value: 90, confirmed: 90, phase: 'confirmed' };
+    expect(adoptReported(state, 90)).toBe(state);
+  });
+
+  it('is a no-op for a level that only differs as a FLOAT — the wire carries f32', () => {
+    // Without the clamp-before-compare this churns the state on every single poll, four times a
+    // second, replacing the object the UI is keyed on for no change at all.
+    const state: ThresholdState = { value: 90, confirmed: 90, phase: 'confirmed' };
+    expect(adoptReported(state, 90.0)).toBe(state);
+    expect(adoptReported(state, 89.6)).toBe(state);
+  });
+});
+
+describe('markSent / foldPolled — the confirmation is a POLL, not a response', () => {
+  const T0 = 1_000_000;
+  const sending = (over: Partial<ThresholdState> = {}): ThresholdState => ({
+    value: 104,
+    confirmed: 90,
+    phase: 'sent',
+    sent: 104,
+    sentAt: T0,
+    ...over
+  });
+
+  it('records what was asked for and when, which is all the confirmation needs', () => {
+    const state = markSent({ value: 104, confirmed: 90, phase: 'pending' }, 104, T0);
+    expect(state).toMatchObject({ value: 104, phase: 'sent', sent: 104, sentAt: T0 });
+  });
+
+  it('confirms once a POLL shows the timer holding the level', () => {
+    // `POST /calibration` only says "accepted". RotorHazard broadcasts `enter_and_exit_at_levels`,
+    // which arrives as `NodeSignal.enter_at` on a LATER `GET /signal` — so this, and nothing about
+    // the response body, is the evidence the write landed.
+    expect(foldPolled(sending(), 104, T0 + 500)).toEqual({
+      value: 104,
+      confirmed: 104,
+      phase: 'confirmed'
+    });
+  });
+
+  it('stays Sending… while the polls still disagree but the timeout has not run out', () => {
+    // A mismatch declared one poll too early is a false alarm: the change may simply still be in
+    // flight through the Director and RH's broadcast.
+    const state = sending();
+    expect(foldPolled(state, 90, T0 + CONFIRM_TIMEOUT_MS - 1)).toBe(state);
+  });
+
+  it('flags a MISMATCH once the polls have kept disagreeing, and names both levels', () => {
+    const folded = foldPolled(sending(), 90, T0 + CONFIRM_TIMEOUT_MS);
+    expect(folded.phase).toBe('mismatch');
+    expect(folded.confirmed).toBe(90);
+    expect(folded.detail).toContain('90');
+    expect(folded.detail).toContain('104');
+  });
+
+  it('flags a mismatch when the timer reports no such threshold at all', () => {
+    // `enter_at` is `Option`: a node that has dropped its thresholds reports nothing, which is a
+    // failed write just as surely as a wrong number — and must not read as "still sending".
+    const folded = foldPolled(sending(), undefined, T0 + CONFIRM_TIMEOUT_MS);
+    expect(folded.phase).toBe('mismatch');
+    expect(folded.confirmed).toBeUndefined();
+  });
+
+  it('matches a level the wire rounds — the thresholds cross as f32, the domain is integers', () => {
+    expect(foldPolled(sending(), 104.0, T0 + 10).phase).toBe('confirmed');
+    expect(foldPolled(sending(), 103.7, T0 + 10).phase).toBe('confirmed');
+  });
+
+  it('keeps no undo value — the number is on screen and re-draggable', () => {
+    const folded = foldPolled(sending(), 104, T0 + 10);
+    expect(Object.keys(folded).sort()).toEqual(['confirmed', 'phase', 'value']);
+  });
+
+  it('at rest, is just the hardware winning — the poll adopts what the timer reports', () => {
+    const atRest: ThresholdState = { value: 90, confirmed: 90, phase: 'confirmed' };
+    expect(foldPolled(atRest, 104, T0)).toEqual({ value: 104, confirmed: 104, phase: 'confirmed' });
+  });
+
+  it('leaves a threshold the RD is holding alone, whatever the poll says', () => {
+    for (const phase of ['pending', 'mismatch', 'failed', 'refused'] as const) {
+      const busy: ThresholdState = { value: 120, confirmed: 90, phase };
+      expect(foldPolled(busy, 104, T0)).toBe(busy);
+    }
+  });
+});
+
+describe('phase presentation', () => {
+  it('labels every phase in plain language, readable at arm’s length', () => {
+    expect(phaseLabel('confirmed')).toBe('On timer');
+    expect(phaseLabel('pending')).toBe('Adjusting');
+    expect(phaseLabel('sent')).toBe('Sending…');
+    expect(phaseLabel('mismatch')).toBe('Not taken');
+    expect(phaseLabel('failed')).toBe('Failed');
+    expect(phaseLabel('refused')).toBe('Not sent');
+  });
+
+  it('tones the settled state apart from the wrong ones', () => {
+    expect(phaseTone('confirmed')).toBe('success');
+    expect(phaseTone('mismatch')).toBe('danger');
+    expect(phaseTone('failed')).toBe('danger');
+    expect(phaseTone('refused')).toBe('warn');
+  });
+});
+
+describe('nodeTuneLabel — CLAUDE.md: never a bare frequency, never a raw seat', () => {
+  it('resolves the frequency to band + channel through channels.ts', () => {
+    expect(nodeTuneLabel(0, 5880, CATALOG)).toBe('Node 1 · Raceband R7');
+    expect(nodeTuneLabel(3, 5658, CATALOG)).toBe('Node 4 · Raceband R1');
+  });
+
+  it('is the 1-based seat alone when the node has no frequency yet', () => {
+    expect(nodeTuneLabel(0, undefined, CATALOG)).toBe('Node 1');
+  });
+
+  it('never renders a bare raw seat ref', () => {
+    expect(nodeTuneLabel(0, 5880, CATALOG)).not.toContain('node-0');
+  });
+});
+
+describe('nodeCountOf', () => {
+  it('prefers what the timer actually reports', () => {
+    const snap = snapshot({ nodes: [node(), node({ node: 1, seat: 'node-1' })] });
+    expect(nodeCountOf(snap, 8)).toBe(2);
+  });
+
+  it('lays out from the registry before the first snapshot lands', () => {
+    expect(nodeCountOf(undefined, 4)).toBe(4);
+    expect(nodeCountOf(snapshot({ nodes: [] }), 4)).toBe(4);
+  });
+
+  it('counts UNSEEN nodes too — "is this node even alive?" is half the diagnostic', () => {
+    // The Director includes unseated/unreported nodes deliberately. Filtering them out here would
+    // silently drop the columns an RD chasing a dead gate is most likely to be looking at.
+    const snap = snapshot({
+      nodes: [node(), node({ node: 1, seat: 'node-1', seen: false })]
+    });
+    expect(nodeCountOf(snap, 8)).toBe(2);
+  });
+});
+
+describe('nodeTraceOf — the adapter onto RssiGraph’s live mode', () => {
+  it('keys the trace on the node’s OWN seat, not a locally re-spelled one', () => {
+    // The seat is what a heat's registration binds a pilot to. Re-deriving `node-{i}` here is
+    // exactly the resolver drift CLAUDE.md exists to prevent — so the wire's handle is used as-is.
+    const n = node({ node: 2, seat: 'node-2', samples: [10, 20] });
+    const trace = nodeTraceOf(snapshot({ nodes: [n] }), n);
+    expect(trace.competitor).toEqual({ adapter: 'rh-1', competitor: 'node-2' });
+    expect(trace.samples).toEqual([10, 20]);
+  });
+
+  it('carries the levels the TIMER holds — the page overlays its pending value via `tuned`', () => {
+    const n = node({ enter_at: 90, exit_at: 80 });
+    const trace = nodeTraceOf(snapshot({ nodes: [n] }), n);
+    expect(trace.enter).toBe(90);
+    expect(trace.exit).toBe(80);
+  });
+
+  it('takes its time base from the SHARED axis, not from the node', () => {
+    // `sample_micros` lives on the snapshot, once, because every node is sampled in the same pass.
+    // A per-node `from` would be O(nodes) copies of identical numbers — and 2b invented one.
+    const n = node({ samples: [10, 20, 30] });
+    const snap = snapshot({ nodes: [n], sample_micros: [1_000, 1_200, 1_400] });
+    const trace = nodeTraceOf(snap, n);
+    expect(trace.from).toBe(1_000);
+    expect(trace.period_micros).toBe(200_000);
+    // Handed on verbatim, so the plot is drawn at the instants the Director stamped rather than at
+    // a `from + i·period` grid reconstructed from them.
+    expect(trace.times).toEqual([1_000, 1_200, 1_400]);
+  });
+
+  it('drops the explicit axis when it does not line up with the node’s samples', () => {
+    // Belt and braces: a mis-lengthed axis would misplace every sample, and the uniform grid is
+    // exact for this (steady-cadence) feed anyway.
+    const n = node({ samples: [10, 20, 30] });
+    const trace = nodeTraceOf(snapshot({ nodes: [n], sample_micros: [1_000] }), n);
+    expect(trace.times).toBeUndefined();
+  });
+
+  it('never yields a zero period (a zero would divide the whole projection by nothing)', () => {
+    const n = node();
+    expect(nodeTraceOf(snapshot({ nodes: [n], period_micros: 0 }), n).period_micros).toBe(1);
+  });
+});
+
+describe('plottable — an unseen node is DEAD, not quiet', () => {
+  it('refuses to plot a node RotorHazard has never reported', () => {
+    // The Director samples every node on the same pass and fills an unreported one's slot with 0.0,
+    // so a dead node arrives with a full, perfectly plottable ring of zeroes. Drawn, that is a flat
+    // trace along the floor — indistinguishable from a live node over a quiet gate, which is the
+    // one confusion this page exists to remove.
+    expect(plottable(node({ seen: false, samples: [0, 0, 0, 0] }))).toBe(false);
+  });
+
+  it('plots a node that HAS reported, even with nothing on the gate', () => {
+    expect(plottable(node({ seen: true, samples: [12, 11, 12] }))).toBe(true);
+  });
+
+  it('has nothing to plot before the first snapshot', () => {
+    expect(plottable(undefined)).toBe(false);
+  });
+});
+
+describe('the signal feed is LEASED, and the poll is what holds it', () => {
+  it('polls an order of magnitude inside the lease, not merely inside it', () => {
+    // Every GET renews the lease; stop polling and the Director tears the stream down. A cadence
+    // that only just fits would drop the feed the first time one answer is slow, and the RD would
+    // see a plot stop moving for no reason they can see.
+    expect(holdsLease(SIGNAL_POLL_MS)).toBe(true);
+    expect(SIGNAL_POLL_MS * 10).toBeLessThanOrEqual(SIGNAL_LEASE_MS);
+  });
+
+  it('rejects a cadence with no margin, even one that technically renews in time', () => {
+    expect(holdsLease(4_000)).toBe(false);
+    expect(holdsLease(SIGNAL_LEASE_MS)).toBe(false);
+    expect(holdsLease(0)).toBe(false);
+  });
+});
+
+describe('readoutsOf — the six stats, all from node_data', () => {
+  it('reads the peaks/nadirs/count off node_data, not the heartbeat', () => {
+    // `get_heartbeat_json` carries only rssi / frequency_mhz / loop_time_micros / crossing; a page
+    // that looked for the peaks there would render six permanent dashes.
+    const out = readoutsOf(
+      node({
+        rssi: 48,
+        node_peak_rssi: 132,
+        node_nadir_rssi: 12,
+        pass_peak_rssi: 118,
+        pass_nadir_rssi: 41,
+        pass_count: 7
+      })
+    );
+    expect(out.map((r) => `${r.label} ${r.value}`)).toEqual([
+      'RSSI 48',
+      'Node peak 132',
+      'Node nadir 12',
+      'Pass peak 118',
+      'Pass nadir 41',
+      'Passes 7'
+    ]);
+  });
+
+  it('dashes an unreported field rather than rendering a misleading zero', () => {
+    // Every field is `Option` on the wire and that is load-bearing: a dash says "not reported",
+    // which is information. A zero standing in for it is a lie the RD would tune against.
+    expect(readoutsOf(undefined).every((r) => r.value === '—')).toBe(true);
+    expect(readoutsOf(node({ pass_count: 0 })).at(-1)?.value).toBe('0');
+  });
+
+  it('renders the counts as integers — they cross the wire as f32 but they are ADC counts', () => {
+    const out = readoutsOf(node({ rssi: 48.0, node_peak_rssi: 131.6 }));
+    expect(out[0].value).toBe('48');
+    expect(out[1].value).toBe('132');
+  });
+
+  it('dashes every stat of a node the timer has never reported', () => {
+    // An unseen node carries no `node_data` at all — six dashes, and the column says why.
+    expect(
+      readoutsOf(node({ seen: false, samples: [0, 0, 0] })).every((r) => r.value === '—')
+    ).toBe(true);
+  });
+});

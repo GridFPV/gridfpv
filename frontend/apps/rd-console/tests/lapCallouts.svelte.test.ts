@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { flushSync } from 'svelte';
-import type { PilotProgress } from '@gridfpv/types';
-import { useLapCallouts, type LapCrossing } from '../src/lib/lapCallouts.svelte.js';
+import type { LiveCrossing, PilotProgress } from '@gridfpv/types';
+import {
+  useCrossingTones,
+  useLapCallouts,
+  type LapCrossing
+} from '../src/lib/lapCallouts.svelte.js';
 
 /**
  * Unit tests for the new-lap detector behind the audio callouts. Driven inside an `$effect.root`
@@ -163,6 +167,227 @@ describe('useLapCallouts', () => {
     const h = harness({ heat: undefined, progress: [progressRow('maverick-1', 0)] });
     h.set({ progress: [progressRow('maverick-1', 1, 20_000_000)] });
     expect(h.crossings).toEqual([]);
+    h.cleanup();
+  });
+});
+
+/**
+ * Unit tests for the per-CROSSING detector behind the crossing tone (#397). The point of the whole
+ * feature is that this fires where the lap detector above cannot — the holeshot and a pass the
+ * min-lap floor rejected close no lap, and a crossing on a seat nobody is flying belongs to no
+ * lineup at all. Pins:
+ *   • a tone per crossing whatever its disposition — holeshot, counted, rejected, marshal-voided;
+ *   • an unseated seat's crossing tones too (the false-crossing case, which is the FEATURE);
+ *   • a re-pushed identical state fires NOTHING (identity is `pass_ref`, not frame arrival);
+ *   • the first frame BASELINES silently even carrying a full 64-deep feed (mid-heat mount);
+ *   • nothing outside Running, and the watermark still advances there (no burst on race-go);
+ *   • an event switch re-baselines — append offsets restart per event log.
+ */
+describe('useCrossingTones', () => {
+  const crossing = (
+    passRef: number,
+    competitor: string,
+    disposition: LiveCrossing['disposition'],
+    lapNumber?: number
+  ): LiveCrossing => ({
+    pass_ref: passRef,
+    competitor,
+    at: passRef * 1_000_000,
+    disposition,
+    lap_number: lapNumber
+  });
+
+  function harness(initial?: {
+    scope?: string | undefined;
+    phase?: string;
+    crossings?: LiveCrossing[];
+  }) {
+    let scope = $state<string | undefined>('scope' in (initial ?? {}) ? initial?.scope : 'event-1');
+    let phase = $state<string | undefined>(initial?.phase ?? 'Running');
+    let feed = $state<LiveCrossing[] | undefined>(initial?.crossings ?? []);
+    const toned: LiveCrossing[] = [];
+    const cleanup = $effect.root(() => {
+      useCrossingTones(
+        () => scope,
+        () => phase,
+        () => feed,
+        (c) => toned.push(c)
+      );
+    });
+    flushSync();
+    return {
+      toned,
+      set(next: { scope?: string | undefined; phase?: string; crossings?: LiveCrossing[] }) {
+        if ('scope' in next) scope = next.scope;
+        if ('phase' in next) phase = next.phase;
+        // A fresh array every push, exactly as a `$state.raw` live-state replacement delivers it —
+        // so re-push idempotency is proved against a NEW reference, not a reused one.
+        if ('crossings' in next) feed = [...(next.crossings ?? [])];
+        flushSync();
+      },
+      cleanup
+    };
+  }
+
+  it('tones on EVERY crossing — holeshot, counted, rejected-too-short and marshal-voided alike', () => {
+    const h = harness();
+    const holeshot = crossing(10, 'maverick-1', 'Holeshot');
+    const counted = crossing(11, 'maverick-1', 'Counted', 1);
+    const rejected = crossing(12, 'maverick-1', 'RejectedTooShort');
+    const voided = crossing(13, 'goose-2', 'VoidedByMarshal');
+
+    h.set({ crossings: [holeshot] });
+    h.set({ crossings: [holeshot, counted] });
+    h.set({ crossings: [holeshot, counted, rejected] });
+    h.set({ crossings: [holeshot, counted, rejected, voided] });
+
+    expect(h.toned).toEqual([holeshot, counted, rejected, voided]);
+    expect(h.toned.map((c) => c.disposition)).toEqual([
+      'Holeshot',
+      'Counted',
+      'RejectedTooShort',
+      'VoidedByMarshal'
+    ]);
+    h.cleanup();
+  });
+
+  it('tones a crossing on an UNSEATED seat — a phantom detection is the feature, not noise', () => {
+    const h = harness();
+    // `node-7` is in no lineup and has no pilot binding: the feed reports it anyway, and an RD
+    // hearing a pip with nobody on course is exactly how a too-sensitive gate gets noticed.
+    const phantom = crossing(20, 'node-7', 'Holeshot');
+    h.set({ crossings: [phantom] });
+    expect(h.toned).toEqual([phantom]);
+    h.cleanup();
+  });
+
+  it('a RE-PUSHED identical state fires nothing — novelty is pass_ref, never frame arrival', () => {
+    const h = harness();
+    const feed = [crossing(30, 'maverick-1', 'Holeshot'), crossing(31, 'maverick-1', 'Counted', 1)];
+    h.set({ crossings: feed });
+    expect(h.toned).toHaveLength(2);
+
+    // Three more pushes of the same crossings (a stream wake-up, a re-snapshot, a resubscribe).
+    h.set({ crossings: feed });
+    h.set({ crossings: feed });
+    h.set({ crossings: feed });
+    expect(h.toned).toHaveLength(2);
+
+    // A RE-LABELLED crossing is not a new crossing: same pass_ref, marshal-changed disposition.
+    h.set({
+      crossings: [
+        crossing(30, 'maverick-1', 'Holeshot'),
+        crossing(31, 'maverick-1', 'VoidedByMarshal')
+      ]
+    });
+    expect(h.toned).toHaveLength(2);
+
+    // The next genuinely new offset still tones.
+    const next = crossing(32, 'goose-2', 'Counted', 1);
+    h.set({ crossings: [...feed, next] });
+    expect(h.toned).toHaveLength(3);
+    expect(h.toned[2]).toEqual(next);
+    h.cleanup();
+  });
+
+  it('BASELINES silently on the first frame, even carrying a full feed (mid-heat mount)', () => {
+    // A mid-heat mount or a reconnect arrives with up to the feed's whole 64-entry bound unseen.
+    const history = Array.from({ length: 64 }, (_, i) =>
+      crossing(100 + i, `seat-${i % 8}`, 'Counted', i)
+    );
+    const h = harness({ crossings: history });
+    expect(h.toned).toEqual([]);
+
+    // Only what arrives AFTER the baseline tones.
+    const fresh = crossing(164, 'seat-0', 'Counted', 9);
+    h.set({ crossings: [...history.slice(1), fresh] });
+    expect(h.toned).toEqual([fresh]);
+    h.cleanup();
+  });
+
+  it('tones while ARMED — a crossing with everyone on the line is the clearest false positive', () => {
+    const h = harness({ phase: 'Armed', crossings: [] });
+    // Nobody is flying yet. Anything the gate reports here is either a phantom or a deliberate
+    // pre-race gate check, and the RD wants to hear both.
+    const armedPhantom = crossing(40, 'node-3', 'Holeshot');
+    h.set({ crossings: [armedPhantom] });
+    expect(h.toned).toEqual([armedPhantom]);
+
+    // Race-go does not re-announce what already toned while Armed.
+    h.set({ phase: 'Running' });
+    expect(h.toned).toEqual([armedPhantom]);
+
+    const live = crossing(41, 'maverick-1', 'Counted', 1);
+    h.set({ crossings: [armedPhantom, live] });
+    expect(h.toned).toEqual([armedPhantom, live]);
+    h.cleanup();
+  });
+
+  it('is silent outside Armed/Running, and advances the watermark there (no burst on arming)', () => {
+    const h = harness({ phase: 'Staged', crossings: [] });
+    // Staged: the countdown is running, frequencies are assigned, nobody is on the gate yet.
+    const stagedPhantom = crossing(40, 'node-3', 'Holeshot');
+    h.set({ crossings: [stagedPhantom] });
+    expect(h.toned).toEqual([]);
+
+    // Arming must NOT dump what was retired silently while Staged.
+    h.set({ phase: 'Armed' });
+    expect(h.toned).toEqual([]);
+
+    const live = crossing(41, 'maverick-1', 'Counted', 1);
+    h.set({ phase: 'Running', crossings: [stagedPhantom, live] });
+    expect(h.toned).toEqual([live]);
+
+    // The heat finishes; a late marshaling fold on the finished heat is silent again.
+    h.set({ phase: 'Unofficial' });
+    h.set({ crossings: [stagedPhantom, live, crossing(42, 'maverick-1', 'Counted', 2)] });
+    expect(h.toned).toEqual([live]);
+    h.cleanup();
+  });
+
+  it('an EVENT switch re-baselines — append offsets restart in a different log', () => {
+    const h = harness();
+    h.set({ crossings: [crossing(500, 'maverick-1', 'Counted', 1)] });
+    expect(h.toned).toHaveLength(1);
+
+    // A different event's log starts its offsets at zero. Without a scope reset the high watermark
+    // (500) would swallow that event's entire race.
+    h.set({ scope: 'event-2', crossings: [crossing(3, 'carla-3', 'Holeshot')] });
+    expect(h.toned).toHaveLength(1); // the new scope's first frame baselines, silently
+
+    const fresh = crossing(4, 'carla-3', 'Counted', 1);
+    h.set({ crossings: [crossing(3, 'carla-3', 'Holeshot'), fresh] });
+    expect(h.toned).toHaveLength(2);
+    expect(h.toned[1]).toEqual(fresh);
+    h.cleanup();
+  });
+
+  it('tones each of eight near-simultaneous crossings exactly once, in offset order', () => {
+    const h = harness();
+    h.set({ crossings: [crossing(60, 'seat-0', 'Holeshot')] });
+    expect(h.toned).toHaveLength(1);
+
+    // A whole pack lands in ONE frame (the stream coalesces): eight crossings, eight tones.
+    const pack = Array.from({ length: 8 }, (_, i) => crossing(61 + i, `seat-${i}`, 'Counted', 1));
+    h.set({ crossings: [crossing(60, 'seat-0', 'Holeshot'), ...pack] });
+    expect(h.toned.slice(1)).toEqual(pack);
+    expect(h.toned.slice(1).map((c) => c.pass_ref)).toEqual([61, 62, 63, 64, 65, 66, 67, 68]);
+    h.cleanup();
+  });
+
+  it('never re-fires when a marshal-inserted pass arrives with an OLDER source time', () => {
+    const h = harness();
+    const first = crossing(70, 'maverick-1', 'Holeshot');
+    const second = crossing(71, 'maverick-1', 'Counted', 1);
+    h.set({ crossings: [first, second] });
+    expect(h.toned).toHaveLength(2);
+
+    // A marshal inserts a missed pass: NEW offset (72), OLD source time (between 70 and 71). The
+    // feed stays ordered by offset, so it is one new tone — and the two seen ones stay silent.
+    const inserted: LiveCrossing = { ...crossing(72, 'maverick-1', 'Counted', 2), at: 70_500_000 };
+    h.set({ crossings: [first, second, inserted] });
+    expect(h.toned).toHaveLength(3);
+    expect(h.toned[2]).toEqual(inserted);
     h.cleanup();
   });
 });

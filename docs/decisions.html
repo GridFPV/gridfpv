@@ -834,6 +834,65 @@
       upstream device. Folding the floor once, beneath every projection, keeps the lap list
       and the score incapable of disagreeing; recording everything keeps the evidence; the
       marshal override keeps a whoop track's genuine 2-second laps scoreable.</dd>
+      <dt>Enforced by</dt>
+      <dd><code>crates/server/tests/min_lap_floor_conformance.rs</code> — one test that IS this
+      decision: over a single log carrying a genuine sub-floor echo pass, it reads the lap count
+      off every surface that reports one (the lap list; live state at event, class and heat scope,
+      over both the HTTP snapshot and the WebSocket change stream; the scored heat result; the
+      round standings) and asserts they are the same number. "Applied identically" was
+      <em>false</em> on every live fold for as long as the floor lived only in registry meta
+      (#409): a pure-log fold cannot see <code>min_lap_secs</code>, so each of them counted the
+      echo the lap list had suppressed. Every one of those folds now resolves the floor through
+      <code>app::live_fold_floor</code> — the stream re-resolving it <em>per prefix</em>, since
+      the current heat (and so the round that owns the floor) moves as the log crosses into the
+      next round.</dd>
+    </dl>
+
+    <h2 id="d27">D27 · GridFPV owns every config and every record; a timer is controlled, never consulted</h2>
+    <dl>
+      <dt>Context</dt>
+      <dd>D26 established this for lap semantics. One week of field testing showed the same hole
+      everywhere else the timer holds an opinion. A RotorHazard win condition nobody in GridFPV had
+      set truncated a practice run at 3 laps while the pilot flew 8, and the symptom was
+      indistinguishable from a dead gate (#403). Practice channels were whatever RH happened to be
+      tuned to — GridFPV could neither show nor set them (#402). RH's own min-lap filter can discard
+      crossings before GridFPV's floor ever runs (#407). Each was found separately and diagnosed as
+      its own bug; they are one bug. <strong>Wherever a timer remembers something, GridFPV's
+      behaviour depends on a settings screen it does not own, cannot see, and did not write.</strong></dd>
+      <dt>Decision</dt>
+      <dd><strong>GridFPV is the sole system of record for configuration and for results.</strong> A
+      timer is an instrument: GridFPV tells it what to do and reads observations back. It stores
+      nothing GridFPV depends on.
+      <ul>
+        <li><strong>Config lives in GridFPV</strong> — channels, calibration thresholds, race
+        conduct, lap semantics. Editable with no timer attached, and versioned with the event.</li>
+        <li><strong>Writing to a timer is <em>applying</em>, not <em>storing</em>.</strong> Values
+        pushed onto hardware — a Grid-owned race format (#405), a frequency set, enter/exit levels —
+        are a <em>disposable projection</em> of GridFPV's config. The test: <em>delete everything
+        GridFPV put on the timer, and it must rebuild identically from GridFPV's own state.</em></li>
+        <li><strong>Never read config back as truth.</strong> A value read from a timer is evidence
+        about the timer, not an input to a decision. Drift is surfaced to the RD and re-applied —
+        never silently adopted.</li>
+        <li><strong>The RD's own timer data is not ours to mutate.</strong> GridFPV creates and
+        selects its own objects and leaves the operator's alone, so a takeover is reversible by
+        construction rather than by remembering to restore.</li>
+      </ul></dd>
+      <dt>Rationale</dt>
+      <dd>Two systems holding opinions about the same thing is not redundancy, it is ambiguity — and
+      the ambiguity always resolves in favour of whichever one the operator cannot see. Every
+      instance of this found in the field presented as a GridFPV defect and cost a diagnosis; #403
+      cost a full session, and its symptom pointed at the gate rather than at the timer's settings.
+      Making GridFPV the only place a decision lives means a race is reproducible from the event log
+      and the config that produced it, without asking what a particular box happened to be set to
+      that day. It is also what makes a second adapter tractable: a timer that only detects and
+      reports has a small, honest interface, while one that also decides has an unbounded one.
+      <br><br>
+      This generalises D26 rather than replacing it — D26 remains the specific, and hardest-won,
+      case. (D26's claim that the floor is "applied identically in the lap list, the live view, and
+      every scoring path" was <em>false</em> on the push path — the change stream and the
+      event/class snapshots folded the log with no floor at all — until #409 plumbed it through
+      every live fold. It is now true, and D26's <em>Enforced by</em> names the conformance test
+      that keeps it true.)</dd>
     </dl>
 
     <footer class="doc-footer">

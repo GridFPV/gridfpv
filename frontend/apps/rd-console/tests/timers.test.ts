@@ -22,7 +22,8 @@ function timerWith(status: TimerStatus): Timer {
     channel_capability: 'Flexible',
     node_count: 8,
     available_channels: [],
-    manual_connect: false
+    manual_connect: false,
+    calibration: []
   } as Timer;
 }
 

@@ -837,6 +837,148 @@ where
     LapList { competitors }
 }
 
+/// What became of one gate crossing — the **disposition** the live crossing feed carries (#397).
+///
+/// A timer emits crossings; GridFPV owns lap semantics, so a crossing is not the same thing as a
+/// lap and the interesting ones are mostly *not* laps. There is no "holeshot" concept in the log —
+/// the first crossing is an ordinary [`GateIndex::LAP`](gridfpv_events::GateIndex::LAP) pass, and
+/// lap derivation is nothing but consecutive pairs of the corrected chain (`passes.windows(2)`).
+/// So a disposition is a **position in the corrected pass chain**, or the removal record the fold
+/// already keeps — never a new logged fact.
+///
+/// The two removal-side variants map 1:1 onto the only two [`VoidReason`]s that exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum CrossingDisposition {
+    /// The **first** surviving crossing of this competitor's chain — the holeshot. It opens the
+    /// first lap and closes none, so it derives no [`Lap`] at all and is invisible to every
+    /// lap-derived consumer.
+    Holeshot,
+    /// A crossing that **closed a lap** (chain position `n >= 1` closes lap `n`).
+    Counted,
+    /// The corrected fold **auto-suppressed** it under the round's minimum-lap floor (D26 —
+    /// [`VoidReason::UnderMinLap`]): a gate reflection / double-detection. It records no lap and
+    /// today reaches no live consumer at all, which is the gap #397 exists to close — a
+    /// too-sensitive gate is as broken as an insensitive one, and nothing surfaces it live.
+    RejectedTooShort,
+    /// A marshal explicitly removed it after the fact ([`VoidReason::Marshal`]). It was a real
+    /// observed crossing when it happened; the removal is a later ruling over it.
+    VoidedByMarshal,
+}
+
+impl CrossingDisposition {
+    /// The disposition a removal-record [`VoidReason`] maps to.
+    fn of_void(reason: VoidReason) -> Self {
+        match reason {
+            VoidReason::Marshal => Self::VoidedByMarshal,
+            VoidReason::UnderMinLap => Self::RejectedTooShort,
+        }
+    }
+}
+
+/// One gate crossing paired with **what became of it** — the unit [`dispositioned_passes`] emits.
+///
+/// Deliberately *not* a wire type: the live-state projection maps it onto its own additive field
+/// (`LiveRaceState::crossings`), resolving the source-local competitor to a pilot on the way.
+/// Keeping the derivation here puts it beside [`laps_from_corrected`], which owns the same
+/// chain-position rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DispositionedPass {
+    /// The crossing's **global append offset** — its stable identity. The same crossing folds to
+    /// the same offset on every re-fold of the same log, from any scope, which is what lets a
+    /// consumer fire once per crossing instead of once per delivered frame.
+    pub offset: LogRef,
+    /// The concrete pass: a marshal re-time applied for a surviving crossing; the RAW instant for
+    /// one on the removal record (the record exists so the signal trace can be matched against it,
+    /// and the trace knows nothing of a re-time).
+    pub pass: Pass,
+    /// What became of it.
+    pub disposition: CrossingDisposition,
+    /// The 1-based lap this crossing **closed**, when it closed one — exactly [`Lap::number`] for
+    /// the lap whose `end_ref` is this offset. `None` for a holeshot (it closes nothing) and for
+    /// anything on the removal record.
+    pub lap_number: Option<u32>,
+}
+
+/// Fold a window into its **crossings with dispositions** (#397) — every lap-gate crossing the
+/// window carries, surviving *and* suppressed, each labelled with what became of it.
+///
+/// This is the counterpart to [`lap_list_marshaled_with_floor`] for consumers that care about
+/// *crossings* rather than *laps*. It is that same fold —
+/// [`corrected_and_voided_passes_with_floor`] — read a second way: the surviving chain is walked
+/// in corrected order (so chain position 0 is the holeshot and position `n` closed lap `n`,
+/// matching [`laps_from_corrected`] exactly), and the removal record supplies the crossings that
+/// never made the chain.
+///
+/// # Ordering — by OFFSET, not by time
+///
+/// The result is sorted by global append offset, ascending. That is deliberate and load-bearing
+/// for idempotency: append offsets only ever grow, so a consumer can hold a single high-water mark
+/// and read "offset > watermark" as "a crossing I have not seen". Source *time* is not monotonic
+/// across the feed — a marshal-inserted pass carries an old `at` under a brand-new offset — so
+/// ordering by `at` would sort a genuinely new entry into the middle of already-seen ones.
+///
+/// # What is deliberately NOT here
+///
+/// - **Split gates.** Only lap-gate passes are crossings
+///   ([`is_lap_gate`](gridfpv_events::GateIndex::is_lap_gate)); intermediate splits are lap detail,
+///   exactly as the lap fold has it.
+/// - **Seats with no crossings.** Unlike [`lap_list_marshaled_with_floor`] (which seeds from the
+///   lineup so an undetected pilot can still be marshaled, #388), there is nothing to say about a
+///   competitor who has not crossed. Conversely a crossing by a competitor who is *not* in the
+///   lineup IS reported — a phantom detection on an empty seat is precisely what an RD needs to
+///   notice, so this fold must never filter toward "only meaningful laps".
+pub fn dispositioned_passes<'a, I>(events: I, min_lap_micros: Option<i64>) -> Vec<DispositionedPass>
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
+    let (surviving, voided) =
+        corrected_and_voided_passes_with_floor(pairs.iter().copied(), min_lap_micros);
+
+    // Group the surviving stream per competitor so chain POSITION is per-seat: seat 3's first
+    // crossing is seat 3's holeshot however many other seats crossed before it.
+    let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
+    for (offset, pass) in surviving {
+        by_competitor
+            .entry(CompetitorKey::from_pass(&pass))
+            .or_default()
+            .push((offset, pass));
+    }
+
+    let mut out: Vec<DispositionedPass> = Vec::new();
+    for (_, mut chain) in by_competitor {
+        // The SAME ordering key the lap list uses, so chain position and `Lap::number` cannot
+        // drift apart.
+        chain.sort_by_key(|(_, p)| corrected_order_key(p));
+        for (position, (offset, pass)) in chain.into_iter().enumerate() {
+            out.push(DispositionedPass {
+                offset: LogRef(offset),
+                pass,
+                // Position 0 opens the first lap and closes none — that IS the holeshot, derived
+                // rather than flagged, because nothing in the log says "holeshot".
+                disposition: if position == 0 {
+                    CrossingDisposition::Holeshot
+                } else {
+                    CrossingDisposition::Counted
+                },
+                lap_number: (position > 0).then_some(position as u32),
+            });
+        }
+    }
+    for (offset, _void_ref, pass, reason) in voided {
+        out.push(DispositionedPass {
+            offset: LogRef(offset),
+            pass,
+            disposition: CrossingDisposition::of_void(reason),
+            lap_number: None,
+        });
+    }
+
+    out.sort_by_key(|d| d.offset.0);
+    out
+}
+
 /// Ordering key for a corrected pass.
 ///
 /// A *corrected view* is a single coherent timeline: a re-timed pass moves to its

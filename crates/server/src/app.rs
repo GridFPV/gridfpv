@@ -105,7 +105,7 @@ use crate::events::{
     SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{
-    HeatSummary, heat_summaries, live_state, live_state_over, live_state_over_with_floor,
+    HeatSummary, heat_summaries, live_state_over_with_floor, live_state_with_floor,
     with_heat_timing,
 };
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
@@ -114,7 +114,7 @@ use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
 use crate::stream::Cursor;
 use crate::timers::{
-    CreateTimerRequest, SetEventTimersRequest, SetPrimaryTimerRequest, Timer, TimerId,
+    CreateTimerRequest, SetEventTimersRequest, SetPrimaryTimerRequest, Timer, TimerId, TimerSignal,
     UpdateTimerRequest,
 };
 use gridfpv_events::RoundId;
@@ -426,6 +426,17 @@ pub fn router(registry: EventRegistry) -> Router {
         // last step, so installing the plugin never requires opening RotorHazard's own web UI.
         // RD-gated, and REFUSED outright while a race is in progress on the timer.
         .route("/timers/{timer_id}/restart", post(restart_timer))
+        // **Tune telemetry** (#355 S2a): live per-node signal for one timer, on demand.
+        //
+        // A polled read rather than a scoped subscription on the event change-stream, because it
+        // is not the same kind of thing: `ws.rs` is log-offset cursors, sequences and re-snapshot
+        // machinery over an event's *log*, and tune telemetry is timer-scoped, log-free, and must
+        // work **before an event exists** — which is the state an untuned timer is in. The `GET`
+        // both reads the snapshot and renews the subscription lease (the first call starts it);
+        // the `stop` is for promptness on view close, not for correctness.
+        .route("/timers/{timer_id}/signal", get(timer_signal))
+        .route("/timers/{timer_id}/calibration", post(calibrate_timer))
+        .route("/timers/{timer_id}/signal/stop", post(stop_timer_signal))
         // The downloadable GridFPV RotorHazard plugin bundle (D16, S1) the guided-install UX
         // offers when a timer's plugin is missing/incompatible. Open read: it's static, embedded
         // at build, and carries no event data — just the plugin folder to drop into RH's plugins/.
@@ -839,6 +850,180 @@ async fn restart_timer(
         .request_restart(&timer_id)
         .map(Json)
         .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
+}
+
+/// `GET /timers/{timer_id}/signal` — the timer's **live tuning signal**, RD-gated (#355 S2a).
+///
+/// Returns a [`TimerSignal`]: every node the timer reports (**including unseated ones** — "is this
+/// node even alive?" is half the diagnostic), each with its latest RSSI / peak / nadir / pass count
+/// / thresholds and a bounded rolling RSSI window for the graph.
+///
+/// **The call is the subscription.** The first `GET` starts the stream — the connection driver
+/// sees the new lease on its next tick and opens the transport's pre-parse gate — and every `GET`
+/// renews it. Stop polling and the stream stops itself within [`SIGNAL_LEASE`], which is what
+/// makes a closed tab, a crashed browser or a dropped network safe: none of them get to leave a
+/// timer streaming forever, and none of them have to say goodbye.
+///
+/// Nothing this touches is an `Event`, a `SignalChunk`, or a log. The data exists only in memory,
+/// only while an RD is looking at it.
+///
+/// A **Mock** is a `400` (it has no signal to read); an unknown id is a 404 (`UnknownScope`).
+async fn timer_signal(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<Json<TimerSignal>, ProtocolError> {
+    let timers = registry.timers();
+    let timer = signal_capable_timer(&timers, &timer_id)?;
+    let _ = timer;
+    Ok(Json(timers.signal(&timer_id)))
+}
+
+/// `POST /timers/{timer_id}/calibration` — set one node's enter/exit thresholds, RD-gated (#355).
+///
+/// The **write** half of the Tune page, and the thing that turns it from a diagnostic into a
+/// repair. Body is a [`CalibrationRequest`]: a node, and whichever of `enter_at` / `exit_at`
+/// actually moved. There is no Apply button on the page, so this is called per adjustment (on
+/// pointer-up, on blur) rather than once per session — which is also why every refusal below is
+/// re-checked on **every** write and not once at page load.
+///
+/// # This acknowledges a dispatch. It is not a readback.
+///
+/// RotorHazard does not echo a level set: `on_set_enter_at_level` / `on_set_exit_at_level` call
+/// straight into `calibration.py`, which writes the profile, pushes to the hardware and fires an
+/// internal `Evt` — and emits nothing back (identical on v4.3.0 and v4.4.0). So a `200` here means
+/// the write was accepted and queued onto the live socket, and **nothing more**. Answering with a
+/// synthesised readback would report success for a write that may never have reached the detector,
+/// which is precisely the failure this page exists to diagnose.
+///
+/// **The console confirms by poll.** The Director asks RotorHazard to re-broadcast
+/// `enter_and_exit_at_levels` immediately after each write; that arrives on the same socket that
+/// feeds [`timer_signal`], so the value comes back as [`NodeSignal::enter_at`] /
+/// [`NodeSignal::exit_at`] on the next `GET /timers/{id}/signal`. A threshold that never comes back
+/// holding the value the RD sent is a write that did not land, and the page must say so.
+///
+/// # The refusals
+///
+/// * A **Mock** → `400`: it has no radio, so there is nothing to calibrate.
+/// * A **scored race in progress on this timer** → `400`, gated on heat phase
+///   ([`EventRegistry::scored_heat_in_progress_on_timer`]:
+///   `Staged`/`Armed`/`Running`/`Unofficial` in the active event). Moving a detection threshold
+///   under a competition heat changes what counts as a lap while it is being counted.
+///
+///   **Open practice is exempt, and deliberately so.** Practice is excluded from scoring (#398),
+///   so there is no result for a moved threshold to corrupt — and a pilot in the air on a practice
+///   heat is exactly when an RD wants to tune (*"I want to slide the slider and then test right
+///   away"*). Refusing there would leave the RD tuning an idle gate and walking a quad through by
+///   hand: the RotorHazard-UI loop this page exists to replace. This is a **narrower** gate than
+///   [`restart_timer`]'s on purpose — a restart takes the timing hardware down and destroys the
+///   practice session with it, while a threshold nudge does not.
+/// * A timer that is **not connected**, a `node` beyond the timer's width, or a body carrying
+///   **neither** threshold → `400` from the registry.
+/// * An unknown id → 404 (`UnknownScope`).
+///
+/// Every refusal names the timer by its **friendly name** (repo display rule).
+///
+/// Levels are **clamped** server-side to `RSSI_MIN..=RSSI_MAX`, never trusted from the client: a
+/// `0` is falsy to RotorHazard and would silently no-op while looking accepted.
+async fn calibrate_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+    Json(request): Json<crate::timers::CalibrationRequest>,
+) -> Result<Json<crate::timers::CalibrationDispatch>, ProtocolError> {
+    let timers = registry.timers();
+    // Resolve first so the refusals can name the timer, and so an unknown id is a clean 404 rather
+    // than a message about a timer that does not exist.
+    let timer = timers.get(&timer_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })?;
+    // Kind before phase, for the same reason [`restart_timer`] does it: the built-in Mock is in
+    // every event's default selection, so gating on the heat first would answer a Mock with "… is
+    // running Heat 1", which is both wrong and actionable-looking.
+    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is not a RotorHazard timer — there is no detector to calibrate",
+                timer.name
+            ),
+        ));
+    }
+    // The hard gate: never move a detection threshold under a SCORED race. Open practice is
+    // exempt (#398 excludes it from scoring), which is what lets an RD tune with pilots in the air.
+    let scored_heat = registry.scored_heat_in_progress_on_timer(&timer_id);
+    if let Some(heat) = scored_heat {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is running {}, a scored heat — finish or reset it before changing its \
+                 thresholds (open practice can be tuned while it runs)",
+                timer.name, heat
+            ),
+        ));
+    }
+    // Whether a heat — necessarily an open-practice one, the scored case having just refused — is
+    // racing on this timer right now. Carried onto the write so the driver's own armed-heat
+    // backstop knows this one was cleared: without it the route would accept a practice write the
+    // driver then silently dropped, and a write that reports dispatched but never lands is the
+    // exact failure this page exists to catch.
+    let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
+    timers
+        .request_calibration(&timer_id, &request, during_open_practice)
+        .map(Json)
+        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
+}
+
+/// `POST /timers/{timer_id}/signal/stop` — end the timer's tuning stream now, RD-gated (#355 S2a).
+///
+/// The lease already guarantees the stream stops; this makes it stop *promptly* when the RD closes
+/// the Tune view, instead of a few seconds later. Idempotent, and harmless on a timer that was
+/// never streaming. An unknown id is a 404 (`UnknownScope`).
+async fn stop_timer_signal(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<StatusCode, ProtocolError> {
+    let timers = registry.timers();
+    if !timers.exists(&timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        ));
+    }
+    timers.stop_signal(&timer_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Resolve a timer that can carry tune telemetry, or say why it cannot.
+///
+/// Kind-checked the same way [`restart_timer`] is, and for the same reason: the built-in Mock is in
+/// every event's default selection, so answering "no signal yet" for it would look like a timer
+/// that is merely quiet rather than one that has no detector at all. The refusal names the timer by
+/// its **friendly name** (repo display rule).
+fn signal_capable_timer(
+    timers: &crate::timers::TimerRegistry,
+    timer_id: &TimerId,
+) -> Result<Timer, ProtocolError> {
+    let timer = timers.get(timer_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })?;
+    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is not a RotorHazard timer — it has no detector signal to tune against",
+                timer.name
+            ),
+        ));
+    }
+    Ok(timer)
 }
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated (issue #73).
@@ -1807,7 +1992,13 @@ async fn snapshot_event(
     // practice laps are ordinary `Pass` events, so there is no overlay to splice.
     // `with_heat_timing` folds the current heat's server-authoritative race-start/end instants
     // (#62 follow-up) from the stored log's `recorded_at` so the clock is consistent everywhere.
-    let body = with_heat_timing(live_state(&events), &stored);
+    //
+    // The D26 min-lap floor is resolved from registry meta for the heat this fold reports as
+    // current (#409). It is NOT in the log, so a pure-log fold cannot see it — and without it the
+    // event scope counted an echo pass the heat scope's lap list suppressed.
+    let rounds = registry.rounds_of(&event_id).unwrap_or_default();
+    let floor = live_fold_floor(&events, &rounds);
+    let body = with_heat_timing(live_state_with_floor(&events, floor), &stored);
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(body),
@@ -1831,10 +2022,16 @@ async fn snapshot_class(
     let class_offsets = class_window_offsets(&events, &class);
     // The window's `current_heat` resolves which heat is on the timer; its timing is folded
     // from the *full* stored log (the heat's transition instants live there with `recorded_at`).
+    //
+    // The D26 floor is resolved over the WINDOW, not the whole log (#409): the class fold picks
+    // its current heat from the filtered slice, so that is the heat whose round owns the floor.
+    let window_events: Vec<Event> = class_offsets.iter().map(|(_, e)| e.clone()).collect();
+    let rounds = registry.rounds_of(&event_id).unwrap_or_default();
+    let floor = live_fold_floor(&window_events, &rounds);
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(with_heat_timing(
-            live_state_over(&class_offsets),
+            live_state_over_with_floor(&class_offsets, floor),
             &stored,
         )),
     }))
@@ -1850,7 +2047,7 @@ async fn snapshot_class(
 /// [`heat_window_offsets`] uses to scope a single heat, generalized to a set of heats. So a
 /// class's live state folds only its own heats and passes, with no other class's racing bleeding
 /// in. Carries each event's GLOBAL append offset — the class-scope live fold
-/// feeds these to [`live_state_over`] so marshaling adjudications (global `LogRef` targets)
+/// feeds these to [`live_state_over_with_floor`] so marshaling adjudications (global `LogRef` targets)
 /// resolve inside the filtered view (the same #55 rule as `heat_window_offsets`).
 pub(crate) fn class_window_offsets(events: &[Event], class: &ClassId) -> Vec<(u64, Event)> {
     // The heat ids tagged with this class (a `HeatScheduled` whose `class` equals `class`).
@@ -1935,21 +2132,11 @@ async fn snapshot_heat(
     // the win condition (#45) and the min-lap floor (D26 — the floor must reach the laps,
     // live, and result folds identically, or the lap list and the score disagree about a
     // suppressed pass). A heat with no round (ad-hoc) keeps the neutral defaults.
-    let round_def = events
-        .iter()
-        .find_map(|e| match e {
-            Event::HeatScheduled {
-                heat: h,
-                round: Some(round),
-                ..
-            } if *h == heat => Some(round.clone()),
-            _ => None,
-        })
-        .and_then(|round_id| {
-            registry
-                .meta_of(&event_id)
-                .and_then(|meta| meta.rounds.iter().find(|r| r.id == round_id).cloned())
-        });
+    // Through the SHARED resolver every live surface uses (`round_def_of_heat` /
+    // `live_fold_floor`, #409), so the heat scope and the event/class scopes can never resolve
+    // a different round — or a different floor — for the same heat.
+    let rounds = registry.rounds_of(&event_id).unwrap_or_default();
+    let round_def = round_def_of_heat(&events, &heat, &rounds);
     let min_lap_micros = min_lap_micros_of(round_def.as_ref());
 
     let body = match query.projection {
@@ -2229,6 +2416,39 @@ pub(crate) fn min_lap_micros_of(round: Option<&crate::events::RoundDef>) -> Opti
         .map(|s| s as i64 * 1_000_000)
 }
 
+/// The [`RoundDef`](crate::events::RoundDef) a heat was scheduled under, resolved against
+/// `rounds` (the event's CURRENT registry meta) — `None` for an untagged / ad-hoc heat, or a
+/// round that has since been removed.
+///
+/// The round tag is read off the log with [`round_of_heat`] (the heat's *latest*
+/// `HeatScheduled`, so a re-materialized heat resolves against the schedule that stands), and
+/// the config is read from registry meta, which is where `min_lap_secs` and the win condition
+/// live. One helper so every scope resolves "which round is this heat's" identically.
+pub(crate) fn round_def_of_heat(
+    events: &[Event],
+    heat: &HeatId,
+    rounds: &[crate::events::RoundDef],
+) -> Option<crate::events::RoundDef> {
+    let round_id = crate::live_state::round_of_heat(events, heat)?;
+    rounds.iter().find(|r| r.id == round_id).cloned()
+}
+
+/// The **min-lap floor** (D26) that applies to a live fold over `events` — the floor of the
+/// round owning the heat that fold will report as current.
+///
+/// This is the one resolver every live surface goes through: the event- and class-scope
+/// snapshots, and the change stream's per-prefix fold (#409). It deliberately takes the *same*
+/// event slice the fold consumes — for the class scope that is the class's filtered window, not
+/// the whole log — because [`live_state_core`](crate::live_state) picks its current heat from
+/// that slice, and a floor resolved against a different heat is worse than no floor at all.
+///
+/// A heat with no round, or a round with no `min_lap_secs`, yields `None` — D26's "0/absent =
+/// off, so pre-existing rounds keep bit-identical results".
+pub(crate) fn live_fold_floor(events: &[Event], rounds: &[crate::events::RoundDef]) -> Option<i64> {
+    let heat = crate::live_state::current_heat(events)?;
+    min_lap_micros_of(round_def_of_heat(events, &heat, rounds).as_ref())
+}
+
 /// Render a [`ProtocolError`] as an HTTP error response (protocol.html §9.8): the JSON
 /// error body under the status its [`ErrorCode`] maps to. The single shared error shape is
 /// returned uniformly across every snapshot path.
@@ -2259,6 +2479,7 @@ mod tests {
     use gridfpv_events::{AdapterId, GateIndex, HeatTransition, LogRef, Pass};
     use gridfpv_projection::CompetitorKey;
     use http_body_util::BodyExt;
+    use serde_json::json;
     use tower::ServiceExt;
 
     use crate::snapshot::HeatPhase;
@@ -3701,7 +3922,8 @@ mod tests {
     // --- #73: the application-level timer registry + per-event selection ----------------
 
     use crate::timers::{
-        CreateTimerRequest, SetEventTimersRequest, Timer, TimerKind, UpdateTimerRequest,
+        CreateTimerRequest, NodeReading, SIGNAL_SAMPLE_INTERVAL, SetEventTimersRequest, Timer,
+        TimerKind, UpdateTimerRequest,
     };
 
     /// `GET /timers` → status + parsed `Timer[]`.
@@ -3806,6 +4028,141 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = post_timer_connection(registry, "no-such-timer", "connect").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// `GET /timers/{id}/signal` → status + parsed [`TimerSignal`] (when the call succeeded).
+    async fn get_timer_signal(
+        registry: EventRegistry,
+        timer_id: &str,
+    ) -> (StatusCode, Option<TimerSignal>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/timers/{timer_id}/signal"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice::<TimerSignal>(&bytes).ok())
+    }
+
+    /// `POST /timers/{id}/signal/stop` → status.
+    async fn post_stop_timer_signal(registry: EventRegistry, timer_id: &str) -> StatusCode {
+        router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/timers/{timer_id}/signal/stop"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// A RotorHazard timer to read tune telemetry from — no event, and none needed (#355 S2a): the
+    /// tune path is timer-scoped precisely so it works before an event exists, which is the state
+    /// an untuned timer is in.
+    fn rh_timer_for_signal(registry: &EventRegistry) -> Timer {
+        registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reading_a_timers_signal_starts_and_renews_the_lease() {
+        // #355 S2a: the GET *is* the subscription. Nothing else opens it, and nothing but a
+        // continuing poll keeps it open.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = rh_timer_for_signal(&registry);
+        assert!(
+            !registry.timers().signal_wanted(&rh.id),
+            "nothing streams until someone asks"
+        );
+
+        let (status, signal) = get_timer_signal(registry.clone(), &rh.id.0).await;
+        assert_eq!(status, StatusCode::OK);
+        let signal = signal.expect("a snapshot");
+        assert_eq!(signal.timer, rh.id);
+        // No live connection in this test, so nothing has pushed — which the snapshot says plainly
+        // rather than pretending. "No signal" and "no link" are different problems.
+        assert!(!signal.streaming);
+        assert!(signal.lease_ms_remaining > 0);
+        assert_eq!(
+            signal.period_micros,
+            SIGNAL_SAMPLE_INTERVAL.as_micros() as u32
+        );
+        assert!(registry.timers().signal_wanted(&rh.id));
+
+        // A push from the (simulated) connection driver shows up on the next read, all nodes.
+        registry.timers().push_signal(
+            &rh.id,
+            &(0..8)
+                .map(|index| NodeReading {
+                    seen: true,
+                    rssi: Some(40.0 + index as f32),
+                    enter_at: Some(90.0),
+                    exit_at: Some(80.0),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let (_, signal) = get_timer_signal(registry.clone(), &rh.id.0).await;
+        let signal = signal.expect("a snapshot");
+        assert!(signal.streaming);
+        assert_eq!(signal.nodes.len(), 8);
+        assert_eq!(signal.sample_micros.len(), 1);
+        assert_eq!(signal.nodes[7].samples, vec![47.0]);
+        assert_eq!(signal.nodes[7].enter_at, Some(90.0));
+    }
+
+    #[tokio::test]
+    async fn stopping_a_timers_signal_ends_it_promptly() {
+        // The lease alone would stop it; the explicit stop is for closing the Tune view without
+        // leaving the socket parsing heartbeats for another five seconds.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = rh_timer_for_signal(&registry);
+        get_timer_signal(registry.clone(), &rh.id.0).await;
+        assert!(registry.timers().signal_wanted(&rh.id));
+
+        assert_eq!(
+            post_stop_timer_signal(registry.clone(), &rh.id.0).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!registry.timers().signal_wanted(&rh.id));
+        // Idempotent — a second close, or a view that was never opened, is not an error.
+        assert_eq!(
+            post_stop_timer_signal(registry.clone(), &rh.id.0).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mock_or_unknown_timer_has_no_signal_to_read() {
+        // A Mock is in every event's default selection and has no detector at all, so answering
+        // "no nodes yet" would read as a quiet timer rather than one that cannot have signal.
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, _) = get_timer_signal(registry.clone(), "mock").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get_timer_signal(registry.clone(), "no-such-timer").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            post_stop_timer_signal(registry, "no-such-timer").await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     /// A connected RotorHazard timer selected by Practice — the precondition every restart test
@@ -4015,6 +4372,437 @@ mod tests {
         let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(registry.timers().take_restart_requests().is_empty());
+    }
+
+    /// `POST /timers/{id}/calibration` with a raw JSON body → status + raw bytes.
+    async fn post_calibration(
+        registry: EventRegistry,
+        timer_id: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, Vec<u8>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/timers/{timer_id}/calibration"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    /// The refusal message from a failed calibration call.
+    fn refusal(bytes: &[u8]) -> String {
+        serde_json::from_slice::<ProtocolError>(bytes)
+            .expect("a ProtocolError body")
+            .message
+    }
+
+    #[tokio::test]
+    async fn calibrating_a_connected_rh_timer_queues_the_write_and_records_it_as_grid_config() {
+        // #355: the write half of the Tune page. The route parks the write on the timer registry —
+        // the connection layer lives above this crate — and the reconciler drains it onto the live
+        // socket. D27: the accepted value is ALSO recorded on the timer, because a threshold the RD
+        // set is GridFPV's config; the timer is only where it is applied.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 2, "enter_at": 96 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::CalibrationDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.timer, rh.id);
+        assert_eq!(dispatch.node, 2);
+        assert_eq!(dispatch.enter_at, Some(96));
+        // The threshold that was NOT sent stays absent — the route never invents the other half.
+        assert_eq!(dispatch.exit_at, None);
+
+        // D27: GridFPV holds the value itself, not merely the timer.
+        assert_eq!(
+            registry.timers().calibration(&rh.id),
+            vec![crate::timers::NodeCalibration {
+                node: 2,
+                enter_at: Some(96),
+                exit_at: None,
+            }]
+        );
+
+        // The queue drains EXACTLY ONCE.
+        let drained = registry.timers().take_calibration_requests();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].timer, rh.id);
+        assert_eq!(drained[0].node, 2);
+        assert_eq!(drained[0].enter_at, Some(96));
+        assert!(
+            registry.timers().take_calibration_requests().is_empty(),
+            "a second drain is empty — nothing is re-queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_writes_to_one_node_coalesce_to_the_latest_value_per_threshold() {
+        // The page writes on interaction end, so a drag that lands twice before the reconciler's
+        // next tick must apply the LATEST value once — never replay a stale one after it. Enter and
+        // exit are independent: writing one must not clear the other.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        for enter in [80, 90, 101] {
+            let (status, _) = post_calibration(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "enter_at": enter }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, _) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "exit_at": 77 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // A different node is its own entry, not a coalesce target.
+        let (status, _) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 3, "enter_at": 55 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let drained = registry.timers().take_calibration_requests();
+        assert_eq!(drained.len(), 2, "one entry per node, not one per write");
+        assert_eq!(drained[0].node, 0);
+        assert_eq!(drained[0].enter_at, Some(101), "the latest enter wins");
+        assert_eq!(
+            drained[0].exit_at,
+            Some(77),
+            "the exit is carried alongside"
+        );
+        assert_eq!(drained[1].node, 3);
+        assert!(registry.timers().take_calibration_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn calibration_levels_are_clamped_server_side() {
+        // Never trust the client for a value that reaches timing hardware. `0` is the dangerous one:
+        // RotorHazard's `calibration.py` tests the level for truthiness, so a `0` is read as "re-read
+        // it off the node" and the old threshold silently survives while the write looks accepted.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 1, "enter_at": 0, "exit_at": 9_999 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::CalibrationDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.enter_at, Some(crate::timers::RSSI_MIN));
+        assert_eq!(dispatch.exit_at, Some(crate::timers::RSSI_MAX));
+
+        // The clamp happens ONCE, before both the record and the queue — so neither can hold a
+        // value the other does not.
+        let drained = registry.timers().take_calibration_requests();
+        assert_eq!(drained[0].enter_at, Some(crate::timers::RSSI_MIN));
+        assert_eq!(drained[0].exit_at, Some(crate::timers::RSSI_MAX));
+        assert_eq!(
+            registry.timers().calibration(&rh.id),
+            vec![crate::timers::NodeCalibration {
+                node: 1,
+                enter_at: Some(crate::timers::RSSI_MIN),
+                exit_at: Some(crate::timers::RSSI_MAX),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn calibrating_is_refused_while_a_scored_race_is_in_progress_on_the_timer() {
+        // The hard gate (#355): moving a detection threshold under a SCORED race changes what counts
+        // as a lap while it is being counted. Gated on HEAT PHASE, and the refusal names the heat and
+        // the timer by their FRIENDLY names (CLAUDE.md) — and says the heat is *scored*, so an RD
+        // refused mid-heat learns why rather than just "a heat is running".
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_practice(&registry);
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("q-1".into()),
+                        lineup: vec![CompetitorRef("A".into())],
+                        class: None,
+                        round: None,
+                        frequencies: vec![],
+                        label: Some("Qualifier Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("q-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let (status, bytes) = post_calibration(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "enter_at": 90 }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "a {transition:?} heat must refuse the calibration write"
+            );
+            let message = refusal(&bytes);
+            assert!(
+                message.contains("Qualifier Heat 1"),
+                "the refusal must name the heat: {message}"
+            );
+            assert!(
+                message.contains("Field RH"),
+                "the refusal must name the timer: {message}"
+            );
+            assert!(
+                message.contains("scored heat"),
+                "the refusal must say the heat is SCORED — that is what makes it different from \
+                 open practice, which is tunable while it runs: {message}"
+            );
+            assert!(
+                !message.contains(&rh.id.0),
+                "the refusal must not leak the raw timer id: {message}"
+            );
+            // A real refusal, not a confirm-and-fire — and nothing was recorded as config either.
+            assert!(registry.timers().take_calibration_requests().is_empty());
+            assert!(registry.timers().calibration(&rh.id).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn calibrating_is_accepted_while_an_open_practice_heat_is_running() {
+        // #355 + #398, and the companion to the refusal above: an OPEN PRACTICE heat does NOT block
+        // a threshold change. Practice is excluded from scoring, so there is no result for a moved
+        // threshold to corrupt — and a pilot in the air on a practice heat is exactly when an RD
+        // wants to tune ("I want to slide the slider and then test right away"). Refuse here and the
+        // RD can only tune an idle gate and wave a quad through by hand, which is the RotorHazard-UI
+        // loop this page was built to replace.
+        //
+        // Easy to regress back to the stricter `heat_in_progress_on_timer` gate, which is why this
+        // exercises every racing phase rather than just Running.
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_practice(&registry);
+            // A round in the OPEN PRACTICE format — `open_practice::excluded_from_scoring` keys on
+            // the format alone, and the gate consults that same predicate so the two cannot drift.
+            let round = registry
+                .add_round(
+                    &EventId(PRACTICE_EVENT_ID.into()),
+                    NewRoundReq {
+                        label: "Practice".into(),
+                        classes: vec![],
+                        // The OPEN PRACTICE format is the whole of the exemption:
+                        // `open_practice::excluded_from_scoring` keys on the format name alone, and
+                        // the calibration gate consults that same predicate, so the two cannot drift.
+                        format: gridfpv_engine::format::OpenPractice::NAME.to_string(),
+                        params: std::collections::BTreeMap::new(),
+                        win_condition: None,
+                        seeding: SeedingRule::AllChannels { channels: vec![0] },
+                        time_limit_secs: None,
+                        channel_mode: None,
+                        staging_timer_secs: None,
+                        start_procedure: None,
+                        grace_window: None,
+                        protest_window: None,
+                        min_lap_secs: None,
+                    },
+                )
+                .expect("an open-practice round");
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("p-1".into()),
+                        lineup: vec![CompetitorRef("node-0".into())],
+                        class: None,
+                        round: Some(round.id.clone()),
+                        frequencies: vec![],
+                        label: Some("Practice Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("p-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let (status, bytes) = post_calibration(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "enter_at": 90 }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an open-practice heat in {transition:?} must NOT block a threshold change"
+            );
+            let dispatch: crate::timers::CalibrationDispatch =
+                serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(dispatch.enter_at, Some(90));
+
+            // …and it must actually reach the wire. The write carries the route's finding that a
+            // practice heat is racing, so the driver's own armed-heat backstop lets it through —
+            // without that flag the route would accept a write the driver silently dropped, which is
+            // "dispatched but never landed", the failure this page exists to catch.
+            let drained = registry.timers().take_calibration_requests();
+            assert_eq!(drained.len(), 1);
+            assert!(
+                drained[0].during_open_practice,
+                "the write must be stamped as cleared against an open-practice heat, or the \
+                 driver's armed-heat backstop will drop it"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn calibrating_a_mock_an_unknown_or_a_disconnected_timer_is_rejected() {
+        // A Mock has no radio to calibrate; an unknown id is a 404 (never a message about a timer
+        // that does not exist); a configured-but-not-connected RH timer is a 400 — there is no socket
+        // to emit on, and a threshold is never held over for a future connection.
+        let (registry, _state, _) = state_with(vec![]);
+
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            "mock",
+            json!({ "node": 0, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Mock") && message.contains("not a RotorHazard timer"),
+            "the Mock refusal must name the timer and say why: {message}"
+        );
+
+        let (status, _) = post_calibration(
+            registry.clone(),
+            "no-such-timer",
+            json!({ "node": 0, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Field RH") && message.contains("not connected"),
+            "the disconnected refusal must name the timer: {message}"
+        );
+        assert!(registry.timers().take_calibration_requests().is_empty());
+        assert!(registry.timers().calibration(&rh.id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_calibration_write_with_no_threshold_or_an_unknown_node_is_refused() {
+        // "I asked for nothing and it worked" is the shape of every silent calibration failure, so an
+        // empty write is a refusal rather than a no-op success. A node beyond the timer's width is
+        // refused too: RotorHazard's `calibration.py` drops an out-of-range seat index with nothing
+        // but a log line, which would look exactly like a successful write that did nothing.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        let (status, bytes) =
+            post_calibration(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refusal(&bytes).contains("no threshold given"),
+            "the empty-write refusal must say what is missing"
+        );
+
+        let node_count = registry.timers().get(&rh.id).unwrap().node_count;
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": node_count, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Field RH"),
+            "the refusal must name the timer: {message}"
+        );
+        assert!(registry.timers().take_calibration_requests().is_empty());
     }
 
     #[tokio::test]

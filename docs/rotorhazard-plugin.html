@@ -97,11 +97,13 @@
       <dd>Real, sanctioned methods at 1.3+ (in RHAPI&nbsp;1.0 they were <code>pass</code> stubs
       monkeypatched at runtime — the floor avoids that). This is the clean start/stop, no socket
       <code>stage_race</code> / <code>alter_race_format</code> dance.</dd>
-      <dt>Calibration write — <code>rhapi.db.frequencyset_alter(enter_ats=, exit_ats=)</code></dt>
-      <dd>The sanctioned, persisted threshold write-path (per-channel enter/exit levels on the frequency
-      set). <strong>Note:</strong> <code>rhapi.interface</code> stays <em>read-only</em> even at 1.4
-      (<code>seats</code> + <code>add</code> only), so an <em>immediate, live</em> threshold change uses
-      the internal interface setter via <code>RaceContext</code> (semi-private, stable). For
+      <dt>Calibration write — <strong>not RHAPI at all</strong>:
+      <code>set_enter_at_level</code> / <code>set_exit_at_level</code> on the socket</dt>
+      <dd>There is <strong>no supported RHAPI calibration path</strong> on 1.3 or 1.4 —
+      <code>rhapi.interface</code> is read-only in both (1.4 adds only <code>add()</code>). The working
+      write is RotorHazard's own stock socket.io handler, on the connection the Grid adapter already
+      holds — so <strong>calibration needs no plugin at all</strong>, which is what lets the Tune page
+      (#355) work on a bone-stock RH. See the correction below for the shape and the two traps. For
       <a href="marshaling-plan.html">#3 recalc</a> we mostly need the dense trace (below), not a live
       setter — see §3.</dd>
       <dt>Seating — <code>rhapi.db</code> + <code>rhapi.race.slots</code></dt>
@@ -115,6 +117,61 @@
       the plugin channel rides <strong>that same connection and port</strong> — no hosted blueprint, no
       second transport.</dd>
     </dl>
+
+    <div class="callout" id="calibration-correction">
+      <p>
+        <strong>⚠ Correction (2026-08-25, #355): the <code>frequencyset_alter</code> calibrate route
+        this document used to specify cannot work.</strong> It maps to
+        <code>RHData.alter_profile</code>, which writes <code>profile.enter_ats</code> /
+        <code>exit_ats</code> to the database, commits, and fires <code>Evt.PROFILE_ALTER</code> — and
+        <strong>never calls <code>interface.set_enter_at_level</code></strong>. The value persists and
+        the timing hardware keeps detecting at the old threshold: a calibration that silently does
+        nothing. It was never built; every mention of it below has been corrected.
+      </p>
+      <p>
+        <strong>What actually works</strong>, verified against RotorHazard <strong>v4.3.0</strong> (the
+        D16 floor, and what the field timers run) <strong>and v4.4.0</strong> source —
+        <code>server.py::on_set_enter_at_level</code> / <code>on_set_exit_at_level</code> and
+        <code>calibration.py</code>:
+      </p>
+      <ul>
+        <li><strong>Events:</strong> <code>set_enter_at_level</code> and
+        <code>set_exit_at_level</code>.</li>
+        <li><strong>Payload:</strong> <code>{ node, enter_at_level }</code> and
+        <code>{ node, exit_at_level }</code>, where <code>node</code> is the <strong>0-based seat
+        index</strong>.</li>
+        <li><strong>Identical on v4.3.0 and v4.4.0</strong> — same event names, same payload keys.
+        v4.4.0 differs only by an <code>int(… or 0)</code> coercion around the value, so one code path
+        covers both and no version branch is needed.</li>
+        <li><strong>No socket-level auth.</strong> The <code>@requires_auth</code> decorators in
+        <code>server.py</code> guard Flask HTTP routes; <em>zero</em> socket handlers carry them.</li>
+        <li><strong>It reaches the hardware.</strong> <code>calibration.py</code> writes the profile
+        row, calls <code>interface.set_enter_at_level</code>, <em>and</em> fires
+        <code>Evt.ENTER_AT_LEVEL_SET</code> — all three, which is exactly what
+        <code>frequencyset_alter</code> does not do.</li>
+        <li><strong>No echo.</strong> Neither handler emits anything in reply, so a write cannot be
+        confirmed synchronously. The readback is <code>load_data</code> with
+        <code>{"load_types": ["enter_and_exit_at_levels"]}</code>, which answers with an
+        <code>enter_and_exit_at_levels</code> emit. Grid fires it after every write and the Tune page
+        confirms by seeing the level come back — never by trusting the write's own response.</li>
+      </ul>
+      <p><strong>Two traps that cost a field day if they are rediscovered the hard way:</strong></p>
+      <ul>
+        <li><strong><code>0</code> is falsy.</strong> <code>calibration.py</code> tests the incoming
+        level for <em>truthiness</em> (<code>if not enter_at_level:</code>), so a <code>0</code> means
+        “ignore me and re-read the level off the node” rather than “set it to zero”. The old threshold
+        survives while the write looks perfectly accepted. Clamp the minimum to <strong>1</strong>.</li>
+        <li><strong><code>255</code> writes the profile but never reaches the detector.</strong>
+        <code>Node.is_valid_rssi</code> is <code>value &gt; 0 and value &lt; max_rssi_value</code> —
+        <em>strictly</em> less — and <code>max_rssi_value</code> is <code>255</code> at node API
+        level ≥ 18. So <code>RHInterface.set_enter_at_level</code> drops it, while
+        <code>calibration.py</code> has <em>already</em> written the profile row. And because
+        <code>RHUI.emit_enter_and_exit_at_levels</code> serialises that <strong>profile row, not the
+        node</strong>, the readback cheerfully confirms a level the detector never received. The
+        readback proves “RotorHazard took it”, one step short of “the detector holds it”; staying
+        inside <code>1..=254</code> is what closes the gap.</li>
+      </ul>
+    </div>
 
     <h2>3. The Grid&harr;plugin protocol</h2>
     <p>
@@ -134,8 +191,12 @@
       node count) · <code>gridfpv_clock_sync</code> (NTP-style exchange — RH's monotonic clock demands
       it) · <code>gridfpv_seat</code> (assign node&nbsp;&rarr;&nbsp;{raw RH pilot id, callsign,
       frequency/channel}) · <code>gridfpv_start</code> / <code>gridfpv_stop</code> (Grid's go/finish —
-      maps to <code>race.stage()</code> / <code>race.stop()</code>) · <code>gridfpv_calibrate</code>
-      (write per-channel enter/exit via <code>frequencyset_alter</code>).</dd>
+      maps to <code>race.stage()</code> / <code>race.stop()</code>).
+      <strong>There is no <code>gridfpv_calibrate</code>:</strong> calibration does not go through the
+      plugin at all — Grid writes <code>set_enter_at_level</code> / <code>set_exit_at_level</code> on
+      the stock socket it already holds (see the
+      <a href="#calibration-correction">correction above</a>), which is what lets the Tune page work on
+      a plugin-less RH.</dd>
       <dt>Data · plugin &rarr; Grid (<code>gridfpv_*</code> broadcast)</dt>
       <dd><code>gridfpv_session</code> (stage/start/finish/stop edges) · <code>gridfpv_competitor_seen</code>
       (a node seat went active) · <code>gridfpv_pass</code> (the atom: node seat, source timestamp,
@@ -149,8 +210,10 @@
         detection at new thresholds" call, so the draggable-threshold recalculate is a <em>computation
         over the stored dense trace</em> (the <code>history_values</code> Grid captured in S2): replay RH's
         enter/exit hysteresis at the marshal's chosen levels and <em>propose</em> the resulting laps. It
-        needs the trace + a faithful copy of the detection rule — not a live setter. Committing a new
-        calibration optionally writes it back via <code>gridfpv_calibrate</code>.
+        needs the trace + a faithful copy of the detection rule — not a live setter. Pushing a
+        marshal-chosen level forward onto the timer is the ordinary calibration write
+        (<code>set_enter_at_level</code>, <a href="#calibration-correction">above</a>), not a plugin
+        route.
       </p>
     </div>
     <p>
@@ -168,7 +231,7 @@ flowchart LR
     nm["Node manager&lt;br/&gt;dense RSSI · thresholds"]
     rms["RMS · race lifecycle"]
     subgraph plug["GridFPV plugin (in-process, RHAPI 1.3+)"]
-      hooks["events.on / interface.seats&lt;br/&gt;race.stage·stop · frequencyset_alter"]
+      hooks["events.on / interface.seats&lt;br/&gt;race.stage·stop"]
       ch["socket_listen / socket_broadcast&lt;br/&gt;gridfpv_* namespace"]
     end
     nm --> hooks
@@ -180,7 +243,8 @@ flowchart LR
     canon{{"Canonical events&lt;br/&gt;Pass · signal · lifecycle"}}
   end
   ch -->|"broadcast: pass · signal · session"| adp
-  adp -->|"ack: seat · start · stop · calibrate"| ch
+  adp -->|"ack: seat · start · stop"| ch
+  adp -->|"set_enter_at_level / set_exit_at_level&lt;br/&gt;(stock socket, no plugin)"| nm
   adp --> canon
 
   classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
@@ -199,7 +263,7 @@ flowchart LR
         <tr><td><strong><code>add_pilot</code>/<code>alter_heat</code> seating dance</strong></td><td><code>rhapi.db</code> + <code>race.slots</code> in-process</td><td>S3 ◐ (not yet — seating dance still production)</td></tr>
         <tr><td><strong>un-zeroable ~0.9&nbsp;s prestage</strong> (<code>RACE_START_DELAY_EXTRA_SECS</code>)</td><td>plugin <strong>zeroes it via <code>rhapi.config</code></strong> at load — shipped independently of the control rewrite, so <code>stage_race</code> reaches RACING immediately</td><td>done</td></tr>
         <tr><td>per-pass RSSI only via <code>node_data</code></td><td>full <code>current_rssi</code>/<code>pass_peak_rssi</code>/levels every heartbeat</td><td>S2 ✅</td></tr>
-        <tr><td><strong>no signal write-back</strong> (blocks #3 recalc)</td><td>re-detection over the stored dense trace + <code>frequencyset_alter</code> calibrate</td><td>S4 ◐ (re-detection shipped Grid-side; calibrate write-back future)</td></tr>
+        <tr><td><strong>no signal write-back</strong> (blocks #3 recalc)</td><td>re-detection over the stored dense trace; the calibrate write is <strong>stock-socket, not plugin</strong> (<code>set_enter_at_level</code>)</td><td>S4 ● (re-detection shipped Grid-side; the calibration write path shipped in #355, with no plugin involved)</td></tr>
       </tbody>
     </table>
 
@@ -287,8 +351,10 @@ flowchart LR
     <div class="principle">
       <p><span class="name">Floor on RHAPI 1.3 (RH v4.3.0+); use the new features.</span> The plugin
       requires <strong>RH&nbsp;v4.3.0+</strong> (RHAPI&nbsp;1.3, verified to carry <code>socket_listen</code>/
-      <code>socket_broadcast</code>, real <code>race.stage()/stop()</code>, <code>frequencyset_alter</code>,
-      and <code>manifest.json</code> + <code>required_rhapi_version</code> gating). Current RH is v4.4.0
+      <code>socket_broadcast</code>, real <code>race.stage()/stop()</code>, and
+      <code>manifest.json</code> + <code>required_rhapi_version</code> gating — <em>not</em>
+      calibration, which has no RHAPI path at any version and rides RH's stock socket instead; see the
+      <a href="#calibration-correction">correction</a>). Current RH is v4.4.0
       (RHAPI&nbsp;1.4). The <code>manifest.json</code> declares <code>required_rhapi_version</code> 1.3 so
       RH's own loader refuses to load us into a too-old server, and Grid surfaces "update RH to v4.3.0+"
       as part of the guided install. We are comfortable making users update RH — every serious RMS
@@ -351,13 +417,15 @@ flowchart LR
       <dt>Slice 4 — Draggable-threshold recalculate ◐ DELIVERED GRID-SIDE</dt>
       <dd>A <code>recalculate</code> that replays detection over the stored dense trace at marshal-chosen
       enter/exit levels and <em>proposes</em> lap changes (Grid/marshal commits; RH truth is not mutated
-      under the RD), plus an optional <code>gridfpv_calibrate</code> write-back via
-      <code>frequencyset_alter</code>. The marshaling graph gets draggable thresholds over the captured
-      trace. The payoff feature owning-the-stack was for. <strong>Shipped ahead of the plugin
+      under the RD), plus an optional write-back of the chosen levels onto the timer. The marshaling
+      graph gets draggable thresholds over the captured trace. The payoff feature owning-the-stack was for. <strong>Shipped ahead of the plugin
       slice, Grid-side</strong>: re-detection re-runs the enter/exit hysteresis over the captured
       trace in the console (preview-only; committed via the ordinary marshaling rulings) — resolving
-      open decision #3 in favour of a faithful Grid-side reimplementation. The optional
-      <code>gridfpv_calibrate</code> write-back remains future.</dd>
+      open decision #3 in favour of a faithful Grid-side reimplementation. The <strong>forward</strong>
+      write-back landed in #355 — but as <code>set_enter_at_level</code> on the stock socket, with
+      <strong>no plugin route and no <code>gridfpv_calibrate</code></strong> (see the
+      <a href="#calibration-correction">correction</a>); pushing a <em>marshaling</em> panel's levels
+      through it is the remaining follow-up.</dd>
     </dl>
 
     <pre class="mermaid">
