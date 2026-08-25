@@ -2,11 +2,11 @@
     "name": "GridFPV",
     "author": "GridFPV",
     "author_uri": "https://github.com/GridFPV",
-    "description": "GridFPV race-director integration: live dense RSSI, clean start/stop, and threshold recalculate over RH's socket.io (gridfpv_* namespace).",
+    "description": "GridFPV race-director integration: live dense RSSI, native passes, and a Grid-owned race format so RotorHazard makes no race decisions, over RH socket.io (gridfpv_* namespace).",
     "info_uri": "https://github.com/GridFPV/gridfpv",
     "license": "MIT",
     "license_uri": "https://github.com/GridFPV/gridfpv/blob/main/LICENSE",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "required_rhapi_version": "1.3",
     "update_uri": null,
     "text_domain": null
