@@ -83,8 +83,8 @@ use gridfpv_storage::StoredEvent;
 
 use crate::app::{AppState, resolve_event};
 use crate::error::{ErrorCode, ProtocolError};
-use crate::events::EventRegistry;
-use crate::live_state::{live_state, live_state_over, with_heat_timing};
+use crate::events::{EventRegistry, RoundDef};
+use crate::live_state::{live_state_over_with_floor, live_state_with_floor, with_heat_timing};
 use crate::scope::{EventId, Scope};
 use crate::snapshot::{ProjectionBody, ProjectionKind};
 use crate::stream::{Change, ChangeEnvelope, Cursor, StreamMessage};
@@ -147,6 +147,33 @@ struct ScopeProjection {
     encoding: Encoding,
 }
 
+/// Where a stream re-reads the event's **round config** from, so the D26 min-lap floor can be
+/// resolved per fold rather than captured once at subscribe (#409).
+///
+/// `RoundDef::min_lap_secs` lives in registry meta, not in the log, so it is invisible to a
+/// pure-log fold and it can be **edited while a stream is open**. Holding the registry handle
+/// (rather than a `Vec<RoundDef>` snapshot taken at subscribe) is what gives the stream the
+/// property the snapshot path gets for free by re-resolving per request: the config the fold
+/// applies is the config that stands *now*.
+#[derive(Clone)]
+struct RoundFloors {
+    registry: EventRegistry,
+    event: EventId,
+}
+
+impl RoundFloors {
+    /// The event's rounds as registry meta holds them **at this instant**. Read once per
+    /// [`Engine::advance`] — i.e. once per wake — and shared across the prefixes that batch
+    /// folds, which are all folded within the same instant anyway.
+    ///
+    /// An unknown event (deleted mid-stream) yields no rounds, which reads as "no floor": the
+    /// stream degrades to the pre-#409 counts rather than failing, and the socket closes on the
+    /// next log read regardless.
+    fn rounds(&self) -> Vec<RoundDef> {
+        self.registry.rounds_of(&self.event).unwrap_or_default()
+    }
+}
+
 impl ScopeProjection {
     /// The projection + encoding preference a scope's change stream uses.
     fn of(scope: &Scope) -> Self {
@@ -178,7 +205,17 @@ impl ScopeProjection {
     /// accumulator to consult and no overlay to splice. That is what makes the change-suppression
     /// in [`Engine::advance`] sound — an append that does not move the folded body (a
     /// `SignalHistory` chunk, say) emits nothing at all.
-    fn fold(scope: &Scope, stored: &[StoredEvent]) -> Option<ProjectionBody> {
+    ///
+    /// # The D26 min-lap floor is resolved PER PREFIX (#409)
+    ///
+    /// `rounds` is the event's registry meta — the only place `RoundDef::min_lap_secs` lives, so
+    /// a pure-log fold cannot see it. The floor itself is **not** a parameter: it is re-derived
+    /// inside this fold, from *this* prefix, because the floor belongs to the heat the prefix
+    /// reports as current and the current heat changes as the stream crosses into the next round.
+    /// A floor captured once at subscribe would be wrong from that crossing onward. Every live
+    /// scope resolves it through [`crate::app::live_fold_floor`], the same helper the snapshot
+    /// handlers use, so a subscriber and a snapshot of one scope still converge.
+    fn fold(scope: &Scope, stored: &[StoredEvent], rounds: &[RoundDef]) -> Option<ProjectionBody> {
         // The bare-event view the lap/phase fold consumes; the live-state clock timing is
         // folded separately from `stored` (which carries the `recorded_at` server timestamps).
         let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
@@ -186,8 +223,9 @@ impl ScopeProjection {
         match scope {
             Scope::Event { .. } => {
                 // `with_heat_timing` anchors the clock to the current heat's race-go (#62 follow-up).
+                let floor = crate::app::live_fold_floor(events, rounds);
                 Some(ProjectionBody::LiveRaceState(with_heat_timing(
-                    live_state(events),
+                    live_state_with_floor(events, floor),
                     stored,
                 )))
             }
@@ -197,8 +235,12 @@ impl ScopeProjection {
                 // diverge: the stream folded the whole event). Offsets matter so marshaling
                 // adjudications (global LogRef targets) resolve inside the filtered view.
                 let window = crate::app::class_window_offsets(events, class);
+                // The floor is resolved over the WINDOW: the class fold picks its current heat
+                // from the filtered slice, so that is the heat whose round owns the floor.
+                let window_events: Vec<Event> = window.iter().map(|(_, e)| e.clone()).collect();
+                let floor = crate::app::live_fold_floor(&window_events, rounds);
                 Some(ProjectionBody::LiveRaceState(with_heat_timing(
-                    live_state_over(&window),
+                    live_state_over_with_floor(&window, floor),
                     stored,
                 )))
             }
@@ -214,8 +256,13 @@ impl ScopeProjection {
                 // The heat's phase/clock are its real log window; the race-go timing folds from the
                 // full stored log.
                 let window = crate::app::heat_window_offsets(events, heat);
+                // The scope NAMES the heat, so the floor is that heat's round's — resolved through
+                // the same helper `snapshot_heat` uses, against the same registry meta.
+                let floor = crate::app::min_lap_micros_of(
+                    crate::app::round_def_of_heat(events, heat, rounds).as_ref(),
+                );
                 Some(ProjectionBody::LiveRaceState(with_heat_timing(
-                    live_state_over(&window),
+                    live_state_over_with_floor(&window, floor),
                     stored,
                 )))
             }
@@ -254,14 +301,20 @@ pub async fn stream_handler(
         // An unknown event id can't open a stream — reject the upgrade with the typed 404.
         Err(err) => return err.into_response(),
     };
-    ws.on_upgrade(move |socket| run_stream(socket, state))
+    // The stream keeps the registry handle so it can re-read this event's rounds — the D26
+    // min-lap floor lives there, not in the log (#409).
+    let floors = RoundFloors {
+        registry,
+        event: event_id,
+    };
+    ws.on_upgrade(move |socket| run_stream(socket, state, floors))
 }
 
 /// Drive one subscribed change stream over an upgraded socket (protocol.html §3).
 ///
 /// Reads the one [`SubscribeRequest`], then runs the replay-then-tail loop until the client
 /// disconnects, the cursor is stale, or a send fails.
-async fn run_stream(mut socket: WebSocket, state: AppState) {
+async fn run_stream(mut socket: WebSocket, state: AppState, floors: RoundFloors) {
     // 1. The client's single subscribe frame — it doubles as the connect message (§7),
     //    carrying the contract version and an optional read token.
     let request = match recv_subscribe(&mut socket).await {
@@ -326,7 +379,7 @@ async fn run_stream(mut socket: WebSocket, state: AppState) {
     // 3. Replay-then-tail. `Engine` folds the log forward from offset `from`, emitting a
     // fresh-value envelope each time the scoped projection changes, advancing the per-stream
     // sequence. `applied_offset` is how far into the log it has folded.
-    let mut engine = Engine::new(request.scope, projection, from);
+    let mut engine = Engine::new(request.scope, projection, from, floors);
     let appended = state.appended();
 
     loop {
@@ -385,10 +438,13 @@ struct Engine {
     applied_offset: u64,
     /// The last projection body emitted, to suppress re-emitting an unchanged fold.
     last_emitted: Option<ProjectionBody>,
+    /// Where the D26 min-lap floor comes from (#409) — re-read on every [`advance`], never
+    /// captured as a resolved floor.
+    floors: RoundFloors,
 }
 
 impl Engine {
-    fn new(scope: Scope, projection: ScopeProjection, from: u64) -> Self {
+    fn new(scope: Scope, projection: ScopeProjection, from: u64, floors: RoundFloors) -> Self {
         Self {
             scope,
             projection,
@@ -397,6 +453,7 @@ impl Engine {
             // Seed with the projection *at* the resume point so the first envelope reflects
             // a change *after* `from`, not a re-send of what the snapshot already carried.
             last_emitted: None,
+            floors,
         }
     }
 
@@ -429,9 +486,21 @@ impl Engine {
     /// The client dedups by per-stream `sequence`, not by content, so re-sending the same body is
     /// harmless; the extra envelope simply wakes consumers to re-read the heats list. `current_heat`
     /// is untouched, so this never steals focus (the `current-heat` proof stays green).
+    /// # The min-lap floor is re-read here, not at subscribe (#409)
+    ///
+    /// The event's rounds are pulled from registry meta at the top of every `advance` — i.e. on
+    /// every wake — and the floor is then derived *per prefix* inside [`ScopeProjection::fold`]
+    /// (the current heat, and so the round that owns the floor, moves as the log crosses into the
+    /// next round). Since every envelope is a fresh value re-folded from the whole prefix, an
+    /// edited `min_lap_secs` re-applies to the run already on the log rather than leaving a
+    /// half-floored tail behind: the next envelope carries the counts the heat snapshot would
+    /// now give. What it cannot do is emit on its own — a meta edit appends nothing, so the new
+    /// floor reaches subscribers on the next logged event (D26 freezes the floor once the round
+    /// has raced, so an edit lands before the passes it would have re-judged).
     fn advance(&mut self, events: &[StoredEvent]) -> Vec<StreamMessage> {
         let mut out = Vec::new();
         let len = events.len() as u64;
+        let rounds = self.floors.rounds();
         // Whether this scope folds the live race-state (Event/Class/Heat): only those carry the
         // heat set the `/heats` lists derive from, so only they need the schedule-wake re-emit.
         let live_state_scope = self.projection.kind == ProjectionKind::LiveRaceState;
@@ -442,7 +511,7 @@ impl Engine {
         // (`from == 0`) there is nothing prior, so the first non-empty fold is emitted.
         if self.last_emitted.is_none() && self.applied_offset > 0 {
             let prefix = &events[..(self.applied_offset as usize).min(events.len())];
-            self.last_emitted = ScopeProjection::fold(&self.scope, prefix);
+            self.last_emitted = ScopeProjection::fold(&self.scope, prefix, &rounds);
         }
 
         while self.applied_offset < len {
@@ -456,7 +525,7 @@ impl Engine {
                     prefix.last().map(|s| &s.event),
                     Some(Event::HeatScheduled { .. })
                 );
-            let body = ScopeProjection::fold(&self.scope, prefix);
+            let body = ScopeProjection::fold(&self.scope, prefix, &rounds);
             if let Some(body) = body {
                 if scheduled_heat || self.last_emitted.as_ref() != Some(&body) {
                     out.push(StreamMessage::Change(Box::new(self.envelope(body.clone()))));
@@ -585,7 +654,14 @@ mod tests {
         let scope = Scope::Event {
             event: EventId("practice".into()),
         };
-        Engine::new(scope.clone(), ScopeProjection::of(&scope), 0)
+        // A registry whose Practice event has no rounds ⇒ no D26 floor, which is what these
+        // (round-less) fixtures always meant. The floor's own conformance proof lives in
+        // `tests/min_lap_floor_conformance.rs`.
+        let floors = RoundFloors {
+            registry: EventRegistry::new(None).expect("in-memory registry"),
+            event: EventId(crate::events::PRACTICE_EVENT_ID.into()),
+        };
+        Engine::new(scope.clone(), ScopeProjection::of(&scope), 0, floors)
     }
 
     /// How many `Change` envelopes a batch of stream messages carries.

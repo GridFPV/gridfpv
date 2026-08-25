@@ -306,28 +306,51 @@ pub struct PilotProgress {
 /// [`HeatPhase`], reads its lineup, derives each active pilot's [`PilotProgress`] from the
 /// (marshaling-aware) lap projection, ranks them into a running order, and finds the
 /// on-deck heat. Replaying the same log twice yields the same state.
+///
+/// **Unfloored** (D26): it counts every raw pass, so it is for the *positional* questions —
+/// `current_heat`, `phase`, `on_deck` — that no floor can move. A surface that shows LAPS must
+/// go through [`live_state_with_floor`] with the current round's floor, or it will disagree with
+/// the lap list about a suppressed echo, which is the bug #409 records.
 pub fn live_state(events: &[Event]) -> LiveRaceState {
+    live_state_with_floor(events, None)
+}
+
+/// [`live_state`] under the current heat's **min-lap floor** (D26) — the whole-log (event
+/// scope) counterpart of [`live_state_over_with_floor`].
+///
+/// The event and class scopes fold the log as a whole but still report exactly ONE heat (the
+/// current one), so exactly one round's floor applies. The caller resolves it with
+/// [`crate::app::live_fold_floor`] over the *same* slice this fold sees — resolving it
+/// anywhere else risks naming a different heat than the fold picks.
+///
+/// Passing `None` here is "this round has no floor", never "the floor was not available":
+/// the event scope used to count a sub-floor echo the heat scope's lap list had suppressed,
+/// which is exactly the D26 violation #409 records.
+pub fn live_state_with_floor(events: &[Event], min_lap_micros: Option<i64>) -> LiveRaceState {
     let window: Vec<(u64, &Event)> = events
         .iter()
         .enumerate()
         .map(|(i, e)| (i as u64, e))
         .collect();
-    live_state_core(events, &window, None)
+    live_state_core(events, &window, min_lap_micros)
 }
 
-/// Fold a **windowed** log slice with its PRESERVED global offsets — the heat/class-scope
-/// entry point (`heat_window_offsets` / `class_window_offsets` output). The marshaling
-/// adjudications inside the window (`DetectionVoided`/`LapThrownOut`/…) target global
-/// [`LogRef`]s; folding a filtered slice through the plain [`live_state`] re-enumerated it
-/// `0,1,2,…`, so a correction to a heat deep in the log silently missed (or, on coincidence,
-/// hit the wrong pass) in every heat-scoped live view. `window` must be in log order.
-pub fn live_state_over(window: &[(u64, Event)]) -> LiveRaceState {
-    live_state_over_with_floor(window, None)
-}
-
-/// [`live_state_over`] under the current heat's **min-lap floor** (D26): the live lap fold
-/// suppresses under-floor raw passes exactly like the laps/result projections, so the race
-/// screen's lap counts and the marshaling list can never disagree about an echo.
+/// Fold a **windowed** log slice with its PRESERVED global offsets, under the current heat's
+/// **min-lap floor** (D26) — the heat/class-scope entry point (`heat_window_offsets` /
+/// `class_window_offsets` output).
+///
+/// The marshaling adjudications inside the window (`DetectionVoided`/`LapThrownOut`/…) target
+/// global [`LogRef`]s; folding a filtered slice through the plain [`live_state`] re-enumerated it
+/// `0,1,2,…`, so a correction to a heat deep in the log silently missed (or, on coincidence, hit
+/// the wrong pass) in every heat-scoped live view. `window` must be in log order.
+///
+/// The floor is **required, not optional**: the live lap fold suppresses under-floor raw passes
+/// exactly like the laps/result projections, so the race screen's lap counts and the marshaling
+/// list can never disagree about an echo. There is deliberately no floorless windowed entry point
+/// — the one that existed is how the change stream came to violate D26 (#409). Callers resolve
+/// the value with [`crate::app::live_fold_floor`] (or, for a named heat,
+/// [`crate::app::round_def_of_heat`] + [`crate::app::min_lap_micros_of`]) and pass `None` only
+/// when the round genuinely has no floor.
 pub fn live_state_over_with_floor(
     window: &[(u64, Event)],
     min_lap_micros: Option<i64>,
@@ -339,8 +362,8 @@ pub fn live_state_over_with_floor(
     live_state_core(&events, &pairs, min_lap_micros)
 }
 
-/// The shared fold behind [`live_state`] (full log, positional offsets) and
-/// [`live_state_over`] (a window with preserved global offsets). `window` is the SAME
+/// The shared fold behind [`live_state_with_floor`] (full log, positional offsets) and
+/// [`live_state_over_with_floor`] (a window with preserved global offsets). `window` is the SAME
 /// sequence as `events`, paired with each event's global append offset.
 fn live_state_core(
     events: &[Event],
@@ -668,7 +691,11 @@ fn phase_of(state: HeatState) -> HeatPhase {
 /// (Stage/Start/…) or an explicit manual selection. If there has been neither yet, fall
 /// back to the **first `HeatScheduled`** so the very first heat is controllable before any
 /// transition. `None` if no heat was ever scheduled.
-fn current_heat(events: &[Event]) -> Option<HeatId> {
+///
+/// Crate-visible because the D26 floor resolution ([`crate::app::live_fold_floor`]) must name
+/// the *same* heat this fold reports — the floor belongs to the current heat's round, so
+/// re-deriving "which heat" by any other rule is how the live view and the lap list drift apart.
+pub(crate) fn current_heat(events: &[Event]) -> Option<HeatId> {
     let mut active: Option<HeatId> = None;
     let mut first_scheduled: Option<HeatId> = None;
     for event in events {
