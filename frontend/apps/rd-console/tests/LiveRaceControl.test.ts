@@ -6,6 +6,7 @@ import type {
   ChannelCatalogEntry,
   EventMeta,
   HeatSummary,
+  LiveCrossing,
   LiveRaceState,
   RoundDef,
   Timer
@@ -689,7 +690,25 @@ describe('LiveRaceControl', () => {
     // A roster-seeded lineup so the callsign resolves through the shared resolver: the competitor
     // ref IS the pilot id, looked up in the pilots directory.
     const CO_PILOTS = [{ id: 'maverick-4d9rp8', callsign: 'Maverick', vtx_types: [] }];
-    const coLive = (laps: number, lastLapMicros?: number, phase = 'Running'): LiveRaceState =>
+    /** One entry of the live crossing feed (#397) — the TONE's source, keyed on `pass_ref`. */
+    const cross = (
+      passRef: number,
+      disposition: LiveCrossing['disposition'],
+      lapNumber?: number,
+      competitor = 'maverick-4d9rp8'
+    ): LiveCrossing => ({
+      pass_ref: passRef,
+      competitor,
+      at: passRef * 1_000_000,
+      disposition,
+      lap_number: lapNumber
+    });
+    const coLive = (
+      laps: number,
+      lastLapMicros?: number,
+      phase = 'Running',
+      crossings: LiveCrossing[] = []
+    ): LiveRaceState =>
       ({
         current_heat: 'heat-1',
         phase,
@@ -702,7 +721,8 @@ describe('LiveRaceControl', () => {
             ...(lastLapMicros != null ? { last_lap_micros: lastLapMicros } : {})
           }
         ],
-        running_order: ['maverick-4d9rp8']
+        running_order: ['maverick-4d9rp8'],
+        crossings
       }) as LiveRaceState;
 
     function renderCallouts(opts?: { calloutsMuted?: boolean }) {
@@ -719,24 +739,58 @@ describe('LiveRaceControl', () => {
       return { ...madeSession, ...audioStub, ...speech };
     }
 
-    it('a new lap fires the crossing pip + speaks "<callsign>, lap N, M.SS" (resolved name)', async () => {
+    it('a lap pips per CROSSING (holeshot too) and speaks "<callsign>, lap N, M.SS" once', async () => {
       const { pushLive, started, utterances } = renderCallouts();
       // Let the pilots directory settle so the callsign resolves before the crossing.
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_470_000));
+      // Lap 1 is TWO crossings: the holeshot that opened it and the pass that closed it. Both pip
+      // (#397 — the holeshot used to be silent because it derives no lap); only the closing one
+      // has a lap number and a time, so only it is spoken.
+      pushLive(coLive(1, 21_470_000, 'Running', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       // The crossing pip is the distinct high/short voice (1760), not a procedure tone.
-      expect(started).toEqual([1760]);
-      // The lap time is spoken to the hundredth.
+      expect(started).toEqual([1760, 1760]);
+      // The lap time is spoken to the hundredth — once, not once per crossing.
       expect(utterances.map((u) => u.text)).toEqual(['Maverick, lap 1, 21.47']);
+    });
+
+    it('a crossing REJECTED under the min-lap floor pips with NOTHING spoken (#397)', async () => {
+      const { pushLive, started, utterances } = renderCallouts();
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      // A too-short pass records no lap, so `progress` never moves — the case that was pure
+      // silence before, and the one that tells an RD their gate is double-triggering.
+      pushLive(
+        coLive(0, undefined, 'Running', [cross(1, 'Holeshot'), cross(2, 'RejectedTooShort')])
+      );
+      await tick();
+      expect(started).toEqual([1760, 1760]);
+      expect(utterances).toEqual([]);
+    });
+
+    it('a RE-PUSHED identical live state pips nothing — identity is pass_ref, not the frame', async () => {
+      const { pushLive, started } = renderCallouts();
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      const feed = [cross(1, 'Holeshot'), cross(2, 'Counted', 1)];
+      pushLive(coLive(1, 21_400_000, 'Running', feed));
+      await tick();
+      expect(started).toEqual([1760, 1760]);
+
+      // The stream re-pushes the same state (a wake-up, a re-snapshot, a resubscribe).
+      pushLive(coLive(1, 21_400_000, 'Running', feed));
+      await tick();
+      pushLive(coLive(1, 21_400_000, 'Running', feed));
+      await tick();
+      expect(started).toEqual([1760, 1760]);
     });
 
     it('the callouts mute silences BOTH the crossing pip and the speech', async () => {
       const { pushLive, started, utterances } = renderCallouts({ calloutsMuted: true });
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_400_000));
+      pushLive(coLive(1, 21_400_000, 'Running', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       expect(started).toEqual([]);
       expect(utterances).toEqual([]);
@@ -746,10 +800,11 @@ describe('LiveRaceControl', () => {
       const { pushLive, started, utterances } = renderCallouts();
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      // The heat finishes; a marshaling-style fold bumps the count on the finished heat.
+      // The heat finishes; a marshaling-style fold bumps the count (and appends a crossing) on
+      // the finished heat. Neither the tone nor the voice may fire.
       pushLive(coLive(0, undefined, 'Unofficial'));
       await tick();
-      pushLive(coLive(1, 20_000_000, 'Unofficial'));
+      pushLive(coLive(1, 20_000_000, 'Unofficial', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       expect(started).toEqual([]);
       expect(utterances).toEqual([]);
