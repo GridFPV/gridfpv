@@ -312,6 +312,13 @@ pub fn apply_command_in_event(
         // round mid-fill) and always needs to select the next heat, so it runs through the
         // event-aware path where the registry/meta are in scope — see [`apply_advance`].
         Command::Advance { heat } => apply_advance(registry, event_id, state, heat),
+        // `Start` is the **arm** (it opens the gate to detections). It is the last moment Grid can
+        // refuse before RotorHazard is driving a live race, so it carries the GridFPV-plugin
+        // backstop (#405) — see [`refuse_arm_without_plugin`].
+        Command::Start { heat } => match refuse_arm_without_plugin(registry, event_id) {
+            Some(err) => CommandAck::failed(err),
+            None => apply_command(state, Command::Start { heat }),
+        },
         // `ScheduleHeat` also needs the event meta + timer registry (the channel cap + assignment),
         // so it is handled here rather than in the log-only `apply_command`.
         Command::ScheduleHeat {
@@ -334,6 +341,43 @@ pub fn apply_command_in_event(
         ),
         other => apply_command(state, other),
     }
+}
+
+/// The **arm-time GridFPV-plugin backstop** (#405): refuse to arm a heat when the event races a
+/// RotorHazard timer whose plugin is no longer [`Present`](crate::timers::PluginPresence::Present).
+///
+/// Selection is the primary gate (`PUT /events/{event_id}/timers` refuses a plugin-less RH timer),
+/// but a plugin can disappear *after* a valid selection — the RD restarts RotorHazard without it,
+/// or it fails to load on boot — and a pre-existing event may have been persisted with one already
+/// selected. Selection was legitimate when it was made, so the refusal has to move to the last
+/// point before Grid commits: the arm.
+///
+/// **Every selected RotorHazard timer is checked, not just the effective primary.** Alternates are
+/// hot standby that take over on a primary drop (#112), so an alternate with no plugin is a race
+/// Grid would silently fall into conducting without one — exactly the #403 class of failure.
+///
+/// Mock timers are never checked (the requirement is RotorHazard-specific), and an event with no
+/// resolvable timers is left alone. Returns the typed `400` to ack with, or `None` to proceed.
+fn refuse_arm_without_plugin(
+    registry: &EventRegistry,
+    event_id: &EventId,
+) -> Option<ProtocolError> {
+    let meta = registry.meta_of(event_id)?;
+    let timers = registry.timers();
+    for id in &meta.timers {
+        // An id that no longer resolves is a stale selection, not a plugin problem — the event
+        // simply has one fewer source. Skip it rather than blocking the race on it.
+        let Some(timer) = timers.get(id) else {
+            continue;
+        };
+        if let Some(refusal) = timer.selection_refusal() {
+            return Some(ProtocolError::new(
+                ErrorCode::BadRequest,
+                refusal.arm_message(&timer.name),
+            ));
+        }
+    }
+    None
 }
 
 /// Handle [`Command::ScheduleHeat`] (race redesign Slice 4a) — create a heat with its lineup, with
@@ -5292,6 +5336,184 @@ mod tests {
         let ack = apply_command_in_event(&registry, &event_id, &state, Command::Stage { heat });
         assert!(ack.ok);
         assert_eq!(serde_json::to_string(&ack).unwrap(), r#"{"ok":true}"#);
+    }
+
+    // ── The arm-time GridFPV-plugin backstop (#405) ───────────────────────────
+
+    /// An event from [`round_robin_event`] with a **RotorHazard timer added to its selection**,
+    /// selected while its plugin was `Present` — the state the arm-time backstop guards. Returns
+    /// the registry, event id, app state and the first heat of the (already filled) round, staged
+    /// and ready to arm.
+    fn event_with_a_selected_rh_timer() -> (
+        EventRegistry,
+        EventId,
+        AppState,
+        HeatId,
+        crate::timers::TimerId,
+    ) {
+        use crate::timers::{CreateTimerRequest, PluginPresence, TimerKind};
+
+        let (registry, event_id, round) = round_robin_event(&["alpha", "bravo"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+        // Selected while healthy — a legitimate selection under the #405 gate.
+        registry.timers().set_plugin(
+            &rh.id,
+            PluginPresence::Present {
+                plugin_version: "0.1.0".into(),
+                rhapi_version: "1.4".into(),
+                capabilities: vec!["hello".into()],
+            },
+        );
+        let mut selection = registry.timers_of(&event_id).unwrap();
+        selection.push(rh.id.clone());
+        registry.set_timers(&event_id, selection).unwrap();
+
+        apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.clone(),
+                mode: FillMode::Next,
+            },
+        );
+        let heat = heat_ids_in_round(&state, &round)[0].clone();
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::Stage { heat: heat.clone() }
+            )
+            .ok,
+            "staging is never gated — the gate is at selection, and the backstop is at the arm"
+        );
+        (registry, event_id, state, heat, rh.id)
+    }
+
+    #[test]
+    fn arming_is_refused_once_a_selected_rh_timers_plugin_stops_answering() {
+        // #405: a plugin can disappear **after** a valid selection (RH restarted without it, or it
+        // failed to load). The selection was legitimate when it was made, so the refusal moves to
+        // the last point before Grid commits to a live race — the arm.
+        use crate::timers::PluginPresence;
+        let (registry, event_id, state, heat, rh) = event_with_a_selected_rh_timer();
+
+        // Present → the arm goes through.
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::Start { heat: heat.clone() },
+        );
+        assert!(ack.ok, "a Present plugin arms normally: {ack:?}");
+
+        // Restart the heat so it can be armed again, then take the plugin away.
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::Restart { heat: heat.clone() }
+            )
+            .ok
+        );
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::Stage { heat: heat.clone() }
+            )
+            .ok
+        );
+        registry.timers().set_plugin(&rh, PluginPresence::Missing);
+
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::Start { heat: heat.clone() },
+        );
+        assert!(!ack.ok, "a vanished plugin must refuse the arm");
+        let message = ack.error.unwrap().message;
+        assert!(message.contains("Field RH"), "{message}");
+        assert!(message.contains("no longer answering"), "{message}");
+        assert!(!message.contains(&rh.0), "no raw timer id: {message}");
+
+        // Nothing was appended — the heat is still Staged and can be armed once the plugin is back.
+        assert_eq!(
+            heat::heat_state(&state.read().unwrap().0, &heat),
+            Some(gridfpv_engine::heat::HeatState::Staged)
+        );
+    }
+
+    #[test]
+    fn the_arm_backstop_says_connect_it_when_the_timer_was_never_probed() {
+        // `plugin: None` is a different problem with a different fix — a Director restart resets
+        // presence to "never probed", and the answer is "connect it", not "install a plugin".
+        let (registry, event_id, state, heat, rh) = event_with_a_selected_rh_timer();
+        // Re-pointing the timer at a new URL is what the Director does on a reconfigure: it wipes
+        // the live presence back to `None` pending a re-probe (#382).
+        registry
+            .timers()
+            .update(
+                &rh,
+                &crate::timers::UpdateTimerRequest {
+                    kind: Some(crate::timers::TimerKind::Rotorhazard {
+                        url: "http://other-rh.local:5000".into(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let ack = apply_command_in_event(&registry, &event_id, &state, Command::Start { heat });
+        assert!(!ack.ok);
+        let message = ack.error.unwrap().message;
+        assert!(message.contains("Field RH"), "{message}");
+        assert!(message.contains("not connected"), "{message}");
+        assert!(!message.contains("no longer answering"), "{message}");
+    }
+
+    #[test]
+    fn the_arm_backstop_leaves_mock_only_events_alone() {
+        // Mock timers are unaffected (#405): the whole existing Stage → Start path over the
+        // built-in sim must be untouched.
+        let (registry, event_id, round) = round_robin_event(&["alpha", "bravo"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+        apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round: round.clone(),
+                mode: FillMode::Next,
+            },
+        );
+        let heat = heat_ids_in_round(&state, &round)[0].clone();
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::Stage { heat: heat.clone() }
+            )
+            .ok
+        );
+        assert!(apply_command_in_event(&registry, &event_id, &state, Command::Start { heat }).ok);
     }
 
     /// Wire-compat (#216): an older `FillRound` payload with **no `mode`** deserializes to the

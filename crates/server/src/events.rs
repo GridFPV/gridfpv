@@ -2889,6 +2889,67 @@ mod tests {
     }
 
     #[test]
+    fn an_event_selecting_a_plugin_less_rh_timer_still_opens_after_a_restart() {
+        // #405, "do not break existing events": events persisted before the GridFPV-plugin gate
+        // may already select a RotorHazard timer with no plugin. Loading is deliberately NOT
+        // validated — a hard load-time rejection would make such an event **unopenable**, which is
+        // strictly worse than the problem it guards against. The event opens with its selection
+        // intact; the refusals live at *selection* (`PUT /events/{id}/timers`, for newly added
+        // ids) and at the *arm* (`control_handler`), where they can be acted on.
+        use crate::timers::{CreateTimerRequest, TimerKind};
+
+        let dir = std::env::temp_dir().join(format!("gridfpv-legacy-rh-{}", short_suffix()));
+        let event_id;
+        let rh_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let rh = reg
+                .timers()
+                .create(&CreateTimerRequest {
+                    name: "Field RH".into(),
+                    kind: TimerKind::Rotorhazard {
+                        url: "http://rh.local:5000".into(),
+                    },
+                    channel_capability: None,
+                    node_count: None,
+                    available_channels: None,
+                })
+                .unwrap();
+            rh_id = rh.id.clone();
+            let created = reg
+                .create(&CreateEventRequest {
+                    name: "Legacy Cup".to_string(),
+                    date: None,
+                    location: None,
+                    description: None,
+                    organizer: None,
+                })
+                .unwrap();
+            event_id = created.id.clone();
+            reg.set_timers(&created.id, vec![rh.id.clone()]).unwrap();
+            reg.set_primary_timer(&created.id, Some(rh.id)).unwrap();
+        }
+
+        // Restart. The RH timer restores with `plugin: None` (presence is never persisted), so on
+        // a fresh boot every selected RH timer looks exactly like the pre-gate case.
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        let restored = reopened
+            .meta_of(&event_id)
+            .expect("an event selecting a plugin-less RH timer must still load");
+        assert_eq!(restored.timers, vec![rh_id.clone()]);
+        assert_eq!(restored.primary_timer, Some(rh_id.clone()));
+        assert!(reopened.timers().get(&rh_id).unwrap().plugin.is_none());
+        // …and it is fully openable: activatable, resolvable, appendable.
+        reopened.set_active(&event_id).unwrap();
+        let state = reopened
+            .resolve(&event_id)
+            .expect("the event's log must still open");
+        assert!(state.read().is_ok());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn created_events_and_their_metadata_survive_a_restart() {
         // The core #111 regression: a created event (with a name, descriptive fields, a timer
         // selection, and a primary) must be re-listed with its metadata intact, and its log, after

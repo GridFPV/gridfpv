@@ -67,6 +67,7 @@
     timers = $bindable([]),
     onchange,
     rowLead,
+    rowNote,
     listHeader,
     listFooter,
     rowChecked
@@ -78,6 +79,13 @@
     onchange?: (timers: Timer[]) => void;
     /** Rendered at the **start** of each row (e.g. the per-event selection checkbox). */
     rowLead?: Snippet<[Timer]>;
+    /**
+     * Rendered **inside** the row, under its config lines — the per-embedder sentence about *this*
+     * timer (e.g. #405's "why this one can't be selected for the event, and what to do about it").
+     * Kept a snippet because the reason is the embedder's business: the standalone Timers page has
+     * no event to refuse a selection for.
+     */
+    rowNote?: Snippet<[Timer]>;
     /** Rendered **above** the list (e.g. nothing today; reserved for selection chrome). */
     listHeader?: Snippet;
     /** Rendered **below** the list (e.g. the selection count + Save). */
@@ -539,6 +547,7 @@
             {#if connectionHint(timer)}
               <span class="connect-hint" role="status">{connectionHint(timer)}</span>
             {/if}
+            {@render rowNote?.(timer)}
           </div>
           <StatusPill status={timer.status} label={timer.status} size="sm" />
           <!-- `session` is what unlocks the guided install's Restart-timer action (#386);

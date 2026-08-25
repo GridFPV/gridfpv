@@ -18,11 +18,25 @@
    * background; on a save error the change is reverted (re-seeded from the event) and surfaced.
    * Because every save sends the *entire* current selection (not a delta), coalescing rapid clicks
    * into one trailing save is safe last-write-wins.
+   *
+   * ## The GridFPV-plugin gate (#405)
+   *
+   * A RotorHazard timer without a loaded, compatible GridFPV plugin **cannot be selected**: its
+   * checkbox is disabled *and* the row carries the reason plus the next action, because "greyed
+   * out with no explanation" is the state that stranded the RD in #385. The Director enforces the
+   * same rule on `PUT /events/{id}/timers` — this is the half that fails while the RD is choosing
+   * equipment rather than while they are trying to start a race.
+   *
+   * A timer the event **already** selects stays tickable (and untickable) even when its plugin has
+   * since gone away: the Director grandfathers an existing selection so a pre-#405 event is still
+   * editable, and the row carries a warning instead. What stops such an event from racing it is
+   * the Director's arm-time backstop.
    */
   import { Button, Card, toast } from '@gridfpv/components';
   import type { Timer, TimerId } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import { AutoSaver } from '../lib/autosave.js';
+  import { selectionRefusal } from '../lib/pluginPresence.js';
   import TimerManager from './TimerManager.svelte';
 
   let {
@@ -80,10 +94,31 @@
   // The ids to save, in the registry's listed order (a stable, sensible order).
   const orderedSelection = $derived(timers.filter((t) => selected.has(t.id)).map((t) => t.id));
 
+  // ── The GridFPV-plugin gate (#405) ────────────────────────────────────────
+  //
+  // `blocked` is "the Director would refuse to *newly* select this". A timer the event already
+  // selects is grandfathered by the Director (so a pre-#405 event stays editable), so its box
+  // stays live — the RD must be able to untick it, which is the fix. Its row still carries the
+  // warning, which is how a presence change on an already-selected timer surfaces here.
+  function isBlocked(timer: Timer): boolean {
+    return selectionRefusal(timer) !== null && !selected.has(timer.id);
+  }
+  /** The sentence the row shows: the refusal, or the already-selected warning. */
+  function rowReason(timer: Timer): string | undefined {
+    const refusal = selectionRefusal(timer);
+    if (!refusal) return undefined;
+    return selected.has(timer.id) ? refusal.alreadySelectedWarning : refusal.reason;
+  }
+
   // ── Auto-save (debounced, optimistic, wholesale `setEventTimers`) ──────────
   const autosaver = new AutoSaver();
 
   function toggle(id: TimerId) {
+    // The plugin gate (#405): never send a selection the Director will refuse. The box is already
+    // disabled for a blocked timer; this is the belt to that braces, so a programmatic/keyboard
+    // path can't slip a refused id into the wholesale save.
+    const timer = timers.find((t) => t.id === id);
+    if (timer && isBlocked(timer)) return;
     // Optimistic flip first so the checkbox reflects the click instantly.
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
@@ -180,9 +215,19 @@
           type="checkbox"
           class="select-box"
           checked={selected.has(timer.id)}
+          disabled={isBlocked(timer)}
           onchange={() => toggle(timer.id)}
           aria-label={`Use ${timer.name}`}
         />
+      {/snippet}
+
+      <!-- #405: the reason lives ON the row, not in a tooltip — a disabled checkbox with no
+           explanation is exactly the dead end this gate is supposed to prevent. -->
+      {#snippet rowNote(timer)}
+        {@const reason = rowReason(timer)}
+        {#if reason}
+          <span class="gate-reason" role="status">{reason}</span>
+        {/if}
       {/snippet}
 
       {#snippet listFooter()}
@@ -299,6 +344,17 @@
     accent-color: var(--gf-accent);
     flex-shrink: 0;
     cursor: pointer;
+  }
+  .select-box:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+  /* The #405 refusal / warning sentence. Sized like real data, not chrome: at a venue this is the
+     line that tells the RD why they cannot race this timer and what to do about it. */
+  .gate-reason {
+    margin-top: 2px;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-warn);
   }
   .foot {
     display: flex;

@@ -871,6 +871,23 @@ async fn delete_timer(
 /// must name a known timer in the registry (else a 404 naming the bad id) — so an event can never
 /// reference a deleted/unknown timer. When a `primary` is given it must be one of `ids` (else a
 /// 400). On success the updated [`EventMeta`] is returned.
+///
+/// # The GridFPV-plugin gate (#405)
+///
+/// A RotorHazard timer without a loaded, compatible GridFPV plugin **cannot be newly selected**:
+/// the refusal is a typed `400` carrying
+/// [`SelectionRefusal::selection_message`](crate::timers::SelectionRefusal::selection_message),
+/// which names the timer by its friendly name and says what to do next. This lives here, in the
+/// API, and not only in the console's picker, because this route is reachable directly — a rule
+/// enforced only in the UI is not enforced. Mock timers are never gated.
+///
+/// **Already-selected timers are grandfathered.** Only ids that are *not already* in the event's
+/// selection are gated. Two reasons: (1) an event persisted before this rule may already select a
+/// plugin-less RH timer, and re-affirming that selection — which the console's wholesale
+/// auto-save does on *every* toggle — must not fail, or the RD could never edit that event's
+/// timers again; (2) "select" is the act being gated, and re-sending an existing selection is not
+/// selecting. What stops such an event from actually *racing* a plugin-less timer is the
+/// **arm-time backstop** in `control_handler`, plus the warning the console renders on the row.
 async fn set_event_timers(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
@@ -885,6 +902,27 @@ async fn set_event_timers(
                 ErrorCode::UnknownScope,
                 format!("no timer with id {:?}", id.0),
             ));
+        }
+    }
+    // The plugin gate (#405), applied only to *newly* selected ids. An unknown event has no
+    // selection to compare against and no reason to be gated — `set_timers` below reports it as
+    // the typed 404 it already is, and reporting a plugin problem on a non-existent event would
+    // bury that.
+    if let Some(meta) = registry.meta_of(&event_id) {
+        let already: std::collections::BTreeSet<_> = meta.timers.iter().collect();
+        for id in &body.ids {
+            if already.contains(id) {
+                continue;
+            }
+            let Some(timer) = timers.get(id) else {
+                continue;
+            };
+            if let Some(refusal) = timer.selection_refusal() {
+                return Err(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    refusal.selection_message(&timer.name),
+                ));
+            }
         }
     }
     // A primary, if given, must be one of the timers being selected (issue #112).
@@ -4042,6 +4080,175 @@ mod tests {
             .unwrap();
         // Protected delete is a client error, not a 404.
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `PUT /events/{id}/timers` → status + body bytes (the shared driver for the #405 gate tests).
+    async fn put_event_timers(
+        registry: EventRegistry,
+        event_id: &str,
+        ids: Vec<crate::timers::TimerId>,
+    ) -> (StatusCode, Vec<u8>) {
+        let req = SetEventTimersRequest { ids, primary: None };
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/events/{event_id}/timers"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    /// Create a RotorHazard timer in `registry` named `name` (unprobed — `plugin: None`).
+    fn create_rh_timer(registry: &EventRegistry, name: &str) -> Timer {
+        registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: name.into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap()
+    }
+
+    /// The `PluginPresence::Present` a healthy `gridfpv_hello` probe records.
+    fn present_plugin() -> crate::timers::PluginPresence {
+        crate::timers::PluginPresence::Present {
+            plugin_version: "0.1.0".into(),
+            rhapi_version: "1.4".into(),
+            capabilities: vec!["hello".into()],
+        }
+    }
+
+    #[tokio::test]
+    async fn selecting_an_rh_timer_without_the_plugin_is_refused_with_the_reason() {
+        // #405: the gate is at **event timer selection**, and it lives in the API — this route is
+        // reachable directly, so a rule enforced only in the console's picker is not enforced.
+        // Each presence gets its own message: three problems, three fixes.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = create_rh_timer(&registry, "Field RH");
+
+        // `plugin: None` — never probed. "Connect this timer first", NOT "plugin missing":
+        // presence is only knowable over a live socket, so this is the normal state of a freshly
+        // added timer, and installing a plugin is not the fix.
+        let (status, body) =
+            put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let err: ProtocolError = serde_json::from_slice(&body).unwrap();
+        assert!(err.message.contains("Field RH"), "{}", err.message);
+        assert!(err.message.contains("Connect it"), "{}", err.message);
+        assert!(
+            !err.message.contains(&rh.id.0),
+            "no raw id: {}",
+            err.message
+        );
+        // Nothing was recorded.
+        assert!(
+            !registry
+                .timers_of(&EventId(PRACTICE_EVENT_ID.into()))
+                .unwrap()
+                .contains(&rh.id)
+        );
+
+        // Probed, no plugin → the guided install.
+        registry
+            .timers()
+            .set_plugin(&rh.id, crate::timers::PluginPresence::Missing);
+        let (status, body) =
+            put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let err: ProtocolError = serde_json::from_slice(&body).unwrap();
+        assert!(
+            err.message.contains("not running the GridFPV plugin"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("Install it"), "{}", err.message);
+
+        // Probed, wrong protocol → update it.
+        registry.timers().set_plugin(
+            &rh.id,
+            crate::timers::PluginPresence::Incompatible {
+                plugin_version: "0.0.1".into(),
+                protocol_version: 99,
+                reason: "protocol 99".into(),
+            },
+        );
+        let (status, body) =
+            put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let err: ProtocolError = serde_json::from_slice(&body).unwrap();
+        assert!(err.message.contains("Update it"), "{}", err.message);
+
+        // Present → selectable. This is what makes #383's Connect load-bearing rather than a
+        // diagnostic convenience: a timer becomes selectable only after it has been connected.
+        registry.timers().set_plugin(&rh.id, present_plugin());
+        let (status, body) =
+            put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        assert_eq!(status, StatusCode::OK);
+        let meta: EventMeta = serde_json::from_slice(&body).unwrap();
+        assert_eq!(meta.timers, vec![rh.id]);
+    }
+
+    #[tokio::test]
+    async fn the_plugin_gate_never_touches_mock_timers() {
+        // Mock timers are unaffected (#405) — they have no plugin to require, and gating them
+        // would break the out-of-the-box sim race.
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, _) = put_event_timers(
+            registry,
+            "practice",
+            vec![crate::timers::TimerId(crate::timers::MOCK_TIMER_ID.into())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_already_selected_plugin_less_timer_stays_saveable() {
+        // "Do not break existing events" (#405). An event persisted before this rule may already
+        // select a plugin-less RH timer. The gate applies to *newly* selected ids only, so the RD
+        // can still edit that event's selection — including the console's wholesale auto-save,
+        // which resends the whole selection on every toggle. What stops it from actually racing is
+        // the arm-time backstop, not a refusal to save.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = create_rh_timer(&registry, "Field RH");
+        let practice = EventId(PRACTICE_EVENT_ID.into());
+        // Simulate the persisted-before-the-rule state by writing the selection past the route.
+        registry.set_timers(&practice, vec![rh.id.clone()]).unwrap();
+        registry
+            .timers()
+            .set_plugin(&rh.id, crate::timers::PluginPresence::Missing);
+
+        // Re-sending the existing selection, and adding a Mock alongside it, both succeed.
+        let mock = crate::timers::TimerId(crate::timers::MOCK_TIMER_ID.into());
+        let (status, _) = put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = put_event_timers(
+            registry.clone(),
+            "practice",
+            vec![rh.id.clone(), mock.clone()],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let meta: EventMeta = serde_json::from_slice(&body).unwrap();
+        assert_eq!(meta.timers, vec![rh.id.clone(), mock.clone()]);
+
+        // But once the RD drops it, re-selecting it is a fresh selection — and refused.
+        let (status, _) = put_event_timers(registry.clone(), "practice", vec![mock.clone()]).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = put_event_timers(registry, "practice", vec![mock, rh.id]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
