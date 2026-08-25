@@ -459,7 +459,7 @@ impl Engine {
             let body = ScopeProjection::fold(&self.scope, prefix);
             if let Some(body) = body {
                 if scheduled_heat || self.last_emitted.as_ref() != Some(&body) {
-                    out.push(StreamMessage::Change(self.envelope(body.clone())));
+                    out.push(StreamMessage::Change(Box::new(self.envelope(body.clone()))));
                     self.last_emitted = Some(body);
                 }
             }
