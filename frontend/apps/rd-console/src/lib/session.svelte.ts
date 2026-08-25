@@ -50,6 +50,9 @@ import {
   connectTimer,
   disconnectTimer,
   restartTimer,
+  setCalibration,
+  timerSignal,
+  stopTimerSignal,
   setEventTimers,
   setPrimaryTimer,
   listPilots,
@@ -79,7 +82,12 @@ import {
   classStandings,
   PRACTICE_EVENT_ID
 } from '@gridfpv/protocol-client';
-import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
+import type {
+  ProtocolClient,
+  ProtocolState,
+  ConnectionStatus,
+  CalibrationRequest
+} from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
 import type {
@@ -118,6 +126,7 @@ import type {
   SignalTraceView,
   Timer,
   TimerId,
+  TimerSignal,
   UpdateClassRequest,
   UpdatePilotRequest,
   UpdateRoundReq,
@@ -362,6 +371,9 @@ export class Session {
   #connectTimerImpl: typeof connectTimer;
   #disconnectTimerImpl: typeof disconnectTimer;
   #restartTimerImpl: typeof restartTimer;
+  #setCalibrationImpl: typeof setCalibration;
+  #timerSignalImpl: typeof timerSignal;
+  #stopTimerSignalImpl: typeof stopTimerSignal;
   #setEventTimersImpl: typeof setEventTimers;
   #setPrimaryTimerImpl: typeof setPrimaryTimer;
   #listPilotsImpl: typeof listPilots;
@@ -405,6 +417,9 @@ export class Session {
     connectTimerImpl?: typeof connectTimer;
     disconnectTimerImpl?: typeof disconnectTimer;
     restartTimerImpl?: typeof restartTimer;
+    setCalibrationImpl?: typeof setCalibration;
+    timerSignalImpl?: typeof timerSignal;
+    stopTimerSignalImpl?: typeof stopTimerSignal;
     setEventTimersImpl?: typeof setEventTimers;
     setPrimaryTimerImpl?: typeof setPrimaryTimer;
     listPilotsImpl?: typeof listPilots;
@@ -449,6 +464,9 @@ export class Session {
     this.#connectTimerImpl = opts?.connectTimerImpl ?? connectTimer;
     this.#disconnectTimerImpl = opts?.disconnectTimerImpl ?? disconnectTimer;
     this.#restartTimerImpl = opts?.restartTimerImpl ?? restartTimer;
+    this.#setCalibrationImpl = opts?.setCalibrationImpl ?? setCalibration;
+    this.#timerSignalImpl = opts?.timerSignalImpl ?? timerSignal;
+    this.#stopTimerSignalImpl = opts?.stopTimerSignalImpl ?? stopTimerSignal;
     this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
     this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
     this.#listPilotsImpl = opts?.listPilotsImpl ?? listPilots;
@@ -743,6 +761,46 @@ export class Session {
    */
   restartTimer(id: TimerId): Promise<Timer | undefined> {
     return this.#privilegedWrite((token) => this.#restartTimerImpl(this.baseUrl, id, token));
+  }
+
+  /**
+   * Set a timer node's enter/exit detection thresholds (`POST /timers/{id}/calibration`, #355) —
+   * the Tune page's write half. Resolves when the Director **accepted** the change, `undefined` on
+   * a cancelled token prompt, or throws on any other failure (including the Director's refusal for
+   * a Mock, a disconnected timer, or an unknown node, whose message the caller surfaces verbatim).
+   *
+   * Accepted is not applied: RotorHazard does not echo a level set, so the Tune page confirms by
+   * watching `NodeSignal.enter_at` / `exit_at` on the signal feed it is already polling.
+   */
+  setCalibration(id: TimerId, request: CalibrationRequest): Promise<void | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#setCalibrationImpl(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * Poll a timer's live tuning signal (`GET /timers/{id}/signal`, #355) — the Tune page's read half.
+   *
+   * Deliberately **not** a `#privilegedWrite`: this runs several times a second, and the lazy
+   * token prompt that path opens on a 401 would fire a dialog per poll. It sends whatever token the
+   * session already holds and lets the failure surface, which the page renders as a lost feed.
+   *
+   * Every call renews the Director's lease on the stream — so this *is* the subscription, and the
+   * page's cadence is what keeps the timer streaming. See {@link stopTimerSignal}.
+   */
+  timerSignal(id: TimerId, opts: { signal?: AbortSignal } = {}): Promise<TimerSignal> {
+    return this.#timerSignalImpl(this.baseUrl, id, { token: this.#token, signal: opts.signal });
+  }
+
+  /**
+   * End a timer's tuning stream now (`POST /timers/{id}/signal/stop`, #355) — what the Tune page
+   * calls when it leaves, so a timer is not left streaming to nobody for the rest of its lease.
+   *
+   * Same reasoning as {@link timerSignal} for skipping the token prompt: this fires on teardown,
+   * where a modal dialog would be absurd, and the lease is the backstop if it fails.
+   */
+  stopTimerSignal(id: TimerId): Promise<void> {
+    return this.#stopTimerSignalImpl(this.baseUrl, id, this.#token);
   }
 
   /**

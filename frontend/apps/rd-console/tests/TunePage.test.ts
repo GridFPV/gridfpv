@@ -10,12 +10,23 @@
  *    position.
  *  • **No Apply button, but no write storm either.** An adjustment reaches the timer on its own;
  *    a drag emits dozens of values a second and must produce exactly ONE write, on release.
- *  • **The readback is the confirmation.** `set_enter_at_level` does not echo, so a write that the
- *    hardware did not take must be visible on that node, never silent (#403's failure class).
+ *  • **The POLL is the confirmation.** `POST /calibration` only says "accepted"; RotorHazard does
+ *    not echo a level set, so a write is confirmed by a later `GET /signal` showing the new level —
+ *    and a write the hardware did not take must be visible on that node, never silent (#403).
  *  • **The practice-only gate is checked per write**, not once at load — a heat going Running while
  *    the RD is at the gate has to start refusing mid-tune.
  *  • **No raw seat, no bare frequency** on screen (CLAUDE.md).
- *  • **The poll stops** on unmount and when the tab is hidden — the endpoint holds a TTL lease.
+ *  • **The feed is leased**, so the page holds it while it is on screen and gives it back —
+ *    `signal/stop` — when it leaves: unmount, route change, or a hidden tab.
+ *  • **`streaming: false` is not "no signal"**, and an unseen node is not a quiet one.
+ *
+ * ## The fixtures are the GENERATED wire shape, not a plausible one
+ *
+ * `snapshot()` below is typed as `TimerSignal` from `@gridfpv/types` with no casts, so every field
+ * name is checked against the ts-rs bindings. The previous fixture was a hand-written guess in
+ * which every field was misnamed, and this whole file passed green against it — on a page that
+ * would have shown `undefined` at every readout in front of a live Director. Structural agreement
+ * with the generated type is the only thing that makes these tests mean anything.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
@@ -26,12 +37,15 @@ import type {
   EventMeta,
   HeatSummary,
   LiveRaceState,
+  NodeSignal,
   Pilot,
   RoundDef,
-  Timer
+  Timer,
+  TimerSignal
 } from '@gridfpv/types';
 import TunePage from '../src/screens/TunePage.svelte';
-import type { CalibrationReadback, TimerSignal } from '../src/lib/tuning.js';
+import type { CalibrationRequest } from '@gridfpv/protocol-client';
+import type { SessionRole } from '../src/lib/session.svelte.js';
 import { makeTestSession } from './support.js';
 
 const CATALOG: ChannelCatalogEntry[] = [
@@ -50,40 +64,56 @@ const TIMER: Timer = {
   manual_connect: true
 };
 
-/** Two nodes at rest: node 0 on Raceband R7 with 90/80, node 1 on R2 with 95/85. */
-function snapshot(over: Partial<TimerSignal['nodes'][number]> = {}): TimerSignal {
+/**
+ * Two nodes at rest: node 0 on Raceband R7 with 90/80, node 1 on R2 with 95/85.
+ *
+ * `sample_micros` is on the SNAPSHOT, once — the shared time base every node is sampled against —
+ * and the per-node `samples` line up with it index for index. `streaming` and `lease_ms_remaining`
+ * are the feed's own state, distinct from any node's.
+ */
+function snapshot(
+  over: Partial<NodeSignal> = {},
+  signalOver: Partial<TimerSignal> = {}
+): TimerSignal {
   return {
     timer: 'rh-1',
+    streaming: true,
+    lease_ms_remaining: 5_000,
+    period_micros: 200_000,
+    sample_micros: [0, 200_000, 400_000, 600_000, 800_000],
     nodes: [
       {
         node: 0,
-        frequency: 5880,
-        current_rssi: 48,
-        crossing_flag: false,
-        enter_at_level: 90,
-        exit_at_level: 80,
+        seat: 'node-0',
+        seen: true,
+        frequency_mhz: 5880,
+        rssi: 48,
+        crossing: false,
+        crossed_recently: false,
+        enter_at: 90,
+        exit_at: 80,
         node_peak_rssi: 132,
         node_nadir_rssi: 12,
         pass_peak_rssi: 118,
         pass_nadir_rssi: 41,
-        debug_pass_count: 7,
+        pass_count: 7,
         samples: [40, 42, 44, 46, 48],
-        from: 0,
-        period_micros: 200_000,
         ...over
       },
       {
         node: 1,
-        frequency: 5695,
-        current_rssi: 51,
-        crossing_flag: false,
-        enter_at_level: 95,
-        exit_at_level: 85,
-        samples: [50, 51, 52],
-        from: 0,
-        period_micros: 200_000
+        seat: 'node-1',
+        seen: true,
+        frequency_mhz: 5695,
+        rssi: 51,
+        crossing: false,
+        crossed_recently: false,
+        enter_at: 95,
+        exit_at: 85,
+        samples: [50, 51, 52, 53, 54]
       }
-    ]
+    ],
+    ...signalOver
   };
 }
 
@@ -138,47 +168,54 @@ const RUNNING: LiveRaceState = { current_heat: 'heat-1', phase: 'Running' };
 interface Harness {
   applyLevels: ReturnType<typeof vi.fn>;
   fetchSignal: ReturnType<typeof vi.fn>;
+  stopSignal: ReturnType<typeof vi.fn>;
   unmount: () => void;
 }
 
-/** Render the page over a stubbed signal feed + calibration write. */
+/**
+ * Render the page over a stubbed signal feed + calibration write.
+ *
+ * The feed is a **mutable** snapshot the write path mutates, because that is how the real thing
+ * works: `POST /calibration` answers "accepted" and the level itself only reappears on a later
+ * `GET /signal`. `opts.takes` decides what the timer ends up holding — default, exactly what it was
+ * sent; return `{}` to model a write RotorHazard silently ignored.
+ *
+ * `pollMs` defaults to ten minutes so the mount poll is the only one; a test about the confirmation
+ * lowers it, because a second poll is precisely what it is testing.
+ */
 async function renderTune(
   opts: {
     signal?: TimerSignal;
-    readback?: (
-      node: number,
-      body: { enter_at_level?: number; exit_at_level?: number }
-    ) => CalibrationReadback;
+    takes?: (body: CalibrationRequest) => { enter_at?: number; exit_at?: number };
     applyRejects?: Error;
     live?: LiveRaceState;
     event?: EventMeta;
     heats?: HeatSummary[];
     pilots?: Pilot[];
+    role?: SessionRole;
+    pollMs?: number;
+    confirmMs?: number;
   } = {}
 ): Promise<Harness> {
-  const snap = opts.signal ?? snapshot();
-  const fetchSignal = vi.fn(async () => snap);
-  const applyLevels = vi.fn(
-    async (
-      _timer: string,
-      node: number,
-      body: { enter_at_level?: number; exit_at_level?: number }
-    ) => {
-      if (opts.applyRejects) throw opts.applyRejects;
-      return (
-        opts.readback?.(node, body) ?? {
-          node,
-          // Default: the hardware took exactly what it was sent.
-          enter_at_level: body.enter_at_level ?? 90,
-          exit_at_level: body.exit_at_level ?? 80
-        }
-      );
+  const feed: TimerSignal = opts.signal ?? snapshot();
+  // A fresh object per poll: the page holds the snapshot in `$state.raw`, so handing back the same
+  // reference would be indistinguishable from no new poll at all.
+  const fetchSignal = vi.fn(async () => structuredClone(feed));
+  const applyLevels = vi.fn(async (_timer: string, body: CalibrationRequest) => {
+    if (opts.applyRejects) throw opts.applyRejects;
+    const took = opts.takes?.(body) ?? { enter_at: body.enter_at, exit_at: body.exit_at };
+    const target = feed.nodes.find((n) => n.node === body.node);
+    if (target) {
+      if (took.enter_at !== undefined) target.enter_at = took.enter_at;
+      if (took.exit_at !== undefined) target.exit_at = took.exit_at;
     }
-  );
+  });
+  const stopSignal = vi.fn(async () => {});
 
   const { session } = makeTestSession({
     live: opts.live,
     event: opts.event,
+    role: opts.role,
     listChannelsImpl: async () => CATALOG,
     listPilotsImpl: async () => opts.pilots ?? [],
     listHeatsImpl: async () => opts.heats ?? []
@@ -191,13 +228,14 @@ async function renderTune(
     ontimers: () => {},
     fetchSignal,
     applyLevels,
-    // One poll on mount; these tests never want a second one firing mid-assertion.
-    pollMs: 10 * 60 * 1000
+    stopSignal,
+    pollMs: opts.pollMs ?? 10 * 60 * 1000,
+    confirmMs: opts.confirmMs ?? 150
   });
 
   // Wait for the first snapshot to seed the per-(node, threshold) state.
   await screen.findByLabelText('Enter at level for Node 1 · Raceband R7');
-  return { applyLevels, fetchSignal, unmount };
+  return { applyLevels, fetchSignal, stopSignal, unmount };
 }
 
 const box = (node = 1, th = 'Enter at') =>
@@ -276,9 +314,12 @@ describe('TunePage — one value, three editors', () => {
 
     await fireEvent.input(box(), { target: { value: '9999' } });
     await tick();
-    expect(box().value).toBe('255');
-    expect(slider().value).toBe('255');
-    expect(graphValue('Enter')).toBe(255);
+    // 254, not 255: RH's `is_valid_rssi` is a STRICT `< 255`, so a literal 255 is dropped before
+    // the detector and then confirmed anyway off the profile row — "On timer" for a value that is
+    // not on the timer. It must never reach the wire either.
+    expect(box().value).toBe('254');
+    expect(slider().value).toBe('254');
+    expect(graphValue('Enter')).toBe(254);
     h.unmount();
   });
 
@@ -311,7 +352,7 @@ describe('TunePage — write cadence (no Apply button, no write storm)', () => {
 
     await fireEvent.pointerUp(slider());
     await waitFor(() => expect(h.applyLevels).toHaveBeenCalledTimes(1));
-    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', 0, { enter_at_level: 110 });
+    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', { node: 0, enter_at: 110 });
     h.unmount();
   });
 
@@ -325,7 +366,7 @@ describe('TunePage — write cadence (no Apply button, no write storm)', () => {
 
     await fireEvent.keyUp(knob, { key: 'ArrowUp' });
     await waitFor(() => expect(h.applyLevels).toHaveBeenCalledTimes(1));
-    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', 0, { enter_at_level: 92 });
+    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', { node: 0, enter_at: 92 });
     h.unmount();
   });
 
@@ -348,7 +389,7 @@ describe('TunePage — write cadence (no Apply button, no write storm)', () => {
     const h = await renderTune();
     await fireEvent.input(box(), { target: { value: '112' } });
     await waitFor(() => expect(h.applyLevels).toHaveBeenCalledTimes(1), { timeout: 2000 });
-    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', 0, { enter_at_level: 112 });
+    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', { node: 0, enter_at: 112 });
     h.unmount();
   });
 
@@ -357,7 +398,7 @@ describe('TunePage — write cadence (no Apply button, no write storm)', () => {
     await fireEvent.input(box(1, 'Exit at'), { target: { value: '70' } });
     await fireEvent.blur(box(1, 'Exit at'));
     await waitFor(() => expect(h.applyLevels).toHaveBeenCalledTimes(1));
-    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', 0, { exit_at_level: 70 });
+    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', { node: 0, exit_at: 70 });
     h.unmount();
   });
 
@@ -377,14 +418,17 @@ describe('TunePage — write cadence (no Apply button, no write storm)', () => {
     await fireEvent.input(box(), { target: { value: '111' } });
     await fireEvent.keyDown(box(), { key: 'Enter' });
     await waitFor(() => expect(h.applyLevels).toHaveBeenCalledTimes(1));
-    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', 0, { enter_at_level: 111 });
+    expect(h.applyLevels).toHaveBeenCalledWith('rh-1', { node: 0, enter_at: 111 });
     h.unmount();
   });
 });
 
-describe('TunePage — the readback is the confirmation', () => {
-  it('shows Adjusting → On timer once the readback matches', async () => {
-    const h = await renderTune();
+describe('TunePage — the POLL is the confirmation', () => {
+  it('shows Adjusting → Sending… → On timer, settling only when a POLL sees the level', async () => {
+    // `POST /calibration` answers "accepted" and nothing else. RotorHazard broadcasts
+    // `enter_and_exit_at_levels`, which comes back as `NodeSignal.enter_at` on a LATER `GET
+    // /signal` — so `Sending…` is not waiting on the response, it is waiting on the feed.
+    const h = await renderTune({ pollMs: 15 });
     const threshold = () => screen.getByTestId('threshold-0-enter');
     expect(within(threshold()).getByText('On timer')).toBeInTheDocument();
 
@@ -393,22 +437,48 @@ describe('TunePage — the readback is the confirmation', () => {
     expect(within(threshold()).getByText('Adjusting')).toBeInTheDocument();
 
     await fireEvent.pointerUp(slider());
+    await waitFor(() => expect(h.applyLevels).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(within(threshold()).getByText('On timer')).toBeInTheDocument());
     h.unmount();
   });
 
-  it('says so on the node when the hardware did NOT take the value', async () => {
+  it('stays Sending… while the write is accepted but the polls have not shown it yet', async () => {
+    // The write is accepted immediately; the feed keeps reporting the OLD level. Until the timeout
+    // that is not a failure — the change may still be in flight — so it must not read as settled.
+    const h = await renderTune({ pollMs: 15, confirmMs: 5_000, takes: () => ({}) });
+    await fireEvent.input(slider(), { target: { value: '110' } });
+    await fireEvent.pointerUp(slider());
+
+    const threshold = () => screen.getByTestId('threshold-0-enter');
+    await waitFor(() => expect(within(threshold()).getByText('Sending…')).toBeInTheDocument());
+    await new Promise((r) => setTimeout(r, 60));
+    expect(within(threshold()).getByText('Sending…')).toBeInTheDocument();
+    h.unmount();
+  });
+
+  it('says so on the node when the polls keep showing the OLD level', async () => {
     // RotorHazard does not echo the set, so a silent divergence would leave the RD tuning against
     // a level the timer never held — the #403 failure class.
-    const h = await renderTune({
-      readback: (node) => ({ node, enter_at_level: 90, exit_at_level: 80 })
-    });
+    const h = await renderTune({ pollMs: 15, takes: () => ({}) });
     await fireEvent.input(slider(), { target: { value: '110' } });
     await fireEvent.pointerUp(slider());
 
     const threshold = () => screen.getByTestId('threshold-0-enter');
     await waitFor(() => expect(within(threshold()).getByText('Not taken')).toBeInTheDocument());
     expect(within(threshold()).getByText(/reports 90, not 110/)).toBeInTheDocument();
+    h.unmount();
+  });
+
+  it('gives a verdict even when the poll itself has stopped answering', async () => {
+    // The backstop: with no further polls there is no confirmation coming, and a threshold left
+    // reading `Sending…` for ever is the silent failure this page exists to prevent.
+    const h = await renderTune({ pollMs: 10 * 60 * 1000, takes: () => ({}) });
+    await fireEvent.input(slider(), { target: { value: '110' } });
+    await fireEvent.pointerUp(slider());
+
+    const threshold = () => screen.getByTestId('threshold-0-enter');
+    await waitFor(() => expect(within(threshold()).getByText('Not taken')).toBeInTheDocument());
+    expect(h.fetchSignal).toHaveBeenCalledTimes(1);
     h.unmount();
   });
 
@@ -420,6 +490,15 @@ describe('TunePage — the readback is the confirmation', () => {
     const threshold = () => screen.getByTestId('threshold-0-enter');
     await waitFor(() => expect(within(threshold()).getByText('Failed')).toBeInTheDocument());
     expect(within(threshold()).getByText(/503/)).toBeInTheDocument();
+    h.unmount();
+  });
+
+  it('lets the hardware reclaim a threshold at rest — the RD tuned in RotorHazard’s own UI', async () => {
+    const feed = snapshot();
+    const h = await renderTune({ signal: feed, pollMs: 15 });
+    expect(box().value).toBe('90');
+    feed.nodes[0].enter_at = 104;
+    await waitFor(() => expect(box().value).toBe('104'));
     h.unmount();
   });
 });
@@ -517,10 +596,158 @@ describe('TunePage — readouts', () => {
   });
 });
 
-describe('TunePage — the poll holds a TTL lease, so it must stop', () => {
-  it('polls once on mount', async () => {
+describe('TunePage — an unseen node is DEAD, not quiet', () => {
+  /** A snapshot whose node 1 RotorHazard has never reported — zero-filled samples and all. */
+  const withDeadNode = () => {
+    const feed = snapshot();
+    feed.nodes[1] = {
+      node: 1,
+      seat: 'node-1',
+      seen: false,
+      crossing: false,
+      crossed_recently: false,
+      // The Director samples every node on the same pass and fills an unreported one's slot with
+      // 0.0 — so a dead node arrives carrying a full, perfectly plottable ring of zeroes.
+      samples: [0, 0, 0, 0, 0]
+    };
+    return feed;
+  };
+
+  it('says the node is not reporting, instead of drawing its zeroes as a trace', async () => {
+    // Plotted, that ring is a flat line along the floor — indistinguishable from a live node over
+    // an empty gate. Telling those two apart is the entire reason an RD opens this page.
+    const h = await renderTune({ signal: withDeadNode() });
+    expect(screen.getByTestId('node-dead-1')).toBeInTheDocument();
+    expect(screen.getByText('Not reporting')).toBeInTheDocument();
+    // Node 0 still plots; only the dead one loses its graph.
+    const graphs = document.querySelectorAll('[aria-label="RSSI signal graph"]');
+    expect(graphs.length).toBe(1);
+    h.unmount();
+  });
+
+  it('offers no thresholds to write to a node that is not there', async () => {
+    const h = await renderTune({ signal: withDeadNode() });
+    expect(screen.queryByTestId('threshold-1-enter')).toBeNull();
+    expect(screen.getByTestId('threshold-0-enter')).toBeInTheDocument();
+    h.unmount();
+  });
+
+  it('still keeps the node in the layout — "is this node even alive?" needs an answer', async () => {
+    // Unseated nodes are in the snapshot deliberately: filtering them out would answer the RD's
+    // question with silence for exactly the node they are checking.
+    const h = await renderTune({ signal: withDeadNode() });
+    expect(screen.getByRole('heading', { name: 'Node 2 · Raceband R2' })).toBeInTheDocument();
+    expect(within(screen.getByTestId('readout-1-rssi')).getByText('—')).toBeInTheDocument();
+    h.unmount();
+  });
+});
+
+describe('TunePage — "no signal" is not "no link"', () => {
+  it('reports a live feed as live', async () => {
+    const h = await renderTune();
+    expect(within(screen.getByTestId('feed-status')).getByText('Feed live')).toBeInTheDocument();
+    expect(screen.queryByText(/No link to this timer/)).toBeNull();
+    h.unmount();
+  });
+
+  it('says NO LINK when the Director answers but nothing is feeding it', async () => {
+    // `streaming: false` on a perfectly valid snapshot means the timer is not connected (or has
+    // just dropped) — a different fault from a live feed over a quiet gate, with a different fix.
+    const h = await renderTune({ signal: snapshot({}, { streaming: false }) });
+    await waitFor(() => expect(screen.getByText(/No link to this timer/)).toBeInTheDocument());
+    expect(within(screen.getByTestId('feed-status')).getByText('No link')).toBeInTheDocument();
+    h.unmount();
+  });
+
+  it('distinguishes that from a feed that failed outright', async () => {
+    // The Director itself did not answer: nothing on the page is current, which is a louder thing.
+    const { session } = makeTestSession({
+      listChannelsImpl: async () => CATALOG,
+      listPilotsImpl: async () => [],
+      listHeatsImpl: async () => []
+    });
+    const { unmount } = render(TunePage, {
+      session,
+      timer: TIMER,
+      onhome: () => {},
+      ontimers: () => {},
+      fetchSignal: vi.fn(async () => {
+        throw new Error('Track RH is not answering.');
+      }),
+      applyLevels: vi.fn(),
+      stopSignal: vi.fn(async () => {}),
+      pollMs: 10 * 60 * 1000
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/Lost the timer's signal feed/)).toBeInTheDocument()
+    );
+    expect(screen.queryByText(/No link to this timer/)).toBeNull();
+    unmount();
+  });
+});
+
+describe('TunePage — control authority', () => {
+  it('disables every editor for a read-only session, and says why', async () => {
+    // `POST /calibration` is ControlAuth-gated: a read-only session's every adjustment would come
+    // back 401, which is a different thing from a broken gate. Better to disable up front than to
+    // let the RD drag a slider that cannot possibly apply.
+    const h = await renderTune({ role: 'readonly' });
+    expect(screen.getByText(/Read-only session/)).toBeInTheDocument();
+    expect(box().disabled).toBe(true);
+    expect(slider().disabled).toBe(true);
+    h.unmount();
+  });
+
+  it('writes nothing even if an adjustment gets through anyway', async () => {
+    const h = await renderTune({ role: 'readonly' });
+    await fireEvent.input(slider(), { target: { value: '110' } });
+    await fireEvent.pointerUp(slider());
+    await tick();
+    expect(h.applyLevels).not.toHaveBeenCalled();
+    h.unmount();
+  });
+});
+
+describe('TunePage — the feed is leased: hold it, then give it back', () => {
+  it('polls once on mount — the call IS the subscription', async () => {
     const h = await renderTune();
     expect(h.fetchSignal).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+
+  it('keeps renewing the lease while the page is on screen', async () => {
+    // Every GET resets the Director's lease; stop calling and it tears the stream down. So the
+    // cadence is not a refresh rate, it is the thing holding the feed open.
+    const h = await renderTune({ pollMs: 15 });
+    await waitFor(() => expect(h.fetchSignal.mock.calls.length).toBeGreaterThan(2));
+    h.unmount();
+  });
+
+  it('STOPS the stream when the page unmounts — which is also how the route leaves', async () => {
+    // The shell swaps TunePage out on a hash change, so this cleanup is what releases the feed when
+    // the RD navigates away. Without it the timer keeps streaming to nobody until the lease lapses.
+    const h = await renderTune();
+    expect(h.stopSignal).not.toHaveBeenCalled();
+    h.unmount();
+    expect(h.stopSignal).toHaveBeenCalledWith('rh-1');
+  });
+
+  it('stops the stream when the tab is hidden, and re-subscribes when it comes back', async () => {
+    // The RD walks to the gate with the phone in a pocket. A backgrounded tab must not leave a
+    // timer parsing telemetry into a screen nobody is looking at.
+    const h = await renderTune();
+    expect(h.fetchSignal).toHaveBeenCalledTimes(1);
+
+    const spy = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await tick();
+    expect(h.fetchSignal).toHaveBeenCalledTimes(1); // still one — nothing new while hidden
+    expect(h.stopSignal).toHaveBeenCalledWith('rh-1');
+
+    spy.mockReturnValue('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await waitFor(() => expect(h.fetchSignal).toHaveBeenCalledTimes(2));
+    spy.mockRestore();
     h.unmount();
   });
 
@@ -532,6 +759,7 @@ describe('TunePage — the poll holds a TTL lease, so it must stop', () => {
       seen = o.signal;
       return new Promise<TimerSignal>(() => {});
     });
+    const stopSignal = vi.fn(async () => {});
     const { session } = makeTestSession({
       listChannelsImpl: async () => CATALOG,
       listPilotsImpl: async () => [],
@@ -544,28 +772,15 @@ describe('TunePage — the poll holds a TTL lease, so it must stop', () => {
       ontimers: () => {},
       fetchSignal,
       applyLevels: vi.fn(),
+      stopSignal,
       pollMs: 10 * 60 * 1000
     });
     await waitFor(() => expect(seen).toBeDefined());
     expect(seen!.aborted).toBe(false);
     unmount();
     expect(seen!.aborted).toBe(true);
-  });
-
-  it('stops polling when the tab is hidden and resumes when it comes back', async () => {
-    const h = await renderTune();
-    expect(h.fetchSignal).toHaveBeenCalledTimes(1);
-
-    const spy = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
-    document.dispatchEvent(new Event('visibilitychange'));
-    await tick();
-    expect(h.fetchSignal).toHaveBeenCalledTimes(1); // still one — nothing new while hidden
-
-    spy.mockReturnValue('visible');
-    document.dispatchEvent(new Event('visibilitychange'));
-    await waitFor(() => expect(h.fetchSignal).toHaveBeenCalledTimes(2));
-    spy.mockRestore();
-    h.unmount();
+    // …and the Director is told, rather than left to time the lease out on its own.
+    expect(stopSignal).toHaveBeenCalledWith('rh-1');
   });
 });
 
