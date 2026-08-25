@@ -166,8 +166,13 @@ const FULL_TARGETS: &[LiveTarget] = &[
     ("gridfpv-engine", "timed_qual_live", true),
     ("gridfpv-engine", "zippyq_live", true),
     ("gridfpv-engine", "multiclass_live", true),
-    // The protocol server's mock-RH e2e: full event → server log → protocol client (#47).
+    // The protocol server's mock-RH e2e: one heat, driven very hard — RH → server log →
+    // protocol client, plus marshaling corrections and the auth gate (#47).
     ("gridfpv-server", "full_event_live", true),
+    // The protocol server's mock-RH **multi-round event** e2e (#47): a `timed_qual` round,
+    // `SeedingRule::FromRanking` into a `head_to_head` main, and the round + class standings —
+    // every heat flown live, every assertion read off the protocol surface.
+    ("gridfpv-server", "multi_round_event_live", true),
     // The Director's RH-connect e2e (#65, #73): the per-event bridge connects dockerized RH,
     // drives status to Connected, and feeds real passes into the event log.
     ("gridfpv-app", "rh_connect_live", true),
@@ -185,7 +190,10 @@ const FULL_TARGETS: &[LiveTarget] = &[
 /// - `scoring_live` — the ingested passes must fold into laps and a ranked result, so a
 ///   *partial* ingest (some laps dropped) fails too, not just a total blackout.
 /// - `gridfpv-server`'s `full_event_live` — the whole spine: RH → adapter → engine →
-///   event log → protocol client, over a full multi-heat event.
+///   event log → protocol client, over one real heat. (The multi-round event e2e,
+///   `multi_round_event_live`, covers the same spine across a whole event; it runs only on the
+///   full leg — three live heats is too much wall clock to repeat four times for the same
+///   ingest signal.)
 ///
 /// Running the full suite four times would cost ~4× the wall clock for near-duplicate
 /// coverage; these three are what actually discriminate between the plugin's pass path

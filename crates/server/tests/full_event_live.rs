@@ -1,5 +1,13 @@
-//! Mock-RH end-to-end **server** test (#47) — the backend proof of v0.4's "a complete
-//! event runs live ... against dockerized RotorHazard".
+//! Mock-RH end-to-end **server** test (#47) — one heat, driven hard, all the way through the
+//! protocol server to a protocol client.
+//!
+//! This is the **single-heat depth** half of #47: it takes one real heat and exercises the
+//! seams a whole-event run does not — a marshaling correction re-folding on the wire, the
+//! pilot scope's 200-vs-404 rule, and the control-path auth gate. Its sibling
+//! [`multi_round_event_live`](../multi_round_event_live/index.html) is the **breadth** half:
+//! a `timed_qual` round, `SeedingRule::FromRanking`, a `head_to_head` main, and the round +
+//! class standings — a full multi-round event over the same spine. Together they are #47;
+//! neither is it alone.
 //!
 //! Where the engine's `full_event_live` (#37) drives a whole event through the *pure*
 //! engine, this drives a real heat through **dockerized RotorHazard into the running
