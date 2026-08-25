@@ -26,6 +26,9 @@ export {
   connectTimer,
   disconnectTimer,
   restartTimer,
+  setCalibration,
+  timerSignal,
+  stopTimerSignal,
   setEventTimers,
   setPrimaryTimer,
   listPilots,
@@ -63,5 +66,6 @@ export type {
   StateListener,
   WebSocketLike,
   WebSocketFactory,
-  FetchLike
+  FetchLike,
+  CalibrationRequest
 } from './client.js';

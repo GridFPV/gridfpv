@@ -49,23 +49,55 @@
    * `Sending…` → `On timer`, and says so loudly if the readback disagrees or never arrives. A
    * silent failure means tuning against a value the hardware never took (#403's failure class).
    *
+   * ## The confirmation is a POLL, not a response
+   *
+   * `POST /timers/{id}/calibration` answers "accepted" and nothing more. RotorHazard does not echo a
+   * level set synchronously — it broadcasts `enter_and_exit_at_levels`, which comes back to this page
+   * as `NodeSignal.enter_at`/`exit_at` on a **later** `GET /signal`. So `Sending…` is not "waiting
+   * for the HTTP response" (that already returned); it is waiting for the feed this page is already
+   * polling to show the new level. If the polls keep disagreeing past `CONFIRM_TIMEOUT_MS` the
+   * threshold says `Not taken`, loudly, on that node.
+   *
    * ## Gates and lifetimes
    *
    * Every adjustment is a write, so the practice-only gate (`writeGate`) is checked **per write**,
    * not once at load: a heat that goes `Running` while the RD is at the gate starts refusing
-   * mid-session. And the signal poll stops on unmount **and on `visibilitychange`** — the endpoint
-   * holds a TTL lease and a hidden tab must not keep a timer streaming.
+   * mid-session. And control authority (`session.canControl`) disables the editors up front rather
+   * than letting the RD drag a slider whose write cannot possibly land.
+   *
+   * ## The feed is LEASED, and this page is what holds it
+   *
+   * `GET /timers/{id}/signal` is a subscription, not a read: the Director streams a timer's telemetry
+   * only while somebody is looking, each `GET` renews a ~5 s lease, and the stream stops by itself
+   * once the calls stop. So the poll cadence is not merely a refresh rate — it is the thing keeping
+   * the feed alive, which is why it sits an order of magnitude inside the lease (`holdsLease`).
+   *
+   * The other half of that bargain is giving it back. The page `POST`s `signal/stop` when it goes
+   * away — unmount, route change, or the tab being hidden — because "the RD walked to the gate with
+   * the phone in their pocket" must not leave a timer parsing telemetry into nobody's screen. The
+   * lease is the backstop if that call never lands; it is not the plan.
+   *
+   * ## `streaming: false` is not "no signal"
+   *
+   * A snapshot can arrive perfectly well while nothing is feeding it. `TimerSignal.streaming` is the
+   * difference between **no signal** (the feed is live; the gate is quiet) and **no link** (the timer
+   * is not connected, or just dropped) — and an RD chasing a dead gate needs to be able to tell those
+   * apart, because they have opposite fixes. Likewise `NodeSignal.seen`: a node RotorHazard has never
+   * reported arrives carrying a full ring of zeroes, and drawing that would be a flat live-looking
+   * trace along the floor. Those nodes are rendered as **dead**, not as quiet.
    */
   import { Badge, Banner, Button, Card, toast } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
     CompetitorRef,
     HeatSummary,
+    NodeSignal,
     Pilot,
     PilotId,
     PilotProgress,
     Timer,
-    TimerId
+    TimerId,
+    TimerSignal
   } from '@gridfpv/types';
   import type { Action } from 'svelte/action';
   import type { Session } from '../lib/session.svelte.js';
@@ -75,32 +107,29 @@
   import { createCompetitorNameResolver } from '../lib/competitorName.js';
   import { isOpenPracticeRound } from '../lib/heats.js';
   import {
+    CONFIRM_TIMEOUT_MS,
     RSSI_MAX,
     RSSI_MIN,
-    adoptReported,
+    SIGNAL_POLL_MS,
     clampLevel,
-    foldReadback,
+    foldPolled,
     isParsableLevel,
+    markSent,
     nodeCountOf,
-    nodeRefOf,
     nodeTraceOf,
     nodeTuneLabel,
     phaseLabel,
     phaseTone,
+    plottable,
     readoutsOf,
     seedThreshold,
     writeGate,
     type ApplyLevels,
-    type CalibrationReadback,
     type FetchSignal,
+    type StopSignal,
     type Threshold,
-    type ThresholdState,
-    type TimerSignal,
-    type TimerSignalNode
+    type ThresholdState
   } from '../lib/tuning.js';
-
-  /** How often to poll the signal endpoint. Fast enough for a rolling plot, slow enough for a LAN. */
-  const DEFAULT_POLL_MS = 250;
 
   /**
    * How long typing in the numeric box may pause before it counts as "done" and writes. Blur and
@@ -116,7 +145,9 @@
     ontimers,
     fetchSignal,
     applyLevels,
-    pollMs = DEFAULT_POLL_MS
+    stopSignal,
+    pollMs = SIGNAL_POLL_MS,
+    confirmMs = CONFIRM_TIMEOUT_MS
   }: {
     session: Session;
     /** The timer being tuned, resolved from the route by the shell (never a bare id here). */
@@ -125,50 +156,42 @@
     onhome: () => void;
     /** Leave to the Timers page (the second breadcrumb — where this page is entered from). */
     ontimers: () => void;
-    /** Test/host seam for the signal poll; defaults to `GET /timers/{id}/signal`. */
+    /** Test/host seam for the signal poll; defaults to the session's `GET /timers/{id}/signal`. */
     fetchSignal?: FetchSignal;
-    /** Test/host seam for the calibration write; defaults to `POST /timers/{id}/calibration`. */
+    /** Test/host seam for the calibration write; defaults to the session's `setCalibration`. */
     applyLevels?: ApplyLevels;
+    /** Test/host seam for releasing the feed; defaults to the session's `signal/stop`. */
+    stopSignal?: StopSignal;
     /** Poll cadence (ms). */
     pollMs?: number;
+    /** How long a write may go unconfirmed by the poll before it reads `Not taken` (ms). */
+    confirmMs?: number;
   } = $props();
 
-  const base = $derived(
-    session.baseUrl.endsWith('/') ? session.baseUrl.slice(0, -1) : session.baseUrl
-  );
-
+  // All three seams default to the SESSION's calls, not a bare `fetch`: every one of these routes
+  // is `ControlAuth`-gated, so a hand-rolled fetch would 401 against any token-gated Director —
+  // including the RD's real one — and the Director's refusal messages (which name the timer and the
+  // heat by their friendly names) would be replaced by a status code.
   const readSignal = $derived<FetchSignal>(
-    fetchSignal ??
-      (async (id, opts) => {
-        const resp = await globalThis.fetch(`${base}/timers/${encodeURIComponent(id)}/signal`, {
-          signal: opts.signal
-        });
-        if (!resp.ok) throw new Error(`The timer's signal feed answered ${resp.status}.`);
-        return (await resp.json()) as TimerSignal;
-      })
+    fetchSignal ?? ((id, opts) => session.timerSignal(id, { signal: opts.signal }))
   );
-
   const writeLevels = $derived<ApplyLevels>(
     applyLevels ??
-      (async (id, node, body) => {
-        const resp = await globalThis.fetch(
-          `${base}/timers/${encodeURIComponent(id)}/calibration`,
-          {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ node, ...body })
-          }
-        );
-        if (!resp.ok) throw new Error(`The timer refused the change (${resp.status}).`);
-        return (await resp.json()) as CalibrationReadback;
+      (async (id, body) => {
+        await session.setCalibration(id, body);
       })
   );
+  const releaseSignal = $derived<StopSignal>(stopSignal ?? ((id) => session.stopTimerSignal(id)));
 
   // ── The live signal poll ────────────────────────────────────────────────────────────────────
-  // On-demand and lease-held: the Director only streams while somebody is watching, so the poll
-  // must stop the moment nobody is. `visibilitychange` matters as much as unmount here — the RD
-  // walks to the gate with the phone in a pocket, and a backgrounded tab that kept polling would
-  // hold the lease (and the 10 Hz socket parse) open indefinitely.
+  // The poll IS the subscription. The Director streams a timer only while somebody is watching, and
+  // every `GET /signal` renews a ~5 s lease on that; so this cadence is not a refresh rate, it is
+  // the thing keeping the feed alive, and it stays an order of magnitude inside the lease.
+  //
+  // The reverse obligation is `signal/stop`, fired on every path that ends the watch: unmount, a
+  // route change, and `visibilitychange` — the RD walks to the gate with the phone in a pocket, and
+  // a backgrounded tab must not leave a timer parsing telemetry into nobody's screen. The lease is
+  // the backstop for a stop that never lands (a killed tab, a dead network), not the plan.
   let signal = $state.raw<TimerSignal | undefined>(undefined);
   let signalError = $state<string | undefined>(undefined);
   /** Whether a first snapshot has landed — distinguishes "connecting" from "no nodes". */
@@ -201,27 +224,38 @@
     poll = setInterval(() => void pollOnce(id), pollMs);
   }
 
-  function stopPolling(): void {
+  /**
+   * Stop watching `id`: end the cadence, abandon anything in flight, and **tell the Director** so
+   * the stream stops now rather than when the lease runs out.
+   *
+   * The stop is fire-and-forget on purpose. It runs from teardown, where there is nobody left to
+   * show an error to and nothing useful to do about one — and the lease already guarantees the
+   * outcome if it never arrives. Not firing it at all is the thing that would be wrong.
+   */
+  function stopWatching(id: TimerId): void {
     if (poll !== undefined) {
       clearInterval(poll);
       poll = undefined;
     }
     inflightPoll?.abort();
     inflightPoll = undefined;
+    void releaseSignal(id).catch(() => {});
   }
 
   $effect(() => {
     const id = timer.id;
     const doc = typeof document === 'undefined' ? undefined : document;
     const sync = () => {
-      if (doc?.visibilityState === 'hidden') stopPolling();
+      if (doc?.visibilityState === 'hidden') stopWatching(id);
       else startPolling(id);
     };
     sync();
     doc?.addEventListener('visibilitychange', sync);
+    // Unmount is also how the ROUTE leaves — the shell swaps TunePage out on a hash change — so
+    // this cleanup is the one that has to release the feed when the RD navigates away.
     return () => {
       doc?.removeEventListener('visibilitychange', sync);
-      stopPolling();
+      stopWatching(id);
     };
   });
 
@@ -232,13 +266,22 @@
   let levels = $state<Record<number, { enter: ThresholdState; exit: ThresholdState }>>({});
 
   /**
-   * A per-(node, threshold) write sequence. Non-reactive on purpose — it exists only so a readback
-   * that lands *after* the RD has started adjusting again is dropped instead of stamping a stale
-   * value over the live one.
+   * A per-(node, threshold) write sequence. Non-reactive on purpose — it exists only so a write
+   * whose answer lands *after* the RD has started adjusting again is dropped instead of stamping a
+   * stale value over the live one.
    */
   const writeSeq = new Map<string, number>();
   /** The pending "typing stopped" timers, one per (node, threshold). */
   const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * The pending "this should have shown up by now" timers, one per (node, threshold).
+   *
+   * A write is confirmed by the poll, so in the ordinary case {@link ingest} settles it and this
+   * never fires. It exists for the case the poll itself has stopped — the feed errored, the tab was
+   * hidden, the Director went away — where waiting on a poll that is not coming would leave the
+   * threshold reading `Sending…` forever. Same verdict either way, via the same `foldPolled`.
+   */
+  const confirmTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const keyOf = (node: number, th: Threshold) => `${node}:${th}`;
 
   /**
@@ -252,29 +295,45 @@
   const beginDrag = (node: number) => dragging.add(node);
   const endDrag = (node: number) => dragging.delete(node);
 
+  /**
+   * Fold one poll into the page. This is where a write is **confirmed** — `POST /calibration` only
+   * says "accepted", and the level itself comes back through `enter_at`/`exit_at` on a later
+   * snapshot — and where the hardware reclaims a threshold the RD is not touching.
+   */
   function ingest(snap: TimerSignal): void {
     signal = snap;
+    const now = Date.now();
     for (const n of snap.nodes) {
-      const enter = n.enter_at_level;
-      const exit = n.exit_at_level;
-      if (enter === undefined || exit === undefined) continue;
       const held = levels[n.node];
       if (!held) {
-        levels[n.node] = { enter: seedThreshold(enter), exit: seedThreshold(exit) };
+        // Seed only from a node that has actually reported BOTH levels. A control sitting on a
+        // made-up default is one the RD can drag away from without ever having seen the real one.
+        if (n.enter_at === undefined || n.exit_at === undefined) continue;
+        levels[n.node] = { enter: seedThreshold(n.enter_at), exit: seedThreshold(n.exit_at) };
         continue;
       }
-      // The hardware is authoritative whenever we are not mid-edit — the RD may have tuned in
-      // RotorHazard's own UI, or a profile switch may have moved the levels underneath us.
-      held.enter = adoptReported(held.enter, enter);
-      held.exit = adoptReported(held.exit, exit);
+      // A threshold at rest follows the hardware (the RD may have tuned in RotorHazard's own UI, or
+      // a profile switch moved the levels underneath us); one with a write in flight is comparing
+      // against what it asked for. `foldPolled` is both, and leaves everything else alone.
+      held.enter = foldPolled(held.enter, n.enter_at, now, confirmMs);
+      held.exit = foldPolled(held.exit, n.exit_at, now, confirmMs);
     }
   }
 
   const nodeCount = $derived(nodeCountOf(signal, timer.node_count ?? 0));
   const nodeIndices = $derived(Array.from({ length: nodeCount }, (_, i) => i));
   const nodeById = $derived(
-    new Map<number, TimerSignalNode>((signal?.nodes ?? []).map((n) => [n.node, n]))
+    new Map<number, NodeSignal>((signal?.nodes ?? []).map((n) => [n.node, n]))
   );
+
+  /**
+   * Whether the Director is actually being fed right now. `false` with a perfectly valid snapshot
+   * is **no link** — the timer is not connected, or has just dropped — which is a different fault
+   * from a live feed showing a quiet gate, and has a different fix. An RD chasing a dead gate needs
+   * to be able to tell them apart, so the page says which one it is rather than showing a flat
+   * trace and letting them guess.
+   */
+  const streaming = $derived(signal?.streaming ?? false);
 
   /**
    * Set the one value. **Every** editor comes through here and nowhere else clamps — that is the
@@ -327,7 +386,12 @@
     }
 
     // Per WRITE, not per page load: a heat can go Running while the RD is standing at the gate.
-    const gate = writeGate(session.liveState?.phase, heatKind);
+    // Control authority is checked here too, as a backstop — the editors are already disabled
+    // without it (see `canControl`), but a keyboard path or a role that changes mid-session must
+    // not slip a write past a Director that will only answer 401.
+    const gate = canControl
+      ? writeGate(session.liveState?.phase, heatKind)
+      : ({ allowed: false, reason: NO_CONTROL } as const);
     if (!gate.allowed) {
       held[th] = { ...state, phase: 'refused', detail: gate.reason };
       return;
@@ -336,24 +400,19 @@
     const sent = state.value;
     const seq = (writeSeq.get(key) ?? 0) + 1;
     writeSeq.set(key, seq);
-    held[th] = { ...state, phase: 'sent', detail: undefined };
+    // Only the threshold that MOVED is sent; omitting the other means "leave it where it is".
+    const body = th === 'enter' ? { node, enter_at: sent } : { node, exit_at: sent };
 
     try {
-      const readback = await writeLevels(
-        timer.id,
-        node,
-        th === 'enter' ? { enter_at_level: sent } : { exit_at_level: sent }
-      );
+      await writeLevels(timer.id, body);
       if (writeSeq.get(key) !== seq) return; // superseded by a newer adjustment — drop this answer
       const current = levels[node];
       if (!current) return;
-      const back = th === 'enter' ? readback.enter_at_level : readback.exit_at_level;
-      current[th] = foldReadback(current[th], sent, back);
-      // The readback carries BOTH levels, so it also refreshes the *other* threshold's idea of what
-      // the hardware holds — but only while that one is at rest.
-      const other: Threshold = th === 'enter' ? 'exit' : 'enter';
-      const otherBack = other === 'enter' ? readback.enter_at_level : readback.exit_at_level;
-      current[other] = adoptReported(current[other], otherBack);
+      // Accepted is NOT applied. RotorHazard does not echo a level set; it broadcasts
+      // `enter_and_exit_at_levels`, which reaches this page as `enter_at`/`exit_at` on a later
+      // poll. So the write is only half done here — `ingest` finishes it.
+      current[th] = markSent(current[th], sent, Date.now());
+      armConfirm(node, th, seq);
     } catch (e) {
       if (writeSeq.get(key) !== seq) return;
       const current = levels[node];
@@ -362,6 +421,32 @@
       current[th] = { ...current[th], phase: 'failed', detail: message };
       toast.error(`${nodeLabel(node)}: the ${th} threshold did not reach the timer. ${message}`);
     }
+  }
+
+  /**
+   * Arm the backstop for a write the poll has not confirmed. See {@link confirmTimers}: the poll is
+   * the confirmation, and this only decides the case where the poll never comes.
+   */
+  function armConfirm(node: number, th: Threshold, seq: number): void {
+    const key = keyOf(node, th);
+    const existing = confirmTimers.get(key);
+    if (existing !== undefined) clearTimeout(existing);
+    confirmTimers.set(
+      key,
+      setTimeout(() => {
+        confirmTimers.delete(key);
+        if (writeSeq.get(key) !== seq) return;
+        const held = levels[node];
+        if (!held || held[th].phase !== 'sent') return;
+        const snap = nodeById.get(node);
+        held[th] = foldPolled(
+          held[th],
+          th === 'enter' ? snap?.enter_at : snap?.exit_at,
+          Date.now(),
+          0
+        );
+      }, confirmMs)
+    );
   }
 
   /**
@@ -454,6 +539,17 @@
   /** The page-level gate readout — the same rule the per-write check uses, shown before it bites. */
   const gate = $derived(writeGate(session.liveState?.phase, heatKind));
 
+  /**
+   * Whether this session may write at all. `POST /timers/{id}/calibration` is `ControlAuth`-gated,
+   * so a read-only session's every adjustment would come back 401 — and a 401 is a *different*
+   * thing from "the timer refused" or "the write did not land": the RD needs to know they lack
+   * authority, not that their gate is broken. Better to disable the editors up front than to let
+   * someone drag a slider that cannot possibly apply and then explain the wreckage.
+   */
+  const canControl = $derived(session.canControl);
+  const NO_CONTROL =
+    'This session is read-only, so it cannot change a timer’s thresholds. Sign in with the Director’s control token to tune.';
+
   // ── Names (CLAUDE.md: never a raw seat, never a bare frequency) ─────────────────────────────
   let catalog = $state<ChannelCatalogEntry[]>([]);
   $effect(() => {
@@ -482,7 +578,7 @@
 
   /** The frequency a node is actually on: the live heartbeat's, else the timer's configured pool. */
   function frequencyOf(node: number): number | undefined {
-    return nodeById.get(node)?.frequency ?? timer.available_channels?.[node];
+    return nodeById.get(node)?.frequency_mhz ?? timer.available_channels?.[node];
   }
 
   /** `Node 1 · Raceband R7` — the seat's own name, band+channel resolved through `channels.ts`. */
@@ -490,11 +586,23 @@
     return nodeTuneLabel(node, frequencyOf(node), catalog);
   }
 
+  /**
+   * The competitor ref a node plots under — **the timer's own `seat`**, never a locally re-spelled
+   * `node-{i}`. That handle is what a heat's registration binds a pilot to, so re-deriving it here
+   * is precisely the resolver drift CLAUDE.md exists to prevent. `undefined` before the first
+   * snapshot: until the timer has told us its seats, the page does not have them.
+   */
+  function seatOf(node: number): CompetitorRef | undefined {
+    return nodeById.get(node)?.seat;
+  }
+
   // The shared resolver (CLAUDE.md), with the node labels as the seat fallback: a seat bound to a
   // pilot reads as the callsign, an unbound one as `Node 1 · Raceband R7`, and a raw `node-0` or a
   // bare `5880` never reaches the screen.
   const channelByRef = $derived(
-    new Map<CompetitorRef, string>(nodeIndices.map((i) => [nodeRefOf(i), nodeLabel(i)]))
+    new Map<CompetitorRef, string>(
+      (signal?.nodes ?? []).map((n) => [n.seat, nodeLabel(n.node)] as const)
+    )
   );
   const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
     createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef })
@@ -502,29 +610,41 @@
 
   /** The seated pilot's callsign for a node, or `undefined` when the seat is unbound. */
   function seatedPilot(node: number): string | undefined {
-    const resolved = competitorName(nodeRefOf(node));
-    return resolved === nodeLabel(node) || resolved === nodeRefOf(node) ? undefined : resolved;
+    const seat = seatOf(node);
+    if (seat === undefined) return undefined;
+    const resolved = competitorName(seat);
+    return resolved === nodeLabel(node) || resolved === seat ? undefined : resolved;
   }
+
+  // Both timer maps outlive any single render, so they are cleared with the component — a
+  // typing-idle write or a confirmation backstop firing into a page the RD has already left has
+  // nothing left to write to and nobody left to tell.
+  $effect(() => () => {
+    for (const t of idleTimers.values()) clearTimeout(t);
+    idleTimers.clear();
+    for (const t of confirmTimers.values()) clearTimeout(t);
+    confirmTimers.clear();
+  });
 
   // ── Layout ──────────────────────────────────────────────────────────────────────────────────
   // Columns is the decision; stacked is a look the RD wants to compare against. Same markup, one
   // class — deliberately not a second component, which is how two layouts start to diverge.
   let layout = $state<'columns' | 'stacked'>('columns');
 
-  /** The live trace for one node, in the `{ competitors: [...] }` shape `RssiGraph` consumes. */
+  /**
+   * The live trace for one node, in the `{ competitors: [...] }` shape `RssiGraph` consumes.
+   *
+   * **Empty unless the node has actually been seen.** The Director samples every node on the same
+   * pass and fills an unreported one's slot with `0.0`, so a dead or unseated node arrives with a
+   * full, perfectly plottable ring of zeroes — which drawn is a flat trace along the floor,
+   * indistinguishable from a live node watching an empty gate. Those are the two states an RD is on
+   * this page to tell apart, so the unseen node gets no plot at all and says why instead.
+   */
   function traceFor(node: number) {
     const snap = nodeById.get(node);
+    const snapshot = signal;
     return {
-      competitors: snap
-        ? [nodeTraceOf(timer.id, snap)]
-        : [
-            {
-              competitor: { adapter: timer.id, competitor: nodeRefOf(node) },
-              from: 0,
-              period_micros: 200_000,
-              samples: []
-            }
-          ]
+      competitors: snapshot && plottable(snap) ? [nodeTraceOf(snapshot, snap)] : []
     };
   }
 </script>
@@ -550,29 +670,62 @@
           <strong>Changes go to the timer as you make them</strong>; there is nothing to press.
         </p>
       </div>
-      <div class="layout-toggle" role="group" aria-label="Layout">
-        <Button
-          variant={layout === 'columns' ? 'primary' : 'ghost'}
-          size="sm"
-          aria-pressed={layout === 'columns'}
-          onclick={() => (layout = 'columns')}>Columns</Button
-        >
-        <Button
-          variant={layout === 'stacked' ? 'primary' : 'ghost'}
-          size="sm"
-          aria-pressed={layout === 'stacked'}
-          onclick={() => (layout = 'stacked')}>Stacked</Button
-        >
+      <div class="head-controls">
+        {#if signal}
+          <!-- The feed's own state, distinct from any node's. `streaming: false` means NO LINK —
+               the timer is not connected, or just dropped — as against a live feed over a quiet
+               gate. Opposite faults, opposite fixes, so the page says which. The lease behind the
+               tooltip is what the poll is renewing on every tick; it is the RD's only clue that
+               this page is holding the stream open. -->
+          <span
+            class="feed-status"
+            data-testid="feed-status"
+            title={`The signal feed's lease renews on every poll — ${Math.max(
+              0,
+              Math.round(signal.lease_ms_remaining / 1000)
+            )}s left on the current one.`}
+          >
+            <Badge tone={streaming ? 'success' : 'warn'} variant="outline">
+              {streaming ? 'Feed live' : 'No link'}
+            </Badge>
+          </span>
+        {/if}
+        <div class="layout-toggle" role="group" aria-label="Layout">
+          <Button
+            variant={layout === 'columns' ? 'primary' : 'ghost'}
+            size="sm"
+            aria-pressed={layout === 'columns'}
+            onclick={() => (layout = 'columns')}>Columns</Button
+          >
+          <Button
+            variant={layout === 'stacked' ? 'primary' : 'ghost'}
+            size="sm"
+            aria-pressed={layout === 'stacked'}
+            onclick={() => (layout = 'stacked')}>Stacked</Button
+          >
+        </div>
       </div>
     </header>
 
-    {#if !gate.allowed}
+    {#if !canControl}
+      <!-- Authority, not health: every editor below is disabled, so say why once, up front. -->
+      <Banner tone="warn" title="Read-only session.">{NO_CONTROL}</Banner>
+    {:else if !gate.allowed}
       <!-- Stated up front as well as per write: the RD should know before they drag, not after. -->
       <div class="gate-banner" role="status">{gate.reason}</div>
     {/if}
 
     {#if signalError}
+      <!-- The FEED itself failed — the Director did not answer. Nothing below is current. -->
       <Banner tone="danger" title="Lost the timer's signal feed.">{signalError}</Banner>
+    {:else if everLoaded && !streaming}
+      <!-- The Director answered fine; nothing is feeding it. That is "no link", not "no signal" —
+           the distinction an RD chasing a dead gate is here to make. The plots below are the last
+           thing the timer said before it went quiet, not what it is saying now. -->
+      <Banner tone="warn" title="No link to this timer.">
+        The Director is answering, but nothing is arriving from {timer.name}. Connect it on the
+        Timers page — until then these readings are the last ones it sent, not live ones.
+      </Banner>
     {/if}
 
     {#if nodeIndices.length === 0}
@@ -590,34 +743,55 @@
         {#each nodeIndices as node (node)}
           {@const held = levels[node]}
           {@const snap = nodeById.get(node)}
-          <section class="node" aria-label={nodeLabel(node)}>
+          {@const seat = seatOf(node)}
+          {@const dead = snap !== undefined && !snap.seen}
+          <section class="node" class:dead aria-label={nodeLabel(node)}>
             <header class="node-head">
               <h2 class="node-name">{nodeLabel(node)}</h2>
               {#if seatedPilot(node)}
                 <span class="node-pilot">{seatedPilot(node)}</span>
               {/if}
-              {#if snap?.crossing_flag}
+              {#if dead}
+                <Badge tone="danger" variant="outline">Not reporting</Badge>
+              {:else if snap?.crossing}
                 <Badge tone="accent">In gate</Badge>
+              {:else if snap?.crossed_recently}
+                <!-- The sticky flag, which survives the Director's decimation: a fast pass between
+                     two samples lights this even though `crossing` was false at both of them. -->
+                <Badge tone="accent" variant="outline">Crossed</Badge>
               {/if}
             </header>
 
-            <!-- `use:commitOnRelease` catches the end of a threshold drag on the graph (see the
-                 action) — that release is what triggers the single write. -->
-            <div class="plot" use:commitOnRelease={node}>
-              <RssiGraph
-                mode="live"
-                trace={traceFor(node)}
-                nameFor={competitorName}
-                onthresholds={held
-                  ? (_ref, enter, exit) => onGraphThresholds(node, enter, exit)
-                  : undefined}
-                tuned={held
-                  ? { competitor: nodeRefOf(node), enter: held.enter.value, exit: held.exit.value }
-                  : undefined}
-              />
-            </div>
+            {#if dead}
+              <!-- A node RotorHazard has never reported. It arrives with a full ring of ZEROES —
+                   the Director samples every node on the same pass — so plotting it would draw a
+                   flat live-looking trace along the floor, exactly the picture of a quiet gate.
+                   That is the one confusion this page exists to remove, so it gets no plot. -->
+              <p class="node-dead" data-testid={`node-dead-${node}`} role="status">
+                This node has not reported to the timer at all. It is not a quiet gate — there is
+                nothing there to be quiet. Check the node is fitted and the timer sees it.
+              </p>
+            {:else}
+              <!-- `use:commitOnRelease` catches the end of a threshold drag on the graph (see the
+                   action) — that release is what triggers the single write. -->
+              <div class="plot" use:commitOnRelease={node}>
+                <RssiGraph
+                  mode="live"
+                  trace={traceFor(node)}
+                  nameFor={competitorName}
+                  onthresholds={held && seat !== undefined && canControl
+                    ? (_ref, enter, exit) => onGraphThresholds(node, enter, exit)
+                    : undefined}
+                  tuned={held && seat !== undefined
+                    ? { competitor: seat, enter: held.enter.value, exit: held.exit.value }
+                    : undefined}
+                />
+              </div>
+            {/if}
 
-            {#if held}
+            {#if dead}
+              <!-- No controls: there is no node there to write a threshold to. -->
+            {:else if held}
               <div class="thresholds">
                 {#each [{ th: 'enter' as Threshold, label: 'Enter at' }, { th: 'exit' as Threshold, label: 'Exit at' }] as row (row.th)}
                   {@const state = held[row.th]}
@@ -644,6 +818,7 @@
                         step="1"
                         aria-label={`${row.label} level for ${nodeLabel(node)}`}
                         value={state.value}
+                        disabled={!canControl}
                         oninput={(e) => {
                           const raw = e.currentTarget.value;
                           // A half-typed / emptied box is not a number: leave the state alone
@@ -669,6 +844,7 @@
                         step="1"
                         aria-label={`${row.label} slider for ${nodeLabel(node)}`}
                         value={state.value}
+                        disabled={!canControl}
                         oninput={(e) => adjust(node, row.th, e.currentTarget.value)}
                         onpointerdown={() => beginDrag(node)}
                         onchange={() => {
@@ -697,9 +873,15 @@
                 {/each}
               </div>
             {:else}
-              <p class="node-waiting" role="status">Waiting for this node to report its levels…</p>
+              <p class="node-waiting" role="status">
+                {everLoaded
+                  ? 'This node has not reported its thresholds yet.'
+                  : 'Waiting for this node to report its levels…'}
+              </p>
             {/if}
 
+            <!-- Kept even for a dead node: six dashes say "nothing reported", which is information.
+                 Six zeroes would be a lie, and it is the lie an RD would tune against. -->
             <dl class="readouts">
               {#each readoutsOf(snap) as r (r.key)}
                 <div class="readout" data-testid={`readout-${node}-${r.key}`}>
@@ -763,9 +945,19 @@
     color: var(--gf-text-secondary);
     font-weight: var(--gf-font-weight-semibold);
   }
+  .head-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+    flex-wrap: wrap;
+  }
   .layout-toggle {
     display: flex;
     gap: var(--gf-space-1);
+    align-items: center;
+  }
+  .feed-status {
+    display: inline-flex;
     align-items: center;
   }
 
@@ -834,6 +1026,19 @@
   }
   .node-waiting {
     margin: 0;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+  /* A node the timer has never reported. Recessed rather than alarming: the column still holds its
+     place in the row (so the node numbering stays readable across eight of them) but reads at a
+     glance as absent, not as a live node sitting quiet. */
+  .node.dead {
+    border-style: dashed;
+    background: var(--gf-surface-2);
+  }
+  .node-dead {
+    margin: 0;
+    padding: var(--gf-space-4) 0;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
   }
