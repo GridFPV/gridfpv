@@ -132,6 +132,35 @@ type SeatSlot = Arc<Mutex<Option<Vec<(u64, String)>>>>;
 /// reconnect → re-probe path do the rest.
 type RestartSlot = Arc<AtomicBool>;
 
+/// One queued **calibration write** the driver applies on its next loop (#355): a node and whichever
+/// of its enter/exit thresholds the RD moved, already clamped by the server route.
+///
+/// The app-crate twin of `gridfpv_server::timers::PendingCalibration`, restated here so this crate's
+/// slot type does not leak a `TimerId` it does not need — the connection already knows which timer
+/// it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalibrationWrite {
+    /// The node to calibrate, 0-based (RotorHazard's `seat_index`).
+    pub node: u64,
+    /// The enter threshold to set, or `None` to leave it alone.
+    pub enter_at: Option<u32>,
+    /// The exit threshold to set, or `None` to leave it alone.
+    pub exit_at: Option<u32>,
+    /// Whether the route accepted this write with an **open-practice** heat racing on the timer
+    /// (#355, #398) — so the driver's armed-heat backstop below must let it through.
+    pub during_open_practice: bool,
+}
+
+/// **Pending calibration writes** the driver applies on its next loop (#355): the enter/exit
+/// thresholds the RD set on the Tune page, shared from the async
+/// [`RhConnection::calibrate`] caller to the blocking driver thread.
+///
+/// A **queue**, not a single slot like [`TuneSlot`]: the page writes per threshold on interaction
+/// end, so several nodes can be pending in one reconcile tick, and each is a distinct emit. Pushes
+/// coalesce per node (last value wins per threshold) so a drag that lands twice before a drain
+/// applies the latest value once rather than replaying a stale one after it.
+type CalibrationSlot = Arc<Mutex<Vec<CalibrationWrite>>>;
+
 /// The RH heat id **seated** for the current arming, if seating succeeded (the laps-attribute fix):
 /// a fresh RH heat built at Stage with the bound pilots assigned + made current, so RH records +
 /// attributes passes. Held by [`drive`] **outside** its reconnect loop (not a `maintain`-local) so it
@@ -233,6 +262,11 @@ pub struct RhConnection {
     /// drops, this driver reconnects with backoff, and the reconnect's plugin probe republishes the
     /// timer's `PluginPresence` — `Missing → Present` with no extra plumbing.
     restart: RestartSlot,
+    /// **Pending calibration writes** the driver applies on its next loop (#355): set by
+    /// [`calibrate`](Self::calibrate) from the Tune page, the driver emits RotorHazard's
+    /// `set_enter_at_level` / `set_exit_at_level` and then asks for the `enter_and_exit_at_levels`
+    /// readback — RH echoes neither write, so the readback is the only confirmation there is.
+    calibration: CalibrationSlot,
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
@@ -253,6 +287,7 @@ impl RhConnection {
         let prepare: PrepareSlot = Arc::new(AtomicBool::new(false));
         let seat: SeatSlot = Arc::new(Mutex::new(None));
         let restart: RestartSlot = Arc::new(AtomicBool::new(false));
+        let calibration: CalibrationSlot = Arc::new(Mutex::new(Vec::new()));
         let driver = {
             let cancel = cancel.clone();
             let yield_status = yield_status.clone();
@@ -261,6 +296,7 @@ impl RhConnection {
             let prepare = prepare.clone();
             let seat = seat.clone();
             let restart = restart.clone();
+            let calibration = calibration.clone();
             tokio::task::spawn_blocking(move || {
                 drive(
                     url,
@@ -273,6 +309,7 @@ impl RhConnection {
                     prepare,
                     seat,
                     restart,
+                    calibration,
                 );
             })
         };
@@ -284,6 +321,7 @@ impl RhConnection {
             prepare,
             seat,
             restart,
+            calibration,
             _driver: driver,
         }
     }
@@ -368,6 +406,44 @@ impl RhConnection {
     /// this connection (below) so a request racing an arm can never land on a live race.
     pub fn restart(&self) {
         self.restart.store(true, Ordering::Relaxed);
+    }
+
+    /// **Set a node's enter/exit detection thresholds** on this connection (#355) — the Tune page's
+    /// write.
+    ///
+    /// Queues the write; the driver emits RotorHazard's `set_enter_at_level` /
+    /// `set_exit_at_level` on its next loop and then fires the `enter_and_exit_at_levels` readback,
+    /// which flows back through the same signal tap the Tune page polls. RH echoes neither write, so
+    /// that readback is the *only* evidence a level landed — there is nothing synchronous to return
+    /// here, and this deliberately returns nothing at all.
+    ///
+    /// Pushes **coalesce per node**: a slider dragged twice before the driver's next loop applies the
+    /// latest value once rather than replaying a stale one after it. A write carrying neither
+    /// threshold is dropped (the route already refuses one, so this is only a backstop).
+    ///
+    /// **Refused mid-race by the driver as well as by the route** — but only for a *scored* heat.
+    /// The route decides that (it is the layer that can see the event log) and records its answer in
+    /// [`CalibrationWrite::during_open_practice`]; this backstop only covers the window between that
+    /// check and the emit. An open-practice write is passed through, because #398 excludes practice
+    /// from scoring and tuning with pilots in the air is the page's whole workflow.
+    pub fn calibrate(&self, write: CalibrationWrite) {
+        if write.enter_at.is_none() && write.exit_at.is_none() {
+            return;
+        }
+        let mut pending = self.calibration.lock().expect("calibration lock poisoned");
+        match pending.iter_mut().find(|p| p.node == write.node) {
+            Some(existing) => {
+                if write.enter_at.is_some() {
+                    existing.enter_at = write.enter_at;
+                }
+                if write.exit_at.is_some() {
+                    existing.exit_at = write.exit_at;
+                }
+                // The freshest phase reading wins (see the registry's coalesce).
+                existing.during_open_practice = write.during_open_practice;
+            }
+            None => pending.push(write),
+        }
     }
 
     /// Tear the connection down: stop any race, disconnect, leave the timer `Disconnected`. Called
@@ -512,6 +588,7 @@ fn drive(
     prepare: PrepareSlot,
     seat: SeatSlot,
     restart: RestartSlot,
+    calibration: CalibrationSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
     // The RH heat id **seated** for the current arming (the laps-attribute fix), if seating
@@ -579,6 +656,16 @@ fn drive(
         // later, restarting the timer with no one asking: exactly the surprise `restart`'s own
         // contract says cannot happen.
         restart.store(false, Ordering::Relaxed);
+        // …and any calibration write that outlived the previous connection, for the same reason.
+        // The route only accepts one while the timer reads `Connected`, but the link can drop in the
+        // window before the reconciler drains. A threshold is not held over for a future connection:
+        // firing it minutes later, onto whatever RotorHazard came back, would move a detector nobody
+        // asked to move — and the RD would have long since seen the value fail to come back and
+        // re-set it by hand.
+        calibration
+            .lock()
+            .expect("calibration lock poisoned")
+            .clear();
 
         // Probe for the GridFPV plugin (D16, S1): `connect` already emitted `gridfpv_hello`, so
         // wait briefly for the `gridfpv_hello_ack`. Present-&-compatible / incompatible / missing
@@ -596,6 +683,7 @@ fn drive(
                 prepare: &prepare,
                 seat: &seat,
                 restart: &restart,
+                calibration: &calibration,
                 seated_heat: &seated_heat,
                 timers: &timers,
                 timer_id: &timer_id,
@@ -675,6 +763,8 @@ struct ControlSlots<'a> {
     seat: &'a Mutex<Option<Vec<(u64, String)>>>,
     /// Set when the RD has asked RotorHazard to restart (#386).
     restart: &'a AtomicBool,
+    /// Calibration writes the RD queued from the Tune page (#355), one entry per node.
+    calibration: &'a Mutex<Vec<CalibrationWrite>>,
     /// The heat whose seats are currently bound on the timer.
     seated_heat: &'a Mutex<Option<u64>>,
     /// The timer registry — where the **tune-telemetry lease** lives (#355 S2a). The registry is
@@ -692,6 +782,7 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
         prepare,
         seat,
         restart,
+        calibration,
         seated_heat,
         timers,
         timer_id,
@@ -745,6 +836,64 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
                 if conn.restart_server().is_err() {
                     // A failed emit on a supposedly-live socket signals a drop; reconnect and let the
                     // RD retry (the restart may or may not have been taken — the reconnect tells us).
+                    return true;
+                }
+            }
+        }
+
+        // Apply any pending **calibration** (#355): the RD moved an enter/exit threshold on the Tune
+        // page and it goes to the timer now — there is no Apply button, so this is the whole write
+        // path, once per adjustment.
+        //
+        // Belt-and-braces refusal while a heat is armed — but **only for a scored heat**, which is
+        // the one place this differs from the restart above. The server route owns that judgement
+        // (it is the layer that can see the event log) and stamps its answer on each write; this
+        // backstop only covers the window between that check and this emit, since the write travels
+        // route → registry → reconciler → this thread and an arm could land in between.
+        //
+        // Loosening it here is not optional: the route now ACCEPTS a write during open practice
+        // (#398 excludes practice from scoring, and tuning with pilots in the air is the page's
+        // whole point). A backstop that still dropped it would report a write as dispatched that
+        // never landed — the exact failure the readback design exists to make impossible.
+        let pending_calibration: Vec<CalibrationWrite> = {
+            let mut slot = calibration.lock().expect("calibration lock poisoned");
+            std::mem::take(&mut *slot)
+        };
+        if !pending_calibration.is_empty() {
+            let heat_armed = armed.lock().expect("armed-heat lock poisoned").is_some();
+            let mut emitted = 0usize;
+            let mut refused = 0usize;
+            for write in &pending_calibration {
+                if heat_armed && !write.during_open_practice {
+                    refused += 1;
+                    continue;
+                }
+                if let Some(level) = write.enter_at {
+                    if conn.set_enter_at_level(write.node, level).is_err() {
+                        return true;
+                    }
+                }
+                if let Some(level) = write.exit_at {
+                    if conn.set_exit_at_level(write.node, level).is_err() {
+                        return true;
+                    }
+                }
+                emitted += 1;
+            }
+            if refused > 0 {
+                eprintln!(
+                    "gridfpv: ignoring {refused} calibration write(s) — a scored heat is armed on \
+                     this connection; moving a detection threshold mid-race changes what counts as \
+                     a lap"
+                );
+            }
+            if emitted > 0 {
+                // The readback, and the reason a write is confirmable at all: RotorHazard emits
+                // NOTHING in reply to `set_enter_at_level` / `set_exit_at_level` (verified on
+                // v4.3.0 and v4.4.0), so without this ask the Tune page would never see the level
+                // it just sent come back — and "sent" would be indistinguishable from "landed",
+                // which is the #403 failure class. One `load_data` covers every node in this batch.
+                if conn.request_thresholds().is_err() {
                     return true;
                 }
             }
