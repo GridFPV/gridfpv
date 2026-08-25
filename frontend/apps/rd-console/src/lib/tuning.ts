@@ -155,10 +155,9 @@ export type ApplyLevels = (timer: TimerId, body: CalibrationRequest) => Promise<
 
 /**
  * The outbound calibration body, re-exported so the page has one import site for the whole tuning
- * vocabulary. Currently declared in `@gridfpv/protocol-client` beside the call that sends it,
- * because the Director-side write path's generated `CalibrationRequest` binding is not in this tree
- * yet. Same name, same shape, on purpose: when it lands, this import moves to `@gridfpv/types` and
- * nothing else changes.
+ * vocabulary. The definition is the ts-rs binding generated from the Director's own route
+ * (`@gridfpv/types`), reached here via `@gridfpv/protocol-client`, which re-exports it beside the
+ * call that sends it — so the page and the Director cannot disagree about the shape.
  */
 export type { CalibrationRequest };
 

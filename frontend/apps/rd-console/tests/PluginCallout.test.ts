@@ -23,6 +23,7 @@ const RH_MISSING: Timer = {
   node_count: 8,
   available_channels: [],
   manual_connect: false,
+  calibration: [],
   plugin: 'Missing'
 };
 

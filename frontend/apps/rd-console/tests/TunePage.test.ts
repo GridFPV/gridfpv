@@ -61,7 +61,8 @@ const TIMER: Timer = {
   channel_capability: 'Flexible',
   node_count: 2,
   available_channels: [5880, 5695],
-  manual_connect: true
+  manual_connect: true,
+  calibration: []
 };
 
 /**

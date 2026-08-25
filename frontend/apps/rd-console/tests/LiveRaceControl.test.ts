@@ -1052,7 +1052,8 @@ const OP_TIMER: Timer = {
   channel_capability: 'Flexible',
   node_count: 2,
   available_channels: [5658, 5800],
-  manual_connect: false
+  manual_connect: false,
+  calibration: []
 };
 const OP_CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
@@ -1337,7 +1338,8 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
     channel_capability: 'Flexible',
     node_count: 2,
     available_channels: [5658, 5800],
-    manual_connect: false
+    manual_connect: false,
+    calibration: []
   };
   const FN_CATALOG: ChannelCatalogEntry[] = [
     { band: 'Raceband', channel: 'R1', mhz: 5658 },

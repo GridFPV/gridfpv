@@ -19,6 +19,7 @@
 
 import type {
   ActiveEvent,
+  CalibrationRequest,
   ChangeEnvelope,
   ChannelCatalogEntry,
   Class,
@@ -569,27 +570,6 @@ export async function stopTimerSignal(
   );
   if (!resp.ok)
     throw new Error(`The Director could not stop the signal feed (HTTP ${resp.status}).`);
-}
-
-/**
- * The body of `POST /timers/{id}/calibration`: which node, and whichever threshold(s) moved.
- *
- * Only the level that actually changed is sent — omitting one means "leave it where it is", which
- * is what lets the Tune page write a single threshold on a single drag without disturbing its pair.
- *
- * **A stand-in, deliberately named after the real thing.** The Director-side write path generates a
- * `CalibrationRequest` binding of exactly this shape; it is not in this tree yet, so this holds the
- * name until it is, and the reconciliation is then a one-line swap to `@gridfpv/types` rather than
- * a rename rippling through the page. Nothing else here hand-writes a wire shape, and this one is
- * outbound — a body the caller constructs, never a payload it receives and trusts.
- */
-export interface CalibrationRequest {
-  /** The 0-based node on the timer. */
-  node: number;
-  /** The enter threshold to set, when it moved. */
-  enter_at?: number;
-  /** The exit threshold to set, when it moved. */
-  exit_at?: number;
 }
 
 /**

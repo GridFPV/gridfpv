@@ -66,6 +66,13 @@ export type {
   StateListener,
   WebSocketLike,
   WebSocketFactory,
-  FetchLike,
-  CalibrationRequest
+  FetchLike
 } from './client.js';
+
+/**
+ * The outbound calibration body for {@link setCalibration}, re-exported so a caller has one import
+ * site for the call and its payload. The definition is the ts-rs binding generated from the
+ * Director's own route — this package hand-writes no wire shape of its own (see the module note
+ * above), so the page and the Director cannot disagree about it.
+ */
+export type { CalibrationRequest } from '@gridfpv/types';

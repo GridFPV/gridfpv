@@ -17,6 +17,7 @@ function rhTimer(plugin: Timer['plugin']): Timer {
     node_count: 8,
     available_channels: [],
     manual_connect: false,
+    calibration: [],
     plugin
   };
 }
@@ -31,7 +32,8 @@ describe('pluginView', () => {
       channel_capability: 'Flexible',
       node_count: 8,
       available_channels: [],
-      manual_connect: false
+      manual_connect: false,
+      calibration: []
     };
     expect(pluginView(mock)).toBeNull();
   });
@@ -94,7 +96,8 @@ describe('selectionRefusal', () => {
     channel_capability: 'Flexible',
     node_count: 8,
     available_channels: [],
-    manual_connect: false
+    manual_connect: false,
+    calibration: []
   };
 
   it('never refuses a Mock timer — the requirement is RotorHazard-specific', () => {
