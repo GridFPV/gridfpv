@@ -50,10 +50,12 @@ use std::time::{Duration, Instant};
 
 use gridfpv_adapters::rotorhazard::RotorHazardAdapter;
 use gridfpv_adapters::rotorhazard::transport::{
-    DIRECTOR_PROTOCOL_VERSION, PluginHello, RotorHazardConnection,
+    DIRECTOR_PROTOCOL_VERSION, NodeTick, PluginHello, RotorHazardConnection,
 };
 use gridfpv_events::{AdapterId, CompetitorRef, Event};
-use gridfpv_server::timers::{PluginPresence, TimerId, TimerRegistry, TimerStatus};
+use gridfpv_server::timers::{
+    NodeReading, PluginPresence, SIGNAL_SAMPLE_INTERVAL, TimerId, TimerRegistry, TimerStatus,
+};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
@@ -390,6 +392,33 @@ impl Drop for RhConnection {
     }
 }
 
+/// Map the transport's latest per-node readings onto the registry's crate-boundary twin (#355 S2a).
+///
+/// A field-for-field copy, and deliberately so: the live socket lives here in `gridfpv-app` and the
+/// registry lives in `gridfpv-server` *below* it, so the two cannot share one type without pointing
+/// the dependency arrow the wrong way. The mapping is the seam, and it is the only place the two
+/// shapes meet.
+fn readings(ticks: Vec<NodeTick>) -> Vec<NodeReading> {
+    ticks
+        .into_iter()
+        .map(|tick| NodeReading {
+            seen: tick.seen,
+            rssi: tick.rssi,
+            frequency_mhz: tick.frequency_mhz,
+            loop_time_micros: tick.loop_time_micros,
+            crossing: tick.crossing,
+            crossed: tick.crossed,
+            node_peak_rssi: tick.node_peak_rssi,
+            node_nadir_rssi: tick.node_nadir_rssi,
+            pass_peak_rssi: tick.pass_peak_rssi,
+            pass_nadir_rssi: tick.pass_nadir_rssi,
+            pass_count: tick.pass_count,
+            enter_at: tick.enter_at,
+            exit_at: tick.exit_at,
+        })
+        .collect()
+}
+
 /// The RH node index `node-{n}` encodes, if any. Passes from the adapter carry the stable node seat
 /// handle; we remap it onto the running heat's lineup by this index.
 fn node_index(competitor: &CompetitorRef) -> Option<usize> {
@@ -568,6 +597,8 @@ fn drive(
                 seat: &seat,
                 restart: &restart,
                 seated_heat: &seated_heat,
+                timers: &timers,
+                timer_id: &timer_id,
             },
         );
 
@@ -646,6 +677,12 @@ struct ControlSlots<'a> {
     restart: &'a AtomicBool,
     /// The heat whose seats are currently bound on the timer.
     seated_heat: &'a Mutex<Option<u64>>,
+    /// The timer registry — where the **tune-telemetry lease** lives (#355 S2a). The registry is
+    /// the one seam this crate and the RD-gated route in `gridfpv-server` already share, exactly as
+    /// it is for the manual connection hold and the restart queue.
+    timers: &'a TimerRegistry,
+    /// Which timer this connection is, for reading that lease and pushing snapshots back.
+    timer_id: &'a TimerId,
 }
 
 fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlots<'_>) -> bool {
@@ -656,6 +693,8 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
         seat,
         restart,
         seated_heat,
+        timers,
+        timer_id,
     } = slots;
     let mut last_activity = Instant::now();
     let mut probed_since_activity = false;
@@ -667,6 +706,9 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
     // stays armed after the RH race is stopped, so the DONE-triggered dense marshal pull lands in
     // the right heat's log before the slot clears. `None` ⇒ no heat is finishing.
     let mut finish_deadline: Option<Instant> = None;
+    // When this connection last sampled the tune-telemetry tap (#355 S2a). Seeded in the past so
+    // the first sample lands on the tick after the subscription opens rather than 200 ms later.
+    let mut last_signal_sample = Instant::now() - SIGNAL_SAMPLE_INTERVAL;
 
     while !cancel.load(Ordering::Relaxed) {
         // The source of truth for a drop (#105): `rust_socketio` runs with `.reconnect(false)`, so a
@@ -938,6 +980,29 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
                     stage_deadline = None;
                 }
             }
+        }
+
+        // ---------------------------------------------------------------------------------------
+        // Tune telemetry (#355 S2a). Three lines of policy, all of it here on the Director:
+        //
+        //  1. **The lease is the subscription.** Re-read every tick, so a Tune page that stopped
+        //     polling — closed tab, dead browser, lost Wi-Fi — shuts the transport's pre-parse gate
+        //     by itself within `SIGNAL_LEASE`. There is no state a client has to remember to clear.
+        //  2. **Decimate here, not on arrival.** RotorHazard's heartbeat is 10 Hz on a stock timer
+        //     and 100 Hz with its frequency scanner on (`HEARTBEAT_DATA_RATE_FACTOR` 5 → 50), so
+        //     sampling the transport's last-value-wins store on our own fixed cadence is what makes
+        //     the ring's time base mean something.
+        //  3. **All nodes, unfiltered.** These readings go nowhere near `remap` — which drops every
+        //     node outside the armed heat — because an unseated node's signal is exactly what an RD
+        //     is looking for when a gate has stopped detecting.
+        //
+        // Nothing here touches `heat.sink`, and the readings are not `Event`s. There is no code
+        // path from this block to a log.
+        let wanted = timers.signal_wanted(timer_id);
+        conn.set_signal_capture(wanted);
+        if wanted && last_signal_sample.elapsed() >= SIGNAL_SAMPLE_INTERVAL {
+            timers.push_signal(timer_id, &readings(conn.take_signal()));
+            last_signal_sample = Instant::now();
         }
 
         // Drain whatever the transport has translated since the last tick.
