@@ -23,6 +23,16 @@ source (#389). A pass whose required fields cannot be read is **never** broadcas
 partial/zero-filled atom would pre-empt the working ``current_laps`` value and silently
 destroy laps, which is precisely the failure #389 spent a day bisecting.
 
+**Slice 3b — the Grid-owned race format.** RotorHazard holds its own opinions about when a
+race ends and which crossings count; Grid holds the same opinions and is the referee. Two
+referees is how #403 happened — RH declared a winner at lap 3 of an open-practice heat and
+marked the pilot's remaining four crossings late/deleted at source, so Grid never saw them.
+The plugin therefore creates (find-or-create, once) a **`GridFPV` race format** with every
+RH-side race decision neutralised, and selects it on request (`gridfpv_select_format` →
+`gridfpv_format_ack`). The RD's own format row is never touched, so the takeover is
+reversible by construction: `race.raceformat = <theirs>` puts it back. Declared via the
+``"owned_format"`` capability (#404, #405).
+
 Clean start/stop and threshold recalculate arrive in S4.
 
 Floor: RHAPI 1.3 / RotorHazard v4.3.0+ (declared in ``manifest.json``).
@@ -49,7 +59,7 @@ PROTOCOL_VERSION = 1
 
 # This plugin build's own version (independent of PROTOCOL_VERSION). Keep in step with
 # manifest.json's "version".
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 
 # Capabilities this build implements — the Director keys transport decisions off these.
 # Native start/stop control ("clean_control") lands in a later step.
@@ -61,8 +71,14 @@ PLUGIN_VERSION = "0.2.0"
 # lap atom is readable. Advertising it makes the plugin the *authoritative* pass source on the
 # Director side, so a plugin that cannot actually read a lap must not claim it — it must degrade
 # to RotorHazard's own `current_laps` rather than pre-empt it (#389).
-BASE_CAPABILITIES = ["hello", "live_signal"]
+BASE_CAPABILITIES = ["hello", "live_signal", "owned_format"]
 PASS_CAPABILITY = "live_pass"
+# The Grid-owned race format (#404/#405). Unconditional, unlike `live_pass`: the Director's
+# fallback here is the OLD behaviour (alter the RD's active format in place), which is
+# safe-but-wrong rather than lap-destroying, and a load-time DB hiccup must not strand a timer on
+# it forever. So the capability is advertised, the load-time outcome is REPORTED in the hello ack
+# (`grid_format_id` / `grid_format_error`), and every `gridfpv_select_format` retries.
+FORMAT_CAPABILITY = "owned_format"
 # Everything this build implements, for reference/tests. The *advertised* set is computed per
 # server in `initialize()` and reported in the hello ack.
 CAPABILITIES = BASE_CAPABILITIES + [PASS_CAPABILITY]
@@ -72,6 +88,58 @@ EVT_HELLO = "gridfpv_hello"
 EVT_HELLO_ACK = "gridfpv_hello_ack"
 EVT_SIGNAL = "gridfpv_signal"
 EVT_PASS = "gridfpv_pass"
+EVT_SELECT_FORMAT = "gridfpv_select_format"
+EVT_FORMAT_ACK = "gridfpv_format_ack"
+
+# ---- The Grid-owned race format (#403, #404, #405) --------------------------------------------
+# The name of the format row this plugin owns. Find-or-create keys off it, so the row is created
+# once EVER (not once per connect, not once per restart), and an RD reading RotorHazard's format
+# list can see plainly whose it is.
+GRID_FORMAT_NAME = "GridFPV"
+
+# Every race-conduct field on RotorHazard's `RaceFormat`, set so RH makes **no race decisions at
+# all** — it detects crossings, Grid referees. Verified against `Database.py::RaceFormat` and
+# `RHData.py::add_format` / `alter_raceFormat` on RH 4.3.0 (RHAPI 1.3, our floor) and RH 4.4.0
+# (RHAPI 1.4): the column set, the ORM attribute names and the coercions are identical on both.
+#
+#  win_condition = WinCondition.NONE (0)
+#      THE root cause of #403. With any other value RH declares a winner, and `RHRace.py` then sets
+#      `lap_data.deleted = lap_late_flag` on every later crossing — numbering it -1 and deleting it
+#      at source. Grid correctly skips deleted laps, so those crossings are gone before Grid can
+#      see them. WinCondition.NONE means RH never declares, never marks late, never deletes.
+#  number_laps_win = 0
+#      The lap cap that fired in #403 (`lap_number >= number_laps_win` -> pilot done -> late laps).
+#  unlimited_time = 1
+#      Grid owns the time limit and drives the stop. NOTE the DB column is `race_mode` — renamed
+#      across versions — while the ORM attribute is `unlimited_time` on both 4.3.0 and 4.4.0.
+#      Going through RHAPI rather than touching columns is what makes that rename a non-event.
+#  race_time_sec = 0
+#      Moot under unlimited_time, but pinned so the row cannot carry a stale countdown.
+#  lap_grace_sec = -1
+#      RH's neutral value: every grace check in `RHRace.py` is guarded by `lap_grace_sec > -1`, so
+#      -1 disables the post-expiry cutoff entirely. (0 would be a ZERO-second grace — stricter, not
+#      neutral. This one is a trap.)
+#  team_racing_mode = RacingMode.INDIVIDUAL (0)
+#      Team and co-op modes change how RH aggregates laps AND add their own late-lap rules.
+#  start_behavior = StartBehavior.HOLESHOT (0)
+#      FIRST_LAP makes RH do `lap_number += 1`, shifting the numbering Grid dedups and sequences
+#      on. Grid assumes holeshot-first everywhere; anything else is a latent correctness bug.
+#  staging_fixed_tones / staging_delay_tones / start_delay_min_ms / start_delay_max_ms = 0
+#      Grid owns the start procedure — its tone is the only go. (What the Director already did to
+#      the RD's format; now it lives on Grid's own row instead.)
+GRID_FORMAT_FIELDS = {
+    "unlimited_time": 1,
+    "race_time_sec": 0,
+    "lap_grace_sec": -1,
+    "staging_fixed_tones": 0,
+    "staging_delay_tones": 0,
+    "start_delay_min_ms": 0,
+    "start_delay_max_ms": 0,
+    "start_behavior": 0,
+    "win_condition": 0,
+    "number_laps_win": 0,
+    "team_racing_mode": 0,
+}
 
 # Live-signal broadcast cadence (seconds) — decimated so the stream stays cheap on a Pi
 # (design risk #5). 0.5 s = 2 Hz. Each tick sends only the NEW dense samples since the last
@@ -103,6 +171,150 @@ def _lap_fields(lap):
             )
         )
     return int(lap_number), float(lap_time_stamp)
+
+
+def _format_drift(rhapi, format_id):
+    """Which [`GRID_FORMAT_FIELDS`] the row `format_id` does NOT currently carry.
+
+    Returns ``{field: (found, wanted)}`` — empty when the row is exactly neutral. Read back
+    through ``raceformat_by_id`` rather than trusting the write, because *every* value RH stores
+    here goes through a coercion (``unlimited_time`` is truthy-mapped, ``staging_delay_tones`` maps
+    to 2-or-0, ``team_racing_mode`` falls back to INDIVIDUAL) and a coercion that quietly turned
+    our 0 into something else is exactly the class of bug this whole change exists to kill.
+    """
+    row = rhapi.db.raceformat_by_id(format_id)
+    if row is None:
+        raise RuntimeError("race format id {0} does not exist".format(format_id))
+    drift = {}
+    for field, wanted in GRID_FORMAT_FIELDS.items():
+        found = getattr(row, field, None)
+        if found != wanted:
+            drift[field] = (found, wanted)
+    return drift
+
+
+def _find_grid_format(rhapi):
+    """The existing `GridFPV` format row, or ``None`` — the *find* half of find-or-create.
+
+    Keyed on the name, which is what makes the whole thing idempotent across reconnects AND
+    across RotorHazard restarts: the row is looked up in RH's own database, not remembered in
+    plugin state. RH does not constrain format names to be unique, so if a rig somehow ends up
+    with several we take the lowest id (the original) and say so rather than adding another.
+    """
+    owned = [
+        fmt
+        for fmt in (rhapi.db.raceformats or [])
+        if getattr(fmt, "name", None) == GRID_FORMAT_NAME
+    ]
+    if not owned:
+        return None
+    owned.sort(key=lambda fmt: fmt.id)
+    if len(owned) > 1:
+        logger.warning(
+            "GridFPV: %s race format rows are named '%s' (ids %s) — using the first and leaving "
+            "the rest alone; delete the duplicates in RotorHazard if they bother you",
+            len(owned),
+            GRID_FORMAT_NAME,
+            [fmt.id for fmt in owned],
+        )
+    return owned[0]
+
+
+def ensure_grid_format(rhapi):
+    """**Find-or-create** the Grid-owned `GridFPV` race format; return ``(format_id, created,
+    repaired)``.
+
+    Idempotent by construction — the row is found by name in RH's database, so a reconnect, a
+    plugin reload and an RH restart all land on the same row and no `GridFPV` rows accumulate.
+    ``repaired`` names the fields that had drifted (an RD editing Grid's row in RH's UI, or an RH
+    upgrade changing a default) and were written back; an empty list is the normal steady state.
+
+    Raises if the row cannot be created, or if it still is not neutral after a repair — the caller
+    turns that into a failed ack, which the Director announces. A silently un-neutralised timer is
+    exactly #403.
+    """
+    existing = _find_grid_format(rhapi)
+    if existing is None:
+        added = rhapi.db.raceformat_add(name=GRID_FORMAT_NAME, **GRID_FORMAT_FIELDS)
+        format_id = getattr(added, "id", None)
+        if format_id is None:
+            raise RuntimeError(
+                "raceformat_add returned {0!r}, which carries no id".format(added)
+            )
+        created = True
+    else:
+        format_id = existing.id
+        created = False
+
+    drift = _format_drift(rhapi, format_id)
+    if drift:
+        rhapi.db.raceformat_alter(format_id, name=GRID_FORMAT_NAME, **GRID_FORMAT_FIELDS)
+        remaining = _format_drift(rhapi, format_id)
+        if remaining:
+            raise RuntimeError(
+                "race format {0} ('{1}') is still not neutral after a repair: {2} "
+                "(field: (found, wanted))".format(format_id, GRID_FORMAT_NAME, remaining)
+            )
+    return format_id, created, sorted(drift)
+
+
+def select_grid_format(rhapi, state):
+    """Ensure the `GridFPV` format exists and is **selected** as RH's current race format.
+
+    Returns the ``gridfpv_format_ack`` payload. Selecting — rather than mutating whatever format
+    the RD had selected — is the whole point (#404): their row is never touched, so handing the
+    timer back is just ``race.raceformat = <theirs>``, with no snapshot/restore bookkeeping to get
+    wrong and nothing left behind if Grid dies mid-race. The first format we displace is recorded
+    (and reported on every ack) so that hand-back is a known id rather than a guess.
+
+    RotorHazard refuses a format change while a race is running (`on_set_race_format` requires
+    ``RaceStatus.READY``), which is why the Director asks for this at **Stage**, pre-Armed.
+    """
+    current = rhapi.race.raceformat
+    previous_id = getattr(current, "id", None)
+    previous_name = getattr(current, "name", None)
+
+    format_id, created, repaired = ensure_grid_format(rhapi)
+
+    if previous_id != format_id:
+        # Remember the RD's own format the FIRST time we take the timer over, so the hand-back
+        # target survives however many times Grid re-selects its own row afterwards.
+        if state.get("displaced") is None and previous_id is not None:
+            state["displaced"] = {"id": previous_id, "name": previous_name}
+            logger.info(
+                "GridFPV: taking the timer over from race format '%s' (%s) — that row is left "
+                "untouched; select it again in RotorHazard to hand the timer back",
+                previous_name,
+                previous_id,
+            )
+        rhapi.race.raceformat = format_id
+    elif repaired:
+        # Already current, but the row we just repaired is the one RH is holding in memory —
+        # re-select so `RaceContext.race.format` is re-read from the database.
+        rhapi.race.raceformat = format_id
+
+    selected = getattr(rhapi.race.raceformat, "id", None)
+    if selected != format_id:
+        raise RuntimeError(
+            "RotorHazard did not select race format {0}; it is on {1!r} (a format change is "
+            "refused unless the race status is READY)".format(format_id, selected)
+        )
+
+    state["format_id"] = format_id
+    displaced = state.get("displaced") or {}
+    return {
+        "ok": True,
+        "format_id": format_id,
+        "format_name": GRID_FORMAT_NAME,
+        "created": created,
+        "repaired": repaired,
+        "fields": dict(GRID_FORMAT_FIELDS),
+        # The RD's own format, for the hand-back. Names, not just ids, so the Director can say
+        # something an RD recognises.
+        "previous_format_id": displaced.get("id"),
+        "previous_format_name": displaced.get("name"),
+        "error": None,
+    }
 
 
 def _self_check_live_pass(rhapi):
@@ -161,7 +373,18 @@ def initialize(rhapi):
     # {index: {"t": [secs], "v": [rssi], "sent": int}} — the source of the incremental slices.
     # `passes`: per-race count of gridfpv_pass broadcasts, reported at race end (field diagnostics
     # for #389 — "did the plugin actually deliver?" is otherwise unanswerable on a shipped build).
-    state = {"greenlet": None, "acc": {}, "passes": 0}
+    # `format_id`: the Grid-owned `GridFPV` race format row (see `ensure_grid_format`).
+    # `format_error`: why that row could not be readied, if it could not — reported in the hello
+    # ack so the Director can announce it. `displaced`: the RD's own format we took the timer over
+    # from, for the hand-back.
+    state = {
+        "greenlet": None,
+        "acc": {},
+        "passes": 0,
+        "format_id": None,
+        "format_error": None,
+        "displaced": None,
+    }
 
     # ---- S3 gate: earn `live_pass` before advertising it (#389) -------------------------
     live_pass_ok, live_pass_detail = _self_check_live_pass(rhapi)
@@ -183,6 +406,45 @@ def initialize(rhapi):
             live_pass_detail,
             EVT_PASS,
         )
+
+    # ---- S3b gate: the Grid-owned race format (#403, #404, #405) ------------------------
+    # Create it ONCE, eagerly, so the row exists before the Director ever asks for it and so a
+    # failure shows up in RotorHazard's own log rather than at the start of a heat. Find-or-create
+    # keyed on the name: reconnects, plugin reloads and RH restarts all land on the same row.
+    #
+    # Hung off Evt.STARTUP, NOT done inline here: on a first boot RotorHazard loads plugins
+    # *before* it creates the database (`server.py` calls `rh_program_initialize` — which loads
+    # plugins — and only then `Database.create_db_all()`), so a `raceformat_add` at load time hits
+    # "no such table: race_format" on exactly the rig where a clean setup matters most. STARTUP
+    # fires after the schema exists, on fresh and existing databases alike.
+    #
+    # A failure is NOT fatal and does NOT withdraw the capability — unlike `live_pass`, whose
+    # fallback would destroy laps, this one's fallback is the Director's old behaviour (mutate the
+    # RD's active format), which is merely wrong rather than lossy. So we record the failure, let
+    # the hello ack report it for the Director to announce, and retry on every
+    # `gridfpv_select_format`.
+    def ready_grid_format(_args=None):
+        try:
+            format_id, created, repaired = ensure_grid_format(rhapi)
+            state["format_id"] = format_id
+            state["format_error"] = None
+            logger.info(
+                "GridFPV: %s the '%s' race format (id %s)%s — RotorHazard will declare no winner, "
+                "apply no lap cap, no time limit and no team aggregation while Grid drives (#403)",
+                "created" if created else "reusing",
+                GRID_FORMAT_NAME,
+                format_id,
+                "; repaired {0}".format(repaired) if repaired else "",
+            )
+        except Exception as exc:  # noqa: BLE001 - reported, retried at select time, never fatal
+            state["format_error"] = "{0!r}".format(exc)
+            logger.exception(
+                "GridFPV: could NOT create/repair the '%s' race format — until it succeeds the "
+                "Director falls back to altering the race director's own active format, which is "
+                "what #403 was. Retried on the next %s.",
+                GRID_FORMAT_NAME,
+                EVT_SELECT_FORMAT,
+            )
 
     # ---- Grid owns start timing --------------------------------------------------------
     # RotorHazard adds a fixed pre-stage pad (GENERAL/RACE_START_DELAY_EXTRA_SECS, default 0.9s)
@@ -222,11 +484,52 @@ def initialize(rhapi):
             "node_count": _node_count(rhapi),
             # The RACE_START_DELAY_EXTRA_SECS we found before zeroing it (None if unreadable).
             "prestage_secs_was": prestage_secs_was,
+            # The Grid-owned race format (#404): its row id, or None with the reason it could not
+            # be created. The Director announces a None through its diagnostic sink and falls back
+            # to altering the RD's active format — loudly, never silently.
+            "grid_format_id": state.get("format_id"),
+            "grid_format_name": GRID_FORMAT_NAME,
+            "grid_format_error": state.get("format_error"),
         }
         logger.info("GridFPV hello -> ack %s", ack)
         rhapi.ui.socket_send(EVT_HELLO_ACK, ack)
 
     rhapi.ui.socket_listen(EVT_HELLO, on_hello)
+
+    # ---- S3b: select the Grid-owned race format ----------------------------------------
+    def on_select_format(_data=None):
+        """Ensure the `GridFPV` format exists and is RH's current format, then ack the outcome.
+
+        The Director asks for this at each heat's **Stage** (pre-Armed) — RotorHazard refuses a
+        format change during an active race. Idempotent: repeat calls re-verify the row's fields
+        and re-select, which is what makes the second, pre-`stage_race` call cheap and safe.
+        """
+        try:
+            ack = select_grid_format(rhapi, state)
+            if ack["created"] or ack["repaired"]:
+                logger.info("GridFPV: race format ready -> %s", ack)
+            else:
+                logger.debug("GridFPV: race format ready -> %s", ack)
+        except Exception as exc:  # noqa: BLE001 - reported to the Director, never fatal
+            logger.exception(
+                "GridFPV: could not select the '%s' race format — acking the failure so the "
+                "Director says so and falls back to altering the RD's format (#403/#404)",
+                GRID_FORMAT_NAME,
+            )
+            ack = {
+                "ok": False,
+                "format_id": state.get("format_id"),
+                "format_name": GRID_FORMAT_NAME,
+                "created": False,
+                "repaired": [],
+                "fields": dict(GRID_FORMAT_FIELDS),
+                "previous_format_id": (state.get("displaced") or {}).get("id"),
+                "previous_format_name": (state.get("displaced") or {}).get("name"),
+                "error": "{0!r}".format(exc),
+            }
+        rhapi.ui.socket_send(EVT_FORMAT_ACK, ack)
+
+    rhapi.ui.socket_listen(EVT_SELECT_FORMAT, on_select_format)
 
     # ---- S2: live dense RSSI (incremental) ---------------------------------------------
     def reconcile(seat):
@@ -393,6 +696,8 @@ def initialize(rhapi):
         logger.debug("GridFPV %s -> %s", EVT_PASS, payload)
 
     if Evt is not None:
+        # Ready the Grid-owned race format once the database exists (see `ready_grid_format`).
+        rhapi.events.on(Evt.STARTUP, ready_grid_format, name="gridfpv_format")
         rhapi.events.on(Evt.RACE_START, start_signal, name="gridfpv_signal_start")
         rhapi.events.on(Evt.RACE_STOP, stop_signal, name="gridfpv_signal_stop")
         rhapi.events.on(Evt.RACE_FINISH, stop_signal, name="gridfpv_signal_finish")

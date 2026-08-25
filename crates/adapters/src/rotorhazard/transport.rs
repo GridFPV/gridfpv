@@ -191,6 +191,19 @@ pub struct PluginHello {
     /// The plugin's node/seat count.
     #[serde(default)]
     pub node_count: u32,
+    /// The id of the plugin's **Grid-owned race format** row (D16, S3b / #404), if it could be
+    /// created. `None` from an older plugin build that has no such concept, and `None` **with**
+    /// [`grid_format_error`](Self::grid_format_error) set when this build tried and failed.
+    #[serde(default)]
+    pub grid_format_id: Option<i64>,
+    /// The plugin's name for that format row (`"GridFPV"`), for diagnostics an RD can act on.
+    #[serde(default)]
+    pub grid_format_name: Option<String>,
+    /// Why the plugin could not create its owned race format at load, if it could not. Announced
+    /// through the [`crate::diag`] sink: a timer whose race decisions were not neutralised is
+    /// exactly #403, and it must never be a silent condition.
+    #[serde(default)]
+    pub grid_format_error: Option<String>,
 }
 
 impl PluginHello {
@@ -206,6 +219,56 @@ impl PluginHello {
 /// nothing else — decides whether the adapter takes plugin passes or RotorHazard's `current_laps`.
 pub const CAP_LIVE_PASS: &str = "live_pass";
 
+/// The plugin capability that makes **Grid own its RotorHazard race format** (#404, #405): the
+/// plugin creates (find-or-create, once) a `GridFPV` format row with every RH-side race decision
+/// neutralised, and selects it on request. Its presence is what switches
+/// [`prepare_instant_start`](RotorHazardConnection::prepare_instant_start) from mutating the race
+/// director's own active format to selecting Grid's.
+pub const CAP_OWNED_FORMAT: &str = "owned_format";
+
+/// How long [`prepare_instant_start`](RotorHazardConnection::prepare_instant_start) waits for the
+/// plugin's `gridfpv_format_ack` the **first** time it selects the Grid-owned format on a
+/// connection. Only the first selection blocks: the Director asks at the heat's Stage transition
+/// (pre-Armed, seconds before "go"), so a short confirm there costs nothing, and every later call
+/// is fire-and-forget because the format is already proven. On a timeout the fallback engages and
+/// is announced — Grid never races on an unconfirmed neutralisation.
+const FORMAT_ACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The plugin's `gridfpv_format_ack` — its reply to a `gridfpv_select_format` request (D16, S3b).
+///
+/// Carries the outcome of the plugin's find-or-create-and-select of its `GridFPV` race format:
+/// which row it is, whether this call created or repaired it, and the race director's own format
+/// that Grid displaced (so handing the timer back is a known id, not a guess). `ok: false` with
+/// `error` set when the plugin could not get the timer into a neutral state — which the Director
+/// announces and then falls back from.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FormatAck {
+    /// Whether the Grid-owned format is now RotorHazard's current race format.
+    pub ok: bool,
+    /// The `GridFPV` format row id, when there is one.
+    #[serde(default)]
+    pub format_id: Option<i64>,
+    /// The plugin's name for that row (`"GridFPV"`).
+    #[serde(default)]
+    pub format_name: Option<String>,
+    /// Whether this call created the row (as opposed to reusing the existing one) — `false` on
+    /// every call after the first ever, which is what idempotency looks like on the wire.
+    #[serde(default)]
+    pub created: bool,
+    /// Conduct fields that had drifted off neutral and were written back (normally empty).
+    #[serde(default)]
+    pub repaired: Vec<String>,
+    /// The race director's own format that Grid took the timer over from, if any.
+    #[serde(default)]
+    pub previous_format_id: Option<i64>,
+    /// That format's name, for a diagnostic an RD recognises (the raw id alone is not a name).
+    #[serde(default)]
+    pub previous_format_name: Option<String>,
+    /// Why it failed, when `ok` is false.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// Parse a `gridfpv_hello_ack` socket payload (a one-element array, like every RH emit) into a
 /// [`PluginHello`]. `None` for a malformed/unexpected shape (treated as no answer).
 fn parse_hello(payload: &Payload) -> Option<PluginHello> {
@@ -214,6 +277,37 @@ fn parse_hello(payload: &Payload) -> Option<PluginHello> {
         _ => return None,
     };
     serde_json::from_value(value).ok()
+}
+
+/// Parse a `gridfpv_format_ack` socket payload into a [`FormatAck`]. `None` for a
+/// malformed/unexpected shape (treated as no answer — the confirm then times out and the
+/// fallback engages, loudly).
+fn parse_format_ack(payload: &Payload) -> Option<FormatAck> {
+    let value = match payload {
+        Payload::Text(values) => values.first()?.clone(),
+        _ => return None,
+    };
+    serde_json::from_value(value).ok()
+}
+
+/// What this connection knows about the plugin's **Grid-owned race format** (#404).
+///
+/// One instance per connection (never carried across a reconnect): a timer whose plugin was
+/// removed, downgraded, or whose format row was deleted while we were away must re-earn all of
+/// this on the new socket rather than inherit a stale "yes, it's neutralised".
+#[derive(Debug, Default)]
+struct OwnedFormat {
+    /// Whether the connected plugin advertised [`CAP_OWNED_FORMAT`].
+    advertised: bool,
+    /// The `GridFPV` format row id, once the plugin has named one.
+    id: Option<i64>,
+    /// Set once a `gridfpv_format_ack` confirmed the format is **selected** on this connection.
+    selected: bool,
+    /// The plugin's failure text, from a failed ack or a failed load-time create.
+    error: Option<String>,
+    /// One-shot latch: the fallback to mutating the RD's own format has already been announced on
+    /// this connection. Announced once, not once per heat — a per-stage repeat would bury it.
+    announced: bool,
 }
 
 /// A live connection to a RotorHazard server, translating its socket stream into
@@ -250,6 +344,11 @@ pub struct RotorHazardConnection {
     /// [`wait_for_plugin`](Self::wait_for_plugin). Stays `None` against a stock RH (no handler
     /// registered) — that absence is what drives the Director's guided-install prompt (D16, S1).
     hello: Arc<Mutex<Option<PluginHello>>>,
+    /// What this connection knows about the plugin's **Grid-owned race format** (#404) — see
+    /// [`OwnedFormat`]. Written by the `gridfpv_hello_ack` / `gridfpv_format_ack` handlers, read
+    /// by [`prepare_instant_start`](Self::prepare_instant_start) to decide whether Grid selects
+    /// its own format row or falls back to mutating the race director's.
+    owned_format: Arc<Mutex<OwnedFormat>>,
 }
 
 impl RotorHazardConnection {
@@ -284,6 +383,9 @@ impl RotorHazardConnection {
         // The GridFPV plugin handshake reply, stashed by the `gridfpv_hello_ack` handler below and
         // read by the driver (see the struct field). Empty until/unless a plugin-equipped RH answers.
         let hello: Arc<Mutex<Option<PluginHello>>> = Arc::new(Mutex::new(None));
+        // Fresh link, fresh owned-format state: nothing is assumed neutralised until THIS socket's
+        // plugin says so (see `OwnedFormat`).
+        let owned_format: Arc<Mutex<OwnedFormat>> = Arc::new(Mutex::new(OwnedFormat::default()));
 
         // `rust_socketio`'s reserved events: on a dropped socket the poll loop fires `error`
         // (the engine.io read failed) and, on a clean disconnect packet, `close`. Either way the
@@ -551,8 +653,36 @@ impl RotorHazardConnection {
                 let hello = hello.clone();
                 let adapter = adapter.clone();
                 let sink = events.clone();
+                let owned_format = owned_format.clone();
                 move |payload: Payload, _client: RawClient| {
                     if let Some(parsed) = parse_hello(&payload) {
+                        // The Grid-owned race format (#404): learn the row the plugin made for us,
+                        // or the reason it could not. A plugin that advertises the capability but
+                        // carries no id is a timer whose race decisions are NOT neutralised — say
+                        // so now, not after a heat comes up four laps short (#403).
+                        {
+                            let mut owned = owned_format.lock().expect("owned-format lock");
+                            owned.advertised = parsed.advertises(CAP_OWNED_FORMAT);
+                            owned.id = parsed.grid_format_id;
+                            owned.error = parsed.grid_format_error.clone();
+                        }
+                        if parsed.advertises(CAP_OWNED_FORMAT) && parsed.grid_format_id.is_none() {
+                            crate::diag!(
+                                "gridfpv: rotorhazard: the GridFPV plugin (v{}) could not create \
+                                 its `{}` race format ({}) — it will retry at each heat's stage, \
+                                 and until it succeeds Grid falls back to altering the race \
+                                 director's own format (#403/#404)",
+                                parsed.plugin_version,
+                                parsed
+                                    .grid_format_name
+                                    .clone()
+                                    .unwrap_or_else(|| "GridFPV".to_string()),
+                                parsed
+                                    .grid_format_error
+                                    .clone()
+                                    .unwrap_or_else(|| "no reason given".to_string()),
+                            );
+                        }
                         let live_pass = parsed.advertises(CAP_LIVE_PASS);
                         // The switch mints any laps held for the plugin instead of dropping them
                         // (#400) — forward them to the same sink the frame handlers feed.
@@ -572,6 +702,71 @@ impl RotorHazardConnection {
                             );
                         }
                         *hello.lock().expect("plugin-hello lock") = Some(parsed);
+                    }
+                }
+            })
+            // The plugin's reply to `gridfpv_select_format` (D16, S3b): the Grid-owned race format
+            // is (or is not) now RotorHazard's current format. `prepare_instant_start` blocks on
+            // this the first time; afterwards it is the channel through which a *later* failure —
+            // an RD editing the row mid-event, a format change refused because RH was not READY —
+            // still gets announced instead of silently un-neutralising the timer.
+            .on("gridfpv_format_ack", {
+                let owned_format = owned_format.clone();
+                move |payload: Payload, _client: RawClient| {
+                    let Some(ack) = parse_format_ack(&payload) else {
+                        return;
+                    };
+                    let name = ack
+                        .format_name
+                        .clone()
+                        .unwrap_or_else(|| "GridFPV".to_string());
+                    // Whether this ack is the moment the takeover took effect on this link —
+                    // the Director asks at every heat's stage, so only the transition is news.
+                    let first_selection = {
+                        let mut owned = owned_format.lock().expect("owned-format lock");
+                        let first = ack.ok && !owned.selected;
+                        owned.id = ack.format_id.or(owned.id);
+                        owned.selected = ack.ok;
+                        owned.error = ack.error.clone();
+                        first
+                    };
+                    if !ack.ok {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: the GridFPV plugin could not select its `{name}` \
+                             race format ({}) — RotorHazard's own race decisions are NOT \
+                             neutralised on this timer, so it may declare a winner and delete \
+                             later crossings at source (#403)",
+                            ack.error
+                                .clone()
+                                .unwrap_or_else(|| "no reason given".to_string()),
+                        );
+                        return;
+                    }
+                    // Worth a line when something actually changed: the first takeover names the
+                    // RD's format so they know what to re-select to get their timer back, and a
+                    // repair means the row had drifted off neutral since we last looked.
+                    if ack.created {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: created the Grid-owned `{name}` race format — \
+                             RotorHazard will declare no winner, apply no lap cap, no time limit \
+                             and no team aggregation while Grid drives (#403/#404)"
+                        );
+                    }
+                    if !ack.repaired.is_empty() {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: the `{name}` race format had drifted off \
+                             neutral ({}) — repaired before staging",
+                            ack.repaired.join(", "),
+                        );
+                    }
+                    if let (true, Some(previous)) =
+                        (first_selection, ack.previous_format_name.clone())
+                    {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: racing on the Grid-owned `{name}` race format; \
+                             this timer's own format `{previous}` is untouched — select it again \
+                             in RotorHazard to hand the timer back"
+                        );
                     }
                 }
             })
@@ -603,6 +798,7 @@ impl RotorHazardConnection {
             savable_heat,
             current_format,
             hello,
+            owned_format,
         })
     }
 
@@ -825,36 +1021,147 @@ impl RotorHazardConnection {
         self.client.emit("stage_race", Payload::Text(vec![]))
     }
 
-    /// **Prepare RotorHazard for an instant start** — the Grid-owns-all-timing model: GridFPV's own
-    /// start procedure (the randomized Armed hold + the start tone) is the *only* delay; RH must just
-    /// begin recording the instant Grid says go, with **no RH-side staging hold or tones**.
+    /// **Put RotorHazard in a state where it makes no race decisions** — it detects crossings,
+    /// Grid referees.
     ///
-    /// Stock RotorHazard formats ship with a multi-second staging sequence — staging *tones* plus a
-    /// fixed/random *start delay* (`start_delay_min_ms`/`start_delay_max_ms`, typically 1–2 s) — that
-    /// `on_stage_race` runs as its own STAGING→RACING countdown ("Staging new race, format: … →
-    /// tones → Race started"). That ran *on top of* Grid's start procedure (two competing start
-    /// sequences — the root of the staging-race-eats-laps bug the `STAGE_RESET_SETTLE` band-aid
-    /// papered over). This zeroes the **current** format's staging fields so `stage_race`'s
-    /// `staging_total_ms` is 0 and RH transitions straight to RACING:
-    ///   * `staging_fixed_tones = 0`, `staging_delay_tones = 0` — no staging tones;
-    ///   * `start_delay_min_ms = 0`, `start_delay_max_ms = 0` — no fixed/random staging delay;
-    ///   * `unlimited_time = 1` — RH never auto-expires the race; **Grid owns the stop**, not RH's
-    ///     race-format timer.
+    /// Two referees is how #403 happened: an open-practice heat in which the pilot flew 8 gate
+    /// crossings and Grid recorded 4, because RotorHazard declared a winner at lap 3 and numbered
+    /// the rest `-1`, marking them late/deleted *at source*. Grid correctly skips deleted laps, so
+    /// four crossings the timer had detected perfectly were gone before Grid could see them.
     ///
-    /// The only residual is RotorHazard's fixed `RACE_START_DELAY_EXTRA_SECS` prestage (a
-    /// `Config.GENERAL` value, ~0.9 s by default, with no socket setter), which is *constant* and so
-    /// **does not affect lap-time correctness**: RH timestamps every pass relative to its own race
-    /// start, and Grid derives lap times as pass-to-pass deltas on that clock, so a constant prestage
-    /// offset cancels out. (If a deployment needs RH RACING to coincide exactly with Grid's tone, set
-    /// `RACE_START_DELAY_EXTRA_SECS = 0` in the timer's config — outside this socket API.)
+    /// Two paths, in preference order:
     ///
-    /// Targets the current format learned from the `race_status` stream; re-applies it as current so
-    /// `RaceContext.race.format` reflects the zeroed staging. **Must be emitted while RH is READY** —
-    /// `alter_race_format`/`set_race_format` are rejected during an active race — so the bridge calls
-    /// this at **Stage** (pre-Armed, pre-go), not at the start instant. A no-op (best-effort `Ok`) if
-    /// no current format id has been learned yet. Idempotent: re-zeroing an already-zeroed format is
-    /// harmless.
+    /// 1. **The Grid-owned format** (#404/#405, the plugin's [`CAP_OWNED_FORMAT`]). The plugin
+    ///    creates a `GridFPV` race format once — every conduct field neutral: no win condition, no
+    ///    lap cap, no time limit, no team aggregation, holeshot lap numbering, no staging tones or
+    ///    start delay — and selects it. The race director's own format is **never touched**, so the
+    ///    takeover is reversible by construction (`race.raceformat = <theirs>` puts it back) with
+    ///    no snapshot/restore bookkeeping to get wrong and nothing left behind if Grid dies
+    ///    mid-race. See [`select_owned_format`](Self::select_owned_format).
+    /// 2. **The legacy in-place path** — kept working for the transition, while plugin builds older
+    ///    than the owned format are still in the field. It zeroes the *staging* half of whichever
+    ///    format is current (tones + start delays + `unlimited_time`) by mutating the RD's own row.
+    ///    That is what shipped before this change; it fixes the start but leaves RH's *stopping*
+    ///    and *counting* decisions intact, which is precisely #403. Engaging it is announced.
+    ///
+    /// Either way this is about *staging*: RotorHazard rejects `alter_race_format`/`set_race_format`
+    /// during an active race, so the bridge calls this at **Stage** (pre-Armed, pre-go), never at
+    /// the start instant. Idempotent — the driver calls it again immediately before `stage_race`,
+    /// because seating a heat can switch the effective format.
+    ///
+    /// The only residual delay is RotorHazard's fixed `RACE_START_DELAY_EXTRA_SECS` prestage (a
+    /// `Config.GENERAL` value, ~0.9 s by default; the plugin zeroes it at load). It is *constant*
+    /// and so does not affect lap-time correctness: RH timestamps every pass relative to its own
+    /// race start and Grid derives lap times as pass-to-pass deltas on that clock, so a constant
+    /// offset cancels out.
     pub fn prepare_instant_start(&self) -> Result<(), rust_socketio::Error> {
+        if self.select_owned_format()? {
+            return Ok(());
+        }
+        self.neutralize_active_format()
+    }
+
+    /// Ask the plugin to select its **Grid-owned `GridFPV` race format**; `Ok(true)` when the timer
+    /// is confirmed racing on it (#404).
+    ///
+    /// `Ok(false)` means the caller must fall back to [`neutralize_active_format`] — and by then
+    /// the reason has already been announced through the [`crate::diag`] sink, once per connection.
+    /// The confirm only blocks the **first** selection on a connection: the Director asks at the
+    /// heat's Stage transition, seconds of Armed hold before "go", so waiting there is free, while
+    /// the second call (immediately before `stage_race`, at the go instant) is fire-and-forget
+    /// against an already-proven format. A later failure still surfaces — the `gridfpv_format_ack`
+    /// handler announces any `ok: false` whenever it arrives.
+    fn select_owned_format(&self) -> Result<bool, rust_socketio::Error> {
+        let (advertised, selected, gave_up) = {
+            // Clear any stale failure — the plugin's load-time error, or a previous stage's — so
+            // only an ack for the request we are about to send can end the confirm below. The
+            // plugin retries the create on every request, so yesterday's reason is not evidence.
+            let mut owned = self.owned_format.lock().expect("owned-format lock");
+            owned.error = None;
+            (owned.advertised, owned.selected, owned.announced)
+        };
+        // No plugin, or a plugin build predating the owned format: the legacy path, announced once.
+        if !advertised {
+            return Ok(false);
+        }
+        self.client.emit("gridfpv_select_format", json!({}))?;
+        if selected {
+            return Ok(true);
+        }
+        // Already gave up (and said so) on this connection: the request above still went out, so a
+        // plugin that recovers is picked up at the next stage — but don't re-block every stage
+        // waiting for one that won't.
+        if gave_up {
+            return Ok(false);
+        }
+        // First selection on this link: confirm before racing on it.
+        let deadline = Instant::now() + FORMAT_ACK_TIMEOUT;
+        loop {
+            {
+                let owned = self.owned_format.lock().expect("owned-format lock");
+                if owned.selected {
+                    return Ok(true);
+                }
+                // A failed ack already announced itself in its handler; stop waiting.
+                if owned.error.is_some() {
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut owned = self.owned_format.lock().expect("owned-format lock");
+        if !owned.announced {
+            owned.announced = true;
+            let why = match owned.error.as_ref() {
+                Some(error) => format!("it reported: {error}"),
+                None => format!("it did not answer within {}s", FORMAT_ACK_TIMEOUT.as_secs()),
+            };
+            crate::diag!(
+                "gridfpv: rotorhazard: the GridFPV plugin advertised `{CAP_OWNED_FORMAT}` but its \
+                 race format is not selected — {why}. Falling back to altering this timer's own \
+                 race format, which neutralises its START but NOT its stopping or counting: \
+                 RotorHazard may still declare a winner and delete later crossings at source (#403)"
+            );
+        }
+        Ok(false)
+    }
+
+    /// The **legacy** neutralisation: mutate whichever race format is currently selected on the
+    /// timer, zeroing its staging so `stage_race` transitions straight to RACING.
+    ///
+    /// This is what shipped before the Grid-owned format, kept working for the transition period —
+    /// a stock RotorHazard, or a plugin build older than [`CAP_OWNED_FORMAT`], still needs *some*
+    /// neutralisation, and losing the instant start would be a worse regression than the gap this
+    /// leaves. But understand what it does not do: it zeroes four *starting* fields and
+    /// `unlimited_time`, and says nothing about **stopping** or **counting**. Whatever
+    /// `win_condition` / `number_laps_win` the RD last set still governs the race, which is #403.
+    /// It also edits the RD's own row, which is why #404 could not answer "restore, or don't?".
+    ///
+    /// Both of those are why the owned-format path above exists and is preferred. Engaging this
+    /// one is announced once per connection so a timer running on the weaker guarantee is never a
+    /// silent condition.
+    ///
+    /// Targets the current format learned from the `race_status` stream, then re-selects it so
+    /// `RaceContext.race.format` picks up the zeroed staging (altering the row alone does not
+    /// refresh the in-memory current-format object on every RH build). A no-op (best-effort `Ok`)
+    /// if no current format id has been learned yet. Idempotent.
+    fn neutralize_active_format(&self) -> Result<(), rust_socketio::Error> {
+        {
+            let mut owned = self.owned_format.lock().expect("owned-format lock");
+            if !owned.announced {
+                owned.announced = true;
+                crate::diag!(
+                    "gridfpv: rotorhazard: no GridFPV plugin race format on this timer — Grid is \
+                     altering the timer's own active format to zero its staging. That does NOT \
+                     neutralise RotorHazard's win condition or lap cap, so a heat run past the \
+                     timer's configured lap limit can still lose crossings (#403). Install/update \
+                     the GridFPV plugin to race on a Grid-owned format instead."
+                );
+            }
+        }
         let Some(format_id) = *self.current_format.lock().expect("current-format lock") else {
             // No format id known yet (no `race_status` folded): cannot target a format. Best-effort
             // no-op — staging then keeps whatever the format ships, which the reset/stage flow still
@@ -874,6 +1181,56 @@ impl RotorHazardConnection {
         )?;
         // Re-select the format as current so `RaceContext.race.format` picks up the zeroed staging
         // (altering the row alone does not refresh the in-memory current-format object on every RH).
+        self.client
+            .emit("set_race_format", json!({ "race_format": format_id }))
+    }
+
+    /// The id of the **Grid-owned `GridFPV` race format** on this connection, once the plugin has
+    /// named one. `None` against a stock RH, an older plugin build, or a plugin that could not
+    /// create it.
+    pub fn owned_format_id(&self) -> Option<i64> {
+        self.owned_format.lock().expect("owned-format lock").id
+    }
+
+    /// Whether this connection is confirmed racing on the Grid-owned race format — i.e. whether
+    /// RotorHazard has been stripped of *every* race decision, not just its staging (#403/#404).
+    /// `false` means the legacy in-place path is in use (and has been announced).
+    pub fn owned_format_selected(&self) -> bool {
+        self.owned_format
+            .lock()
+            .expect("owned-format lock")
+            .selected
+    }
+
+    /// RotorHazard's currently selected race-format id, as last reported by the `race_status`
+    /// stream. `None` until the first status carrying one has been folded.
+    pub fn current_format_id(&self) -> Option<i64> {
+        *self.current_format.lock().expect("current-format lock")
+    }
+
+    /// **Give a race format a lap-count win condition** — a driving helper that recreates #403's
+    /// field configuration on a disposable RotorHazard, so a regression test can prove Grid no
+    /// longer inherits it.
+    ///
+    /// `win_condition` takes RotorHazard's `RHRace.WinCondition` values (`2` = `FIRST_TO_LAP_X`,
+    /// the one that bit); `number_laps_win` is the cap. With both set, RH marks a node finished at
+    /// `lap_number >= number_laps_win` and flags every later crossing late — `RHRace.py` then sets
+    /// `lap_data.deleted`, and the crossing never reaches Grid at all. Never for a production
+    /// timer: this deliberately mis-configures the format it targets.
+    pub fn set_race_format_win_condition(
+        &self,
+        format_id: i64,
+        win_condition: i64,
+        number_laps_win: i64,
+    ) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "alter_race_format",
+            json!({
+                "format_id": format_id,
+                "win_condition": win_condition,
+                "number_laps_win": number_laps_win,
+            }),
+        )?;
         self.client
             .emit("set_race_format", json!({ "race_format": format_id }))
     }

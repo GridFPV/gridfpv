@@ -26,6 +26,18 @@ use gridfpv_testkit::RhContainer;
 /// Port for this test's disposable RotorHazard (distinct from rh_signal's).
 const PORT: u16 = 5030;
 
+/// The in-repo GridFPV plugin directory, mounted explicitly by the owned-format test.
+///
+/// That test is about what the **plugin** guarantees, so it must not depend on which leg of the
+/// version × plugin matrix is running (`RhContainer::start` mounts a plugin only when the
+/// harness's env var points at one). Every other test here uses `start`, unchanged.
+fn plugin_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/gridfpv")
+        .canonicalize()
+        .expect("the in-repo plugins/gridfpv directory exists")
+}
+
 fn event_kind(e: &Event) -> &'static str {
     match e {
         Event::AdapterConnected { .. } => "AdapterConnected",
@@ -312,4 +324,161 @@ fn mid_race_reconnect_does_not_double_count_laps() {
          (the replayed in-progress snapshot was not deduped — the persisted-adapter fix regressed)"
     );
     println!("live RH reconnect: node-0 stable at {laps_after} lap(s) across the reconnect");
+}
+
+/// **A heat run past RotorHazard's configured lap limit must still deliver every crossing**
+/// (#403, #404, #405).
+///
+/// The field case, 2026-08-25: a pilot flew 8 gate crossings in an open-practice heat and Grid
+/// showed 4 laps. RotorHazard had detected all 8 — but it declared a winner at lap 3, numbered
+/// every later crossing `-1`, and marked them deleted at source (`RHRace.py`:
+/// `lap_data.deleted = lap_late_flag`). Grid correctly skips deleted laps, so four crossings the
+/// timer read perfectly were gone before Grid could see them. The cause was that Grid neutralised
+/// RotorHazard's *staging* fields and nothing about its stopping or counting.
+///
+/// The rest of the live matrix cannot catch this: its heats are a handful of laps long, far too
+/// short to reach any default win condition. So this test **arms the trap first** — it gives the
+/// timer's own race format `FIRST_TO_LAP_X` at 3 laps, exactly the configuration that bit — and
+/// then runs a heat well past it. What must happen:
+///
+///   * Grid races on the plugin's **Grid-owned** `GridFPV` format, not the sabotaged one, and
+///     that is *confirmed* rather than assumed;
+///   * the timer's own format is a different row, so it was never mutated to get there;
+///   * all [`CROSSINGS`] crossings arrive, i.e. `CROSSINGS - 1` completed laps (holeshot first).
+///
+/// Run it against both supported RotorHazard versions — the conduct columns are the same on 4.3.0
+/// and 4.4.0, but `unlimited_time` (DB column `race_mode`) is itself a rename, so "the field names
+/// carry" is a thing to check, not assume:
+///
+/// ```sh
+/// cargo xtask live --rh 4.3.0 --plugin --full
+/// cargo xtask live --rh 4.4.0 --plugin --full
+/// ```
+#[test]
+#[ignore = "requires a running dockerized RotorHazard (docker/rotorhazard/)"]
+fn heat_past_rh_lap_limit_still_delivers_every_crossing() {
+    /// Crossings to fly — comfortably past the 3-lap cap armed below, and the field's own count.
+    const CROSSINGS: usize = 8;
+    /// The lap cap given to the timer's own format: RotorHazard's `WinCondition.FIRST_TO_LAP_X`.
+    const RH_WIN_CONDITION_FIRST_TO_LAP_X: i64 = 2;
+    const RH_LAP_CAP: i64 = 3;
+
+    let rh = RhContainer::start_with_plugin(PORT + 2, "0.5", &[], Some(plugin_dir()));
+    let conn = RotorHazardConnection::connect(rh.url(), RotorHazardAdapter::new())
+        .expect("connect to RotorHazard");
+
+    // The plugin must be there: this test is about the guarantee it provides. A missing handshake
+    // means the mount failed, not that the guarantee is optional.
+    let hello = conn.wait_for_plugin(Duration::from_secs(20)).expect(
+        "the GridFPV plugin answered gridfpv_hello (it is mounted read-only from the repo)",
+    );
+    assert!(
+        hello.capabilities.iter().any(|c| c == "owned_format"),
+        "the plugin must advertise `owned_format`; it advertised {:?}",
+        hello.capabilities
+    );
+
+    let mut events: Vec<Event> = Vec::new();
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Short sim laps: RH's 10s default MIN_LAP_TIME would otherwise reject them (see the tests
+    // above). Orthogonal to the win condition under test.
+    conn.set_min_lap_time(0).ok();
+
+    // Clean READY state, then forget the churn.
+    conn.stop_race().ok();
+    conn.discard_laps().expect("emit discard_laps");
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = conn.events();
+
+    // ---- arm the trap on the TIMER'S OWN format --------------------------------------------
+    let rd_format = conn
+        .current_format_id()
+        .expect("RotorHazard reported its current race format id in race_status");
+    conn.set_race_format_win_condition(rd_format, RH_WIN_CONDITION_FIRST_TO_LAP_X, RH_LAP_CAP)
+        .expect("give the timer's own format a 3-lap win condition");
+    std::thread::sleep(Duration::from_secs(1));
+    let _ = conn.events();
+
+    // ---- prepare exactly as the Director's staging loop does --------------------------------
+    conn.prepare_instant_start().expect("prepare_instant_start");
+    assert!(
+        conn.owned_format_selected(),
+        "the Grid-owned race format was not confirmed selected — Grid would have raced the \
+         timer's own format, whose {RH_LAP_CAP}-lap win condition truncates the heat (#403)"
+    );
+    let grid_format = conn
+        .owned_format_id()
+        .expect("the plugin named its GridFPV race format id");
+    assert_ne!(
+        grid_format, rd_format,
+        "the Grid-owned format must be its own row — racing (and neutralising) the timer's own \
+         format row is what #404 set out to stop"
+    );
+
+    // Seat a pilot on node 0 and make that heat current, exactly as the Director does at Stage.
+    // Selecting a heat can switch RotorHazard's effective race format, so this is where a
+    // selection that only *looked* durable would come undone.
+    let seated = conn
+        .seat_heat(&[(0, "LAPCAP".to_string())])
+        .expect("seat node 0");
+    assert!(seated.is_some(), "seating did not produce a heat to race");
+    let _ = conn.events();
+
+    // The driver re-prepares immediately before staging, for exactly the reason above.
+    conn.prepare_instant_start()
+        .expect("prepare_instant_start (pre-stage)");
+    assert!(
+        conn.owned_format_selected(),
+        "selecting a heat dislodged the Grid-owned race format"
+    );
+
+    // ---- fly the heat, well past the cap ----------------------------------------------------
+    conn.stage_race().expect("emit stage_race");
+    assert!(
+        wait_until(&conn, &mut events, Duration::from_secs(20), |evs| {
+            evs.iter()
+                .any(|e| matches!(e, Event::SessionStarted { .. }))
+        }),
+        "race never reached RACING (no SessionStarted)"
+    );
+
+    for _ in 0..CROSSINGS {
+        conn.simulate_lap(0).expect("emit simulate_lap");
+        std::thread::sleep(Duration::from_millis(1200));
+        events.extend(conn.events());
+    }
+    // Holeshot-first numbering: N crossings are N-1 completed laps.
+    let wanted = CROSSINGS - 1;
+    let arrived = wait_until(&conn, &mut events, Duration::from_secs(15), |evs| {
+        lap_list(evs)
+            .competitors
+            .iter()
+            .any(|c| c.competitor.competitor.0 == "node-0" && c.lap_count() >= wanted)
+    });
+
+    conn.stop_race().ok();
+    std::thread::sleep(Duration::from_millis(800));
+    events.extend(conn.events());
+    conn.disconnect();
+
+    let laps = lap_list(&events);
+    let got = laps
+        .competitors
+        .iter()
+        .find(|c| c.competitor.competitor.0 == "node-0")
+        .map(|c| c.lap_count())
+        .unwrap_or(0);
+    assert!(
+        arrived && got >= wanted,
+        "RotorHazard's own {RH_LAP_CAP}-lap win condition truncated the heat: flew {CROSSINGS} \
+         crossings, Grid recorded {got} lap(s), expected {wanted}. RotorHazard declared a winner \
+         and deleted the later crossings at source — Grid is not racing on a neutralised race \
+         format (#403)"
+    );
+    println!(
+        "live RH: {CROSSINGS} crossings past a {RH_LAP_CAP}-lap win condition -> {got} laps, on \
+         the Grid-owned race format ({grid_format}); the timer's own format ({rd_format}) was \
+         never touched"
+    );
 }
