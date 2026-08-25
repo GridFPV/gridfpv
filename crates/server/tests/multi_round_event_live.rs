@@ -117,7 +117,7 @@ use gridfpv_server::scope::{EventId, Scope, SubscribeRequest};
 use gridfpv_server::snapshot::{HeatPhase, LiveRaceState, ProjectionBody, Snapshot};
 use gridfpv_server::stream::{Change, StreamMessage};
 use gridfpv_server::timers::{
-    ChannelCapability, CreateTimerRequest, SetEventTimersRequest, Timer, TimerKind,
+    ChannelCapability, CreateTimerRequest, PluginPresence, SetEventTimersRequest, Timer, TimerKind,
 };
 use gridfpv_testkit::{NodeCsv, RhContainer, node_csv};
 use serde::de::DeserializeOwned;
@@ -525,6 +525,7 @@ fn run_rh_heat(rh_url: &str, seats: usize, heat: &str) -> Vec<Event> {
 ///
 /// Returns `(event id, class id, pilot refs in membership order)`.
 async fn build_event(
+    registry: &EventRegistry,
     addr: &str,
     token: &str,
     rh_url: &str,
@@ -578,6 +579,20 @@ async fn build_event(
         },
     )
     .await;
+
+    // This test runs `gridfpv-server` WITHOUT the Director's RH bridge (see above) — nothing ever
+    // dials the timer, so its `PluginPresence` would stay `None` forever. Since #405 a RotorHazard
+    // timer can only be selected for an event once a probe has shown the GridFPV plugin present,
+    // so stand in for that probe the same way this test already stands in for the bridge. Without
+    // it the selection below is correctly refused with "it has not been connected yet".
+    registry.timers().set_plugin(
+        &timer.id,
+        PluginPresence::Present {
+            plugin_version: "e2e".into(),
+            rhapi_version: "1.3".into(),
+            capabilities: vec!["hello".into(), "live_pass".into()],
+        },
+    );
 
     // --- The event, and its selections ---
     let event: EventMeta = rd_write(
@@ -1112,7 +1127,7 @@ async fn a_full_multi_round_event_runs_live_through_the_protocol() {
     let (addr, _server) = serve(registry.clone()).await;
 
     // === Setup: build the event through the RD's HTTP surface. ===
-    let (event, class, field) = build_event(&addr, &token, &rh_url).await;
+    let (event, class, field) = build_event(&registry, &addr, &token, &rh_url).await;
     let state = registry
         .resolve(&event)
         .expect("the created event resolves to its own log");
