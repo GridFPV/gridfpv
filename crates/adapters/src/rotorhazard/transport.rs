@@ -2013,6 +2013,58 @@ mod tests {
         ));
     }
 
+    /// A `-1` lap number is RotorHazard talking, not drift: once it declares a winner it numbers
+    /// every later crossing `-1` (*recorded, but not counted*). Typing that field `u64` made serde
+    /// fail the **whole `current_laps` frame**, so the valid laps beside it were thrown away too
+    /// and the loss was charged to the malformed-frame counter — "schema drift", pointing an RD at
+    /// a plugin-version mismatch, when the real fault was the timer still refereeing (#406).
+    #[test]
+    fn a_negative_lap_number_decodes_and_keeps_the_rest_of_its_frame() {
+        // The frame as RotorHazard 4.4 sends it with a lap-count win condition in force.
+        let frame = text(json!({
+            "current": { "node_index": [{
+                "pilot": { "callsign": "ZIP" },
+                "laps": [
+                    { "lap_index": 0, "lap_number": 0, "lap_time_stamp": 0.0, "late_lap": false },
+                    { "lap_index": 1, "lap_number": 1, "lap_time_stamp": 31000.0, "late_lap": false },
+                    // RotorHazard declared the pilot finished here and stopped counting.
+                    { "lap_index": 2, "lap_number": -1, "lap_time_stamp": 62000.0,
+                      "late_lap": true, "deleted": true },
+                ],
+            }] }
+        }));
+
+        let Decoded::Translated(raw) = decode_socket("current_laps", &frame) else {
+            panic!(
+                "a `-1` lap number must decode: it is RotorHazard's own value, not drift (#406)"
+            );
+        };
+
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: 1,
+            race_heat_id: Some(1),
+        }));
+        let events = adapter.translate(raw);
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, gridfpv_events::Event::Pass(_)))
+                .count(),
+            2,
+            "the two counted laps in the frame survive — that is the regression"
+        );
+        assert_eq!(
+            adapter.counts.uncounted, 1,
+            "and the uncounted crossing is counted as one"
+        );
+        assert_eq!(
+            adapter.counts.malformed_frames, 0,
+            "nothing about this frame is malformed"
+        );
+    }
+
     /// The transport's half of the contract: a frame it drops lands on the adapter's counter, so
     /// the heat summary can say "laps may be missing, and here is why".
     #[test]
