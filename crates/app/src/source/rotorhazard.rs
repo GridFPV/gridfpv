@@ -146,6 +146,9 @@ pub struct CalibrationWrite {
     pub enter_at: Option<u32>,
     /// The exit threshold to set, or `None` to leave it alone.
     pub exit_at: Option<u32>,
+    /// Whether the route accepted this write with an **open-practice** heat racing on the timer
+    /// (#355, #398) — so the driver's armed-heat backstop below must let it through.
+    pub during_open_practice: bool,
 }
 
 /// **Pending calibration writes** the driver applies on its next loop (#355): the enter/exit
@@ -418,9 +421,11 @@ impl RhConnection {
     /// latest value once rather than replaying a stale one after it. A write carrying neither
     /// threshold is dropped (the route already refuses one, so this is only a backstop).
     ///
-    /// **Refused mid-race by the driver as well as by the route**, exactly like
-    /// [`restart`](Self::restart): moving a detection threshold with a heat armed on this connection
-    /// changes what counts as a lap while it is being counted.
+    /// **Refused mid-race by the driver as well as by the route** — but only for a *scored* heat.
+    /// The route decides that (it is the layer that can see the event log) and records its answer in
+    /// [`CalibrationWrite::during_open_practice`]; this backstop only covers the window between that
+    /// check and the emit. An open-practice write is passed through, because #398 excludes practice
+    /// from scoring and tuning with pilots in the air is the page's whole workflow.
     pub fn calibrate(&self, write: CalibrationWrite) {
         if write.enter_at.is_none() && write.exit_at.is_none() {
             return;
@@ -434,6 +439,8 @@ impl RhConnection {
                 if write.exit_at.is_some() {
                     existing.exit_at = write.exit_at;
                 }
+                // The freshest phase reading wins (see the registry's coalesce).
+                existing.during_open_practice = write.during_open_practice;
             }
             None => pending.push(write),
         }
@@ -838,36 +845,49 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
         // page and it goes to the timer now — there is no Apply button, so this is the whole write
         // path, once per adjustment.
         //
-        // Belt-and-braces refusal while a heat is armed, exactly as the restart above: the server
-        // route already gates on heat phase, but the write travels route → registry → reconciler →
-        // this thread, so an arm could in principle land in between. Moving a detection threshold
-        // under a running heat changes what counts as a lap while it is being counted, so the driver
-        // drops the write rather than emitting it — the RD sees the level fail to come back
-        // confirmed, which is the honest outcome.
+        // Belt-and-braces refusal while a heat is armed — but **only for a scored heat**, which is
+        // the one place this differs from the restart above. The server route owns that judgement
+        // (it is the layer that can see the event log) and stamps its answer on each write; this
+        // backstop only covers the window between that check and this emit, since the write travels
+        // route → registry → reconciler → this thread and an arm could land in between.
+        //
+        // Loosening it here is not optional: the route now ACCEPTS a write during open practice
+        // (#398 excludes practice from scoring, and tuning with pilots in the air is the page's
+        // whole point). A backstop that still dropped it would report a write as dispatched that
+        // never landed — the exact failure the readback design exists to make impossible.
         let pending_calibration: Vec<CalibrationWrite> = {
             let mut slot = calibration.lock().expect("calibration lock poisoned");
             std::mem::take(&mut *slot)
         };
         if !pending_calibration.is_empty() {
-            if armed.lock().expect("armed-heat lock poisoned").is_some() {
-                eprintln!(
-                    "gridfpv: ignoring {} calibration write(s) — a heat is armed on this \
-                     connection; moving a detection threshold mid-race changes what counts as a lap",
-                    pending_calibration.len()
-                );
-            } else {
-                for write in &pending_calibration {
-                    if let Some(level) = write.enter_at {
-                        if conn.set_enter_at_level(write.node, level).is_err() {
-                            return true;
-                        }
-                    }
-                    if let Some(level) = write.exit_at {
-                        if conn.set_exit_at_level(write.node, level).is_err() {
-                            return true;
-                        }
+            let heat_armed = armed.lock().expect("armed-heat lock poisoned").is_some();
+            let mut emitted = 0usize;
+            let mut refused = 0usize;
+            for write in &pending_calibration {
+                if heat_armed && !write.during_open_practice {
+                    refused += 1;
+                    continue;
+                }
+                if let Some(level) = write.enter_at {
+                    if conn.set_enter_at_level(write.node, level).is_err() {
+                        return true;
                     }
                 }
+                if let Some(level) = write.exit_at {
+                    if conn.set_exit_at_level(write.node, level).is_err() {
+                        return true;
+                    }
+                }
+                emitted += 1;
+            }
+            if refused > 0 {
+                eprintln!(
+                    "gridfpv: ignoring {refused} calibration write(s) — a scored heat is armed on \
+                     this connection; moving a detection threshold mid-race changes what counts as \
+                     a lap"
+                );
+            }
+            if emitted > 0 {
                 // The readback, and the reason a write is confirmable at all: RotorHazard emits
                 // NOTHING in reply to `set_enter_at_level` / `set_exit_at_level` (verified on
                 // v4.3.0 and v4.4.0), so without this ask the Tune page would never see the level

@@ -627,6 +627,15 @@ pub struct PendingCalibration {
     pub enter_at: Option<u32>,
     /// The clamped exit threshold to emit, if any.
     pub exit_at: Option<u32>,
+    /// Whether the route accepted this write **with an open-practice heat racing on the timer**
+    /// (#355, #398).
+    ///
+    /// The driver keeps its own armed-heat backstop for the window between the route's phase check
+    /// and the emit; this tells it that this particular write was already cleared against a heat
+    /// that is exempt, so it must not drop it. Without the flag the route would accept a practice
+    /// write the driver then silently discarded — dispatched, never landed, which is the failure
+    /// mode the whole confirmation design exists to make impossible.
+    pub during_open_practice: bool,
 }
 
 /// The application-level registry of all configured timers (issue #73).
@@ -1303,14 +1312,18 @@ impl TimerRegistry {
     /// socket to emit on, and a threshold is not held over for a future connection), a `node`
     /// beyond the timer's width, and a request carrying **neither** threshold.
     ///
-    /// The **race-phase refusal** — never move a detection threshold under a live race — is not
+    /// The **race-phase refusal** — never move a detection threshold under a *scored* race — is not
     /// here: it needs the event log, so it lives in the route
-    /// (`EventRegistry::heat_in_progress_on_timer`), exactly as it does for
-    /// [`request_restart`](Self::request_restart).
+    /// (`EventRegistry::scored_heat_in_progress_on_timer`), as the restart's does in
+    /// [`request_restart`](Self::request_restart). `during_open_practice` is that route's answer to
+    /// the *other* half of the question — whether an (exempt) practice heat is racing right now —
+    /// carried through to the driver so its own armed-heat backstop does not drop a write the route
+    /// deliberately allowed.
     pub fn request_calibration(
         &self,
         id: &TimerId,
         request: &CalibrationRequest,
+        during_open_practice: bool,
     ) -> Result<CalibrationDispatch, TimerError> {
         let enter_at = request.enter_at.map(clamp_level);
         let exit_at = request.exit_at.map(clamp_level);
@@ -1386,12 +1399,16 @@ impl TimerRegistry {
                 if exit_at.is_some() {
                     pending.exit_at = exit_at;
                 }
+                // The freshest phase reading wins: a heat that has just gone racing (or just
+                // stopped) must not be judged by a check made several writes ago.
+                pending.during_open_practice = during_open_practice;
             }
             None => reg.calibration_requests.push(PendingCalibration {
                 timer: id.clone(),
                 node: request.node,
                 enter_at,
                 exit_at,
+                during_open_practice,
             }),
         }
         reg.persist()?;

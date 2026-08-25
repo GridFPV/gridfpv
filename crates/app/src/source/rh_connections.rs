@@ -447,6 +447,7 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                             node: u64::from(write.node),
                             enter_at: write.enter_at,
                             exit_at: write.exit_at,
+                            during_open_practice: write.during_open_practice,
                         },
                     );
                     if !landed {
@@ -533,6 +534,7 @@ mod tests {
                 node: 0,
                 enter_at: Some(96),
                 exit_at: None,
+                during_open_practice: false,
             }
         ));
     }
@@ -556,6 +558,7 @@ mod tests {
                         enter_at: Some(enter),
                         exit_at: None,
                     },
+                    false,
                 )
                 .expect("connected RH timer");
         }
@@ -567,6 +570,7 @@ mod tests {
                     enter_at: None,
                     exit_at: Some(70),
                 },
+                false,
             )
             .expect("the exit half is independent of the enter half");
 

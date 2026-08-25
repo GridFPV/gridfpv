@@ -905,10 +905,18 @@ async fn timer_signal(
 /// # The refusals
 ///
 /// * A **Mock** → `400`: it has no radio, so there is nothing to calibrate.
-/// * A **race in progress on this timer** → `400`, gated on heat phase
-///   ([`EventRegistry::heat_in_progress_on_timer`]: `Staged`/`Armed`/`Running`/`Unofficial` in the
-///   active event), exactly as [`restart_timer`] is. Moving a detection threshold under a live race
-///   changes what counts as a lap while it is being counted.
+/// * A **scored race in progress on this timer** → `400`, gated on heat phase
+///   ([`EventRegistry::scored_heat_in_progress_on_timer`]:
+///   `Staged`/`Armed`/`Running`/`Unofficial` in the active event). Moving a detection threshold
+///   under a competition heat changes what counts as a lap while it is being counted.
+///
+///   **Open practice is exempt, and deliberately so.** Practice is excluded from scoring (#398),
+///   so there is no result for a moved threshold to corrupt — and a pilot in the air on a practice
+///   heat is exactly when an RD wants to tune (*"I want to slide the slider and then test right
+///   away"*). Refusing there would leave the RD tuning an idle gate and walking a quad through by
+///   hand: the RotorHazard-UI loop this page exists to replace. This is a **narrower** gate than
+///   [`restart_timer`]'s on purpose — a restart takes the timing hardware down and destroys the
+///   practice session with it, while a threshold nudge does not.
 /// * A timer that is **not connected**, a `node` beyond the timer's width, or a body carrying
 ///   **neither** threshold → `400` from the registry.
 /// * An unknown id → 404 (`UnknownScope`).
@@ -944,18 +952,27 @@ async fn calibrate_timer(
             ),
         ));
     }
-    // The hard gate: never move a detection threshold under a live race.
-    if let Some(heat) = registry.heat_in_progress_on_timer(&timer_id) {
+    // The hard gate: never move a detection threshold under a SCORED race. Open practice is
+    // exempt (#398 excludes it from scoring), which is what lets an RD tune with pilots in the air.
+    let scored_heat = registry.scored_heat_in_progress_on_timer(&timer_id);
+    if let Some(heat) = scored_heat {
         return Err(ProtocolError::new(
             ErrorCode::BadRequest,
             format!(
-                "{} is running {} — finish or reset that heat before changing its thresholds",
+                "{} is running {}, a scored heat — finish or reset it before changing its \
+                 thresholds (open practice can be tuned while it runs)",
                 timer.name, heat
             ),
         ));
     }
+    // Whether a heat — necessarily an open-practice one, the scored case having just refused — is
+    // racing on this timer right now. Carried onto the write so the driver's own armed-heat
+    // backstop knows this one was cleared: without it the route would accept a practice write the
+    // driver then silently dropped, and a write that reports dispatched but never lands is the
+    // exact failure this page exists to catch.
+    let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
     timers
-        .request_calibration(&timer_id, &request)
+        .request_calibration(&timer_id, &request, during_open_practice)
         .map(Json)
         .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
 }
@@ -4512,10 +4529,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn calibrating_is_refused_while_a_race_is_in_progress_on_the_timer() {
-        // The hard gate (#355, and the same one #386 uses): moving a detection threshold under a
-        // live race changes what counts as a lap while it is being counted. Gated on HEAT PHASE, and
-        // the refusal names the heat and the timer by their FRIENDLY names (CLAUDE.md).
+    async fn calibrating_is_refused_while_a_scored_race_is_in_progress_on_the_timer() {
+        // The hard gate (#355): moving a detection threshold under a SCORED race changes what counts
+        // as a lap while it is being counted. Gated on HEAT PHASE, and the refusal names the heat and
+        // the timer by their FRIENDLY names (CLAUDE.md) — and says the heat is *scored*, so an RD
+        // refused mid-heat learns why rather than just "a heat is running".
         for transition in [
             HeatTransition::Staged,
             HeatTransition::Armed,
@@ -4578,12 +4596,123 @@ mod tests {
                 "the refusal must name the timer: {message}"
             );
             assert!(
+                message.contains("scored heat"),
+                "the refusal must say the heat is SCORED — that is what makes it different from \
+                 open practice, which is tunable while it runs: {message}"
+            );
+            assert!(
                 !message.contains(&rh.id.0),
                 "the refusal must not leak the raw timer id: {message}"
             );
             // A real refusal, not a confirm-and-fire — and nothing was recorded as config either.
             assert!(registry.timers().take_calibration_requests().is_empty());
             assert!(registry.timers().calibration(&rh.id).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn calibrating_is_accepted_while_an_open_practice_heat_is_running() {
+        // #355 + #398, and the companion to the refusal above: an OPEN PRACTICE heat does NOT block
+        // a threshold change. Practice is excluded from scoring, so there is no result for a moved
+        // threshold to corrupt — and a pilot in the air on a practice heat is exactly when an RD
+        // wants to tune ("I want to slide the slider and then test right away"). Refuse here and the
+        // RD can only tune an idle gate and wave a quad through by hand, which is the RotorHazard-UI
+        // loop this page was built to replace.
+        //
+        // Easy to regress back to the stricter `heat_in_progress_on_timer` gate, which is why this
+        // exercises every racing phase rather than just Running.
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_practice(&registry);
+            // A round in the OPEN PRACTICE format — `open_practice::excluded_from_scoring` keys on
+            // the format alone, and the gate consults that same predicate so the two cannot drift.
+            let round = registry
+                .add_round(
+                    &EventId(PRACTICE_EVENT_ID.into()),
+                    NewRoundReq {
+                        label: "Practice".into(),
+                        classes: vec![],
+                        // The OPEN PRACTICE format is the whole of the exemption:
+                        // `open_practice::excluded_from_scoring` keys on the format name alone, and
+                        // the calibration gate consults that same predicate, so the two cannot drift.
+                        format: gridfpv_engine::format::OpenPractice::NAME.to_string(),
+                        params: std::collections::BTreeMap::new(),
+                        win_condition: None,
+                        seeding: SeedingRule::AllChannels { channels: vec![0] },
+                        time_limit_secs: None,
+                        channel_mode: None,
+                        staging_timer_secs: None,
+                        start_procedure: None,
+                        grace_window: None,
+                        protest_window: None,
+                        min_lap_secs: None,
+                    },
+                )
+                .expect("an open-practice round");
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("p-1".into()),
+                        lineup: vec![CompetitorRef("node-0".into())],
+                        class: None,
+                        round: Some(round.id.clone()),
+                        frequencies: vec![],
+                        label: Some("Practice Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("p-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let (status, bytes) = post_calibration(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "enter_at": 90 }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an open-practice heat in {transition:?} must NOT block a threshold change"
+            );
+            let dispatch: crate::timers::CalibrationDispatch =
+                serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(dispatch.enter_at, Some(90));
+
+            // …and it must actually reach the wire. The write carries the route's finding that a
+            // practice heat is racing, so the driver's own armed-heat backstop lets it through —
+            // without that flag the route would accept a write the driver silently dropped, which is
+            // "dispatched but never landed", the failure this page exists to catch.
+            let drained = registry.timers().take_calibration_requests();
+            assert_eq!(drained.len(), 1);
+            assert!(
+                drained[0].during_open_practice,
+                "the write must be stamped as cleared against an open-practice heat, or the \
+                 driver's armed-heat backstop will drop it"
+            );
         }
     }
 
