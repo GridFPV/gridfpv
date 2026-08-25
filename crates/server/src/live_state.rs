@@ -44,8 +44,13 @@
 use std::collections::BTreeMap;
 
 use gridfpv_engine::heat::{HeatState, heat_state};
-use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, HeatTransition, PilotId, RoundId};
-use gridfpv_projection::{CompetitorKey, lap_list_marshaled_with_floor, registrations};
+use gridfpv_events::{
+    ClassId, CompetitorRef, Event, HeatId, HeatTransition, LogRef, PilotId, RoundId, SourceTime,
+};
+use gridfpv_projection::{
+    CompetitorKey, CrossingDisposition, dispositioned_passes, lap_list_marshaled_with_floor,
+    registrations,
+};
 use gridfpv_storage::StoredEvent;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -139,6 +144,90 @@ pub struct LiveRaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub lifecycle: Option<LifecycleState>,
+    /// The current heat's recent **gate crossings, each with its disposition** (#397) — the live
+    /// feed a console announces from, in ascending `pass_ref` (append-offset) order.
+    ///
+    /// `progress` reports *laps*, and laps are derived (`passes.windows(2)`), so a lap-derived
+    /// consumer is structurally blind to most crossings: the **holeshot** closes no lap, and a
+    /// crossing **rejected under the round's min-lap floor** is auto-voided in the projection and
+    /// reaches no live consumer at all. This field carries the crossings themselves, so "the gate
+    /// saw nothing" and "the gate saw something that did not count" stop being the same silence.
+    ///
+    /// **Idempotency (the hard requirement).** Every entry carries a stable
+    /// [`pass_ref`](LiveCrossing::pass_ref) — the crossing's global append offset — and the feed is
+    /// ordered by it. A consumer holds a single high-water mark and acts on `pass_ref >` it, so
+    /// a re-pushed or re-snapshotted `LiveRaceState` (or a resubscribe, or a scope change) can
+    /// never look like new crossings. Receipt of a frame means nothing; identity is everything.
+    ///
+    /// **Bounded** to the most recent [`MAX_LIVE_CROSSINGS`] entries — see that constant for why
+    /// dropping the *oldest* is the one truncation that leaves the high-water mark sound.
+    ///
+    /// Additive: absent on the wire when empty, so older payloads round-trip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crossings: Vec<LiveCrossing>,
+}
+
+/// How many crossings [`LiveRaceState::crossings`] carries at most — the feed's bound.
+///
+/// A heat is not small: 8 seats × 20 laps is ~168 crossings before any rejection, and open
+/// practice runs unbounded, so the feed cannot simply be "every crossing of the run" — that would
+/// grow a latency-sensitive frame without limit, and `Engine::advance` re-folds and re-sends it
+/// once per appended offset.
+///
+/// **The truncation drops the OLDEST entries, never the newest.** That preserves idempotency:
+/// append offsets only grow, so anything trimmed is already *below* any consumer's high-water mark
+/// and can never be mistaken for new. Trimming the other end would make new crossings vanish and
+/// then reappear. The only thing a bound can cost is a *miss*: a consumer that was away for more
+/// than this many crossings sees the window jump past some — and those are stale by then anyway
+/// (a tone for a crossing 64 crossings ago is noise, not awareness).
+///
+/// 64 is ~8 laps of an 8-seat heat, far more than the 1–2 crossings that land between two
+/// consecutive live-state frames, so a connected console never loses one.
+pub const MAX_LIVE_CROSSINGS: usize = 64;
+
+/// One gate crossing of the current heat, with what became of it (#397).
+///
+/// The **crossing** is the observation; the lap is a derivation over pairs of them. This carries
+/// the observation, so a consumer can react to crossings that never became laps — the holeshot,
+/// and a pass rejected under the min-lap floor.
+///
+/// Competitor and pilot are raw wire handles, exactly as [`PilotProgress`] carries them; the
+/// console resolves them to a callsign through its shared resolver before anything is displayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct LiveCrossing {
+    /// **The crossing's stable identity**: its global append offset in the event log. Identical on
+    /// every re-fold of the same log and across every scope, so a consumer deduplicates on this
+    /// and never on frame arrival. The feed is sorted ascending by it.
+    pub pass_ref: LogRef,
+    /// The source-local competitor that crossed. Not necessarily a member of the current lineup —
+    /// a crossing on an unseated node is reported too, because a phantom detection is exactly what
+    /// an RD needs to notice.
+    pub competitor: CompetitorRef,
+    /// The GridFPV pilot this competitor is bound to, if a registration has bound it (#60). `None`
+    /// for an unregistered competitor, which still appears by its bare [`CompetitorRef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pilot: Option<PilotId>,
+    /// When the crossing happened, on the **source's** clock (µs) — the same axis as
+    /// [`Lap::at`](gridfpv_projection::Lap::at) and the signal trace's sample times, NOT the server
+    /// wall clock the race anchors (`race_started_at`) use. Renders as a plain TS `number`.
+    pub at: SourceTime,
+    /// What became of this crossing — holeshot / counted / rejected-too-short / voided by a
+    /// marshal. Derived from the crossing's position in the corrected pass chain and the fold's
+    /// removal record; nothing in the log states it.
+    ///
+    /// A crossing's disposition MAY change while its `pass_ref` stays the same (a marshal voids a
+    /// counted lap; voiding a holeshot promotes the next crossing). That is correct and is why
+    /// deduplication keys on `pass_ref` alone: a re-labelled crossing is not a new one.
+    pub disposition: CrossingDisposition,
+    /// The 1-based lap this crossing **closed**, when it closed one. `None` for a holeshot (it
+    /// opens the first lap and closes none) and for a rejected or voided crossing. Lets a consumer
+    /// tell a crossing that already drove a lap callout from one that did not, without
+    /// re-deriving laps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub lap_number: Option<u32>,
 }
 
 /// The provisional → official lifecycle of a heat's result (marshaling Slice 5), projected for the
@@ -180,6 +269,7 @@ impl Default for LiveRaceState {
             staged_at: None,
             tone_at: None,
             lifecycle: None,
+            crossings: Vec::new(),
         }
     }
 }
@@ -280,29 +370,33 @@ fn live_state_core(
     // boundary, so everything counts (a normally-finalized heat is unaffected).
     let run_start = current_run_start(events, &current_heat);
     let pass_ceiling = current_run_pass_ceiling(events, &current_heat);
-    let laps = lap_list_marshaled_with_floor(
-        window
-            .iter()
-            .enumerate()
-            .filter(|(i, (_, e))| {
-                if *i < run_start {
-                    return false;
+    // The current run's window, with global offsets preserved. Materialised once because two folds
+    // read it: the lap projection below (which drives `progress`/`running_order`) and the crossing
+    // feed (#397). Feeding both from the SAME window is what keeps the two views of one pass
+    // consistent — a crossing the lap fold counted is `Counted` in the feed, with the same lap
+    // number, and one the floor suppressed is `RejectedTooShort` in both.
+    let run_window: Vec<(u64, &Event)> = window
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, e))| {
+            if *i < run_start {
+                return false;
+            }
+            // Tag-aware pass attribution: a pass stamped for ANOTHER heat never counts
+            // toward this one — selecting an older heat as current used to absorb every
+            // later heat's passes (they all sit after its run_start). An untagged
+            // (legacy) pass keeps the positional rule. Either way a pass landing AFTER
+            // the run went official is frozen out (the Final freeze).
+            match e {
+                Event::Pass(p) => {
+                    *i < pass_ceiling && p.heat.as_ref().is_none_or(|h| h == &current_heat)
                 }
-                // Tag-aware pass attribution: a pass stamped for ANOTHER heat never counts
-                // toward this one — selecting an older heat as current used to absorb every
-                // later heat's passes (they all sit after its run_start). An untagged
-                // (legacy) pass keeps the positional rule. Either way a pass landing AFTER
-                // the run went official is frozen out (the Final freeze).
-                match e {
-                    Event::Pass(p) => {
-                        *i < pass_ceiling && p.heat.as_ref().is_none_or(|h| h == &current_heat)
-                    }
-                    _ => true,
-                }
-            })
-            .map(|(_, (offset, e))| (*offset, *e)),
-        min_lap_micros,
-    );
+                _ => true,
+            }
+        })
+        .map(|(_, (offset, e))| (*offset, *e))
+        .collect();
+    let laps = lap_list_marshaled_with_floor(run_window.iter().copied(), min_lap_micros);
     // Per ref: lap count, the last lap's DURATION (the wire's `last_lap_micros` display value),
     // and the last lap's COMPLETION time (`at`) — the running-order tie-break. The scorer ranks
     // equal-lap pilots by earlier last-lap completion; ordering on duration here made the live
@@ -355,6 +449,24 @@ fn live_state_core(
         .collect();
     let running_order = running_order_by_completion(&progress, &last_completion);
 
+    // The crossing feed (#397) — the same run window, read as *crossings* rather than *laps*, so
+    // the holeshot and a floor-rejected pass (neither of which derives a lap) are visible live.
+    // Bounded to the most recent `MAX_LIVE_CROSSINGS`: the tail is kept and the head dropped, so
+    // every surviving `pass_ref` is still above anything a consumer already retired.
+    let dispositioned = dispositioned_passes(run_window.iter().copied(), min_lap_micros);
+    let bounded = dispositioned.len().saturating_sub(MAX_LIVE_CROSSINGS);
+    let crossings: Vec<LiveCrossing> = dispositioned[bounded..]
+        .iter()
+        .map(|d| LiveCrossing {
+            pass_ref: d.offset,
+            competitor: d.pass.competitor.clone(),
+            pilot: pilot_by_ref.get(&d.pass.competitor).map(|p| (*p).clone()),
+            at: d.pass.at,
+            disposition: d.disposition,
+            lap_number: d.lap_number,
+        })
+        .collect();
+
     LiveRaceState {
         current_heat: Some(current_heat.clone()),
         phase,
@@ -374,6 +486,7 @@ fn live_state_core(
         // The lifecycle is likewise finished by [`with_heat_timing`] from the *stored* log (it needs
         // the `HeatFinalizing` deadline's `recorded_at` context); the bare-event fold leaves it `None`.
         lifecycle: None,
+        crossings,
     }
 }
 
