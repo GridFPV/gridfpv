@@ -17,7 +17,16 @@
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import TimerManager from './TimerManager.svelte';
 
-  let { session, onhome }: { session: Session; onhome: () => void } = $props();
+  let {
+    session,
+    onhome,
+    ontune
+  }: {
+    session: Session;
+    onhome: () => void;
+    /** Open the per-timer Tune page (#355) — the shell owns the route; the row is the entry point. */
+    ontune?: (timerId: string) => void;
+  } = $props();
 
   let manager = $state<TimerManager | undefined>(undefined);
 
@@ -47,7 +56,11 @@
 
     <Card elevation="sm">
       <div class="manager-wrap">
-        <TimerManager bind:this={manager} {session} />
+        <TimerManager
+          bind:this={manager}
+          {session}
+          ontune={ontune ? (timer) => ontune(timer.id) : undefined}
+        />
       </div>
     </Card>
   </div>

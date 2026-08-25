@@ -46,6 +46,7 @@
     isBuiltInMock,
     isConnectable,
     isManuallyHeld,
+    isTimerConnected,
     kindLabel,
     kindSummary,
     kindTag,
@@ -70,7 +71,8 @@
     rowNote,
     listHeader,
     listFooter,
-    rowChecked
+    rowChecked,
+    ontune
   }: {
     session: Session;
     /** The latest loaded registry, exposed so a selection owner can reconcile its working set. */
@@ -92,6 +94,12 @@
     listFooter?: Snippet;
     /** Whether a row is currently selected — drives the row's "checked" highlight in select mode. */
     rowChecked?: (timer: Timer) => boolean;
+    /**
+     * Open the per-timer **Tune** page for a timer (#355). Optional: an embedder with nowhere to
+     * navigate to (the in-event selector) simply doesn't offer the action, rather than offering one
+     * that goes nowhere. The row decides *which* timers get it (see the button's `{#if}`).
+     */
+    ontune?: (timer: Timer) => void;
   } = $props();
 
   type LoadState =
@@ -566,6 +574,24 @@
                 onclick={() => toggleConnection(timer)}
               >
                 {connectActionLabel(timer)}
+              </Button>
+            {/if}
+            <!-- Tune (#355) — the entry point to the per-timer gate-tuning page. Offered on the
+                 timers that HAVE a gate to tune: the built-in Mock has no radio, and a timer this
+                 console can't dial has nothing to read. Disabled (not hidden) while disconnected,
+                 so the RD learns the action exists and what it needs, rather than wondering where
+                 tuning went. -->
+            {#if ontune && isConnectable(timer)}
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={!isTimerConnected(timer)}
+                title={isTimerConnected(timer)
+                  ? `Tune the gate thresholds on “${timer.name}”`
+                  : `Connect “${timer.name}” first — tuning reads its live signal.`}
+                onclick={() => ontune(timer)}
+              >
+                Tune
               </Button>
             {/if}
             <Button variant="ghost" size="sm" onclick={() => openEdit(timer)}>Edit</Button>
