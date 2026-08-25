@@ -29,10 +29,12 @@
 //! module stays purely the *configuration* half — the connector itself lives in the app crate,
 //! behind its default `live` feature (a non-`live` build leaves an RH timer inert).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
+use gridfpv_events::CompetitorRef;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -498,6 +500,17 @@ pub struct SetPrimaryTimerRequest {
 #[derive(Clone)]
 pub struct TimerRegistry {
     inner: Arc<RwLock<Registry>>,
+    /// Live **tune telemetry** (#355 S2a), keyed by timer — a sibling map beside the timer set,
+    /// exactly like `restart_requests`, and for the same layering reason: the live socket lives in
+    /// `gridfpv-app`, above this crate, so the registry is the one seam the route and the
+    /// connection driver already share.
+    ///
+    /// Its **own** lock rather than a field inside [`Registry`]: pushes land at 5 Hz per watched
+    /// timer, and they must never contend with — or worse, be tempted to ride along with — the
+    /// timer set's write path, which persists `timers.json`. Nothing in here is ever written to
+    /// disk, restored on boot, or turned into an [`Event`](gridfpv_events::Event); the whole map
+    /// evaporates when the Director exits, which is the point.
+    signal: Arc<Mutex<HashMap<TimerId, TimerSignalState>>>,
 }
 
 /// The guarded interior: the timer map and where `timers.json` lives.
@@ -519,6 +532,295 @@ struct Registry {
     /// connection. In-memory only, and never persisted: a Director restart must not re-fire an
     /// RD's restart from a previous session.
     restart_requests: Vec<TimerId>,
+}
+
+// -------------------------------------------------------------------------------------------
+// Tune telemetry (#355, slice 2a) — the per-timer live signal snapshot.
+// -------------------------------------------------------------------------------------------
+
+/// How long a tune-telemetry subscription survives without being renewed.
+///
+/// **A lease, not a boolean.** Every `GET /timers/{id}/signal` renews it; nothing else does. A
+/// closed tab, a crashed browser, a laptop that walked out of Wi-Fi range and a Director the RD
+/// forgot about all stop the stream by simply not asking again — which a bare "streaming: true"
+/// flag would leave running until the process died. Sized at roughly ten polls of a 4–5 Hz page,
+/// so an ordinary hiccup does not tear the stream down mid-tune.
+pub const SIGNAL_LEASE: Duration = Duration::from_secs(5);
+
+/// The Director's own decimation cadence for tune telemetry — 5 Hz.
+///
+/// Deliberately **not** RotorHazard's. `HEARTBEAT_DATA_RATE_FACTOR` is 5 (10 Hz) on a stock timer
+/// and jumps to 50 (100 Hz) the moment RH's frequency scanner is switched on, so a ring driven by
+/// arrival would silently change what a "30 second window" means. The Director samples the
+/// transport's last-value-wins store on this fixed schedule instead, which makes the ring's time
+/// base exact by construction and caps the work per timer regardless of what the wire is doing.
+pub const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How many samples each node's ring holds — [`SIGNAL_SAMPLE_INTERVAL`] × this is the rolling
+/// window the Tune graph can draw (30 s at 5 Hz).
+///
+/// The ring is the *only* thing here that grows with time, and it does not: it is a fixed-capacity
+/// [`VecDeque`] per node, so a Tune page left open all weekend costs exactly what it cost after the
+/// first thirty seconds.
+pub const SIGNAL_RING: usize = 150;
+
+/// A snapshot is reported as **streaming** while a live connection has pushed into it this
+/// recently. Comfortably longer than [`SIGNAL_SAMPLE_INTERVAL`], so ordinary jitter does not make
+/// the page flicker between "live" and "stalled".
+const SIGNAL_STREAMING_WITHIN: Duration = Duration::from_millis(1500);
+
+/// One node's live signal, as a Tune page reads it (#355).
+///
+/// Everything is `Option` because everything is genuinely optional: a node RotorHazard has not
+/// reported yet, a timer whose thresholds have not arrived, a build that omits a readout. A
+/// missing value renders as "—", which is information; a zero would be a lie.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NodeSignal {
+    /// The node's index on the timer, `0`-based. The **display** name is built from this plus the
+    /// channel (`Node 1 · Raceband R7`) — see the repo display rule.
+    pub node: u32,
+    /// The stable per-node competitor handle (`node-0`, `node-1`, …) the rest of GridFPV uses for
+    /// a seat. A wire handle, not a label.
+    pub seat: CompetitorRef,
+    /// Whether RotorHazard has reported anything at all for this node.
+    ///
+    /// **Unseated nodes are included, and this is why.** "Is this node even alive?" is half the
+    /// diagnostic a mistuned timer needs, and filtering the snapshot to a heat's lineup would
+    /// answer it with silence for exactly the nodes an RD is most likely to be checking.
+    pub seen: bool,
+    /// Live RSSI (filtered ADC counts) at the newest sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rssi: Option<f32>,
+    /// The node's tuned frequency in MHz; `None` when the node is not tuned to anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub frequency_mhz: Option<u16>,
+    /// The detector's loop time in microseconds — a timer falling behind shows up here first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub loop_time_micros: Option<u32>,
+    /// Whether the node is inside a crossing right now.
+    pub crossing: bool,
+    /// Whether a crossing was seen at any point in the interval this sample covers — the sticky
+    /// flag that survives the Director's decimation, so a fast pass still lights the lamp.
+    pub crossed_recently: bool,
+    /// The node's running peak RSSI (`node_data.node_peak_rssi`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node_peak_rssi: Option<f32>,
+    /// The node's running nadir RSSI (`node_data.node_nadir_rssi`) — the noise floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node_nadir_rssi: Option<f32>,
+    /// Peak RSSI of the most recent pass (`node_data.pass_peak_rssi`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pass_peak_rssi: Option<f32>,
+    /// Nadir RSSI of the most recent pass (`node_data.pass_nadir_rssi`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pass_nadir_rssi: Option<f32>,
+    /// How many passes this node has detected (`node_data.debug_pass_count`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pass_count: Option<u32>,
+    /// The enter threshold the timer is detecting against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub enter_at: Option<f32>,
+    /// The exit threshold the timer is detecting against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_at: Option<f32>,
+    /// The rolling RSSI window, **oldest first**, one value per entry in
+    /// [`TimerSignal::sample_micros`]. At most [`SIGNAL_RING`] long, always.
+    pub samples: Vec<f32>,
+}
+
+/// A timer's live tuning signal — the whole of `GET /timers/{id}/signal` (#355).
+///
+/// **Never an [`Event`](gridfpv_events::Event), never a log.** This is a read of a bounded
+/// in-memory buffer that exists only while an RD is looking at it; it is not derived from a log,
+/// it is not written to one, and it has no `SignalChunk` / `SignalHistory` in its lineage. That is
+/// why it is timer-scoped and polled rather than a scoped subscription on the event change-stream:
+/// it must work before an event exists at all, which is the state an untuned timer is in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct TimerSignal {
+    /// The timer this snapshot came from.
+    pub timer: TimerId,
+    /// Whether a live connection is actually feeding this snapshot right now. `false` with a valid
+    /// lease means the timer is not connected (or has just dropped) — the difference between "no
+    /// signal" and "no link", which an RD chasing a dead gate needs to be able to tell.
+    pub streaming: bool,
+    /// Milliseconds left on the subscription lease before the stream stops by itself. Each `GET`
+    /// resets it to [`SIGNAL_LEASE`].
+    pub lease_ms_remaining: u32,
+    /// Microseconds between consecutive samples — the Director's own decimation cadence, not the
+    /// timer's heartbeat rate.
+    pub period_micros: u32,
+    /// The **shared** sample time base (microseconds since this subscription started), oldest
+    /// first: `sample_micros[i]` is when `nodes[*].samples[i]` was taken. One axis for every node
+    /// because every node is sampled in the same pass, so this stays O(1) per tick rather than
+    /// O(nodes) copies of the same numbers.
+    ///
+    /// Rendered as plain TS `number`s (`#[ts(as = …)]`), the same choice
+    /// [`SourceTime`](gridfpv_events::SourceTime) makes and for the same reason: a rolling window's
+    /// microsecond offsets sit far below 2^53, so `number` is exact — and a `bigint` here would be
+    /// a needless conversion between this axis and the one every other trace on screen uses.
+    #[ts(as = "Vec<f64>")]
+    pub sample_micros: Vec<i64>,
+    /// Every node the timer reports, **including unseated ones** (see [`NodeSignal::seen`]), in
+    /// node order.
+    pub nodes: Vec<NodeSignal>,
+}
+
+/// One node's latest readings as the connection layer hands them over — the crate-boundary twin of
+/// the adapter's `NodeTick`.
+///
+/// It exists because the live socket lives in `gridfpv-app`, *above* this crate, so the registry
+/// cannot name the adapter's type. Restating the fields here keeps the dependency arrow pointing
+/// the right way; the app crate does the (trivial) mapping.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeReading {
+    /// Whether the timer has reported this node at all.
+    pub seen: bool,
+    /// Live RSSI.
+    pub rssi: Option<f32>,
+    /// Tuned frequency in MHz, `None` when untuned.
+    pub frequency_mhz: Option<u16>,
+    /// Detector loop time in microseconds.
+    pub loop_time_micros: Option<u32>,
+    /// Crossing state as of the newest frame.
+    pub crossing: bool,
+    /// Any crossing seen since the previous reading was taken.
+    pub crossed: bool,
+    /// Running peak RSSI.
+    pub node_peak_rssi: Option<f32>,
+    /// Running nadir RSSI.
+    pub node_nadir_rssi: Option<f32>,
+    /// Most recent pass's peak RSSI.
+    pub pass_peak_rssi: Option<f32>,
+    /// Most recent pass's nadir RSSI.
+    pub pass_nadir_rssi: Option<f32>,
+    /// Passes detected.
+    pub pass_count: Option<u32>,
+    /// Enter threshold.
+    pub enter_at: Option<f32>,
+    /// Exit threshold.
+    pub exit_at: Option<f32>,
+}
+
+/// The live tune-telemetry state for **one** timer: the lease, the shared time base and the
+/// per-node rings.
+///
+/// Held in a map beside the timer set — never inside [`Timer`] — because `Timer`'s JSON *is* both
+/// its wire form and its persisted form: a sample ring on it would be written to `timers.json` on
+/// every CRUD, and read back on boot as configuration, which it emphatically is not.
+struct TimerSignalState {
+    /// When the subscription lapses unless renewed.
+    lease_until: Instant,
+    /// The origin the shared sample times are measured from (this subscription's start).
+    origin: Instant,
+    /// When a live connection last pushed — drives [`TimerSignal::streaming`].
+    last_push: Option<Instant>,
+    /// The shared sample time base, bounded to [`SIGNAL_RING`].
+    times: VecDeque<i64>,
+    /// Per-node latest readings + rolling window, bounded to [`SIGNAL_RING`] each.
+    nodes: Vec<NodeRing>,
+}
+
+/// One node's latest reading plus its bounded rolling window.
+#[derive(Default)]
+struct NodeRing {
+    /// The newest reading, last-value-wins.
+    latest: NodeReading,
+    /// The rolling RSSI window, oldest first, at most [`SIGNAL_RING`] long.
+    samples: VecDeque<f32>,
+}
+
+impl TimerSignalState {
+    /// A fresh subscription: leased from `now`, no samples yet.
+    fn new(now: Instant) -> Self {
+        Self {
+            lease_until: now + SIGNAL_LEASE,
+            origin: now,
+            last_push: None,
+            times: VecDeque::with_capacity(SIGNAL_RING),
+            nodes: Vec::new(),
+        }
+    }
+
+    /// Whether the lease is still open at `now`.
+    fn leased(&self, now: Instant) -> bool {
+        now < self.lease_until
+    }
+
+    /// Append one decimated tick. `readings` is every node the timer reports, in node order.
+    ///
+    /// A **width change** (the timer came back with a different node count) resets the rings: a
+    /// window whose columns silently shifted under it is worse than a window that restarts.
+    fn push(&mut self, readings: &[NodeReading], now: Instant) {
+        if self.nodes.len() != readings.len() {
+            self.nodes = (0..readings.len()).map(|_| NodeRing::default()).collect();
+            self.times.clear();
+        }
+        self.last_push = Some(now);
+        if self.times.len() == SIGNAL_RING {
+            self.times.pop_front();
+        }
+        self.times
+            .push_back(now.duration_since(self.origin).as_micros() as i64);
+        for (ring, reading) in self.nodes.iter_mut().zip(readings) {
+            ring.latest = reading.clone();
+            if ring.samples.len() == SIGNAL_RING {
+                ring.samples.pop_front();
+            }
+            ring.samples.push_back(reading.rssi.unwrap_or(0.0));
+        }
+    }
+
+    /// Render the snapshot for `timer` at `now`.
+    fn snapshot(&self, timer: &TimerId, now: Instant) -> TimerSignal {
+        TimerSignal {
+            timer: timer.clone(),
+            streaming: self
+                .last_push
+                .is_some_and(|at| now.duration_since(at) < SIGNAL_STREAMING_WITHIN),
+            lease_ms_remaining: self
+                .lease_until
+                .saturating_duration_since(now)
+                .as_millis()
+                .min(u32::MAX as u128) as u32,
+            period_micros: SIGNAL_SAMPLE_INTERVAL.as_micros() as u32,
+            sample_micros: self.times.iter().copied().collect(),
+            nodes: self
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(index, ring)| NodeSignal {
+                    node: index as u32,
+                    seat: CompetitorRef(format!("node-{index}")),
+                    seen: ring.latest.seen,
+                    rssi: ring.latest.rssi,
+                    frequency_mhz: ring.latest.frequency_mhz,
+                    loop_time_micros: ring.latest.loop_time_micros,
+                    crossing: ring.latest.crossing,
+                    crossed_recently: ring.latest.crossed,
+                    node_peak_rssi: ring.latest.node_peak_rssi,
+                    node_nadir_rssi: ring.latest.node_nadir_rssi,
+                    pass_peak_rssi: ring.latest.pass_peak_rssi,
+                    pass_nadir_rssi: ring.latest.pass_nadir_rssi,
+                    pass_count: ring.latest.pass_count,
+                    enter_at: ring.latest.enter_at,
+                    exit_at: ring.latest.exit_at,
+                    samples: ring.samples.iter().copied().collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl TimerRegistry {
@@ -581,6 +883,7 @@ impl TimerRegistry {
                 data_dir,
                 restart_requests: Vec::new(),
             })),
+            signal: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -804,6 +1107,88 @@ impl TimerRegistry {
         std::mem::take(&mut self.write().restart_requests)
     }
 
+    /// **Read the timer's live tuning signal and renew its lease** (#355 S2a) — the whole of
+    /// `GET /timers/{id}/signal`, and the only thing that keeps the stream alive.
+    ///
+    /// The first call *starts* the subscription: it creates the state, which the connection driver
+    /// notices on its next tick and turns into an open transport gate. Every later call pushes the
+    /// expiry out by [`SIGNAL_LEASE`]. Stop calling — because the tab closed, the browser died, or
+    /// the Wi-Fi went — and the stream stops on its own within five seconds, with nothing to clean
+    /// up and no client cooperation required.
+    pub fn signal(&self, id: &TimerId) -> TimerSignal {
+        let now = Instant::now();
+        let mut store = self.signal_store();
+        // An expired entry is a *new* subscription, not a resumed one: its ring belongs to a
+        // window that has since gone stale, and its sample origin to a session that has ended.
+        let state = match store.entry(id.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get().leased(now) => {
+                entry.into_mut()
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(TimerSignalState::new(now));
+                entry.into_mut()
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(TimerSignalState::new(now))
+            }
+        };
+        state.lease_until = now + SIGNAL_LEASE;
+        state.snapshot(id, now)
+    }
+
+    /// **Stop the timer's tuning stream now** (#355 S2a) — `POST /timers/{id}/signal/stop`.
+    ///
+    /// The lease alone is enough for correctness; this exists for *promptness*. Closing the Tune
+    /// view should quiet the socket immediately rather than after the lease runs out, so the
+    /// heartbeat gate shuts on the driver's next tick instead of five seconds later.
+    pub fn stop_signal(&self, id: &TimerId) {
+        self.signal_store().remove(id);
+    }
+
+    /// Whether a tune-telemetry subscription is currently open for `timer` — what the connection
+    /// driver reads on every tick to decide whether the transport's pre-parse gate is open.
+    ///
+    /// **Prunes as it reads**: a lapsed subscription's state is dropped here, so a Tune page that
+    /// went away leaves nothing behind at all.
+    pub fn signal_wanted(&self, id: &TimerId) -> bool {
+        let now = Instant::now();
+        let mut store = self.signal_store();
+        match store.get(id) {
+            Some(state) if state.leased(now) => true,
+            Some(_) => {
+                store.remove(id);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Append one **decimated** tick of per-node readings to `timer`'s rolling window (#355 S2a).
+    ///
+    /// Called by the connection driver on its own fixed cadence ([`SIGNAL_SAMPLE_INTERVAL`]) —
+    /// never on frame arrival, because RotorHazard's heartbeat rate is not something to trust
+    /// (`HEARTBEAT_DATA_RATE_FACTOR` jumps 5 → 50 when its frequency scanner is on).
+    ///
+    /// A push with **no live lease is dropped**, and takes the state with it. The gate should
+    /// already be shut by then; this is the second lock on the same door, so a driver that is a
+    /// tick behind can never resurrect a stream nobody is watching.
+    pub fn push_signal(&self, id: &TimerId, readings: &[NodeReading]) {
+        let now = Instant::now();
+        let mut store = self.signal_store();
+        let Some(state) = store.get_mut(id) else {
+            return;
+        };
+        if !state.leased(now) {
+            store.remove(id);
+            return;
+        }
+        state.push(readings, now);
+    }
+
+    fn signal_store(&self) -> std::sync::MutexGuard<'_, HashMap<TimerId, TimerSignalState>> {
+        self.signal.lock().expect("timer signal lock poisoned")
+    }
+
     /// Delete a timer (issue #73). The built-in **Mock cannot be deleted** (it is always
     /// present); attempting to is a [`TimerError`]. An unknown id is also an error. The registry
     /// is **persisted** on success. A manual connection hold (#383) dies with the timer — the
@@ -938,6 +1323,196 @@ fn short_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An in-memory registry plus a RotorHazard timer to hang tune telemetry off.
+    fn registry_with_rh() -> (TimerRegistry, TimerId) {
+        let timers = TimerRegistry::new(None, 5, 2500).expect("in-memory registry");
+        let id = timers
+            .create(&CreateTimerRequest {
+                name: "Field RH".to_string(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".to_string(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .expect("timer created")
+            .id;
+        (timers, id)
+    }
+
+    /// One tick of readings for `nodes` nodes, node 0 carrying `rssi`.
+    fn tick(nodes: usize, rssi: f32) -> Vec<NodeReading> {
+        (0..nodes)
+            .map(|index| NodeReading {
+                seen: true,
+                rssi: Some(if index == 0 { rssi } else { 10.0 }),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// Back-date the lease so expiry is testable without sleeping through [`SIGNAL_LEASE`].
+    fn expire(timers: &TimerRegistry, id: &TimerId) {
+        timers
+            .signal_store()
+            .get_mut(id)
+            .expect("a live subscription")
+            .lease_until = Instant::now() - Duration::from_millis(1);
+    }
+
+    /// **The first GET starts the stream; nothing else does.** Before anyone asks, the connection
+    /// driver is told not to capture — an idle Director must not be paying for a heartbeat parse.
+    #[test]
+    fn the_first_read_opens_the_subscription() {
+        let (timers, rh) = registry_with_rh();
+        assert!(
+            !timers.signal_wanted(&rh),
+            "no one has asked, so nothing streams"
+        );
+        let snapshot = timers.signal(&rh);
+        assert_eq!(snapshot.timer, rh);
+        assert!(!snapshot.streaming, "leased, but nothing has pushed yet");
+        assert!(snapshot.nodes.is_empty());
+        assert!(timers.signal_wanted(&rh), "the read is the subscription");
+    }
+
+    /// **A lease, not a boolean.** A Tune page that stops asking — closed tab, dead browser, lost
+    /// network — stops the stream by itself, and takes its buffer with it. A bare flag would leave
+    /// the timer streaming until the Director exited.
+    #[test]
+    fn a_lapsed_lease_stops_the_stream_and_drops_its_buffer() {
+        let (timers, rh) = registry_with_rh();
+        timers.signal(&rh);
+        timers.push_signal(&rh, &tick(4, 48.0));
+        assert_eq!(timers.signal(&rh).nodes.len(), 4);
+
+        expire(&timers, &rh);
+        assert!(
+            !timers.signal_wanted(&rh),
+            "the gate shuts with no client cooperation at all"
+        );
+        assert!(
+            !timers.signal_store().contains_key(&rh),
+            "and the lapsed subscription's buffer is pruned, not left to rot"
+        );
+
+        // A driver a tick behind cannot resurrect it either — the push is the second lock.
+        timers.push_signal(&rh, &tick(4, 48.0));
+        assert!(!timers.signal_store().contains_key(&rh));
+    }
+
+    /// A renewed lease keeps the window; a *lapsed* one starts a new session rather than resuming
+    /// a stale buffer whose samples belong to a window that has since scrolled away.
+    #[test]
+    fn renewing_keeps_the_window_but_relapsing_starts_a_new_one() {
+        let (timers, rh) = registry_with_rh();
+        timers.signal(&rh);
+        timers.push_signal(&rh, &tick(4, 48.0));
+        timers.push_signal(&rh, &tick(4, 49.0));
+        assert_eq!(timers.signal(&rh).nodes[0].samples.len(), 2);
+
+        expire(&timers, &rh);
+        assert_eq!(
+            timers.signal(&rh).nodes.len(),
+            0,
+            "a re-opened subscription starts from nothing"
+        );
+    }
+
+    /// **The ring is bounded.** Cost per tick is O(nodes) and the buffer's size is fixed, so a Tune
+    /// page left open all afternoon costs exactly what it cost after the first thirty seconds.
+    #[test]
+    fn the_rolling_window_is_bounded() {
+        let (timers, rh) = registry_with_rh();
+        timers.signal(&rh);
+        for i in 0..(SIGNAL_RING * 3) {
+            timers.push_signal(&rh, &tick(8, i as f32));
+        }
+        let snapshot = timers.signal(&rh);
+        assert_eq!(snapshot.sample_micros.len(), SIGNAL_RING);
+        for node in &snapshot.nodes {
+            assert_eq!(node.samples.len(), SIGNAL_RING);
+        }
+        // Oldest-first, last-value-wins: the window holds the MOST RECENT `SIGNAL_RING` samples.
+        let first = &snapshot.nodes[0];
+        assert_eq!(first.samples[SIGNAL_RING - 1], (SIGNAL_RING * 3 - 1) as f32);
+        assert_eq!(first.rssi, Some((SIGNAL_RING * 3 - 1) as f32));
+        // And the shared time base stays parallel to every node's window.
+        assert!(snapshot.sample_micros.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    /// **Every node, including unseated ones.** Tune telemetry never passes through the app layer's
+    /// lineup remap, so a node no heat has seated still reports — which is the whole point, since
+    /// "is this node even alive?" is the question an RD with a dead gate cannot otherwise answer.
+    #[test]
+    fn unseated_nodes_are_in_the_snapshot() {
+        let (timers, rh) = registry_with_rh();
+        timers.signal(&rh);
+        // Eight nodes; node 0 is flying, the rest are unseated and idle.
+        let mut readings = tick(8, 120.0);
+        for reading in readings.iter_mut().skip(1) {
+            reading.seen = true;
+            reading.rssi = Some(9.0);
+        }
+        timers.push_signal(&rh, &readings);
+
+        let snapshot = timers.signal(&rh);
+        assert_eq!(snapshot.nodes.len(), 8);
+        assert_eq!(snapshot.nodes[7].seat, CompetitorRef("node-7".to_string()));
+        assert!(snapshot.nodes[7].seen);
+        assert_eq!(snapshot.nodes[7].rssi, Some(9.0));
+    }
+
+    /// A timer that comes back a different width restarts the window rather than shifting every
+    /// node's history sideways under the graph.
+    #[test]
+    fn a_node_count_change_restarts_the_window() {
+        let (timers, rh) = registry_with_rh();
+        timers.signal(&rh);
+        timers.push_signal(&rh, &tick(8, 48.0));
+        timers.push_signal(&rh, &tick(8, 49.0));
+        timers.push_signal(&rh, &tick(4, 50.0));
+
+        let snapshot = timers.signal(&rh);
+        assert_eq!(snapshot.nodes.len(), 4);
+        assert_eq!(snapshot.sample_micros.len(), 1);
+        assert_eq!(snapshot.nodes[0].samples, vec![50.0]);
+    }
+
+    /// The explicit stop is about **promptness**, not correctness: closing the Tune view should
+    /// quiet the socket now rather than when the lease runs out.
+    #[test]
+    fn stopping_ends_the_subscription_immediately() {
+        let (timers, rh) = registry_with_rh();
+        timers.signal(&rh);
+        timers.push_signal(&rh, &tick(4, 48.0));
+        assert!(timers.signal_wanted(&rh));
+
+        timers.stop_signal(&rh);
+        assert!(!timers.signal_wanted(&rh));
+        assert!(timers.signal_store().is_empty());
+        // Idempotent, and harmless on a timer that never streamed.
+        timers.stop_signal(&rh);
+    }
+
+    /// Tune telemetry is **never persisted**. `Timer`'s JSON is both its wire form and its
+    /// on-disk form, so a sample ring living on it would hit `timers.json` on every CRUD and come
+    /// back on boot as configuration. It lives in a sibling map for exactly that reason.
+    #[test]
+    fn telemetry_never_reaches_the_persisted_timer() {
+        let (timers, rh) = registry_with_rh();
+        timers.signal(&rh);
+        timers.push_signal(&rh, &tick(8, 120.0));
+        let json = serde_json::to_string(&timers.get(&rh).expect("the timer")).expect("serializes");
+        for leaked in ["samples", "rssi", "sample_micros", "lease"] {
+            assert!(
+                !json.contains(leaked),
+                "a persisted Timer must carry no telemetry ({leaked} leaked into {json})"
+            );
+        }
+    }
 
     #[test]
     fn validate_timer_config_rejects_bad_configs() {

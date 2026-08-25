@@ -482,3 +482,99 @@ fn heat_past_rh_lap_limit_still_delivers_every_crossing() {
          never touched"
     );
 }
+
+/// **Tune telemetry arrives at idle, with no race and no event** (#355 S2a).
+///
+/// The premise the whole Tune page rests on: RotorHazard's `heartbeat` runs unconditionally from
+/// boot, and `node_data` re-broadcasts the peak / nadir / pass-count readouts alongside it — both
+/// while the timer is sitting DONE/READY with nothing staged. If that were not true the page would
+/// need a race to tune against, which is precisely the trap an untuned timer is already in.
+///
+/// It also asserts the two properties that make the path safe to leave in the transport:
+/// the subscription **gate** really controls whether anything accumulates, and closing it leaves
+/// nothing behind.
+#[test]
+#[ignore = "requires a running dockerized RotorHazard (docker/rotorhazard/)"]
+fn tune_telemetry_flows_at_idle_and_only_while_subscribed() {
+    // Four mock nodes with a signal plan, so `node_data` has something to report. Nothing is
+    // staged and no heat is seated: this is a timer sitting idle, the state an RD tunes in.
+    let rh = RhContainer::start(PORT + 3, "0.1", &[]);
+    let conn = RotorHazardConnection::connect(rh.url(), RotorHazardAdapter::new())
+        .expect("connect to RotorHazard");
+    std::thread::sleep(Duration::from_secs(2));
+    // Make sure nothing is racing — the claim under test is specifically about idle.
+    conn.stop_race().ok();
+    conn.discard_laps().ok();
+    std::thread::sleep(Duration::from_secs(2));
+
+    // ---- Closed subscription: the frames are arriving, and we accumulate nothing. -------------
+    assert!(
+        conn.take_signal().is_empty(),
+        "an unsubscribed connection must not be buffering heartbeats"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        conn.take_signal().is_empty(),
+        "two seconds of 10 Hz heartbeat still accumulates nothing while the gate is shut"
+    );
+
+    // ---- Open it: both feeds land. -------------------------------------------------------------
+    assert!(conn.set_signal_capture(true), "this call opened it");
+    assert!(
+        !conn.set_signal_capture(true),
+        "a repeat is not a fresh rising edge"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let nodes;
+    loop {
+        let snapshot = conn.take_signal();
+        // The heartbeat half (rssi) AND the `node_data` half (a peak readout the heartbeat does
+        // not carry) must BOTH be present — one without the other is not enough to tune with.
+        let both = snapshot
+            .iter()
+            .any(|n| n.rssi.is_some() && n.node_peak_rssi.is_some());
+        if both || Instant::now() >= deadline {
+            assert!(
+                both,
+                "both RotorHazard feeds must reach an idle timer's tune snapshot; got {snapshot:?}"
+            );
+            nodes = snapshot;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    // Every node the timer has, not a heat's lineup: nothing is seated here at all, and the whole
+    // snapshot must still be populated ("is this node even alive?" is half the diagnostic).
+    assert!(
+        nodes.len() >= 4,
+        "an idle timer reports all of its nodes; got {}",
+        nodes.len()
+    );
+    assert!(
+        nodes.iter().all(|n| n.seen),
+        "every node RotorHazard reported is marked seen: {nodes:?}"
+    );
+    // The thresholds the tuning graph draws its handles at arrive with no event and no armed heat —
+    // the app layer's lineup remap could not have supplied these.
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.enter_at.is_some() && n.exit_at.is_some()),
+        "the rising-edge warm-up pulls the enter/exit levels: {nodes:?}"
+    );
+
+    // ---- Close it: the stream stops and the buffer is gone. ------------------------------------
+    // Closing is never a rising edge, so it reports `false` — see `set_signal_capture`.
+    assert!(!conn.set_signal_capture(false));
+    assert!(
+        conn.take_signal().is_empty(),
+        "closing the subscription empties the store"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        conn.take_signal().is_empty(),
+        "and nothing accumulates again while it stays shut"
+    );
+}

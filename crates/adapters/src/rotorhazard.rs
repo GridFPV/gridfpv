@@ -314,7 +314,7 @@ pub struct RawPassRecord {
 /// `current_marshal_data`, which a live translator does not subscribe to). So the trace this
 /// adapter captures samples `node_peak_rssi` at the `node_data` emit cadence — see
 /// [`SignalChunk`](gridfpv_events::SignalChunk)'s fidelity bound.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RawNodeData {
     /// Per-node peak RSSI of the most recent pass (array index = node index). This is
     /// the per-pass RSSI source for a [`Pass`]'s [`SignalContext`]; `0` under mock nodes.
@@ -326,6 +326,19 @@ pub struct RawNodeData {
     /// payloads (defaults empty), in which case the trace falls back to `pass_peak_rssi`.
     #[serde(default)]
     pub node_peak_rssi: Vec<f32>,
+    /// Per-node **current** nadir RSSI (the node's running noise floor). Read by the tune
+    /// telemetry tap only (#355): `heartbeat` does not carry it, and it is what tells an RD
+    /// whether an enter threshold is set above the noise or inside it.
+    #[serde(default)]
+    pub node_nadir_rssi: Vec<f32>,
+    /// Per-node nadir RSSI of the most recent pass. Tune telemetry only (#355).
+    #[serde(default)]
+    pub pass_nadir_rssi: Vec<f32>,
+    /// Per-node count of passes the detector has recorded (`debug_pass_count`). Tune telemetry
+    /// only (#355) — the "did this gate see anything at all?" counter, which is the question a
+    /// zero-lap heat leaves an RD unable to answer.
+    #[serde(default)]
+    pub debug_pass_count: Vec<i64>,
 }
 
 /// A RotorHazard `enter_and_exit_at_levels` message (`RHUI.emit_enter_and_exit_at_levels`):
@@ -2047,6 +2060,7 @@ mod tests {
         adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![201.5, 0.0],
             node_peak_rssi: vec![201.5, 0.0],
+            ..Default::default()
         }));
         let events = adapter.translate(snapshot(0, 0, vec![lap(0, 1_000.0)]));
         let pass = events
@@ -2082,6 +2096,7 @@ mod tests {
         let idle = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![70.0, 60.0],
             node_peak_rssi: vec![70.0, 60.0],
+            ..Default::default()
         }));
         assert!(chunks(&idle).is_empty(), "no trace before the race starts");
 
@@ -2093,10 +2108,12 @@ mod tests {
         let t0 = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![150.0, 120.0],
             node_peak_rssi: vec![150.0, 120.0],
+            ..Default::default()
         }));
         let t1 = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![151.0, 121.0],
             node_peak_rssi: vec![151.0, 121.0],
+            ..Default::default()
         }));
 
         // One chunk per node per tick, sampling node_peak_rssi, anchored on the per-node index.
@@ -2123,6 +2140,7 @@ mod tests {
         let after = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![70.0, 60.0],
             node_peak_rssi: vec![70.0, 60.0],
+            ..Default::default()
         }));
         assert!(chunks(&after).is_empty(), "no trace after the race ends");
     }
@@ -2138,6 +2156,7 @@ mod tests {
         let t = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![88.0],
             node_peak_rssi: vec![],
+            ..Default::default()
         }));
         let c = chunks(&t);
         assert_eq!(c.len(), 1);
@@ -2154,6 +2173,7 @@ mod tests {
         adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![100.0],
             node_peak_rssi: vec![100.0],
+            ..Default::default()
         }));
         adapter.translate(Raw::RaceStatus(RawRaceStatus {
             race_status: race_status::DONE,
@@ -2167,6 +2187,7 @@ mod tests {
         let t = adapter.translate(Raw::NodeData(RawNodeData {
             pass_peak_rssi: vec![100.0],
             node_peak_rssi: vec![100.0],
+            ..Default::default()
         }));
         assert_eq!(chunks(&t)[0].from, SourceTime::from_micros(0));
     }

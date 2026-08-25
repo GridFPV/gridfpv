@@ -114,7 +114,7 @@ use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
 use crate::stream::Cursor;
 use crate::timers::{
-    CreateTimerRequest, SetEventTimersRequest, SetPrimaryTimerRequest, Timer, TimerId,
+    CreateTimerRequest, SetEventTimersRequest, SetPrimaryTimerRequest, Timer, TimerId, TimerSignal,
     UpdateTimerRequest,
 };
 use gridfpv_events::RoundId;
@@ -426,6 +426,16 @@ pub fn router(registry: EventRegistry) -> Router {
         // last step, so installing the plugin never requires opening RotorHazard's own web UI.
         // RD-gated, and REFUSED outright while a race is in progress on the timer.
         .route("/timers/{timer_id}/restart", post(restart_timer))
+        // **Tune telemetry** (#355 S2a): live per-node signal for one timer, on demand.
+        //
+        // A polled read rather than a scoped subscription on the event change-stream, because it
+        // is not the same kind of thing: `ws.rs` is log-offset cursors, sequences and re-snapshot
+        // machinery over an event's *log*, and tune telemetry is timer-scoped, log-free, and must
+        // work **before an event exists** — which is the state an untuned timer is in. The `GET`
+        // both reads the snapshot and renews the subscription lease (the first call starts it);
+        // the `stop` is for promptness on view close, not for correctness.
+        .route("/timers/{timer_id}/signal", get(timer_signal))
+        .route("/timers/{timer_id}/signal/stop", post(stop_timer_signal))
         // The downloadable GridFPV RotorHazard plugin bundle (D16, S1) the guided-install UX
         // offers when a timer's plugin is missing/incompatible. Open read: it's static, embedded
         // at build, and carries no event data — just the plugin folder to drop into RH's plugins/.
@@ -839,6 +849,82 @@ async fn restart_timer(
         .request_restart(&timer_id)
         .map(Json)
         .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
+}
+
+/// `GET /timers/{timer_id}/signal` — the timer's **live tuning signal**, RD-gated (#355 S2a).
+///
+/// Returns a [`TimerSignal`]: every node the timer reports (**including unseated ones** — "is this
+/// node even alive?" is half the diagnostic), each with its latest RSSI / peak / nadir / pass count
+/// / thresholds and a bounded rolling RSSI window for the graph.
+///
+/// **The call is the subscription.** The first `GET` starts the stream — the connection driver
+/// sees the new lease on its next tick and opens the transport's pre-parse gate — and every `GET`
+/// renews it. Stop polling and the stream stops itself within [`SIGNAL_LEASE`], which is what
+/// makes a closed tab, a crashed browser or a dropped network safe: none of them get to leave a
+/// timer streaming forever, and none of them have to say goodbye.
+///
+/// Nothing this touches is an `Event`, a `SignalChunk`, or a log. The data exists only in memory,
+/// only while an RD is looking at it.
+///
+/// A **Mock** is a `400` (it has no signal to read); an unknown id is a 404 (`UnknownScope`).
+async fn timer_signal(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<Json<TimerSignal>, ProtocolError> {
+    let timers = registry.timers();
+    let timer = signal_capable_timer(&timers, &timer_id)?;
+    let _ = timer;
+    Ok(Json(timers.signal(&timer_id)))
+}
+
+/// `POST /timers/{timer_id}/signal/stop` — end the timer's tuning stream now, RD-gated (#355 S2a).
+///
+/// The lease already guarantees the stream stops; this makes it stop *promptly* when the RD closes
+/// the Tune view, instead of a few seconds later. Idempotent, and harmless on a timer that was
+/// never streaming. An unknown id is a 404 (`UnknownScope`).
+async fn stop_timer_signal(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<StatusCode, ProtocolError> {
+    let timers = registry.timers();
+    if !timers.exists(&timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        ));
+    }
+    timers.stop_signal(&timer_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Resolve a timer that can carry tune telemetry, or say why it cannot.
+///
+/// Kind-checked the same way [`restart_timer`] is, and for the same reason: the built-in Mock is in
+/// every event's default selection, so answering "no signal yet" for it would look like a timer
+/// that is merely quiet rather than one that has no detector at all. The refusal names the timer by
+/// its **friendly name** (repo display rule).
+fn signal_capable_timer(
+    timers: &crate::timers::TimerRegistry,
+    timer_id: &TimerId,
+) -> Result<Timer, ProtocolError> {
+    let timer = timers.get(timer_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })?;
+    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is not a RotorHazard timer — it has no detector signal to tune against",
+                timer.name
+            ),
+        ));
+    }
+    Ok(timer)
 }
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated (issue #73).
@@ -3736,7 +3822,8 @@ mod tests {
     // --- #73: the application-level timer registry + per-event selection ----------------
 
     use crate::timers::{
-        CreateTimerRequest, SetEventTimersRequest, Timer, TimerKind, UpdateTimerRequest,
+        CreateTimerRequest, NodeReading, SIGNAL_SAMPLE_INTERVAL, SetEventTimersRequest, Timer,
+        TimerKind, UpdateTimerRequest,
     };
 
     /// `GET /timers` → status + parsed `Timer[]`.
@@ -3841,6 +3928,141 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = post_timer_connection(registry, "no-such-timer", "connect").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// `GET /timers/{id}/signal` → status + parsed [`TimerSignal`] (when the call succeeded).
+    async fn get_timer_signal(
+        registry: EventRegistry,
+        timer_id: &str,
+    ) -> (StatusCode, Option<TimerSignal>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/timers/{timer_id}/signal"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice::<TimerSignal>(&bytes).ok())
+    }
+
+    /// `POST /timers/{id}/signal/stop` → status.
+    async fn post_stop_timer_signal(registry: EventRegistry, timer_id: &str) -> StatusCode {
+        router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/timers/{timer_id}/signal/stop"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// A RotorHazard timer to read tune telemetry from — no event, and none needed (#355 S2a): the
+    /// tune path is timer-scoped precisely so it works before an event exists, which is the state
+    /// an untuned timer is in.
+    fn rh_timer_for_signal(registry: &EventRegistry) -> Timer {
+        registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reading_a_timers_signal_starts_and_renews_the_lease() {
+        // #355 S2a: the GET *is* the subscription. Nothing else opens it, and nothing but a
+        // continuing poll keeps it open.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = rh_timer_for_signal(&registry);
+        assert!(
+            !registry.timers().signal_wanted(&rh.id),
+            "nothing streams until someone asks"
+        );
+
+        let (status, signal) = get_timer_signal(registry.clone(), &rh.id.0).await;
+        assert_eq!(status, StatusCode::OK);
+        let signal = signal.expect("a snapshot");
+        assert_eq!(signal.timer, rh.id);
+        // No live connection in this test, so nothing has pushed — which the snapshot says plainly
+        // rather than pretending. "No signal" and "no link" are different problems.
+        assert!(!signal.streaming);
+        assert!(signal.lease_ms_remaining > 0);
+        assert_eq!(
+            signal.period_micros,
+            SIGNAL_SAMPLE_INTERVAL.as_micros() as u32
+        );
+        assert!(registry.timers().signal_wanted(&rh.id));
+
+        // A push from the (simulated) connection driver shows up on the next read, all nodes.
+        registry.timers().push_signal(
+            &rh.id,
+            &(0..8)
+                .map(|index| NodeReading {
+                    seen: true,
+                    rssi: Some(40.0 + index as f32),
+                    enter_at: Some(90.0),
+                    exit_at: Some(80.0),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let (_, signal) = get_timer_signal(registry.clone(), &rh.id.0).await;
+        let signal = signal.expect("a snapshot");
+        assert!(signal.streaming);
+        assert_eq!(signal.nodes.len(), 8);
+        assert_eq!(signal.sample_micros.len(), 1);
+        assert_eq!(signal.nodes[7].samples, vec![47.0]);
+        assert_eq!(signal.nodes[7].enter_at, Some(90.0));
+    }
+
+    #[tokio::test]
+    async fn stopping_a_timers_signal_ends_it_promptly() {
+        // The lease alone would stop it; the explicit stop is for closing the Tune view without
+        // leaving the socket parsing heartbeats for another five seconds.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = rh_timer_for_signal(&registry);
+        get_timer_signal(registry.clone(), &rh.id.0).await;
+        assert!(registry.timers().signal_wanted(&rh.id));
+
+        assert_eq!(
+            post_stop_timer_signal(registry.clone(), &rh.id.0).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!registry.timers().signal_wanted(&rh.id));
+        // Idempotent — a second close, or a view that was never opened, is not an error.
+        assert_eq!(
+            post_stop_timer_signal(registry.clone(), &rh.id.0).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mock_or_unknown_timer_has_no_signal_to_read() {
+        // A Mock is in every event's default selection and has no detector at all, so answering
+        // "no nodes yet" would read as a quiet timer rather than one that cannot have signal.
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, _) = get_timer_signal(registry.clone(), "mock").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get_timer_signal(registry.clone(), "no-such-timer").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            post_stop_timer_signal(registry, "no-such-timer").await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     /// A connected RotorHazard timer selected by Practice — the precondition every restart test
