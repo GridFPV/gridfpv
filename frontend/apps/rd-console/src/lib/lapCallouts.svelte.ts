@@ -136,10 +136,16 @@ export function useLapCallouts(
  * watermark carried across an event switch would swallow the new event's whole race. The scope
  * key (the event id) re-baselines the watermark — silently, like any first sight.
  *
- * ── Only while the heat is RUNNING ───────────────────────────────────────────────────────────
- * Idle/tuning crossings are out of scope (#355's Tune page owns the bench case, and owns it
- * better — visual, per-node, with the thresholds in view). Outside `Running` the watermark still
- * advances **silently**, so entering `Running` can never dump a backlog as a burst.
+ * ── While the heat is ARMED or RUNNING ───────────────────────────────────────────────────────
+ * `Armed` is included deliberately, and it is arguably the most valuable window of the two: with
+ * pilots on the line and nobody flying, *nothing* should trigger the gate — so a pip in that
+ * silence is an unambiguous false crossing, which is the whole reason this feature exists. A
+ * legitimate pre-race gate check (waving a quad through to confirm the gate lives) pips too, which
+ * is also wanted.
+ *
+ * Still excluded: idle and tuning (#355's Tune page owns the bench case, and owns it better —
+ * visual, per-node, with the thresholds in view). Outside those phases the watermark still
+ * advances **silently**, so arming or starting can never dump a backlog as a burst.
  *
  * Must be called during component setup so its internal `$effect` is owned (torn down on unmount).
  */
@@ -158,7 +164,10 @@ export function useCrossingTones(
 
   $effect(() => {
     const scope = getScope();
-    const running = getPhase() === 'Running';
+    const phase = getPhase();
+    // Armed as well as Running — see the header: a crossing while everyone is on the line is the
+    // clearest false positive there is.
+    const audible = phase === 'Armed' || phase === 'Running';
     const crossings = getCrossings() ?? [];
     if (scope !== scopeKey) {
       // A different event log ⇒ a different offset space. Re-baseline on its first frame.
@@ -167,7 +176,7 @@ export function useCrossingTones(
       watermark = -1;
     }
     // First sight of this scope BASELINES: retire everything on offer, announce none of it.
-    const announce = baselined && running;
+    const announce = baselined && audible;
     // Snapshot the mark before the sweep so an (unexpectedly) unsorted feed cannot let an earlier
     // entry retire a later one's chance to speak. The feed is documented ascending; this costs
     // nothing and makes the sweep independent of that.

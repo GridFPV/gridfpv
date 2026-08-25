@@ -305,23 +305,42 @@ describe('useCrossingTones', () => {
     h.cleanup();
   });
 
-  it('fires nothing outside Running, and advances the watermark there (no burst on race-go)', () => {
+  it('tones while ARMED — a crossing with everyone on the line is the clearest false positive', () => {
     const h = harness({ phase: 'Armed', crossings: [] });
+    // Nobody is flying yet. Anything the gate reports here is either a phantom or a deliberate
+    // pre-race gate check, and the RD wants to hear both.
     const armedPhantom = crossing(40, 'node-3', 'Holeshot');
     h.set({ crossings: [armedPhantom] });
-    expect(h.toned).toEqual([]);
+    expect(h.toned).toEqual([armedPhantom]);
 
-    // Race-go: the crossings already retired while Armed must NOT all fire at once.
+    // Race-go does not re-announce what already toned while Armed.
     h.set({ phase: 'Running' });
-    expect(h.toned).toEqual([]);
+    expect(h.toned).toEqual([armedPhantom]);
 
     const live = crossing(41, 'maverick-1', 'Counted', 1);
     h.set({ crossings: [armedPhantom, live] });
+    expect(h.toned).toEqual([armedPhantom, live]);
+    h.cleanup();
+  });
+
+  it('is silent outside Armed/Running, and advances the watermark there (no burst on arming)', () => {
+    const h = harness({ phase: 'Staged', crossings: [] });
+    // Staged: the countdown is running, frequencies are assigned, nobody is on the gate yet.
+    const stagedPhantom = crossing(40, 'node-3', 'Holeshot');
+    h.set({ crossings: [stagedPhantom] });
+    expect(h.toned).toEqual([]);
+
+    // Arming must NOT dump what was retired silently while Staged.
+    h.set({ phase: 'Armed' });
+    expect(h.toned).toEqual([]);
+
+    const live = crossing(41, 'maverick-1', 'Counted', 1);
+    h.set({ phase: 'Running', crossings: [stagedPhantom, live] });
     expect(h.toned).toEqual([live]);
 
     // The heat finishes; a late marshaling fold on the finished heat is silent again.
     h.set({ phase: 'Unofficial' });
-    h.set({ crossings: [armedPhantom, live, crossing(42, 'maverick-1', 'Counted', 2)] });
+    h.set({ crossings: [stagedPhantom, live, crossing(42, 'maverick-1', 'Counted', 2)] });
     expect(h.toned).toEqual([live]);
     h.cleanup();
   });
