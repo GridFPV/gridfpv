@@ -217,6 +217,87 @@ pub enum PluginPresence {
     },
 }
 
+/// Why an event may **not select** a RotorHazard timer (#405) — the reason, so every surface can
+/// phrase it its own way without re-deriving the rule.
+///
+/// The GridFPV plugin is **required** for Grid to race a RotorHazard timer (D16 / #405): without
+/// it Grid cannot own its RH-side race objects, and every race-conduct decision falls back to
+/// mutating the RD's own format and hoping (the #403 failure). The gate is at **event timer
+/// selection** — not at connecting, and not at the plugin probe: connect / disconnect (#383),
+/// restart (#386) and the presence probe stay open, because they are exactly how the RD *gets* to
+/// a working plugin. Gating them would deadlock the setup flow.
+///
+/// The three variants are three genuinely different problems with three different fixes, which is
+/// why they are not collapsed into one "plugin not ok":
+///
+/// - [`NotConnected`](Self::NotConnected) — presence is `None`, i.e. **never probed**. Probing
+///   needs a live socket, so this is the *normal* state of a freshly added timer, and the fix is
+///   "connect it", not "install something".
+/// - [`PluginMissing`](Self::PluginMissing) — probed, nothing answered: install the plugin.
+/// - [`PluginIncompatible`](Self::PluginIncompatible) — probed, answered, wrong protocol: update it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionRefusal {
+    /// The timer has never been probed (`plugin: None`) — it has not been connected yet, so Grid
+    /// has never had a chance to ask whether the plugin is there.
+    NotConnected,
+    /// Probed, and no GridFPV plugin answered ([`PluginPresence::Missing`]).
+    PluginMissing,
+    /// Probed, and the plugin that answered speaks a protocol this Director does not
+    /// ([`PluginPresence::Incompatible`]).
+    PluginIncompatible,
+}
+
+impl SelectionRefusal {
+    /// The **selection-time** refusal, naming the timer by its friendly name (repo display rule).
+    ///
+    /// Each variant points at the next action the RD should take, because "no" without "do this
+    /// instead" is what stranded the RD in #385.
+    pub fn selection_message(self, name: &str) -> String {
+        match self {
+            Self::NotConnected => format!(
+                "cannot select {name:?} for this event: it has not been connected yet, so Grid \
+                 cannot tell whether it is running the GridFPV plugin. Connect it from the Timers \
+                 menu first, then select it."
+            ),
+            Self::PluginMissing => format!(
+                "cannot select {name:?} for this event: it is not running the GridFPV plugin, \
+                 which Grid requires to race a RotorHazard timer. Install it from the guided \
+                 install in the Timers menu, restart RotorHazard, then select it."
+            ),
+            Self::PluginIncompatible => format!(
+                "cannot select {name:?} for this event: its GridFPV plugin speaks a protocol this \
+                 Director does not. Update it from the guided install in the Timers menu, restart \
+                 RotorHazard, then select it."
+            ),
+        }
+    }
+
+    /// The **arm-time** backstop refusal (#405), naming the timer by its friendly name.
+    ///
+    /// Distinct copy from [`selection_message`](Self::selection_message) because the situation is
+    /// distinct: the selection was *valid when it was made* and the plugin has since gone away (RH
+    /// restarted without it, or it failed to load), so the RD is being told something changed
+    /// under them mid-event — not that they picked wrong.
+    pub fn arm_message(self, name: &str) -> String {
+        match self {
+            Self::NotConnected => format!(
+                "cannot arm this heat: this event races {name:?}, which is not connected, so Grid \
+                 cannot confirm the GridFPV plugin is loaded. Connect it from the Timers menu."
+            ),
+            Self::PluginMissing => format!(
+                "cannot arm this heat: the GridFPV plugin is no longer answering on {name:?}, and \
+                 Grid requires it to race a RotorHazard timer. Reinstall it and restart \
+                 RotorHazard, or select a different timer for this event."
+            ),
+            Self::PluginIncompatible => format!(
+                "cannot arm this heat: the GridFPV plugin on {name:?} now speaks a protocol this \
+                 Director does not. Update it and restart RotorHazard, or select a different timer \
+                 for this event."
+            ),
+        }
+    }
+}
+
 /// One configured timer in the application-level registry (issue #73).
 ///
 /// The wire shape `GET /timers` returns and the on-disk shape `timers.json` persists: a stable
@@ -292,6 +373,31 @@ impl Timer {
         match kind {
             TimerKind::Mock { .. } => TimerStatus::Ready,
             TimerKind::Rotorhazard { .. } => TimerStatus::Configured,
+        }
+    }
+
+    /// Why this timer cannot be **selected by an event** (#405), or `None` when it can.
+    ///
+    /// The single source of the rule, so the API route, the arm-time backstop and any future
+    /// surface cannot drift. **Mock timers are always selectable** — the requirement is
+    /// RotorHazard-specific, and the built-in Mock is what an unconfigured Director races out of
+    /// the box. A RotorHazard timer is selectable only when its GridFPV plugin has been probed and
+    /// found [`Present`](PluginPresence::Present); every other presence maps to the matching
+    /// [`SelectionRefusal`].
+    pub fn selection_refusal(&self) -> Option<SelectionRefusal> {
+        match self.kind {
+            // Mock is unaffected: it produces its own passes, there is no plugin to require.
+            TimerKind::Mock { .. } => None,
+            TimerKind::Rotorhazard { .. } => match &self.plugin {
+                Some(PluginPresence::Present { .. }) => None,
+                Some(PluginPresence::Missing) => Some(SelectionRefusal::PluginMissing),
+                Some(PluginPresence::Incompatible { .. }) => {
+                    Some(SelectionRefusal::PluginIncompatible)
+                }
+                // Never probed. Presence is only knowable over a live socket, so this is the
+                // resting state of a freshly added (or freshly restarted-into) timer.
+                None => Some(SelectionRefusal::NotConnected),
+            },
         }
     }
 }
@@ -1249,6 +1355,120 @@ mod tests {
             .unwrap();
         assert_eq!(updated.node_count, 6);
         assert_eq!(updated.available_channels, vec![5800, 5820, 5840]);
+    }
+
+    // ── The GridFPV-plugin selection gate (#405) ──────────────────────────────
+
+    /// The `Present` presence a healthy probe records.
+    fn present() -> PluginPresence {
+        PluginPresence::Present {
+            plugin_version: "0.1.0".into(),
+            rhapi_version: "1.4".into(),
+            capabilities: vec!["hello".into()],
+        }
+    }
+
+    #[test]
+    fn a_mock_timer_is_always_selectable() {
+        // #405 is RotorHazard-specific: the built-in Mock (and any created Mock) has no plugin to
+        // require, and is what an unconfigured Director races out of the box.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let mock = reg.get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
+        assert!(mock.selection_refusal().is_none());
+        let created = reg.create(&sim_req("Extra Sim")).unwrap();
+        assert!(created.selection_refusal().is_none());
+    }
+
+    #[test]
+    fn an_rh_timer_is_selectable_only_once_its_plugin_probes_present() {
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&rh_req("Field RH", "http://rh.local:5000"))
+            .unwrap();
+
+        // Never probed: a different problem ("connect it first"), not a missing plugin.
+        assert_eq!(
+            reg.get(&rh.id).unwrap().selection_refusal(),
+            Some(SelectionRefusal::NotConnected)
+        );
+
+        reg.set_plugin(&rh.id, PluginPresence::Missing);
+        assert_eq!(
+            reg.get(&rh.id).unwrap().selection_refusal(),
+            Some(SelectionRefusal::PluginMissing)
+        );
+
+        reg.set_plugin(
+            &rh.id,
+            PluginPresence::Incompatible {
+                plugin_version: "0.0.1".into(),
+                protocol_version: 99,
+                reason: "protocol 99 is newer than this Director".into(),
+            },
+        );
+        assert_eq!(
+            reg.get(&rh.id).unwrap().selection_refusal(),
+            Some(SelectionRefusal::PluginIncompatible)
+        );
+
+        // Only a Present plugin unlocks selection.
+        reg.set_plugin(&rh.id, present());
+        assert!(reg.get(&rh.id).unwrap().selection_refusal().is_none());
+
+        // …and the presence can go away again (RH restarted without the plugin) — the timer
+        // becomes unselectable, which is what the arm-time backstop keys off.
+        reg.set_plugin(&rh.id, PluginPresence::Missing);
+        assert_eq!(
+            reg.get(&rh.id).unwrap().selection_refusal(),
+            Some(SelectionRefusal::PluginMissing)
+        );
+    }
+
+    #[test]
+    fn each_refusal_names_the_timer_and_says_something_different() {
+        // Three problems, three fixes: "connect it", "install it", "update it". Collapsing them
+        // into one message is the bug this test exists to prevent. Every message names the timer
+        // by its friendly name (repo display rule) and never by its id.
+        let name = "Field RH";
+        let id = "field-rh-ab12";
+        let messages: Vec<String> = [
+            SelectionRefusal::NotConnected,
+            SelectionRefusal::PluginMissing,
+            SelectionRefusal::PluginIncompatible,
+        ]
+        .into_iter()
+        .map(|r| r.selection_message(name))
+        .collect();
+
+        for message in &messages {
+            assert!(message.contains(name), "{message:?} must name the timer");
+            assert!(
+                !message.contains(id),
+                "{message:?} must not leak the raw id"
+            );
+        }
+        // Distinct copy, and each points at its own next action.
+        assert!(messages[0].contains("Connect it"));
+        assert!(messages[1].contains("Install it"));
+        assert!(messages[2].contains("Update it"));
+        let unique: std::collections::BTreeSet<&String> = messages.iter().collect();
+        assert_eq!(unique.len(), 3, "the three refusals must not share copy");
+    }
+
+    #[test]
+    fn the_arm_message_differs_from_the_selection_message() {
+        // The arm-time backstop is a different situation — the selection was valid when it was
+        // made and the plugin went away underneath it — so it gets its own copy.
+        for refusal in [
+            SelectionRefusal::NotConnected,
+            SelectionRefusal::PluginMissing,
+            SelectionRefusal::PluginIncompatible,
+        ] {
+            let arm = refusal.arm_message("Field RH");
+            assert_ne!(arm, refusal.selection_message("Field RH"));
+            assert!(arm.contains("Field RH"));
+            assert!(arm.contains("arm"));
+        }
     }
 
     #[test]

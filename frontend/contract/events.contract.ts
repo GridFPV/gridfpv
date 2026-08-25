@@ -386,6 +386,44 @@ describe('seam 10: application-level timers + per-event selection (#73)', () => 
     // RD-gated: no token → 401.
     expect((await setEventTimers(event.id, [timer.id])).status).toBe(401);
   });
+
+  it('refuses to select a RotorHazard timer with no GridFPV plugin (#405)', async () => {
+    // #405: the plugin is REQUIRED to race a RotorHazard timer, and the gate is at event timer
+    // selection. It has to live in the Director, not just in the console's picker — this route is
+    // reachable directly, and this suite mocks nothing, so it proves the wire actually refuses.
+    //
+    // A freshly created RH timer has never been probed (`plugin` absent): presence is only
+    // knowable over a live socket. That is its own case, and its message says "connect it", not
+    // "plugin missing" — different problem, different fix.
+    const rh = (
+      await createTimer(
+        { name: 'Plugin-less RH', kind: { Rotorhazard: { url: 'http://rh.invalid:5000' } } },
+        TOKEN
+      )
+    ).body as Timer;
+    // The wire sends an explicit `null` for "never probed" (the TS binding types it optional, so
+    // a console must treat absent and null alike — `selectionRefusal` keys off falsiness).
+    expect(rh.plugin ?? null).toBeNull();
+
+    const event = (await createEvent('Plugin Gate Event', TOKEN)).body as EventMeta;
+    const refused = await setEventTimers(event.id, [rh.id], TOKEN);
+    expect(refused.status).toBe(400);
+    const err = refused.body as { code?: string; message?: string };
+    expect(err.code).toBe('BadRequest');
+    // Names the timer by its friendly name, never its id (repo display rule), and says what next.
+    expect(err.message).toContain('Plugin-less RH');
+    expect(err.message).toContain('Connect it');
+    expect(err.message).not.toContain(rh.id);
+
+    // Nothing was recorded — the event never picks up the refused timer.
+    const after = (await listEvents()).find((e) => e.id === event.id)!;
+    expect(after.timers).not.toContain(rh.id);
+
+    // A Mock is never gated — the requirement is RotorHazard-specific.
+    const mockOk = await setEventTimers(event.id, ['mock'], TOKEN);
+    expect(mockOk.status).toBe(200);
+    expect((mockOk.body as EventMeta).timers).toEqual(['mock']);
+  });
 });
 
 /**
