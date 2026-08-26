@@ -55,6 +55,22 @@ describe('TimersPage (app-level timer registry)', () => {
     expect(within(rows[1]).getByRole('button', { name: 'Remove' })).toBeInTheDocument();
   });
 
+  it('warns that a timer with no chosen channels cannot seat a heat (#117 S1)', async () => {
+    // The fifth instance of the empty-`available_channels` trap. This line used to read "No
+    // channels available", which on a Flexible RotorHazard is exactly backwards: it can tune all 52
+    // catalog channels and lists none only because nobody has ticked any. It also read as "nothing
+    // to do here" when it is the thing to do — the server now REFUSES to seat a heat on a timer with
+    // an empty allowed set, and this picker is where the RD closes the gap.
+    const listTimersImpl = vi.fn(async () => [RH]);
+    const { session } = makeTestSession({ listTimersImpl, listChannelsImpl: async () => CATALOG });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Track RH');
+    expect(screen.queryByText('No channels available')).toBeNull();
+    expect(screen.getByText(/No channels chosen/)).toBeInTheDocument();
+    expect(screen.getByText(/heats cannot be seated/)).toBeInTheDocument();
+  });
+
   it('adds a timer and reloads the list', async () => {
     const created: Timer = {
       id: 'fast-x',

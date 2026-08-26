@@ -492,11 +492,33 @@ pub struct Timer {
     /// [`Timer::node_label`].
     #[serde(default)]
     pub disabled_nodes: Vec<u32>,
-    /// The timer's **defined available channels** (race redesign Slice 4a): the raw-MHz channels,
-    /// within its [`channel_capability`](Timer::channel_capability), that the Race Director has
-    /// made available on this timer — the pool per-heat assignment allocates from, in preference
-    /// order. Empty means none configured (assignment then allocates nothing). Additive — defaults
-    /// empty for a pre-channel-model timer.
+    /// The timer's **allowed channel set** (race redesign Slice 4a; #117 S1): the raw-MHz channels
+    /// the Race Director has said this timer **may ever use** — what per-heat assignment draws
+    /// from, in preference order. Edited by the checkbox picker on the Timers page.
+    ///
+    /// **"Allowed", not "assigned", and not "capable".** Three different questions live nearby and
+    /// conflating them has been a recurring bug class (#402, #413, #416):
+    ///
+    /// - *What can the hardware tune?* → [`channel_capability`](Timer::channel_capability).
+    ///   [`Fixed`](ChannelCapability::Fixed) restricts; [`Flexible`](ChannelCapability::Flexible)
+    ///   does not. Assignment filters this set by it.
+    /// - *What may this timer be used on?* → **here**.
+    /// - *What is node N tuned to right now?* → [`node_channels`](Timer::node_channels) for what
+    ///   GridFPV last wrote from the bench, the heat's own `frequencies` for what a race allocated,
+    ///   `NodeSignal::frequency_mhz` for what the hardware reports. **Never this field indexed by
+    ///   node** — an allowed set carries no per-node mapping (that is S2's event *layers*).
+    ///
+    /// ⚠️ **Empty means "the RD has not configured this timer", and what follows differs by
+    /// context.** Every RotorHazard on the bench reports `Flexible` with an empty set.
+    ///
+    /// - **Offering a human a choice** (the #413 Tune-page dropdown): empty ⇒ offer the whole
+    ///   catalog. The RD is actively picking; show them everything the timer can do.
+    /// - **Assigning automatically** ([`assign_frequencies`](crate::round_engine::assign_frequencies)):
+    ///   empty ⇒ **refuse**, naming the timer. Inventing channels from the catalog would scatter a
+    ///   heat across the band with no RD intent behind it — "no channels" becoming "arbitrary
+    ///   channels", which is worse for looking deliberate.
+    ///
+    /// Additive — defaults empty for a pre-channel-model timer.
     #[serde(default)]
     pub available_channels: Vec<u16>,
     /// Whether this (RotorHazard) timer carries the **GridFPV plugin** (D16, S1). `None` until
@@ -549,11 +571,12 @@ pub struct Timer {
     /// Grid-owned config *applied* to the timer, exactly like a threshold. Written by
     /// [`TimerRegistry::request_channel`] at the moment a write is accepted.
     ///
-    /// ⚠️ **Distinct from [`available_channels`](Timer::available_channels).** That is the *pool*
-    /// per-heat assignment allocates from; this is what an individual node was last told to tune
-    /// to from the bench. A heat legitimately overwrites the latter (it re-tunes every node to its
-    /// assigned channel) and this record is not re-applied afterwards — the Tune page says so
-    /// rather than pretending the bench value wins.
+    /// ⚠️ **Distinct from [`available_channels`](Timer::available_channels).** That is the
+    /// *allowed set* per-heat assignment draws from — a set, carrying no per-node mapping; this is
+    /// what an individual node was last told to tune to from the bench. A heat legitimately
+    /// overwrites the latter (it re-tunes every node to its assigned channel) and this record is
+    /// not re-applied afterwards — the Tune page says so rather than pretending the bench value
+    /// wins.
     ///
     /// ⚠️ **Not re-applied on reconnect** either — same gap, and same reason, as `calibration`'s.
     ///

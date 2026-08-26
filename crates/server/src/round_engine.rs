@@ -186,7 +186,8 @@ impl std::fmt::Display for FillError {
 impl std::error::Error for FillError {}
 
 /// Per-heat **channel assignment** failed (race redesign Slice 4a): the lineup exceeds the timer's
-/// node/slot count (the heat-size cap), or there are too few available channels to seat it.
+/// node/slot count (the heat-size cap), the timer has no allowed channels to draw from, or there
+/// are too few of them to seat the lineup.
 ///
 /// A typed error the heat-build paths (`FillRound` / `ScheduleHeat`) surface as a `400` with a
 /// clear message — a heat that cannot be seated on the timer must not be scheduled.
@@ -199,7 +200,30 @@ pub enum AssignError {
         /// The timer's node/slot count (the cap).
         nodes: usize,
     },
-    /// The lineup fits the node count, but the timer's **available channels** are too few to give
+    /// The timer's **allowed channel set** is empty, so there is nothing to assign from (#117 S1).
+    ///
+    /// This is a **configuration gap the RD must close**, not a default to fill in: every
+    /// RotorHazard on the bench reports `Flexible` with an empty
+    /// [`available_channels`](crate::timers::Timer::available_channels), and silently auto-assigning
+    /// the whole 52-entry catalog would scatter a heat across the band with no RD intent behind it.
+    /// "No channels" becoming "arbitrary channels" is worse for looking deliberate.
+    NoChannelsAllowed {
+        /// The timer's **friendly name** (CLAUDE.md: never the raw id) — which timer to go fix.
+        timer: String,
+    },
+    /// Channels are configured on the timer, but its
+    /// [`channel_capability`](crate::timers::Timer::channel_capability) —
+    /// [`Fixed`](crate::timers::ChannelCapability::Fixed) — allows **none** of them (#117 S1).
+    ///
+    /// Distinct from [`NoChannelsAllowed`](AssignError::NoChannelsAllowed) because the RD's fix is
+    /// different: the set is not empty, it is incompatible with the hardware.
+    CapabilityAllowsNoConfigured {
+        /// The timer's **friendly name** (CLAUDE.md: never the raw id).
+        timer: String,
+        /// How many channels are configured on it (all of them excluded by the capability).
+        configured: usize,
+    },
+    /// The lineup fits the node count, but the timer's **allowed channels** are too few to give
     /// every pilot a distinct channel: `lineup` pilots, `available` channels.
     TooFewChannels {
         /// Pilots in the heat's lineup.
@@ -216,6 +240,17 @@ impl std::fmt::Display for AssignError {
                 f,
                 "heat lineup of {lineup} exceeds the timer's {nodes} node(s)"
             ),
+            AssignError::NoChannelsAllowed { timer } => write!(
+                f,
+                "{timer:?} has no channels configured — choose the channels it may use on the \
+                 Timers page before seating a heat on it"
+            ),
+            AssignError::CapabilityAllowsNoConfigured { timer, configured } => write!(
+                f,
+                "{timer:?} cannot tune any of the {configured} channel(s) configured for it — it \
+                 supports only the channels it was configured with; pick from those on the Timers \
+                 page"
+            ),
             AssignError::TooFewChannels { lineup, available } => write!(
                 f,
                 "the timer offers only {available} channel(s) for a {lineup}-pilot heat"
@@ -226,19 +261,46 @@ impl std::fmt::Display for AssignError {
 
 impl std::error::Error for AssignError {}
 
-/// Assign **video channels** to a heat's lineup from a timer's available channels (race redesign
-/// Slice 4a; IMD-aware selection #209) — the engine's half of the RE §7.3 split (the engine
-/// allocates; the adapter applies).
+/// Assign **video channels** to a heat's lineup from a timer's **allowed** channel set (race
+/// redesign Slice 4a; IMD-aware selection #209; #117 S1) — the engine's half of the RE §7.3 split
+/// (the engine allocates; the adapter applies).
+///
+/// [`available_channels`](crate::timers::Timer::available_channels) means **allowed**: what this
+/// timer may ever use, as the RD ticked it on the Timers page (D27 — channels are Grid-owned config
+/// *applied* to the timer, never read back off it).
+///
+/// # An empty allowed set is a configuration gap, not a default to fill (#117 S1, #402)
+///
+/// Until #117 S1 this function opened with `if timer.available_channels.is_empty() { return
+/// Ok(Vec::new()) }`, and **both** RotorHazard timers on the bench report `Flexible` with an empty
+/// list. So on real hardware the early return fired for every heat and **no pilot was ever assigned
+/// a channel** — the root of #402, and the reason #209's IMD auto-pick had never once executed in
+/// the field.
+///
+/// The fix is *not* to read the empty list as "the whole catalog". Empty is only *"no restriction"*
+/// when the question is **what a human may pick** (the #413 Tune-page dropdown offers the full
+/// catalog, and [`ChannelCapability::allows`](crate::timers::ChannelCapability::allows) still says
+/// yes to anything in range). When the question is **what to assign automatically**, inventing 52
+/// catalog channels would scatter a heat across the band with no RD intent behind it — replacing
+/// "no channels" with "arbitrary channels", which is worse for looking deliberate. So an empty
+/// allowed set is [`AssignError::NoChannelsAllowed`], naming the timer, and the RD configures it.
 ///
 /// Given the event's selected `timer` and the heat's `lineup` (in seed order):
 ///
 /// 1. **Heat-size cap.** The lineup must fit the timer's **enabled node set** (#412) — its
 ///    [`seat_capacity`](crate::timers::Timer::seat_capacity), which is how many nodes the RD has
-///    left switched on, not the timer's width; otherwise [`AssignError::TooManyForNodes`].
-///    A timer with **no available channels** (a sim/Mock-without-frequencies, an unconfigured
-///    timer) assigns **nothing** — an empty allocation — *after* the cap check, so a heat that is
-///    simply un-channelled is fine but an oversized one is still rejected.
-/// 2. **IMD-aware channel SELECTION (#209 auto-pick).** Rather than first-fitting the pool's first
+///    left switched on, not the timer's width; otherwise [`AssignError::TooManyForNodes`]. Checked
+///    **first**, so an oversized heat is still rejected as oversized on an unconfigured timer.
+/// 2. **Capability filter.** The allowed set is filtered by the timer's
+///    [`channel_capability`](crate::timers::Timer::channel_capability):
+///    [`Fixed`](crate::timers::ChannelCapability::Fixed) restricts to its declared set;
+///    [`Flexible`](crate::timers::ChannelCapability::Flexible) restricts nothing. Filtering happens
+///    **before** the seat-capacity truncation below, so a `Fixed` timer whose first few configured
+///    channels it cannot tune still reaches the ones it can. Nothing left ⇒
+///    [`AssignError::NoChannelsAllowed`] (none configured) or
+///    [`AssignError::CapabilityAllowsNoConfigured`] (configured, none tunable). An **empty lineup**
+///    needs no channels and is exempt: there is nothing to seat, so there is nothing to refuse.
+/// 3. **IMD-aware channel SELECTION (#209 auto-pick).** Rather than first-fitting the pool's first
 ///    `lineup.len()` channels, pick the **cleanest** size-`lineup.len()` *subset* of the timer's
 ///    available channels by third-order intermodulation
 ///    ([`pick_best_imd_set`](gridfpv_engine::imd::pick_best_imd_set)). IMD only matters for the
@@ -246,7 +308,7 @@ impl std::error::Error for AssignError {}
 ///    heat's lineup size — products landing on/near a used channel cause video breakup, so the
 ///    subset that keeps the worst product farthest from every used channel is chosen. Too few
 ///    available channels for the lineup is [`AssignError::TooFewChannels`].
-/// 3. **First-fit assignment of the chosen set.** The IMD-best channels (sorted ascending) are
+/// 4. **First-fit assignment of the chosen set.** The IMD-best channels (sorted ascending) are
 ///    laid onto the lineup in seed order via [`allocate`] — top seed gets the lowest chosen
 ///    channel, etc. — so the per-pilot mapping is deterministic.
 ///
@@ -268,20 +330,42 @@ pub fn assign_frequencies(
             nodes,
         });
     }
-    // No available channels ⇒ no channel assignment (sim/Mock-without-frequencies, unconfigured).
-    // The cap above still applies; only the channel step is skipped.
-    if timer.available_channels.is_empty() {
-        return Ok(Vec::new());
-    }
-    // The candidate pool is the available channels, but never more than the timer has nodes for (a
-    // node can't run two channels). De-duplicate first so the IMD picker chooses among distinct
-    // channels and the TooFewChannels count below is the real distinct supply.
-    let mut pool: Vec<u16> = Vec::new();
-    for &ch in timer.available_channels.iter().take(nodes) {
-        if !pool.contains(&ch) {
-            pool.push(ch);
+    // The allowed set, filtered by what the hardware can actually tune (#117 S1): `Fixed` restricts
+    // to its declared set, `Flexible` restricts nothing. De-duplicated so the IMD picker chooses
+    // among distinct channels and the TooFewChannels count below is the real distinct supply.
+    //
+    // Filtering runs BEFORE the seat-capacity truncation: truncating first would let a `Fixed`
+    // timer whose first `nodes` configured channels happen to be untunable refuse a heat it could
+    // perfectly well seat from the rest of the set.
+    let mut allowed: Vec<u16> = Vec::new();
+    for &ch in &timer.available_channels {
+        if timer.channel_capability.allows(ch) && !allowed.contains(&ch) {
+            allowed.push(ch);
         }
     }
+    // #117 S1 / #402: an empty allowed set is a CONFIGURATION GAP the RD must see, never a silent
+    // `Ok(Vec::new())`. A heat with nobody in it needs no channels, so only a real lineup refuses.
+    if !lineup.is_empty() && allowed.is_empty() {
+        return Err(if timer.available_channels.is_empty() {
+            AssignError::NoChannelsAllowed {
+                timer: timer.name.clone(),
+            }
+        } else {
+            AssignError::CapabilityAllowsNoConfigured {
+                timer: timer.name.clone(),
+                configured: timer.available_channels.len(),
+            }
+        });
+    }
+    // The candidate pool the picker chooses from, capped at the enabled seat count — a heat can
+    // never use more channels than it has seats, so beyond that the picker is choosing among
+    // candidates it cannot spend. NOTE(S2/S4): this cap is also what keeps a deliberately LARGE
+    // allowed set (the RD's "16 channels on a 4-node timer") from ever reaching the auto-picker —
+    // it always sees the first `nodes` of the set, in the RD's preference order. That is the right
+    // default for the bracket strategy (one channel set for the whole tournament) and the wrong one
+    // for the pool-larger-than-heat case the RD kept `pick_best_imd_set` for. Event **layers** (S2)
+    // decide which channels a heat flies; revisit the cap there, not here.
+    let pool: Vec<u16> = allowed.into_iter().take(nodes).collect();
     if lineup.len() > pool.len() {
         return Err(AssignError::TooFewChannels {
             lineup: lineup.len(),
@@ -1504,10 +1588,18 @@ fn per_heat_plans(
         return Ok((Vec::new(), field_draw));
     }
 
-    // Open practice (open-practice format): the heat carries **empty** frequencies — its lineup is
-    // the active *channels* themselves (`node-{i}` seats), so there is nothing to allocate. Force
+    // Open practice (open-practice format): the heat carries **empty** frequencies. Force
     // `Some(empty)` so the caller logs the `HeatScheduled` with no frequencies regardless of the
-    // timer's channel pool.
+    // timer's allowed channel set — `assign_frequencies` never runs for a practice heat.
+    //
+    // ⚠️ The original justification for this was *"its lineup is the active channels themselves"*,
+    // and **that premise is false** (#402): `SeedingRule::AllChannels { channels }` takes node/seat
+    // *indices*, and a seat index carries no frequency at all. So a practice seat's channel has no
+    // source in the log, and the console can only fall back to what the hardware reports.
+    //
+    // #117 S1 deliberately leaves this as-is: what a practice seat should be tuned to is a *heat →
+    // channel* mapping, which is exactly what event **layers** (S2/S3) introduce. Assigning here
+    // from the allowed set would be inventing that mapping ahead of the RD's model.
     let open_practice = is_open_practice(round);
     let plans = match generator.next(&completed) {
         GeneratorStep::Run(plans) => plans
@@ -2082,12 +2174,123 @@ mod tests {
     }
 
     #[test]
-    fn assign_with_no_available_channels_is_empty() {
-        // A sim/Mock-without-frequencies (no available channels) assigns no channels — but the cap
-        // still applies (covered separately).
+    fn assign_with_an_empty_allowed_set_refuses_and_names_the_timer() {
+        // #117 S1 / #402 — THE bench case. Both RotorHazard timers report `Flexible` with an EMPTY
+        // `available_channels`, so the old `return Ok(Vec::new())` fired for every heat and no pilot
+        // was ever assigned a channel on real hardware. An empty allowed set is a CONFIGURATION GAP
+        // the RD must see, not a silent no-op — and not licence to invent channels from the catalog
+        // either (that would replace "no channels" with "arbitrary channels").
+        let mut timer = timer_with(8, vec![]);
+        timer.name = "NuclearHazard".into();
+        let err = assign_frequencies(&timer, &lineup(&["A", "B"])).unwrap_err();
+        assert_eq!(
+            err,
+            AssignError::NoChannelsAllowed {
+                timer: "NuclearHazard".into()
+            }
+        );
+        // The refusal the RD reads names the timer by its FRIENDLY name (CLAUDE.md) and says where
+        // to fix it — a bare "no channels" would leave them nowhere to go.
+        let message = err.to_string();
+        assert!(
+            message.contains("NuclearHazard") && message.contains("Timers page"),
+            "the refusal must name the timer and point at its editor: {message}"
+        );
+        // Nothing was assigned from the 52-entry catalog behind the RD's back.
+        assert!(!message.contains("5658"));
+    }
+
+    #[test]
+    fn assign_with_an_empty_allowed_set_and_an_empty_lineup_assigns_nothing() {
+        // A heat with nobody in it needs no channels, so there is nothing to refuse. The refusal is
+        // about a lineup that cannot be seated, not about the timer existing in an unconfigured
+        // state.
         let timer = timer_with(8, vec![]);
+        assert!(assign_frequencies(&timer, &lineup(&[])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn assign_on_a_fixed_timer_is_restricted_to_its_declared_set() {
+        // The capability is a FILTER over the allowed set (#117 S1): `Fixed` restricts to what the
+        // hardware can tune, `Flexible` restricts nothing. All eight Raceband channels are ticked,
+        // but this timer can only reach two of them, so those two are what a heat flies.
+        let mut timer = timer_with(4, RACEBAND_MHZ.to_vec());
+        timer.channel_capability = ChannelCapability::Fixed {
+            channels: vec![5695, 5806],
+        };
         let assignment = assign_frequencies(&timer, &lineup(&["A", "B"])).unwrap();
-        assert!(assignment.is_empty());
+        assert_eq!(
+            assignment,
+            vec![
+                (CompetitorRef("A".into()), 5695),
+                (CompetitorRef("B".into()), 5806),
+            ]
+        );
+        // …and the supply the shortfall is measured against is the FILTERED set, not the eight
+        // channels that are merely ticked.
+        assert_eq!(
+            assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap_err(),
+            AssignError::TooFewChannels {
+                lineup: 3,
+                available: 2
+            }
+        );
+    }
+
+    #[test]
+    fn assign_filters_by_capability_before_capping_the_pool_at_the_seat_count() {
+        // Order matters: capping the candidate pool to the seat count FIRST would leave this
+        // 2-node timer holding [R1, R2] — neither of which it can tune — and refuse a heat it can
+        // seat perfectly well from the rest of the ticked set.
+        let mut timer = timer_with(2, RACEBAND_MHZ.to_vec());
+        timer.channel_capability = ChannelCapability::Fixed {
+            channels: vec![5880, 5917],
+        };
+        assert_eq!(
+            assign_frequencies(&timer, &lineup(&["A", "B"])).unwrap(),
+            vec![
+                (CompetitorRef("A".into()), 5880),
+                (CompetitorRef("B".into()), 5917),
+            ]
+        );
+    }
+
+    #[test]
+    fn assign_refuses_when_a_fixed_timer_can_tune_none_of_its_configured_channels() {
+        // Configured but incompatible is a different gap from "nothing configured", and the RD's
+        // fix is different too — so it is a different refusal.
+        let mut timer = timer_with(4, RACEBAND_MHZ.to_vec());
+        timer.name = "Fixed RH".into();
+        timer.channel_capability = ChannelCapability::Fixed {
+            channels: vec![5333],
+        };
+        let err = assign_frequencies(&timer, &lineup(&["A", "B"])).unwrap_err();
+        assert_eq!(
+            err,
+            AssignError::CapabilityAllowsNoConfigured {
+                timer: "Fixed RH".into(),
+                configured: RACEBAND_MHZ.len()
+            }
+        );
+        assert!(err.to_string().contains("Fixed RH"));
+    }
+
+    #[test]
+    fn assign_on_a_flexible_timer_with_a_configured_allowed_set_channels_every_pilot() {
+        // The whole point of S1: on a Flexible timer (every RotorHazard) with the RD's allowed set
+        // ticked, EVERY pilot in the heat comes out with a distinct channel drawn from that set.
+        let timer = timer_with(4, RACEBAND_MHZ.to_vec());
+        let assignment = assign_frequencies(&timer, &lineup(&["A", "B", "C", "D"])).unwrap();
+        assert_eq!(assignment.len(), 4, "every pilot is channelled");
+        let chosen: Vec<u16> = assignment.iter().map(|(_, mhz)| *mhz).collect();
+        let mut distinct = chosen.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 4, "no two pilots share a channel");
+        assert!(
+            chosen.iter().all(|mhz| RACEBAND_MHZ.contains(mhz)),
+            "channels come from the RD's allowed set, never invented"
+        );
     }
 
     #[test]

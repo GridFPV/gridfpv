@@ -1655,9 +1655,10 @@ async fn set_class_membership(
         }
     }
     // Validate each assigned channel (race redesign Slice 7a) against the event's **primary**
-    // timer's available-channels pool — the GQ-style fixed channel must be one the timer offers.
-    // The pool may exceed the timer's `node_count` (node_count caps only pilots-per-heat), so any
-    // channel in the pool is valid; we never cap the number of distinct channels at node_count.
+    // timer's **allowed** channel set (#117 S1) — the GQ-style fixed channel must be one the RD has
+    // said this timer may use. The allowed set may exceed the timer's `node_count` (node_count caps
+    // only pilots-per-heat), so any channel in it is valid; we never cap the number of distinct
+    // channels at node_count.
     let assigned: Vec<u16> = body.pilots.iter().filter_map(|s| s.channel).collect();
     if !assigned.is_empty() {
         let timer = meta
@@ -1674,9 +1675,12 @@ async fn set_class_membership(
             if !timer.available_channels.contains(channel) {
                 return Err(ProtocolError::new(
                     ErrorCode::BadRequest,
+                    // CLAUDE.md: the RD reads a band+channel label and a timer NAME — never a raw
+                    // MHz number and never the timer's id.
                     format!(
-                        "channel {channel} is not in the primary timer {:?}'s available channels",
-                        timer.id.0
+                        "{} is not one of the channels {:?} is allowed to use",
+                        crate::timers::channel_label(*channel),
+                        timer.name
                     ),
                 ));
             }

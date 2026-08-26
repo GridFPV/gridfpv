@@ -149,13 +149,27 @@
       .catch(() => (catalog = []));
   });
 
-  /** A timer's available channels, summarised as band+channel labels (e.g. "Raceband R1, F4 …"). */
+  /**
+   * A timer's **allowed** channels, summarised as band+channel labels (e.g. "Raceband R1, F4 …").
+   *
+   * An empty set is a **configuration gap, not a capability statement** (#117 S1). This line used to
+   * read "No channels available", which is false on exactly the timers it fires for: every real
+   * RotorHazard is `Flexible` — it can tune all 52 catalog channels — and lists none only because
+   * nobody has ticked any yet. Worse, it read as *"nothing to do here"* when it is precisely the
+   * thing to do: with an empty allowed set the server now refuses to seat a heat on this timer
+   * (`NoChannelsAllowed`), and this row's picker is where the RD fixes it.
+   */
   function channelSummary(timer: Timer): string {
     const list = timer.available_channels ?? [];
-    if (list.length === 0) return 'No channels available';
+    if (list.length === 0) return 'No channels chosen — heats cannot be seated on this timer';
     const labels = list.map((mhz) => channelLabel(mhz, catalog));
     const shown = labels.slice(0, 4).join(', ');
     return labels.length > 4 ? `${shown} +${labels.length - 4} more` : shown;
+  }
+
+  /** Whether a timer has no allowed channels chosen — the summary above reads as a warning. */
+  function channelsUnset(timer: Timer): boolean {
+    return (timer.available_channels ?? []).length === 0;
   }
 
   /**
@@ -626,7 +640,9 @@
               {#if timerDrifts(timer)}
                 <Badge tone="danger" variant="outline">Timer reports {timer.reported_nodes}</Badge>
               {/if}
-              <span class="channel-summary">{channelSummary(timer)}</span>
+              <span class="channel-summary" class:unset={channelsUnset(timer)}
+                >{channelSummary(timer)}</span
+              >
             </div>
             <!-- The manual-hold readout (#383): only while a hold is up, and only when there is
                  something to say beyond the pill — "Reachable", or what to check when it isn't. -->
@@ -1029,6 +1045,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* An empty allowed set is a gap the RD has to close before a heat can be seated (#117 S1) —
+     it reads as a warning, not as neutral config. */
+  .channel-summary.unset {
+    color: var(--gf-warn);
   }
 
   .form-rule {
