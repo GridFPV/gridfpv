@@ -43,7 +43,7 @@ test('Live control shows pilot callsigns for a NOT-running roster-seeded heat (n
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-LiveCall-Ace-${SUFFIX}`;

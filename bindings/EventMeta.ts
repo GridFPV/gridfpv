@@ -10,8 +10,9 @@ import type { TimerId } from "./TimerId";
  * The metadata describing one event in the registry (issue #72).
  *
  * The wire shape `GET /events` returns: a stable [`EventId`], a human display `name`, the
- * creation time, and whether the event is **persistent** (file-backed) or ephemeral (the
- * in-memory Practice event). Derives serde (its JSON *is* the wire form) and `ts_rs::TS`
+ * creation time, and whether the event is **persistent** (file-backed) or ephemeral (an
+ * in-memory log, when the Director has no data dir configured). Derives serde (its JSON *is*
+ * the wire form) and `ts_rs::TS`
  * so the frontend reads a generated `EventMeta` type.
  */
 export type EventMeta = { 
@@ -26,12 +27,12 @@ name: string,
 /**
  * Creation time in **milliseconds since the Unix epoch** (a plain JSON number — bounded
  * far below 2^53, rendered as a TS `number` not a `bigint`, matching every other integer
- * on the wire). Practice is seeded at registry construction.
+ * on the wire).
  */
 created_at: number, 
 /**
- * Whether the event's log is durable (a SQLite file) or ephemeral (the in-memory
- * Practice log, `false`).
+ * Whether the event's log is durable (a SQLite file) or ephemeral (an in-memory log —
+ * `false`, which happens only when no data dir is configured).
  */
 persistent: boolean, 
 /**
@@ -57,7 +58,7 @@ organizer?: string,
  * The application-level timers this event **selects** (issue #73) — the per-event reference
  * into the app-level [`TimerRegistry`](crate::timers::TimerRegistry). Additive
  * (`#[serde(default)]`) so an event persisted before #73 reads back with an empty list; new
- * events and Practice default to `["mock"]` (the built-in Mock) so they work out of the
+ * events default to `["mock"]` (the built-in Mock) so they work out of the
  * box. The per-event source bridge runs the selected Sim timers; a selected RotorHazard timer is
  * dialled by the RH connection reconciler instead (#65/#73), not by this bridge.
  */
@@ -82,7 +83,7 @@ primary_timer?: TimerId,
  * and each event simply picks which of them race it (mirroring [`timers`](Self::timers)).
  *
  * Additive (`#[serde(default)]`) so an event persisted before #74 reads back with an empty
- * roster; new events and Practice default to an **empty** roster. Channels (which frequency a
+ * roster; a new event defaults to an **empty** roster. Channels (which frequency a
  * roster pilot flies in a heat) are a separate concern (#117) and are not modelled here.
  */
 roster: Array<PilotId>, 
@@ -94,7 +95,7 @@ roster: Array<PilotId>,
  * [`roster`](Self::roster) and [`timers`](Self::timers)).
  *
  * Additive (`#[serde(default)]`) so an event persisted before #84 reads back with an empty
- * selection; new events and Practice default to an **empty** selection. This is the registry
+ * selection; a new event defaults to an **empty** selection. This is the registry
  * slice only — the rounds / phase engine a class later drives is a separate concern.
  */
 classes: Array<ClassId>, 
@@ -110,7 +111,7 @@ classes: Array<ClassId>,
  * [`set_class_membership`](EventRegistry::set_class_membership).
  *
  * Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted
- * before Slice 1a reads back with no membership; new events and Practice default to an
+ * before Slice 1a reads back with no membership; a new event defaults to an
  * **empty** list. The whole field round-trips through the event's persisted meta (issue
  * #115), so it is restart-safe for free.
  */
@@ -125,7 +126,7 @@ classes_membership?: Array<ClassMembership>,
  * ranking via [`SeedingRule::FromRanking`].
  *
  * Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted before
- * Slice 2a reads back with no rounds; new events and Practice default to an **empty** list. The
+ * Slice 2a reads back with no rounds; a new event defaults to an **empty** list. The
  * whole field round-trips through the event's persisted meta (issue #115), so it is restart-safe
  * for free.
  */

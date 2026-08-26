@@ -60,7 +60,7 @@ use gridfpv_adapters::rotorhazard::transport::RotorHazardConnection;
 use gridfpv_events::{CompetitorRef, Event, HeatId, LogRef};
 use gridfpv_server::app::{AppState, router};
 use gridfpv_server::control::{Command, CommandAck};
-use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
+use gridfpv_server::events::{CreateEventRequest, EventRegistry};
 use gridfpv_server::scope::{EventId, PilotId, Scope, SubscribeRequest};
 use gridfpv_server::snapshot::{HeatPhase, LiveRaceState, ProjectionBody, Snapshot};
 use gridfpv_server::stream::{Change, StreamMessage};
@@ -81,44 +81,86 @@ const TICK: &str = "0.1";
 const PASSES: usize = 4;
 /// The single heat this e2e drives.
 const HEAT: &str = "q-e2e-1";
-/// The registry event this e2e drives against. Every route is rooted under
-/// `/events/{EVENT}` and every scope names this event (issue #72 made the protocol
-/// surface event-rooted). The built-in **Practice** event is always present in a fresh
-/// [`EventRegistry`], so the test uses it rather than creating a bespoke one.
-const EVENT: &str = PRACTICE_EVENT_ID;
+/// The display name of the event this e2e creates. Every route is rooted under
+/// `/events/{id}` and every scope names that event (issue #72 made the protocol surface
+/// event-rooted). A fresh [`EventRegistry`] holds no events at all (#414), so the test
+/// creates one through the real creation path and addresses it by its generated id.
+const EVENT_NAME: &str = "Full Event E2E";
 
 // ---------------------------------------------------------------------------------------
 // Server / client plumbing (mirrors `tests/ws_stream.rs` + `tests/control.rs`).
 // ---------------------------------------------------------------------------------------
 
 /// Serve `router(registry)` on an ephemeral port; return the base `127.0.0.1:port`
-/// address and the server task handle (dropped at test end, aborting the task). The
-/// router is event-rooted (#72), so it takes the whole [`EventRegistry`].
-async fn serve(registry: EventRegistry) -> (String, tokio::task::JoinHandle<()>) {
+/// address (bundled with the event id every path is rooted under) and the server task handle
+/// (dropped at test end, aborting the task). The router is event-rooted (#72), so it takes the
+/// whole [`EventRegistry`].
+async fn serve(registry: EventRegistry, event: EventId) -> (Director, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(registry);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (format!("{addr}"), handle)
+    (
+        Director {
+            addr: format!("{addr}"),
+            event: event.0,
+        },
+        handle,
+    )
+}
+
+/// The running Director this e2e drives: its socket address plus the id of the event every
+/// per-event path is rooted under.
+struct Director {
+    addr: String,
+    event: String,
+}
+
+impl Director {
+    /// `/events/{id}` + `suffix` — the request-line path for a per-event route.
+    fn path(&self, suffix: &str) -> String {
+        format!("/events/{}{}", self.event, suffix)
+    }
+
+    /// The event-scope snapshot path (the scope segment names the same event).
+    fn event_snapshot(&self) -> String {
+        self.path(&format!("/snapshot/event/{}", self.event))
+    }
+
+    /// The pilot-scope snapshot path for `pilot` under this event.
+    fn pilot_snapshot_path(&self, pilot: &str) -> String {
+        self.path(&format!("/snapshot/pilot/{}/{}", self.event, pilot))
+    }
+
+    /// This event's [`EventId`] (scopes name the event, not just the route).
+    fn event_id(&self) -> EventId {
+        EventId(self.event.clone())
+    }
 }
 
 /// `POST /control` with the optional bearer `token`; return the HTTP status and (when the
 /// body parses) the [`CommandAck`]. A tiny manual HTTP/1.1 POST so the test pulls in no
 /// extra HTTP client dependency (the same shape `tests/control.rs` uses).
-async fn post_raw(addr: &str, command: &Command, token: Option<&str>) -> (u16, Option<CommandAck>) {
+async fn post_raw(
+    addr: &Director,
+    command: &Command,
+    token: Option<&str>,
+) -> (u16, Option<CommandAck>) {
     let body = serde_json::to_string(command).unwrap();
     let auth = token
         .map(|t| format!("Authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
     let request = format!(
-        "POST /events/{EVENT}/control HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
          {auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        addr.path("/control"),
+        addr.addr,
         body.len()
     );
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut stream = TcpStream::connect(&addr.addr).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
@@ -136,7 +178,7 @@ async fn post_raw(addr: &str, command: &Command, token: Option<&str>) -> (u16, O
 
 /// POST one command with the RD `token`, asserting it acks ok (200) — the RD's heat-loop /
 /// marshaling driver.
-async fn rd_command(addr: &str, command: &Command, token: &str) -> CommandAck {
+async fn rd_command(addr: &Director, command: &Command, token: &str) -> CommandAck {
     let (status, ack) = post_raw(addr, command, Some(token)).await;
     assert_eq!(status, 200, "RD control should be admitted (got {status})");
     let ack = ack.expect("body is a CommandAck");
@@ -145,10 +187,11 @@ async fn rd_command(addr: &str, command: &Command, token: &str) -> CommandAck {
 }
 
 /// GET a snapshot over a manual HTTP/1.1 request; return the parsed [`Snapshot`].
-async fn get_snapshot(addr: &str, path: &str) -> Snapshot {
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+async fn get_snapshot(addr: &Director, path: &str) -> Snapshot {
+    let host = &addr.addr;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut stream = TcpStream::connect(host).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
@@ -164,10 +207,11 @@ async fn get_snapshot(addr: &str, path: &str) -> Snapshot {
 
 /// GET a snapshot path and return `(status, body)` WITHOUT asserting 200 — so the test can
 /// assert the status itself (the pilot scope's 200-vs-404 question after a marshaling void).
-async fn pilot_snapshot(addr: &str, path: &str) -> (u16, String) {
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+async fn pilot_snapshot(addr: &Director, path: &str) -> (u16, String) {
+    let host = &addr.addr;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut stream = TcpStream::connect(host).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
@@ -185,10 +229,9 @@ async fn pilot_snapshot(addr: &str, path: &str) -> (u16, String) {
 }
 
 /// Connect a `/stream` reader at `addr`, subscribing to `scope` from the snapshot `cursor`.
-async fn subscribe(addr: &str, request: &SubscribeRequest) -> Ws {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/events/{EVENT}/stream"))
-        .await
-        .unwrap();
+async fn subscribe(addr: &Director, request: &SubscribeRequest) -> Ws {
+    let url = format!("ws://{}{}", addr.addr, addr.path("/stream"));
+    let (mut ws, _) = connect_async(url).await.unwrap();
     ws.send(Message::text(serde_json::to_string(request).unwrap()))
         .await
         .unwrap();
@@ -353,15 +396,17 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
 
     // --- Stand up the server over a fresh registry; the RD issues itself a token. ---
     // The router is event-rooted (#72): it serves the whole registry, and every request
-    // resolves the per-event `AppState`. We keep a handle to the Practice event's state
+    // resolves the per-event `AppState`. We keep a handle to the created event's state
     // (it shares the log + token store the router resolves) so the test can `append` real
     // passes and read the log directly.
     let registry = EventRegistry::new(None).expect("fresh registry");
-    let state = registry
-        .resolve(&EventId(EVENT.into()))
-        .expect("Practice event is always present");
+    let event = registry
+        .create(&CreateEventRequest::named(EVENT_NAME))
+        .expect("create the e2e event")
+        .id;
+    let state = registry.resolve(&event).expect("the created event");
     let rd = registry.tokens().issue_rd_token();
-    let (addr, _server) = serve(registry).await;
+    let (addr, _server) = serve(registry, event).await;
 
     // === 1. Schedule the heat via the control path (the RD's surface). ===
     rd_command(
@@ -381,7 +426,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     // === 2. Attach a protocol client: snapshot first, then subscribe from its cursor. ===
     // The event-scope snapshot is the whole-event live state; its cursor is the resume
     // point so the stream begins exactly after the snapshot (§2, §3).
-    let snapshot = get_snapshot(&addr, &format!("/events/{EVENT}/snapshot/event/{EVENT}")).await;
+    let snapshot = get_snapshot(&addr, &addr.event_snapshot()).await;
     let snap_live = match &snapshot.body {
         ProjectionBody::LiveRaceState(ls) => ls.clone(),
         other => panic!("expected a live-state snapshot, got {other:?}"),
@@ -398,7 +443,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
         &addr,
         &SubscribeRequest {
             scope: Scope::Event {
-                event: EventId(EVENT.into()),
+                event: addr.event_id(),
             },
             from: Some(snapshot.cursor),
             contract_version: None,
@@ -445,7 +490,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     // and the stream agree (§2, §3). The structural guarantee is that the live state still
     // reflects this heat / pilot, Running, with the crossings banked.
     drain_envelopes(&mut stream).await;
-    let folded_snap = get_snapshot(&addr, &format!("/events/{EVENT}/snapshot/event/{EVENT}")).await;
+    let folded_snap = get_snapshot(&addr, &addr.event_snapshot()).await;
     let folded = match &folded_snap.body {
         ProjectionBody::LiveRaceState(ls) => ls.clone(),
         other => panic!("expected a live-state snapshot, got {other:?}"),
@@ -465,11 +510,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
 
     // === 5. The protocol client reads the pilot's lap list (snapshot scope). ===
     // The pilot scope folds to a `LapList`; its lap chain is the marshaling baseline.
-    let pilot_snap = get_snapshot(
-        &addr,
-        &format!("/events/{EVENT}/snapshot/pilot/{EVENT}/node-0"),
-    )
-    .await;
+    let pilot_snap = get_snapshot(&addr, &addr.pilot_snapshot_path("node-0")).await;
     let baseline = lap_list_of(&pilot_snap.body);
     let baseline_laps = lap_count(&baseline);
     assert_eq!(
@@ -495,16 +536,12 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
 
     // A fresh pilot-scope subscribe so the stream's seeded `last_emitted` is the *pre-void*
     // lap list; the first envelope after the void is therefore the re-folded value.
-    let pilot_snap2 = get_snapshot(
-        &addr,
-        &format!("/events/{EVENT}/snapshot/pilot/{EVENT}/node-0"),
-    )
-    .await;
+    let pilot_snap2 = get_snapshot(&addr, &addr.pilot_snapshot_path("node-0")).await;
     let mut pilot_stream = subscribe(
         &addr,
         &SubscribeRequest {
             scope: Scope::Pilot {
-                event: EventId(EVENT.into()),
+                event: addr.event_id(),
                 pilot: PilotId("node-0".into()),
             },
             from: Some(pilot_snap2.cursor),
@@ -550,11 +587,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
     // make the pilot scope flicker in and out of existence as rulings are applied and undone.
     // The scope is bounded by the heat lineup, so it stays honestly 404 for a pilot who was
     // never in the event at all.
-    let (status, body) = pilot_snapshot(
-        &addr,
-        &format!("/events/{EVENT}/snapshot/pilot/{EVENT}/node-0"),
-    )
-    .await;
+    let (status, body) = pilot_snapshot(&addr, &addr.pilot_snapshot_path("node-0")).await;
     assert_eq!(
         status, 200,
         "a scheduled pilot's scope is KNOWN even with laps voided away; got {status}: {body}"
@@ -572,11 +605,7 @@ async fn a_live_heat_flows_through_the_server_to_a_protocol_client() {
         )
         .await;
     }
-    let emptied = get_snapshot(
-        &addr,
-        &format!("/events/{EVENT}/snapshot/pilot/{EVENT}/node-0"),
-    )
-    .await;
+    let emptied = get_snapshot(&addr, &addr.pilot_snapshot_path("node-0")).await;
     let emptied = lap_list_of(&emptied.body);
     assert_eq!(
         lap_count(&emptied),

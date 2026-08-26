@@ -83,8 +83,7 @@ import {
   eventAudit,
   roundRanking,
   roundStandings,
-  classStandings,
-  PRACTICE_EVENT_ID
+  classStandings
 } from '@gridfpv/protocol-client';
 import type {
   ProtocolClient,
@@ -1793,5 +1792,3 @@ export class Session {
     return undefined;
   }
 }
-
-export { PRACTICE_EVENT_ID };

@@ -62,12 +62,15 @@ import type {
 } from '@gridfpv/types';
 import { Session, type SessionRole } from '../src/lib/session.svelte.js';
 
-/** The built-in Practice event the screen tests render inside. */
+/**
+ * The event the screen tests render inside — an ordinary **created** event named "Practice",
+ * which is what an RD makes now that the built-in one is gone (#414).
+ */
 const PRACTICE: EventMeta = {
-  id: 'practice',
+  id: 'practice-ab12',
   name: 'Practice',
   created_at: 0,
-  persistent: false,
+  persistent: true,
   timers: ['mock'],
   roster: [],
   classes: []

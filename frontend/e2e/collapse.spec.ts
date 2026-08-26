@@ -44,7 +44,7 @@ test('RD collapses a class placement section and a round; both persist across a 
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Collapse-Ace-${SUFFIX}`;

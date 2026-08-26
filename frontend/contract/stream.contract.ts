@@ -18,24 +18,23 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { connect } from '../packages/protocol-client/dist/index.js';
-import { type Director } from '../test-harness/director.ts';
 import {
-  eventRoot,
   openSocket,
   rdControl,
-  startContractDirector,
+  startDirectorWithEvent,
   waitForFrame,
-  wsBase
+  wsBase,
+  type ContractDirector
 } from './harness.ts';
 
 const TOKEN = 'rd-stream-contract';
 const HEAT = 'q-1';
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
-  director = await startContractDirector({ token: TOKEN, simLaps: 2, simLapMs: 40 });
-  const ack = await rdControl(director.baseUrl, TOKEN, {
+  director = await startDirectorWithEvent({ token: TOKEN, simLaps: 2, simLapMs: 40 });
+  const ack = await rdControl(director, TOKEN, {
     ScheduleHeat: { heat: HEAT, lineup: ['A', 'B'] }
   });
   expect(ack.ok).toBe(true);
@@ -51,7 +50,7 @@ afterAll(async () => {
  * event (#72) here.
  */
 async function snapshotCursor(path: string): Promise<number> {
-  const res = await fetch(`${eventRoot(director.baseUrl)}${path}`);
+  const res = await fetch(`${director.eventRoot}${path}`);
   const snap = (await res.json()) as { cursor: number };
   return snap.cursor;
 }
@@ -59,11 +58,11 @@ async function snapshotCursor(path: string): Promise<number> {
 describe('seam 2: stream frames are externally-tagged StreamMessage', () => {
   it('a control append produces a `{ Change: ChangeEnvelope }` frame, not a bare envelope', async () => {
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
 
     // A heat-state change after the subscribe re-folds the scope and pushes one envelope.
-    await rdControl(director.baseUrl, TOKEN, { Stage: { heat: HEAT } });
+    await rdControl(director, TOKEN, { Stage: { heat: HEAT } });
     await waitForFrame(frames, (f) => f.length > 0);
 
     const frame = frames[0] as Record<string, unknown>;
@@ -81,13 +80,11 @@ describe('seam 2: stream frames are externally-tagged StreamMessage', () => {
     // Push the log tail far past the retained window (256), then resume from offset 1: that
     // offset is below the window, so the server sends the terminal ReSnapshotRequired signal.
     for (let i = 0; i < 300; i++) {
-      await rdControl(director.baseUrl, TOKEN, {
+      await rdControl(director, TOKEN, {
         Register: { adapter: 'sim', competitor: `x${i}`, pilot: `p${i}` }
       });
     }
-    const { ws, frames, closed } = await openSocket(
-      `${wsBase(eventRoot(director.baseUrl))}/stream`
-    );
+    const { ws, frames, closed } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: 1 }));
     await waitForFrame(frames, (f) => f.length > 0);
 
@@ -103,9 +100,9 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
     expect(cursor).toBeGreaterThan(0); // the cursor axis is well past 1
 
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
-    await rdControl(director.baseUrl, TOKEN, { Start: { heat: HEAT } });
+    await rdControl(director, TOKEN, { Start: { heat: HEAT } });
     await waitForFrame(frames, (f) => f.length > 0);
 
     const seq = (frames[0] as { Change: { sequence: number } }).Change.sequence;
@@ -119,11 +116,15 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
     // Subscribe with the real client to a non-empty log (cursor > 0). If it conflated cursor
     // and sequence it would treat sequence 1,2,3 (<= cursor) as duplicates and freeze. It must
     // instead converge to the running heat with climbing laps.
-    const client = connect({ baseUrl: director.baseUrl, scope: { Heat: { heat: HEAT } } });
+    const client = connect({
+      baseUrl: director.baseUrl,
+      eventId: director.event,
+      scope: { Heat: { heat: HEAT } }
+    });
     try {
       await waitForState(client, (s) => s.body !== undefined);
       // SkipCountdown forces Armed → Running (the override standing in for the runtime auto-start).
-      await rdControl(director.baseUrl, TOKEN, { SkipCountdown: { heat: HEAT } });
+      await rdControl(director, TOKEN, { SkipCountdown: { heat: HEAT } });
       await waitForState(
         client,
         (s) => {
@@ -145,9 +146,7 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
 
 describe('seam 7: contract-version negotiation', () => {
   it('an out-of-band contract_version → VersionMismatch refresh signal + close', async () => {
-    const { ws, frames, closed } = await openSocket(
-      `${wsBase(eventRoot(director.baseUrl))}/stream`
-    );
+    const { ws, frames, closed } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, contract_version: 999 }));
     await waitForFrame(frames, (f) => f.length > 0);
     const frame = frames[0] as { code?: string };
@@ -157,10 +156,10 @@ describe('seam 7: contract-version negotiation', () => {
 
   it('an absent contract_version subscribes and streams normally', async () => {
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     // No contract_version field at all — treated as this build's version, streams fine.
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
-    await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: HEAT } });
+    await rdControl(director, TOKEN, { ForceEnd: { heat: HEAT } });
     await waitForFrame(frames, (f) =>
       f.some((x) => (x as { Change?: unknown }).Change !== undefined)
     );

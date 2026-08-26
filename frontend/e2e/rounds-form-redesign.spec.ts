@@ -51,8 +51,7 @@ test('the redesigned Rounds form shows the dynamic per-format fields (practice +
   page,
   director
 }) => {
-  const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   await page.goto('/');
   await enterPractice(page);
@@ -123,8 +122,7 @@ test('the win-condition selector labels the Timed condition "Timed — Most Laps
   page,
   director
 }) => {
-  const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   await page.goto('/');
   await enterPractice(page);
@@ -170,8 +168,7 @@ test('a qualifying round: win condition IS the metric, "Heats per pilot", heats 
   page,
   director
 }) => {
-  const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const OPEN_CLASS = 'mgp-open';
 

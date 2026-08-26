@@ -50,13 +50,13 @@ test('a marshaling DQ correction re-folds the heat result', async ({ page, direc
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });
   const result = async () => {
     const res = await page.request.get(
-      `${director.baseUrl}/events/practice/snapshot/heat/${HEAT_ID}?projection=result`
+      `${director.eventRoot}/snapshot/heat/${HEAT_ID}?projection=result`
     );
     expect(res.ok()).toBeTruthy();
     return (await res.json()).body.HeatResult as {
@@ -167,7 +167,7 @@ test('the Marshaling screen corrects laps and the audit + standings update live'
   await enterPractice(page);
 
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });
@@ -243,7 +243,7 @@ test('the Marshaling screen corrects laps and the audit + standings update live'
   // The DQ flows into standings (the result snapshot re-folds).
   const result = async () => {
     const res = await page.request.get(
-      `${director.baseUrl}/events/practice/snapshot/heat/${UI_HEAT}?projection=result`
+      `${director.eventRoot}/snapshot/heat/${UI_HEAT}?projection=result`
     );
     expect(res.ok()).toBeTruthy();
     return (await res.json()).body.HeatResult as {
@@ -291,7 +291,7 @@ test('the full adjudication framework: protest, throw-out, DQ+reverse re-fold au
   await enterPractice(page);
 
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });
@@ -312,7 +312,7 @@ test('the full adjudication framework: protest, throw-out, DQ+reverse re-fold au
 
   const result = async () => {
     const res = await page.request.get(
-      `${director.baseUrl}/events/practice/snapshot/heat/${S6_HEAT}?projection=result`
+      `${director.eventRoot}/snapshot/heat/${S6_HEAT}?projection=result`
     );
     expect(res.ok()).toBeTruthy();
     return (await res.json()).body.HeatResult as {
@@ -390,7 +390,7 @@ test('a read-only session sees the laps + audit but cannot mutate', async ({ pag
   // Reuse the heat the UI test created if present, else schedule a fresh one so the screen has laps.
   const roHeat = `marshal-ro-${Date.now()}`;
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });
@@ -442,7 +442,7 @@ test('the Marshaling screen shows pilot callsigns (not raw ids) in lap headings 
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Marsh-Ace-${SUFFIX}`;
@@ -560,7 +560,7 @@ test('a sim heat (no captured trace) shows no RSSI graph and keeps the lap-only 
   await enterPractice(page);
 
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });
@@ -621,7 +621,7 @@ test('the Add-lap control inserts a new lap and it appears in the lap list', asy
 }) => {
   await enterPractice(page);
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });
@@ -771,7 +771,7 @@ test('the RD can finalize early, and Revert re-opens the result to provisional',
   // No protest window needed for early-finalize / revert: a round-less heat is Provisional (manual
   // finalize only), which is exactly the path this exercises through the open control path.
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });
@@ -806,7 +806,7 @@ test('a read-only session sees the lifecycle but cannot finalize', async ({ page
   // Schedule + run a heat to Unofficial as the open RD, then re-enter read-only and confirm the
   // lifecycle is visible while the Finalize transition is not available to a pilot.
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });

@@ -66,7 +66,7 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // round/class members in the Rounds & Heats stage (covered by `rounds.spec.ts`). This race
   // spec's focus is *running* a heat, so it schedules one straight over the open control path
   // (the Director is booted with no token configured) — exactly what the Heats UI emits.
-  const ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  const ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: HEAT_ID, lineup: PILOTS } }
   });
@@ -75,7 +75,7 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // shared worker Director's `current_heat` stays pinned to whatever heat a prior spec last touched
   // (it never resets between specs), and filling a heat does NOT steal Live focus (current-heat.spec.ts)
   // — so this server-side selection keeps the run independent of spec order.
-  const focused = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  const focused = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { SetCurrentHeat: { heat: HEAT_ID } }
   });
@@ -261,7 +261,7 @@ test('Live control shows pilot callsigns (not refs) and an on-deck heat', async 
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });

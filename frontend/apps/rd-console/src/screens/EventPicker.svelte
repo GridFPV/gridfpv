@@ -4,9 +4,16 @@
    *
    * In the two-level IA the home hub is the landing and this is the **Events page** (Home ›
    * Events) — the select/create surface. On load it reads the open event list (`listEvents()`,
-   * no token) and renders **Practice** prominently as the no-friction "just try it" entry, then
-   * the list of created (persistent) events. Selecting one enters its workspace. "+ New event"
-   * opens a name `Dialog` → `createEvent(name)` (which obtains the RD token lazily) → enters it.
+   * no token) and renders the events the RD has created. Selecting one enters its workspace.
+   * "+ New event" opens a name `Dialog` → `createEvent(name)` (which obtains the RD token
+   * lazily) → enters it, then hands off to the guided setup wizard (#97).
+   *
+   * **The list can be empty, and that is a first run, not an error** (#414): the built-in
+   * in-memory Practice event is gone, so a brand-new Director genuinely has zero events. The
+   * empty state is therefore the *primary* call to action — "Create your first event" — and it
+   * opens the same create dialog, whose "Set up event after creating" default walks the RD
+   * straight into the wizard. An RD who wants a practice session creates an event with an open-practice round;
+   * that event persists, takes a roster, and can be marshaled afterwards.
    *
    * The old picker-header "Timers" modal entry is **gone** — app-level timer management is now its
    * own page in the hub ({@link TimersPage}). Breadcrumbs (Home › Events) + a Home button get you
@@ -19,7 +26,6 @@
   import { Badge, Button, Card, Dialog, Field, Input, toast } from '@gridfpv/components';
   import type { EventMeta } from '@gridfpv/types';
   import type { Session, CreateEventFields } from '../lib/session.svelte.js';
-  import { PRACTICE_EVENT_ID } from '../lib/session.svelte.js';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
 
@@ -133,16 +139,8 @@
     void load();
   });
 
-  /** The built-in Practice event, pulled out of the list (server lists it first). */
-  const practice = $derived(
-    loadState.kind === 'ready'
-      ? loadState.events.find((e) => e.id === PRACTICE_EVENT_ID)
-      : undefined
-  );
-  /** Every other (created) event, Practice removed. */
-  const others = $derived(
-    loadState.kind === 'ready' ? loadState.events.filter((e) => e.id !== PRACTICE_EVENT_ID) : []
-  );
+  /** The events the Director holds — every one of them RD-created (#414). */
+  const events = $derived(loadState.kind === 'ready' ? loadState.events : []);
 
   function formatDate(ms: number): string {
     try {
@@ -257,16 +255,23 @@
       </Card>
     {:else}
       <section class="created" aria-label="Events">
-        <h2 class="section-title">Your events</h2>
-        {#if others.length === 0}
-          <div class="empty">
-            <p>No events yet.</p>
-            <p class="empty-sub">Create one to keep heats, registration, and results.</p>
-            <Button variant="secondary" onclick={openNew}>+ New event</Button>
+        {#if events.length === 0}
+          <!-- First run (#414): no events exist yet, so this is the whole screen's job. It is a
+               call to action, not an "empty list" apology — creating an event is step one, and
+               the dialog's "Set up event after creating" default continues into the wizard (#97). -->
+          <div class="first-run">
+            <span class="first-run-icon" aria-hidden="true">◆</span>
+            <h2 class="first-run-title">Create your first event</h2>
+            <p class="first-run-sub">
+              An event holds your pilots, classes, rounds, and results — including a practice round
+              to warm up on. Setting one up takes a minute, and you can change everything later.
+            </p>
+            <Button variant="primary" onclick={openNew}>Create your first event</Button>
           </div>
         {:else}
+          <h2 class="section-title">Your events</h2>
           <ul class="event-list">
-            {#each others as ev (ev.id)}
+            {#each events as ev (ev.id)}
               <li class="event-item">
                 <button type="button" class="event-row" onclick={() => enter(ev)}>
                   <span class="event-icon" aria-hidden="true">●</span>
@@ -293,27 +298,6 @@
           </ul>
         {/if}
       </section>
-
-      {#if practice}
-        <section class="practice-wrap" aria-label="Practice">
-          <h2 class="section-title">Practice</h2>
-          <button
-            type="button"
-            class="event-row practice"
-            onclick={() => enter(practice)}
-            title="No setup — just fly. Nothing here is saved."
-          >
-            <span class="event-icon practice-icon" aria-hidden="true">▶</span>
-            <span class="event-main">
-              <span class="event-name">{practice.name}</span>
-            </span>
-            {#if practice.id === activeEventId}
-              <span class="active-pill"><Badge tone="success" dot>Active</Badge></span>
-            {/if}
-            <span class="event-go" aria-hidden="true">→</span>
-          </button>
-        </section>
-      {/if}
     {/if}
   </div>
 </div>
@@ -610,23 +594,6 @@
     outline: none;
     box-shadow: var(--gf-focus-ring);
   }
-  /* Practice hero — a warm red-orange wash (#91), not the brand green: green reads as
-     "live / brand", so the warm accent signals a friendly, non-persistent scratch space. */
-  .event-row.practice {
-    background: linear-gradient(
-      180deg,
-      var(--gf-accent-practice-soft),
-      color-mix(in srgb, var(--gf-surface) 88%, transparent)
-    );
-    border-color: color-mix(in srgb, var(--gf-accent-practice) 45%, var(--gf-border));
-    padding: var(--gf-space-5);
-  }
-  .event-row.practice:hover {
-    border-color: var(--gf-accent-practice);
-  }
-  .event-row.practice:hover .event-go {
-    color: var(--gf-accent-practice);
-  }
   .event-icon {
     display: inline-flex;
     align-items: center;
@@ -638,11 +605,6 @@
     background: var(--gf-surface-sunken);
     color: var(--gf-text-faint);
     font-size: var(--gf-font-size-xs);
-  }
-  .event-icon.practice-icon {
-    background: var(--gf-accent-practice-soft);
-    color: var(--gf-accent-practice);
-    font-size: var(--gf-font-size-md);
   }
   /* The "Active" pill (#91): sits between the name and the arrow, never shrinking. */
   .active-pill {
@@ -699,24 +661,40 @@
     flex-direction: column;
     gap: var(--gf-space-3);
   }
-  .empty {
+  /* First run (#414): the create path is the page, so it gets hero weight rather than the
+     dashed "nothing here" box an incidental empty list would use. */
+  .first-run {
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-2);
-    align-items: flex-start;
-    padding: var(--gf-space-6);
-    border: 1px dashed var(--gf-border);
+    gap: var(--gf-space-3);
+    align-items: center;
+    text-align: center;
+    padding: var(--gf-space-8) var(--gf-space-6);
+    border: 1px solid var(--gf-border);
     border-radius: var(--gf-radius-lg);
     background: var(--gf-surface-alt);
   }
-  .empty p {
-    margin: 0;
-    font-weight: var(--gf-font-weight-medium);
+  .first-run-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-accent);
+    font-size: var(--gf-font-size-md);
   }
-  .empty-sub {
+  .first-run-title {
+    margin: 0;
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .first-run-sub {
+    margin: 0;
+    max-width: 46ch;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
-    font-weight: var(--gf-font-weight-regular) !important;
   }
 
   .new-form {

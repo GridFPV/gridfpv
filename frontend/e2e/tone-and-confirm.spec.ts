@@ -89,13 +89,13 @@ test('no start tone on landing on an already-running heat (late join); tone on a
 
   // ── A: late join — drive a heat all the way to Running over the control API BEFORE the page lands
   // on the Live screen, then assert the Live page renders with NO tone (no oscillator built). ──────
-  let ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  let ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: 'late-join-1', lineup: ['Ace', 'Bee', 'Cee'] } }
   });
   expect(ack.ok()).toBeTruthy();
   for (const cmd of ['Stage', 'Start'] as const) {
-    ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+    ack = await page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: { [cmd]: { heat: 'late-join-1' } }
     });
@@ -111,7 +111,7 @@ test('no start tone on landing on an already-running heat (late join); tone on a
     .poll(
       async () => {
         const snap = await page.request.get(
-          `${director.baseUrl}/events/practice/snapshot/event/practice`
+          `${director.eventRoot}/snapshot/event/${director.event}`
         );
         const body = (await snap.json()) as { body?: { LiveRaceState?: { phase?: string } } };
         return body.body?.LiveRaceState?.phase;
@@ -144,7 +144,7 @@ test('no start tone on landing on an already-running heat (late join); tone on a
   // left NO tone (asserted), but its cleanup clicks did unlock the context — so part B reasons over
   // the oscillator-start count *delta* from a baseline, not an absolute zero. ──────────────────────
   const startedBeforeRaceGo = await page.evaluate(() => window.__toneCalls.started);
-  ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: 'tone-1', lineup: ['Ace', 'Bee', 'Cee'] } }
   });
@@ -152,7 +152,7 @@ test('no start tone on landing on an already-running heat (late join); tone on a
   // Filling tone-1 does NOT steal Live focus (fill-no-steal), and discarding the late-join heat
   // above did not move focus off it either — so explicitly focus tone-1 as the current heat over
   // the control path (server-side, independent of the Live picker's fetch timing).
-  ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { SetCurrentHeat: { heat: 'tone-1' } }
   });
@@ -237,7 +237,7 @@ test('REAL AudioContext: a control click resumes to running and the synth graph 
   await enterPractice(page);
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
-  let ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  let ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: 'tone-real-1', lineup: ['Ace', 'Bee', 'Cee'] } }
   });
@@ -245,7 +245,7 @@ test('REAL AudioContext: a control click resumes to running and the synth graph 
   // Explicitly focus THIS heat as the current heat (SetCurrentHeat) over the control path; filling
   // does not steal Live focus, so this keeps the test independent of any heat a prior spec left
   // current (server-side, independent of the Live picker's fetch timing).
-  ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { SetCurrentHeat: { heat: 'tone-real-1' } }
   });

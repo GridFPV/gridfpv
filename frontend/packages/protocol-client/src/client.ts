@@ -116,11 +116,11 @@ export interface ConnectOptions {
   baseUrl: string;
   /**
    * The **event** this connection's scope lives in (issue #72). Every read/realtime surface
-   * is rooted under `/events/{eventId}/…`, so the client targets one event's own log. Defaults
-   * to the built-in `practice` event when omitted, so an un-migrated caller still connects to
-   * a working event.
+   * is rooted under `/events/{eventId}/…`, so the client targets one event's own log.
+   * **Required** — there is no built-in event to fall back to (#414), and silently defaulting
+   * to a magic id would connect a caller to something it never chose.
    */
-  eventId?: EventId;
+  eventId: EventId;
   /** The resource this connection is scoped to (protocol.html §4). */
   scope: Scope;
   /** Optional bearer token (sent as `Authorization: Bearer …` and on the WS URL). */
@@ -223,13 +223,11 @@ function snapshotPath(eventId: string, scope: Scope): string {
   )}`;
 }
 
-/** The built-in Practice event id — the default the client connects to when none is given. */
-export const PRACTICE_EVENT_ID = 'practice';
-
 /**
  * List every event the server knows (`GET /events`) — issue #72. Reads are open on the LAN,
  * so no token is needed; an optional token is sent when present. Resolves to the events'
- * {@link EventMeta} (Practice first), or rejects on a transport/HTTP failure.
+ * {@link EventMeta} in id order — **possibly empty**, which is a fresh Director's first-run
+ * state (#414), not an error — or rejects on a transport/HTTP failure.
  */
 export async function listEvents(
   baseUrl: string,
@@ -1564,8 +1562,8 @@ export function connect(options: ConnectOptions): ProtocolClient {
   const wsBase = trimSlash(toWebSocketBase(options.baseUrl));
   const scope = options.scope;
   const token = options.token;
-  // The event this connection is rooted under (issue #72); defaults to Practice.
-  const eventId = options.eventId ?? PRACTICE_EVENT_ID;
+  // The event this connection is rooted under (issue #72). Always explicit — see ConnectOptions.
+  const eventId = options.eventId;
 
   // ── Mutable connection state ───────────────────────────────────────────────
   let body: ProjectionBody | undefined;

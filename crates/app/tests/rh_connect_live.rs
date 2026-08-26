@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use gridfpv_app::source::{SIM_ADAPTER, SourceConfig, spawn_registry_bridge};
 use gridfpv_events::{AdapterId, CompetitorRef, Event, HeatId, HeatTransition};
 use gridfpv_server::app::AppState;
-use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
+use gridfpv_server::events::{CreateEventRequest, EventRegistry};
 use gridfpv_server::scope::EventId;
 use gridfpv_server::timers::{
     CreateTimerRequest, MOCK_TIMER_ID, PluginPresence, TimerId, TimerKind, TimerStatus,
@@ -77,9 +77,21 @@ const RH_PORT: u16 = 5042;
 /// CSV tick interval (seconds) — a brisk pace so passes land within the live window.
 const TICK: &str = "0.1";
 
-/// Practice's event id (its in-memory log + default selection the bridge drives).
-fn practice() -> EventId {
-    EventId(PRACTICE_EVENT_ID.to_string())
+/// The id of the registry's single created event (its log + the timer selection the bridge
+/// drives). There is no built-in event any more (#414), so [`test_registry`] creates one.
+fn event_of(registry: &EventRegistry) -> EventId {
+    let mut list = registry.list();
+    assert_eq!(list.len(), 1, "one created event per test registry");
+    EventId(list.remove(0).id.0)
+}
+
+/// A fresh registry holding one created event — the fixture every live test drives against.
+fn test_registry() -> EventRegistry {
+    let registry = EventRegistry::new(None).expect("event registry");
+    registry
+        .create(&CreateEventRequest::named("Live Test Event"))
+        .expect("create the test event");
+    registry
 }
 
 fn count_passes(events: &[Event]) -> usize {
@@ -133,7 +145,7 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
     let rh = RhContainer::start(RH_PORT, TICK, &scenario);
 
     // === Build the registry, configure an RH timer, and select it for Practice. ===
-    let registry = EventRegistry::new(None).expect("event registry");
+    let registry = test_registry();
     let rh_timer = registry
         .timers()
         .create(&CreateTimerRequest {
@@ -154,13 +166,15 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
     // Make Practice the active event and select the RH timer for it — the reconciler connects the
     // active event's selected RH timers (#105).
     registry
-        .set_active(&practice())
-        .expect("make Practice active");
+        .set_active(&event_of(&registry))
+        .expect("make the event active");
     registry
-        .set_timers(&practice(), vec![rh_timer.id.clone()])
-        .expect("select the RH timer for Practice");
+        .set_timers(&event_of(&registry), vec![rh_timer.id.clone()])
+        .expect("select the RH timer for the event");
 
-    let state = registry.resolve(&practice()).expect("Practice state");
+    let state = registry
+        .resolve(&event_of(&registry))
+        .expect("the event's state");
 
     // === Spawn the REAL registry bridge — the same wiring `main` runs (it also spawns the
     // persistent-connection reconciler). ===
@@ -509,7 +523,7 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
     )];
     let rh = RhContainer::start(RH_FAILOVER_PORT, TICK, &scenario);
 
-    let registry = EventRegistry::new(None).expect("event registry");
+    let registry = test_registry();
     // A brisk, long-running Mock alternate so it still has passes to emit after the failover (a
     // hot-standby Mock runs its emission in real time; failover catches the not-yet-emitted passes).
     registry
@@ -540,20 +554,22 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
         .expect("create RH timer");
 
     registry
-        .set_active(&practice())
-        .expect("make Practice active");
+        .set_active(&event_of(&registry))
+        .expect("make the event active");
     // Select [RH, Mock] with the RH as the explicit PRIMARY and the Mock as the alternate.
     registry
         .set_timers(
-            &practice(),
+            &event_of(&registry),
             vec![rh_timer.id.clone(), TimerId(MOCK_TIMER_ID.to_string())],
         )
         .expect("select RH primary + Mock alternate");
     registry
-        .set_primary_timer(&practice(), Some(rh_timer.id.clone()))
+        .set_primary_timer(&event_of(&registry), Some(rh_timer.id.clone()))
         .expect("designate the RH timer primary");
 
-    let state = registry.resolve(&practice()).expect("Practice state");
+    let state = registry
+        .resolve(&event_of(&registry))
+        .expect("the event's state");
     let _bridge = spawn_registry_bridge(
         registry.clone(),
         SourceConfig::from_env(),
@@ -690,7 +706,7 @@ async fn editing_a_live_timers_url_in_place_re_dials_without_a_restart() {
     let rh = RhContainer::start(RH_URL_EDIT_PORT, TICK, &scenario);
 
     // === Everything below is built ONCE. Nothing here is rebuilt after the URL edit. ===
-    let registry = EventRegistry::new(None).expect("event registry");
+    let registry = test_registry();
     // The timer is created pointing at the WRONG address — the typo, as the RD would save it.
     let rh_timer = registry
         .timers()
@@ -705,11 +721,11 @@ async fn editing_a_live_timers_url_in_place_re_dials_without_a_restart() {
         })
         .expect("create RH timer at the wrong URL");
     registry
-        .set_active(&practice())
-        .expect("make Practice active");
+        .set_active(&event_of(&registry))
+        .expect("make the event active");
     registry
-        .set_timers(&practice(), vec![rh_timer.id.clone()])
-        .expect("select the RH timer for Practice");
+        .set_timers(&event_of(&registry), vec![rh_timer.id.clone()])
+        .expect("select the RH timer for the event");
 
     let _bridge = spawn_registry_bridge(
         registry.clone(),

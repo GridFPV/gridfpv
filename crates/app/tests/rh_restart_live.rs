@@ -39,7 +39,7 @@ use axum::http::{Request, StatusCode};
 use gridfpv_app::director::build_app;
 use gridfpv_app::source::{SIM_ADAPTER, SourceConfig, spawn_registry_bridge};
 use gridfpv_events::{AdapterId, CompetitorRef, Event, HeatId, HeatTransition};
-use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
+use gridfpv_server::events::{CreateEventRequest, EventRegistry};
 use gridfpv_server::scope::EventId;
 use gridfpv_server::timers::{CreateTimerRequest, TimerId, TimerKind, TimerStatus};
 use gridfpv_testkit::{NodeCsv, RhContainer, node_csv};
@@ -55,8 +55,21 @@ const TICK: &str = "0.1";
 /// `restart_server` re-execs the process, which prints the banner again.
 const RH_STARTUP_BANNER: &str = "RotorHazard v";
 
-fn practice() -> EventId {
-    EventId(PRACTICE_EVENT_ID.to_string())
+/// The id of the registry's single created event (its log + the timer selection the bridge
+/// drives). There is no built-in event any more (#414), so [`test_registry`] creates one.
+fn event_of(registry: &EventRegistry) -> EventId {
+    let mut list = registry.list();
+    assert_eq!(list.len(), 1, "one created event per test registry");
+    EventId(list.remove(0).id.0)
+}
+
+/// A fresh registry holding one created event — the fixture every live test drives against.
+fn test_registry() -> EventRegistry {
+    let registry = EventRegistry::new(None).expect("event registry");
+    registry
+        .create(&CreateEventRequest::named("Live Test Event"))
+        .expect("create the test event");
+    registry
 }
 
 /// How many times RotorHazard has started inside `rh` (its startup banner count).
@@ -119,7 +132,7 @@ async fn restarting_a_timer_reexecutes_rotorhazard_and_the_director_reconnects_a
     // === Configure the RH timer, select it for the active Practice event, and run the REAL bridge
     // (which also spawns the persistent-connection reconciler — the thing that drains the restart
     // request queue). ===
-    let registry = EventRegistry::new(None).expect("event registry");
+    let registry = test_registry();
     let rh_timer = registry
         .timers()
         .create(&CreateTimerRequest {
@@ -133,12 +146,14 @@ async fn restarting_a_timer_reexecutes_rotorhazard_and_the_director_reconnects_a
         })
         .expect("create RH timer");
     registry
-        .set_active(&practice())
-        .expect("make Practice active");
+        .set_active(&event_of(&registry))
+        .expect("make the event active");
     registry
-        .set_timers(&practice(), vec![rh_timer.id.clone()])
-        .expect("select the RH timer for Practice");
-    let state = registry.resolve(&practice()).expect("Practice state");
+        .set_timers(&event_of(&registry), vec![rh_timer.id.clone()])
+        .expect("select the RH timer for the event");
+    let state = registry
+        .resolve(&event_of(&registry))
+        .expect("the event's state");
 
     let _bridge = spawn_registry_bridge(
         registry.clone(),

@@ -16,7 +16,7 @@ use axum::http::{Request, StatusCode};
 use gridfpv_app::director::{
     AssetStatus, asset_status, build_app, default_assets_dir, run_director,
 };
-use gridfpv_server::events::EventRegistry;
+use gridfpv_server::events::{CreateEventRequest, EventRegistry};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -33,7 +33,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 /// `GET <uri>` against the Director router over an empty in-memory log.
 async fn get(assets: &Path, uri: &str) -> (StatusCode, String) {
-    let registry = EventRegistry::new(None).unwrap();
+    let (registry, _event) = registry_with_event();
     let app = build_app(registry, assets);
     let response = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -42,6 +42,18 @@ async fn get(assets: &Path, uri: &str) -> (StatusCode, String) {
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A registry holding one **created** event, plus its id. There is no built-in event any more
+/// (#414), so anything driving a per-event route creates one through the real creation path.
+fn registry_with_event() -> (EventRegistry, String) {
+    let registry = EventRegistry::new(None).unwrap();
+    let id = registry
+        .create(&CreateEventRequest::named("Test Event"))
+        .expect("create the test event")
+        .id
+        .0;
+    (registry, id)
 }
 
 #[tokio::test]
@@ -57,8 +69,19 @@ async fn health_endpoint_is_served() {
 async fn snapshot_endpoint_returns_ok() {
     let assets = std::env::temp_dir().join("gridfpv-director-no-assets");
     // The event scope folds the whole (empty) log into idle live state — a 200 either way.
-    let (status, _body) = get(&assets, "/events/practice/snapshot/event/spring-cup").await;
-    assert_eq!(status, StatusCode::OK);
+    // `get` builds its own registry, so ask a matching one for the id shape it will hold.
+    let (registry, event) = registry_with_event();
+    let app = build_app(registry, &assets);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/events/{event}/snapshot/event/spring-cup"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -109,13 +132,13 @@ async fn cors_preflight_is_permissive() {
     let dir = temp_dir("cors");
     std::fs::write(dir.join("index.html"), "<title>shell</title>").unwrap();
 
-    let registry = EventRegistry::new(None).unwrap();
+    let (registry, event) = registry_with_event();
     let app = build_app(registry, &dir);
     let response = app
         .oneshot(
             Request::builder()
                 .method("OPTIONS")
-                .uri("/events/practice/snapshot/event/spring-cup")
+                .uri(format!("/events/{event}/snapshot/event/spring-cup"))
                 .header("Origin", "http://tauri.localhost")
                 .header("Access-Control-Request-Method", "GET")
                 .body(Body::empty())

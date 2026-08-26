@@ -57,7 +57,7 @@ test('two labelled boxes collapse + persist; select-all roster; per-class auto-a
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const PILOTS = [`E2E-Box-Ace-${SUFFIX}`, `E2E-Box-Bee-${SUFFIX}`, `E2E-Box-Cas-${SUFFIX}`];

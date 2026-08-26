@@ -16,8 +16,9 @@
 //!
 //! - **Local (now):** each persistent event is its **own SQLite file** (one `log` table per
 //!   file, dense offsets from 0 — exactly the existing [`SqliteLog`](gridfpv_storage::SqliteLog)
-//!   schema). The built-in **Practice** event is an **in-memory** log
-//!   ([`InMemoryLog`](gridfpv_storage::InMemoryLog)), non-persistent by design.
+//!   schema). A registry with no configured data dir falls back to an **in-memory** log
+//!   ([`InMemoryLog`](gridfpv_storage::InMemoryLog)) per created event, so an unconfigured
+//!   Director (and the tests) still work — non-durably.
 //! - **Cloud (v0.7 — NOT built here, kept compatible):** one Postgres DB with an `events`
 //!   table and a shared `event_log` table keyed by `event_id` with a **composite primary key
 //!   `(event_id, offset)`**, so each event's offset sequence stays **per-event dense** —
@@ -49,16 +50,6 @@ use crate::round_engine;
 use crate::scope::{ClassId, EventId, PilotId};
 use crate::timers::{MOCK_TIMER_ID, Timer, TimerId, TimerRegistry};
 
-/// The reserved id of the always-present built-in **Practice** event.
-///
-/// Practice is seeded into every registry, backed by an in-memory (non-persistent) log:
-/// the RD can run a sim race with nothing configured. Its id is reserved — [`EventRegistry::create`]
-/// auto-generates ids and never collides with it.
-pub const PRACTICE_EVENT_ID: &str = "practice";
-
-/// The display name of the built-in Practice event.
-pub const PRACTICE_EVENT_NAME: &str = "Practice";
-
 /// The file name (under the data dir) the Director's active-event id is persisted to (issue
 /// #90), so the selected event survives a Director restart.
 pub const ACTIVE_EVENT_FILE: &str = "active-event";
@@ -75,8 +66,9 @@ const EVENT_DB_SUFFIX: &str = ".sqlite";
 /// The metadata describing one event in the registry (issue #72).
 ///
 /// The wire shape `GET /events` returns: a stable [`EventId`], a human display `name`, the
-/// creation time, and whether the event is **persistent** (file-backed) or ephemeral (the
-/// in-memory Practice event). Derives serde (its JSON *is* the wire form) and `ts_rs::TS`
+/// creation time, and whether the event is **persistent** (file-backed) or ephemeral (an
+/// in-memory log, when the Director has no data dir configured). Derives serde (its JSON *is*
+/// the wire form) and `ts_rs::TS`
 /// so the frontend reads a generated `EventMeta` type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
@@ -87,11 +79,11 @@ pub struct EventMeta {
     pub name: String,
     /// Creation time in **milliseconds since the Unix epoch** (a plain JSON number — bounded
     /// far below 2^53, rendered as a TS `number` not a `bigint`, matching every other integer
-    /// on the wire). Practice is seeded at registry construction.
+    /// on the wire).
     #[ts(type = "number")]
     pub created_at: i64,
-    /// Whether the event's log is durable (a SQLite file) or ephemeral (the in-memory
-    /// Practice log, `false`).
+    /// Whether the event's log is durable (a SQLite file) or ephemeral (an in-memory log —
+    /// `false`, which happens only when no data dir is configured).
     pub persistent: bool,
     /// Optional **display date** of the event, as a free-form string (e.g. `"2026-06-20"` or
     /// `"Sat 20 Jun"`). A string, not an epoch — it is a *human label the RD types*, shown
@@ -115,7 +107,7 @@ pub struct EventMeta {
     /// The application-level timers this event **selects** (issue #73) — the per-event reference
     /// into the app-level [`TimerRegistry`](crate::timers::TimerRegistry). Additive
     /// (`#[serde(default)]`) so an event persisted before #73 reads back with an empty list; new
-    /// events and Practice default to `["mock"]` (the built-in Mock) so they work out of the
+    /// events default to `["mock"]` (the built-in Mock) so they work out of the
     /// box. The per-event source bridge runs the selected Sim timers; a selected RotorHazard timer is
     /// dialled by the RH connection reconciler instead (#65/#73), not by this bridge.
     #[serde(default)]
@@ -139,7 +131,7 @@ pub struct EventMeta {
     /// and each event simply picks which of them race it (mirroring [`timers`](Self::timers)).
     ///
     /// Additive (`#[serde(default)]`) so an event persisted before #74 reads back with an empty
-    /// roster; new events and Practice default to an **empty** roster. Channels (which frequency a
+    /// roster; a new event defaults to an **empty** roster. Channels (which frequency a
     /// roster pilot flies in a heat) are a separate concern (#117) and are not modelled here.
     #[serde(default)]
     pub roster: Vec<PilotId>,
@@ -150,7 +142,7 @@ pub struct EventMeta {
     /// [`roster`](Self::roster) and [`timers`](Self::timers)).
     ///
     /// Additive (`#[serde(default)]`) so an event persisted before #84 reads back with an empty
-    /// selection; new events and Practice default to an **empty** selection. This is the registry
+    /// selection; a new event defaults to an **empty** selection. This is the registry
     /// slice only — the rounds / phase engine a class later drives is a separate concern.
     #[serde(default)]
     pub classes: Vec<ClassId>,
@@ -165,7 +157,7 @@ pub struct EventMeta {
     /// [`set_class_membership`](EventRegistry::set_class_membership).
     ///
     /// Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted
-    /// before Slice 1a reads back with no membership; new events and Practice default to an
+    /// before Slice 1a reads back with no membership; a new event defaults to an
     /// **empty** list. The whole field round-trips through the event's persisted meta (issue
     /// #115), so it is restart-safe for free.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -179,7 +171,7 @@ pub struct EventMeta {
     /// ranking via [`SeedingRule::FromRanking`].
     ///
     /// Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted before
-    /// Slice 2a reads back with no rounds; new events and Practice default to an **empty** list. The
+    /// Slice 2a reads back with no rounds; a new event defaults to an **empty** list. The
     /// whole field round-trips through the event's persisted meta (issue #115), so it is restart-safe
     /// for free.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1002,8 +994,8 @@ pub struct SetClassMembershipRequest {
 ///
 /// Just a display `name`; the **id is always auto-generated** (a slug of the name plus a
 /// short random suffix), never user-entered, per the maintainer's rule. Keeping the id off
-/// the wire means two events can share a name without colliding and a client can't squat a
-/// reserved id (e.g. `practice`).
+/// the wire means two events can share a name without colliding and a client cannot pick its
+/// own id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct CreateEventRequest {
@@ -1028,6 +1020,21 @@ pub struct CreateEventRequest {
     pub organizer: Option<String>,
 }
 
+impl CreateEventRequest {
+    /// A **name-only** create request — the one-click path the console's "create your first
+    /// event" affordance and the setup wizard both take, and the shape every test uses to build
+    /// its event now that there is no built-in one (#414).
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            date: None,
+            location: None,
+            description: None,
+            organizer: None,
+        }
+    }
+}
+
 /// One registered event: its metadata plus the [`AppState`] (its own log + append-notify,
 /// the shared token store) every per-event surface serves against.
 struct RegisteredEvent {
@@ -1038,9 +1045,9 @@ struct RegisteredEvent {
 /// The registry of all events on this Director (issue #72) — the backend-agnostic
 /// `EventRegistry` the routing layer resolves an [`EventId`] through.
 ///
-/// Maps each [`EventId`] to its [`AppState`] (and so its own [`EventLog`]). A built-in
-/// **Practice** event ([`PRACTICE_EVENT_ID`], in-memory, non-persistent) is always present.
-/// Created events get a file-backed [`SqliteLog`](gridfpv_storage::SqliteLog) under the
+/// Maps each [`EventId`] to its [`AppState`] (and so its own [`EventLog`]). A fresh registry
+/// holds **no events at all** (#414 removed the built-in in-memory Practice event) — the RD
+/// creates the first one. Created events get a file-backed [`SqliteLog`](gridfpv_storage::SqliteLog) under the
 /// configured data dir (one file per event — the local realization of the per-event-dense
 /// log; see the module docs for the Postgres mapping). Cloning shares the one registry (it
 /// is `Arc<RwLock<…>>`), so it can be the axum router state cloned into every handler.
@@ -1052,8 +1059,7 @@ pub struct EventRegistry {
 /// The guarded interior: the event map, the shared token store, and where persistent event
 /// DBs live.
 struct Registry {
-    /// `EventId → RegisteredEvent`. A `BTreeMap` so listing is deterministic (Practice is
-    /// listed first explicitly regardless).
+    /// `EventId → RegisteredEvent`. A `BTreeMap` so listing is deterministic (id order).
     events: BTreeMap<EventId, RegisteredEvent>,
     /// The one Director-wide auth authority, shared into every per-event [`AppState`].
     tokens: TokenStore,
@@ -1140,10 +1146,10 @@ struct RoundHeatFacts {
 }
 
 impl EventRegistry {
-    /// Build a registry seeded with the built-in Practice event, persisting created events
-    /// under `data_dir` when given.
+    /// Build a registry over `data_dir`, restoring every event previously created there.
     ///
-    /// The Practice event is an in-memory, non-persistent log. When `data_dir` is `Some`,
+    /// A registry over a fresh data dir holds **no events** (#414): there is no built-in event,
+    /// so the RD's first act on a new Director is to create one. When `data_dir` is `Some`,
     /// [`create`](EventRegistry::create) writes a SQLite file per event there; when `None`,
     /// created events fall back to an in-memory log (so the registry is still usable with no
     /// configured storage — useful in tests and an unconfigured Director).
@@ -1170,42 +1176,15 @@ impl EventRegistry {
         let classes = ClassDirectory::new(data_dir.clone())
             .map_err(|e| RegistryError::io(format!("could not build class directory: {e}")))?;
 
-        // Seed Practice: an in-memory (non-persistent) log, sharing the one token store.
-        let practice_id = EventId(PRACTICE_EVENT_ID.to_string());
-        let practice_state = AppState::with_tokens(InMemoryLog::new(), tokens.clone());
-        events.insert(
-            practice_id.clone(),
-            RegisteredEvent {
-                meta: EventMeta {
-                    id: practice_id,
-                    name: PRACTICE_EVENT_NAME.to_string(),
-                    created_at: now_millis(),
-                    persistent: false,
-                    date: None,
-                    location: None,
-                    description: None,
-                    organizer: None,
-                    timers: default_timer_selection(),
-                    primary_timer: None,
-                    roster: Vec::new(),
-                    classes: Vec::new(),
-                    classes_membership: Vec::new(),
-                    rounds: Vec::new(),
-                },
-                state: practice_state,
-            },
-        );
-
         if let Some(dir) = &data_dir {
             std::fs::create_dir_all(dir).map_err(|e| {
                 RegistryError::io(format!("could not create data dir {}: {e}", dir.display()))
             })?;
             // Reload every previously-created event (issue #111): scan the data dir for the
             // per-event `<id>.sqlite` files and restore each event's `EventMeta` + its log into
-            // the registry. Without this the registry only ever seeded Practice on boot, so
-            // created events vanished on a Director restart (and the persisted active-event id
-            // degraded to the picker because its event wasn't loaded). Practice stays the
-            // built-in in-memory event, seeded above and never overwritten here.
+            // the registry. Without this the registry booted empty every time, so created events
+            // vanished on a Director restart (and the persisted active-event id degraded to the
+            // picker because its event wasn't loaded).
             restore_persisted_events(dir, &tokens, &mut events);
         }
 
@@ -2110,23 +2089,17 @@ impl EventRegistry {
         self.read().events.get(id).map(|e| e.state.clone())
     }
 
-    /// The metadata for every event, **Practice first**, then the rest in id order.
+    /// The metadata for every event, in id order.
     ///
-    /// The order is stable so `GET /events` is deterministic and the console can default to
-    /// the first (Practice).
+    /// The order is stable (the map is a `BTreeMap`) so `GET /events` is deterministic. The list
+    /// is **empty on a fresh Director** — that is the first-run state the picker must handle
+    /// (#414), not an error.
     pub fn list(&self) -> Vec<EventMeta> {
-        let reg = self.read();
-        let mut out = Vec::with_capacity(reg.events.len());
-        let practice = EventId(PRACTICE_EVENT_ID.to_string());
-        if let Some(p) = reg.events.get(&practice) {
-            out.push(p.meta.clone());
-        }
-        for (id, ev) in &reg.events {
-            if *id != practice {
-                out.push(ev.meta.clone());
-            }
-        }
-        out
+        self.read()
+            .events
+            .values()
+            .map(|e| e.meta.clone())
+            .collect()
     }
 
     /// Create a new persistent event from a [`CreateEventRequest`], returning its [`EventMeta`].
@@ -2143,10 +2116,10 @@ impl EventRegistry {
         let mut reg = self.write();
 
         // Auto-generate a unique id: slug + short random suffix, retried on the (astronomically
-        // unlikely) collision so the id is always fresh and never the reserved `practice`.
+        // unlikely) collision so the id is always fresh.
         let id = loop {
             let candidate = EventId(format!("{}-{}", slugify(name), short_suffix()));
-            if candidate.0 != PRACTICE_EVENT_ID && !reg.events.contains_key(&candidate) {
+            if !reg.events.contains_key(&candidate) {
                 break candidate;
             }
         };
@@ -2212,9 +2185,8 @@ impl EventRegistry {
     /// restart). The deletion is complete: nothing of the event survives a restart (the boot scan
     /// finds no `<id>.sqlite` to restore).
     ///
-    /// The built-in **Practice** event ([`PRACTICE_EVENT_ID`]) cannot be deleted — it is the
-    /// always-present in-memory scratch event — so an attempt is a [`RegistryError`] the caller
-    /// maps to a `BadRequest`. An unknown id is a [`RegistryError`] the caller maps to a typed 404.
+    /// Every event is deletable — there is no reserved built-in event any more (#414). An unknown
+    /// id is a [`RegistryError`] the caller maps to a typed 404.
     ///
     /// The on-disk file removal is best-effort *after* the in-memory drop: dropping the
     /// [`RegisteredEvent`] closes the live SQLite connection (its `AppState` is the only holder),
@@ -2223,11 +2195,6 @@ impl EventRegistry {
     pub fn delete(&self, id: &EventId) -> Result<(), RegistryError> {
         let mut reg = self.write();
 
-        if id.0 == PRACTICE_EVENT_ID {
-            return Err(RegistryError::invalid(
-                "the built-in Practice event cannot be deleted".to_string(),
-            ));
-        }
         // Drop the in-memory entry first; this closes the event's own SQLite connection (its
         // `AppState` is the sole holder) so the on-disk files are unlocked for removal below.
         let removed = reg.events.remove(id);
@@ -2318,7 +2285,7 @@ fn persist_event_meta(dir: &Path, meta: &EventMeta) -> Result<(), RegistryError>
 /// Write an updated [`EventMeta`] through to its SQLite file when the event is persistent and
 /// a data dir is configured (issue #111) — the shared tail of every meta mutation
 /// (`set_timers`/`set_primary_timer`/…). A non-persistent event (in-memory, no data dir) is a
-/// no-op: it has nothing to persist to and is gone on restart by design (Practice).
+/// no-op: it has nothing to persist to and is gone on restart by design.
 fn persist_meta_change(data_dir: Option<&Path>, meta: &EventMeta) -> Result<(), RegistryError> {
     match data_dir {
         Some(dir) if meta.persistent => persist_event_meta(dir, meta),
@@ -2333,8 +2300,7 @@ fn persist_meta_change(data_dir: Option<&Path>, meta: &EventMeta) -> Result<(), 
 /// [`RegisteredEvent`] over that same on-disk log — so created events (and their metadata)
 /// survive a Director restart. An entry that cannot be opened, has no persisted meta, or whose
 /// meta cannot be parsed is **skipped** (logged-shaped, not fatal) so one bad file never blocks
-/// boot. The reserved `practice` id is never produced here (Practice is the in-memory built-in,
-/// seeded separately); a stray `practice.sqlite` is ignored so it can't shadow it.
+/// boot.
 fn restore_persisted_events(
     dir: &Path,
     tokens: &TokenStore,
@@ -2355,8 +2321,7 @@ fn restore_persisted_events(
         let Some(stem) = name.strip_suffix(EVENT_DB_SUFFIX) else {
             continue;
         };
-        // Never let a stray `practice.sqlite` shadow the built-in in-memory Practice event.
-        if stem == PRACTICE_EVENT_ID || stem.is_empty() {
+        if stem.is_empty() {
             continue;
         }
         let id = EventId(stem.to_string());
@@ -2950,7 +2915,7 @@ fn prune_membership_to_roster(meta: &mut EventMeta) {
 }
 
 /// The default per-event timer selection (issue #73): just the built-in **Mock**
-/// ([`MOCK_TIMER_ID`]). New events and Practice select it so they run a sim race out of the box.
+/// ([`MOCK_TIMER_ID`]). A new event selects it so it runs a sim race out of the box.
 fn default_timer_selection() -> Vec<TimerId> {
     vec![TimerId(MOCK_TIMER_ID.to_string())]
 }
@@ -3039,24 +3004,31 @@ mod tests {
     }
 
     fn req(name: &str) -> CreateEventRequest {
-        CreateEventRequest {
-            name: name.to_string(),
-            date: None,
-            location: None,
-            description: None,
-            organizer: None,
-        }
+        CreateEventRequest::named(name)
     }
 
     #[test]
-    fn practice_is_always_present_and_first() {
+    fn a_fresh_registry_has_no_events() {
+        // #414: there is no built-in event any more. A brand-new Director lists nothing, and
+        // nothing resolves — that empty state is the console's "create your first event" screen,
+        // not an error.
         let reg = EventRegistry::new(None).unwrap();
-        let list = reg.list();
-        assert_eq!(list.first().unwrap().id.0, PRACTICE_EVENT_ID);
-        assert_eq!(list.first().unwrap().name, PRACTICE_EVENT_NAME);
-        assert!(!list.first().unwrap().persistent);
-        // Practice resolves to a usable AppState.
-        assert!(reg.resolve(&EventId(PRACTICE_EVENT_ID.into())).is_some());
+        assert!(reg.list().is_empty());
+        assert!(reg.active().is_none());
+        assert!(reg.resolve(&EventId("practice".into())).is_none());
+    }
+
+    #[test]
+    fn creating_the_first_event_makes_it_resolvable_and_listed() {
+        let reg = EventRegistry::new(None).unwrap();
+        let meta = reg.create(&req("Practice")).unwrap();
+        // The RD's own "Practice" event is an ordinary created event: it carries the default
+        // timer selection and resolves to a usable AppState.
+        assert_eq!(meta.name, "Practice");
+        assert_eq!(meta.timers, default_timer_selection());
+        assert!(reg.resolve(&meta.id).is_some());
+        assert_eq!(reg.list().len(), 1);
+        assert_eq!(reg.list()[0].id, meta.id);
     }
 
     #[test]
@@ -3074,17 +3046,18 @@ mod tests {
         assert!(a.id.0.starts_with("spring-cup-2026-"));
         assert!(b.id.0.starts_with("spring-cup-2026-"));
         assert_ne!(a.id, b.id);
-        // Both resolve, and they are listed after Practice.
+        // Both resolve, and both are listed.
         assert!(reg.resolve(&a.id).is_some());
         let ids: Vec<_> = reg.list().into_iter().map(|m| m.id).collect();
-        assert_eq!(ids[0].0, PRACTICE_EVENT_ID);
+        assert_eq!(ids.len(), 2);
         assert!(ids.contains(&a.id) && ids.contains(&b.id));
     }
 
     #[test]
-    fn created_event_log_is_independent_of_practice() {
+    fn each_created_event_gets_its_own_log() {
         let reg = EventRegistry::new(None).unwrap();
-        let practice = reg.resolve(&EventId(PRACTICE_EVENT_ID.into())).unwrap();
+        let other = reg.create(&req("Practice")).unwrap();
+        let other_state = reg.resolve(&other.id).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         let created_state = reg.resolve(&created.id).unwrap();
 
@@ -3103,11 +3076,11 @@ mod tests {
             )
             .unwrap();
 
-        // The created event's log has the heat; Practice's log is untouched (per-event dense).
+        // That event's log has the heat; the other event's log is untouched (per-event dense).
         let (created_events, _) = created_state.read().unwrap();
         assert_eq!(created_events.len(), 1);
-        let (practice_events, _) = practice.read().unwrap();
-        assert_eq!(practice_events.len(), 0);
+        let (other_events, _) = other_state.read().unwrap();
+        assert_eq!(other_events.len(), 0);
     }
 
     #[test]
@@ -3115,10 +3088,11 @@ mod tests {
         let reg = EventRegistry::new(None).unwrap();
         let rd = reg.tokens().issue_rd_token();
         let created = reg.create(&req("Race Night")).unwrap();
+        let other = reg.create(&req("Club Night")).unwrap();
         // The shared token store is the same instance behind every event's AppState.
-        let practice = reg.resolve(&EventId(PRACTICE_EVENT_ID.into())).unwrap();
+        let other_state = reg.resolve(&other.id).unwrap();
         let created_state = reg.resolve(&created.id).unwrap();
-        assert!(practice.tokens().authenticate_control(Some(&rd)).is_ok());
+        assert!(other_state.tokens().authenticate_control(Some(&rd)).is_ok());
         assert!(
             created_state
                 .tokens()
@@ -3141,10 +3115,37 @@ mod tests {
         assert!(reg.active().is_none());
 
         // Setting to a known event returns its meta and reads back.
-        let practice = EventId(PRACTICE_EVENT_ID.into());
-        let meta = reg.set_active(&practice).unwrap();
-        assert_eq!(meta.id, practice);
-        assert_eq!(reg.active().map(|m| m.id), Some(practice));
+        let created = reg.create(&req("Race Night")).unwrap().id;
+        let meta = reg.set_active(&created).unwrap();
+        assert_eq!(meta.id, created);
+        assert_eq!(reg.active().map(|m| m.id), Some(created));
+    }
+
+    #[test]
+    fn a_stale_active_event_pointer_degrades_to_the_picker() {
+        // #414: a Director that ran before this change has `<data_dir>/active-event` holding
+        // "practice" — an id that no longer names anything. Booting over that data dir must
+        // land on the picker, not fail to boot and not dangle at a missing event.
+        let dir = std::env::temp_dir().join(format!("gridfpv-stale-active-{}", short_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(ACTIVE_EVENT_FILE), "practice").unwrap();
+
+        let reg =
+            EventRegistry::new(Some(dir.clone())).expect("a stale pointer must not fail boot");
+        assert!(
+            reg.active().is_none(),
+            "the stale id degrades to the picker"
+        );
+        assert!(reg.resolve(&EventId("practice".into())).is_none());
+        assert!(reg.list().is_empty());
+
+        // And the RD can still create an event and make it active over the same data dir.
+        let created = reg.create(&req("Race Night")).unwrap();
+        reg.set_active(&created.id).unwrap();
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        assert_eq!(reopened.active().map(|m| m.id), Some(created.id));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -3167,13 +3168,11 @@ mod tests {
             let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
             assert_eq!(reopened.active().map(|m| m.id), Some(created.id.clone()));
 
-            // Persisting Practice (always present) survives the restart.
-            reg.set_active(&EventId(PRACTICE_EVENT_ID.into())).unwrap();
+            // A second created event takes over the pointer, and that survives too.
+            let second = reg.create(&req("Second")).unwrap();
+            reg.set_active(&second.id).unwrap();
             let reopened2 = EventRegistry::new(Some(dir.clone())).unwrap();
-            assert_eq!(
-                reopened2.active().map(|m| m.id.0),
-                Some(PRACTICE_EVENT_ID.to_string())
-            );
+            assert_eq!(reopened2.active().map(|m| m.id), Some(second.id));
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3286,7 +3285,7 @@ mod tests {
         // Simulate a Director restart: a brand-new registry over the SAME data dir.
         let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
 
-        // The event is listed again (Practice first, then the created one) with its metadata.
+        // The event is listed again with its metadata.
         let restored = reopened
             .meta_of(&created_id)
             .expect("the created event should be reloaded on restart");
@@ -3301,9 +3300,8 @@ mod tests {
         );
         assert_eq!(restored.primary_timer, Some(TimerId("rh-1".into())));
 
-        // It is in the public list, after Practice.
+        // It is in the public list.
         let ids: Vec<_> = reopened.list().into_iter().map(|m| m.id).collect();
-        assert_eq!(ids.first().map(|i| i.0.as_str()), Some(PRACTICE_EVENT_ID));
         assert!(ids.contains(&created_id));
 
         // Its log facts survived too.
@@ -3380,17 +3378,17 @@ mod tests {
     }
 
     #[test]
-    fn delete_rejects_practice_and_an_unknown_event() {
+    fn delete_rejects_an_unknown_event_and_no_event_is_reserved() {
         let reg = EventRegistry::new(None).unwrap();
-        // Practice (the built-in in-memory event) cannot be deleted.
-        let practice = EventId(PRACTICE_EVENT_ID.into());
-        assert!(reg.delete(&practice).is_err());
-        assert!(
-            reg.resolve(&practice).is_some(),
-            "Practice survives a delete attempt"
-        );
         // An unknown id is an error and removes nothing.
         assert!(reg.delete(&EventId("no-such-event".into())).is_err());
+        // Nothing is reserved any more (#414): the old built-in `practice` id is just an
+        // unknown event, and an event an RD names "Practice" deletes like any other.
+        assert!(reg.delete(&EventId("practice".into())).is_err());
+        let mine = reg.create(&req("Practice")).unwrap();
+        assert!(reg.delete(&mine.id).is_ok());
+        assert!(reg.resolve(&mine.id).is_none());
+        assert!(reg.list().is_empty());
     }
 
     #[test]
@@ -3461,13 +3459,6 @@ mod tests {
         let reg = EventRegistry::new(None).unwrap();
         let event = reg.create(&req("Class Event")).unwrap();
         assert!(event.classes.is_empty(), "a new event selects no classes");
-        // Practice also defaults to an empty class selection.
-        assert!(
-            reg.meta_of(&EventId(PRACTICE_EVENT_ID.into()))
-                .unwrap()
-                .classes
-                .is_empty()
-        );
 
         let a = ClassId("open-1".into());
         let b = ClassId("spec-2".into());

@@ -11,6 +11,9 @@ import type { FetchLike, WebSocketLike } from './client.js';
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
+/** The event every test connection is rooted under — explicit since #414 removed the default. */
+const EVENT = 'test-event-ab12';
+
 const SCOPE: Scope = { Heat: { heat: 'heat-1' } };
 
 const liveState = (phase: HeatPhase): ProjectionBody => ({
@@ -161,6 +164,7 @@ describe('ProtocolClient', () => {
 
     const client = connect({
       baseUrl: 'http://director.local:8080',
+      eventId: EVENT,
       scope: SCOPE,
       fetch,
       webSocketFactory: factory
@@ -193,7 +197,13 @@ describe('ProtocolClient', () => {
     // which is every real Director snapshot. Earlier tests used cursor 0, masking it.
     const { fetch } = mockFetch([{ cursor: 5, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -214,7 +224,13 @@ describe('ProtocolClient', () => {
   it('is idempotent: re-delivered envelopes at/below the cursor are no-ops', async () => {
     const { fetch } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -236,7 +252,13 @@ describe('ProtocolClient', () => {
       { cursor: 5, body: liveState('Running') } // re-snapshot after the gap
     ]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -273,7 +295,13 @@ describe('ProtocolClient', () => {
       { cursor: 200, body: liveState('Running') }
     ]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -300,6 +328,7 @@ describe('ProtocolClient', () => {
     const timer = manualTimer();
     const client = connect({
       baseUrl: 'http://d',
+      eventId: EVENT,
       scope: SCOPE,
       fetch,
       webSocketFactory: factory,
@@ -350,7 +379,13 @@ describe('ProtocolClient', () => {
       { cursor: 9, body: liveState('Running') } // re-snapshot forced by the delta
     ]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -376,7 +411,13 @@ describe('ProtocolClient', () => {
   it('a re-delivered Delta at/below the applied sequence is a duplicate no-op (no re-snapshot)', async () => {
     const { fetch, calls } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -398,7 +439,13 @@ describe('ProtocolClient', () => {
   it('notifies onState listeners and stops after close', async () => {
     const { fetch } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
 
     const seen: (HeatPhase | undefined)[] = [];
     const unsub = client.onState((s) => seen.push(phaseOf(s.body)));
@@ -420,26 +467,7 @@ describe('ProtocolClient', () => {
 
   // ── Event-rooted surface (issue #72) ─────────────────────────────────────────
 
-  it('roots the snapshot + stream URLs under the default Practice event', async () => {
-    const { fetch, calls } = mockFetch([{ cursor: 3, body: liveState('Scheduled') }]);
-    const { factory, sockets } = mockWsFactory();
-
-    const client = connect({
-      baseUrl: 'http://director.local:8080',
-      scope: SCOPE,
-      fetch,
-      webSocketFactory: factory
-    });
-    await flush();
-
-    // No eventId given → both the snapshot and the WS are rooted under `/events/practice`.
-    expect(calls[0]).toBe('http://director.local:8080/events/practice/snapshot/heat/heat-1');
-    expect(sockets[0].url).toBe('ws://director.local:8080/events/practice/stream');
-
-    client.close();
-  });
-
-  it('roots the URLs under an explicit eventId when given', async () => {
+  it('roots the snapshot + stream URLs under the named event', async () => {
     const { fetch, calls } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
 
@@ -470,14 +498,21 @@ describe('events lifecycle helpers (#72)', () => {
         ok: true,
         status: 200,
         json: async (): Promise<unknown> => [
-          { id: 'practice', name: 'Practice', created_at: 1, persistent: false }
+          { id: 'spring-cup-2026-ab12', name: 'Spring Cup', created_at: 1, persistent: true }
         ]
       } as unknown as Response;
     };
     const { listEvents } = await import('./client.js');
     const events = await listEvents('http://director.local:8080/', { fetch });
     expect(calls[0]).toBe('http://director.local:8080/events');
-    expect(events[0].id).toBe('practice');
+    expect(events[0].id).toBe('spring-cup-2026-ab12');
+  });
+
+  it('listEvents accepts an EMPTY list — a fresh Director has no events (#414)', async () => {
+    const fetch: FetchLike = async () =>
+      ({ ok: true, status: 200, json: async (): Promise<unknown> => [] }) as unknown as Response;
+    const { listEvents } = await import('./client.js');
+    expect(await listEvents('http://director.local:8080/', { fetch })).toEqual([]);
   });
 
   it('createEvent POSTs the name to /events with the RD token and returns the new EventMeta', async () => {

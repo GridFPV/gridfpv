@@ -531,7 +531,7 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfpv_server::events::PRACTICE_EVENT_ID;
+    use gridfpv_server::events::CreateEventRequest;
     use gridfpv_server::timers::{
         CalibrationRequest, ChannelRequest, CreateTimerRequest, UpdateTimerRequest,
     };
@@ -979,13 +979,19 @@ mod tests {
             ]
         );
 
-        // Practice goes active and selects one of them: that one moves to the event key, the other
-        // keeps its manual key, and neither is listed twice.
-        let practice = EventId(PRACTICE_EVENT_ID.to_string());
+        // An event goes active and selects one of them: that one moves to the event key, the
+        // other keeps its manual key, and neither is listed twice.
+        let practice = EventId(
+            events
+                .create(&CreateEventRequest::named("Practice"))
+                .expect("create the event")
+                .id
+                .0,
+        );
         events
             .set_timers(&practice, vec![selected.clone()])
             .expect("selection set");
-        events.set_active(&practice).expect("practice active");
+        events.set_active(&practice).expect("event active");
         let mut wanted = wanted_connections(&events, &timers);
         wanted.sort_by(|a, b| a.1.cmp(&b.1));
         assert_eq!(

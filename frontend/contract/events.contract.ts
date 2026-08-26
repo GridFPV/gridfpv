@@ -3,13 +3,13 @@
  * event-rooted surface.
  *
  * guards:
- *  - `GET /events` lists the events, with the built-in **Practice** event always present and
- *    listed first (in-memory, non-persistent).
+ *  - `GET /events` on a **fresh** Director is an empty list — there is no built-in event
+ *    (#414), so first run is genuinely "create an event", not "pick the seeded one".
  *  - `POST /events` is RD-gated (no/bad token → 401), auto-generates a unique `id` from the
  *    display `name` (the id is never user-supplied), and returns the new event's `EventMeta`.
  *  - the new event is immediately reachable: a snapshot under `/events/{id}/snapshot/...` is a
  *    200, and a control command under `/events/{id}/control` acks — against THAT event's own
- *    log, independent of Practice (a heat scheduled in one is not visible in the other).
+ *    log, independent of every other event (a heat scheduled in one is invisible in the other).
  *  - an unknown event id → a typed `ProtocolError` 404 (`UnknownScope`), the same shape an
  *    unknown heat/pilot gets.
  *
@@ -102,15 +102,19 @@ async function deleteEvent(id: string, token?: string): Promise<{ status: number
 }
 
 describe('seam 9: events lifecycle API', () => {
-  it('GET /events lists the built-in Practice event first (in-memory, non-persistent)', async () => {
-    const events = await listEvents();
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    const first = events[0];
-    expect(first.id).toBe('practice');
-    expect(first.name).toBe('Practice');
-    expect(first.persistent).toBe(false);
+  it('GET /events on a fresh Director is empty — there is no built-in event (#414)', async () => {
+    // This must run first: the suite creates events below. A brand-new Director holds nothing,
+    // which is the first-run state the console's "create your first event" screen handles.
+    expect(await listEvents()).toEqual([]);
+  });
+
+  it('a created event is persistent and carries a numeric created_at', async () => {
+    const created = (await createEvent('Shape Check', TOKEN)).body as EventMeta;
+    expect(created.persistent).toBe(true);
     // created_at is a plain JSON number (the i64 → number contract), never a bigint/string.
-    expect(typeof first.created_at).toBe('number');
+    expect(typeof created.created_at).toBe('number');
+    const listed = (await listEvents()).find((e) => e.id === created.id);
+    expect(listed?.name).toBe('Shape Check');
   });
 
   it('POST /events requires the RD token — no/bad token → 401', async () => {
@@ -131,14 +135,15 @@ describe('seam 9: events lifecycle API', () => {
     expect(a.name).toBe('Spring Cup 2026!');
     expect(a.persistent).toBe(true);
 
-    // The new event now appears in the listing (after Practice).
+    // Both new events now appear in the listing.
     const ids = (await listEvents()).map((e) => e.id);
-    expect(ids[0]).toBe('practice');
     expect(ids).toContain(a.id);
+    expect(ids).toContain(b.id);
   });
 
-  it('a created event is reachable and independent of Practice', async () => {
+  it('a created event is reachable and independent of every other event', async () => {
     const created = (await createEvent('Race Night', TOKEN)).body as EventMeta;
+    const other = (await createEvent('Club Night', TOKEN)).body as EventMeta;
 
     // Schedule a heat in the created event over ITS OWN control path (`/events/{id}/control`).
     const command: Command = { ScheduleHeat: { heat: 'cn-1', lineup: ['A', 'B'] } };
@@ -154,9 +159,9 @@ describe('seam 9: events lifecycle API', () => {
     const inCreated = await fetch(`${eventRoot(director.baseUrl, created.id)}/snapshot/heat/cn-1`);
     expect(inCreated.status).toBe(200);
 
-    // …but is NOT visible in Practice (per-event logs are independent).
-    const inPractice = await fetch(`${eventRoot(director.baseUrl)}/snapshot/heat/cn-1`);
-    expect(inPractice.status).toBe(404);
+    // …but is NOT visible in the other event (per-event logs are independent).
+    const inOther = await fetch(`${eventRoot(director.baseUrl, other.id)}/snapshot/heat/cn-1`);
+    expect(inOther.status).toBe(404);
   });
 
   it('an unknown event id → 404 ProtocolError(UnknownScope)', async () => {
@@ -189,7 +194,7 @@ describe('seam 9: events lifecycle API', () => {
     expect(heat.status).toBe(404);
   });
 
-  it('DELETE /events/{id} is RD-gated, rejects Practice (400), and unknown ids (404)', async () => {
+  it('DELETE /events/{id} is RD-gated and 404s unknown ids — no event is reserved', async () => {
     // Create a fresh event to attempt an unauthenticated delete against (it must survive).
     const created = (await createEvent('Gated Delete', TOKEN)).body as EventMeta;
     expect((await deleteEvent(created.id)).status).toBe(401);
@@ -197,11 +202,11 @@ describe('seam 9: events lifecycle API', () => {
     // Still present after the rejected deletes.
     expect((await listEvents()).map((e) => e.id)).toContain(created.id);
 
-    // The built-in Practice cannot be deleted → a typed BadRequest (400).
+    // Nothing is undeletable any more (#414): the old built-in `practice` id is simply an
+    // unknown event, so it 404s like any other rather than 400-ing as reserved.
     const practice = await deleteEvent('practice', TOKEN);
-    expect(practice.status).toBe(400);
-    expect((practice.body as { code?: string }).code).toBe('BadRequest');
-    expect((await listEvents())[0].id).toBe('practice');
+    expect(practice.status).toBe(404);
+    expect((practice.body as { code?: string }).code).toBe('UnknownScope');
 
     // An unknown id → a typed 404 (UnknownScope).
     const unknown = await deleteEvent('no-such-event', TOKEN);
@@ -248,8 +253,9 @@ describe('seam 9b: the Director active event (#90)', () => {
   }
 
   it('PUT /active-event is RD-gated — no/bad token → 401', async () => {
-    expect((await putActive('practice')).status).toBe(401);
-    expect((await putActive('practice', 'not-a-real-token')).status).toBe(401);
+    const created = (await createEvent('Gate Check', TOKEN)).body as EventMeta;
+    expect((await putActive(created.id)).status).toBe(401);
+    expect((await putActive(created.id, 'not-a-real-token')).status).toBe(401);
   });
 
   it('PUT /active-event rejects an unknown event with 404 UnknownScope', async () => {
@@ -269,9 +275,10 @@ describe('seam 9b: the Director active event (#90)', () => {
     const active = await getActive();
     expect(active.event?.id).toBe(created.id);
 
-    // And switching it to Practice re-points the Director (last write wins).
-    expect((await putActive('practice', TOKEN)).status).toBe(200);
-    expect((await getActive()).event?.id).toBe('practice');
+    // And switching it to a second event re-points the Director (last write wins).
+    const second = (await createEvent('Resume Me Too', TOKEN)).body as EventMeta;
+    expect((await putActive(second.id, TOKEN)).status).toBe(200);
+    expect((await getActive()).event?.id).toBe(second.id);
   });
 });
 
