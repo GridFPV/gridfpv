@@ -49,3 +49,39 @@ Rules of thumb:
 Live control, the global header, marshaling (audit / ruling / protests / add-lap),
 graph labels, and heat names have each leaked raw ids at some point. Treat a raw
 id reaching the screen as a bug.
+
+## Pre-release: break things freely, and do not write migrations
+
+**GridFPV has never been released publicly.** There are no users but the maintainer,
+and no deployed data anyone depends on. Until the first public release, a breaking
+change is **free** — and paying for backwards compatibility is a real cost with no
+benefit.
+
+So, by default:
+
+- **Rename badly-named things properly.** Do not keep the old name as an alias.
+- **Change a wire type's shape or meaning** when the new one is right.
+- **Do not write compatibility shims, dual-reads, old-key fallbacks or data
+  migrations.** A stored record in the old shape may simply be lost; the maintainer
+  recreates it.
+- **Do not add a "legacy" branch** to keep an old client working. There are none.
+
+The maintainer will say so when they want data preserved. Ask only when the data is
+*theirs and expensive to recreate* (a tuned timer's calibration, a raced event's log)
+— not for test fixtures, scratch events, or config they can re-enter in a minute.
+
+### What this does NOT excuse
+
+- **A stored record in an old shape must still LOAD.** Losing the field is fine;
+  failing to open the event, or 500ing, is not. `#[serde(default)]` on the new field,
+  and an unknown old key is ignored on read.
+- **Deleting anything the maintainer owns and cannot recreate.** Preserve it or ask.
+- **Silence.** If a change drops data, say so plainly in the report — "a test event
+  needs recreating" is a fine outcome, discovering it in the field is not.
+
+### When this flips
+
+At the **first public release**. From then on: additive changes, `#[serde(default)]`
+on every new field, and a real migration for anything that moves. Delete this section
+when that happens — a stale "break things freely" rule is exactly the kind of note
+that outlives its truth and does damage.
