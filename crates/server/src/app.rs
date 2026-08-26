@@ -101,12 +101,12 @@ use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
     ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, NewRoundReq, RegistryError,
-    RegistryErrorKind, RoundDef, RoundError, SetActiveEventRequest, SetClassMembershipRequest,
-    SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
+    RegistryErrorKind, RoundDef, RoundError, RoundIssue, SetActiveEventRequest,
+    SetClassMembershipRequest, SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{
-    HeatSummary, heat_summaries, live_state_over_with_floor, live_state_with_floor,
-    with_heat_timing,
+    HeatSummary, heat_summaries, heats_of_defined_rounds, live_state_over_with_floor,
+    live_state_with_floor, with_heat_timing,
 };
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::round_engine;
@@ -495,6 +495,12 @@ pub fn router(registry: EventRegistry) -> Router {
         // Per-event scheduled **heats** (race redesign Slice 3b): the round-tagged heats list the
         // Heats UI reads — open, no token (a read), like the snapshot routes.
         .route("/events/{event_id}/heats", get(list_heats))
+        // Per-event **round issues** (#416): the stored rounds whose `node-{i}` seats cannot record
+        // a lap — a read, open like the heats list. #412 refuses an impossible seat when a round is
+        // written; this is the same rule applied to what is ALREADY stored, so a round authored
+        // before that fix (or one a later node/timer change broke) is visible where the RD can
+        // repair it instead of racing a heat that silently records nothing.
+        .route("/events/{event_id}/round-issues", get(list_round_issues))
         // The event-wide **audit trail** (the "defensible results" review surface): every heat's
         // marshaling audit fold, heat-tagged and merged newest-first — what the console's Audit
         // page reads. Open, no token (a read, like the heats list and the snapshot routes).
@@ -1685,7 +1691,46 @@ async fn list_heats(
 ) -> Result<Json<Vec<HeatSummary>>, ProtocolError> {
     let state = resolve_event(&registry, &event_id)?;
     let (events, _cursor) = state.read()?;
-    Ok(Json(heat_summaries(&events)))
+    // Heats whose round the event no longer defines went with that round (#418). The log is
+    // append-only so the `HeatScheduled` entries remain, but a removed round takes its heats with
+    // it: they have no name, no win condition and no scoring left to resolve through. Only
+    // unstarted heats can be in this position — `remove_round` refuses a round with a heat in
+    // progress or past `Scheduled` — so nothing with results is ever hidden here.
+    let defined: Vec<gridfpv_events::RoundId> = registry
+        .rounds_of(&event_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|round| round.id)
+        .collect();
+    Ok(Json(heats_of_defined_rounds(
+        heat_summaries(&events),
+        &defined,
+    )))
+}
+
+/// `GET /events/{event_id}/round-issues` — the event's **impossible seats** (#416).
+///
+/// A read (open, no token, like the heats list): every stored round whose open-practice seating
+/// names a node that cannot record a lap — one beyond the primary timer's width, one the RD has
+/// disabled, or one beyond what the timer reported ([`SeatProblem`]). Each entry carries the
+/// round's label, the timer's name, the 1-based node label and the RD-facing sentence that says
+/// what to do about it; the console renders them on the round they belong to, next to the edit
+/// control that repairs them.
+///
+/// Empty means **nothing wrong** — an event with no resolvable primary timer has no node set to
+/// check against and answers with an empty list. An unknown event is a typed **404**.
+///
+/// [`SeatProblem`]: crate::events::SeatProblem
+async fn list_round_issues(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Json<Vec<RoundIssue>>, ProtocolError> {
+    registry.round_issues(&event_id).map(Json).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        )
+    })
 }
 
 /// Map a [`round_engine::FillError`] to a typed [`ProtocolError`]: an unknown round (or seeding

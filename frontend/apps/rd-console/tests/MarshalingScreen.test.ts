@@ -13,6 +13,7 @@ import type {
 } from '@gridfpv/types';
 import { toasts } from '@gridfpv/components';
 import Marshaling from '../src/screens/Marshaling.svelte';
+import { REMOVED_HEAT_NAME } from '../src/lib/heats.js';
 import { makeTestSession } from './support.js';
 import {
   liveRunning,
@@ -1356,10 +1357,12 @@ describe('Marshaling (Slice 3)', () => {
       });
       render(Marshaling, { session });
 
-      // After the first (empty) read the names fall back to raw ids — the bug's visible symptom.
+      // After the first (empty) read the heat name cannot resolve — the bug's visible symptom. It
+      // still is not the raw id: `heatNameById` never prints a heat handle (#418).
       await waitFor(() => {
         const header = screen.getByRole('region', { name: 'Marshaling' }).querySelector('.heat');
-        expect(header?.textContent).toContain('q1-heat');
+        expect(header?.textContent).toContain(REMOVED_HEAT_NAME);
+        expect(header?.textContent).not.toContain('q1-heat');
       });
 
       // The active event settles — a fresh `EventMeta` assigned with no accompanying stream advance

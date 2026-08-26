@@ -20,8 +20,6 @@ import type {
   HeatId,
   HeatSummary,
   Pilot,
-  PilotId,
-  PilotProgress,
   RoundDef
 } from '@gridfpv/types';
 import type { Session } from './session.svelte.js';
@@ -29,8 +27,7 @@ import { RaceAudioPlayer } from './raceAudio.js';
 import { CalloutQueue, lapCalloutText } from './callouts.js';
 import { useEndOfRaceTones } from './endTones.svelte.js';
 import { useCrossingTones, useLapCallouts } from './lapCallouts.svelte.js';
-import { createCompetitorNameResolver } from './competitorName.js';
-import { channelLabel } from './channels.js';
+import { buildCompetitorNames } from './competitorName.js';
 import { fixedEndWindowMicros } from './raceWindow.js';
 
 /** The shared controller surface the pages use (the Live page's Callouts toggle). */
@@ -124,25 +121,20 @@ export function mountRaceDayAudio(session: Session): RaceDayAudio {
   const toneCue = $derived(currentRound?.start_procedure?.tone);
   const windowMicros = $derived(fixedEndWindowMicros(currentRound));
 
-  // The shared callsign resolver (friendly-names rule) — roster binding first, explicit
-  // register second, channel label for a bare node seat, raw ref last.
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  const explicitPilotByRef = $derived(
-    new Map<CompetitorRef, PilotId>(
-      (live?.progress ?? [])
-        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
-        .map((p) => [p.competitor, p.pilot])
-    )
+  // The shared callsign resolver (friendly-names rule) — roster binding first, explicit register
+  // second, the `"Node 7 · Raceband R7"` seat label for a bare node seat, raw ref last. Built from
+  // the ONE shared input assembly every screen uses (#416).
+  const names = $derived(
+    buildCompetitorNames({
+      pilots,
+      progress: live?.progress,
+      heat: heats.find((h) => h.heat === heat),
+      catalog,
+      timer: session.primaryTimer,
+      membership: session.currentEvent?.classes_membership
+    })
   );
-  const channelByRef = $derived.by(() => {
-    const summary = heats.find((h) => h.heat === heat);
-    const map = new Map<CompetitorRef, string>();
-    for (const [ref, mhz] of summary?.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
-  });
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef })
-  );
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
 
   // ── Start tone: fire on an OBSERVED transition into Running, never a late join ────────────
   // (Unchanged logic — see the original Live-page comment block. Hoisted here, "late join"
@@ -207,13 +199,13 @@ export function mountRaceDayAudio(session: Session): RaceDayAudio {
     () => live?.progress,
     (crossing) => {
       if (audio.muted) return;
-      const name = competitorName(crossing.ref);
+      // Spoken, not printed: a seat label carries its channel after a "·" separator, which reads
+      // as punctuation on screen and as noise out loud — so the callout speaks the node alone.
+      // A ref that resolved to nothing but itself is still skipped rather than spelled out.
+      const resolved = competitorName(crossing.ref);
+      const name = resolved === crossing.ref ? undefined : resolved.split(' · ')[0];
       callouts.enqueue({
-        text: lapCalloutText(
-          name === crossing.ref ? undefined : name,
-          crossing.lap,
-          crossing.lastLapMicros
-        ),
+        text: lapCalloutText(name, crossing.lap, crossing.lastLapMicros),
         key: crossing.ref
       });
     }

@@ -1122,9 +1122,9 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
     render(LiveRaceControl, { session });
 
     // The board replaces the pilot-keyed panels; rows are keyed by channel.
-    const r1 = await screen.findByLabelText('Channel Raceband R1 · 5658');
+    const r1 = await screen.findByLabelText('Channel Node 1 · Raceband R1');
     expect(r1).toBeInTheDocument();
-    expect(screen.getByLabelText('Channel Fatshark F4 · 5800')).toBeInTheDocument();
+    expect(screen.getByLabelText('Channel Node 2 · Fatshark F4')).toBeInTheDocument();
 
     // node-0 shows 3 laps and a best lap of 28.0s (formatMicros), tracked from the last lap.
     expect(within(r1).getByText('3')).toBeInTheDocument();
@@ -1134,7 +1134,7 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
   it('tracks best lap as the min last-lap across the run', async () => {
     const { session, pushLive } = renderBoard();
     render(LiveRaceControl, { session });
-    const r1 = await screen.findByLabelText('Channel Raceband R1 · 5658');
+    const r1 = await screen.findByLabelText('Channel Node 1 · Raceband R1');
     // Both Last and Best read 28.0s on the first snapshot (best seeds from the only lap).
     await within(r1).findAllByText('28.000');
 
@@ -1175,7 +1175,7 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
   it('does not show the pilot-keyed panels for an open-practice heat', async () => {
     const { session } = renderBoard();
     render(LiveRaceControl, { session });
-    await screen.findByLabelText('Channel Raceband R1 · 5658');
+    await screen.findByLabelText('Channel Node 1 · Raceband R1');
     // The normal Heat sheet / Live standing panels are replaced by the practice board.
     expect(screen.queryByText('Heat sheet')).not.toBeInTheDocument();
     expect(screen.queryByText('Live standing')).not.toBeInTheDocument();

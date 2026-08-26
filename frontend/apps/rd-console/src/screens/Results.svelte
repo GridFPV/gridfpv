@@ -52,8 +52,7 @@
   import { buildResultsExport, downloadJson, toExportJson } from '../lib/results.js';
   import { isTimedQualFormat } from '../lib/formats.js';
   import { heatNameById } from '../lib/heats.js';
-  import { createCompetitorNameResolver } from '../lib/competitorName.js';
-  import { channelLabel, nodeIndexOf } from '../lib/channels.js';
+  import { buildCompetitorNames } from '../lib/competitorName.js';
   import type { AuditPrefilter } from '../lib/auditFilter.svelte.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -124,44 +123,40 @@
   // only carries the CURRENT heat's progress, so a FINISHED node-seeded heat's seats rendered raw
   // `node-0` in the placements + JSON export. The live current heat's progress merges on top so a
   // just-made Register resolves before its heat-window snapshot lands.
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
   $effect(() => {
     if (!session) return;
     const ids = heats.map((h) => h.heat);
     if (ids.length > 0) void session.ensureHeatBindings(ids);
   });
-  const explicitPilotByRef = $derived.by(() => {
-    const map = new Map<CompetitorRef, PilotId>();
-    if (!session) return map;
+  const heatBindings = $derived.by<(readonly [CompetitorRef, PilotId])[]>(() => {
+    const rows: (readonly [CompetitorRef, PilotId])[] = [];
+    if (!session) return rows;
     for (const h of heats) {
       const bound = session.heatBindings.get(h.heat);
-      if (bound) for (const [ref, pid] of bound) map.set(ref, pid);
+      if (bound) rows.push(...bound);
     }
-    for (const p of session.liveState?.progress ?? [])
-      if (p.pilot != null) map.set(p.competitor, p.pilot);
-    return map;
+    return rows;
   });
-  const channelByRef = $derived.by(() => {
-    const map = new Map<CompetitorRef, string>();
-    for (const h of heats)
-      for (const [ref, mhz] of h.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
-  });
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef })
+  // ONE assembly of the resolver inputs, shared with every other screen (#416).
+  const names = $derived.by(() =>
+    buildCompetitorNames({
+      pilots,
+      bindings: heatBindings,
+      progress: session?.liveState?.progress,
+      heats,
+      catalog,
+      timer: session?.primaryTimer,
+      membership: session?.currentEvent?.classes_membership
+    })
   );
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
 
   // The display name for a competitor ref. Shows "—" while the pilot directory loads (so a
-  // roster-seeded ref never flashes as its raw id), and a neutral "Node N" for an unresolved
-  // open-practice seat (never the raw `node-0`). A genuine free-text sim handle is its own label.
+  // roster-seeded ref never flashes as its raw id); the shared resolver handles the rest, including
+  // the `"Node 7 · Raceband R7"` / `"Node 7"` seat label that a raw `node-0` must never become.
   function resolveName(ref: CompetitorRef): string {
     if (!pilotsLoaded) return '—';
-    const name = competitorName(ref);
-    if (name === ref) {
-      const idx = nodeIndexOf(ref);
-      if (idx !== undefined) return `Node ${idx + 1}`;
-    }
-    return name;
+    return competitorName(ref);
   }
 
   // --- Rounds + heats (the phase inputs) --------------------------------------------------------

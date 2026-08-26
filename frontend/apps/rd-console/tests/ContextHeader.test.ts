@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import type { EventMeta, HeatSummary, LiveRaceState, RoundDef } from '@gridfpv/types';
 import ContextHeader from '../src/ContextHeader.svelte';
+import { REMOVED_HEAT_NAME } from '../src/lib/heats.js';
 import { makeTestSession } from './support.js';
 
 /**
@@ -135,7 +136,7 @@ describe('ContextHeader heat name', () => {
   });
 
   // The #242 cold-load race: the header mounts while the active event is still resolving, so the
-  // first `listHeats()` lands EMPTY (no event in hand) and the name falls back to the raw id. When
+  // first `listHeats()` lands EMPTY (no event in hand) and the name cannot resolve. When
   // `currentEvent` then settles with NO accompanying stream tick (a quiet heat), the read must
   // re-fire and the name must resolve — the effect depends on `currentEvent`, not just the stream.
   it('re-reads heats and resolves the name when currentEvent settles, with no stream tick', async () => {
@@ -147,8 +148,10 @@ describe('ContextHeader heat name', () => {
     });
     render(ContextHeader, { session, ongolive: () => {} });
 
-    // First (empty) read → raw id fallback, the visible symptom of the cold-load race.
-    await waitFor(() => expect(heatId()?.textContent).toBe('q1-heat'));
+    // First (empty) read → the unresolved fallback, the visible symptom of the cold-load race.
+    // It is a NAME, not the raw id: `heatNameById` never prints a heat handle (#418).
+    await waitFor(() => expect(heatId()?.textContent).toBe(REMOVED_HEAT_NAME));
+    expect(heatId()?.textContent).not.toContain('q1-heat');
 
     // The active event settles — a fresh EventMeta with no stream advance.
     session.currentEvent = { ...EVENT };

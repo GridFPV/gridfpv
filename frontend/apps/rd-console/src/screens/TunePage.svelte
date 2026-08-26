@@ -106,8 +106,6 @@
     HeatSummary,
     NodeSignal,
     Pilot,
-    PilotId,
-    PilotProgress,
     Timer,
     TimerId,
     TimerSignal
@@ -117,7 +115,7 @@
   import RssiGraph from '../lib/RssiGraph.svelte';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
-  import { createCompetitorNameResolver } from '../lib/competitorName.js';
+  import { buildCompetitorNames } from '../lib/competitorName.js';
   import { isOpenPracticeRound } from '../lib/heats.js';
   import {
     CONFIRM_TIMEOUT_MS,
@@ -130,7 +128,6 @@
     markSent,
     nodeCountOf,
     nodeTraceOf,
-    nodeTuneLabel,
     phaseLabel,
     phaseTone,
     plottable,
@@ -595,23 +592,24 @@
       .then((p) => (pilots = p))
       .catch(() => {});
   });
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  const explicitPilotByRef = $derived(
-    new Map<CompetitorRef, PilotId>(
-      (session.liveState?.progress ?? [])
-        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
-        .map((p) => [p.competitor, p.pilot])
-    )
+  // ONE assembly of the resolver inputs, shared with every other screen (#416). This page is the
+  // only one that holds a live `TimerSignal` subscription, so it is the one that can hand over
+  // `NodeSignal.frequency_mhz` — what each node is ACTUALLY tuned to, and the only channel source
+  // that works on a Flexible RotorHazard timer (whose `available_channels` is empty).
+  const names = $derived(
+    buildCompetitorNames({
+      pilots,
+      progress: session.liveState?.progress,
+      catalog,
+      signal,
+      timer,
+      membership: session.currentEvent?.classes_membership
+    })
   );
-
-  /** The frequency a node is actually on: the live heartbeat's, else the timer's configured pool. */
-  function frequencyOf(node: number): number | undefined {
-    return nodeById.get(node)?.frequency_mhz ?? timer.available_channels?.[node];
-  }
 
   /** `Node 1 · Raceband R7` — the seat's own name, band+channel resolved through `channels.ts`. */
   function nodeLabel(node: number): string {
-    return nodeTuneLabel(node, frequencyOf(node), catalog);
+    return names.seatLabel(node);
   }
 
   /**
@@ -627,14 +625,7 @@
   // The shared resolver (CLAUDE.md), with the node labels as the seat fallback: a seat bound to a
   // pilot reads as the callsign, an unbound one as `Node 1 · Raceband R7`, and a raw `node-0` or a
   // bare `5880` never reaches the screen.
-  const channelByRef = $derived(
-    new Map<CompetitorRef, string>(
-      (signal?.nodes ?? []).map((n) => [n.seat, nodeLabel(n.node)] as const)
-    )
-  );
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef })
-  );
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
 
   /** The seated pilot's callsign for a node, or `undefined` when the seat is unbound. */
   function seatedPilot(node: number): string | undefined {

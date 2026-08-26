@@ -40,6 +40,7 @@ import type {
   updateRound,
   deleteRound,
   listHeats,
+  listRoundIssues,
   eventAudit,
   roundRanking,
   roundStandings,
@@ -120,6 +121,8 @@ export interface TimerImpls {
   deleteRoundImpl?: typeof deleteRound;
   /** The scheduled-heats read (race redesign Slice 3b) — backs the EventRounds Heats UI tests. */
   listHeatsImpl?: typeof listHeats;
+  /** The stored-round seat check (#416) — backs the EventRounds impossible-seat tests. */
+  listRoundIssuesImpl?: typeof listRoundIssues;
   /** The event-wide audit read — backs the EventAudit page tests. */
   eventAuditImpl?: typeof eventAudit;
   /** The round-ranking + class-standings reads (race redesign Slice 5/6a) — back the Results +
@@ -253,6 +256,9 @@ export function makeTestSession(
     // Scheduled-heats read seam (race redesign Slice 3b): inert success unless a test overrides it
     // (see the listPilotsImpl note — a failing default would trip the #340 error state everywhere).
     listHeatsImpl: opts?.listHeatsImpl ?? (async () => []),
+    // The stored-round seat check (#416): inert success (nothing wrong) unless a test overrides it —
+    // a failing default would trip the "couldn't check" banner in every unrelated Rounds test.
+    listRoundIssuesImpl: opts?.listRoundIssuesImpl ?? (async () => []),
     // The event-wide audit read: inert success (empty trail) unless a test overrides it — a
     // failing default would trip the Audit page's #340 error state in unrelated tests.
     eventAuditImpl: opts?.eventAuditImpl ?? (async () => []),

@@ -8,6 +8,7 @@ import type {
   HeatSummary,
   Pilot,
   RoundDef,
+  RoundIssue,
   Timer
 } from '@gridfpv/types';
 import EventRounds from '../src/screens/EventRounds.svelte';
@@ -955,8 +956,8 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     expect(screen.queryByLabelText('Time limit hours')).toBeNull();
 
     // Pick both active channels (the picker is driven by the primary timer's node seats).
-    await fireEvent.click(await screen.findByLabelText(/Channel .*5658/));
-    await fireEvent.click(screen.getByLabelText(/Channel .*5800/));
+    await fireEvent.click(await screen.findByLabelText(/Channel Node 1 · Raceband R1/));
+    await fireEvent.click(screen.getByLabelText(/Channel Node 2 · Fatshark F4/));
 
     // Set a 90-minute practice duration (stored as 90*60 = 5400s).
     await fireEvent.input(screen.getByLabelText('Time limit minutes'), { target: { value: '90' } });
@@ -1001,8 +1002,8 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     });
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'open_practice' } });
     await waitFor(() => expect(screen.queryByLabelText('Win condition')).toBeNull());
-    await fireEvent.click(await screen.findByLabelText(/Channel .*5658/));
-    await fireEvent.click(screen.getByLabelText(/Channel .*5800/));
+    await fireEvent.click(await screen.findByLabelText(/Channel Node 1 · Raceband R1/));
+    await fireEvent.click(screen.getByLabelText(/Channel Node 2 · Fatshark F4/));
 
     // Leave the minutes field blank → no limit.
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
@@ -1269,7 +1270,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     expect(within(heatRow).getByText('5685 MHz')).toBeInTheDocument();
   });
 
-  it('shows — for a sim/free-text heat that carries no frequencies (Slice 4b)', async () => {
+  it('says the channel is UNKNOWN, not "none", for a heat with no assignment (#416)', async () => {
     const heat: HeatSummary = {
       heat: 'q-2',
       lineup: ['p1', 'p2'],
@@ -1288,9 +1289,11 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const heatRow = (await screen.findByText('Qualifying R1 Heat 1')).closest(
       '.heat-row'
     ) as HTMLElement;
-    // Both pilots show the dash (no channel assigned).
-    const dashes = within(heatRow).getAllByText('—');
-    expect(dashes.length).toBe(2);
+    // Unknown is not "none": nothing here has told GridFPV what channel these seats are on, and an
+    // em dash meaning "no channel" would be a different — and false — statement (#416, #413).
+    const unknown = within(heatRow).getAllByText('unknown');
+    expect(unknown.length).toBe(2);
+    expect(within(heatRow).queryByText('—')).toBeNull();
   });
 
   it("names an open-practice round's auto-created heat 'Practice Heat' (not its id)", async () => {
@@ -1716,13 +1719,13 @@ describe('EventRounds — open-practice active-channels picker', () => {
     await waitFor(() => expect(screen.queryByLabelText('Eligible Open')).not.toBeInTheDocument());
 
     // Seats labelled by band+channel·MHz, with a bare node for the unconfigured 4th seat.
-    expect(await screen.findByLabelText('Channel Raceband R1 · 5658')).toBeInTheDocument();
-    expect(screen.getByLabelText('Channel Fatshark F4 · 5800')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Channel Node 1 · Raceband R1')).toBeInTheDocument();
+    expect(screen.getByLabelText('Channel Node 2 · Fatshark F4')).toBeInTheDocument();
     expect(screen.getByLabelText('Channel Node 4')).toBeInTheDocument();
 
     // Activate node 0 (Raceband R1) and node 2 (5732 → custom MHz).
-    await fireEvent.click(screen.getByLabelText('Channel Raceband R1 · 5658'));
-    await fireEvent.click(screen.getByLabelText('Channel 5732 MHz'));
+    await fireEvent.click(screen.getByLabelText('Channel Node 1 · Raceband R1'));
+    await fireEvent.click(screen.getByLabelText('Channel Node 3 · 5732 MHz'));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
 
@@ -1758,8 +1761,8 @@ describe('EventRounds — open-practice active-channels picker', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     // The saved active channel (node 1 → Fatshark F4) seeds checked; node 0 is not.
-    const f4 = (await screen.findByLabelText('Channel Fatshark F4 · 5800')) as HTMLInputElement;
-    const r1 = screen.getByLabelText('Channel Raceband R1 · 5658') as HTMLInputElement;
+    const f4 = (await screen.findByLabelText('Channel Node 2 · Fatshark F4')) as HTMLInputElement;
+    const r1 = screen.getByLabelText('Channel Node 1 · Raceband R1') as HTMLInputElement;
     expect(f4.checked).toBe(true);
     expect(r1.checked).toBe(false);
   });
@@ -1890,5 +1893,97 @@ describe('EventRounds — a round with a heat in progress cannot be edited (#387
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     const form = await screen.findByRole('form', { name: 'Add round' });
     expect(within(form).queryByText(/Saving rebuilds/)).toBeNull();
+  });
+});
+
+/**
+ * #416 — a STORED round seating a node that cannot record a lap is surfaced where the RD can
+ * repair it.
+ *
+ * #412 refuses an impossible seat when a round is *written*, so new rounds are safe. The round on
+ * the bench predates that fix: it seeds `AllChannels { channels: [6] }` — node index 6, the 7th
+ * node — on a four-node timer, so its practice heat can never record a lap, and nothing said so.
+ * Silently rendering that seat is the worst available behaviour.
+ */
+describe('EventRounds — the impossible seat (#416)', () => {
+  const issue = (over: Partial<RoundIssue> = {}): RoundIssue => ({
+    round: 'r1',
+    round_label: 'Qualifying R1',
+    timer: 'rh',
+    timer_name: 'Docker RH',
+    node: 6,
+    node_label: 'Node 7',
+    problem: 'NoSuchNode',
+    detail:
+      'Qualifying R1 seats a pilot on Node 7, but Docker RH has only 4 nodes — that seat can ' +
+      'never record a lap. Edit the round and pick a node the timer has.',
+    ...over
+  });
+
+  it('flags the round, by friendly name, with the Director\u2019s own sentence', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => [issue()]),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const alert = await screen.findByText(/records nothing/);
+    const row = alert.closest('.round-row') as HTMLElement;
+    // On the round it belongs to — beside the Edit control that repairs it.
+    expect(within(row).getByText('Qualifying R1')).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // 1-based node, named timer, named round. Never a raw index or ref.
+    expect(alert.textContent).toContain('Node 7');
+    expect(row.textContent).toContain('Docker RH');
+    expect(row.textContent).not.toContain('node-6');
+  });
+
+  it('says nothing when every seat is live', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => []),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    await screen.findAllByText('Qualifying R1');
+    expect(screen.queryByText(/records nothing/)).toBeNull();
+  });
+
+  it('says the CHECK did not run rather than implying the seats are fine', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => {
+        throw new Error('nope');
+      }),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    // Silence here would read as "checked, nothing wrong" — the failure mode this read exists for.
+    expect(await screen.findByText(/that check has not run/)).toBeInTheDocument();
+  });
+
+  it('flags a DISABLED node distinctly from one that does not exist', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => [
+        issue({
+          node: 2,
+          node_label: 'Node 3',
+          problem: 'Disabled',
+          detail:
+            'Qualifying R1 seats a pilot on Node 3, which is switched off on Docker RH — that ' +
+            'seat can never record a lap. Re-enable the node on the timer, or edit the round and ' +
+            'pick another.'
+        })
+      ]),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const alert = await screen.findByText(/records nothing/);
+    expect(alert.closest('.round-row')?.textContent).toContain('switched off');
   });
 });

@@ -76,6 +76,7 @@ import {
   updateRound,
   deleteRound,
   listHeats,
+  listRoundIssues,
   eventAudit,
   roundRanking,
   roundStandings,
@@ -121,6 +122,7 @@ import type {
   RankEntry,
   RoundDef,
   RoundId,
+  RoundIssue,
   RoundStanding,
   Scope,
   SignalTraceView,
@@ -397,6 +399,7 @@ export class Session {
   #updateRoundImpl: typeof updateRound;
   #deleteRoundImpl: typeof deleteRound;
   #listHeatsImpl: typeof listHeats;
+  #listRoundIssuesImpl: typeof listRoundIssues;
   #eventAuditImpl: typeof eventAudit;
   #roundRankingImpl: typeof roundRanking;
   #roundStandingsImpl: typeof roundStandings;
@@ -443,6 +446,7 @@ export class Session {
     updateRoundImpl?: typeof updateRound;
     deleteRoundImpl?: typeof deleteRound;
     listHeatsImpl?: typeof listHeats;
+    listRoundIssuesImpl?: typeof listRoundIssues;
     eventAuditImpl?: typeof eventAudit;
     roundRankingImpl?: typeof roundRanking;
     roundStandingsImpl?: typeof roundStandings;
@@ -490,6 +494,7 @@ export class Session {
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
     this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
+    this.#listRoundIssuesImpl = opts?.listRoundIssuesImpl ?? listRoundIssues;
     this.#eventAuditImpl = opts?.eventAuditImpl ?? eventAudit;
     this.#roundRankingImpl = opts?.roundRankingImpl ?? roundRanking;
     this.#roundStandingsImpl = opts?.roundStandingsImpl ?? roundStandings;
@@ -1050,6 +1055,22 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
     return this.#listHeatsImpl(this.baseUrl, event.id, { token: this.#token });
+  }
+
+  /**
+   * List the current event's **round issues** (`GET /events/{id}/round-issues`, open, no token) —
+   * #416. One {@link RoundIssue} per stored round seat that cannot record a lap: a node beyond the
+   * primary timer's width, one the RD disabled, or one beyond what the timer reported.
+   *
+   * The Rounds & Heats stage renders these on the round they belong to, beside the edit control
+   * that repairs them. An **empty list means nothing is wrong**; a failed read is surfaced by the
+   * caller rather than swallowed, because silently showing a seat that cannot record is the exact
+   * behaviour this read exists to stop. No-op (resolves `[]`) when no event is selected.
+   */
+  listRoundIssues(): Promise<RoundIssue[]> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve([]);
+    return this.#listRoundIssuesImpl(this.baseUrl, event.id, { token: this.#token });
   }
 
   /**

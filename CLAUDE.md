@@ -15,8 +15,15 @@ error messages.
 Go through the **shared resolvers** — never re-derive a name inline (that's how
 they drift):
 
-- **Competitor ref → callsign:** `createCompetitorNameResolver`
-  (`frontend/apps/rd-console/src/lib/competitorName.ts`)
+- **Competitor ref → callsign / node seat:** `buildCompetitorNames`
+  (`frontend/apps/rd-console/src/lib/competitorName.ts`) — hand it the sources a
+  screen has (pilots, live progress, the heat, the timer, the live signal, class
+  membership, the channel catalog) and consume its `name` / `channelFor` /
+  `seatLabel`. **One place builds the inputs, too** (#416): the resolver was
+  already shared, but three screens each assembled its inputs and answered
+  `node-6` on one screen against `Node 7` on another for the same seat. Do not
+  call `createCompetitorNameResolver` directly — that is the rule, not the entry
+  point.
 - **Heat id → "‹Round› Heat N" / main tier / custom label:** `heatNameById`
   (`frontend/apps/rd-console/src/lib/heats.ts`)
 - **Pilot id → callsign**, **round id → round label**, **class id → class name**,
@@ -26,6 +33,9 @@ they drift):
 Rules of thumb:
 
 - Raw ids/refs are **wire handles only**. The UI layer resolves them before display.
+- **Never re-derive a resolver's *inputs* inline either.** A shared resolver fed
+  three different input sets is three resolvers. If a screen needs data the shared
+  builder does not carry, extend the builder.
 - Resolve from a **durable source** (the entity's own record / a projection), not
   just live/current state — so **finished, non-current, or not-yet-running**
   entities still resolve (e.g. marshaling a *finished* heat must still show
