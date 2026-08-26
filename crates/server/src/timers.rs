@@ -348,6 +348,77 @@ pub struct NodeCalibration {
     pub exit_at: Option<u32>,
 }
 
+/// One node's **GridFPV-owned** channel (#413, D27) — the twin of [`NodeCalibration`].
+///
+/// D27 again: *"GridFPV is the sole system of record for configuration"*, and *"writing to a timer
+/// is applying, not storing"*. A channel the RD picks on the Tune page is GridFPV's value; the
+/// node's receiver is merely where it takes effect. So an accepted channel write is recorded here,
+/// on the [`Timer`], and persisted with it — while the `frequency_mhz` RotorHazard reports back on
+/// `GET /timers/{id}/signal` is **evidence about the timer**, never the store.
+///
+/// The `band`/`channel` pair is the **friendly name** ([`crate::channels::ChannelCatalogEntry`]),
+/// resolved server-side from the shared catalog at accept time and carried onto the emit so
+/// RotorHazard's own UI shows `Raceband R7` rather than a bare number. `None` for a **custom** raw
+/// MHz the catalog does not know — that is an honest absence, not a name worth inventing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NodeChannel {
+    /// The node's index on the timer, `0`-based (RotorHazard's `seat_index`).
+    pub node: u32,
+    /// The channel's centre frequency in raw MHz — the value the receiver actually tunes.
+    pub mhz: u16,
+    /// The catalog band this channel was picked from (`"Raceband"`), or `None` for a custom MHz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub band: Option<String>,
+    /// The catalog channel label within that band (`"R7"`), or `None` for a custom MHz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel: Option<String>,
+}
+
+/// The **friendly name** for a raw centre frequency (`5880` → `"Raceband R7"`), resolved through
+/// the shared channel catalog — the repo display rule's `frequency → band+channel` resolver on the
+/// Director side, so a refusal message never puts a bare number in front of an RD.
+///
+/// The **first** catalog entry whose MHz matches wins (the catalog is ordered Raceband first), and
+/// a frequency the catalog does not know falls back to `"5885 MHz"` — a custom channel has no name
+/// to resolve, and inventing one would be worse than the number.
+pub fn channel_label(mhz: u16) -> String {
+    crate::channels::catalog()
+        .into_iter()
+        .find(|entry| entry.mhz == mhz)
+        .map(|entry| format!("{} {}", entry.band, entry.channel))
+        .unwrap_or_else(|| format!("{mhz} MHz"))
+}
+
+/// Resolve the `(band, channel)` a channel write should carry, against the shared catalog (#413).
+///
+/// GridFPV owns the vocabulary (D27), so a client-supplied label is **validated**, never trusted:
+/// a `(band, channel, mhz)` triple the catalog actually holds is honoured — which is what lets the
+/// RD pick `HDZero R7` rather than the coincident `Raceband R7` — and anything else falls back to
+/// the first catalog entry for that frequency. A frequency the catalog does not know resolves to
+/// `None`: a **custom** channel travels as a bare frequency, because it has no label to send.
+fn resolve_channel_label(
+    mhz: u16,
+    band: Option<&str>,
+    channel: Option<&str>,
+) -> Option<(String, String)> {
+    let catalog = crate::channels::catalog();
+    if let (Some(band), Some(channel)) = (band, channel) {
+        if let Some(entry) = catalog
+            .iter()
+            .find(|e| e.mhz == mhz && e.band == band && e.channel == channel)
+        {
+            return Some((entry.band.clone(), entry.channel.clone()));
+        }
+    }
+    catalog
+        .iter()
+        .find(|e| e.mhz == mhz)
+        .map(|e| (e.band.clone(), e.channel.clone()))
+}
+
 /// One configured timer in the application-level registry (issue #73).
 ///
 /// The wire shape `GET /timers` returns and the on-disk shape `timers.json` persists: a stable
@@ -471,6 +542,27 @@ pub struct Timer {
     /// overwrite; that half is not built (see [`TimerRegistry::request_calibration`]).
     #[serde(default)]
     pub calibration: Vec<NodeCalibration>,
+    /// The per-node channels **GridFPV has set** on this timer (#413, D27), in node order — one
+    /// entry per node whose channel has ever been set from the Tune page.
+    ///
+    /// The twin of [`calibration`](Timer::calibration), and for the same D27 reason: a channel is
+    /// Grid-owned config *applied* to the timer, exactly like a threshold. Written by
+    /// [`TimerRegistry::request_channel`] at the moment a write is accepted.
+    ///
+    /// ⚠️ **Distinct from [`available_channels`](Timer::available_channels).** That is the *pool*
+    /// per-heat assignment allocates from; this is what an individual node was last told to tune
+    /// to from the bench. A heat legitimately overwrites the latter (it re-tunes every node to its
+    /// assigned channel) and this record is not re-applied afterwards — the Tune page says so
+    /// rather than pretending the bench value wins.
+    ///
+    /// ⚠️ **Not re-applied on reconnect** either — same gap, and same reason, as `calibration`'s.
+    ///
+    /// **Additive on the wire and on disk**, and `#[ts(optional)]` like [`plugin`](Timer::plugin):
+    /// an empty record is omitted entirely, so a pre-#413 `timers.json` restores with none and a
+    /// console (or a test fixture) written before this existed still parses a `Timer`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<NodeChannel>>", optional)]
+    pub node_channels: Vec<NodeChannel>,
 }
 
 impl Timer {
@@ -982,6 +1074,109 @@ pub struct PendingCalibration {
     pub during_open_practice: bool,
 }
 
+/// The lowest raw centre frequency a channel write may carry (#413) — the bottom of the 5.8 GHz
+/// band the catalog lives in, matching the console's own custom-MHz guard.
+///
+/// **Not `0`.** RotorHazard reads `frequency: 0` as *"tune this node to nothing"* — a real command
+/// that silently switches a gate off, and one no dropdown should be able to send by accident. A
+/// Flexible timer tunes freely, but "freely" means any channel, not any integer.
+pub const CHANNEL_MHZ_MIN: u16 = 5300;
+
+/// The highest raw centre frequency a channel write may carry (#413) — the top of the same band.
+pub const CHANNEL_MHZ_MAX: u16 = 6000;
+
+/// The body of `POST /timers/{timer_id}/channel` (#413) — set one node's channel while tuning it.
+///
+/// Tuning a gate is meaningless until the node is listening on the channel it will race, so the
+/// Tune page makes the frequency it already *shows* settable. The `band`/`channel` pair is the
+/// **catalog entry the RD picked**; it is validated against the shared catalog server-side (D27
+/// owns the vocabulary) and carried onto RotorHazard's `set_frequency`, whose handler stores both
+/// on the active profile — without them RotorHazard's own UI shows a bare number with no `R7`-style
+/// label, and the RD validates this work by refreshing that page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ChannelRequest {
+    /// The node to tune, `0`-based — RotorHazard's `seat_index`, and the same index
+    /// [`NodeSignal::node`] and [`CalibrationRequest::node`] carry.
+    pub node: u32,
+    /// The channel's centre frequency in raw MHz. Must be within the timer's
+    /// [`channel_capability`](Timer::channel_capability) and inside
+    /// [`CHANNEL_MHZ_MIN`]..=[`CHANNEL_MHZ_MAX`].
+    pub mhz: u16,
+    /// The catalog band the RD picked (`"Raceband"`), if any. Honoured only when the
+    /// `(band, channel, mhz)` triple is a real catalog entry; otherwise the label is resolved from
+    /// the catalog instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub band: Option<String>,
+    /// The catalog channel label the RD picked (`"R7"`), if any. See [`band`](ChannelRequest::band).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel: Option<String>,
+}
+
+/// The answer to `POST /timers/{timer_id}/channel` (#413): **what was dispatched** — never a
+/// readback, exactly like [`CalibrationDispatch`].
+///
+/// RotorHazard's `on_set_frequency` does not answer the caller; it re-broadcasts its frequency data
+/// and, more usefully, every heartbeat carries each node's current frequency. So the console
+/// confirms a channel change the same way it confirms a threshold: by seeing
+/// [`NodeSignal::frequency_mhz`] come back holding what it sent on a later
+/// `GET /timers/{id}/signal`.
+///
+/// `previous_mhz` is what the node was **last told to tune to by GridFPV**, when GridFPV had told
+/// it anything — the console pairs it with its own live reading to say plainly that the node's
+/// enter/exit thresholds were tuned on a different channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ChannelDispatch {
+    /// The timer the write was dispatched to.
+    pub timer: TimerId,
+    /// The node it addresses, `0`-based.
+    pub node: u32,
+    /// The centre frequency that was queued, in raw MHz.
+    pub mhz: u16,
+    /// The resolved catalog band, or absent for a custom raw MHz the catalog does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub band: Option<String>,
+    /// The resolved catalog channel label, or absent for a custom raw MHz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel: Option<String>,
+    /// The channel GridFPV had this node on before this write, if it had set one. Absent the first
+    /// time a node's channel is set from GridFPV.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous_mhz: Option<u16>,
+    /// Whether GridFPV holds **enter/exit thresholds** for this node ([`Timer::calibration`]) that
+    /// were set while it was on a *different* channel — i.e. whether the levels the Tune page is
+    /// showing were tuned for the frequency this write just moved away from.
+    ///
+    /// Reported, never acted on: the thresholds are deliberately left exactly where they are (D27 —
+    /// GridFPV changed one thing, so one thing changed). Recalling per-channel levels is #411.
+    pub thresholds_tuned_on_another_channel: bool,
+}
+
+/// One queued channel write, as the connection reconciler drains it (#413) — the internal twin of
+/// [`ChannelDispatch`], and the exact shape [`PendingCalibration`] is for a threshold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingChannel {
+    /// Which timer to write to.
+    pub timer: TimerId,
+    /// The node, `0`-based.
+    pub node: u32,
+    /// The centre frequency to tune to, in raw MHz.
+    pub mhz: u16,
+    /// The resolved catalog band to send alongside it, if the catalog knows one.
+    pub band: Option<String>,
+    /// The resolved catalog channel label to send alongside it, if the catalog knows one.
+    pub channel: Option<String>,
+    /// Whether the route accepted this write with an **open-practice** heat racing on the timer
+    /// (#355's rule, applied to #413) — so the driver's armed-heat backstop lets it through.
+    pub during_open_practice: bool,
+}
+
 /// The application-level registry of all configured timers (issue #73).
 ///
 /// Maps each [`TimerId`] to its [`Timer`]. A built-in **Mock** ([`MOCK_TIMER_ID`]) is always
@@ -1041,6 +1236,15 @@ struct Registry {
     /// In-memory only, and never persisted: a Director restart must not replay an RD's tuning from
     /// a previous session onto whatever timer happens to be plugged in now.
     calibration_requests: Vec<PendingCalibration>,
+    /// **Pending channel writes** (#413), in request order — the channel the RD picked for a node
+    /// on the Tune page, not yet emitted onto a live socket.
+    ///
+    /// The same hand-off queue, the same layering reason, and the same discipline as
+    /// [`calibration_requests`](Registry::calibration_requests): coalesced per `(timer, node)` so a
+    /// dropdown changed twice before a drain tunes the node once, drained exactly once
+    /// ([`TimerRegistry::take_channel_requests`]), and never persisted — a Director restart must
+    /// not retune whatever timer happens to be plugged in now.
+    channel_requests: Vec<PendingChannel>,
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1367,6 +1571,7 @@ impl TimerRegistry {
             plugin: None,
             manual_connect: false,
             calibration: Vec::new(),
+            node_channels: Vec::new(),
         };
         timers.insert(sim.id.clone(), sim);
 
@@ -1403,6 +1608,7 @@ impl TimerRegistry {
                 data_dir,
                 restart_requests: Vec::new(),
                 calibration_requests: Vec::new(),
+                channel_requests: Vec::new(),
             })),
             signal: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -1461,6 +1667,7 @@ impl TimerRegistry {
             plugin: None,
             manual_connect: false,
             calibration: Vec::new(),
+            node_channels: Vec::new(),
         };
         reg.timers.insert(id, timer.clone());
         reg.persist()?;
@@ -1880,6 +2087,208 @@ impl TimerRegistry {
     /// stays on [`Timer::calibration`] regardless.
     pub fn take_calibration_requests(&self) -> Vec<PendingCalibration> {
         std::mem::take(&mut self.write().calibration_requests)
+    }
+
+    /// **Set a node's channel** on `id` (#413), returning what was dispatched.
+    ///
+    /// The Tune page's other write, and the one that makes the page's readings mean anything:
+    /// tuning a gate is pointless until the node is listening on the channel it will race. Modelled
+    /// on [`request_calibration`](Self::request_calibration) line for line, because it is the same
+    /// kind of thing.
+    ///
+    /// # D27: this is GridFPV's value, applied to the timer
+    ///
+    /// The accepted channel is recorded on [`Timer::node_channels`] and persisted **here**, at
+    /// accept time; the `frequency_mhz` RotorHazard later reports is evidence about the timer, never
+    /// adopted as truth. The `(band, channel)` label is resolved **server-side** from the shared
+    /// catalog ([`resolve_channel_label`]) rather than trusted from the client — GridFPV owns the
+    /// vocabulary — and travels with the emit so RotorHazard's own UI shows `Raceband R7` instead
+    /// of a bare number.
+    ///
+    /// ⚠️ **A heat will overwrite this, and that is correct.** Heat setup re-tunes every node to
+    /// its assigned channel; this record is a bench setting, not a claim on the node, and is
+    /// deliberately not re-applied afterwards.
+    ///
+    /// # Refused
+    ///
+    /// A [`TimerError`] (a `400` at the route) for an unknown id, a non-RotorHazard timer (a Mock
+    /// has no receiver to tune), a timer that is **not connected** (there is no socket to emit on,
+    /// and a channel is not held over for a future connection), a `node` beyond the timer's width
+    /// or one the RD has **disabled** (#412 — RotorHazard validates `0 <= node < num_nodes` and
+    /// otherwise just logs, so an out-of-range write would vanish silently), a frequency outside
+    /// [`CHANNEL_MHZ_MIN`]..=[`CHANNEL_MHZ_MAX`], and a frequency the timer's
+    /// [`channel_capability`](Timer::channel_capability) does not allow.
+    ///
+    /// **Two nodes on one channel is NOT refused.** It is a real mistake worth flagging, and the
+    /// console flags it — but it is also exactly what a bench swap looks like halfway through, and
+    /// blocking it would block the legitimate case to prevent a recoverable one.
+    ///
+    /// The **race-phase refusal** — never retune a receiver under a *scored* race — is not here for
+    /// the same reason the calibration one is not: it needs the event log, so it lives in the route
+    /// (`EventRegistry::scored_heat_in_progress_on_timer`). `during_open_practice` is that route's
+    /// answer to the other half, carried through so the driver's armed-heat backstop does not drop
+    /// a write the route deliberately allowed.
+    pub fn request_channel(
+        &self,
+        id: &TimerId,
+        request: &ChannelRequest,
+        during_open_practice: bool,
+    ) -> Result<ChannelDispatch, TimerError> {
+        let mut reg = self.write();
+        let timer = reg
+            .timers
+            .get_mut(id)
+            .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
+        if !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
+            return Err(TimerError(format!(
+                "{:?} is not a RotorHazard timer — there is no receiver to tune",
+                timer.name
+            )));
+        }
+        if timer.status != TimerStatus::Connected {
+            return Err(TimerError(format!(
+                "{:?} is not connected — connect it before setting a node's channel",
+                timer.name
+            )));
+        }
+        // The node must exist AND be enabled (#412). RotorHazard validates
+        // `0 <= node_index < num_nodes` and otherwise only writes a log line, so an out-of-range
+        // write would look accepted here and land nowhere at all.
+        if request.node >= timer.node_width() {
+            return Err(TimerError(format!(
+                "{:?} has {} nodes — there is no {} to tune",
+                timer.name,
+                timer.node_width(),
+                Timer::node_label(request.node)
+            )));
+        }
+        if !timer.node_enabled(request.node) {
+            return Err(TimerError(format!(
+                "{} is disabled on {:?} — enable it before setting its channel",
+                Timer::node_label(request.node),
+                timer.name
+            )));
+        }
+        if !(CHANNEL_MHZ_MIN..=CHANNEL_MHZ_MAX).contains(&request.mhz) {
+            return Err(TimerError(format!(
+                "{} MHz is not a 5.8 GHz channel — a node's channel must be between {} and {} MHz",
+                request.mhz, CHANNEL_MHZ_MIN, CHANNEL_MHZ_MAX
+            )));
+        }
+        // A Fixed timer supports only its declared set. (A Flexible one allows anything the range
+        // check above let through — that is what Flexible means, and an EMPTY `available_channels`
+        // on a Flexible timer is "no restriction", never "no channels": every RotorHazard on the
+        // bench reports exactly that, and reading it as a restriction would leave the RD's dropdown
+        // empty on precisely the timers this exists for.)
+        if !timer.channel_capability.allows(request.mhz) {
+            return Err(TimerError(format!(
+                "{:?} cannot tune to {} — it supports only the channels it was configured with",
+                timer.name,
+                channel_label(request.mhz)
+            )));
+        }
+
+        // The label GridFPV will send, resolved from ITS catalog rather than trusted from the wire.
+        let label = resolve_channel_label(
+            request.mhz,
+            request.band.as_deref(),
+            request.channel.as_deref(),
+        );
+        let (band, channel) = match &label {
+            Some((band, channel)) => (Some(band.clone()), Some(channel.clone())),
+            None => (None, None),
+        };
+
+        // What the console needs to tell the RD their thresholds are now stale: the channel GridFPV
+        // had this node on, and whether GridFPV holds levels for it at all. Read BEFORE the record
+        // is updated — afterwards "previous" is gone.
+        let previous_mhz = timer
+            .node_channels
+            .iter()
+            .find(|c| c.node == request.node)
+            .map(|c| c.mhz);
+        let has_thresholds = timer
+            .calibration
+            .iter()
+            .any(|c| c.node == request.node && (c.enter_at.is_some() || c.exit_at.is_some()));
+        let thresholds_tuned_on_another_channel =
+            has_thresholds && previous_mhz != Some(request.mhz);
+
+        // D27: record GridFPV's value first — the store, not the timer, is where this lives.
+        match timer
+            .node_channels
+            .iter_mut()
+            .find(|c| c.node == request.node)
+        {
+            Some(existing) => {
+                existing.mhz = request.mhz;
+                existing.band = band.clone();
+                existing.channel = channel.clone();
+            }
+            None => {
+                timer.node_channels.push(NodeChannel {
+                    node: request.node,
+                    mhz: request.mhz,
+                    band: band.clone(),
+                    channel: channel.clone(),
+                });
+                timer.node_channels.sort_by_key(|c| c.node);
+            }
+        }
+
+        // Then queue the *application* of it, coalesced per (timer, node): a dropdown changed twice
+        // before a drain tunes the node once, to the latest value.
+        match reg
+            .channel_requests
+            .iter_mut()
+            .find(|p| &p.timer == id && p.node == request.node)
+        {
+            Some(pending) => {
+                pending.mhz = request.mhz;
+                pending.band = band.clone();
+                pending.channel = channel.clone();
+                pending.during_open_practice = during_open_practice;
+            }
+            None => reg.channel_requests.push(PendingChannel {
+                timer: id.clone(),
+                node: request.node,
+                mhz: request.mhz,
+                band: band.clone(),
+                channel: channel.clone(),
+                during_open_practice,
+            }),
+        }
+        reg.persist()?;
+
+        Ok(ChannelDispatch {
+            timer: id.clone(),
+            node: request.node,
+            mhz: request.mhz,
+            band,
+            channel,
+            previous_mhz,
+            thresholds_tuned_on_another_channel,
+        })
+    }
+
+    /// Take every pending channel write (#413), leaving the queue empty — the reconciler's drain,
+    /// and the twin of [`take_calibration_requests`](Self::take_calibration_requests).
+    ///
+    /// Handed out **exactly once**: with no live connection the write is dropped (and logged),
+    /// never re-queued — a node retuned minutes later on a reconnect would move a receiver nobody
+    /// asked to move. The RD sees that on the page as a channel that never comes back confirmed.
+    pub fn take_channel_requests(&self) -> Vec<PendingChannel> {
+        std::mem::take(&mut self.write().channel_requests)
+    }
+
+    /// The per-node channels GridFPV holds for `id` (#413, D27) — its own record, never a readback.
+    /// Empty for an unknown timer.
+    pub fn node_channels(&self, id: &TimerId) -> Vec<NodeChannel> {
+        self.read()
+            .timers
+            .get(id)
+            .map(|t| t.node_channels.clone())
+            .unwrap_or_default()
     }
 
     /// The per-node thresholds GridFPV holds for `id` (#355, D27) — its own record, never a

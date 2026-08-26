@@ -34,6 +34,7 @@ import { fireEvent, waitFor } from '@testing-library/dom';
 import { tick } from 'svelte';
 import type {
   ChannelCatalogEntry,
+  ChannelDispatch,
   EventMeta,
   HeatSummary,
   LiveRaceState,
@@ -41,6 +42,7 @@ import type {
   Pilot,
   RoundDef,
   Timer,
+  TimerNodes,
   TimerSignal
 } from '@gridfpv/types';
 import TunePage from '../src/screens/TunePage.svelte';
@@ -50,7 +52,10 @@ import { makeTestSession } from './support.js';
 
 const CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R7', mhz: 5880 },
-  { band: 'Raceband', channel: 'R2', mhz: 5695 }
+  { band: 'Raceband', channel: 'R2', mhz: 5695 },
+  // Deliberately a channel that is in NEITHER the timer's `available_channels` pool nor on any
+  // node: the channel dropdown must offer it anyway, because the pool is not the option source.
+  { band: 'Fatshark', channel: 'F4', mhz: 5800 }
 ];
 
 const TIMER: Timer = {
@@ -169,9 +174,32 @@ const RUNNING: LiveRaceState = { current_heat: 'heat-1', phase: 'Running' };
 
 interface Harness {
   applyLevels: ReturnType<typeof vi.fn>;
+  applyChannel: ReturnType<typeof vi.fn>;
   fetchSignal: ReturnType<typeof vi.fn>;
   stopSignal: ReturnType<typeof vi.fn>;
   unmount: () => void;
+}
+
+/**
+ * The Director's node view (#412): both nodes exist and are enabled unless a test says otherwise.
+ *
+ * Supplied explicitly because the channel control **fails closed** without it — RotorHazard drops
+ * an out-of-range seat index with nothing but a log line, so a dropdown offered for a node that
+ * does not exist would produce a write that looks accepted and lands nowhere.
+ */
+function nodeView(enabled: number[] = [0, 1]): TimerNodes {
+  return {
+    timer: 'rh-1',
+    width: 2,
+    enabled,
+    nodes: [0, 1].map((node) => ({
+      node,
+      label: `Node ${node + 1}`,
+      seat: `node-${node}`,
+      enabled: enabled.includes(node),
+      reported: true
+    }))
+  };
 }
 
 /**
@@ -197,6 +225,15 @@ async function renderTune(
     role?: SessionRole;
     pollMs?: number;
     confirmMs?: number;
+    /** The Director's node view (#412); `null` models the read never landing (fails closed). */
+    nodes?: TimerNodes | null;
+    /** What the timer ends up tuned to after a channel write — default, exactly what it was sent. */
+    tunes?: (mhz: number) => number | undefined;
+    /** The Director's verdict on whether the node's thresholds are now stale. */
+    staleThresholds?: boolean;
+    channelRejects?: Error;
+    /** Override the timer under test (its capability / channel pool). */
+    timer?: Timer;
   } = {}
 ): Promise<Harness> {
   const feed: TimerSignal = opts.signal ?? snapshot();
@@ -213,6 +250,20 @@ async function renderTune(
     }
   });
   const stopSignal = vi.fn(async () => {});
+  // The channel write behaves like the real one: the Director answers with a DISPATCH, and the
+  // channel itself only reappears on a later poll (RotorHazard's heartbeat carries it).
+  const applyChannel = vi.fn(async (_timer: string, body: { node: number; mhz: number }) => {
+    if (opts.channelRejects) throw opts.channelRejects;
+    const took = opts.tunes ? opts.tunes(body.mhz) : body.mhz;
+    const target = feed.nodes.find((n) => n.node === body.node);
+    if (target && took !== undefined) target.frequency_mhz = took;
+    return {
+      timer: 'rh-1',
+      node: body.node,
+      mhz: body.mhz,
+      thresholds_tuned_on_another_channel: opts.staleThresholds ?? false
+    } satisfies ChannelDispatch;
+  });
 
   const { session } = makeTestSession({
     live: opts.live,
@@ -223,13 +274,19 @@ async function renderTune(
     listHeatsImpl: async () => opts.heats ?? []
   });
 
+  const view = opts.nodes === undefined ? nodeView() : opts.nodes;
   const { unmount } = render(TunePage, {
     session,
-    timer: TIMER,
+    timer: opts.timer ?? TIMER,
     onhome: () => {},
     ontimers: () => {},
     fetchSignal,
     applyLevels,
+    applyChannel,
+    fetchNodes: async () => {
+      if (view === null) throw new Error('the node view is unavailable');
+      return view;
+    },
     stopSignal,
     pollMs: opts.pollMs ?? 10 * 60 * 1000,
     confirmMs: opts.confirmMs ?? 150
@@ -237,7 +294,7 @@ async function renderTune(
 
   // Wait for the first snapshot to seed the per-(node, threshold) state.
   await screen.findByLabelText('Enter at level for Node 1 · Raceband R7');
-  return { applyLevels, fetchSignal, stopSignal, unmount };
+  return { applyLevels, applyChannel, fetchSignal, stopSignal, unmount };
 }
 
 const box = (node = 1, th = 'Enter at') =>
@@ -885,6 +942,225 @@ describe('TunePage — layout', () => {
     expect(after.dataset.layout).toBe('stacked');
     // Same nodes, same sections — a class, not a second component.
     expect(after.querySelectorAll('section').length).toBe(before);
+    h.unmount();
+  });
+});
+
+describe('TunePage — the channel is settable, not just shown (#413)', () => {
+  /** The channel dropdown for a node, by the node's friendly name (CLAUDE.md). */
+  const channelSelect = (name = 'Node 1 · Raceband R7') =>
+    screen.getByLabelText(`Channel for ${name}`) as HTMLSelectElement;
+
+  it('offers the WHOLE catalog on a Flexible timer, not the timer\u2019s channel pool', async () => {
+    // The trap #413 was filed with a warning about. Both real RotorHazard timers on the bench
+    // report `Flexible` with an EMPTY `available_channels` — which means "no restriction", not "no
+    // channels" — so a dropdown bound to the pool renders empty on exactly the timer this is for.
+    // Here the pool is [5880, 5695] and the catalog also holds 5800: the dropdown must offer all
+    // three, and the extra one proves the source is the capability rather than the pool.
+    const h = await renderTune();
+    const labels = [...channelSelect().options].map((o) => o.textContent?.trim());
+    expect(labels).toEqual(['Raceband R7', 'Raceband R2', 'Fatshark F4']);
+    h.unmount();
+  });
+
+  it('still offers the full catalog when the pool is empty — the bench case exactly', async () => {
+    const h = await renderTune({ timer: { ...TIMER, available_channels: [] } });
+    expect(channelSelect().options).toHaveLength(CATALOG.length);
+    h.unmount();
+  });
+
+  it("adds the RD's custom raw-MHz channels alongside the catalog", async () => {
+    // The one thing `available_channels` legitimately contributes: the custom entries the RD typed
+    // into the timer's channel config, which they asked to see beside the catalog.
+    const h = await renderTune({
+      timer: { ...TIMER, available_channels: [5880, 5891] }
+    });
+    const labels = [...channelSelect().options].map((o) => o.textContent?.trim());
+    expect(labels).toContain('5891 MHz');
+    // …after the catalog, not instead of it.
+    expect(labels.slice(0, CATALOG.length)).toEqual(['Raceband R7', 'Raceband R2', 'Fatshark F4']);
+    h.unmount();
+  });
+
+  it('limits a Fixed timer to the channels it declares', async () => {
+    const h = await renderTune({
+      timer: { ...TIMER, channel_capability: { Fixed: { channels: [5880, 5695] } } }
+    });
+    expect([...channelSelect().options].map((o) => o.textContent?.trim())).toEqual([
+      'Raceband R7',
+      'Raceband R2'
+    ]);
+    h.unmount();
+  });
+
+  it('sends the BAND AND CHANNEL, not just the frequency', async () => {
+    // RotorHazard's `on_set_frequency` stores band/channel on its active profile, and the RD
+    // validates this work by refreshing RotorHazard's own page — where a bare number with no `R7`
+    // beside it reads as "it half worked".
+    const h = await renderTune();
+    await fireEvent.change(channelSelect(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+    expect(h.applyChannel).toHaveBeenCalledWith('rh-1', {
+      node: 0,
+      mhz: 5800,
+      band: 'Fatshark',
+      channel: 'F4'
+    });
+    h.unmount();
+  });
+
+  it('shows the channel as `Sending…` until a POLL brings it back', async () => {
+    // Same rule as a threshold: `POST /channel` only says "accepted". The channel comes back on the
+    // heartbeat, so the feed the page is already polling is the confirmation.
+    const h = await renderTune({ pollMs: 20 });
+    await fireEvent.change(channelSelect(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalled());
+    // The node's own name follows the channel it is now on, so it is addressed by the new one.
+    await waitFor(() =>
+      expect(within(screen.getByTestId('channel-0')).getByText('On timer')).toBeInTheDocument()
+    );
+    h.unmount();
+  });
+
+  it('says NOT TAKEN when the timer never comes back on the new channel', async () => {
+    // The #403 failure class: a write that reports dispatched and never lands. Silence here would
+    // leave the RD tuning a gate that is on a different channel from the one on screen.
+    const h = await renderTune({ pollMs: 20, confirmMs: 40, tunes: () => undefined });
+    await fireEvent.change(channelSelect(), { target: { value: '5800' } });
+    await waitFor(() =>
+      expect(within(screen.getByTestId('channel-0')).getByText('Not taken')).toBeInTheDocument()
+    );
+    h.unmount();
+  });
+
+  it('says the thresholds were tuned on a different channel, factually', async () => {
+    // `on_set_frequency` writes the frequency into the SAME profile row that holds the thresholds,
+    // so they came through the change untouched — tuned for the channel the node just left. Nothing
+    // else announces that: the levels look unchanged and therefore fine.
+    const h = await renderTune({ staleThresholds: true });
+    await fireEvent.change(channelSelect(), { target: { value: '5800' } });
+    const note = await screen.findByTestId('channel-stale-0');
+    expect(note.textContent).toContain('Raceband R7');
+    expect(note.textContent).toContain('Fatshark F4');
+    // Factual, not alarming — and never a bare frequency (CLAUDE.md).
+    expect(note.textContent).not.toMatch(/wrong|broken|error/i);
+    expect(note.textContent).not.toMatch(/\b5880\b/);
+    h.unmount();
+  });
+
+  it('says nothing about stale thresholds when the Director says there are none', async () => {
+    const h = await renderTune({ staleThresholds: false });
+    await fireEvent.change(channelSelect(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalled());
+    expect(screen.queryByTestId('channel-stale-0')).toBeNull();
+    h.unmount();
+  });
+
+  it('flags two nodes on one channel — but does not block it', async () => {
+    // A real mistake worth flagging, and also exactly what a bench swap looks like halfway through.
+    const h = await renderTune();
+    // Node 1 (index 0) is on R7; move node 2 (index 1) onto R7 as well.
+    await fireEvent.change(screen.getByLabelText('Channel for Node 2 · Raceband R2'), {
+      target: { value: '5880' }
+    });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+    const note = await screen.findByTestId('channel-clash-1');
+    // Named the way the RD names them — 1-based, never a raw index.
+    expect(note.textContent).toContain('Node 1');
+    // The write went through regardless: flagged, not refused.
+    expect(h.applyChannel).toHaveBeenCalledWith(
+      'rh-1',
+      expect.objectContaining({ node: 1, mhz: 5880 })
+    );
+    h.unmount();
+  });
+
+  it('states that a heat will overwrite the channel, rather than trying to win', async () => {
+    // Channel here is a bench setting; heat setup legitimately reassigns. An RD who tunes node 1 to
+    // R7 and then starts a heat must not be surprised.
+    const h = await renderTune();
+    const panel = screen.getByTestId('channel-0');
+    expect(panel.textContent).toMatch(/bench setting/i);
+    expect(panel.textContent).toMatch(/heat/i);
+    h.unmount();
+  });
+
+  it('never offers a channel for a node the RD has DISABLED', async () => {
+    // #412: RotorHazard validates `0 <= node < num_nodes` and otherwise writes nothing but a log
+    // line, and a disabled node seats no pilot — so the RD is never offered the choice.
+    const h = await renderTune({ nodes: nodeView([0]) });
+    expect(screen.getByLabelText('Channel for Node 1 · Raceband R7')).toBeInTheDocument();
+    expect(screen.queryByTestId('channel-1')).toBeNull();
+    h.unmount();
+  });
+
+  it('says why rather than silently omitting the dropdown on a channel-less node', async () => {
+    // The node exists and is enabled, but the timer has not said what it is tuned to. A dropdown
+    // resting on a fabricated default is one the RD can change away from without ever having seen
+    // the real one — so there is none, and the gap is explained rather than left blank.
+    const feed = snapshot();
+    feed.nodes[0].frequency_mhz = undefined;
+    const h = await renderTune({ signal: feed });
+    expect(screen.queryByTestId('channel-0')).toBeNull();
+    expect(screen.getByTestId('channel-waiting-0').textContent).toMatch(/not reported a channel/i);
+    h.unmount();
+  });
+
+  it('offers no channel at all until the Director says which nodes exist', async () => {
+    // Fails closed. Better a control that appears a beat late than one that offers a gate the
+    // hardware does not have.
+    const h = await renderTune({ nodes: null });
+    expect(screen.queryByTestId('channel-0')).toBeNull();
+    expect(screen.queryByTestId('channel-1')).toBeNull();
+    h.unmount();
+  });
+
+  it('refuses a channel change while a COMPETITION heat is running', async () => {
+    const h = await renderTune({
+      live: RUNNING,
+      event: eventWith([QUAL_ROUND]),
+      heats: heatOn(QUAL_ROUND)
+    });
+    expect(channelSelect()).toBeDisabled();
+    // And the page says why, in the words of what a retune actually does.
+    const banner = await screen.findByTestId('channel-gate');
+    expect(banner.textContent).toMatch(/channel/i);
+    expect(h.applyChannel).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('ALLOWS a channel change during open practice', async () => {
+    // #398: practice is excluded from scoring, and pilots in the air is exactly when an RD is
+    // checking whether the gate is even on the right channel.
+    const h = await renderTune({
+      live: RUNNING,
+      event: eventWith([PRACTICE_ROUND]),
+      heats: heatOn(PRACTICE_ROUND)
+    });
+    expect(channelSelect()).not.toBeDisabled();
+    await fireEvent.change(channelSelect(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+    h.unmount();
+  });
+
+  it('disables the dropdown for a read-only session', async () => {
+    const h = await renderTune({ role: 'readonly' });
+    expect(channelSelect()).toBeDisabled();
+    h.unmount();
+  });
+
+  it('surfaces the Director\u2019s refusal verbatim on the node', async () => {
+    // The Director's message already names the timer, the node and the channel by their friendly
+    // names; replacing it with a status code would put a raw id or a bare number on screen.
+    const h = await renderTune({
+      channelRejects: new Error('Node 3 is disabled on "Track RH" — enable it first')
+    });
+    await fireEvent.change(channelSelect(), { target: { value: '5800' } });
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('channel-0')).getByText(/Node 3 is disabled/)
+      ).toBeInTheDocument()
+    );
     h.unmount();
   });
 });

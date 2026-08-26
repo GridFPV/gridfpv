@@ -2038,6 +2038,7 @@ mod tests {
             plugin: None,
             manual_connect: false,
             calibration: Vec::new(),
+            node_channels: Vec::new(),
         }
     }
 

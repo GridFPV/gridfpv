@@ -1663,15 +1663,36 @@ impl RotorHazardConnection {
         self.client.emit("simulate_lap", json!({ "node": node }))
     }
 
-    /// **Tune** `node` (0-based) to `frequency` MHz (race redesign Slice 4a) — the engine allocates
-    /// the channel, the adapter applies it (RE §7.3). Emits RotorHazard's `set_frequency` handler
-    /// (`{ node, frequency }`); the server retunes that node's receiver. Best-effort: a failed emit
-    /// on a dropped socket surfaces as an `Err` the caller logs.
-    pub fn set_frequency(&self, node: u64, frequency: u16) -> Result<(), rust_socketio::Error> {
-        self.client.emit(
-            "set_frequency",
-            json!({ "node": node, "frequency": frequency }),
-        )
+    /// **Tune** `node` (0-based) to `frequency` MHz (race redesign Slice 4a; #413) — the engine
+    /// allocates the channel, the adapter applies it (RE §7.3). Emits RotorHazard's `set_frequency`
+    /// handler; the server retunes that node's receiver. Best-effort: a failed emit on a dropped
+    /// socket surfaces as an `Err` the caller logs.
+    ///
+    /// ## `label` is not decoration — it is half the write
+    ///
+    /// `on_set_frequency` accepts `{ node, frequency, band?, channel? }` (`server.py`) and stores
+    /// the band/channel pair on the **active profile** when it is given. Emitting the frequency
+    /// alone leaves RotorHazard's own UI showing a bare number where its channel label goes, and an
+    /// RD who validates a channel change by refreshing that page reads an unlabelled frequency as
+    /// *"it half worked"*. So a caller that knows the catalog entry — the Tune page's channel write
+    /// does (#413) — passes `Some(("Raceband", "R7"))`, and the two keys are simply **omitted**
+    /// (rather than sent as nulls) when it does not: RotorHazard leaves whatever label it had in
+    /// place, which is better than overwriting it with an empty string.
+    ///
+    /// The frequency is still the authoritative half. `label` never changes what the receiver tunes
+    /// to; it only decides what RotorHazard's screen calls it.
+    pub fn set_frequency(
+        &self,
+        node: u64,
+        frequency: u16,
+        label: Option<(&str, &str)>,
+    ) -> Result<(), rust_socketio::Error> {
+        let mut payload = json!({ "node": node, "frequency": frequency });
+        if let (Some((band, channel)), Some(map)) = (label, payload.as_object_mut()) {
+            map.insert("band".into(), json!(band));
+            map.insert("channel".into(), json!(channel));
+        }
+        self.client.emit("set_frequency", payload)
     }
 
     /// **Set node `node`'s enter threshold** to `level` (#355) — the calibration write.

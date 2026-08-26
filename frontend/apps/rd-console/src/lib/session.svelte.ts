@@ -51,6 +51,8 @@ import {
   disconnectTimer,
   restartTimer,
   setCalibration,
+  setNodeChannel,
+  timerNodes,
   timerSignal,
   stopTimerSignal,
   setEventTimers,
@@ -86,7 +88,9 @@ import type {
   ProtocolClient,
   ProtocolState,
   ConnectionStatus,
-  CalibrationRequest
+  CalibrationRequest,
+  ChannelDispatch,
+  ChannelRequest
 } from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
@@ -126,6 +130,7 @@ import type {
   SignalTraceView,
   Timer,
   TimerId,
+  TimerNodes,
   TimerSignal,
   UpdateClassRequest,
   UpdatePilotRequest,
@@ -372,6 +377,8 @@ export class Session {
   #disconnectTimerImpl: typeof disconnectTimer;
   #restartTimerImpl: typeof restartTimer;
   #setCalibrationImpl: typeof setCalibration;
+  #setNodeChannelImpl: typeof setNodeChannel;
+  #timerNodesImpl: typeof timerNodes;
   #timerSignalImpl: typeof timerSignal;
   #stopTimerSignalImpl: typeof stopTimerSignal;
   #setEventTimersImpl: typeof setEventTimers;
@@ -418,6 +425,8 @@ export class Session {
     disconnectTimerImpl?: typeof disconnectTimer;
     restartTimerImpl?: typeof restartTimer;
     setCalibrationImpl?: typeof setCalibration;
+    setNodeChannelImpl?: typeof setNodeChannel;
+    timerNodesImpl?: typeof timerNodes;
     timerSignalImpl?: typeof timerSignal;
     stopTimerSignalImpl?: typeof stopTimerSignal;
     setEventTimersImpl?: typeof setEventTimers;
@@ -465,6 +474,8 @@ export class Session {
     this.#disconnectTimerImpl = opts?.disconnectTimerImpl ?? disconnectTimer;
     this.#restartTimerImpl = opts?.restartTimerImpl ?? restartTimer;
     this.#setCalibrationImpl = opts?.setCalibrationImpl ?? setCalibration;
+    this.#setNodeChannelImpl = opts?.setNodeChannelImpl ?? setNodeChannel;
+    this.#timerNodesImpl = opts?.timerNodesImpl ?? timerNodes;
     this.#timerSignalImpl = opts?.timerSignalImpl ?? timerSignal;
     this.#stopTimerSignalImpl = opts?.stopTimerSignalImpl ?? stopTimerSignal;
     this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
@@ -776,6 +787,37 @@ export class Session {
     return this.#privilegedWrite((token) =>
       this.#setCalibrationImpl(this.baseUrl, id, request, token)
     );
+  }
+
+  /**
+   * Set a timer node's **channel** (`POST /timers/{id}/channel`, #413) — the Tune page's other
+   * write. Resolves with the Director's `ChannelDispatch` when it **accepted** the change,
+   * `undefined` on a cancelled token prompt, or throws on any other failure (a Mock, a disconnected
+   * timer, a scored heat running on it, a disabled or non-existent node, a channel a Fixed timer
+   * cannot tune to — each message already phrased for the RD, so the caller surfaces it verbatim).
+   *
+   * Accepted is not applied: the page confirms by watching `NodeSignal.frequency_mhz` come back on
+   * the signal feed it is already polling. The dispatch is still worth reading for the one thing
+   * the page cannot know on its own — whether the node's stored thresholds were tuned on a
+   * different channel.
+   */
+  setNodeChannel(id: TimerId, request: ChannelRequest): Promise<ChannelDispatch | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#setNodeChannelImpl(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * Read a timer's **node set** (`GET /timers/{id}/nodes`, #412) — the effective width, every
+   * node's 1-based label and enabled flag, and any reported-vs-configured drift.
+   *
+   * The shared answer to "which gates exist, and which may be used?". A surface that re-derives it
+   * from `Timer.node_count` / `disabled_nodes` is one off-by-one away from offering a node the
+   * hardware does not have — which, for a channel or a threshold write, RotorHazard would accept
+   * and silently drop.
+   */
+  timerNodes(id: TimerId): Promise<TimerNodes> {
+    return this.#timerNodesImpl(this.baseUrl, id, { token: this.#token });
   }
 
   /**
