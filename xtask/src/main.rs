@@ -144,6 +144,126 @@ fn gen_check() -> bool {
     clean
 }
 
+/// The frontend barrel that must re-export **every** generated binding (#410).
+const BARREL: &str = "frontend/packages/types/src/generated.ts";
+
+/// The one line shape the barrel re-exports a binding with.
+const BARREL_PREFIX: &str = "export type * from '@bindings/";
+
+/// The binding name one barrel line re-exports, if it is such a line.
+///
+/// Presence, not order: the barrel carries one deliberate out-of-alphabetical entry
+/// (`VoidReason`, parked beside `LapList`), and the doc comment above the list mentions
+/// `@bindings/*` — neither is a re-export, and neither is this check's business.
+fn barrel_export(line: &str) -> Option<&str> {
+    line.trim()
+        .strip_prefix(BARREL_PREFIX)?
+        .strip_suffix("';")
+        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+}
+
+/// `(missing, stale)`: generated bindings with no re-export line, and re-export lines
+/// naming a binding that no longer exists. Pure, so it is unit-testable with no filesystem.
+fn barrel_gaps(bindings: &[String], barrel_src: &str) -> (Vec<String>, Vec<String>) {
+    let exported: Vec<&str> = barrel_src.lines().filter_map(barrel_export).collect();
+    let missing = bindings
+        .iter()
+        .filter(|name| !exported.contains(&name.as_str()))
+        .cloned()
+        .collect();
+    let stale = exported
+        .iter()
+        .filter(|name| !bindings.iter().any(|b| b == *name))
+        .map(|name| (*name).to_string())
+        .collect();
+    (missing, stale)
+}
+
+/// Every `bindings/*.ts` type name, sorted.
+fn binding_names(root: &Path) -> Result<Vec<String>, String> {
+    let dir = root.join("bindings");
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("ts") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.push(stem.to_string());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// **Barrel completeness check** for `ci` (#410) — every generated binding is reachable
+/// from `@gridfpv/types`.
+///
+/// The twin of [`gen_check`], one layer out: `gen_check` keeps `bindings/*.ts` honest with
+/// the Rust types, and this keeps the frontend's single import seam honest with
+/// `bindings/`. A type that is generated but never re-exported is not importable from
+/// `@gridfpv/types` at all — which is the hole `TimerSignal` / `NodeSignal` fell through in
+/// #410: the Tune page could not import the real wire type even if it wanted to, so it
+/// hand-declared one instead, and every gate passed on the fabrication.
+///
+/// Costs a directory listing and one file read — no cargo, no node, no network.
+fn barrel_check() -> bool {
+    let root = workspace_root();
+    println!("\n\x1b[1m$ barrel check ({BARREL} vs bindings/)\x1b[0m");
+    let bindings = match binding_names(&root) {
+        Ok(names) => names,
+        Err(err) => {
+            eprintln!("barrel: cannot read bindings/ — {err}");
+            return false;
+        }
+    };
+    let barrel_path = root.join(BARREL);
+    let src = match std::fs::read_to_string(&barrel_path) {
+        Ok(src) => src,
+        Err(err) => {
+            eprintln!("barrel: cannot read {} — {err}", barrel_path.display());
+            return false;
+        }
+    };
+    let (missing, stale) = barrel_gaps(&bindings, &src);
+    if missing.is_empty() && stale.is_empty() {
+        println!(
+            "barrel: {} generated bindings, all re-exported from {BARREL}",
+            bindings.len()
+        );
+        return true;
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "\n\x1b[31mbarrel gap: {} generated binding(s) are NOT re-exported from \
+             {BARREL}.\x1b[0m\n\
+             They are not importable from `@gridfpv/types`, which is how a hand-declared (and \
+             wrong) copy of a wire type gets written instead — #410.\n\
+             Add one line per name:\n{}",
+            missing.len(),
+            missing
+                .iter()
+                .map(|name| format!("  {BARREL_PREFIX}{name}';"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    if !stale.is_empty() {
+        eprintln!(
+            "\n\x1b[31mbarrel gap: {} re-export(s) name a binding that no longer \
+             exists.\x1b[0m\n\
+             Delete these lines from {BARREL}:\n{}",
+            stale.len(),
+            stale
+                .iter()
+                .map(|name| format!("  {BARREL_PREFIX}{name}';"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    false
+}
+
 /// A live target: `(package, test binary, is `#[ignore]`d)`.
 type LiveTarget = (&'static str, &'static str, bool);
 
@@ -540,7 +660,10 @@ fn main() {
         "lint" | "clippy" => lint(),
         "test" => test(),
         "gen" => generate(),
-        "ci" => fmt() && lint() && test() && gen_check(),
+        // Every `bindings/*.ts` is re-exported from the frontend's `@gridfpv/types` barrel
+        // (#410) — the twin of `gen_check`, one layer out. See [`barrel_check`].
+        "barrel" => barrel_check(),
+        "ci" => fmt() && lint() && test() && gen_check() && barrel_check(),
         // The RotorHazard version × plugin live matrix; bare `live` runs all four legs.
         "live" => live(&args[1..]),
         // The interactive RotorHazard mock-signal harness (marshaling testing). Needs Docker to
@@ -554,11 +677,93 @@ fn main() {
         "version" => version(&args[1..]),
         other => {
             eprintln!("unknown task: {other}");
-            eprintln!("usage: cargo xtask [ci|fmt|lint|test|gen|live|rh-mock|race-day|version]");
+            eprintln!(
+                "usage: cargo xtask [ci|fmt|lint|test|gen|barrel|live|rh-mock|race-day|version]"
+            );
             false
         }
     };
     if !ok {
         exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The barrel as it really looks: a doc comment that mentions `@bindings/*`, then one
+    /// re-export line per generated type.
+    const BARREL_SRC: &str = "/**\n * The alias is `@bindings/* → ../../../bindings/*`.\n */\n\
+         export type * from '@bindings/LapList';\n\
+         export type * from '@bindings/VoidReason';\n\
+         export type * from '@bindings/TimerSignal';\n";
+
+    #[test]
+    fn barrel_gaps_is_clean_when_every_binding_is_re_exported() {
+        let bindings = names(&["LapList", "TimerSignal", "VoidReason"]);
+        let (missing, stale) = barrel_gaps(&bindings, BARREL_SRC);
+        assert!(missing.is_empty(), "unexpected missing: {missing:?}");
+        assert!(stale.is_empty(), "unexpected stale: {stale:?}");
+    }
+
+    /// The #410 case itself: a binding was generated and nobody added its export line.
+    #[test]
+    fn barrel_gaps_reports_a_generated_binding_that_is_never_re_exported() {
+        let bindings = names(&["LapList", "NodeSignal", "TimerSignal", "VoidReason"]);
+        let (missing, stale) = barrel_gaps(&bindings, BARREL_SRC);
+        assert_eq!(missing, names(&["NodeSignal"]));
+        assert!(stale.is_empty(), "unexpected stale: {stale:?}");
+    }
+
+    /// The other direction: a type was deleted from Rust and its export line lingered.
+    #[test]
+    fn barrel_gaps_reports_a_re_export_with_no_binding_behind_it() {
+        let bindings = names(&["LapList", "VoidReason"]);
+        let (missing, stale) = barrel_gaps(&bindings, BARREL_SRC);
+        assert!(missing.is_empty(), "unexpected missing: {missing:?}");
+        assert_eq!(stale, names(&["TimerSignal"]));
+    }
+
+    /// Presence, not order — `VoidReason` sits out of alphabetical order on purpose, and the
+    /// `@bindings/*` mention in the doc comment is not a re-export.
+    #[test]
+    fn barrel_export_reads_lines_not_ordering() {
+        assert_eq!(
+            barrel_export("export type * from '@bindings/Cursor';"),
+            Some("Cursor")
+        );
+        assert_eq!(
+            barrel_export("  export type * from '@bindings/Cursor';  "),
+            Some("Cursor")
+        );
+        assert_eq!(
+            barrel_export(" * The alias is `@bindings/* → ../../../bindings/*`."),
+            None
+        );
+        assert_eq!(
+            barrel_export("export type { Cursor } from '@bindings/Cursor';"),
+            None
+        );
+        assert_eq!(barrel_export(""), None);
+    }
+
+    /// The real repo, checked from the test suite as well as from `ci`: every checked-in
+    /// binding is re-exported, and the barrel names nothing that does not exist.
+    #[test]
+    fn the_checked_in_barrel_covers_every_checked_in_binding() {
+        let root = workspace_root();
+        let bindings = binding_names(&root).expect("bindings/ is readable");
+        assert!(!bindings.is_empty(), "bindings/ should not be empty");
+        let src = std::fs::read_to_string(root.join(BARREL)).expect("the barrel is readable");
+        let (missing, stale) = barrel_gaps(&bindings, &src);
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "barrel gap — missing: {missing:?}, stale: {stale:?}"
+        );
     }
 }
