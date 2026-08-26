@@ -613,8 +613,11 @@ describe('TunePage — names (CLAUDE.md)', () => {
     expect(screen.getByRole('heading', { name: 'Node 2 · Raceband R2' })).toBeInTheDocument();
     expect(screen.queryByText(/node-0/)).toBeNull();
     expect(screen.queryByText(/node-1/)).toBeNull();
-    expect(screen.queryByText(/5880/)).toBeNull();
-    expect(screen.queryByText(/5695/)).toBeNull();
+    // A frequency may appear in the channel PICKER — see below — but never as a heading, where it
+    // would be the raw handle standing in for the name.
+    for (const heading of screen.getAllByRole('heading')) {
+      expect(heading.textContent ?? '').not.toMatch(/\b5\d{3}\b/);
+    }
     h.unmount();
   });
 
@@ -959,7 +962,7 @@ describe('TunePage — the channel is settable, not just shown (#413)', () => {
     // three, and the extra one proves the source is the capability rather than the pool.
     const h = await renderTune();
     const labels = [...channelSelect().options].map((o) => o.textContent?.trim());
-    expect(labels).toEqual(['Raceband R7', 'Raceband R2', 'Fatshark F4']);
+    expect(labels).toEqual(['Raceband R7 — 5880', 'Raceband R2 — 5695', 'Fatshark F4 — 5800']);
     h.unmount();
   });
 
@@ -976,9 +979,15 @@ describe('TunePage — the channel is settable, not just shown (#413)', () => {
       timer: { ...TIMER, available_channels: [5880, 5891] }
     });
     const labels = [...channelSelect().options].map((o) => o.textContent?.trim());
-    expect(labels).toContain('5891 MHz');
+    // A frequency the catalog does not know is marked as such — the RD can see at a glance that it
+    // is theirs, not a standard channel.
+    expect(labels).toContain('Custom — 5891');
     // …after the catalog, not instead of it.
-    expect(labels.slice(0, CATALOG.length)).toEqual(['Raceband R7', 'Raceband R2', 'Fatshark F4']);
+    expect(labels.slice(0, CATALOG.length)).toEqual([
+      'Raceband R7 — 5880',
+      'Raceband R2 — 5695',
+      'Fatshark F4 — 5800'
+    ]);
     h.unmount();
   });
 
@@ -987,8 +996,8 @@ describe('TunePage — the channel is settable, not just shown (#413)', () => {
       timer: { ...TIMER, channel_capability: { Fixed: { channels: [5880, 5695] } } }
     });
     expect([...channelSelect().options].map((o) => o.textContent?.trim())).toEqual([
-      'Raceband R7',
-      'Raceband R2'
+      'Raceband R7 — 5880',
+      'Raceband R2 — 5695'
     ]);
     h.unmount();
   });
@@ -1161,6 +1170,18 @@ describe('TunePage — the channel is settable, not just shown (#413)', () => {
         within(screen.getByTestId('channel-0')).getByText(/Node 3 is disabled/)
       ).toBeInTheDocument()
     );
+    h.unmount();
+  });
+
+  it('shows band, channel AND frequency in the channel picker, and marks a custom one', async () => {
+    // The RD picks a channel by matching it against a VTX, a printed sheet, or RotorHazard's own
+    // screen — and those speak in MHz. Here the number is EXTRA information beside the friendly
+    // name, never a substitute for it, so the band and channel still lead.
+    const h = await renderTune();
+    const select = await screen.findByLabelText('Channel for Node 1 · Raceband R7');
+    const labels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent?.trim());
+    expect(labels).toContain('Raceband R7 — 5880');
+    expect(labels).toContain('Raceband R2 — 5695');
     h.unmount();
   });
 });

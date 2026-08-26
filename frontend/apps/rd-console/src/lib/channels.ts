@@ -46,6 +46,36 @@ export function channelLabel(mhz: number, catalog: ChannelCatalogEntry[]): strin
   return hit ? `${hit.band} ${hit.channel}` : `${mhz} MHz`;
 }
 
+/**
+ * The label for a channel **inside a picker**, where the frequency itself is wanted:
+ * `"Raceband R7 — 5880"`, or `"Custom — 5891"` for a frequency that is not in the catalog.
+ *
+ * Deliberately different from {@link channelLabel}, which is the label for a channel being
+ * *reported* — a heading, a seat, a summary — where a bare number would be the raw handle standing
+ * in for the name the display rule exists to prevent.
+ *
+ * Choosing is the opposite situation. An RD picking a channel is matching it against a VTX, a
+ * printed sheet, or RotorHazard's own screen, and those speak in MHz. Here the number is *extra*
+ * information sitting beside the friendly name, never a substitute for it — which is why the band
+ * and channel still lead.
+ */
+export function channelOptionLabel(mhz: number, catalog: ChannelCatalogEntry[]): string {
+  const hit = catalog.find((e) => e.mhz === mhz);
+  return hit ? entryOptionLabel(hit) : `Custom — ${mhz}`;
+}
+
+/**
+ * The picker label for a **known catalog entry** — used when the caller already has the entry it
+ * offered, which is the only way to keep bands apart at a **coincident frequency**.
+ *
+ * `HDZero R7` and `Raceband R7` are both 5880. Re-deriving the label from the number alone finds
+ * whichever the catalog lists first, silently relabelling the RD's choice as the other band. So an
+ * option built from an entry must be labelled from that entry.
+ */
+export function entryOptionLabel(entry: ChannelCatalogEntry): string {
+  return `${entry.band} ${entry.channel} — ${entry.mhz}`;
+}
+
 /** The catalog entry an MHz resolves to (the first match), or `undefined` for a custom/unknown one. */
 export function catalogEntryFor(
   mhz: number,

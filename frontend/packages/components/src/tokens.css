@@ -417,3 +417,18 @@
     --gf-motion-slow: 0ms;
   }
 }
+
+/* Native <option> popups are drawn by the OS, not by the page — so a select styled dark inherits
+   its TEXT color into the popup while the popup's own background stays the browser default white.
+   On the bench that read as white-on-white: unreadable except for the row under the cursor, which
+   the OS repaints with its own highlight colors.
+   Nothing in the app styled `option` at all, so this applied to every native select, not one
+   screen. Setting both halves explicitly is the fix, and it belongs here rather than per-component
+   so a new select cannot reintroduce it.
+   `:where()` keeps specificity at zero — any component that wants a different option look still
+   wins without an `!important`. */
+:where(.gridfpv-root, :root) select option,
+:where(.gridfpv-root, :root) select optgroup {
+  background-color: var(--gf-surface-2);
+  color: var(--gf-text);
+}

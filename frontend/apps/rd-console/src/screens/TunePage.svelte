@@ -402,6 +402,20 @@
   const streaming = $derived(feed.streaming);
 
   /**
+   * Whether the feed has **settled** — a snapshot has arrived AND the Director is being fed.
+   *
+   * The first `GET` on a fresh subscription legitimately answers `streaming: false` with an
+   * empty ring: it OPENS the lease, and RotorHazard has not pushed yet. `everLoaded` alone is
+   * true at that moment, so the page claimed "this node has not reported a channel yet" about
+   * a node that simply had not been asked about yet — and a manual refresh 'fixed' it, which is
+   * the tell. Until the feed settles the honest answer is that we are still reading.
+   *
+   * A genuinely disconnected timer is NOT left saying 'reading' forever: the no-link banner
+   * above owns that case and says so explicitly.
+   */
+  const settled = $derived(everLoaded && streaming);
+
+  /**
    * Set the one value. **Every** editor comes through here and nowhere else clamps — that is the
    * whole guarantee. Marks the threshold `Adjusting` and (re)arms the typing-idle write, so a value
    * typed and then left alone still reaches the timer.
@@ -1092,7 +1106,9 @@
                    No dropdown resting on a fabricated default: the RD would change away from a
                    channel they never actually saw. Saying so beats an unexplained gap. -->
               <p class="channel-waiting" data-testid={`channel-waiting-${node}`} role="status">
-                This node has not reported a channel yet.
+                {settled
+                  ? 'This node has not reported a channel yet.'
+                  : 'Reading this node’s channel…'}
               </p>
             {/if}
 
@@ -1181,7 +1197,7 @@
               </div>
             {:else}
               <p class="node-waiting" role="status">
-                {everLoaded
+                {settled
                   ? 'This node has not reported its thresholds yet.'
                   : 'Waiting for this node to report its levels…'}
               </p>

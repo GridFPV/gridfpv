@@ -49,7 +49,13 @@ import type {
   TimerSignal
 } from '@gridfpv/types';
 
-import { channelLabel, isCatalogChannel, offeredCatalog } from './channels.js';
+import {
+  channelLabel,
+  channelOptionLabel,
+  entryOptionLabel,
+  isCatalogChannel,
+  offeredCatalog
+} from './channels.js';
 
 // ── The value domain ────────────────────────────────────────────────────────────────────────────
 
@@ -556,7 +562,7 @@ export function channelOptions(
     mhz: entry.mhz,
     band: entry.band,
     channel: entry.channel,
-    label: `${entry.band} ${entry.channel}`,
+    label: entryOptionLabel(entry),
     custom: false
   }));
   // A Fixed timer offers its declared set and nothing else — a custom MHz it cannot tune to is not
@@ -576,7 +582,7 @@ export function channelOptions(
   for (const mhz of [...extras].sort((a, b) => a - b)) {
     options.push({
       mhz,
-      label: channelLabel(mhz, catalog),
+      label: channelOptionLabel(mhz, catalog),
       custom: !isCatalogChannel(mhz, catalog)
     });
   }

@@ -504,17 +504,21 @@ describe('channelOptions — the dropdown source is the CAPABILITY, never `avail
     expect(channelOptions(FIXED, FULL, [], 5905).some((o) => o.mhz === 5905)).toBe(false);
   });
 
-  it('labels every option by BAND AND CHANNEL, never as a bare frequency', () => {
-    // CLAUDE.md: the option `value` may stay the raw MHz, the visible label may not.
+  it('labels every option by band, channel AND frequency, and marks a custom one', () => {
+    // The option `value` stays the raw MHz (a wire handle). The visible label LEADS with the
+    // friendly name and carries the frequency after it: an RD choosing a channel is matching it
+    // against a VTX, a printed sheet, or RotorHazard's own screen, and those speak in MHz. The
+    // number is extra information beside the name, never a substitute for it — which is the line
+    // CLAUDE.md's display rule actually draws.
     const options = channelOptions(FLEXIBLE, FULL, [5891]);
-    expect(options[1].label).toBe('Raceband R7');
+    expect(options[1].label).toBe('Raceband R7 — 5880');
     // A coincident frequency keeps the band the RD picked, rather than collapsing to the first
     // catalog entry that happens to share the number.
-    expect(options[3].label).toBe('HDZero R7');
-    expect(options.every((o) => !/\d{4}/.test(o.label) || o.label.endsWith('MHz'))).toBe(true);
-    // A custom channel has no catalog name, so it is spelled as a measurement rather than a bare
-    // number standing in for a name.
-    expect(options.at(-1)?.label).toBe('5891 MHz');
+    expect(options[3].label).toBe('HDZero R7 — 5880');
+    // Every catalog option still leads with its name, never a bare number.
+    expect(options.every((o) => /^[A-Za-z]/.test(o.label))).toBe(true);
+    // A frequency the catalog does not know is marked as the RD's own.
+    expect(options.at(-1)?.label).toBe('Custom — 5891');
   });
 
   it('carries the band and channel of the picked entry, so the emit can label it on RotorHazard', () => {
