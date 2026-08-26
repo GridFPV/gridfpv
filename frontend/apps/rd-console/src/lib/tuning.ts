@@ -38,16 +38,7 @@
  * {@link RSSI_MAX} clamp them away at the only place a value can enter the state.
  */
 import type { CalibrationRequest } from '@gridfpv/protocol-client';
-import type {
-  ChannelCatalogEntry,
-  CompetitorTrace,
-  HeatPhase,
-  NodeSignal,
-  TimerId,
-  TimerSignal
-} from '@gridfpv/types';
-
-import { channelLabel } from './channels.js';
+import type { CompetitorTrace, HeatPhase, NodeSignal, TimerId, TimerSignal } from '@gridfpv/types';
 
 // ── The value domain ────────────────────────────────────────────────────────────────────────────
 
@@ -168,29 +159,10 @@ export type FetchSignal = (timer: TimerId, opts: { signal: AbortSignal }) => Pro
 export type StopSignal = (timer: TimerId) => Promise<void>;
 
 // ── Node identity + display ─────────────────────────────────────────────────────────────────────
-
-/**
- * The display label for one node seat: `Node 1 · Raceband R7`.
- *
- * The **channel half goes through `channels.ts`'s {@link channelLabel}** — a bare `5880` reaching
- * the screen is a rule violation (CLAUDE.md), and re-deriving band+channel here is how resolvers
- * drift. A node with no frequency yet (the timer has not reported one, or the seat is beyond the
- * configured pool) is just `Node 1` — the seat number is a position on the physical timer, not an
- * id standing in for a name, so it is the friendly name here.
- *
- * `frequency` should be the **live** heartbeat frequency when the snapshot carries one, falling
- * back to the registry's `available_channels[node]` — what the node is tuned to right now beats
- * what it was configured to.
- */
-export function nodeTuneLabel(
-  node: number,
-  frequency: number | undefined,
-  catalog: ChannelCatalogEntry[]
-): string {
-  const seat = `Node ${node + 1}`;
-  if (frequency === undefined) return seat;
-  return `${seat} · ${channelLabel(frequency, catalog)}`;
-}
+//
+// The seat's own name (`Node 1 · Raceband R7`) lives in `channels.ts` as `nodeSeatLabel` (#416):
+// Live control, the Rounds & Heats stage and this page all label the same seat, and three copies of
+// "node plus channel" is exactly the drift that put `node-6` on one screen and `Node 7` on another.
 
 /**
  * How many node columns to show for a timer: what the signal snapshot actually reports, falling

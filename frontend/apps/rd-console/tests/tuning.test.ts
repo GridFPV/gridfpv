@@ -15,7 +15,7 @@
  * that can drift from the wire is worse than no fixture, because it manufactures confidence.
  */
 import { describe, expect, it } from 'vitest';
-import type { ChannelCatalogEntry, NodeSignal, TimerSignal } from '@gridfpv/types';
+import type { NodeSignal, TimerSignal } from '@gridfpv/types';
 import {
   CONFIRM_TIMEOUT_MS,
   RSSI_MAX,
@@ -30,7 +30,6 @@ import {
   markSent,
   nodeCountOf,
   nodeTraceOf,
-  nodeTuneLabel,
   phaseLabel,
   phaseTone,
   plottable,
@@ -39,12 +38,6 @@ import {
   writeGate,
   type ThresholdState
 } from '../src/lib/tuning.js';
-
-const CATALOG: ChannelCatalogEntry[] = [
-  { band: 'Raceband', channel: 'R1', mhz: 5658 },
-  { band: 'Raceband', channel: 'R7', mhz: 5880 },
-  { band: 'Fatshark', channel: 'F4', mhz: 5800 }
-];
 
 /**
  * One node, defaulting to a node the timer HAS reported (`seen`). The three non-optional fields —
@@ -296,21 +289,6 @@ describe('phase presentation', () => {
     expect(phaseTone('mismatch')).toBe('danger');
     expect(phaseTone('failed')).toBe('danger');
     expect(phaseTone('refused')).toBe('warn');
-  });
-});
-
-describe('nodeTuneLabel — CLAUDE.md: never a bare frequency, never a raw seat', () => {
-  it('resolves the frequency to band + channel through channels.ts', () => {
-    expect(nodeTuneLabel(0, 5880, CATALOG)).toBe('Node 1 · Raceband R7');
-    expect(nodeTuneLabel(3, 5658, CATALOG)).toBe('Node 4 · Raceband R1');
-  });
-
-  it('is the 1-based seat alone when the node has no frequency yet', () => {
-    expect(nodeTuneLabel(0, undefined, CATALOG)).toBe('Node 1');
-  });
-
-  it('never renders a bare raw seat ref', () => {
-    expect(nodeTuneLabel(0, 5880, CATALOG)).not.toContain('node-0');
   });
 });
 

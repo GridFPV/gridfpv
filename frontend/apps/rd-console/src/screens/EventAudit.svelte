@@ -36,8 +36,7 @@
     type AuditRenderInputs
   } from '../lib/auditRender.js';
   import { consumeAuditPrefilter } from '../lib/auditFilter.svelte.js';
-  import { channelLabel } from '../lib/channels.js';
-  import { createCompetitorNameResolver } from '../lib/competitorName.js';
+  import { buildCompetitorNames } from '../lib/competitorName.js';
   import { heatNameById } from '../lib/heats.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -119,7 +118,6 @@
   // stream only carries the CURRENT heat's progress, so a FINISHED node-seeded heat's audit rows
   // rendered raw `node-0` (the Results pattern, friendly-names rule). The live current heat's
   // progress merges on top so a just-made Register resolves before its heat snapshot lands.
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
   $effect(() => {
     const ids = heats.map((h) => h.heat);
     if (ids.length > 0) void session.ensureHeatBindings(ids);
@@ -134,15 +132,18 @@
       if (p.pilot != null) map.set(p.competitor, p.pilot);
     return map;
   });
-  const channelByRef = $derived.by(() => {
-    const map = new Map<CompetitorRef, string>();
-    for (const h of heats)
-      for (const [ref, mhz] of h.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
-  });
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef })
+  // ONE assembly of the resolver inputs, shared with every other screen (#416).
+  const names = $derived(
+    buildCompetitorNames({
+      pilots,
+      bindings: explicitPilotByRef,
+      heats,
+      catalog,
+      timer: session.primaryTimer,
+      membership: session.currentEvent?.classes_membership
+    })
   );
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
   const heatName = (heat: HeatId): string =>
     heatNameById(heat, heats, session.currentEvent?.rounds ?? []);
 

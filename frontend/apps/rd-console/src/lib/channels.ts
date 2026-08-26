@@ -102,25 +102,49 @@ export function nodeIndexOf(ref: string): number | undefined {
 }
 
 /**
- * The display label for one open-practice node seat (`node-{i}`), resolved through the timer's
- * `available_channels` + the catalog:
+ * The channel a node seat is configured for **within a timer's channel pool**, or `undefined` when
+ * the pool says nothing about it.
  *
- * - a node whose seat has a configured channel → `"Raceband R1 · 5658"` (band + channel · MHz), or
- *   `"5800 MHz"` when the raw MHz isn't a catalog channel;
- * - a node with no configured channel (index ≥ the available pool) → `"Node {i}"`.
+ * # An empty pool is "unrestricted", not "none" (#413, #416)
  *
- * `availableChannels` is the timer's `available_channels` (raw MHz, in seat/node order). Shared by
- * the active-channels picker and the per-channel live board so both label a seat identically.
+ * `Timer.available_channels` is the set of channels the RD has *made available* on a timer. It is
+ * **empty on every Flexible timer** — measured on the bench, the Mock lists eight channels and both
+ * RotorHazard timers list none — and empty there means *"no restriction"*, not *"this timer has no
+ * channels"*. Indexing straight into it (`pool[node]`) reads that emptiness as data and answers
+ * `undefined` for every node of every real timer, which is how the seat label came to degrade to a
+ * bare `Node N` on all RotorHazard hardware.
+ *
+ * So this refuses to index an empty pool at all. The caller asks other sources first (what the node
+ * reports it is tuned to, what the heat assigned) and treats `undefined` as **unknown**.
  */
-export function nodeChannelLabel(
+export function poolChannel(node: number, pool: readonly number[] | undefined): number | undefined {
+  if (!pool || pool.length === 0) return undefined;
+  return pool[node];
+}
+
+/**
+ * The display label for one node seat: **node + channel**, which is the pair an RD actually needs.
+ *
+ * - a seat whose channel is known → `"Node 7 · Raceband R7"` — the node number is what the RD reads
+ *   off the hardware, the channel is what the pilot needs to dial in, and neither alone is enough;
+ * - a seat whose channel is genuinely **unknown** → `"Node 7"`, the node alone. Not "no channel":
+ *   the timer may well be tuned to something GridFPV has not been told about.
+ *
+ * `node` is the 0-based wire index; the label is 1-based, per the repo display rule (index `6` is
+ * the node the RD calls "Node 7"). The one place that boundary is crossed for a seat name — the
+ * server's `Timer::node_label` is its twin, and `NodeSignal.node`'s doc names this same convention.
+ *
+ * Resolve `mhz` through `buildCompetitorNames` (`competitorName.ts`) rather than reaching for a
+ * single source: it is the one place that knows which sources to try, and in what order.
+ */
+export function nodeSeatLabel(
   node: number,
-  availableChannels: number[],
-  catalog: ChannelCatalogEntry[]
+  mhz: number | undefined,
+  catalog: readonly ChannelCatalogEntry[]
 ): string {
-  const mhz = availableChannels[node];
-  if (mhz === undefined) return `Node ${node + 1}`;
-  const hit = catalogEntryFor(mhz, catalog);
-  return hit ? `${hit.band} ${hit.channel} · ${mhz}` : `${mhz} MHz`;
+  const seat = `Node ${node + 1}`;
+  if (mhz === undefined) return seat;
+  return `${seat} · ${channelLabel(mhz, [...catalog])}`;
 }
 
 /**

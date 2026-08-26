@@ -3,6 +3,7 @@ import type { HeatSummary, RoundDef } from '@gridfpv/types';
 import {
   heatDisplayName,
   heatNameById,
+  REMOVED_HEAT_NAME,
   isMultiMainRound,
   isOpenPracticeRound,
   mainTierName,
@@ -73,8 +74,11 @@ describe('heats — heatNameById (by-id resolution for Live control)', () => {
     expect(heatNameById('p-1', [heat('p-1')], [r])).toBe(OPEN_PRACTICE_HEAT_NAME);
   });
 
-  it('falls back to the bare id when the heat is not in the list', () => {
-    expect(heatNameById('unknown', [heat('h-a')], [round()])).toBe('unknown');
+  it('#418: a heat the event no longer serves is NAMED as removed, never rendered as its id', () => {
+    // Removing a round takes its unstarted heats with it. The live `current_heat` can still be
+    // pointing at one (the RD had it loaded in Live control), and the raw id must not surface.
+    expect(heatNameById('unknown', [heat('h-a')], [round()])).toBe(REMOVED_HEAT_NAME);
+    expect(heatNameById('unknown', [heat('h-a')], [round()])).not.toContain('unknown');
   });
 
   it('falls back to the bare id when the heat carries no resolvable round (sim/free-text)', () => {

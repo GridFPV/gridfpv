@@ -47,13 +47,13 @@
     RankEntry,
     RoundDef,
     RoundId,
+    RoundIssue,
     SeedingRule,
     StartProcedure,
     Timer,
     WinCondition
   } from '@gridfpv/types';
-  import { channelLabel, nodeChannelLabel } from '../lib/channels.js';
-  import { createCompetitorNameResolver } from '../lib/competitorName.js';
+  import { buildCompetitorNames } from '../lib/competitorName.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
   import {
     fieldsForFormat,
@@ -126,14 +126,16 @@
     mhz: number | undefined;
     label: string;
   }
-  const timerNodes = $derived<NodeSeat[]>(buildTimerNodes(primaryTimer, catalog));
-  function buildTimerNodes(timer: Timer | undefined, cat: ChannelCatalogEntry[]): NodeSeat[] {
+  const timerNodes = $derived<NodeSeat[]>(buildTimerNodes(primaryTimer));
+  function buildTimerNodes(timer: Timer | undefined): NodeSeat[] {
     if (!timer) return [];
-    const avail = timer.available_channels ?? [];
     const count = Math.max(0, Math.round(timer.node_count ?? 0));
     const seats: NodeSeat[] = [];
+    // Labelled through the SHARED builder (#416), never `available_channels[i]`: that pool is empty
+    // on every Flexible timer, where empty means "no restriction" rather than "no channels", so
+    // indexing it labelled every seat of every RotorHazard timer as channel-less.
     for (let i = 0; i < count; i++) {
-      seats.push({ node: i, mhz: avail[i], label: nodeChannelLabel(i, avail, cat) });
+      seats.push({ node: i, mhz: names.mhzFor(`node-${i}`), label: names.seatLabel(i) });
     }
     return seats;
   }
@@ -215,25 +217,28 @@
     // live-state content change).
     void session.protocolState;
     void refreshHeats();
+    void refreshRoundIssues();
   });
 
   // A pilot id maps straight to a `CompetitorRef` of the same string (round_engine.rs). Resolve
-  // through the SHARED competitor-name resolver (friendly-names rule — never re-derive inline):
-  // directory callsign first; a `node-{i}` seat falls back to its channel label where a heat's
-  // channel map is in hand (`heatCallsign`), never the raw seat.
-  const pilotByRef = $derived(new Map(pilots.map((p) => [p.id, p] as const)));
-  const callsign = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({ pilotById: pilotByRef, explicitPilotByRef: new Map() })
-  );
-  /** The heat-scoped resolver: same rule plus the heat's channel map, so an open-practice
-   * lineup's `node-{i}` seats read as their channel label ("Raceband R1 · 5658"). */
-  function heatCallsign(channels: Map<CompetitorRef, string>): (ref: CompetitorRef) => string {
-    return createCompetitorNameResolver({
-      pilotById: pilotByRef,
-      explicitPilotByRef: new Map(),
-      channelByRef: channels
+  // through the SHARED builder (friendly-names rule — never re-derive inline, and never re-derive
+  // its *inputs* either): `buildCompetitorNames` is the one place that assembles the directory, the
+  // channel sources and the seat labels, so this screen and Live control cannot answer differently
+  // for the same seat (#416 — `node-6` here against `Node 7` there).
+  //
+  // `namesFor(h)` scopes it to one heat, so that heat's own frequency assignment wins; the
+  // event-level `names` (no heat) is what the round card and the node picker read.
+  function namesFor(h: HeatSummary | undefined) {
+    return buildCompetitorNames({
+      pilots,
+      heat: h,
+      catalog,
+      timer: primaryTimer,
+      membership: session.currentEvent?.classes_membership
     });
   }
+  const names = $derived(namesFor(undefined));
+  const callsign = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
 
   const heatsByRound = (id: RoundId): HeatSummary[] => heats.filter((h) => h.round === id);
 
@@ -247,14 +252,28 @@
     return sharedHeatDisplayName(round, h, heatsByRound(round.id));
   }
 
-  // A heat's per-pilot channel assignment, resolved to a band+channel label (race redesign Slice
-  // 4b). `HeatScheduled.frequencies` pairs each ref with a raw MHz; map ref → label so the lineup
-  // can show it. A sim/free-text heat carries no frequencies, so a ref resolves to `undefined` ("—").
-  function channelByRef(h: HeatSummary): Map<CompetitorRef, string> {
-    const map = new Map<CompetitorRef, string>();
-    for (const [ref, mhz] of h.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
+  // ── The stored rounds that cannot record a lap (#416) ────────────────────────────────────────
+  // `GET /events/{id}/round-issues`: every stored round seating a `node-{i}` that does not exist on
+  // the primary timer, is switched off, or is beyond what the timer reported. #412 refuses such a
+  // seat when a round is *written*; this is the same rule applied to what is already stored, because
+  // the round on the bench predates that fix — it seats onto node 6 of a four-node timer, so its
+  // practice heat can never record a lap, and nothing said so.
+  //
+  // Re-read with the heats (the same stream tick), so disabling a node or changing the primary timer
+  // surfaces here without a reload. A failed read is NOT swallowed: silently rendering a seat that
+  // cannot record is exactly what this exists to stop, so the RD is told the check did not run.
+  let roundIssues = $state<RoundIssue[]>([]);
+  let roundIssuesError = $state(false);
+  async function refreshRoundIssues() {
+    try {
+      roundIssues = await session.listRoundIssues();
+      roundIssuesError = false;
+    } catch {
+      roundIssuesError = true;
+    }
   }
+  /** The impossible seats in one round, in seeding order. Empty means the round's seats are live. */
+  const issuesFor = (id: RoundId): RoundIssue[] => roundIssues.filter((i) => i.round === id);
 
   function statusLabel(h: HeatSummary): string {
     if (h.phase === 'Final') return 'Final';
@@ -1208,11 +1227,21 @@
       <p class="empty" role="status">No rounds yet. Add the first round to get going.</p>
     {/if}
 
+    {#if roundIssuesError && rounds.length > 0}
+      <p class="round-bad-seat" role="alert">
+        Couldn’t check these rounds’ node seats against the timer. A round seating a node the timer
+        does not have records nothing, and that check has not run — verify the active channels
+        before racing.
+      </p>
+    {/if}
+
     {#if rounds.length > 0}
       <ol class="round-list">
         {#each rounds as round, i (round.id)}
           <!-- The heat (if any) whose progress makes this round un-editable (#387). -->
           {@const blockedBy = editBlockedBy(round)}
+          <!-- The seats in this round that cannot record a lap (#416). -->
+          {@const badSeats = issuesFor(round.id)}
           <li class="round-row">
             <span class="round-index" aria-hidden="true">{i + 1}</span>
             <div class="round-main">
@@ -1235,6 +1264,16 @@
                 {/if}
                 <span class="meta-chip">{seedSummary(round.seeding)}</span>
               </div>
+              <!-- A seat that can never record a lap, on the round that owns it and next to the
+                   Edit control that repairs it (#416). The Director writes the sentence — round
+                   label, timer name, 1-based node, and what to do — so the console cannot drift
+                   from the rule that produced it. -->
+              {#each badSeats as issue (issue.node)}
+                <p class="round-bad-seat" role="alert">
+                  <strong>{issue.node_label} records nothing.</strong>
+                  {issue.detail}
+                </p>
+              {/each}
               <!-- Why Edit is dead, right under the round it belongs to (#387). -->
               {#if blockedBy}
                 <p class="round-blocked" role="note">
@@ -1404,8 +1443,7 @@
                   {/if}
                   <ol class="heat-list">
                     {#each heatsByRound(round.id) as h (h.heat)}
-                      {@const channels = channelByRef(h)}
-                      {@const lineupName = heatCallsign(channels)}
+                      {@const heatNames = namesFor(h)}
                       <li class="heat-row" class:current={h.is_current}>
                         <div class="heat-main">
                           <div class="heat-head">
@@ -1419,9 +1457,12 @@
                             {#each h.lineup as ref, i (ref)}
                               <span class="lineup-pilot">
                                 <span class="lineup-num" aria-hidden="true">{i + 1}</span>
-                                <span class="lineup-call">{lineupName(ref)}</span>
-                                <span class="lineup-chan" class:none={!channels.get(ref)}>
-                                  {channels.get(ref) ?? '—'}
+                                <span class="lineup-call">{heatNames.name(ref)}</span>
+                                <!-- Unknown is not "none" (#416): a Flexible timer with no channel
+                                     pool configured has simply not told GridFPV what its nodes are
+                                     on, which is a different statement from "no channel". -->
+                                <span class="lineup-chan" class:none={!heatNames.channelFor(ref)}>
+                                  {heatNames.channelFor(ref) ?? 'unknown'}
                                 </span>
                               </span>
                             {/each}
@@ -2035,6 +2076,18 @@
     flex-shrink: 0;
   }
   /* Why this round's Edit is dead (#387) — under the round's own meta, beside the dead button. */
+  /* A seat that can never record a lap (#416) — a real warning, toned like one, on the round it
+     belongs to and beside the Edit control that repairs it. */
+  .round-bad-seat {
+    margin: var(--gf-space-1) 0 0;
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border-left: 3px solid var(--gf-danger);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-danger-soft);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text);
+  }
+
   .round-blocked {
     margin: var(--gf-space-1) 0 0;
     font-size: var(--gf-font-size-sm);

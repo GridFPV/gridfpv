@@ -44,6 +44,7 @@ import type {
   RankEntry,
   RoundDef,
   RoundId,
+  RoundIssue,
   RoundStanding,
   Scope,
   SetClassHiddenRequest,
@@ -1269,6 +1270,36 @@ export async function listHeats(
   const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/heats`, { headers });
   if (!resp.ok) throw new Error(`GET /events/${eventId}/heats failed: HTTP ${resp.status}`);
   return (await resp.json()) as HeatSummary[];
+}
+
+/**
+ * List an event's **round issues** (`GET /events/{id}/round-issues`) — #416. A read (open, no
+ * token): every stored round whose open-practice seating names a node that cannot record a lap —
+ * one beyond the primary timer's width, one the RD has disabled, or one beyond what the timer
+ * reported.
+ *
+ * #412 refuses an impossible seat when a round is *written*; this is the same rule applied to what
+ * is already stored, because the rounds already on disk are the ones that predate the fix. Each
+ * entry carries the round's label, the timer's name, the 1-based node label and the RD-facing
+ * sentence, so the console renders the server's explanation rather than re-deriving one.
+ *
+ * An **empty list means nothing is wrong** — including for an event with no resolvable primary
+ * timer, which has no node set to check against. Rejects on a non-2xx / transport failure; an
+ * unknown event is a 404.
+ */
+export async function listRoundIssues(
+  baseUrl: string,
+  eventId: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<RoundIssue[]> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/round-issues`, {
+    headers
+  });
+  if (!resp.ok) throw new Error(`GET /events/${eventId}/round-issues failed: HTTP ${resp.status}`);
+  return (await resp.json()) as RoundIssue[];
 }
 
 /**

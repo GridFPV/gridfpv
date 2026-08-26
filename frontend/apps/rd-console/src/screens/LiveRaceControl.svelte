@@ -26,12 +26,11 @@
     HeatSummary,
     LiveRaceState,
     Pilot,
-    PilotId,
     PilotProgress,
     RoundDef
   } from '@gridfpv/types';
-  import { channelLabel, nodeChannelLabel, nodeIndexOf } from '../lib/channels.js';
-  import { createCompetitorNameResolver } from '../lib/competitorName.js';
+  import { nodeIndexOf } from '../lib/channels.js';
+  import { buildCompetitorNames } from '../lib/competitorName.js';
   import { heatDisplayName, heatNameById, isOpenPracticeRound } from '../lib/heats.js';
   import {
     actionDescription,
@@ -111,16 +110,7 @@
       });
   });
 
-  // The current heat's ref → channel-label map (race redesign Slice 4b). Empty for a sim/free-text
-  // heat (no frequencies assigned), in which case the channels panel shows "—".
-  const currentChannels = $derived.by(() => {
-    const summary = heats.find((h) => h.heat === heat);
-    const map = new Map<CompetitorRef, string>();
-    for (const [ref, mhz] of summary?.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
-  });
   const lineup = $derived<CompetitorRef[]>(live?.active_pilots ?? []);
-  const hasChannels = $derived(currentChannels.size > 0);
 
   // ── Friendly names everywhere (heat names + pilot callsigns) ─────────────────────────────────
   // Live Control knows heats and competitors only as raw ids/refs (the live `LiveRaceState` carries
@@ -141,18 +131,24 @@
         pilotsError = true;
       });
   });
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  // A competitor ref → its bound pilot id from the live `progress`, which carries an **explicit**
-  // `pilot` only when a `Register` command bound it (the open-practice / manual-registration path).
-  // This is empty for the common roster-seeded heat: `FromRoster` seeding makes each competitor ref
-  // *equal to the pilot id itself* and emits **no** `CompetitorRegistered` event, so `progress.pilot`
-  // stays `null` in every phase (Scheduled → Running) — see `competitorName` for the roster fallback.
-  const explicitPilotByRef = $derived(
-    new Map<CompetitorRef, PilotId>(
-      (live?.progress ?? [])
-        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
-        .map((p) => [p.competitor, p.pilot])
-    )
+
+  // ONE assembly of the resolver inputs (#416). Every screen hands `buildCompetitorNames` the
+  // sources it has and consumes the result — the three independent constructions this screen, the
+  // Rounds & Heats stage and Marshaling each used to do are what put `node-6` on one screen and
+  // `Node 7` on another for the same seat.
+  //
+  // `progress` carries an **explicit** `pilot` only when a `Register` command bound it (the
+  // open-practice / manual-registration path); it is empty for the common roster-seeded heat, where
+  // the ref IS the pilot id (see `competitorName.ts` for the full rule).
+  const seatNames = $derived(
+    buildCompetitorNames({
+      pilots,
+      progress: live?.progress,
+      heat: heats.find((h) => h.heat === heat),
+      catalog,
+      timer: session.primaryTimer,
+      membership: session.currentEvent?.classes_membership
+    })
   );
 
   // `heatName(id)` → the friendly "<Round> Heat N" / "Open Practice Heat" name for a heat id (the
@@ -163,18 +159,18 @@
     return heatNameById(id, heats, session.currentEvent?.rounds ?? []);
   }
 
-  // `competitorName(ref)` → the **callsign** (directory pilot), else an open-practice `node-{i}`
-  // seat's **channel label**, else the bare ref. The single shared resolver every pilot/lineup/
-  // leaderboard row goes through — the same one Marshaling uses (see `competitorName.ts` for the
-  // full rule and why the binding comes from the always-available roster binding, not race progress,
-  // so a callsign shows whether the heat is Scheduled, Staged, Running, or done).
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({
-      pilotById,
-      explicitPilotByRef,
-      channelByRef: currentChannels
-    })
+  // `competitorName(ref)` → the **callsign** (directory pilot), else an open-practice seat's
+  // `"Node 7 · Raceband R7"` label, else the bare ref. The single shared resolver every
+  // pilot/lineup/leaderboard row goes through — the same one Marshaling and the Rounds & Heats
+  // stage use, built from the same inputs (see `competitorName.ts` for the full rule and why the
+  // binding comes from the always-available roster binding, not race progress, so a callsign shows
+  // whether the heat is Scheduled, Staged, Running, or done).
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => seatNames.name);
+  /** The channel a lineup seat is on, or `undefined` when GridFPV genuinely does not know. */
+  const channelOf = $derived.by<(ref: CompetitorRef) => string | undefined>(
+    () => seatNames.channelFor
   );
+  const hasChannels = $derived(lineup.some((ref) => channelOf(ref) !== undefined));
 
   // A plain ref → display-name record for the shared `HeatSheet` (which takes `names`). Built over
   // the union of the lineup and the progress rows so every rendered row resolves.
@@ -282,8 +278,8 @@
   // The casual **open-practice** format runs one open heat over the active **channels**: its live
   // `LiveRaceState` rows are unbound (`pilot: null`) with competitor refs `node-{i}` (the timer
   // seat). Rather than the pilot-keyed channels/heat-sheet panels, this heat reads as a per-channel
-  // practice board — each row a channel (resolved `node-{i}` → the primary timer's
-  // `available_channels[i]` → catalog label) with its laps, last lap, and best lap.
+  // practice board — each row a seat, named `Node 7 · Raceband R7` through the shared seat-label
+  // builder (#416), with its laps, last lap, and best lap.
   const isOpenPractice = $derived(currentRound ? isOpenPracticeRound(currentRound) : false);
   // The transition model's second axis (#393): an open-practice heat is scored by nobody, so it
   // drops the result-ceremony verbs (Finalize / Advance / Revert) and its `Restart` is spelled
@@ -292,8 +288,6 @@
   // The obvious next step for this heat: `Finalize` at the end of a competition run, `Run again`
   // (Restart) at the end of a practice one. Declared here, with the kind it depends on.
   const primary = $derived(primaryAction(phase, heatKind));
-  // The primary timer (its `available_channels` resolve each `node-{i}` seat to a channel label).
-  const availableChannels = $derived<number[]>(session.primaryTimer?.available_channels ?? []);
 
   // One per-channel board row: its node index, channel label, laps, last lap, and best lap (µs).
   interface ChannelRow {
@@ -335,8 +329,8 @@
 
   // The board rows, in node order: every active `node-{i}` channel with its live laps. A channel
   // with no laps yet still shows (a quiet seat reads "0 laps").
-  const channelRows = $derived<ChannelRow[]>(buildChannelRows(live, availableChannels));
-  function buildChannelRows(state: LiveRaceState | undefined, avail: number[]): ChannelRow[] {
+  const channelRows = $derived<ChannelRow[]>(buildChannelRows(live));
+  function buildChannelRows(state: LiveRaceState | undefined): ChannelRow[] {
     const byRef = new Map<CompetitorRef, PilotProgress>(
       (state?.progress ?? []).map((p) => [p.competitor, p])
     );
@@ -349,7 +343,9 @@
       rows.push({
         node,
         ref,
-        label: nodeChannelLabel(node, avail, catalog),
+        // The seat's own name, through the shared builder — never `available_channels[node]`,
+        // which is empty (and so answers "unknown" for every node) on a Flexible timer.
+        label: seatNames.seatLabel(node),
         laps: p?.laps_completed ?? 0,
         lastLapMicros: p?.last_lap_micros ?? undefined,
         bestLapMicros: bestByRef.get(ref)
@@ -744,14 +740,22 @@
           {#each lineup as ref (ref)}
             <li class="channel-row">
               <span class="channel-pilot">{competitorName(ref)}</span>
-              <span class="channel-label" class:none={!currentChannels.get(ref)}>
-                {currentChannels.get(ref) ?? '—'}
+              <span class="channel-label" class:none={!channelOf(ref)}>
+                {channelOf(ref) ?? 'Channel unknown'}
               </span>
             </li>
           {/each}
         </ul>
         {#if !hasChannels}
-          <p class="channels-note">No channels assigned (a sim heat tunes none).</p>
+          <!-- Unknown is not "none" (#416). GridFPV knows a seat's channel from the heat's own
+               assignment, from what the node reports it is tuned to, or from the timer's
+               configured pool — a Flexible RotorHazard timer with no pool configured supplies
+               none of those, and saying "no channels" there would be a false statement about
+               the hardware. -->
+          <p class="channels-note">
+            No channel known for this heat — a sim heat tunes none, and a timer with no channel pool
+            configured has not told GridFPV what its nodes are on.
+          </p>
         {/if}
       </Card>
     {/if}

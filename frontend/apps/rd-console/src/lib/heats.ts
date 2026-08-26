@@ -23,6 +23,19 @@ import { isDeterministicFormat, OPEN_PRACTICE } from './formats.js';
 /** The fixed display name for the single auto-created practice heat. */
 export const OPEN_PRACTICE_HEAT_NAME = 'Practice Heat';
 
+/**
+ * The name for a heat id the event no longer serves — a heat that was **removed with its round**
+ * (#418), or a stale id held from before a refresh.
+ *
+ * Removing a round takes its still-unstarted heats with it: the log keeps the `HeatScheduled` (it
+ * is append-only) but the server stops serving a heat whose round the event no longer defines,
+ * because it has no name, no win condition and no scoring left to resolve through. The live
+ * `current_heat` can still be pointing at one — an RD who had loaded it in Live control and then
+ * deleted the round — and rendering the raw heat id there is exactly the leak the display rule
+ * forbids. This says what actually happened instead.
+ */
+export const REMOVED_HEAT_NAME = 'Removed heat';
+
 /** Whether `round` is an open-practice round (its single heat is named, not numbered). */
 export function isOpenPracticeRound(round: RoundDef): boolean {
   return round.format === OPEN_PRACTICE;
@@ -95,12 +108,16 @@ export function heatDisplayName(
  * **on-deck** heat, which it knows only as ids (off the live `LiveRaceState`). It joins the id → its
  * {@link HeatSummary} → that heat's {@link RoundDef} (off `rounds`), then defers to
  * {@link heatDisplayName} for the same "<Round> Heat N" / "Open Practice Heat" name the picker and
- * the Rounds & Heats stage use. Falls back to the bare id when the heat isn't in the list or carries
- * no resolvable round (a sim / free-text heat) — never an empty string.
+ * the Rounds & Heats stage use.
+ *
+ * A heat the event no longer serves resolves to {@link REMOVED_HEAT_NAME} — never its raw id
+ * (#418: removing a round takes its unstarted heats with it, and the live `current_heat` can still
+ * name one). A heat that IS in the list but carries no resolvable round (a sim / free-text heat)
+ * still falls back to its bare handle, which there is the RD's own typed identifier.
  */
 export function heatNameById(heatId: HeatId, heats: HeatSummary[], rounds: RoundDef[]): string {
   const summary = heats.find((h) => h.heat === heatId);
-  if (!summary) return heatId;
+  if (!summary) return REMOVED_HEAT_NAME;
   // A custom label wins even for a heat with no resolvable round (it has no derived name to fall
   // back to but should still show the RD's name rather than the bare id).
   const custom = summary.label?.trim();

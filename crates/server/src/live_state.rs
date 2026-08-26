@@ -962,6 +962,36 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
         .collect()
 }
 
+/// Drop the heats of rounds the event **no longer defines** — the read half of removing a round
+/// (#418).
+///
+/// The log is append-only, so removing a round cannot remove the `HeatScheduled` entries it once
+/// produced; they stay as the historical fact that those heats were planned. But the round they
+/// resolve their name, win condition and scoring through is gone, so they are no longer heats the
+/// console can render or the RD can run: `heatNameById` would have nothing to derive a name from
+/// and would fall back to the raw heat id, which is exactly the leak the repo display rule forbids.
+///
+/// So a heat tagged to a round that is not in `defined` is **discarded on read**. Nothing with
+/// results is ever hidden this way: [`EventRegistry::remove_round`] refuses a round with a heat in
+/// progress or past `Scheduled`, so every heat this can drop was unstarted and holds no laps.
+///
+/// An **untagged** heat (`round: None` — the free-text / sim path) is never touched: it resolves
+/// its own name and belongs to no round.
+///
+/// [`EventRegistry::remove_round`]: crate::events::EventRegistry::remove_round
+pub fn heats_of_defined_rounds(
+    summaries: Vec<HeatSummary>,
+    defined: &[RoundId],
+) -> Vec<HeatSummary> {
+    summaries
+        .into_iter()
+        .filter(|h| match &h.round {
+            Some(round) => defined.contains(round),
+            None => true,
+        })
+        .collect()
+}
+
 /// The lineup + class/round tag a heat carries, taken from its **most recent** `HeatScheduled`
 /// (a re-schedule of the same id supersedes the earlier one).
 #[allow(clippy::type_complexity)]

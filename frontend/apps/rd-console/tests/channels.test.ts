@@ -13,9 +13,10 @@ import {
   groupByBand,
   isCatalogChannel,
   isPlausibleMhz,
-  nodeChannelLabel,
   nodeIndexOf,
-  offeredCatalog
+  nodeSeatLabel,
+  offeredCatalog,
+  poolChannel
 } from '../src/lib/channels.js';
 
 const CATALOG: ChannelCatalogEntry[] = [
@@ -152,19 +153,43 @@ describe('nodeIndexOf (open-practice node ref parsing)', () => {
   });
 });
 
-describe('nodeChannelLabel (open-practice seat label)', () => {
-  it('labels a configured seat as band + channel · MHz', () => {
-    // node 0 → available_channels[0] = 5658 → Raceband R1 · 5658
-    expect(nodeChannelLabel(0, [5658, 5800], CATALOG)).toBe('Raceband R1 · 5658');
-    expect(nodeChannelLabel(1, [5658, 5800], CATALOG)).toBe('Fatshark F4 · 5800');
+describe('nodeSeatLabel (open-practice seat label) — #416: node AND channel', () => {
+  it('reads as node + channel, which is the pair the RD actually needs', () => {
+    // The node number is what they look at on the hardware; the channel is what the pilot needs.
+    expect(nodeSeatLabel(6, 5695, CATALOG)).toBe('Node 7 · Raceband R2');
+    expect(nodeSeatLabel(0, 5658, CATALOG)).toBe('Node 1 · Raceband R1');
   });
 
   it('falls back to raw MHz for a non-catalog channel', () => {
-    expect(nodeChannelLabel(0, [5111], CATALOG)).toBe('5111 MHz');
+    expect(nodeSeatLabel(0, 5111, CATALOG)).toBe('Node 1 · 5111 MHz');
   });
 
-  it('labels a seat with no configured channel as a bare 1-based node', () => {
-    // index 2 is past the available pool → Node 3 (1-based).
-    expect(nodeChannelLabel(2, [5658, 5800], CATALOG)).toBe('Node 3');
+  it('is the 1-based node ALONE when the channel is genuinely unknown', () => {
+    expect(nodeSeatLabel(2, undefined, CATALOG)).toBe('Node 3');
+  });
+
+  it('never renders a raw seat ref', () => {
+    expect(nodeSeatLabel(6, undefined, CATALOG)).not.toContain('node-6');
+    expect(nodeSeatLabel(6, 5695, CATALOG)).not.toContain('node-6');
+  });
+});
+
+describe('poolChannel — an EMPTY pool is "unrestricted", not "none" (#413, #416)', () => {
+  it('reads a configured pool positionally', () => {
+    expect(poolChannel(0, [5658, 5800])).toBe(5658);
+    expect(poolChannel(1, [5658, 5800])).toBe(5800);
+  });
+
+  it('answers undefined past the end of a configured pool', () => {
+    expect(poolChannel(2, [5658, 5800])).toBeUndefined();
+  });
+
+  it('refuses to read an EMPTY pool at all', () => {
+    // Every Flexible timer (both RotorHazard timers on the bench) reports `available_channels: []`,
+    // where empty means "no restriction" rather than "no channels". Indexing it answers undefined
+    // for every node — which reads as "this seat has no channel", a false statement about the
+    // hardware, and the reason the seat label degraded to a bare `Node N` on all real timers.
+    expect(poolChannel(0, [])).toBeUndefined();
+    expect(poolChannel(0, undefined)).toBeUndefined();
   });
 });

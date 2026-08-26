@@ -1100,17 +1100,34 @@ fn is_racing_phase(state: gridfpv_engine::heat::HeatState) -> bool {
     )
 }
 
-/// What a round's heats say about how far its config may still move (release-hardening; the
-/// in-progress refusal is #387) — the answer
+/// What a round's heats say about how far its config may still move — and whether the round may
+/// still be **removed** (#418) — the answer
 /// [`round_heat_facts`](EventRegistry::round_heat_facts) folds off the event's log in ONE pass.
+///
+/// # One vocabulary for "not active"
+///
+/// Both fields carry a **friendly heat name** rather than a bare flag, and both are populated by
+/// the same phase test the timer-side refusals use ([`is_racing_phase`], the set behind
+/// [`EventRegistry::heat_in_progress_on_timer`] / [`scored_heat_in_progress_on_timer`]). Round
+/// deletion used to reason about mere *existence* while the timer actions reasoned about phase —
+/// two vocabularies for one question (#418). There is now one: a heat is either **in progress**,
+/// or it **carries results**, or it is unstarted and holds nothing worth protecting.
+///
+/// [`scored_heat_in_progress_on_timer`]: EventRegistry::scored_heat_in_progress_on_timer
 #[derive(Debug, Default)]
 struct RoundHeatFacts {
-    /// Whether ANY heat in the log is tagged with this round.
-    has_heats: bool,
-    /// Whether any of them has left `Scheduled` (staged / raced / scored). Scoring re-derives from
-    /// the round's CURRENT config on every read, so editing a raced round's scoring fields would
-    /// silently rewrite already-official results — [`EventRegistry::update_round`] rejects that.
-    raced: bool,
+    /// The **friendly name** of the first heat of this round that has left `Scheduled` (staged /
+    /// raced / scored), or `None` when every heat is still unstarted.
+    ///
+    /// Scoring re-derives from the round's CURRENT config on every read, so editing a raced
+    /// round's scoring fields would silently rewrite already-official results
+    /// ([`EventRegistry::update_round`] rejects that) — and *removing* the round would strand
+    /// those results without the scoring config that produced them
+    /// ([`EventRegistry::remove_round`] rejects that).
+    ///
+    /// It carries the **name**, not the id: it goes straight into an RD-facing refusal, and a raw
+    /// id must never reach a user (repo display rule).
+    raced: Option<String>,
     /// The **friendly name** of the first heat of this round that is *in progress* — staged, armed,
     /// running, or unofficial, or still `Scheduled` but loaded on the timer. While one exists the
     /// round cannot be edited at all (#387): re-materializing its heats would swap a lineup out
@@ -1548,12 +1565,17 @@ impl EventRegistry {
             .and_then(|e| e.meta.rounds.iter().find(|r| &r.id == round_id).cloned());
         let on_timer = round_engine::heat_on_timer(&events);
         for heat in round_engine::scheduled_round_heats(&events, round_id) {
-            facts.has_heats = true;
             let Some(heat_state) = heat_state(&events, &heat) else {
                 continue;
             };
-            if heat_state != HeatState::Scheduled {
-                facts.raced = true;
+            // The heat's RD-facing name, resolved the way the console resolves it. Never the id:
+            // every one of these strings ends up in a refusal a person reads (repo display rule).
+            let name = || match &round {
+                Some(round) => round_engine::heat_display_name(round, &events, &heat),
+                None => "a heat".to_string(),
+            };
+            if heat_state != HeatState::Scheduled && facts.raced.is_none() {
+                facts.raced = Some(name());
             }
             // Countdown begun / gate open / racing / passes recorded but not yet official — plus,
             // stricter than [`is_racing_phase`], a still-`Scheduled` heat the RD has loaded in Live
@@ -1562,10 +1584,7 @@ impl EventRegistry {
             let in_progress = is_racing_phase(heat_state)
                 || (heat_state == HeatState::Scheduled && on_timer.as_ref() == Some(&heat));
             if in_progress && facts.in_progress.is_none() {
-                facts.in_progress = Some(match &round {
-                    Some(round) => round_engine::heat_display_name(round, &events, &heat),
-                    None => heat.0.clone(),
-                });
+                facts.in_progress = Some(name());
             }
         }
         facts
@@ -1770,7 +1789,7 @@ impl EventRegistry {
         // rewrite a bracket chain. Still editable on a raced round: label, staging timer, start
         // procedure, grace window, protest window, time limit — and the `rounds` param (heats
         // per pilot), which only extends future fills.
-        if facts.raced {
+        if facts.raced.is_some() {
             let effective_channel_mode = channel_mode;
             let mut frozen: Vec<&str> = Vec::new();
             if req.format != existing.format {
@@ -1911,17 +1930,50 @@ impl EventRegistry {
     /// [`RoundError::RoundNotFound`] (404). Other rounds that seed from the removed round
     /// ([`SeedingRule::FromRanking`]) are **left as-is** (a dangling source is caught the next time
     /// that round is edited); pruning is a later-slice concern. Written through to disk (issue #115).
+    ///
+    /// # The gate is on state, not on existence (#418)
+    ///
+    /// This used to refuse on *any* heat being tagged to the round, which made a round permanently
+    /// undeletable the moment its heats were generated — even a practice round whose single heat
+    /// was never armed, never run and holds no laps. A practice round is precisely the one an RD
+    /// creates, misconfigures and throws away, so "you filled it once, it is yours forever" is the
+    /// wrong rule; and the refusal recommended *"discard its heats and re-use it"* through a route
+    /// that has never existed (`/events/{id}/heats` is `GET` only), sending the RD looking for a
+    /// control that is not there at the moment they are already stuck.
+    ///
+    /// The rule now is the one the timer-side refusals already use
+    /// ([`heat_in_progress_on_timer`](Self::heat_in_progress_on_timer) /
+    /// [`scored_heat_in_progress_on_timer`](Self::scored_heat_in_progress_on_timer)), read off the
+    /// same [`RoundHeatFacts`] fold, and it **names** what is blocking:
+    ///
+    /// * a heat **in progress** (staged / armed / running / unofficial, or loaded on the timer) →
+    ///   refused, naming that heat — removing the round would pull its config out from under a
+    ///   race that is happening;
+    /// * a heat that **carries results** (anything past `Scheduled`) → refused, naming that heat —
+    ///   scoring re-derives from the round, so the results would lose the config that produced them;
+    /// * otherwise every heat is still unstarted and holds nothing worth protecting, so the round
+    ///   **deletes, and its heats go with it**.
+    ///
+    /// "Go with it" is a read-side discard, because the log is append-only: the `HeatScheduled`
+    /// entries stay in the log as the historical fact that they were once planned, and
+    /// [`heats_of_defined_rounds`](crate::live_state::heats_of_defined_rounds) drops a heat whose
+    /// round the event no longer defines from every list the console reads. There is nothing left
+    /// to advise the RD to do, so the message no longer advises anything.
     pub fn remove_round(&self, id: &EventId, round_id: &RoundId) -> Result<EventMeta, RoundError> {
-        // A round with heats in the log cannot be removed: its heats would strand (they resolve
-        // their name, win condition, and scoring through the round), and a raced round's results
-        // would lose their scoring config entirely. The log is append-only, so there is nothing
-        // safe to "cascade" — the RD abandons a misconfigured round by just not filling it.
-        if self.round_heat_facts(id, round_id).has_heats {
-            return Err(RoundError::Invalid(
-                "this round has scheduled heats — it can no longer be removed (leave it \
-                 unfilled, or discard its heats and re-use it)"
-                    .to_string(),
-            ));
+        // Probe the log BEFORE taking the registry write lock (the log has its own mutex) — the
+        // same order `update_round` uses.
+        let facts = self.round_heat_facts(id, round_id);
+        if let Some(heat) = &facts.in_progress {
+            return Err(RoundError::Invalid(format!(
+                "this round has a heat in progress ({heat}) — finalize or reset it before \
+                 removing the round"
+            )));
+        }
+        if let Some(heat) = &facts.raced {
+            return Err(RoundError::Invalid(format!(
+                "this round has raced heats ({heat}) — removing it would strand their results, \
+                 which are scored through this round's config"
+            )));
         }
         let mut reg = self.write();
         let event = reg
@@ -1937,6 +1989,47 @@ impl EventRegistry {
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
         Ok(meta)
+    }
+
+    /// Every **impossible seat** in this event's stored rounds (#416), or `None` if no such event.
+    ///
+    /// The read-side twin of the write-side refusal in [`validate_round_fields`]: it walks the
+    /// event's stored rounds and reports each `node-{i}` seat that cannot record a lap, checked
+    /// against the event's **effective primary** timer through the shared [`seat_problems`] rule.
+    /// An event with no resolvable timer has nothing to check against and yields an empty list (a
+    /// pure-sim event has no node set) — an empty list is "nothing wrong", never "not checked".
+    ///
+    /// This is what makes a round the RD *already has* repairable: #412 stopped new rounds from
+    /// being authored onto a dead gate, but the one on the bench predates it, and a round that
+    /// silently seats a pilot on a node that does not exist is the worst available behaviour.
+    pub fn round_issues(&self, id: &EventId) -> Option<Vec<RoundIssue>> {
+        let (meta, timers) = {
+            let reg = self.read();
+            let event = reg.events.get(id)?;
+            (event.meta.clone(), reg.timers.clone())
+        };
+        let Some(timer) = meta.effective_primary().and_then(|id| timers.get(&id)) else {
+            return Some(Vec::new());
+        };
+        let mut out = Vec::new();
+        for round in &meta.rounds {
+            let SeedingRule::AllChannels { channels } = &round.seeding else {
+                continue;
+            };
+            for (node, problem) in seat_problems(channels, &timer) {
+                out.push(RoundIssue {
+                    round: round.id.clone(),
+                    round_label: round.label.clone(),
+                    timer: timer.id.clone(),
+                    timer_name: timer.name.clone(),
+                    node,
+                    node_label: Timer::node_label(node),
+                    problem,
+                    detail: seat_problem_detail(round, &timer, node, problem),
+                });
+            }
+        }
+        Some(out)
     }
 
     /// An event's **rounds** (race redesign Slice 2a), or `None` if no such event.
@@ -2433,14 +2526,121 @@ impl From<RegistryError> for RoundError {
     }
 }
 
-/// Validate a round's class selection, format, and seeding against the event and the directories
-/// (race redesign Slice 2a) — the shared check the add/update paths run.
+/// Why a stored round's `node-{i}` seat **cannot record a lap** (#412 / #416).
 ///
-/// Returns [`RoundError::Invalid`] when: a `classes` entry is unknown to the directory or is not one
-/// of the event's selected [`classes`](EventMeta::classes); `format` is not a
-/// [`FormatRegistry::standard`] name; or a [`SeedingRule::FromRanking`]'s `source_rounds` is empty
-/// or names a round that does not exist in this event (excluding `editing` — a round may not seed
-/// from itself).
+/// An open-practice round's field *is* its active channels, laid out as `node-{i}` seats
+/// ([`SeedingRule::AllChannels`], whose entries are **node indices**). A seat naming a node the
+/// timer does not have, or one the RD switched off, is a pilot on a dead gate: the heat runs, the
+/// clock counts, and nothing is ever detected. Silently rendering that seat is the worst available
+/// behaviour, so it is surfaced on **read** as well as refused on write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum SeatProblem {
+    /// The seat names a node index at or beyond the timer's **effective width**
+    /// ([`Timer::node_width`]) — there is no such node at all. The RD's bench case: a round seeded
+    /// `AllChannels { channels: [6] }` on a four-node timer.
+    NoSuchNode,
+    /// The node exists, but the RD has **disabled** it (#412) — a dead receiver, a gate that will
+    /// not tune. A disabled node seats no pilot and is offered no channel.
+    Disabled,
+    /// The node is within the width GridFPV is **configured** for but beyond what the timer
+    /// **reported** ([`NodeDrift`](crate::timers::NodeDrift)) — GridFPV is set wider than the
+    /// hardware. A notice, never a refusal: D27's rule is that an observation about a timer is
+    /// evidence, not an input to a decision, so this is shown and the round is left alone.
+    NotOnTimer,
+}
+
+/// One problem found in a **stored** round's configuration, on read (#416).
+///
+/// # Why read and not only write
+///
+/// #412 refuses an impossible seat at add *and* update, so every round authored since is safe. But
+/// nothing re-checked the rounds already on disk — and the rounds already on disk are exactly where
+/// the bug lives, because they predate the fix. A stored round is also not static: the RD can
+/// disable a node, narrow a timer's width, or swap the event's primary timer, and any of those can
+/// make a round that validated cleanly at write time impossible at race time. So the check runs
+/// where the RD looks (`GET /events/{id}/round-issues`), against the same
+/// [`Timer::node_view`](crate::timers::Timer::node_view) answer `GET /timers/{id}/nodes` serves.
+///
+/// Every field a person reads is a **friendly name** — the round's label, the timer's name, the
+/// 1-based node label — never a raw id or a bare index (repo display rule). `round` and `node` are
+/// the wire handles the console repairs *through* (they address the round-edit form), not labels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RoundIssue {
+    /// The round the problem is in — the handle the console's repair action edits.
+    pub round: RoundId,
+    /// The round's **label**, for display.
+    pub round_label: String,
+    /// The timer the seat was checked against (the event's effective primary).
+    pub timer: TimerId,
+    /// That timer's **name**, for display.
+    pub timer_name: String,
+    /// The offending node index, **0-based** — a wire handle (it is what the round's seeding
+    /// stores), never shown as-is.
+    pub node: u32,
+    /// The node's **display name**, 1-based: index `6` is `"Node 7"`.
+    pub node_label: String,
+    /// Which of the three impossible-seat cases this is.
+    pub problem: SeatProblem,
+    /// The RD-facing sentence: what is wrong, and what to do about it. Written server-side so the
+    /// console does not re-derive (and drift from) the explanation.
+    pub detail: String,
+}
+
+/// The **seat problems** in an `AllChannels` seeding, checked against `timer` — the one place that
+/// decides whether a `node-{i}` seat can record a lap (#412 / #416).
+///
+/// Shared by the write-side refusal ([`validate_round_fields`]) and the read-side notice
+/// ([`EventRegistry::round_issues`]) precisely so the two cannot disagree about what "this seat is
+/// impossible" means. Reads [`Timer::node_view`] — the same answer `GET /timers/{id}/nodes` serves
+/// the console — rather than re-deriving width/enabled locally.
+///
+/// Returns `(node, problem)` in seeding order, one entry per offending seat.
+fn seat_problems(channels: &[usize], timer: &Timer) -> Vec<(u32, SeatProblem)> {
+    let view = timer.node_view();
+    let mut out = Vec::new();
+    for channel in channels {
+        let node = u32::try_from(*channel).unwrap_or(u32::MAX);
+        let problem = if node >= view.width {
+            SeatProblem::NoSuchNode
+        } else if !view.enabled.contains(&node) {
+            SeatProblem::Disabled
+        } else if view.reported.is_some_and(|reported| node >= reported) {
+            SeatProblem::NotOnTimer
+        } else {
+            continue;
+        };
+        out.push((node, problem));
+    }
+    out
+}
+
+/// The RD-facing sentence for one seat problem: what is wrong, and the way out of it.
+fn seat_problem_detail(round: &RoundDef, timer: &Timer, node: u32, problem: SeatProblem) -> String {
+    let node_label = Timer::node_label(node);
+    let round_label = round.label.trim();
+    let timer_name = timer.name.trim();
+    match problem {
+        SeatProblem::NoSuchNode => format!(
+            "{round_label} seats a pilot on {node_label}, but {timer_name} has only {} nodes — \
+             that seat can never record a lap. Edit the round and pick a node the timer has.",
+            timer.node_width()
+        ),
+        SeatProblem::Disabled => format!(
+            "{round_label} seats a pilot on {node_label}, which is switched off on {timer_name} — \
+             that seat can never record a lap. Re-enable the node on the timer, or edit the round \
+             and pick another."
+        ),
+        SeatProblem::NotOnTimer => format!(
+            "{round_label} seats a pilot on {node_label}, but {timer_name} reported only {} nodes \
+             — that seat records nothing. Fix the timer's node width, or edit the round and pick \
+             another.",
+            timer.reported_nodes.unwrap_or(0)
+        ),
+    }
+}
+
 /// The maximum nesting depth a [`SeedingRule`] may reach — the `Combine`-within-`Combine` cap
 /// checked at add/update (and mirrored at fill time by the round engine's depth guard, which also
 /// bounds cross-round seeding cycles). A real multi-main composes only a couple of levels deep; the
@@ -2516,6 +2716,14 @@ fn collect_source_rounds<'a>(
     Ok(())
 }
 
+/// Validate a round's class selection, format, and seeding against the event and the directories
+/// (race redesign Slice 2a) — the shared check the add/update paths run.
+///
+/// Returns [`RoundError::Invalid`] when: a `classes` entry is unknown to the directory or is not one
+/// of the event's selected [`classes`](EventMeta::classes); `format` is not a
+/// [`FormatRegistry::standard`] name; or a [`SeedingRule::FromRanking`]'s `source_rounds` is empty
+/// or names a round that does not exist in this event (excluding `editing` — a round may not seed
+/// from itself).
 #[allow(clippy::too_many_arguments)]
 fn validate_round_fields(
     meta: &EventMeta,
@@ -2542,15 +2750,18 @@ fn validate_round_fields(
     // event has no node set to check against).
     if let SeedingRule::AllChannels { channels } = seeding {
         if let Some(timer) = meta.effective_primary().and_then(|id| timers.get(&id)) {
-            for channel in channels {
-                let node = u32::try_from(*channel).unwrap_or(u32::MAX);
-                if !timer.node_enabled(node) {
-                    return Err(RoundError::Invalid(format!(
-                        "{} is not available on the timer {:?} — it is disabled or does not exist",
-                        Timer::node_label(node),
-                        timer.name
-                    )));
+            for (node, problem) in seat_problems(channels, &timer) {
+                // A reported-vs-configured DRIFT is a notice, never a refusal (#412, D27): an
+                // observation about a timer is evidence, not an input to a decision. It is
+                // surfaced by `round_issues` where the RD can see and repair it, not here.
+                if problem == SeatProblem::NotOnTimer {
+                    continue;
                 }
+                return Err(RoundError::Invalid(format!(
+                    "{} is not available on the timer {:?} — it is disabled or does not exist",
+                    Timer::node_label(node),
+                    timer.name
+                )));
             }
         }
     }
@@ -3776,6 +3987,204 @@ mod tests {
         assert!(format!("{err:?}").contains("heats"), "got {err:?}");
     }
 
+    /// #418 — a round whose heats are ALL still `Scheduled` deletes cleanly, heats included.
+    ///
+    /// The old gate refused on `has_heats`, so filling a round once made it undeletable forever.
+    /// A practice round is exactly the one an RD misconfigures and throws away, and an unstarted
+    /// heat holds nothing worth protecting.
+    #[test]
+    fn a_round_whose_heats_are_all_unstarted_deletes_with_its_heats() {
+        use crate::live_state::{heat_summaries, heats_of_defined_rounds};
+        use gridfpv_events::{CompetitorRef, Event, HeatId};
+
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Practice Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        let round = reg
+            .add_round(&event.id, round_req("Practice", vec![open.clone()]))
+            .unwrap();
+
+        // Fill it: one heat, scheduled and never touched again.
+        let state = reg.resolve(&event.id).unwrap();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("p-1".into()),
+                    lineup: vec![CompetitorRef("node-0".into())],
+                    class: Some(open.clone()),
+                    round: Some(round.id.clone()),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        // It deletes.
+        let meta = reg.remove_round(&event.id, &round.id).unwrap();
+        assert!(meta.rounds.is_empty(), "the round is gone");
+
+        // ...and its heat goes with it: the read side no longer lists a heat whose round the event
+        // does not define. The log still carries the `HeatScheduled` (it is append-only); what
+        // changed is that nothing renders it.
+        let (events, _cursor) = state.read().unwrap();
+        assert_eq!(heat_summaries(&events).len(), 1, "the log is untouched");
+        let defined: Vec<RoundId> = meta.rounds.iter().map(|r| r.id.clone()).collect();
+        assert!(
+            heats_of_defined_rounds(heat_summaries(&events), &defined).is_empty(),
+            "the removed round's heats are discarded on read"
+        );
+    }
+
+    /// #418 — an UNTAGGED heat (the free-text / sim path) is never discarded: it belongs to no
+    /// round and resolves its own name.
+    #[test]
+    fn discarding_a_removed_rounds_heats_leaves_untagged_heats_alone() {
+        use crate::live_state::{heat_summaries, heats_of_defined_rounds};
+        use gridfpv_events::{CompetitorRef, Event, HeatId};
+
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Mixed Event")).unwrap();
+        let state = reg.resolve(&event.id).unwrap();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("free-1".into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
+                    label: Some("Grudge match".into()),
+                },
+                None,
+            )
+            .unwrap();
+        let (events, _cursor) = state.read().unwrap();
+        assert_eq!(
+            heats_of_defined_rounds(heat_summaries(&events), &[]).len(),
+            1,
+            "an untagged heat survives a round list with nothing in it"
+        );
+    }
+
+    /// #418 — a round with a heat IN PROGRESS is still refused, and the refusal NAMES the heat
+    /// (never its raw id — repo display rule).
+    #[test]
+    fn a_round_with_a_heat_in_progress_refuses_removal_and_names_it() {
+        use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition};
+
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Live Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        let round = reg
+            .add_round(&event.id, round_req("Qual", vec![open.clone()]))
+            .unwrap();
+
+        let state = reg.resolve(&event.id).unwrap();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("q-1".into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: Some(open.clone()),
+                    round: Some(round.id.clone()),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: HeatId("q-1".into()),
+                    transition: HeatTransition::Staged,
+                },
+                None,
+            )
+            .unwrap();
+
+        let err = reg.remove_round(&event.id, &round.id).unwrap_err();
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("in progress"),
+            "the refusal says WHICH rule bit, got {message}"
+        );
+        assert!(
+            message.contains("Qual Heat 1"),
+            "the refusal names the heat, got {message}"
+        );
+        assert!(
+            !message.contains("q-1"),
+            "a raw heat id must never reach a user, got {message}"
+        );
+        assert!(
+            !message.contains("discard"),
+            "the refusal must not recommend a route that does not exist, got {message}"
+        );
+    }
+
+    /// #418 — a round with a RACED heat is still refused, named, and for the other reason.
+    #[test]
+    fn a_round_with_raced_heats_refuses_removal_and_says_why() {
+        use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition};
+
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Raced Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        let round = reg
+            .add_round(&event.id, round_req("Qual", vec![open.clone()]))
+            .unwrap();
+
+        let state = reg.resolve(&event.id).unwrap();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("q-1".into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: Some(open.clone()),
+                    round: Some(round.id.clone()),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        for transition in [
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: HeatId("q-1".into()),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+
+        let err = reg.remove_round(&event.id, &round.id).unwrap_err();
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("raced heats"),
+            "the refusal says WHICH rule bit, got {message}"
+        );
+        assert!(
+            message.contains("Qual Heat 1"),
+            "the refusal names the heat, got {message}"
+        );
+        assert!(
+            !message.contains("discard"),
+            "the refusal must not recommend a route that does not exist, got {message}"
+        );
+    }
+
     #[test]
     fn update_and_remove_a_round() {
         let reg = EventRegistry::new(None).unwrap();
@@ -4322,6 +4731,163 @@ mod tests {
             channels: vec![0, 1],
         };
         assert!(reg.add_round(&event.id, practice).is_ok());
+    }
+
+    /// A four-node RotorHazard timer, selected (and therefore primary) on `event`.
+    fn seed_four_node_timer(reg: &EventRegistry, event: &EventId) -> TimerId {
+        let timer = reg
+            .timers()
+            .create(&crate::timers::CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: crate::timers::TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: Some(4),
+                available_channels: None,
+            })
+            .unwrap();
+        reg.set_timers(event, vec![timer.id.clone()]).unwrap();
+        timer.id
+    }
+
+    /// #416 — a STORED round seating onto a node the timer does not have is flagged on **read**,
+    /// by friendly name, with the round to repair.
+    ///
+    /// This is the RD's live bench case: `AllChannels { channels: [6] }` — node index 6, the 7th
+    /// node — on a four-node timer. #412 refuses that at add and update, but the round on the
+    /// bench predates the fix and nothing surfaced it, so the practice heat ran and recorded
+    /// nothing at all.
+    #[test]
+    fn a_stored_round_seating_a_node_the_timer_does_not_have_is_flagged_on_read() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Bench Event")).unwrap();
+
+        // Author the round BEFORE the timer is selected — with no resolvable timer there is no node
+        // set to check against, which is exactly how a pre-#412 round came to be stored.
+        let mut practice = round_req("Open Practice", vec![]);
+        practice.format = "open_practice".to_string();
+        practice.win_condition = None;
+        practice.time_limit_secs = None;
+        practice.seeding = SeedingRule::AllChannels { channels: vec![6] };
+        let round = reg.add_round(&event.id, practice).unwrap();
+        assert!(
+            reg.round_issues(&event.id).unwrap().is_empty(),
+            "an event with no timer has nothing to check against"
+        );
+
+        seed_four_node_timer(&reg, &event.id);
+
+        let issues = reg.round_issues(&event.id).unwrap();
+        assert_eq!(issues.len(), 1, "one impossible seat, got {issues:?}");
+        let issue = &issues[0];
+        assert_eq!(issue.round, round.id);
+        assert_eq!(issue.problem, SeatProblem::NoSuchNode);
+        assert_eq!(issue.node, 6);
+        // 1-based on screen, 0-based on the wire (repo display rule).
+        assert_eq!(issue.node_label, "Node 7");
+        assert_eq!(issue.round_label, "Open Practice");
+        assert_eq!(issue.timer_name, "Field RH");
+        assert!(
+            issue.detail.contains("Node 7") && issue.detail.contains("Field RH"),
+            "the sentence names the node and the timer: {}",
+            issue.detail
+        );
+        assert!(
+            !issue.detail.contains("node-6"),
+            "a raw seat ref must never reach a user: {}",
+            issue.detail
+        );
+    }
+
+    /// #416 / #412 — a stored round seating a node the RD has **disabled** is flagged too, and
+    /// says so distinctly from a node that does not exist.
+    #[test]
+    fn a_stored_round_seating_a_disabled_node_is_flagged_on_read() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Disabled Event")).unwrap();
+        let timer = seed_four_node_timer(&reg, &event.id);
+
+        let mut practice = round_req("Open Practice", vec![]);
+        practice.format = "open_practice".to_string();
+        practice.win_condition = None;
+        practice.time_limit_secs = None;
+        practice.seeding = SeedingRule::AllChannels {
+            channels: vec![0, 2],
+        };
+        reg.add_round(&event.id, practice).unwrap();
+        assert!(
+            reg.round_issues(&event.id).unwrap().is_empty(),
+            "both seats are live to begin with"
+        );
+
+        // The RD switches node index 2 ("Node 3") off — a dead receiver. The round is now seating
+        // a pilot on a gate nothing is listening to.
+        reg.timers()
+            .set_nodes(
+                &timer,
+                &crate::timers::SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some(vec![0, 1, 3]),
+                },
+            )
+            .unwrap();
+
+        let issues = reg.round_issues(&event.id).unwrap();
+        assert_eq!(issues.len(), 1, "got {issues:?}");
+        assert_eq!(issues[0].problem, SeatProblem::Disabled);
+        assert_eq!(issues[0].node_label, "Node 3");
+        assert!(
+            issues[0].detail.contains("switched off"),
+            "the sentence says WHY: {}",
+            issues[0].detail
+        );
+    }
+
+    /// #416 / #412 / D27 — GridFPV configured wider than the hardware reported is a **notice**,
+    /// not a refusal: the round still saves, and the impossible seat is surfaced on read.
+    #[test]
+    fn a_seat_beyond_what_the_timer_reported_is_a_notice_not_a_refusal() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Drift Event")).unwrap();
+        let timer = seed_four_node_timer(&reg, &event.id);
+        // The hardware says two nodes; GridFPV is configured for four.
+        reg.timers().set_reported_nodes(&timer, 2);
+
+        let mut practice = round_req("Open Practice", vec![]);
+        practice.format = "open_practice".to_string();
+        practice.win_condition = None;
+        practice.time_limit_secs = None;
+        practice.seeding = SeedingRule::AllChannels {
+            channels: vec![0, 3],
+        };
+        // The write is NOT refused — an observation about a timer is evidence, not a decision.
+        reg.add_round(&event.id, practice)
+            .expect("drift must not refuse the write (#412, D27)");
+
+        let issues = reg.round_issues(&event.id).unwrap();
+        assert_eq!(issues.len(), 1, "got {issues:?}");
+        assert_eq!(issues[0].problem, SeatProblem::NotOnTimer);
+        assert_eq!(issues[0].node_label, "Node 4");
+    }
+
+    /// #416 — an event with no impossible seat reports nothing, and a non-practice round (whose
+    /// field is pilots, not node seats) is never checked.
+    #[test]
+    fn round_issues_is_empty_for_a_healthy_event() {
+        let reg = EventRegistry::new(None).unwrap();
+        let event = reg.create(&req("Healthy Event")).unwrap();
+        let open = seed_class(&reg, "Open");
+        reg.set_classes(&event.id, vec![open.clone()]).unwrap();
+        seed_four_node_timer(&reg, &event.id);
+        reg.add_round(&event.id, round_req("Qual", vec![open]))
+            .unwrap();
+
+        assert!(reg.round_issues(&event.id).unwrap().is_empty());
+        assert!(
+            reg.round_issues(&EventId("nope".into())).is_none(),
+            "an unknown event is a 404, not an empty list"
+        );
     }
 
     #[test]

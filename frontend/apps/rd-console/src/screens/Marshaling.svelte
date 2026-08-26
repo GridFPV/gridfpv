@@ -32,7 +32,6 @@
     LapList,
     LogRef,
     Pilot,
-    PilotId,
     PilotProgress,
     SignalTraceView,
     VoidReason
@@ -47,8 +46,7 @@
     summaryTargetRef,
     type AuditRenderInputs
   } from '../lib/auditRender.js';
-  import { channelLabel } from '../lib/channels.js';
-  import { createCompetitorNameResolver } from '../lib/competitorName.js';
+  import { buildCompetitorNames } from '../lib/competitorName.js';
   import { heatNameById } from '../lib/heats.js';
   import {
     adjustLapCommand,
@@ -215,8 +213,7 @@
       .catch(() => (catalog = []));
   });
 
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  // A competitor ref → its explicitly-bound pilot id, from the heat's **durable** registration
+  // The heat's **durable** registration bindings, as `progress` rows for the shared builder.
   // binding (`progress.pilot`). Sourced from the MARSHALED heat's own live-state fold
   // (`session.heatLiveState`, `?projection=live` over that heat's window — pulled by
   // `refreshMarshaling`), NOT the global live stream's current heat (`session.liveState`). The
@@ -226,33 +223,34 @@
   // so a bound `node-0 → pilot` resolves its callsign for ANY heat (the raw-ref bug, #214 follow-up).
   // The global stream's progress is merged underneath as a fallback so the current heat still
   // resolves immediately on first mount, before the heat-scope snapshot lands.
-  const explicitPilotByRef = $derived.by(() => {
-    const map = new Map<CompetitorRef, PilotId>();
-    const add = (progress: readonly PilotProgress[] | undefined): void => {
-      for (const p of progress ?? []) if (p.pilot != null) map.set(p.competitor, p.pilot);
-    };
+  // Later rows win, so the order here IS the precedence.
+  const bindingProgress = $derived.by<PilotProgress[]>(() => {
+    const rows: PilotProgress[] = [];
     // Fallback: the global stream — but ONLY when its current heat IS the marshaled heat. Node-seat
     // refs (`node-0`) are reused across heats, so merging the live heat's bindings while marshaling
     // a DIFFERENT heat captioned this heat's laps with the other heat's pilots (worse than raw).
-    if (session.liveState?.current_heat === heat) add(session.liveState?.progress);
+    if (session.liveState?.current_heat === heat) rows.push(...(session.liveState?.progress ?? []));
     // Authoritative: the marshaled heat's durable binding — but only once the heat-scope fold is for
     // THIS heat (a stale fold from a just-deselected heat could re-bind a reused `node-0` ref wrong).
-    if (session.heatLiveState?.current_heat === heat) add(session.heatLiveState?.progress);
-    return map;
-  });
-  // The current heat's competitor ref → channel-label map (for the open-practice `node-{i}` seat
-  // fallback), joined off the heat's `frequencies` like Live control's channels panel.
-  const currentChannels = $derived.by(() => {
-    const summary = heats.find((h) => h.heat === heat);
-    const map = new Map<CompetitorRef, string>();
-    for (const [ref, mhz] of summary?.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
+    if (session.heatLiveState?.current_heat === heat)
+      rows.push(...(session.heatLiveState?.progress ?? []));
+    return rows;
   });
 
-  // The shared competitor → callsign resolver (same rule as Live control).
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef: currentChannels })
+  // The SHARED name builder — one assembly of the inputs, the same one Live control and the Rounds
+  // & Heats stage use (#416). Three screens each building these by hand is what put `node-6` on one
+  // screen against `Node 7` on another for the same seat.
+  const names = $derived(
+    buildCompetitorNames({
+      pilots,
+      progress: bindingProgress,
+      heat: heats.find((h) => h.heat === heat),
+      catalog,
+      timer: session.primaryTimer,
+      membership: session.currentEvent?.classes_membership
+    })
   );
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
   // The current heat's friendly "<Round> Heat N" / "Open Practice Heat" name (the raw id otherwise).
   const heatName = $derived(
     heat ? heatNameById(heat, heats, session.currentEvent?.rounds ?? []) : ''
