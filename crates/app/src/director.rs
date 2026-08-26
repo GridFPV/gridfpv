@@ -23,8 +23,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
+use axum::response::Response;
 #[cfg(not(feature = "embed-assets"))]
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::{Json, Router};
 use gridfpv_events::AdapterId;
@@ -256,6 +257,15 @@ pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
         // Anything the protocol router does not handle falls through to `smart_fallback`:
         // a mistyped API path → a typed `ProtocolError` 404 (#64), any other path → the SPA.
         .fallback_service(smart_fallback(spa_service(assets)))
+        // SPA cache policy. Vite content-hashes every asset, so `assets/*` may be cached forever —
+        // a changed file gets a new name. `index.html` must NOT be: it is the one file that names
+        // those hashes, and it keeps its URL across every build.
+        //
+        // Without this the shell was served with only `last-modified`, which browsers cache
+        // HEURISTICALLY. The RD then kept loading a stale `index.html` pointing at the previous
+        // bundle, so a rebuilt console looked unchanged and even a hard reload was unreliable —
+        // hours were lost to "is the new version up?" during a live bench session.
+        .layer(axum::middleware::from_fn(spa_cache_headers))
         // Permissive CORS so the cross-origin Tauri RD app can reach the API + WS.
         .layer(CorsLayer::permissive())
 }
@@ -284,6 +294,34 @@ async fn diagnostics() -> Json<BTreeMap<&'static str, Option<String>>> {
         ("log_file", path(crate::logging::log_file())),
         ("log_dir", path(crate::logging::log_dir())),
     ]))
+}
+
+
+/// Attach the SPA cache policy (see `build_app`): immutable for content-hashed assets, always
+/// revalidate for everything else — above all `index.html`, the file that names the hashes.
+///
+/// Applied as a response middleware rather than per-service so it covers the `ServeDir` hit, the
+/// `index.html` fallback and the embedded-assets build identically. API responses pass through
+/// untouched except for the no-cache default, which is what they want anyway.
+async fn spa_cache_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let hashed = req.uri().path().starts_with("/assets/");
+    let mut resp = next.run(req).await;
+    let value = if hashed {
+        // Safe precisely because the name changes when the bytes do.
+        "public, max-age=31536000, immutable"
+    } else {
+        // `no-cache` is "revalidate", not "do not store": the browser still keeps it and a 304
+        // costs nothing, but it can never serve a stale shell without asking.
+        "no-cache"
+    };
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static(value),
+    );
+    resp
 }
 
 /// Build the SPA-serving service the Director composes into its `smart_fallback`.
