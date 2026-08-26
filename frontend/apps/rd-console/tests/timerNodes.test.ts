@@ -207,3 +207,41 @@ describe('the timer-row reading', () => {
     expect(timerDrifts({ ...base, node_count: 8 })).toBe(false);
   });
 });
+
+describe('the effective width is what consumers must read (#412 regression)', () => {
+  // `node_count` changed from "the width" to "the RD's OVERRIDE" and is normally null. Every
+  // consumer that read `timer.node_count ?? <fallback>` kept type-checking and silently changed
+  // meaning: `?? 0` became "this timer has no nodes", which emptied the Tune page, the practice
+  // channel picker and the seat-label seed on every timer that had never been pinned.
+  const unpinned = (over: Partial<Timer> = {}): Timer =>
+    ({
+      id: 't',
+      name: 'Field RH',
+      kind: { Rotorhazard: { url: 'http://x' } },
+      status: 'Connected',
+      channel_capability: 'Flexible',
+      node_count: null,
+      reported_nodes: 4,
+      disabled_nodes: [],
+      available_channels: [],
+      manual_connect: false,
+      calibration: [],
+      ...over
+    }) as unknown as Timer;
+
+  it('falls back to what the timer reported when the RD has pinned nothing', () => {
+    expect(timerWidth(unpinned())).toBe(4);
+    expect(timerSeats(unpinned())).toBe(4);
+  });
+
+  it('never reports zero for a connected timer that reported nodes', () => {
+    // The exact shape of the bug: `node_count ?? 0` === 0 here, and 0 reads as "nothing to tune".
+    expect(unpinned().node_count ?? 0).toBe(0);
+    expect(timerWidth(unpinned())).toBeGreaterThan(0);
+  });
+
+  it('still honours an explicit override, and disabled nodes still cut seats', () => {
+    expect(timerWidth(unpinned({ node_count: 8 }))).toBe(8);
+    expect(timerSeats(unpinned({ disabled_nodes: [2] }))).toBe(3);
+  });
+});

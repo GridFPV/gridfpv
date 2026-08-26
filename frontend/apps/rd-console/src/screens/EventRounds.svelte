@@ -69,6 +69,7 @@
     isDeterministicRound,
     isOpenPracticeRound
   } from '../lib/heats.js';
+  import { timerSeats, timerWidth } from '../lib/timerNodes.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -129,7 +130,9 @@
   const timerNodes = $derived<NodeSeat[]>(buildTimerNodes(primaryTimer));
   function buildTimerNodes(timer: Timer | undefined): NodeSeat[] {
     if (!timer) return [];
-    const count = Math.max(0, Math.round(timer.node_count ?? 0));
+    // #412 made `node_count` the RD's OVERRIDE, normally null — so `?? 0` silently meant
+    // "this timer has no nodes". The real width is the override, else what the timer reported.
+    const count = Math.max(0, Math.round(timerWidth(timer)));
     const seats: NodeSeat[] = [];
     // Labelled through the SHARED builder (#416), never `available_channels[i]`: that pool is empty
     // on every Flexible timer, where empty means "no restriction" rather than "no channels", so
@@ -467,9 +470,7 @@
   const canBuild = $derived(buildRound !== '' && buildSelected.size > 0);
   // A hand-built heat can hold at most the primary timer's node count — the most pilots it can run at
   // once. No primary timer ⇒ no cap (the RD will set a timer before running it).
-  const heatNodeCap = $derived(
-    primaryTimer?.node_count && primaryTimer.node_count > 0 ? primaryTimer.node_count : Infinity
-  );
+  const heatNodeCap = $derived(primaryTimer ? timerSeats(primaryTimer) : Infinity);
   const buildAtNodeCap = $derived(buildSelected.size >= heatNodeCap);
 
   // Mint a unique, round-scoped heat id in the readable generator style (`<round>-h-<suffix>`). The
@@ -658,7 +659,7 @@
   const h2hPoints = $derived(isHeadToHead && paramValues['scoring'] === 'points');
   // Group size (pilots per heat) is capped at the primary timer's node count — the most pilots a heat
   // can physically run; default 8 when no primary timer is set yet.
-  const maxGroupSize = $derived(Math.max(2, primaryTimer?.node_count || 8));
+  const maxGroupSize = $derived(Math.max(2, primaryTimer ? timerSeats(primaryTimer) : 8));
   const groupSizeOptions = $derived(Array.from({ length: maxGroupSize - 1 }, (_, i) => i + 2));
   // Head-to-Head Points: the points table has exactly one row per finishing position — i.e. group_size
   // rows. Resize it as the group size changes, keeping entered values and padding new rows with 0.

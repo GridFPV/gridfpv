@@ -48,6 +48,7 @@ import type {
 } from '@gridfpv/types';
 
 import { channelLabel, nodeIndexOf, nodeSeatLabel, poolChannel } from './channels.js';
+import { timerWidth } from './timerNodes.js';
 
 /** The directory + per-heat inputs a {@link CompetitorNameResolver} resolves against. */
 export interface CompetitorNameInputs {
@@ -235,7 +236,10 @@ export function buildCompetitorNames(sources: CompetitorNameSources): Competitor
     ...(sources.progress ?? []).map((p) => p.competitor),
     ...(sources.signal?.nodes ?? []).map((n) => n.seat)
   ]);
-  const width = Math.max(0, Math.round(sources.timer?.node_count ?? 0));
+  // #412: `node_count` is the RD's OVERRIDE and is normally null — `?? 0` would seed no seat
+  // labels at all on a timer that was never pinned. `timerWidth` resolves override → reported
+  // → fallback, the same rule the Director's `Timer::node_width` applies.
+  const width = sources.timer ? Math.max(0, Math.round(timerWidth(sources.timer))) : 0;
   for (let i = 0; i < width; i++) seatRefs.add(`node-${i}`);
 
   const seatLabelByRef = new Map<CompetitorRef, string>();

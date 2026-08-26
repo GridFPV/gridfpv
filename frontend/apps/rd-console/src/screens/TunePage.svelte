@@ -139,6 +139,7 @@
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import { buildCompetitorNames } from '../lib/competitorName.js';
   import { poolChannel } from '../lib/channels.js';
+  import { timerWidth } from '../lib/timerNodes.js';
   import { isOpenPracticeRound } from '../lib/heats.js';
   import {
     CONFIRM_TIMEOUT_MS,
@@ -382,7 +383,10 @@
   });
   const offerable = $derived(offerableNodes(nodeView));
 
-  const nodeCount = $derived(nodeCountOf(signal, timer.node_count ?? 0));
+  // The declared fallback is the timer's **effective width** (#412: `node_count` is the RD's
+  // override and is normally null, so `?? 0` meant "no nodes to tune" on every timer that had
+  // never been pinned). `nodeView.width` is the Director's own resolution of the same rule.
+  const nodeCount = $derived(nodeCountOf(signal, nodeView?.width ?? timerWidth(timer)));
   const nodeIndices = $derived(Array.from({ length: nodeCount }, (_, i) => i));
   const nodeById = $derived(
     new Map<number, NodeSignal>((signal?.nodes ?? []).map((n) => [n.node, n]))
