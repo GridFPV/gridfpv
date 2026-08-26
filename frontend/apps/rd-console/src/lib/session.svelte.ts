@@ -91,6 +91,10 @@ import type {
 } from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
+// The node-configuration seam (#412) lives in the app rather than in `@gridfpv/protocol-client`
+// (see `./timerNodes.ts`); it is injected here exactly like every protocol-client seam above so
+// screen tests can stub it.
+import { timerNodes, setTimerNodes } from './timerNodes.js';
 import type {
   AdapterId,
   AuditEntry,
@@ -125,9 +129,11 @@ import type {
   RoundIssue,
   RoundStanding,
   Scope,
+  SetTimerNodesRequest,
   SignalTraceView,
   Timer,
   TimerId,
+  TimerNodes,
   TimerSignal,
   UpdateClassRequest,
   UpdatePilotRequest,
@@ -376,6 +382,8 @@ export class Session {
   #setCalibrationImpl: typeof setCalibration;
   #timerSignalImpl: typeof timerSignal;
   #stopTimerSignalImpl: typeof stopTimerSignal;
+  #timerNodesImpl: typeof timerNodes;
+  #setTimerNodesImpl: typeof setTimerNodes;
   #setEventTimersImpl: typeof setEventTimers;
   #setPrimaryTimerImpl: typeof setPrimaryTimer;
   #listPilotsImpl: typeof listPilots;
@@ -423,6 +431,8 @@ export class Session {
     setCalibrationImpl?: typeof setCalibration;
     timerSignalImpl?: typeof timerSignal;
     stopTimerSignalImpl?: typeof stopTimerSignal;
+    timerNodesImpl?: typeof timerNodes;
+    setTimerNodesImpl?: typeof setTimerNodes;
     setEventTimersImpl?: typeof setEventTimers;
     setPrimaryTimerImpl?: typeof setPrimaryTimer;
     listPilotsImpl?: typeof listPilots;
@@ -471,6 +481,8 @@ export class Session {
     this.#setCalibrationImpl = opts?.setCalibrationImpl ?? setCalibration;
     this.#timerSignalImpl = opts?.timerSignalImpl ?? timerSignal;
     this.#stopTimerSignalImpl = opts?.stopTimerSignalImpl ?? stopTimerSignal;
+    this.#timerNodesImpl = opts?.timerNodesImpl ?? timerNodes;
+    this.#setTimerNodesImpl = opts?.setTimerNodesImpl ?? setTimerNodes;
     this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
     this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
     this.#listPilotsImpl = opts?.listPilotsImpl ?? listPilots;
@@ -806,6 +818,33 @@ export class Session {
    */
   stopTimerSignal(id: TimerId): Promise<void> {
     return this.#stopTimerSignalImpl(this.baseUrl, id, this.#token);
+  }
+
+  /**
+   * Read a timer's **node configuration** (`GET /timers/{id}/nodes`, #412) — what the hardware
+   * reported, what GridFPV is configured for, which nodes are enabled, and any drift between them.
+   *
+   * An open read like {@link timerSignal}, and for the same reason it is not a `#privilegedWrite`:
+   * it is used to *render* a screen, and a token prompt fired by a render would be absurd. It sends
+   * whatever token the session already holds.
+   */
+  timerNodes(id: TimerId, opts: { signal?: AbortSignal } = {}): Promise<TimerNodes> {
+    return this.#timerNodesImpl(this.baseUrl, id, { token: this.#token, signal: opts.signal });
+  }
+
+  /**
+   * Write a timer's **node configuration** (`PUT /timers/{id}/nodes`, #412) — the width override
+   * (`node_count: null` clears it and follows the hardware again) and/or the enabled node set.
+   *
+   * A **decision**, so it is RD-gated and persisted: a node disabled here stays disabled across a
+   * reconnect. Resolves to the resulting {@link TimerNodes}, `undefined` on a cancelled token
+   * prompt, or throws — including the Director's refusals (a zero width, or an edit leaving no node
+   * enabled), whose messages are already phrased for the RD and are surfaced verbatim.
+   */
+  setTimerNodes(id: TimerId, request: SetTimerNodesRequest): Promise<TimerNodes | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#setTimerNodesImpl(this.baseUrl, id, request, token)
+    );
   }
 
   /**

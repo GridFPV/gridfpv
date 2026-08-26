@@ -57,6 +57,7 @@ import type {
   LiveRaceState,
   SignalTraceView
 } from '@gridfpv/types';
+import type { timerNodes, setTimerNodes } from '../src/lib/timerNodes.js';
 import { Session, type SessionRole } from '../src/lib/session.svelte.js';
 
 /** The built-in Practice event the screen tests render inside. */
@@ -85,6 +86,9 @@ export interface TimerImpls {
   /** The manual connect/disconnect write seams (#383) — back the TimerManager connect tests. */
   connectTimerImpl?: typeof connectTimer;
   disconnectTimerImpl?: typeof disconnectTimer;
+  /** The node-config read/write seams (#412) — back the TimerNodesDialog tests. */
+  timerNodesImpl?: typeof timerNodes;
+  setTimerNodesImpl?: typeof setTimerNodes;
   setEventTimersImpl?: typeof setEventTimers;
   setPrimaryTimerImpl?: typeof setPrimaryTimer;
   /** The app-level pilot directory read (issue #74) — backs the hub + Pilots page tests. */
@@ -220,6 +224,11 @@ export function makeTestSession(
     deleteTimerImpl: opts?.deleteTimerImpl,
     connectTimerImpl: opts?.connectTimerImpl,
     disconnectTimerImpl: opts?.disconnectTimerImpl,
+    // Node-config seams (#412): inert unless a test overrides them. Left undefined (so the real
+    // fetch-backed impls stand) — `fetch` is stubbed to fail below, which is the right default:
+    // the node dialog is only mounted by tests that seed it.
+    timerNodesImpl: opts?.timerNodesImpl,
+    setTimerNodesImpl: opts?.setTimerNodesImpl,
     setEventTimersImpl: opts?.setEventTimersImpl,
     setPrimaryTimerImpl: opts?.setPrimaryTimerImpl,
     // The pilots/heats directory reads default to an INERT SUCCESS (empty list), not the real

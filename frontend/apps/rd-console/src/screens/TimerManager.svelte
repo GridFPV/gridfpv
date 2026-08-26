@@ -35,6 +35,7 @@
     CreateTimerRequest,
     Timer,
     TimerKind,
+    TimerNodes,
     UpdateTimerRequest
   } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
@@ -61,7 +62,14 @@
     isPlausibleMhz,
     type CapabilityTag
   } from '../lib/channels.js';
+  import {
+    DEFAULT_NODE_COUNT,
+    timerDrifts,
+    timerNodeSummary,
+    timerWidth
+  } from '../lib/timerNodes.js';
   import PluginCallout from './PluginCallout.svelte';
+  import TimerNodesDialog from './TimerNodesDialog.svelte';
 
   let {
     session,
@@ -159,12 +167,15 @@
    */
   const displayTimers = $derived.by(() => {
     if (loadState.kind !== 'ready') return [];
-    // Overlay the poll-fresh, in-memory fields (connection `status` AND `plugin` presence) from the
-    // live-polled list; both are driven by the live connection and only refreshed there.
+    // Overlay the poll-fresh, in-memory fields (connection `status`, `plugin` presence AND the
+    // node count the timer REPORTED) from the live-polled list; all three are driven by the live
+    // connection and only refreshed there. `reported_nodes` (#412) is learned on connect, so
+    // without it here a timer that has just come up would keep reading "no drift" until the
+    // manager happened to reload — hiding exactly the disagreement the RD needs to see.
     const live = new Map(session.timers.map((t) => [t.id, t]));
     return loadState.timers.map((t) => {
       const l = live.get(t.id);
-      return l ? { ...t, status: l.status, plugin: l.plugin } : t;
+      return l ? { ...t, status: l.status, plugin: l.plugin, reported_nodes: l.reported_nodes } : t;
     });
   });
 
@@ -284,9 +295,19 @@
   // The capability (Fixed | Flexible), node count, and the chosen available channels. The chosen set
   // is held as a `Set<number>` of raw MHz (catalog picks + custom entries); for a Fixed timer it is
   // limited to the timer's built-in allowed set (`Fixed.channels`); a Flexible timer can add custom.
-  const DEFAULT_NODE_COUNT = 8;
   let formCapability = $state<CapabilityTag>('Flexible');
   let formNodeCount = $state(String(DEFAULT_NODE_COUNT));
+  /**
+   * The width the Node-count field was **seeded** with, so submit can tell "the RD set a width"
+   * from "the RD never touched this field" (#412).
+   *
+   * `node_count` is an *override*: sending it pins the width, and a pinned width that disagrees
+   * with the hardware is precisely the bug #412 was filed for. Before #412 this form always sent
+   * it, so editing a timer's name would silently pin its width and undo "follow the timer". Now it
+   * is only sent when it actually changed — clearing the override, and per-node enable/disable,
+   * live in the Nodes dialog, which is the surface that can express them.
+   */
+  let seededNodeCount = $state(String(DEFAULT_NODE_COUNT));
   let formChannels = $state<Set<number>>(new Set());
   // A Fixed timer's built-in allowed set (its physically-supported channels); the picker offers
   // exactly these, and `formChannels` is the subset the RD makes available. Empty ⇒ all catalog.
@@ -309,7 +330,10 @@
 
   function resetChannelForm(timer?: Timer) {
     formCapability = capabilityTag(timer?.channel_capability);
-    formNodeCount = String(timer?.node_count ?? DEFAULT_NODE_COUNT);
+    // The EFFECTIVE width (override → reported → fallback), not the raw override: showing a blank
+    // or a stale 8 for a timer that is following its hardware would misreport the heat-size cap.
+    formNodeCount = String(timer ? timerWidth(timer) : DEFAULT_NODE_COUNT);
+    seededNodeCount = formNodeCount;
     formChannels = new Set(timer?.available_channels ?? []);
     formFixedAllowed = fixedAllowed(timer?.channel_capability);
     formCustomMhz = '';
@@ -444,7 +468,10 @@
     }
     const channel_capability = buildCapability();
     const available_channels = buildAvailable();
-    const node_count = Math.round(nodeCount);
+    // Only carried when the RD actually set a width — see `seededNodeCount`. Omitted otherwise, so
+    // an unrelated edit never pins an override the RD did not ask for.
+    const node_count =
+      String(formNodeCount) === seededNodeCount ? undefined : Math.round(nodeCount);
     saving = true;
     formError = undefined;
     try {
@@ -484,6 +511,44 @@
     } finally {
       saving = false;
     }
+  }
+
+  // ── Node configuration (#412) ───────────────────────────────────────────────
+  // The row's node reading is a BUTTON, because it is the only place an RD can see reported vs
+  // configured and fix a timer that GridFPV has the wrong width for. The dialog owns the read and
+  // the write; this screen only re-folds the timer it hands back, so the row updates without a
+  // full reload (which would blank the list under an RD mid-setup).
+  let nodesTimer = $state<Timer | undefined>(undefined);
+  let nodesOpen = $state(false);
+
+  function openNodes(timer: Timer) {
+    nodesTimer = timer;
+    nodesOpen = true;
+  }
+
+  /**
+   * Fold an accepted node write back into the loaded row. The `PUT` answers with a `TimerNodes`
+   * view rather than a `Timer`, so the row's three inputs are reconstructed from it — the width
+   * override, the observation, and the disabled set (the complement of `enabled`, which is what
+   * the registry stores).
+   */
+  function applyNodes(view: TimerNodes) {
+    if (loadState.kind !== 'ready') return;
+    const enabled = new Set(view.enabled);
+    const disabled_nodes = view.nodes.map((n) => n.node).filter((n) => !enabled.has(n));
+    const next = loadState.timers.map((t) =>
+      t.id === view.timer
+        ? {
+            ...t,
+            node_count: view.configured ?? undefined,
+            reported_nodes: view.reported ?? undefined,
+            disabled_nodes
+          }
+        : t
+    );
+    loadState = { kind: 'ready', timers: next };
+    timers = next;
+    onchange?.(next);
   }
 
   // ── Remove ──────────────────────────────────────────────────────────────────
@@ -548,9 +613,19 @@
               <Badge tone="neutral" variant="outline"
                 >{capabilityTag(timer.channel_capability)}</Badge
               >
-              <span class="nodes" title="Node count — the heat-size cap">
-                {timer.node_count ?? DEFAULT_NODE_COUNT} nodes
-              </span>
+              <!-- The node reading is the entry point to the node config (#412): this is where an
+                   RD sees "reported 4, configured 8" and where they clear it. -->
+              <button
+                type="button"
+                class="nodes"
+                title={`Configure the nodes on “${timer.name}” — the heat-size cap`}
+                onclick={() => openNodes(timer)}
+              >
+                {timerNodeSummary(timer)}
+              </button>
+              {#if timerDrifts(timer)}
+                <Badge tone="danger" variant="outline">Timer reports {timer.reported_nodes}</Badge>
+              {/if}
               <span class="channel-summary">{channelSummary(timer)}</span>
             </div>
             <!-- The manual-hold readout (#383): only while a hold is up, and only when there is
@@ -684,7 +759,10 @@
           <option value="Fixed">Fixed (built-in set)</option>
         </Select>
       </Field>
-      <Field label="Node count" hint="Slots on the timer — caps a heat's size.">
+      <Field
+        label="Node count"
+        hint={'Slots on the timer — caps a heat’s size. Only sent if you change it; use Nodes on the row to disable one node or follow the timer.'}
+      >
         <Input type="number" min="1" step="1" bind:value={formNodeCount} aria-label="Node count" />
       </Field>
     </div>
@@ -766,6 +844,12 @@
     </Button>
   {/snippet}
 </Dialog>
+
+<!-- Node configuration (#412), stacked the same way the add/edit dialog is. Mounted lazily: it
+     reads `GET /timers/{id}/nodes` on open, and there is nothing to read until the RD asks. -->
+{#if nodesTimer}
+  <TimerNodesDialog {session} timer={nodesTimer} bind:open={nodesOpen} onapplied={applyNodes} />
+{/if}
 
 <style>
   .timer-manager {
@@ -917,9 +1001,28 @@
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
   }
+  /* The node reading is a control, not a label (#412) — styled to read as the row's other data
+     while still being obviously pressable (underline on hover, a real focus ring). */
   .timer-channels .nodes {
+    font: inherit;
     font-weight: var(--gf-font-weight-semibold);
     color: var(--gf-text);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: var(--gf-border-strong);
+    text-underline-offset: 3px;
+  }
+  .timer-channels .nodes:hover {
+    text-decoration-color: var(--gf-accent);
+    color: var(--gf-accent);
+  }
+  .timer-channels .nodes:focus-visible {
+    outline: none;
+    border-radius: var(--gf-radius-xs);
+    box-shadow: var(--gf-focus-ring);
   }
   .channel-summary {
     min-width: 0;
