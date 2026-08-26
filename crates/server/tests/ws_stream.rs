@@ -17,11 +17,14 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition};
+use gridfpv_events::{
+    AdapterId, CompetitorRef, Event, GateIndex, HeatId, HeatTransition, LogRef, Pass,
+    SignalHistory, SourceTime,
+};
 use gridfpv_server::app::{AppState, router};
 use gridfpv_server::events::{CreateEventRequest, EventRegistry};
 use gridfpv_server::scope::{EventId, Scope, SubscribeRequest};
-use gridfpv_server::snapshot::{HeatPhase, ProjectionBody};
+use gridfpv_server::snapshot::{HeatPhase, LiveRaceState, ProjectionBody};
 use gridfpv_server::stream::{Change, Cursor, StreamMessage};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -387,5 +390,418 @@ fn seq(message: &StreamMessage) -> u64 {
     match message {
         StreamMessage::Change(env) => env.sequence.seq,
         other => panic!("expected a Change, got {other:?}"),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// #422 — a reconnect must never show a live count stepping backwards
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// Two halves, and the tests below hold both:
+//
+//   1. every envelope echoes the log offset it was folded through, so a client's resume
+//      cursor is EXACT rather than the `+1`-per-applied-envelope lower bound it used to
+//      infer; and
+//   2. whatever span a resume does ask for is folded once at its end, so even a client
+//      still presenting a stale-but-in-window cursor is shown one settled state.
+//
+// These deliberately subscribe from a **stale** cursor and assert on the **whole**
+// envelope sequence. `min_lap_floor_conformance.rs` reads every stream at `from: tail` and
+// asserts only the last envelope, which is structurally blind to a replayed body — a test
+// shaped like that one passes for the reason that one did, not because the bug is gone.
+
+/// The echoed resume cursor of a `Change` message — the log offset its body was folded through.
+fn env_cursor(message: &StreamMessage) -> u64 {
+    match message {
+        StreamMessage::Change(env) => env.cursor.seq,
+        other => panic!("expected a Change, got {other:?}"),
+    }
+}
+
+/// One competitor's `laps_completed` in a live body (0 if the competitor is absent).
+fn laps_of(live: &LiveRaceState, competitor: &str) -> u32 {
+    live.progress
+        .iter()
+        .find(|p| p.competitor == CompetitorRef(competitor.into()))
+        .map(|p| p.laps_completed)
+        .unwrap_or(0)
+}
+
+/// Collect every frame the stream sends until it goes quiet for `quiet`.
+///
+/// This is what makes "assert on the whole sequence" possible: a staircase of replayed folds
+/// arrives as several frames, and only reading *all* of them can see the dip. Deterministic
+/// because every append under test is already on the log before the subscribe.
+async fn collect_until_quiet(ws: &mut Ws, quiet: Duration) -> Vec<StreamMessage> {
+    let mut out = Vec::new();
+    while let Ok(frame) = tokio::time::timeout(quiet, ws.next()).await {
+        match frame
+            .expect("stream closed unexpectedly")
+            .expect("websocket error")
+        {
+            Message::Text(text) => out.push(serde_json::from_str(&text).expect("StreamMessage")),
+            Message::Close(frame) => panic!("server closed the stream: {frame:?}"),
+            _ => continue,
+        }
+    }
+    out
+}
+
+/// How long a stream must stay silent before we call it settled.
+const QUIET: Duration = Duration::from_millis(300);
+
+fn pass(competitor: &str, at_micros: i64, sequence: u64) -> Event {
+    Event::Pass(Pass {
+        adapter: AdapterId("sim".into()),
+        competitor: CompetitorRef(competitor.into()),
+        at: SourceTime::from_micros(at_micros),
+        sequence: Some(sequence),
+        gate: GateIndex::LAP,
+        signal: None,
+        heat: Some(HeatId("q-1".into())),
+    })
+}
+
+/// A dense RSSI append: a real, logged event that moves no projection — the exact shape of
+/// append that used to widen the client's cursor drift, since it emits no envelope to count.
+fn signal_chunk(base: u64) -> Event {
+    Event::SignalHistory(SignalHistory {
+        adapter: AdapterId("sim".into()),
+        competitor: CompetitorRef("A".into()),
+        times: vec![0, 1_000, 2_000],
+        rssi: vec![50, 60, 70],
+        base,
+    })
+}
+
+/// Append an event that *does* move the live fold; when `watch` is a connected stream, await the
+/// envelope it produces before returning.
+///
+/// Awaiting is what keeps a live console's view of the heat honest: without it the appends race
+/// the stream's first wake, all ten land as one catch-up span, and the test measures the collapse
+/// instead of the drift it is trying to reproduce.
+async fn append_watched(
+    state: &AppState,
+    event: Event,
+    watch: &mut Option<&mut Ws>,
+    seen: &mut Vec<StreamMessage>,
+) -> u64 {
+    let offset = state.append(event, None).unwrap();
+    if let Some(ws) = watch.as_deref_mut() {
+        seen.push(next_message(ws).await);
+    }
+    offset
+}
+
+/// Run a heat on `state` in which A completes four laps, with a signal chunk between each pass.
+///
+/// Returns the log offset of A's **last** pass (the marshaling target the void tests use) and, if
+/// `watch` is a connected stream, every envelope that stream emitted along the way.
+/// Layout — ten offsets, of which seven move the projection and three do not:
+///
+/// | offset | event                | emits |
+/// |--------|----------------------|-------|
+/// | 0      | q-1 scheduled        | yes   |
+/// | 1      | q-1 Running          | yes   |
+/// | 2      | A pass (holeshot)    | yes   |
+/// | 3      | A pass → lap 1       | yes   |
+/// | 4      | signal chunk         | **no**|
+/// | 5      | A pass → lap 2       | yes   |
+/// | 6      | signal chunk         | **no**|
+/// | 7      | A pass → lap 3       | yes   |
+/// | 8      | signal chunk         | **no**|
+/// | 9      | A pass → lap 4       | yes   |
+///
+/// The three silent offsets are the whole mechanism: they are ordinary log appends that a
+/// `+1`-per-envelope client can never count, so its cursor falls three behind the tail.
+async fn run_four_lap_heat(
+    state: &AppState,
+    mut watch: Option<&mut Ws>,
+) -> (u64, Vec<StreamMessage>) {
+    let seen = &mut Vec::new();
+    append_watched(state, heat_scheduled("q-1", &["A", "B"]), &mut watch, seen).await;
+    append_watched(
+        state,
+        heat_changed("q-1", HeatTransition::Running),
+        &mut watch,
+        seen,
+    )
+    .await;
+    append_watched(state, pass("A", 1_000_000, 0), &mut watch, seen).await;
+    append_watched(state, pass("A", 4_000_000, 1), &mut watch, seen).await;
+    state.append(signal_chunk(0), None).unwrap();
+    append_watched(state, pass("A", 7_000_000, 2), &mut watch, seen).await;
+    state.append(signal_chunk(3), None).unwrap();
+    append_watched(state, pass("A", 10_000_000, 3), &mut watch, seen).await;
+    state.append(signal_chunk(6), None).unwrap();
+    let last = append_watched(state, pass("A", 13_000_000, 4), &mut watch, seen).await;
+    (last, std::mem::take(seen))
+}
+
+/// The log length after an append that landed at `offset` — the true tail a snapshot taken
+/// at that instant would hand out as its cursor (offsets are dense from 0).
+fn tail_after(offset: u64) -> u64 {
+    offset + 1
+}
+
+/// **#422 — a resume from a stale (but in-window) cursor delivers no backwards step.**
+///
+/// The premise is reproduced, not assumed: a client streams the whole heat live and counts the
+/// envelopes it applied, which is *exactly* the `+1`-per-applied-envelope resume cursor the old
+/// client inferred. Seven envelopes against a ten-offset log — the three signal chunks moved no
+/// projection, emitted nothing, and so were never counted. That three-offset drift is the bug.
+///
+/// Resubscribing from that stale cursor used to replay offsets 7..10 one at a time: an envelope
+/// carrying A on **3** laps, then one carrying A on 4. The console, already showing 4, dropped to
+/// 3 and climbed back — a pilot visibly losing a lap mid-heat, indistinguishable from a marshal
+/// voiding a pass. The whole resumed sequence is asserted here, so that dip cannot hide.
+#[tokio::test]
+async fn a_resume_from_a_stale_cursor_never_steps_the_lap_count_backwards() {
+    let (registry, state) = test_registry();
+    let (url, _server) = serve(registry.clone()).await;
+
+    // A console connected for the whole heat, applying envelopes as they land.
+    let mut live = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: None,
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+    let (last_pass, applied) = run_four_lap_heat(&state, Some(&mut live)).await;
+    let tail = tail_after(last_pass);
+
+    assert_eq!(tail, 10, "ten appends went onto the log");
+    assert!(
+        collect_until_quiet(&mut live, QUIET).await.is_empty(),
+        "the live stream emitted nothing beyond one envelope per changed offset"
+    );
+    assert_eq!(
+        applied.len(),
+        7,
+        "three of the ten appends moved no projection and emitted nothing"
+    );
+    let displayed = laps_of(live_body(applied.last().unwrap()), "A");
+    assert_eq!(displayed, 4, "the console is showing A on four laps");
+
+    // The old client's inferred cursor: one per APPLIED envelope, from the snapshot's 0.
+    let inferred = applied.len() as u64;
+    assert!(
+        inferred < tail,
+        "the inferred cursor ({inferred}) really does lag the true tail ({tail}) — the premise"
+    );
+    // The server's own answer, echoed on the last envelope, is the true offset.
+    assert_eq!(
+        env_cursor(applied.last().unwrap()),
+        tail,
+        "every envelope states the offset it was folded through"
+    );
+    drop(live);
+
+    // The blip: resubscribe from the STALE cursor, without re-snapshotting.
+    let mut resumed = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: Some(Cursor::new(inferred)),
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+    let replay = collect_until_quiet(&mut resumed, QUIET).await;
+
+    // The whole sequence, not just the last frame: no envelope may carry FEWER laps than the
+    // console already had. This is the assertion the bug fails.
+    for (i, message) in replay.iter().enumerate() {
+        let laps = laps_of(live_body(message), "A");
+        assert!(
+            laps >= displayed,
+            "envelope {i} of the resumed stream stepped A back from {displayed} to {laps} laps"
+        );
+    }
+    // And the span is collapsed: one settled envelope, not a staircase.
+    assert_eq!(
+        replay.len(),
+        1,
+        "a replayed span is one settled fold, not one envelope per offset"
+    );
+    assert_eq!(laps_of(live_body(&replay[0]), "A"), 4);
+    assert_eq!(env_cursor(&replay[0]), tail);
+}
+
+/// **#422 — a resume from the ECHOED cursor has nothing to replay at all.**
+///
+/// The collapse is the safety net; this is the cause fixed. A client that stores each envelope's
+/// own `cursor` resumes at the exact offset it stands on, so the engine seeds itself with the
+/// identical fold and the stream stays silent until something genuinely new lands.
+#[tokio::test]
+async fn a_resume_from_the_echoed_cursor_replays_nothing() {
+    let (registry, state) = test_registry();
+    let (url, _server) = serve(registry.clone()).await;
+
+    let mut live = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: None,
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+    let (last_pass, applied) = run_four_lap_heat(&state, Some(&mut live)).await;
+    let exact = env_cursor(applied.last().unwrap());
+    assert_eq!(exact, tail_after(last_pass));
+    drop(live);
+
+    let mut resumed = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: Some(Cursor::new(exact)),
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+    assert!(
+        collect_until_quiet(&mut resumed, QUIET).await.is_empty(),
+        "an exact resume cursor leaves the server nothing to send"
+    );
+
+    // …and the resumed stream is still live: the next real change arrives, moving forward.
+    state
+        .append(heat_changed("q-1", HeatTransition::Finished), None)
+        .unwrap();
+    let next = next_message(&mut resumed).await;
+    assert_eq!(
+        seq(&next),
+        1,
+        "the resumed stream's own sequence starts at 1"
+    );
+    assert_eq!(live_body(&next).phase, HeatPhase::Unofficial);
+    assert_eq!(laps_of(live_body(&next), "A"), 4, "no lap was lost");
+}
+
+/// **#422 constraint — a genuine marshaling correction must still lower the count.**
+///
+/// GridFPV has real corrections: a marshal voids a pass and a lap legitimately disappears. That is
+/// the thing the spurious replay was indistinguishable from, so removing the replay must not also
+/// remove the real one. Both paths are checked: the void reaching a *connected* console as its own
+/// envelope, and the void reaching a *reconnecting* one through the collapsed catch-up span — where
+/// the settled fold is genuinely lower than what that client last displayed, and is sent anyway.
+#[tokio::test]
+async fn a_marshal_void_still_lowers_the_live_lap_count() {
+    let (registry, state) = test_registry();
+    let (url, _server) = serve(registry.clone()).await;
+
+    let (last_pass, _) = run_four_lap_heat(&state, None).await;
+    let before_void = tail_after(last_pass);
+
+    // 1. The connected console: the void lands as its own tail envelope and the count drops.
+    let mut connected = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: Some(Cursor::new(before_void)),
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+    state
+        .append(
+            Event::DetectionVoided {
+                target: LogRef(last_pass),
+            },
+            None,
+        )
+        .unwrap();
+    let voided = next_message(&mut connected).await;
+    assert_eq!(
+        laps_of(live_body(&voided), "A"),
+        3,
+        "voiding A's closing pass takes the lap back on the live stream"
+    );
+    drop(connected);
+
+    // 2. The reconnecting console: it last displayed four laps and resumes from a cursor BEFORE
+    //    the void. The collapsed span must still deliver the corrected — lower — count. A fix that
+    //    merely clamped the stream to "never decrease" would hide the marshal's ruling here.
+    let mut resumed = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: Some(Cursor::new(before_void)),
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+    let replay = collect_until_quiet(&mut resumed, QUIET).await;
+    assert_eq!(replay.len(), 1, "one settled fold for the replayed span");
+    assert_eq!(
+        laps_of(live_body(&replay[0]), "A"),
+        3,
+        "the real correction survives the collapse — the count goes down, as it should"
+    );
+}
+
+/// **#422 constraint — the stale-cursor guard is neither widened nor narrowed.**
+///
+/// The collapse changes what an *in-window* resume is shown; it must not change which cursors are
+/// in window. Pinned from both sides of the boundary: `tail - RETAINED_WINDOW` is served, one
+/// offset below it is refused. (`too_old_cursor_requires_re_snapshot`, above, covers the far past.)
+#[tokio::test]
+async fn the_retained_window_boundary_is_unchanged() {
+    let (registry, state) = test_registry();
+    let (url, _server) = serve(registry.clone()).await;
+
+    let mut last = 0;
+    for _ in 0..(gridfpv_server::ws::RETAINED_WINDOW + 50) {
+        last = state.append(heat_scheduled("q-1", &["A"]), None).unwrap();
+    }
+    let tail = tail_after(last);
+    let oldest_replayable = tail - gridfpv_server::ws::RETAINED_WINDOW;
+
+    // Exactly at the boundary: still replayable, so it is served (collapsed) rather than refused.
+    let mut inside = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: Some(Cursor::new(oldest_replayable)),
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+    let served = collect_until_quiet(&mut inside, QUIET).await;
+    assert_eq!(
+        served.len(),
+        1,
+        "a cursor at the boundary is replayed (collapsed to one envelope), never refused"
+    );
+    assert!(matches!(served[0], StreamMessage::Change(_)));
+
+    // One offset below it: refused, exactly as before.
+    let mut outside = subscribe(
+        &url,
+        &SubscribeRequest {
+            scope: event_scope(),
+            from: Some(Cursor::new(oldest_replayable - 1)),
+            contract_version: None,
+            token: None,
+        },
+    )
+    .await;
+    match next_message(&mut outside).await {
+        StreamMessage::ReSnapshotRequired(err) => {
+            assert_eq!(err.code, gridfpv_server::error::ErrorCode::StaleCursor);
+        }
+        other => panic!("expected ReSnapshotRequired, got {other:?}"),
     }
 }

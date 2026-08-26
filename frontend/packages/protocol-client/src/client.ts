@@ -1569,9 +1569,9 @@ export function connect(options: ConnectOptions): ProtocolClient {
   let body: ProjectionBody | undefined;
   // The resume cursor: a log offset (protocol.html §2/§3 "as built") used ONLY as the
   // `from:` resume point — it is not the stream's ordering counter. Seeded by each
-  // snapshot and ADVANCED by one per applied envelope (see `applyEnvelope`), so a
-  // reconnect resumes from the last-applied position instead of replaying the whole
-  // backlog from the snapshot's original offset.
+  // snapshot and re-seeded from each applied envelope's own `cursor` (see
+  // `applyEnvelope`), so a reconnect resumes EXACTLY where this client left off instead
+  // of replaying the whole backlog from the snapshot's original offset.
   let cursor: Cursor | undefined;
   // The per-stream `sequence` axis (protocol.html §3/§9.5): starts at 1 on each
   // subscription, distinct from `cursor`. Reset to 0 on every (re)subscribe so the
@@ -1673,15 +1673,26 @@ export function connect(options: ConnectOptions): ProtocolClient {
     }
     body = change.FreshValue;
     streamSeq = seq;
-    // Advance the RESUME cursor alongside the stream. The resume `from` is a log
-    // offset the wire does not echo per envelope, but every applied envelope
-    // corresponds to at least one log append past the current cursor, so a +1
-    // advance is a conservative (at-or-behind the true offset) tracker. Without
-    // it a reconnect re-presented the ORIGINAL snapshot's offset and replayed the
-    // entire backlog through onState — or fell out of the retained window
-    // (StaleCursor). Any short remainder behind the true offset replays as
-    // idempotent fresh values, and the re-snapshot path reconciles any drift.
-    cursor = (cursor ?? 0) + 1;
+    // Re-seed the RESUME cursor from the envelope's own `cursor` — the log offset the
+    // server folded this body through (#422). It is exact, so a reconnect resubscribes
+    // from precisely the position this client is at and the server has nothing to replay.
+    //
+    // This used to be `cursor = (cursor ?? 0) + 1`: the wire echoed no offset, so the
+    // client advanced one per APPLIED envelope and called it "conservative (at-or-behind
+    // the true offset)". It was conservative and it was wrong — every append that moved
+    // no projection (a SignalHistory chunk, a CompetitorSeen, a marshaling no-op) emitted
+    // no envelope and widened the drift. A reconnect then resumed from `tail - drift`,
+    // which is inside the server's retained window, so the stream REPLAYED: `body` was
+    // overwritten with an older fold carrying fewer laps and then climbed back through
+    // every intermediate one. Live lap counts stepped backwards on screen, mid-race,
+    // looking exactly like a marshal voiding a pass. Nothing here may re-derive the
+    // offset; it is the server's to state.
+    //
+    // Fallback: a Director too old to echo the field leaves `cursor` undefined here, so
+    // keep the old lower-bound advance for it rather than losing the resume position
+    // outright. Its stream still replays on reconnect — that is the bug this field fixes —
+    // but the client degrades instead of re-snapshotting on every blip.
+    cursor = typeof env.cursor === 'number' ? env.cursor : (cursor ?? 0) + 1;
     return 'applied';
   }
 

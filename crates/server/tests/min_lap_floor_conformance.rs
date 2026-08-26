@@ -94,14 +94,14 @@ struct Rig {
     echoing: CompetitorRef,
     /// The pilot with a clean run.
     clean: CompetitorRef,
-    /// The log length once the passes are down — the offset the streams resume at, chosen so the
-    /// only envelopes they see are the ones the finish transitions cause.
+    /// The log length once the passes are down — the offset the streams resume at, so the only
+    /// envelopes they see carry the finish transitions.
     tail: u64,
 }
 
 /// Build the event/class/round/roster in the registry, then lay down the heat's log **up to and
 /// including its passes** (the finish transitions are appended later, after the streams subscribe,
-/// so each socket's frame count is deterministic).
+/// so each socket observes the finish rather than being handed it as history).
 fn rig() -> Rig {
     let registry = EventRegistry::new(None).expect("in-memory registry");
 
@@ -308,7 +308,7 @@ async fn serve(registry: &EventRegistry) -> (String, tokio::task::JoinHandle<()>
 }
 
 /// Subscribe one scope's change stream, resuming **at the current tail** so the socket emits
-/// nothing until the finish transitions land — which makes the frame count deterministic.
+/// nothing until the finish transitions land.
 async fn subscribe(base: &str, event: &EventId, scope: Scope, from: u64) -> Ws {
     let url = format!("{base}/events/{}/stream", event.0);
     let (mut ws, _) = connect_async(url).await.unwrap();
@@ -324,14 +324,22 @@ async fn subscribe(base: &str, event: &EventId, scope: Scope, from: u64) -> Ws {
     ws
 }
 
-/// Read `n` change envelopes and return the `LiveRaceState` of the **last** — the stream's settled
-/// value for that scope.
-async fn last_live_of(ws: &mut Ws, n: usize) -> LiveRaceState {
+/// Read change envelopes until the stream falls silent, and return the `LiveRaceState` of the
+/// **last** — the stream's settled value for that scope.
+///
+/// Deliberately not "read exactly N frames". How many envelopes a batch of appends produces is
+/// not a floor question, and it is not fixed: a subscribe races the appends that follow it, and
+/// whatever was already on the log when the server began serving this subscription is delivered
+/// as one collapsed catch-up fold rather than one envelope per offset (#422). What this file
+/// asserts — that every surface reports the same floored lap count — is a property of the
+/// *settled* value, so settle first and read that.
+async fn settled_live_of(ws: &mut Ws) -> LiveRaceState {
     let mut last = None;
-    for _ in 0..n {
-        let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("timed out waiting for a stream frame")
+    // The first frame may take a moment (the appends have to land and wake the stream); once one
+    // has arrived, a short silence means the stream has settled.
+    let mut patience = Duration::from_secs(5);
+    while let Ok(frame) = tokio::time::timeout(patience, ws.next()).await {
+        let frame = frame
             .expect("stream closed unexpectedly")
             .expect("websocket error");
         let message: StreamMessage = match frame {
@@ -345,8 +353,9 @@ async fn last_live_of(ws: &mut Ws, n: usize) -> LiveRaceState {
             },
             other => panic!("expected a Change envelope, got {other:?}"),
         }
+        patience = Duration::from_millis(300);
     }
-    last.expect("at least one envelope")
+    last.expect("timed out waiting for a stream frame")
 }
 
 // ---------------------------------------------------------------------------------------
@@ -398,9 +407,9 @@ async fn the_min_lap_floor_is_identical_on_every_surface_that_reports_a_lap_coun
 
     finish_heat(&rig);
 
-    let stream_event = last_live_of(&mut event_ws, 2).await;
-    let stream_class = last_live_of(&mut class_ws, 2).await;
-    let stream_heat = last_live_of(&mut heat_ws, 2).await;
+    let stream_event = settled_live_of(&mut event_ws).await;
+    let stream_class = settled_live_of(&mut class_ws).await;
+    let stream_heat = settled_live_of(&mut heat_ws).await;
 
     // --- The lap list: D26's reference surface, and the one that was always right. ---------
     let laps: Snapshot = get_json(
@@ -563,7 +572,7 @@ async fn the_event_scope_stream_labels_the_sub_floor_echo_rejected() {
     )
     .await;
     finish_heat(&rig);
-    let live = last_live_of(&mut ws, 2).await;
+    let live = settled_live_of(&mut ws).await;
 
     let rejected: Vec<_> = live
         .crossings
