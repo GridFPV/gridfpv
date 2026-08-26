@@ -54,6 +54,10 @@ export {
   createRound,
   updateRound,
   deleteRound,
+  listChannelLayers,
+  createChannelLayer,
+  updateChannelLayer,
+  deleteChannelLayer,
   listHeats,
   listRoundIssues,
   eventAudit,
@@ -86,3 +90,19 @@ export type { CalibrationRequest } from '@gridfpv/types';
  * its payload, and a definition that is the ts-rs binding rather than a hand-written guess.
  */
 export type { ChannelDispatch, ChannelRequest } from '@gridfpv/types';
+
+/**
+ * The channel-layer wire shapes (#117 S2) — the view every layer read/write answers with, and the
+ * two request bodies. Re-exported for the same reason {@link CalibrationRequest} is: one import
+ * site for the call and its payload, and a definition that is the ts-rs binding rather than a
+ * hand-written guess.
+ */
+export type {
+  ChannelLayer,
+  ChannelLayers,
+  LayerId,
+  LayerNode,
+  LayerOverlap,
+  NewChannelLayerRequest,
+  SetChannelLayerRequest
+} from '@gridfpv/types';

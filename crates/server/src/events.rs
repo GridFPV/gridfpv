@@ -176,6 +176,28 @@ pub struct EventMeta {
     /// for free.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rounds: Vec<RoundDef>,
+    /// The event's **channel layers** (#117 S2) — the event-scoped answer to *what goes on which
+    /// node?*
+    ///
+    /// Each [`ChannelLayer`] is one complete tuning of the event's timer (one channel per enabled
+    /// node), drawn from the timer's **allowed** set ([`Timer::available_channels`], S1). A bracket
+    /// runs off one layer all tournament; a GQ-style qualifier defines many so each pilot keeps
+    /// their own channel — the RD picks the strategy, the model does not.
+    ///
+    /// **This is the field that stops "editing channels in the event" from mutating the global timer
+    /// record.** It sits beside [`timers`](Self::timers) / [`roster`](Self::roster) /
+    /// [`classes`](Self::classes) because it is the same kind of thing: an event-scoped decision,
+    /// next to the log rather than in it. Global is the seed, the event owns what it runs — the same
+    /// layering as #411's base profile → event tune.
+    ///
+    /// Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted before
+    /// #117 S2 reads back with no layers; a new event defaults to an **empty** list (the RD defines
+    /// the first one). The whole field round-trips through the event's persisted meta (issue #115),
+    /// so it is restart-safe for free.
+    ///
+    /// **Nothing reads it yet.** Which heat flies which layer — and the retune on arming — is S3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_layers: Vec<ChannelLayer>,
 }
 
 /// One class's **membership** within an event (race redesign Slice 1a): the roster pilots that
@@ -305,6 +327,422 @@ mod member_slots {
 
         deserializer.deserialize_seq(SlotsVisitor)
     }
+}
+
+// ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────────
+//
+// Three scopes answer three different questions about channels, and conflating any two of them has
+// been this repo's most repeated bug (#402, #412, #413, #416):
+//
+// | scope             | question                          | state                                |
+// |-------------------|-----------------------------------|--------------------------------------|
+// | Global (a timer)  | what may this timer *ever* use?   | [`Timer::available_channels`] (S1)   |
+// | **Event**         | **what goes on which node?**      | **[`ChannelLayer`] — this slice**    |
+// | Heat              | which layer does this heat fly?   | S3, not built                        |
+//
+// A layer is **event-scoped**, and that is the point. Today the Timers-page checkboxes edit one
+// per-timer field, and the event workspace embeds the *same* `TimerManager` — so editing channels
+// "in the event" mutates the **global** timer record. Layers live on [`EventMeta`] beside
+// `timers` / `roster` / `classes`, the same place every other event-scoped decision already lives,
+// and they are written through to the event's SQLite `meta` table (issue #115) so they are
+// restart-safe for free. The global allowed set is the **seed**; the event owns what it runs —
+// deliberately the same layering as #411's base-profile → event-tune, so there is one mental model
+// for both.
+
+/// Identifies one **channel layer** within an event (#117 S2).
+///
+/// A transparent string newtype like every other id on the wire, and **auto-generated** (a slug of
+/// the layer's name plus a short random suffix — the same id-gen as events / pilots / rounds).
+/// Never user-entered, and a **wire handle only**: what an RD reads is [`ChannelLayer::name`]
+/// (CLAUDE.md's display rule).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct LayerId(pub String);
+
+/// One node's tuning within a [`ChannelLayer`] (#117 S2): the node index and the raw-MHz channel it
+/// is tuned to.
+///
+/// **0-based on the wire, 1-based on screen** — index `2` is the node the RD calls "Node 3"
+/// ([`Timer::node_label`]), and `channel` is a raw frequency that renders through
+/// [`crate::timers::channel_label`] as `"Raceband R7"`. Neither raw value may reach a person; both
+/// are wire handles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct LayerNode {
+    /// The node's index on the timer, **0-based** — the same index [`TimerNode`] carries, and the
+    /// one `NodeSignal::node` and the `node-{i}` seat ref mean.
+    pub node: u32,
+    /// The raw centre frequency in **MHz** this node is tuned to in this layer. Must be one of the
+    /// timer's [`available_channels`](Timer::available_channels) — the *allowed* set S1 clarified.
+    pub channel: u16,
+}
+
+/// One event **channel layer** (#117 S2): a complete tuning of the event's timer — one channel per
+/// enabled node.
+///
+/// ```text
+/// Layer A:  Node 1→R1  Node 2→R2  Node 3→R3  Node 4→R4
+/// Layer B:  Node 1→F1  Node 2→F2  Node 3→F4  Node 4→F8
+/// ```
+///
+/// # Why a layer, and why the system does not choose one for you
+///
+/// The RD picks the strategy, per format, and both strategies fall out of this one mechanism with
+/// no special case:
+///
+/// - a **bracket** is *one layer for the whole tournament* — n channels for n pilots per heat, and
+///   they never move;
+/// - a **GQ-style qualifier** defines *many* layers so each pilot can stay on their own channel.
+///
+/// So nothing here encodes a policy that forces either. What the model does enforce is that a layer
+/// is a **complete, conflict-free tuning**: every enabled node has exactly one channel, and no two
+/// nodes share one (a node cannot share a frequency with its neighbour). Reusing a channel *between*
+/// layers is a [`LayerOverlap`] **warning**, never a refusal — it only matters for the
+/// keep-pilots-on-one-channel strategy, and an RD running a bracket off a single layer does not
+/// care.
+///
+/// Carried in [`EventMeta::channel_layers`]. **Not yet wired into heat filling or
+/// `assign_frequencies`** — which heat flies which layer is S3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ChannelLayer {
+    /// The stable, **auto-generated** handle (a slug of [`name`](Self::name) + a short random
+    /// suffix). Never user-entered; the name is display-only but is what a person reads.
+    pub id: LayerId,
+    /// The RD-typed display name (`"Bracket A"`, `"Qual pack 2"`). Non-empty after trimming, and
+    /// unique within the event — two layers called "Bracket A" is a mis-click, not a choice.
+    pub name: String,
+    /// The node → channel mapping, **ascending by node**, one entry per enabled node of the event's
+    /// timer. Complete and duplicate-free (see the type doc).
+    pub nodes: Vec<LayerNode>,
+}
+
+impl ChannelLayer {
+    /// The channel this layer tunes `node` to, or `None` when the layer says nothing about it (a
+    /// layer stored before the RD enabled that node).
+    ///
+    /// **The per-node mapping the allowed set never had.** `competitorName.ts`'s resolver source (3)
+    /// currently reads a seat's channel as `available_channels[node]`, which S1 documented as a
+    /// plausible-looking fabrication; this is the value that replaces it once a heat names a layer
+    /// (S3).
+    pub fn channel_for(&self, node: u32) -> Option<u16> {
+        self.nodes
+            .iter()
+            .find(|n| n.node == node)
+            .map(|n| n.channel)
+    }
+
+    /// Every channel this layer uses, ascending and de-duplicated — the join key for
+    /// [`layer_overlaps`].
+    pub fn channels(&self) -> Vec<u16> {
+        let mut out: Vec<u16> = self.nodes.iter().map(|n| n.channel).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// Two layers that share at least one channel (#117 S2) — a **warning**, never a refusal.
+///
+/// The RD settled this explicitly: *"if I have R1-4 in one layer, I cannot use R1-4 in the next"*
+/// only matters for the **keep-pilots-on-one-channel** strategy. If layers are just timer tunings,
+/// reusing a channel across them is harmless — so it is flagged so an RD pursuing that strategy
+/// sees it, and it never blocks an RD who does not care. Nothing in the write path consults this;
+/// it is computed on top of a layer set that has *already been accepted*.
+///
+/// Carries the two [`LayerId`]s as **wire handles** and the shared channels as raw MHz. Both resolve
+/// to names in the console (layer id → `ChannelLayer.name`, MHz → `channelLabel`), which is the
+/// repo's rule: ids travel, names display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct LayerOverlap {
+    /// The **earlier** of the two layers, in the event's layer order.
+    pub layer: LayerId,
+    /// The **later** of the two layers, in the event's layer order.
+    pub other: LayerId,
+    /// The channels both layers use, ascending. Never empty (an empty intersection is not reported).
+    pub channels: Vec<u16>,
+}
+
+/// An event's layers **and what is worth telling the RD about them** (#117 S2) — the body of
+/// `GET /events/{id}/layers`, and of every layer write.
+///
+/// One view type for the read and all three writes so the console never has to re-derive the
+/// warnings from a write's response: a write returns the resulting whole picture, exactly like the
+/// read. Errors do not appear here — they are refusals, returned as a typed 400 with a sentence the
+/// RD can act on. This carries only the things that are *allowed* and still worth flagging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ChannelLayers {
+    /// The event's layers, in definition order.
+    pub layers: Vec<ChannelLayer>,
+    /// Cross-layer channel reuse ([`LayerOverlap`]) — **advisory**. Empty when no two layers share
+    /// a channel, and empty is *not* a goal: a bracket run off one layer trivially has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlaps: Vec<LayerOverlap>,
+}
+
+/// The body of `POST /events/{id}/layers` — define a new channel layer (#117 S2).
+///
+/// The id is generated server-side (never user-entered). `nodes` is **optional and that is the
+/// global→event seam**: omit it and the layer is *seeded* from the event timer's allowed set —
+/// enabled node *i* takes the *i*-th allowed channel, in the RD's own preference order. That is the
+/// whole of "global is the default subset an event starts from"; from the moment the layer exists
+/// it is event state, and editing it never touches [`Timer::available_channels`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NewChannelLayerRequest {
+    /// The layer's display name. Trimmed; must be non-empty and unique within the event.
+    pub name: String,
+    /// The explicit node → channel mapping, or omitted to **seed** it from the timer's allowed set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub nodes: Option<Vec<LayerNode>>,
+}
+
+/// The body of `PUT /events/{id}/layers/{layer_id}` — replace a layer's editable fields (#117 S2).
+///
+/// The [`LayerId`] is fixed (it is the path segment); the name and the whole mapping are replaced
+/// wholesale, and re-validated exactly as on create.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SetChannelLayerRequest {
+    /// The layer's display name. Trimmed; must be non-empty and unique within the event.
+    pub name: String,
+    /// The complete node → channel mapping (one entry per enabled node, no duplicate channels).
+    pub nodes: Vec<LayerNode>,
+}
+
+/// Why a channel-layer write was refused (#117 S2) — the twin of [`RoundError`].
+///
+/// Every [`Invalid`](LayerError::Invalid) message is written to be **read by an RD at a venue**: it
+/// names the layer, the node (`"Node 3"`) and the channel (`"Raceband R7"`) by their friendly names
+/// and says what to do next — never a raw index, a bare MHz, or a timer id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayerError {
+    /// No event with the given id — a typed 404.
+    EventNotFound(String),
+    /// No layer with the given id in this event — a typed 404.
+    LayerNotFound(String),
+    /// The layer is not a valid tuning (duplicate channel, a channel outside the allowed set, a
+    /// disabled/out-of-range node, an incomplete mapping, a blank/duplicate name) — a 400.
+    Invalid(String),
+}
+
+impl std::fmt::Display for LayerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayerError::EventNotFound(id) => write!(f, "no event with id {id:?}"),
+            LayerError::LayerNotFound(id) => write!(f, "no channel layer with id {id:?}"),
+            LayerError::Invalid(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for LayerError {}
+
+impl From<RegistryError> for LayerError {
+    fn from(e: RegistryError) -> Self {
+        LayerError::Invalid(e.message)
+    }
+}
+
+/// Every pair of layers that shares a channel (#117 S2), in event order — the **warning** half of
+/// the layer model.
+///
+/// Pure and total: it takes the layer list and answers, with no notion of whether the set is
+/// "good". Cross-layer reuse is legal by decision (see [`LayerOverlap`]), so this never gates a
+/// write — [`EventRegistry::add_channel_layer`] and friends compute it *after* the layer has been
+/// accepted and persisted, purely so the console has something to show.
+pub fn layer_overlaps(layers: &[ChannelLayer]) -> Vec<LayerOverlap> {
+    let mut out = Vec::new();
+    for (i, layer) in layers.iter().enumerate() {
+        let mine = layer.channels();
+        for other in &layers[i + 1..] {
+            let shared: Vec<u16> = other
+                .channels()
+                .into_iter()
+                .filter(|c| mine.contains(c))
+                .collect();
+            if !shared.is_empty() {
+                out.push(LayerOverlap {
+                    layer: layer.id.clone(),
+                    other: other.id.clone(),
+                    channels: shared,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The event's timer for the purpose of layers (#117 S2) — its **effective primary**.
+///
+/// A layer is one tuning of *the* timer, and #112's redundant timers are two boxes at **one gate**:
+/// an alternate that takes over mid-event has to be listening on the same channels, so one layer
+/// per event (validated against the primary) is the honest model, not one layer per timer. This is
+/// also the timer `set_class_membership` already validates a pilot's fixed channel against, so the
+/// two channel surfaces cannot disagree about which timer they mean.
+fn layer_timer(meta: &EventMeta, timers: &TimerRegistry) -> Result<Timer, LayerError> {
+    meta.effective_primary()
+        .and_then(|id| timers.get(&id))
+        .ok_or_else(|| {
+            LayerError::Invalid(
+                "this event has no timer selected, so there is no node set to tune — \
+                 pick a timer for this event before defining a channel layer."
+                    .to_string(),
+            )
+        })
+}
+
+/// **Seed** a layer from the timer's allowed set (#117 S2) — the global→event seam.
+///
+/// Enabled node *i* takes the *i*-th allowed channel, in the RD's own preference order: the global
+/// set is a *default subset an event starts from*, and from here on the layer is event state that
+/// no edit to the timer record can reach.
+///
+/// Two refusals, both S1's semantics applied one level up. An **empty** allowed set is "the RD has
+/// not configured this timer" and never "this timer has no channels" — seeding from the catalog
+/// would scatter a layer across the band with no intent behind it. And **fewer allowed channels
+/// than enabled nodes** cannot produce a complete tuning at all; saying so, with both numbers and
+/// both repairs, is more use than a half-filled layer.
+fn seed_layer_nodes(timer: &Timer) -> Result<Vec<LayerNode>, LayerError> {
+    let enabled = timer.enabled_nodes();
+    if timer.available_channels.is_empty() {
+        return Err(LayerError::Invalid(format!(
+            "{:?} has no channels configured — choose the channels it may use on the Timers page \
+             before defining a channel layer.",
+            timer.name
+        )));
+    }
+    if timer.available_channels.len() < enabled.len() {
+        return Err(LayerError::Invalid(format!(
+            "{:?} allows {} channels but has {} enabled nodes, and a layer tunes every node. Allow \
+             more channels on the Timers page, or disable the nodes this event will not fly.",
+            timer.name,
+            timer.available_channels.len(),
+            enabled.len()
+        )));
+    }
+    Ok(enabled
+        .into_iter()
+        .zip(timer.available_channels.iter().copied())
+        .map(|(node, channel)| LayerNode { node, channel })
+        .collect())
+}
+
+/// Validate one layer against the event's timer and the event's other layers (#117 S2).
+///
+/// The rules, in the order an RD hits them:
+///
+/// 1. the **name** is non-blank and not already used by another layer of this event;
+/// 2. every node is **enabled and on the timer** (#412 — a disabled node seats nobody, so tuning it
+///    is at best pointless and at worst hides a dead gate);
+/// 3. every channel is in the timer's **allowed set** (S1's "allowed", not "capable");
+/// 4. **no two nodes share a channel** — the one hard rule inside a layer: a node cannot share a
+///    frequency with its neighbour;
+/// 5. the mapping is **complete** — one channel for every enabled node, because a layer is a
+///    complete tuning of the timer.
+///
+/// Cross-layer channel reuse is deliberately **absent** from this list: it is a [`LayerOverlap`]
+/// warning, computed after the fact, and never a refusal.
+fn validate_layer(
+    timer: &Timer,
+    layers: &[ChannelLayer],
+    editing: Option<&LayerId>,
+    name: &str,
+    nodes: &[LayerNode],
+) -> Result<(), LayerError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(LayerError::Invalid(
+            "a channel layer needs a name — it is what you pick when a heat flies it.".to_string(),
+        ));
+    }
+    if let Some(clash) = layers
+        .iter()
+        .find(|l| Some(&l.id) != editing && l.name.trim().eq_ignore_ascii_case(name))
+    {
+        return Err(LayerError::Invalid(format!(
+            "this event already has a channel layer called {:?} — give this one a different name.",
+            clash.name
+        )));
+    }
+    if timer.available_channels.is_empty() {
+        return Err(LayerError::Invalid(format!(
+            "{:?} has no channels configured — choose the channels it may use on the Timers page \
+             before defining a channel layer.",
+            timer.name
+        )));
+    }
+    let mut seen_nodes: Vec<u32> = Vec::with_capacity(nodes.len());
+    for entry in nodes {
+        // #412: the node must exist on the timer AND be one the RD has left enabled. `node_view()` /
+        // `GET /timers/{id}/nodes` is the console's half of this same rule.
+        if !timer.node_enabled(entry.node) {
+            return Err(LayerError::Invalid(format!(
+                "{} is not available on {:?} — it is disabled or does not exist, so a layer cannot \
+                 tune it.",
+                Timer::node_label(entry.node),
+                timer.name
+            )));
+        }
+        if seen_nodes.contains(&entry.node) {
+            return Err(LayerError::Invalid(format!(
+                "{} is listed twice in this layer — a node has exactly one channel.",
+                Timer::node_label(entry.node)
+            )));
+        }
+        seen_nodes.push(entry.node);
+        // S1's clarified semantics: `available_channels` is what this timer MAY use. A layer draws
+        // from it and nothing else — never from the catalog, which would invent a channel the RD
+        // never allowed.
+        if !timer.available_channels.contains(&entry.channel) {
+            return Err(LayerError::Invalid(format!(
+                "{} is not one of the channels {:?} is allowed to use — tick it on the Timers page \
+                 first, or pick another channel for {}.",
+                crate::timers::channel_label(entry.channel),
+                timer.name,
+                Timer::node_label(entry.node)
+            )));
+        }
+        // The one hard rule inside a layer.
+        if let Some(clash) = nodes
+            .iter()
+            .find(|n| n.node != entry.node && n.channel == entry.channel)
+        {
+            let (first, second) = if clash.node < entry.node {
+                (clash.node, entry.node)
+            } else {
+                (entry.node, clash.node)
+            };
+            return Err(LayerError::Invalid(format!(
+                "{} and {} are both on {} in this layer — two nodes cannot share a frequency.",
+                Timer::node_label(first),
+                Timer::node_label(second),
+                crate::timers::channel_label(entry.channel)
+            )));
+        }
+    }
+    // A layer is a COMPLETE tuning: every enabled node flies something. An incomplete layer would
+    // leave a gate on whatever it happened to be tuned to last — the D27 hole this model closes.
+    let missing: Vec<u32> = timer
+        .enabled_nodes()
+        .into_iter()
+        .filter(|node| !seen_nodes.contains(node))
+        .collect();
+    if let Some(&first) = missing.first() {
+        let labels: Vec<String> = missing.iter().map(|n| Timer::node_label(*n)).collect();
+        return Err(LayerError::Invalid(format!(
+            "this layer does not tune {} — a layer sets a channel for every enabled node on {:?}. \
+             Still to set: {}.",
+            Timer::node_label(first),
+            timer.name,
+            labels.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 /// One **round** within an event (race redesign Slice 2a): an event-level, class-tagged, *dynamic*
@@ -1425,6 +1863,179 @@ impl EventRegistry {
         Ok(meta)
     }
 
+    // ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────
+    //
+    // The event-scoped answer to *what goes on which node?*. Mirrors the rounds API exactly — a
+    // generated id, individual add / update / remove, every write persisted through to the event's
+    // SQLite `meta` table (issue #115) — because a layer is the same kind of thing as a round: a
+    // named, RD-authored piece of event configuration.
+    //
+    // Every one of these returns the whole resulting [`ChannelLayers`] view rather than just the
+    // layer that changed. The overlap warnings are a property of the *set*, so a write that returns
+    // only its own layer would leave the console to re-derive them — a second implementation of a
+    // rule, which is how rules drift.
+
+    /// An event's [`ChannelLayers`] — the layers plus their cross-layer overlap warnings (#117 S2).
+    ///
+    /// The body of `GET /events/{id}/layers`, and `None` for an unknown event (→ a typed 404).
+    pub fn channel_layers(&self, id: &EventId) -> Option<ChannelLayers> {
+        let layers = self.read().events.get(id)?.meta.channel_layers.clone();
+        Some(ChannelLayers {
+            overlaps: layer_overlaps(&layers),
+            layers,
+        })
+    }
+
+    /// Define a **channel layer** on an event (#117 S2), returning the event's whole updated
+    /// [`ChannelLayers`] view.
+    ///
+    /// The id is auto-generated — a slug of the request's `name` plus a short random suffix
+    /// (mirroring the round/event/pilot id-gen) — retried on the (astronomically unlikely) collision
+    /// with an existing layer id.
+    ///
+    /// [`nodes`](NewChannelLayerRequest::nodes) omitted means **seed from the global allowed set**
+    /// ([`seed_layer_nodes`]): enabled node *i* takes the *i*-th channel the RD ticked for this
+    /// timer on the Timers page. That is the whole of "global is the default an event starts from" —
+    /// the moment the layer exists it is event state, and no later edit to it touches
+    /// [`Timer::available_channels`].
+    ///
+    /// Validation is [`validate_layer`]'s (all [`LayerError::Invalid`] → a 400): a named,
+    /// duplicate-free, complete tuning drawn from the allowed set, over nodes that exist and are
+    /// enabled. **Cross-layer channel reuse is not validated** — it comes back as a
+    /// [`LayerOverlap`] in the response and never blocks the write. An unknown event is a
+    /// [`LayerError::EventNotFound`] (→ 404). On success the layer is appended to
+    /// [`EventMeta::channel_layers`] and written through to the event's SQLite `meta` table (issue
+    /// #115) so it survives a Director restart — exactly the rounds path.
+    pub fn add_channel_layer(
+        &self,
+        id: &EventId,
+        req: NewChannelLayerRequest,
+    ) -> Result<ChannelLayers, LayerError> {
+        let mut reg = self.write();
+        // Cloned out before the mutable borrow below (the same reason `add_round` clones its
+        // directories): resolving the event's timer would re-lock the registry we already hold.
+        let timers = reg.timers.clone();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| LayerError::EventNotFound(id.0.clone()))?;
+
+        let timer = layer_timer(&event.meta, &timers)?;
+        // The global→event seam: an omitted mapping is seeded from what the RD allowed globally.
+        let mut nodes = match req.nodes {
+            Some(nodes) => nodes,
+            None => seed_layer_nodes(&timer)?,
+        };
+        nodes.sort_by_key(|n| n.node);
+        validate_layer(&timer, &event.meta.channel_layers, None, &req.name, &nodes)?;
+
+        // Auto-generate a unique layer id within this event: slug(name) + short suffix, retried on
+        // the (astronomically unlikely) collision so the id is always fresh.
+        let layer_id = loop {
+            let candidate = LayerId(format!("{}-{}", slugify(&req.name), short_suffix()));
+            if !event.meta.channel_layers.iter().any(|l| l.id == candidate) {
+                break candidate;
+            }
+        };
+        event.meta.channel_layers.push(ChannelLayer {
+            id: layer_id,
+            name: req.name.trim().to_string(),
+            nodes,
+        });
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(ChannelLayers {
+            overlaps: layer_overlaps(&meta.channel_layers),
+            layers: meta.channel_layers,
+        })
+    }
+
+    /// Replace an existing **channel layer**'s name and mapping (#117 S2), returning the event's
+    /// whole updated [`ChannelLayers`] view.
+    ///
+    /// The layer's [`id`](ChannelLayer::id) is fixed (the path segment); the name and the entire
+    /// node → channel mapping are replaced wholesale and re-validated exactly as on create. Unknown
+    /// event → [`LayerError::EventNotFound`] (404); unknown layer id → [`LayerError::LayerNotFound`]
+    /// (404); an invalid tuning → [`LayerError::Invalid`] (400). Written through to disk (issue
+    /// #115).
+    pub fn update_channel_layer(
+        &self,
+        id: &EventId,
+        layer_id: &LayerId,
+        req: SetChannelLayerRequest,
+    ) -> Result<ChannelLayers, LayerError> {
+        let mut reg = self.write();
+        let timers = reg.timers.clone();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| LayerError::EventNotFound(id.0.clone()))?;
+        let index = event
+            .meta
+            .channel_layers
+            .iter()
+            .position(|l| &l.id == layer_id)
+            .ok_or_else(|| LayerError::LayerNotFound(layer_id.0.clone()))?;
+
+        let timer = layer_timer(&event.meta, &timers)?;
+        let mut nodes = req.nodes;
+        nodes.sort_by_key(|n| n.node);
+        validate_layer(
+            &timer,
+            &event.meta.channel_layers,
+            Some(layer_id),
+            &req.name,
+            &nodes,
+        )?;
+
+        event.meta.channel_layers[index] = ChannelLayer {
+            id: layer_id.clone(),
+            name: req.name.trim().to_string(),
+            nodes,
+        };
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(ChannelLayers {
+            overlaps: layer_overlaps(&meta.channel_layers),
+            layers: meta.channel_layers,
+        })
+    }
+
+    /// Remove a **channel layer** from an event (#117 S2), returning the event's whole updated
+    /// [`ChannelLayers`] view.
+    ///
+    /// Unknown event → [`LayerError::EventNotFound`] (404); unknown layer id →
+    /// [`LayerError::LayerNotFound`] (404) rather than a silent no-op, so a console deleting a layer
+    /// someone else already deleted is told rather than left believing it removed something.
+    /// Written through to disk (issue #115).
+    pub fn remove_channel_layer(
+        &self,
+        id: &EventId,
+        layer_id: &LayerId,
+    ) -> Result<ChannelLayers, LayerError> {
+        let mut reg = self.write();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| LayerError::EventNotFound(id.0.clone()))?;
+        let index = event
+            .meta
+            .channel_layers
+            .iter()
+            .position(|l| &l.id == layer_id)
+            .ok_or_else(|| LayerError::LayerNotFound(layer_id.0.clone()))?;
+        event.meta.channel_layers.remove(index);
+        let meta = event.meta.clone();
+        let data_dir = reg.data_dir.clone();
+        persist_meta_change(data_dir.as_deref(), &meta)?;
+        Ok(ChannelLayers {
+            overlaps: layer_overlaps(&meta.channel_layers),
+            layers: meta.channel_layers,
+        })
+    }
+
     /// Add a **round** to an event (race redesign Slice 2a), returning the created [`RoundDef`]
     /// (with its **generated** [`RoundId`]).
     ///
@@ -2157,6 +2768,10 @@ impl EventRegistry {
             classes: Vec::new(),
             classes_membership: Vec::new(),
             rounds: Vec::new(),
+            // No channel layers until the RD defines one (#117 S2). Deliberately not seeded at
+            // create time: the timer selection is not settled yet, and a layer seeded from the
+            // wrong timer's allowed set is worse than no layer.
+            channel_layers: Vec::new(),
         };
         // Persist the freshly-built meta into the event's own SQLite `meta` table (issue
         // #111) so a Director restart can restore it. Only for a persistent (file-backed)
@@ -5540,5 +6155,514 @@ mod tests {
         reg.update_round(&created.id, &round.id, practice_edit("Renamed", &[0, 1]))
             .unwrap();
         assert_eq!(state.read().unwrap().0.len(), before);
+    }
+
+    // ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────
+    //
+    // The registry's Mock is the fixture: 8 nodes, `available_channels` = Raceband R1–R8, and a
+    // fresh event selects it. So the default event is exactly the "allowed set is the same size as
+    // the node set" case a seed has to handle, and narrowing the allowed set / disabling a node is
+    // how each refusal is provoked.
+
+    /// The event's timer (the Mock), reconfigured for one test.
+    fn tune_mock(reg: &EventRegistry, channels: Vec<u16>, disabled: Vec<u32>) {
+        let timers = reg.timers();
+        let mock = TimerId(MOCK_TIMER_ID.to_string());
+        timers
+            .update(
+                &mock,
+                &crate::timers::UpdateTimerRequest {
+                    available_channels: Some(channels),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        timers
+            .set_nodes(
+                &mock,
+                &crate::timers::SetTimerNodesRequest {
+                    enabled: Some(
+                        (0..8u32)
+                            .filter(|n| !disabled.contains(n))
+                            .collect::<Vec<_>>(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    /// A `node → channel` mapping, for building a layer request by hand.
+    fn nodes(pairs: &[(u32, u16)]) -> Vec<LayerNode> {
+        pairs
+            .iter()
+            .map(|(node, channel)| LayerNode {
+                node: *node,
+                channel: *channel,
+            })
+            .collect()
+    }
+
+    /// The Raceband tuning of every one of the Mock's eight nodes — the layer a seed produces.
+    fn raceband_layer() -> Vec<LayerNode> {
+        (0..8u32)
+            .map(|node| LayerNode {
+                node,
+                channel: crate::channels::RACEBAND_MHZ[node as usize],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_seeded_layer_takes_the_timers_allowed_set_in_order() {
+        // The global→event seam: omitting `nodes` seeds enabled node `i` from allowed channel `i`,
+        // in the RD's own preference order. The global record is the DEFAULT an event starts from.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let view = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(view.layers.len(), 1);
+        assert_eq!(view.layers[0].name, "Bracket A");
+        assert!(view.layers[0].id.0.starts_with("bracket-a-"));
+        assert_eq!(view.layers[0].nodes, raceband_layer());
+        // Nothing about the global timer record changed — seeding reads it, it never writes it.
+        let mock = reg.timers().get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
+        assert_eq!(mock.available_channels, crate::channels::RACEBAND_MHZ);
+    }
+
+    #[test]
+    fn editing_a_layer_never_touches_the_global_allowed_set() {
+        // The bug underneath this slice: the event workspace embeds the same TimerManager, so
+        // "editing channels in the event" mutated the GLOBAL timer record. A layer is event state.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let view = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        let id = view.layers[0].id.clone();
+        // Re-tune every node onto a different allowed channel (reverse the Raceband order).
+        let reversed: Vec<LayerNode> = (0..8u32)
+            .map(|node| LayerNode {
+                node,
+                channel: crate::channels::RACEBAND_MHZ[7 - node as usize],
+            })
+            .collect();
+        let after = reg
+            .update_channel_layer(
+                &created.id,
+                &id,
+                SetChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: reversed.clone(),
+                },
+            )
+            .unwrap();
+        assert_eq!(after.layers[0].nodes, reversed);
+        let mock = reg.timers().get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
+        assert_eq!(
+            mock.available_channels,
+            crate::channels::RACEBAND_MHZ,
+            "the global allowed set is the seed, not the storage"
+        );
+    }
+
+    #[test]
+    fn a_valid_layer_round_trips_and_survives_a_restart() {
+        // Layers ride the event's persisted meta (issue #115), exactly like rounds/membership.
+        let dir = std::env::temp_dir().join(format!("gridfpv-layers-{}", short_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Race Night")).unwrap();
+            id = created.id.clone();
+            reg.add_channel_layer(
+                &id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: Some(raceband_layer()),
+                },
+            )
+            .unwrap();
+        }
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        let view = reopened.channel_layers(&id).unwrap();
+        assert_eq!(view.layers.len(), 1);
+        assert_eq!(view.layers[0].name, "Bracket A");
+        assert_eq!(view.layers[0].nodes, raceband_layer());
+        // And the same layer is on the event's meta — one storage, not two.
+        let meta = reopened.meta_of(&id).unwrap();
+        assert_eq!(meta.channel_layers, view.layers);
+    }
+
+    #[test]
+    fn two_nodes_on_the_same_channel_is_refused() {
+        // The one hard rule INSIDE a layer: a node cannot share a frequency with its neighbour.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let mut clashing = raceband_layer();
+        clashing[2].channel = clashing[1].channel;
+        let err = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: Some(clashing),
+                },
+            )
+            .unwrap_err();
+        let LayerError::Invalid(msg) = &err else {
+            panic!("expected an Invalid refusal, got {err:?}");
+        };
+        // CLAUDE.md: the RD reads node LABELS and a band+channel name, never an index or a bare MHz.
+        assert!(msg.contains("Node 2") && msg.contains("Node 3"), "{msg}");
+        assert!(msg.contains("Raceband R2"), "{msg}");
+        assert!(!msg.contains("5695"), "a bare MHz reached the RD: {msg}");
+        // Nothing was stored.
+        assert!(reg.channel_layers(&created.id).unwrap().layers.is_empty());
+    }
+
+    #[test]
+    fn a_channel_outside_the_allowed_set_is_refused() {
+        // S1's semantics one level up: `available_channels` is what this timer MAY use, and a layer
+        // draws from it and nothing else — never from the catalog.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        tune_mock(&reg, vec![5658, 5695, 5732, 5769], vec![4, 5, 6, 7]);
+        let err = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    // 5800 is Fatshark F4 — a real catalog channel the RD did not tick.
+                    nodes: Some(nodes(&[(0, 5658), (1, 5695), (2, 5732), (3, 5800)])),
+                },
+            )
+            .unwrap_err();
+        let LayerError::Invalid(msg) = &err else {
+            panic!("expected an Invalid refusal, got {err:?}");
+        };
+        assert!(msg.contains("Fatshark F4"), "{msg}");
+        assert!(msg.contains("Mock"), "the timer is named, not id'd: {msg}");
+        assert!(msg.contains("Node 4"), "{msg}");
+    }
+
+    #[test]
+    fn a_disabled_or_out_of_range_node_is_refused() {
+        // #412: a disabled node seats nobody, so a layer must not pretend to tune it — and a node
+        // beyond the timer's width does not exist to tune at all.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        tune_mock(&reg, crate::channels::RACEBAND_MHZ.to_vec(), vec![2]);
+
+        let disabled = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: Some(nodes(&[
+                        (0, 5658),
+                        (1, 5695),
+                        (2, 5732),
+                        (3, 5769),
+                        (4, 5806),
+                        (5, 5843),
+                        (6, 5880),
+                        (7, 5917),
+                    ])),
+                },
+            )
+            .unwrap_err();
+        let LayerError::Invalid(msg) = &disabled else {
+            panic!("expected an Invalid refusal, got {disabled:?}");
+        };
+        assert!(msg.contains("Node 3"), "{msg}");
+        assert!(msg.contains("disabled or does not exist"), "{msg}");
+
+        let beyond = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: Some(nodes(&[(99, 5658)])),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&beyond, LayerError::Invalid(msg) if msg.contains("Node 100")),
+            "expected the out-of-range refusal, got {beyond:?}"
+        );
+    }
+
+    #[test]
+    fn a_layer_must_tune_every_enabled_node() {
+        // A layer is a COMPLETE tuning: leaving a gate on whatever it was last set to is exactly
+        // the D27 hole this model closes.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let err = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: Some(nodes(&[(0, 5658), (1, 5695)])),
+                },
+            )
+            .unwrap_err();
+        let LayerError::Invalid(msg) = &err else {
+            panic!("expected an Invalid refusal, got {err:?}");
+        };
+        assert!(msg.contains("Node 3"), "the first untuned node: {msg}");
+        assert!(msg.contains("Node 8"), "and every other one: {msg}");
+    }
+
+    #[test]
+    fn seeding_refuses_an_unconfigured_timer_rather_than_inventing_channels() {
+        // The fifth-and-sixth instance of the empty-`available_channels` trap, headed off: empty
+        // means "the RD has not configured this timer", never "this timer has no channels" — and
+        // seeding from the catalog would scatter a layer across the band with no intent behind it.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        tune_mock(&reg, vec![], vec![]);
+        let err = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, LayerError::Invalid(msg)
+                if msg.contains("Mock") && msg.contains("Timers page")),
+            "expected the unconfigured-timer refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn seeding_refuses_when_the_allowed_set_cannot_cover_every_node() {
+        // Four channels ticked, eight nodes enabled: there is no complete tuning to seed, and the
+        // refusal names both numbers and both repairs rather than half-filling the layer.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        tune_mock(&reg, vec![5658, 5695, 5732, 5769], vec![]);
+        let err = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, LayerError::Invalid(msg)
+                if msg.contains("4 channels") && msg.contains("8 enabled nodes")),
+            "expected the too-few-channels refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cross_layer_channel_overlap_warns_without_blocking() {
+        // The RD's own call: reuse only matters for the keep-pilots-on-one-channel strategy, so it
+        // is FLAGGED and never refused. A bracket run off one layer does not care.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let a = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        assert!(a.overlaps.is_empty(), "one layer overlaps nothing");
+
+        // The identical tuning again, under a different name — the maximal overlap.
+        let both = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket B".into(),
+                    nodes: None,
+                },
+            )
+            .expect("overlap is a warning, not a refusal");
+        assert_eq!(both.layers.len(), 2, "the layer was accepted and stored");
+        assert_eq!(both.overlaps.len(), 1);
+        assert_eq!(both.overlaps[0].layer, both.layers[0].id);
+        assert_eq!(both.overlaps[0].other, both.layers[1].id);
+        assert_eq!(
+            both.overlaps[0].channels,
+            crate::channels::RACEBAND_MHZ.to_vec()
+        );
+        // And the read agrees with the write — one computation, not two.
+        assert_eq!(reg.channel_layers(&created.id).unwrap(), both);
+    }
+
+    #[test]
+    fn layers_that_share_nothing_raise_no_warning() {
+        // The GQ strategy done right: two disjoint packs, so nothing to flag.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        // Raceband R1-R4 and Fatshark F1/F2/F4/F8, on a four-node timer.
+        tune_mock(
+            &reg,
+            vec![5658, 5695, 5732, 5769, 5740, 5760, 5800, 5880],
+            vec![4, 5, 6, 7],
+        );
+        reg.add_channel_layer(
+            &created.id,
+            NewChannelLayerRequest {
+                name: "Pack A".into(),
+                nodes: Some(nodes(&[(0, 5658), (1, 5695), (2, 5732), (3, 5769)])),
+            },
+        )
+        .unwrap();
+        let view = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Pack B".into(),
+                    nodes: Some(nodes(&[(0, 5740), (1, 5760), (2, 5800), (3, 5880)])),
+                },
+            )
+            .unwrap();
+        assert_eq!(view.layers.len(), 2);
+        assert!(view.overlaps.is_empty(), "{:?}", view.overlaps);
+    }
+
+    #[test]
+    fn a_layer_is_renamed_and_removed_by_id() {
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let view = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        let id = view.layers[0].id.clone();
+        let renamed = reg
+            .update_channel_layer(
+                &created.id,
+                &id,
+                SetChannelLayerRequest {
+                    name: "Mains".into(),
+                    nodes: raceband_layer(),
+                },
+            )
+            .unwrap();
+        assert_eq!(renamed.layers[0].name, "Mains");
+        assert_eq!(renamed.layers[0].id, id, "the id is fixed across an edit");
+
+        let after = reg.remove_channel_layer(&created.id, &id).unwrap();
+        assert!(after.layers.is_empty());
+        // Removing it twice is a 404, not a silent success.
+        assert!(matches!(
+            reg.remove_channel_layer(&created.id, &id),
+            Err(LayerError::LayerNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn two_layers_cannot_share_a_name() {
+        // The name is what an RD picks a layer BY (S3), so a duplicate is a mis-click, not a choice.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        reg.add_channel_layer(
+            &created.id,
+            NewChannelLayerRequest {
+                name: "Bracket A".into(),
+                nodes: None,
+            },
+        )
+        .unwrap();
+        let err = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "  bracket a ".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, LayerError::Invalid(msg) if msg.contains("Bracket A")),
+            "expected the duplicate-name refusal, got {err:?}"
+        );
+        // A blank name is refused for the same reason.
+        assert!(matches!(
+            reg.add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "   ".into(),
+                    nodes: None,
+                },
+            ),
+            Err(LayerError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn an_event_with_no_timer_cannot_define_a_layer() {
+        // A layer is a tuning OF a timer. With no timer selected there is no node set to tune, and
+        // the refusal says so rather than producing an empty layer.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        reg.set_timers(&created.id, vec![]).unwrap();
+        let err = reg
+            .add_channel_layer(
+                &created.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, LayerError::Invalid(msg) if msg.contains("no timer selected")),
+            "expected the no-timer refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn layers_are_addressed_within_their_own_event() {
+        let reg = EventRegistry::new(None).unwrap();
+        let a = reg.create(&req("Friday")).unwrap();
+        let b = reg.create(&req("Saturday")).unwrap();
+        let view = reg
+            .add_channel_layer(
+                &a.id,
+                NewChannelLayerRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        assert!(reg.channel_layers(&b.id).unwrap().layers.is_empty());
+        assert!(matches!(
+            reg.remove_channel_layer(&b.id, &view.layers[0].id),
+            Err(LayerError::LayerNotFound(_))
+        ));
+        assert!(reg.channel_layers(&EventId("nope".into())).is_none());
     }
 }

@@ -38,18 +38,29 @@
    * since gone away: the Director grandfathers an existing selection so a pre-#405 event is still
    * editable, and the row carries a warning instead. What stops such an event from racing it is
    * the Director's arm-time backstop.
+   *
+   * ## Channel layers (#117 S2)
+   *
+   * Per the RD, in **event** scope the timer page becomes per-node channel selection — the
+   * {@link EventChannelLayers} card at the bottom. Note carefully what the two halves of this page
+   * edit: the checkbox picker inside {@link TimerManager} writes `Timer.available_channels`, the
+   * **global** record of what a timer may *ever* use; a **layer** is this event's own `node →
+   * channel` tuning, stored on the event's meta. Global is the seed, the event owns what it runs —
+   * and editing a layer never touches a timer, which is the bug that slice exists to close.
    */
   import { Button, Card, toast } from '@gridfpv/components';
   import type { Timer, TimerId } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import { AutoSaver } from '../lib/autosave.js';
   import { selectionRefusal } from '../lib/pluginPresence.js';
+  import EventChannelLayers from './EventChannelLayers.svelte';
   import TimerManager from './TimerManager.svelte';
 
   let {
     session,
     ontune,
-    onselectionchange = undefined
+    onselectionchange = undefined,
+    showLayers = true
   }: {
     session: Session;
     /**
@@ -67,6 +78,15 @@
      * Timer step until ≥1 timer is ticked. Inert for the standalone Timers page (no callback).
      */
     onselectionchange?: (count: number) => void;
+    /**
+     * Whether to show the per-node **channel layer** editor (#117 S2). On by default — this is the
+     * event Timers page, and in event scope the timer page *is* per-node channel selection.
+     *
+     * The setup wizard passes `false`: its Timer step is where the RD is still choosing *which*
+     * timer feeds the event, and a layer tunes a timer that has not been settled on yet. Layers
+     * stay fully editable on this page afterwards, which is the wizard's whole posture.
+     */
+    showLayers?: boolean;
   } = $props();
 
   let manager = $state<TimerManager | undefined>(undefined);
@@ -192,6 +212,22 @@
   // Guards a primary change in flight so the radios don't double-fire mid-request.
   let settingPrimary = $state(false);
 
+  // ── Channel layers (#117 S2) ──────────────────────────────────────────────
+  //
+  // Per the RD, in **event** scope the timer page becomes per-node channel selection. That is the
+  // layer editor below: a layer is one complete tuning of this event's timer (node → channel),
+  // drawn from the channels ticked above.
+  //
+  // The distinction the two halves of this page draw is the whole slice: the checkbox picker inside
+  // `TimerManager` edits `Timer.available_channels` — **the global timer record**, what a timer may
+  // *ever* use — while a layer is **event** state. Editing a layer never touches a timer.
+  //
+  // A layer tunes the event's **effective primary** timer (#112's redundant timers are two boxes at
+  // one gate, so an alternate must be listening on the same channels). Resolved from the registry
+  // rows this screen already holds, so the editor and the roles picker cannot disagree about which
+  // timer is primary.
+  const layerTimer = $derived(timers.find((t) => t.id === effectivePrimary));
+
   async function choosePrimary(id: TimerId) {
     if (settingPrimary || id === effectivePrimary) return;
     settingPrimary = true;
@@ -289,6 +325,10 @@
         {/each}
       </ul>
     </Card>
+  {/if}
+
+  {#if showLayers}
+    <EventChannelLayers {session} timer={layerTimer} />
   {/if}
 </section>
 

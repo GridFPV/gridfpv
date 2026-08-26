@@ -78,6 +78,10 @@ import {
   createRound,
   updateRound,
   deleteRound,
+  listChannelLayers,
+  createChannelLayer,
+  updateChannelLayer,
+  deleteChannelLayer,
   listHeats,
   listRoundIssues,
   eventAudit,
@@ -99,6 +103,7 @@ import type {
   AdapterId,
   AuditEntry,
   ChannelCatalogEntry,
+  ChannelLayers,
   Class,
   ClassId,
   ClassStandings,
@@ -117,10 +122,12 @@ import type {
   HeatId,
   HeatResult,
   HeatSummary,
+  LayerId,
   LiveRaceState,
   MemberSlot,
   Pilot,
   PilotId,
+  NewChannelLayerRequest,
   NewRoundReq,
   ProjectionBody,
   RankEntry,
@@ -129,6 +136,7 @@ import type {
   RoundIssue,
   RoundStanding,
   Scope,
+  SetChannelLayerRequest,
   SetTimerNodesRequest,
   SignalTraceView,
   Timer,
@@ -407,6 +415,10 @@ export class Session {
   #createRoundImpl: typeof createRound;
   #updateRoundImpl: typeof updateRound;
   #deleteRoundImpl: typeof deleteRound;
+  #listChannelLayersImpl: typeof listChannelLayers;
+  #createChannelLayerImpl: typeof createChannelLayer;
+  #updateChannelLayerImpl: typeof updateChannelLayer;
+  #deleteChannelLayerImpl: typeof deleteChannelLayer;
   #listHeatsImpl: typeof listHeats;
   #listRoundIssuesImpl: typeof listRoundIssues;
   #eventAuditImpl: typeof eventAudit;
@@ -457,6 +469,10 @@ export class Session {
     createRoundImpl?: typeof createRound;
     updateRoundImpl?: typeof updateRound;
     deleteRoundImpl?: typeof deleteRound;
+    listChannelLayersImpl?: typeof listChannelLayers;
+    createChannelLayerImpl?: typeof createChannelLayer;
+    updateChannelLayerImpl?: typeof updateChannelLayer;
+    deleteChannelLayerImpl?: typeof deleteChannelLayer;
     listHeatsImpl?: typeof listHeats;
     listRoundIssuesImpl?: typeof listRoundIssues;
     eventAuditImpl?: typeof eventAudit;
@@ -508,6 +524,10 @@ export class Session {
     this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
+    this.#listChannelLayersImpl = opts?.listChannelLayersImpl ?? listChannelLayers;
+    this.#createChannelLayerImpl = opts?.createChannelLayerImpl ?? createChannelLayer;
+    this.#updateChannelLayerImpl = opts?.updateChannelLayerImpl ?? updateChannelLayer;
+    this.#deleteChannelLayerImpl = opts?.deleteChannelLayerImpl ?? deleteChannelLayer;
     this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
     this.#listRoundIssuesImpl = opts?.listRoundIssuesImpl ?? listRoundIssues;
     this.#eventAuditImpl = opts?.eventAuditImpl ?? eventAudit;
@@ -1050,6 +1070,85 @@ export class Session {
     );
     if (updated) this.currentEvent = updated;
     return updated;
+  }
+
+  // --- Event channel layers (#117 S2) -----------------------------------------------------------
+  //
+  // A **layer** is one complete tuning of the event's timer — one channel per enabled node, drawn
+  // from the timer's *allowed* set. Layers are **event** state: the read is open, the writes are
+  // control-gated, and every one of them keeps {@link currentEvent}'s `channel_layers` in step so
+  // the cached meta never disagrees with what the Director holds.
+  //
+  // Note what these do NOT do: no layer write touches a `Timer`. That is the whole point — the
+  // Timers page's checkboxes edit the global allowed set (what a timer may *ever* use), and a layer
+  // is the event's own answer to what goes on which node.
+
+  /**
+   * List the current event's **channel layers** (`GET /events/{id}/layers`, open, no token) — #117
+   * S2. Resolves the {@link ChannelLayers} view — the layers in definition order plus the advisory
+   * cross-layer `overlaps` the Director computed. Resolves an empty view when no event is selected,
+   * so a caller never has to special-case the picker; rejects on a transport/HTTP failure.
+   */
+  listChannelLayers(): Promise<ChannelLayers> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve({ layers: [], overlaps: [] });
+    return this.#listChannelLayersImpl(this.baseUrl, event.id, { token: this.#token });
+  }
+
+  /**
+   * Define a **channel layer** on the current event (`POST /events/{id}/layers`) — #117 S2.
+   * RD-gated; the layer id is auto-generated server-side.
+   *
+   * **Omit `nodes` to seed the layer from the timer's allowed set** — the global→event seam. No-op
+   * (resolves `undefined`) when no event is selected. On success the returned {@link ChannelLayers}
+   * view also re-homes {@link currentEvent}'s `channel_layers`; returns it, `undefined` on a
+   * cancelled prompt, or throws with the Director's own refusal sentence (already phrased for the
+   * RD — it names the node, the channel and the timer).
+   */
+  async createChannelLayer(request: NewChannelLayerRequest): Promise<ChannelLayers | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const view = await this.#privilegedWrite((token) =>
+      this.#createChannelLayerImpl(this.baseUrl, event.id, request, token)
+    );
+    if (view) this.currentEvent = { ...event, channel_layers: view.layers };
+    return view;
+  }
+
+  /**
+   * Replace a **channel layer**'s name and mapping (`PUT /events/{id}/layers/{layer}`) — #117 S2.
+   * RD-gated; the id is not editable and the whole mapping is replaced wholesale, re-validated as on
+   * create. No-op (resolves `undefined`) when no event is selected. On success the returned
+   * {@link ChannelLayers} view re-homes {@link currentEvent}'s `channel_layers`; returns it,
+   * `undefined` on a cancelled prompt, or throws with the Director's own refusal sentence.
+   */
+  async updateChannelLayer(
+    layerId: LayerId,
+    request: SetChannelLayerRequest
+  ): Promise<ChannelLayers | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const view = await this.#privilegedWrite((token) =>
+      this.#updateChannelLayerImpl(this.baseUrl, event.id, layerId, request, token)
+    );
+    if (view) this.currentEvent = { ...event, channel_layers: view.layers };
+    return view;
+  }
+
+  /**
+   * Remove a **channel layer** (`DELETE /events/{id}/layers/{layer}`) — #117 S2. RD-gated. No-op
+   * (resolves `undefined`) when no event is selected. On success the returned {@link ChannelLayers}
+   * view re-homes {@link currentEvent}'s `channel_layers`; returns it, `undefined` on a cancelled
+   * prompt, or throws (an unknown layer is a **404**).
+   */
+  async deleteChannelLayer(layerId: LayerId): Promise<ChannelLayers | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const view = await this.#privilegedWrite((token) =>
+      this.#deleteChannelLayerImpl(this.baseUrl, event.id, layerId, token)
+    );
+    if (view) this.currentEvent = { ...event, channel_layers: view.layers };
+    return view;
   }
 
   // --- Heats (race redesign Slice 3b) -----------------------------------------------------------

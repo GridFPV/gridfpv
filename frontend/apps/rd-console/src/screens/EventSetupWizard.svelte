@@ -212,7 +212,14 @@
         {#if current.id === 'classes-roster'}
           <EventClassesRoster {session} />
         {:else if current.id === 'timers'}
-          <EventTimers {session} onselectionchange={(n) => (liveTimerCount = n)} />
+          <!-- #117 S2: no layer editor in the wizard. This step is where the RD is still choosing
+               WHICH timer feeds the event, and a layer tunes a settled timer; it stays fully
+               editable on the Timers page afterwards, which is this wizard's whole posture. -->
+          <EventTimers
+            {session}
+            showLayers={false}
+            onselectionchange={(n) => (liveTimerCount = n)}
+          />
         {:else if current.id === 'rounds'}
           <EventRounds bind:this={roundsStage} {session} />
         {:else}
