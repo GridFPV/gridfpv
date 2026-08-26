@@ -2461,6 +2461,7 @@ mod tests {
             classes: vec![ScopeClassId("open".into())],
             classes_membership: membership,
             rounds,
+            channel_layers: vec![],
         }
     }
 

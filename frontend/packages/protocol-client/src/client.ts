@@ -23,6 +23,7 @@ import type {
   ChangeEnvelope,
   ChannelCatalogEntry,
   ChannelDispatch,
+  ChannelLayers,
   ChannelRequest,
   Class,
   ClassId,
@@ -37,7 +38,9 @@ import type {
   EventMeta,
   FormatSchema,
   HeatSummary,
+  LayerId,
   MemberSlot,
+  NewChannelLayerRequest,
   NewRoundReq,
   Pilot,
   PilotId,
@@ -49,6 +52,7 @@ import type {
   RoundIssue,
   RoundStanding,
   Scope,
+  SetChannelLayerRequest,
   SetClassHiddenRequest,
   SetTimerNodesRequest,
   Snapshot,
@@ -1389,6 +1393,150 @@ export async function deleteRound(
   if (!resp.ok)
     throw new Error(`DELETE /events/${eventId}/rounds/${roundId} failed: HTTP ${resp.status}`);
   return (await resp.json()) as EventMeta;
+}
+
+// ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────────
+//
+// A **layer** is one complete tuning of the event's timer — one channel per enabled node, drawn
+// from the timer's *allowed* set. Layers are **event** state: they live on the event's meta beside
+// `timers` / `roster` / `classes`, so editing one never touches the global timer record (which is
+// what the Timers-page checkboxes do, and the bug this slice closes).
+//
+// Every write answers with the whole {@link ChannelLayers} view — the layers *and* the advisory
+// cross-layer `overlaps` — not just the layer that changed, because an overlap is a property of the
+// set. The console renders what the Director computed rather than re-deriving the rule.
+
+/**
+ * The Director's **typed refusal message**, already phrased for the RD, or `''` when there is no
+ * such body (#117 S2).
+ *
+ * A layer refusal is the whole point of validating one: *"Node 2 and Node 3 are both on Raceband R1
+ * in this layer"* is what the RD needs, and `HTTP 400` is not. It names nodes, channels and the
+ * timer by their friendly names (the repo display rule) — so it is thrown verbatim rather than
+ * wrapped in a route line carrying a raw event id.
+ */
+async function directorRefusal(resp: Response): Promise<string> {
+  return resp
+    .json()
+    .then((body: unknown) =>
+      typeof body === 'object' && body !== null && 'message' in body
+        ? String((body as { message: unknown }).message)
+        : ''
+    )
+    .catch(() => '');
+}
+
+/**
+ * List an event's **channel layers** (`GET /events/{id}/layers`) — #117 S2. A read (open, no token):
+ * the layers in definition order plus the advisory `overlaps` between them. Resolves the
+ * {@link ChannelLayers} view, or rejects on a non-2xx / transport failure; an unknown event is 404.
+ */
+export async function listChannelLayers(
+  baseUrl: string,
+  eventId: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<ChannelLayers> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layers`, { headers });
+  if (!resp.ok) throw new Error(`GET /events/${eventId}/layers failed: HTTP ${resp.status}`);
+  return (await resp.json()) as ChannelLayers;
+}
+
+/**
+ * Define a **channel layer** on an event (`POST /events/{id}/layers`) — #117 S2. RD-gated; the layer
+ * id is generated server-side (never in the body).
+ *
+ * **Omitting `nodes` seeds the layer from the timer's allowed set** — the global→event seam: what
+ * the RD ticked on the Timers page is the default an event starts from, and from here on the layer
+ * is event-local. A tuning that puts two nodes on one channel, names a channel the timer is not
+ * allowed to use, names a disabled/out-of-range node, or leaves an enabled node untuned is a
+ * **400** whose message is thrown verbatim (it is already written for the RD). Cross-layer channel
+ * reuse is **not** a refusal — it comes back in `overlaps` on a 200. Resolves the whole updated
+ * {@link ChannelLayers} view.
+ */
+export async function createChannelLayer(
+  baseUrl: string,
+  eventId: EventId,
+  request: NewChannelLayerRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ChannelLayers> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layers`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) {
+    const detail = await directorRefusal(resp);
+    throw new Error(detail || `The Director refused the channel layer (HTTP ${resp.status}).`);
+  }
+  return (await resp.json()) as ChannelLayers;
+}
+
+/**
+ * Replace a **channel layer**'s name and mapping (`PUT /events/{id}/layers/{layer}`) — #117 S2.
+ * RD-gated; the layer id is the path segment (not editable) and the name plus the whole node →
+ * channel mapping are replaced wholesale, re-validated exactly as on create. An unknown event or
+ * layer is **404**; an invalid tuning is a **400** thrown verbatim. Resolves the whole updated
+ * {@link ChannelLayers} view.
+ */
+export async function updateChannelLayer(
+  baseUrl: string,
+  eventId: EventId,
+  layerId: LayerId,
+  request: SetChannelLayerRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ChannelLayers> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/layers/${encodeURIComponent(layerId)}`,
+    { method: 'PUT', headers, body: JSON.stringify(request) }
+  );
+  if (!resp.ok) {
+    const detail = await directorRefusal(resp);
+    throw new Error(detail || `The Director refused the channel layer (HTTP ${resp.status}).`);
+  }
+  return (await resp.json()) as ChannelLayers;
+}
+
+/**
+ * Remove a **channel layer** (`DELETE /events/{id}/layers/{layer}`) — #117 S2. RD-gated; an unknown
+ * event or layer is **404** (not a silent success). Resolves the whole updated
+ * {@link ChannelLayers} view.
+ */
+export async function deleteChannelLayer(
+  baseUrl: string,
+  eventId: EventId,
+  layerId: LayerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ChannelLayers> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/layers/${encodeURIComponent(layerId)}`,
+    { method: 'DELETE', headers }
+  );
+  if (!resp.ok) {
+    const detail = await directorRefusal(resp);
+    throw new Error(detail || `The Director refused the deletion (HTTP ${resp.status}).`);
+  }
+  return (await resp.json()) as ChannelLayers;
 }
 
 /**

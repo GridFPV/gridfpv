@@ -100,9 +100,10 @@ use crate::classes::{
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
-    ActiveEvent, CreateEventRequest, EventMeta, EventRegistry, NewRoundReq, RegistryError,
-    RegistryErrorKind, RoundDef, RoundError, RoundIssue, SetActiveEventRequest,
-    SetClassMembershipRequest, SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
+    ActiveEvent, ChannelLayers, CreateEventRequest, EventMeta, EventRegistry, LayerError, LayerId,
+    NewChannelLayerRequest, NewRoundReq, RegistryError, RegistryErrorKind, RoundDef, RoundError,
+    RoundIssue, SetActiveEventRequest, SetChannelLayerRequest, SetClassMembershipRequest,
+    SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{
     HeatSummary, heat_summaries, heats_of_defined_rounds, live_state_over_with_floor,
@@ -496,6 +497,19 @@ pub fn router(registry: EventRegistry) -> Router {
         .route(
             "/events/{event_id}/rounds/{round_id}",
             put(update_round).delete(remove_round),
+        )
+        // Per-event **channel layers** (#117 S2): the event-scoped answer to *what goes on which
+        // node?*. A layer is one complete tuning of the event's timer — one channel per enabled
+        // node, drawn from the timer's **allowed** set (S1). The `GET` is open (a read, like the
+        // heats list); add / replace / remove are RD-gated. Layers are event state: editing one
+        // never touches the global timer record, which is the bug this slice exists to close.
+        .route(
+            "/events/{event_id}/layers",
+            get(list_channel_layers).post(add_channel_layer),
+        )
+        .route(
+            "/events/{event_id}/layers/{layer_id}",
+            put(update_channel_layer).delete(remove_channel_layer),
         )
         // Per-event scheduled **heats** (race redesign Slice 3b): the round-tagged heats list the
         // Heats UI reads — open, no token (a read), like the snapshot routes.
@@ -1690,6 +1704,99 @@ async fn set_class_membership(
         .set_class_membership(&event_id, class_id, body.pilots)
         .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
+}
+
+// ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────────
+//
+// Four routes, shaped exactly like the rounds ones, and every write answers with the **whole**
+// [`ChannelLayers`] view rather than the one layer it touched. The overlap warnings are a property
+// of the layer *set*, so returning only the changed layer would leave the console to re-derive
+// them — a second implementation of a rule the Director already owns.
+
+/// Map a [`LayerError`] to a [`ProtocolError`]: a missing event/layer is a typed **404**
+/// ([`ErrorCode::UnknownScope`]); an invalid tuning (duplicate channel, a channel outside the
+/// timer's allowed set, a disabled/out-of-range node, an incomplete mapping, a blank/duplicate
+/// name) is a **400** ([`ErrorCode::BadRequest`]) whose message is already phrased for the RD.
+fn layer_error(e: LayerError) -> ProtocolError {
+    let code = match e {
+        LayerError::EventNotFound(_) | LayerError::LayerNotFound(_) => ErrorCode::UnknownScope,
+        LayerError::Invalid(_) => ErrorCode::BadRequest,
+    };
+    ProtocolError::new(code, e.to_string())
+}
+
+/// `GET /events/{event_id}/layers` — an event's **channel layers** plus their cross-layer overlap
+/// warnings (#117 S2). Open, no token (a read, like the heats list).
+///
+/// The `overlaps` are advisory and always have been: reusing a channel between layers only matters
+/// for the keep-pilots-on-one-channel strategy, so it is reported and never enforced. An unknown
+/// event is a typed **404**.
+async fn list_channel_layers(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Json<ChannelLayers>, ProtocolError> {
+    registry.channel_layers(&event_id).map(Json).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        )
+    })
+}
+
+/// `POST /events/{event_id}/layers` — define a **channel layer** on an event (#117 S2), RD-gated.
+///
+/// [`ControlAuth`] runs first. The layer id is **auto-generated** server-side (never in the body).
+/// Omitting `nodes` **seeds** the layer from the event timer's allowed set — the global→event seam:
+/// what the RD ticked globally is the default an event starts from, and every edit from here on is
+/// event-local. A tuning that duplicates a channel, names a channel the timer is not allowed to
+/// use, names a disabled/out-of-range node, or leaves an enabled node untuned is a typed **400**;
+/// an unknown event is a **404**. On success the event's meta is written through to disk (issue
+/// #115) and the whole resulting [`ChannelLayers`] view is returned.
+async fn add_channel_layer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<NewChannelLayerRequest>,
+) -> Result<Json<ChannelLayers>, ProtocolError> {
+    registry
+        .add_channel_layer(&event_id, body)
+        .map(Json)
+        .map_err(layer_error)
+}
+
+/// `PUT /events/{event_id}/layers/{layer_id}` — replace a **channel layer**'s name and mapping
+/// (#117 S2), RD-gated.
+///
+/// The id is fixed (the path segment); the name and the whole node → channel mapping are replaced
+/// wholesale and re-validated exactly as on create. Unknown event/layer → **404**; an invalid
+/// tuning → **400**. Written through to disk (issue #115); returns the whole updated
+/// [`ChannelLayers`] view.
+async fn update_channel_layer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path((event_id, layer_id)): Path<(EventId, LayerId)>,
+    Json(body): Json<SetChannelLayerRequest>,
+) -> Result<Json<ChannelLayers>, ProtocolError> {
+    registry
+        .update_channel_layer(&event_id, &layer_id, body)
+        .map(Json)
+        .map_err(layer_error)
+}
+
+/// `DELETE /events/{event_id}/layers/{layer_id}` — remove a **channel layer** (#117 S2), RD-gated.
+///
+/// Unknown event/layer → **404** (not a silent no-op: a console deleting a layer someone else
+/// already deleted is told, rather than left believing it removed something). Written through to
+/// disk (issue #115); returns the whole updated [`ChannelLayers`] view.
+async fn remove_channel_layer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path((event_id, layer_id)): Path<(EventId, LayerId)>,
+) -> Result<Json<ChannelLayers>, ProtocolError> {
+    registry
+        .remove_channel_layer(&event_id, &layer_id)
+        .map(Json)
+        .map_err(layer_error)
 }
 
 /// Map a [`RoundError`] to a [`ProtocolError`]: a missing event/round is a typed **404**
@@ -6116,6 +6223,136 @@ mod tests {
             put_membership(registry, &event, &class_d, vec![pilot_p]).await,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    // --- #117 S2: event channel layers over the wire -------------------------
+
+    /// `POST /events/{id}/layers` with `body`, returning the status and the parsed JSON body.
+    async fn post_layer(
+        registry: EventRegistry,
+        event: &EventId,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/events/{}/layers", event.0))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn defining_a_layer_seeds_it_from_the_timers_allowed_set() {
+        // The global→event seam over the wire: no `nodes` in the body, and the Director seeds the
+        // layer from what the RD ticked for this timer on the Timers page.
+        let (registry, _state, _) = state_with(vec![]);
+        let event = sole_event(&registry);
+        let (status, body) =
+            post_layer(registry.clone(), &event, json!({ "name": "Bracket A" })).await;
+        assert_eq!(status, StatusCode::OK);
+        let layers = body["layers"].as_array().unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0]["name"], "Bracket A");
+        // The Mock's eight Raceband channels, one per node, node index ascending.
+        let nodes = layers[0]["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 8);
+        assert_eq!(nodes[0]["node"], 0);
+        assert_eq!(nodes[0]["channel"], 5658);
+        assert_eq!(nodes[7]["node"], 7);
+        assert_eq!(nodes[7]["channel"], 5917);
+        // The `GET` sees the same thing (it is the same view type).
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/events/{}/layers", event.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let read: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(read["layers"], body["layers"]);
+    }
+
+    #[tokio::test]
+    async fn a_layer_with_two_nodes_on_one_channel_is_a_400_naming_both_nodes() {
+        let (registry, _state, _) = state_with(vec![]);
+        let event = sole_event(&registry);
+        let (status, body) = post_layer(
+            registry,
+            &event,
+            json!({
+                "name": "Bracket A",
+                "nodes": [
+                    { "node": 0, "channel": 5658 },
+                    { "node": 1, "channel": 5658 },
+                    { "node": 2, "channel": 5732 },
+                    { "node": 3, "channel": 5769 },
+                    { "node": 4, "channel": 5806 },
+                    { "node": 5, "channel": 5843 },
+                    { "node": 6, "channel": 5880 },
+                    { "node": 7, "channel": 5917 }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("Node 1") && message.contains("Node 2"),
+            "{message}"
+        );
+        assert!(message.contains("Raceband R1"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn cross_layer_overlap_comes_back_as_a_warning_on_a_200() {
+        // The RD's call: reuse is flagged, never refused. Two identically-seeded layers both land.
+        let (registry, _state, _) = state_with(vec![]);
+        let event = sole_event(&registry);
+        let (first, _) = post_layer(registry.clone(), &event, json!({ "name": "Bracket A" })).await;
+        assert_eq!(first, StatusCode::OK);
+        let (status, body) = post_layer(registry, &event, json!({ "name": "Bracket B" })).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an overlap must not block the write"
+        );
+        assert_eq!(body["layers"].as_array().unwrap().len(), 2);
+        let overlaps = body["overlaps"].as_array().unwrap();
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!(overlaps[0]["channels"].as_array().unwrap().len(), 8);
+    }
+
+    #[tokio::test]
+    async fn layer_routes_404_an_unknown_event_and_an_unknown_layer() {
+        let (registry, _state, _) = state_with(vec![]);
+        let missing = EventId("nope".into());
+        let (status, _) = post_layer(registry.clone(), &missing, json!({ "name": "X" })).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let event = sole_event(&registry);
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/events/{}/layers/never-existed", event.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     // --- P1-7: a registry I/O failure maps to a 500, not a 404/400 ----------
