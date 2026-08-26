@@ -128,13 +128,13 @@
     NodeSignal,
     Pilot,
     Timer,
-    TimerId,
     TimerNodes,
     TimerSignal
   } from '@gridfpv/types';
   import type { Action } from 'svelte/action';
   import type { Session } from '../lib/session.svelte.js';
   import RssiGraph from '../lib/RssiGraph.svelte';
+  import { useSignalFeed } from '../lib/signalFeed.svelte.js';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import { buildCompetitorNames } from '../lib/competitorName.js';
@@ -255,80 +255,23 @@
   const readNodes = $derived<FetchNodes>(fetchNodes ?? ((id) => session.timerNodes(id)));
 
   // ── The live signal poll ────────────────────────────────────────────────────────────────────
-  // The poll IS the subscription. The Director streams a timer only while somebody is watching, and
-  // every `GET /signal` renews a ~5 s lease on that; so this cadence is not a refresh rate, it is
-  // the thing keeping the feed alive, and it stays an order of magnitude inside the lease.
+  // The poll IS the subscription, and giving the lease back is the other half of the bargain — both
+  // live in `useSignalFeed` now, shared with Race control's read-only gate strip (#415). Two copies
+  // of "hold the lease, then give it back" is exactly the shape of bug where one of them quietly
+  // stops releasing.
   //
-  // The reverse obligation is `signal/stop`, fired on every path that ends the watch: unmount, a
-  // route change, and `visibilitychange` — the RD walks to the gate with the phone in a pocket, and
-  // a backgrounded tab must not leave a timer parsing telemetry into nobody's screen. The lease is
-  // the backstop for a stop that never lands (a killed tab, a dead network), not the plan.
-  let signal = $state.raw<TimerSignal | undefined>(undefined);
-  let signalError = $state<string | undefined>(undefined);
-  /** Whether a first snapshot has landed — distinguishes "connecting" from "no nodes". */
-  let everLoaded = $state(false);
-
-  let poll: ReturnType<typeof setInterval> | undefined;
-  let inflightPoll: AbortController | undefined;
-
-  async function pollOnce(id: TimerId): Promise<void> {
-    inflightPoll?.abort();
-    const ctl = new AbortController();
-    inflightPoll = ctl;
-    try {
-      const snap = await readSignal(id, { signal: ctl.signal });
-      if (ctl.signal.aborted) return;
-      ingest(snap);
-      signalError = undefined;
-      everLoaded = true;
-    } catch (e) {
-      if (ctl.signal.aborted) return;
-      signalError = e instanceof Error ? e.message : String(e);
-    } finally {
-      if (inflightPoll === ctl) inflightPoll = undefined;
-    }
-  }
-
-  function startPolling(id: TimerId): void {
-    if (poll !== undefined) return;
-    void pollOnce(id);
-    poll = setInterval(() => void pollOnce(id), pollMs);
-  }
-
-  /**
-   * Stop watching `id`: end the cadence, abandon anything in flight, and **tell the Director** so
-   * the stream stops now rather than when the lease runs out.
-   *
-   * The stop is fire-and-forget on purpose. It runs from teardown, where there is nobody left to
-   * show an error to and nothing useful to do about one — and the lease already guarantees the
-   * outcome if it never arrives. Not firing it at all is the thing that would be wrong.
-   */
-  function stopWatching(id: TimerId): void {
-    if (poll !== undefined) {
-      clearInterval(poll);
-      poll = undefined;
-    }
-    inflightPoll?.abort();
-    inflightPoll = undefined;
-    void releaseSignal(id).catch(() => {});
-  }
-
-  $effect(() => {
-    const id = timer.id;
-    const doc = typeof document === 'undefined' ? undefined : document;
-    const sync = () => {
-      if (doc?.visibilityState === 'hidden') stopWatching(id);
-      else startPolling(id);
-    };
-    sync();
-    doc?.addEventListener('visibilitychange', sync);
-    // Unmount is also how the ROUTE leaves — the shell swaps TunePage out on a hash change — so
-    // this cleanup is the one that has to release the feed when the RD navigates away.
-    return () => {
-      doc?.removeEventListener('visibilitychange', sync);
-      stopWatching(id);
-    };
+  // `ingest` is this page's own half: it is where an in-flight calibration write is CONFIRMED.
+  const feed = useSignalFeed({
+    timer: () => timer.id,
+    read: () => readSignal,
+    release: () => releaseSignal,
+    pollMs: () => pollMs,
+    onsnapshot: (snap) => ingest(snap)
   });
+  const signal = $derived(feed.snapshot);
+  const signalError = $derived(feed.error);
+  /** Whether a first snapshot has landed — distinguishes "connecting" from "no nodes". */
+  const everLoaded = $derived(feed.everLoaded);
 
   // ── The ONE value per (node, threshold) ─────────────────────────────────────────────────────
   // Keyed by node index. Absent until the timer has actually reported that node's levels: a control
@@ -381,7 +324,6 @@
    * snapshot — and where the hardware reclaims a threshold the RD is not touching.
    */
   function ingest(snap: TimerSignal): void {
-    signal = snap;
     const now = Date.now();
     for (const n of snap.nodes) {
       const held = levels[n.node];
@@ -453,7 +395,7 @@
    * to be able to tell them apart, so the page says which one it is rather than showing a flat
    * trace and letting them guess.
    */
-  const streaming = $derived(signal?.streaming ?? false);
+  const streaming = $derived(feed.streaming);
 
   /**
    * Set the one value. **Every** editor comes through here and nowhere else clamps — that is the
