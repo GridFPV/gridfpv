@@ -427,8 +427,29 @@
    so a new select cannot reintroduce it.
    `:where()` keeps specificity at zero — any component that wants a different option look still
    wins without an `!important`. */
+:where(.gridfpv-root, :root) select {
+  /* The popup list is painted by the OS, not the page. `color-scheme` is what tells it which set
+     of system colors to use — without it a dark-styled select gets a LIGHT popup while inheriting
+     the select's light text into it, which is the white-on-white the RD hit. */
+  color-scheme: dark;
+}
+
 :where(.gridfpv-root, :root) select option,
 :where(.gridfpv-root, :root) select optgroup {
-  background-color: var(--gf-surface-2);
-  color: var(--gf-text);
+  /* Concrete fallbacks, not bare `var()`: if a custom property fails to resolve in the popup's
+     painting context the declaration is INVALID AT COMPUTED-VALUE TIME and the browser falls back
+     to its own default — white — which is the exact failure being fixed. A literal second argument
+     cannot fail. */
+  background-color: var(--gf-surface-2, #191c20);
+  color: var(--gf-text, #e8eaed);
+}
+
+:where(.theme-light, [data-theme='light']) select {
+  color-scheme: light;
+}
+
+:where(.theme-light, [data-theme='light']) select option,
+:where(.theme-light, [data-theme='light']) select optgroup {
+  background-color: var(--gf-surface-2, #ffffff);
+  color: var(--gf-text, #16181b);
 }

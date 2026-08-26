@@ -224,6 +224,8 @@ async function renderTune(
     pilots?: Pilot[];
     role?: SessionRole;
     pollMs?: number;
+    /** First poll answers as an opening subscription (empty, not yet streaming). */
+    warmup?: boolean;
     confirmMs?: number;
     /** The Director's node view (#412); `null` models the read never landing (fails closed). */
     nodes?: TimerNodes | null;
@@ -239,7 +241,18 @@ async function renderTune(
   const feed: TimerSignal = opts.signal ?? snapshot();
   // A fresh object per poll: the page holds the snapshot in `$state.raw`, so handing back the same
   // reference would be indistinguishable from no new poll at all.
-  const fetchSignal = vi.fn(async () => structuredClone(feed));
+  // `warmup` reproduces a REAL fresh subscription: the first GET *opens* the lease, so the Director
+  // legitimately answers `streaming: false` with an empty ring, and the data only arrives on a
+  // later poll. The harness used to hand back a populated snapshot on every call, which is why
+  // "the page needs a manual refresh to show anything" could ship green.
+  let polls = 0;
+  const fetchSignal = vi.fn(async () => {
+    polls += 1;
+    if (opts.warmup && polls === 1) {
+      return { ...structuredClone(feed), streaming: false, sample_micros: [], nodes: [] };
+    }
+    return structuredClone(feed);
+  });
   const applyLevels = vi.fn(async (_timer: string, body: CalibrationRequest) => {
     if (opts.applyRejects) throw opts.applyRejects;
     const took = opts.takes?.(body) ?? { enter_at: body.enter_at, exit_at: body.exit_at };
@@ -1182,6 +1195,27 @@ describe('TunePage — the channel is settable, not just shown (#413)', () => {
     const labels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent?.trim());
     expect(labels).toContain('Raceband R7 — 5880');
     expect(labels).toContain('Raceband R2 — 5695');
+    h.unmount();
+  });
+});
+
+describe('TunePage — a fresh subscription fills in without a manual refresh', () => {
+  it('renders the nodes once a later poll carries them', async () => {
+    // The RD hit this on the bench: open Tune, get "Reading this node's channel…" and
+    // "Waiting for this node to report its levels…" forever, refresh the page, and everything
+    // appears. A refresh worked because by then the lease was already warm — so the very first
+    // GET of the NEW subscription answered with data. The page must not need that.
+    const h = await renderTune({ warmup: true, pollMs: 5 });
+
+    await waitFor(
+      () =>
+        expect(screen.getByRole('heading', { name: 'Node 1 · Raceband R7' })).toBeInTheDocument(),
+      { timeout: 2000 }
+    );
+    // And the placeholders are gone — not merely joined by real content.
+    expect(screen.queryByText(/Reading this node/)).toBeNull();
+    expect(screen.queryByText(/Waiting for this node to report its levels/)).toBeNull();
+    expect(h.fetchSignal.mock.calls.length).toBeGreaterThan(1);
     h.unmount();
   });
 });

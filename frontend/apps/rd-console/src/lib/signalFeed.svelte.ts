@@ -58,12 +58,33 @@ export interface SignalFeedOptions {
  * Must be called during component initialisation — it owns an `$effect` for the poll cadence and
  * the `visibilitychange` listener, and its teardown is what fires the release.
  */
+/**
+ * How many mounted surfaces are watching each timer.
+ *
+ * The Director's subscription is **per timer**, not per subscriber: `POST /signal/stop` removes it
+ * outright. But more than one screen can want the same timer's feed at once — Race control's gate
+ * strip and the Tune page are the pair that actually happens, and navigating between them mounts
+ * the new one before the old one tears down.
+ *
+ * Without a count, the OLD screen's teardown stopped the subscription the NEW screen had just
+ * opened. The new page then polled a subscription that had been removed under it, and every answer
+ * came back empty — which the RD saw as "Reading this node's channel…" forever, cured only by a
+ * manual refresh (which mounts alone, with nothing left to tear down behind it).
+ *
+ * So the release is refcounted: the last watcher out gives the lease back. Renewal is not — every
+ * watcher polls, and every poll renews, which is harmless and keeps each surface's data fresh.
+ */
+const watchers = new Map<TimerId, number>();
+
 export function useSignalFeed(opts: SignalFeedOptions): SignalFeed {
   let snapshot = $state.raw<TimerSignal | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
   let everLoaded = $state(false);
 
   let poll: ReturnType<typeof setInterval> | undefined;
+  /** Whether THIS instance currently counts as a watcher (so the refcount stays honest
+   *  across the visibility stop/start cycle, which is not a mount/unmount). */
+  let held = false;
   let inflight: AbortController | undefined;
 
   async function pollOnce(id: TimerId): Promise<void> {
@@ -87,6 +108,10 @@ export function useSignalFeed(opts: SignalFeedOptions): SignalFeed {
 
   function startPolling(id: TimerId, every: number): void {
     if (poll !== undefined) return;
+    if (!held) {
+      held = true;
+      watchers.set(id, (watchers.get(id) ?? 0) + 1);
+    }
     void pollOnce(id);
     poll = setInterval(() => void pollOnce(id), every);
   }
@@ -106,6 +131,14 @@ export function useSignalFeed(opts: SignalFeedOptions): SignalFeed {
     }
     inflight?.abort();
     inflight = undefined;
+    if (!held) return;
+    held = false;
+    const left = (watchers.get(id) ?? 1) - 1;
+    if (left > 0) {
+      watchers.set(id, left);
+      return; // Another surface is still watching this timer — the lease is not ours to give back.
+    }
+    watchers.delete(id);
     void opts
       .release()(id)
       .catch(() => {});
