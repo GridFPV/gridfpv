@@ -14,7 +14,8 @@ const MOCK: Timer = {
   node_count: 8,
   available_channels: [],
   manual_connect: false,
-  calibration: []
+  calibration: [],
+  disabled_nodes: []
 };
 /**
  * A **healthy** RotorHazard timer: connected, and its GridFPV plugin probed `Present`. Since #405
@@ -31,6 +32,7 @@ const RH: Timer = {
   available_channels: [],
   manual_connect: false,
   calibration: [],
+  disabled_nodes: [],
   plugin: { Present: { plugin_version: '0.1.0', rhapi_version: '1.4', capabilities: ['hello'] } }
 };
 
@@ -164,7 +166,8 @@ describe('EventTimers (in-event CRUD + selection)', () => {
       node_count: 8,
       available_channels: [],
       manual_connect: false,
-      calibration: []
+      calibration: [],
+      disabled_nodes: []
     };
     let calls = 0;
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));

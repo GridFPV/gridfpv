@@ -23,7 +23,8 @@ const MOCK: Timer = {
   node_count: 8,
   available_channels: [],
   manual_connect: false,
-  calibration: []
+  calibration: [],
+  disabled_nodes: []
 };
 const RH: Timer = {
   id: 'rh-1',
@@ -34,7 +35,8 @@ const RH: Timer = {
   node_count: 8,
   available_channels: [],
   manual_connect: false,
-  calibration: []
+  calibration: [],
+  disabled_nodes: []
 };
 
 describe('TimersPage (app-level timer registry)', () => {
@@ -63,7 +65,8 @@ describe('TimersPage (app-level timer registry)', () => {
       node_count: 8,
       available_channels: [],
       manual_connect: false,
-      calibration: []
+      calibration: [],
+      disabled_nodes: []
     };
     let calls = 0;
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));
@@ -138,7 +141,8 @@ describe('TimersPage (app-level timer registry)', () => {
       node_count: 6,
       available_channels: [5658, 5800, 5685],
       manual_connect: false,
-      calibration: []
+      calibration: [],
+      disabled_nodes: []
     };
     let calls = 0;
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));
@@ -196,7 +200,8 @@ describe('TimersPage (app-level timer registry)', () => {
       node_count: 2,
       available_channels: [5658],
       manual_connect: false,
-      calibration: []
+      calibration: [],
+      disabled_nodes: []
     };
     const listTimersImpl = vi.fn(async () => [MOCK, fixed]);
     const updateTimerImpl = vi.fn(async () => fixed);

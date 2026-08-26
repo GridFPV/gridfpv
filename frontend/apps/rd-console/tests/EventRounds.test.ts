@@ -902,7 +902,8 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     node_count: 2,
     available_channels: [5658, 5800],
     manual_connect: false,
-    calibration: []
+    calibration: [],
+    disabled_nodes: []
   };
 
   function opImpls() {
@@ -1438,7 +1439,8 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       node_count: 2,
       available_channels: [5658, 5800],
       manual_connect: false,
-      calibration: []
+      calibration: [],
+      disabled_nodes: []
     };
     const impls = {
       ...heatsImpls([]),
@@ -1671,7 +1673,8 @@ const PRACTICE_TIMER: Timer = {
   node_count: 4,
   available_channels: [5658, 5800, 5732],
   manual_connect: false,
-  calibration: []
+  calibration: [],
+  disabled_nodes: []
 };
 // The schemas including open_practice so the format dropdown offers it.
 const OP_SCHEMAS = [...SCHEMAS, { name: 'open_practice', params: [] }];

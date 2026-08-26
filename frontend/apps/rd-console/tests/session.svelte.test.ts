@@ -568,7 +568,8 @@ describe('Session', () => {
       node_count: 8,
       available_channels: [],
       manual_connect: false,
-      calibration: []
+      calibration: [],
+      disabled_nodes: []
     };
 
     function timerSession(overrides?: SessionOverrides) {
@@ -605,7 +606,8 @@ describe('Session', () => {
         node_count: 8,
         available_channels: [],
         manual_connect: false,
-        calibration: []
+        calibration: [],
+        disabled_nodes: []
       };
       const createTimerImpl = vi.fn(async () => created);
       const session = timerSession({ createTimerImpl });
@@ -723,7 +725,8 @@ describe('Session', () => {
           node_count: 8,
           available_channels: [],
           manual_connect: false,
-          calibration: []
+          calibration: [],
+          disabled_nodes: []
         };
         const listTimersImpl = vi.fn(async () => [rh, MOCK_CONNECTED]); // registry order differs
         const session = timerSession({ listTimersImpl });

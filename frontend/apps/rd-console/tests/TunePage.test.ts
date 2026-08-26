@@ -62,7 +62,8 @@ const TIMER: Timer = {
   node_count: 2,
   available_channels: [5880, 5695],
   manual_connect: true,
-  calibration: []
+  calibration: [],
+  disabled_nodes: []
 };
 
 /**

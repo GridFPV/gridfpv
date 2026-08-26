@@ -44,7 +44,8 @@ const TIMERS: Timer[] = [
     node_count: 8,
     available_channels: [],
     manual_connect: false,
-    calibration: []
+    calibration: [],
+    disabled_nodes: []
   },
   {
     id: 'rh-1',
@@ -56,7 +57,8 @@ const TIMERS: Timer[] = [
     node_count: 8,
     available_channels: [],
     manual_connect: false,
-    calibration: []
+    calibration: [],
+    disabled_nodes: []
   },
   {
     id: 'rh-2',
@@ -68,7 +70,8 @@ const TIMERS: Timer[] = [
     node_count: 8,
     available_channels: [],
     manual_connect: false,
-    calibration: []
+    calibration: [],
+    disabled_nodes: []
   }
 ];
 

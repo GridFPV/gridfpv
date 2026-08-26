@@ -42,8 +42,10 @@ services:
       # The emulated-signal stream for node 1 (not baked into the image — mounted here so
       # the standalone rig demonstrates non-zero RSSI; the test harness mounts its own).
       - ./mock_data_1.csv:/opt/RotorHazard/src/server/mock_data_1.csv:ro
+      - ./mock_data_2.csv:/opt/RotorHazard/src/server/mock_data_2.csv:ro
+      - ./mock_data_3.csv:/opt/RotorHazard/src/server/mock_data_3.csv:ro
       # Live-edit the GridFPV plugin inside the running server (RH restart picks up changes):
-      # - ../../plugins/gridfpv:/opt/RotorHazard/src/server/plugins/gridfpv:ro
+      - ../../plugins/gridfpv:/opt/RotorHazard/src/server/plugins/gridfpv:ro
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/',timeout=5).status==200 else 1)"]
       interval: 10s

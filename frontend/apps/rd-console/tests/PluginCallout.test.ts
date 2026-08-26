@@ -24,6 +24,7 @@ const RH_MISSING: Timer = {
   available_channels: [],
   manual_connect: false,
   calibration: [],
+  disabled_nodes: [],
   plugin: 'Missing'
 };
 
