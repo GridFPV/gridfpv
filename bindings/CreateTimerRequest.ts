@@ -23,8 +23,9 @@ kind: TimerKind,
  */
 channel_capability?: ChannelCapability, 
 /**
- * The new timer's **node/slot count** (race redesign Slice 4a) — the heat-size cap. Optional;
- * defaults to [`DEFAULT_NODE_COUNT`].
+ * The new timer's **node-count override** (race redesign Slice 4a; #412). Optional — omit it
+ * (the normal case now) and the timer's width follows what the hardware reports on connect,
+ * falling back to [`DEFAULT_NODE_COUNT`] until it does.
  */
 node_count?: number, 
 /**

@@ -107,6 +107,17 @@ const IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// against a stock RH, which then gets the guided-install prompt anyway.
 const PLUGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long to wait, after connecting, for a **stock** RotorHazard to say how many nodes it has
+/// (#412) — the fallback path, when no GridFPV plugin answered the handshake with a seat count.
+///
+/// `connect` asks for `frequency_data` in its warm-up `load_data`, so a healthy RotorHazard answers
+/// within a frame or two and [`wait_for_reported_nodes`] returns as soon as it lands. The timeout
+/// only bounds the case where nothing answers, which leaves GridFPV on its configured width — where
+/// it was before #412 — so it is deliberately short.
+///
+/// [`wait_for_reported_nodes`]: gridfpv_adapters::rotorhazard::transport::RotorHazardConnection::wait_for_reported_nodes
+const NODE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
 /// `(node_index, frequency_mhz)` assignment the engine allocated for the staging heat, shared from
 /// the async [`RhConnection::tune`] caller to the blocking driver thread. `None` ⇒ nothing pending.
@@ -670,7 +681,38 @@ fn drive(
         // Probe for the GridFPV plugin (D16, S1): `connect` already emitted `gridfpv_hello`, so
         // wait briefly for the `gridfpv_hello_ack`. Present-&-compatible / incompatible / missing
         // drives the Director's required-with-guided-install UX. Re-probed on every (re)connect.
-        let plugin = classify_plugin(conn.wait_for_plugin(PLUGIN_PROBE_TIMEOUT));
+        let hello = conn.wait_for_plugin(PLUGIN_PROBE_TIMEOUT);
+        // **Ask the timer how many nodes it has** (#412), preferring the most direct answer:
+        //
+        //   1. the GridFPV plugin's `gridfpv_hello_ack` — `len(rhapi.interface.seats)`, straight
+        //      off the live interface, and it rides the handshake we already waited for;
+        //   2. `frequency_data.fdata` — one entry per node on stock RotorHazard (identical on
+        //      v4.3.0 and v4.4.0), requested in `connect`'s warm-up `load_data`;
+        //   3. `enter_and_exit_at_levels` — explicitly sliced `[:num_nodes]`, the fallback.
+        //
+        // RotorHazard publishes no `num_nodes` scalar on the socket at all, which is why this is a
+        // length rather than a field.
+        //
+        // It is an **observation**, recorded as one: it never touches `Timer::node_count` or
+        // `Timer::disabled_nodes` (D27 — a value read from a timer is evidence about the timer, not
+        // an input to a decision). A timer that comes back reporting a different width shows up as
+        // `Timer::node_drift` for the RD; a node the RD disabled stays disabled, because nothing on
+        // this path can re-enable one. Re-read on every (re)connect, like the plugin probe itself.
+        let reported = hello
+            .as_ref()
+            .map(|h| h.node_count)
+            .filter(|n| *n > 0)
+            .or_else(|| conn.wait_for_reported_nodes(NODE_DISCOVERY_TIMEOUT));
+        match reported {
+            Some(nodes) => timers.set_reported_nodes(&timer_id, nodes),
+            None => eprintln!(
+                "gridfpv: RotorHazard {:?} did not report a node count; GridFPV keeps its \
+                 configured width",
+                timer_id.0
+            ),
+        }
+
+        let plugin = classify_plugin(hello);
         timers.set_plugin(&timer_id, plugin);
 
         // Maintain the live link until it drops or we are cancelled.

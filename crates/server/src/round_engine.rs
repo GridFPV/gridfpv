@@ -232,8 +232,9 @@ impl std::error::Error for AssignError {}
 ///
 /// Given the event's selected `timer` and the heat's `lineup` (in seed order):
 ///
-/// 1. **Heat-size cap.** The lineup must be ≤ the timer's
-///    [`node_count`](crate::timers::Timer::node_count); otherwise [`AssignError::TooManyForNodes`].
+/// 1. **Heat-size cap.** The lineup must fit the timer's **enabled node set** (#412) — its
+///    [`seat_capacity`](crate::timers::Timer::seat_capacity), which is how many nodes the RD has
+///    left switched on, not the timer's width; otherwise [`AssignError::TooManyForNodes`].
 ///    A timer with **no available channels** (a sim/Mock-without-frequencies, an unconfigured
 ///    timer) assigns **nothing** — an empty allocation — *after* the cap check, so a heat that is
 ///    simply un-channelled is fine but an oversized one is still rejected.
@@ -256,7 +257,11 @@ pub fn assign_frequencies(
     timer: &Timer,
     lineup: &[CompetitorRef],
 ) -> Result<Vec<(CompetitorRef, u16)>, AssignError> {
-    let nodes = timer.node_count as usize;
+    // #412: the cap is the size of the **enabled** node set. On a 4-node timer with node index 2
+    // disabled that is 3 — and the three seats a heat lands on are 0, 1 and 3, not 0, 1 and 2. This
+    // function only sizes and allocates channels; the seat *indices* are walked (in this same
+    // enabled order) where a heat is applied to the timer.
+    let nodes = timer.seat_capacity();
     if lineup.len() > nodes {
         return Err(AssignError::TooManyForNodes {
             lineup: lineup.len(),
@@ -1563,8 +1568,9 @@ fn fill_round_static(
 }
 
 /// The **static** (channel-balanced) plan for a round: each heat draws pilots on **distinct
-/// channels**, **≤ `node_count` pilots** (the node cap is the only per-heat size limit; the channel
-/// pool may be larger), repeated over the format's round count so every member flies each round.
+/// channels**, **≤ the timer's enabled node count** (the node cap is the only per-heat size limit;
+/// the channel pool may be larger), repeated over the format's round count so every member flies
+/// each round.
 ///
 /// A member with no assigned channel is a [`FillError::MissingChannel`]. An empty field is a
 /// [`FillError::EmptyField`], as for per-heat.
@@ -1581,11 +1587,12 @@ fn static_plans(
         return Err(FillError::EmptyField(round.id.0.clone()));
     }
 
-    // The node cap is the event's primary timer's node count (the only per-heat size limit); with
-    // no resolvable timer, fall back to seating every distinct channel in one heat (a pure-sim
-    // event still channel-balances by the distinct-channel rule, just without a node cap).
+    // The node cap is the size of the event's primary timer's **enabled** node set (#412) — the
+    // only per-heat size limit; with no resolvable timer, fall back to seating every distinct
+    // channel in one heat (a pure-sim event still channel-balances by the distinct-channel rule,
+    // just without a node cap).
     let node_cap = assignment_timer(meta, timers)
-        .map(|t| t.node_count as usize)
+        .map(|t| t.seat_capacity())
         .filter(|n| *n > 0)
         .unwrap_or(usize::MAX);
 
@@ -2013,13 +2020,20 @@ mod tests {
 
     /// A test timer with the given node count + available channels (raw MHz), flexible capability.
     fn timer_with(node_count: u32, available: Vec<u16>) -> Timer {
+        timer_with_disabled(node_count, available, Vec::new())
+    }
+
+    /// As [`timer_with`], with `disabled` node indices (0-based) switched off (#412).
+    fn timer_with_disabled(node_count: u32, available: Vec<u16>, disabled: Vec<u32>) -> Timer {
         Timer {
             id: TimerId("t".into()),
             name: "T".into(),
             kind: TimerKind::Mock { laps: 1, lap_ms: 1 },
             status: TimerStatus::Ready,
             channel_capability: ChannelCapability::Flexible,
-            node_count,
+            node_count: Some(node_count),
+            reported_nodes: None,
+            disabled_nodes: disabled,
             available_channels: available,
             plugin: None,
             manual_connect: false,
@@ -2104,6 +2118,55 @@ mod tests {
         // A 2-pilot lineup fits and gets the first two channels.
         let ok = assign_frequencies(&timer, &lineup(&["A", "B"])).unwrap();
         assert_eq!(ok.len(), 2);
+    }
+
+    #[test]
+    fn assign_caps_the_heat_at_the_enabled_node_set_not_the_timers_width() {
+        // #412: a 4-node timer with node index 2 disabled seats THREE pilots, and the three seats
+        // are 0, 1 and 3 — a set with a hole, not a prefix. A fourth pilot is refused here rather
+        // than seated on the dead gate.
+        let timer = timer_with_disabled(4, RACEBAND_MHZ.to_vec(), vec![2]);
+        assert_eq!(timer.enabled_nodes(), vec![0, 1, 3]);
+
+        let err = assign_frequencies(&timer, &lineup(&["A", "B", "C", "D"])).unwrap_err();
+        assert_eq!(
+            err,
+            AssignError::TooManyForNodes {
+                lineup: 4,
+                // The cap is the size of the enabled set, not the width — the number the RD sees
+                // as "3 nodes usable" rather than "4 nodes".
+                nodes: 3
+            }
+        );
+
+        // Three fit, and each gets a channel.
+        let ok = assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap();
+        assert_eq!(ok.len(), 3);
+        // …and they land on nodes 0, 1 and 3. The channel allocation is by lineup order; the seat
+        // mapping is what turns that order into real node indices.
+        let seats = timer.seat_nodes(&lineup(&["A", "B", "C"]));
+        assert_eq!(
+            seats.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec![0, 1, 3]
+        );
+    }
+
+    #[test]
+    fn the_channel_pool_is_capped_by_the_enabled_nodes_too() {
+        // A disabled node is not offered a channel: the candidate pool a heat's IMD pick is drawn
+        // from is `enabled` wide, not `width` wide.
+        let timer = timer_with_disabled(4, RACEBAND_MHZ.to_vec(), vec![2]);
+        let ok = assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap();
+        let chosen: Vec<u16> = ok.iter().map(|(_, mhz)| *mhz).collect();
+        // Three distinct channels, all from the first three of the Raceband pool (the pool is
+        // `take(3)` — the enabled count — before the IMD pick).
+        assert_eq!(chosen.len(), 3);
+        for mhz in &chosen {
+            assert!(
+                RACEBAND_MHZ[..3].contains(mhz),
+                "{mhz} came from outside the enabled-node-capped pool"
+            );
+        }
     }
 
     #[test]
