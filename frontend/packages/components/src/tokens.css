@@ -199,16 +199,36 @@
   --gf-font-mono:
     'JetBrains Mono', ui-monospace, 'SF Mono', 'Roboto Mono', 'Cascadia Code', monospace;
 
-  --gf-font-size-2xs: 0.6875rem;
-  --gf-font-size-xs: 0.75rem;
-  --gf-font-size-sm: 0.8125rem;
-  --gf-font-size-md: 0.9375rem;
-  --gf-font-size-lg: 1.125rem;
-  --gf-font-size-xl: 1.5rem;
-  --gf-font-size-2xl: 2rem;
-  --gf-font-size-3xl: 2.75rem;
+  /* ── The FIELD-READABLE base scale (#108) ────────────────────────────────
+   * The RD console is run on a medium laptop outdoors, in direct sun, by
+   * someone reading at arm's length while watching the course. "Readable on a
+   * sunlit laptop?" is the bar, and the old scale bottomed out at 11px, which
+   * is not.
+   *
+   * The bump is deliberately NOT uniform. Glare costs you the small end first,
+   * so the small end moves most (2xs/xs/sm gain ~2px, +15–18%) while the
+   * display sizes — already legible at a glance — move least (~9%). That keeps
+   * the ratios between adjacent steps roughly intact, so nothing re-ranks:
+   * a label does not overtake the value it labels.
+   *
+   * Everything is in `rem`, so a surface (or the OS) can still scale the whole
+   * console from the root font size. Changing these numbers changes 280+ files
+   * at once, which is the point — a per-component bump would drift within a
+   * release. */
+  --gf-font-size-2xs: 0.8125rem; /* 13px — was 11px */
+  --gf-font-size-xs: 0.875rem; /* 14px — was 12px */
+  --gf-font-size-sm: 0.9375rem; /* 15px — was 13px */
+  --gf-font-size-md: 1.0625rem; /* 17px — was 15px (the body default) */
+  --gf-font-size-lg: 1.3125rem; /* 21px — was 18px */
+  --gf-font-size-xl: 1.75rem; /* 28px — was 24px */
+  --gf-font-size-2xl: 2.25rem; /* 36px — was 32px */
+  --gf-font-size-3xl: 3rem; /* 48px — was 44px */
 
   --gf-font-weight-normal: 400;
+  /* Alias: six screens already ask for `-regular` (three of them with `!important`), which
+     resolved to nothing and silently left the weight inherited — a bold value where body weight
+     was meant. Defining the alias fixes them all at the token layer rather than in six files. */
+  --gf-font-weight-regular: var(--gf-font-weight-normal);
   --gf-font-weight-medium: 500;
   --gf-font-weight-semibold: 600;
   --gf-font-weight-bold: 700;
@@ -335,9 +355,13 @@
   --gf-color-text-muted: var(--gf-text-muted);
   --gf-color-accent: var(--gf-accent);
 
-  --gf-font-size-sm: 1rem;
-  --gf-font-size-md: 1.25rem;
-  --gf-font-size-lg: 1.75rem;
+  /* The keyer's own scale, unchanged by #108: it is already sized for a
+   * broadcast frame, and it must stay clear of the base scale below it. */
+  --gf-font-size-2xs: 0.875rem;
+  --gf-font-size-xs: 0.9375rem;
+  --gf-font-size-sm: 1.125rem;
+  --gf-font-size-md: 1.375rem;
+  --gf-font-size-lg: 1.875rem;
   --gf-font-size-xl: 2.5rem;
   --gf-font-size-2xl: 3.25rem;
   --gf-font-size-3xl: 4rem;
@@ -347,17 +371,41 @@
 }
 
 /**
- * Dense context: tighter spacing + smaller type for the data-dense RD console
- * tables. Apply `class="gridfpv-dense"` on a wrapping element.
+ * Dense context: tighter **spacing** for the data-dense RD console screens.
+ * Apply `class="gridfpv-dense"` on a wrapping element.
+ *
+ * **It no longer shrinks the type (#108).** The whole RD console is wrapped in
+ * `.gridfpv-dense` (see `App.svelte`), so its `--gf-font-size-*` overrides were
+ * not a per-table exception at all — they *were* the console's effective type
+ * scale, and they pulled `md` back below the root. Raising the base scale above
+ * would have been silently undone for every screen. Density here means the
+ * space between things; the type scale is decided in one place.
+ *
+ * A surface that genuinely needs smaller type opts out explicitly, via
+ * `.gridfpv-text-compact` below.
  */
 :where(.gridfpv-dense) {
   --gf-space-2: 0.375rem;
   --gf-space-3: 0.5rem;
   --gf-space-4: 0.75rem;
   --gf-space-6: 1.125rem;
+}
 
-  --gf-font-size-sm: 0.8125rem;
-  --gf-font-size-md: 0.875rem;
+/**
+ * Compact-text context (#108): steps the small end of the scale back down one
+ * notch, for a surface where the *shape* of a long list matters more than
+ * reading any one row at arm's length — a scrollback of audit lines, say.
+ *
+ * This is an **opt-out and it must stay rare**: applying it to anything an RD
+ * makes a race decision from puts that surface back below the sunlit-laptop
+ * bar. It deliberately does not touch `lg` and up, so headings and readouts on
+ * such a surface stay full size.
+ */
+:where(.gridfpv-text-compact) {
+  --gf-font-size-2xs: 0.75rem;
+  --gf-font-size-xs: 0.8125rem;
+  --gf-font-size-sm: 0.875rem;
+  --gf-font-size-md: 0.9375rem;
 }
 
 /* Honor reduced-motion: collapse durations so transitions are instant. */

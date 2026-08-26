@@ -83,14 +83,16 @@ describe('TimersPage (app-level timer registry)', () => {
 
     await waitFor(() => expect(createTimerImpl).toHaveBeenCalledTimes(1));
     // The add carries the channel config too (race redesign Slice 4b): the permissive default —
-    // Flexible, 8 nodes, no channels picked — when the RD does not touch the channel fields.
+    // Flexible, no channels picked — when the RD does not touch the channel fields. `node_count`
+    // is deliberately ABSENT (#412): it is an *override*, and a new timer follows whatever the
+    // hardware reports on connect rather than being pinned to the console's fallback of 8.
     expect(createTimerImpl).toHaveBeenCalledWith(
       'http://d.local',
       {
         name: 'Fast',
         kind: { Mock: { laps: 3, lap_ms: 30000 } },
         channel_capability: 'Flexible',
-        node_count: 8,
+        node_count: undefined,
         available_channels: []
       },
       'tok'
@@ -116,7 +118,9 @@ describe('TimersPage (app-level timer registry)', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     await waitFor(() => expect(updateTimerImpl).toHaveBeenCalledTimes(1));
-    // The edit carries the timer's (unchanged) channel config too (race redesign Slice 4b).
+    // The edit carries the timer's (unchanged) channel config too (race redesign Slice 4b) — but
+    // NOT `node_count` (#412). Renaming a timer must not pin its width: sending the seeded value
+    // back would silently create the reported-vs-configured drift this release exists to remove.
     expect(updateTimerImpl).toHaveBeenCalledWith(
       'http://d.local',
       'rh-1',
@@ -124,7 +128,7 @@ describe('TimersPage (app-level timer registry)', () => {
         name: 'Renamed',
         kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
         channel_capability: 'Flexible',
-        node_count: 8,
+        node_count: undefined,
         available_channels: []
       },
       'tok'
@@ -233,7 +237,8 @@ describe('TimersPage (app-level timer registry)', () => {
         name: 'Fixed RH',
         kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
         channel_capability: { Fixed: { channels: [5658, 5695] } },
-        node_count: 2,
+        // Untouched, so the width override is left exactly as it was (#412).
+        node_count: undefined,
         available_channels: [5658, 5695]
       },
       'tok'
