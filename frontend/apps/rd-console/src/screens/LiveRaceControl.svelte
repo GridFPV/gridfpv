@@ -30,7 +30,12 @@
     RoundDef
   } from '@gridfpv/types';
   import { nodeIndexOf } from '../lib/channels.js';
+  import { collapseStore } from '../lib/collapse.svelte.js';
   import { buildCompetitorNames } from '../lib/competitorName.js';
+  import { gateGroups } from '../lib/gateSignal.js';
+  import GateSignalStrip from '../lib/GateSignalStrip.svelte';
+  import { useSignalFeed } from '../lib/signalFeed.svelte.js';
+  import { SIGNAL_POLL_MS, type FetchSignal, type StopSignal } from '../lib/tuning.js';
   import { heatDisplayName, heatNameById, isOpenPracticeRound } from '../lib/heats.js';
   import {
     actionDescription,
@@ -53,7 +58,22 @@
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
 
-  let { session, names = {} }: { session: Session; names?: Record<string, string> } = $props();
+  let {
+    session,
+    names = {},
+    fetchSignal,
+    stopSignal,
+    signalPollMs = SIGNAL_POLL_MS
+  }: {
+    session: Session;
+    names?: Record<string, string>;
+    /** Test/host seam for the gate-signal poll; defaults to `GET /timers/{id}/signal` (#415). */
+    fetchSignal?: FetchSignal;
+    /** Test/host seam for releasing the gate-signal lease; defaults to `POST .../signal/stop`. */
+    stopSignal?: StopSignal;
+    /** Gate-signal poll cadence (ms) — the thing that renews the Director's lease. */
+    signalPollMs?: number;
+  } = $props();
 
   const live = $derived<LiveRaceState | undefined>(session.liveState);
   const phase = $derived(live?.phase ?? 'Scheduled');
@@ -132,10 +152,46 @@
       });
   });
 
+  // ── The gate signal (#415) ───────────────────────────────────────────────────────────────────
+  //
+  // Read-only live RSSI for the heat on the timer. Mid-race is exactly when an RD cannot tune and
+  // most needs to know what the gate is seeing: a lap that does not register looks identical on the
+  // board whether the craft is producing no signal at all, crossing under the enter threshold, or
+  // not crossing — three faults, three different responses, one unmoving lap count. The trace, the
+  // threshold lines and the crossing marks are what tell them apart.
+  //
+  // The feed is a LEASE, not a read. The poll cadence is what keeps the Director streaming, and
+  // `useSignalFeed` is the other half of that bargain — it gives the lease back on unmount, on the
+  // route change that unmounts this screen, and on `visibilitychange → hidden`, so an RD who walks
+  // to the gate with the phone in their pocket does not leave a timer streaming to nobody. Exactly
+  // what the Tune page does, because it is literally the same helper.
+  //
+  // Bandwidth was raised as an objection and disproved by measurement: 9,155 bytes per poll on a
+  // full 8-node ring is ~36 KB/s at this cadence — 0.03% of a 1 Gb race network — and the
+  // timer→Director link is unchanged either way (the `node_data` heartbeat already flows for the
+  // marshaling trace; the lease only decides whether the Director buffers it). So there is no
+  // throttling or gating here on purpose.
+  //
+  // Held only by a CONTROLLING session. `GET /timers/{id}/signal` is `ControlAuth`-gated at the
+  // Director, so a read-only / pilot session cannot have it at all — subscribing anyway would earn
+  // them a 401 rendered as "lost the timer's signal feed", which is a false statement about the
+  // hardware in front of somebody who cannot act on it either way.
+  const gateTimer = $derived(canControl ? session.primaryTimer : undefined);
+  const gateFeed = useSignalFeed({
+    timer: () => gateTimer?.id,
+    // Defaults to the SESSION's calls, not a bare `fetch`: both routes are `ControlAuth`-gated, so
+    // a hand-rolled fetch would 401 against any token-gated Director — including the RD's own.
+    read: () => fetchSignal ?? ((id, opts) => session.timerSignal(id, { signal: opts.signal })),
+    release: () => stopSignal ?? ((id) => session.stopTimerSignal(id)),
+    pollMs: () => signalPollMs
+  });
+
   // ONE assembly of the resolver inputs (#416). Every screen hands `buildCompetitorNames` the
   // sources it has and consumes the result — the three independent constructions this screen, the
   // Rounds & Heats stage and Marshaling each used to do are what put `node-6` on one screen and
-  // `Node 7` on another for the same seat.
+  // `Node 7` on another for the same seat. This screen now holds a live signal subscription too,
+  // so it can hand over `NodeSignal.frequency_mhz` — what each node is ACTUALLY tuned to, and the
+  // only channel source that works on a Flexible RotorHazard timer (whose pool is empty).
   //
   // `progress` carries an **explicit** `pilot` only when a `Register` command bound it (the
   // open-practice / manual-registration path); it is empty for the common roster-seeded heat, where
@@ -146,10 +202,38 @@
       progress: live?.progress,
       heat: heats.find((h) => h.heat === heat),
       catalog,
+      signal: gateFeed.snapshot,
+      // The registry's timer, NOT `gateTimer` — the name inputs are needed by every session, and
+      // `gateTimer` is deliberately absent for a read-only one (see the subscription above).
       timer: session.primaryTimer,
       membership: session.currentEvent?.classes_membership
     })
   );
+
+  // The heat's own gates, then every other node the timer reports (including the ones RotorHazard
+  // has never reported at all — "is node 3 even alive?" is half the diagnostic). Attribution is a
+  // join, never a guess: an open-practice lineup IS node seats, and a competition lineup is paired
+  // by channel only where exactly one node and exactly one competitor claim that frequency.
+  const gates = $derived(gateGroups(gateFeed.snapshot, lineup, seatNames.mhzFor));
+
+  // Always-visible or a toggle? A toggle — but one whose CLOSED state still answers the first
+  // question. The strip's collapsed header carries a live chip per gate (reporting / crossing / not
+  // reporting), so a dead node is visible at a glance without spending vertical space on eight
+  // plots; opening it is for "how close was that pass to the enter line?". The choice sticks per
+  // event, so an RD who wants it open all meeting gets it open on every heat.
+  const collapseEventId = $derived(session.currentEvent?.id ?? 'event');
+  const collapseStores = new Map<string, ReturnType<typeof collapseStore>>();
+  function collapse(sectionId: string, defaultOpen: boolean): ReturnType<typeof collapseStore> {
+    const key = `${collapseEventId}:${sectionId}`;
+    let s = collapseStores.get(key);
+    if (!s) {
+      s = collapseStore(collapseEventId, sectionId, defaultOpen);
+      collapseStores.set(key, s);
+    }
+    return s;
+  }
+  const gateCollapse = $derived(collapse('race-gate-signal', false));
+  const gateOthersCollapse = $derived(collapse('race-gate-signal-others', false));
 
   // `heatName(id)` → the friendly "<Round> Heat N" / "Open Practice Heat" name for a heat id (the
   // same helper the picker uses), falling back to the bare id for an untagged/free-text heat. Used
@@ -697,6 +781,32 @@
         {/each}
       </div>
     </div>
+  {/if}
+
+  {#if gateTimer}
+    <!-- The gate signal (#415), read-only.
+         PLACEMENT, decided by the RD: **not** in the leaderboard rows. A per-row sparkline was
+         considered and rejected — Race control is the highest-stakes screen and the leaderboard is
+         what an RD actually reads during a heat, so graphs embedded in it compete with the thing
+         they are meant to support. It sits here instead, between the transition row and the board:
+         in the same glance as the standings it explains, and above them so it reads as the cause
+         and they read as the effect. Collapsed it costs one header row, so the board barely moves;
+         expanding it is a deliberate act, and at that moment the gates SHOULD be the prominent
+         thing on screen.
+         Only rendered with a primary timer at all: a sim-only event has no gate to show, and no
+         lease worth holding. -->
+    <GateSignalStrip
+      groups={gates}
+      signal={gateFeed.snapshot}
+      streaming={gateFeed.streaming}
+      everLoaded={gateFeed.everLoaded}
+      error={gateFeed.error}
+      timerName={gateTimer.name}
+      nameFor={competitorName}
+      seatLabel={seatNames.seatLabel}
+      bind:open={gateCollapse.open}
+      bind:othersOpen={gateOthersCollapse.open}
+    />
   {/if}
 
   {#if isOpenPractice}
