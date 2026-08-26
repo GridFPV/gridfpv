@@ -579,3 +579,55 @@ something has already gone wrong, and it is the path whose diagnostics we most n
 
 **#402** (practice channels), **#407** (RH min-lap filter + RHAPI audit), **#408**
 (`EventOutcome` unserved), **#410** (the guard above — which of the three options).
+
+---
+
+# Session log — 2026-08-26: the Tune page proves out on hardware
+
+## First real-RF validation of #355
+
+The RD ran the Tune page against a live NuclearHazard: *"the tuning is amazing, UI/UX is exactly what I want, it seems to work — can validate the values change on RH with a page refresh."*
+
+Persisted calibration read back off disk afterwards, which is D27 working:
+
+```
+NuclearHazard   node 0 → 62/35   node 1 → 68/57   node 2 → 68/57
+```
+
+Node 3 is absent because it was never tuned — the record is of *decisions*, not a snapshot.
+
+**And it immediately caught real drift.** Grid's record said node 0 enter = 62; the timer reported 37. Either a later write never landed, or something moved it after Grid recorded 62 — and Grid cannot currently tell which, because D27's re-apply half is deliberately unbuilt (#355 flagged it). The case the drift notice exists for occurred naturally within an hour of the feature shipping.
+
+## Closed today (22 issues)
+
+Highlights beyond the routine:
+
+- **#412** — node count is now discovered from the timer. A real 4-node timer was configured as **8**, and `round_engine` caps pilots on that number, so Grid would have seated 8 pilots on a timer that can time 4. Found a fourth discovery source nobody had read: the plugin's `gridfpv_hello_ack.node_count` was already parsed and unused.
+- **#410** — the fabricated-types guard. `wire-shape.ts` validates live responses against the *binding files themselves*, so the test has no opinion of its own to be wrong. Fed the original fabrication, it names all nine divergences. Option (2) was deliberately **not** built: it would not have caught the bug it was proposed for, since `TimerSignalNode` was a name that never existed.
+- **#418 / #416** — the RD's own practice round was simultaneously mis-seeded onto a nonexistent node *and* undeletable, with the refusal recommending a route that does not exist. Both fixed; stored rounds are now validated on **read**, not only on write.
+- **#84** — closed as *"what exists is better than what was proposed"*. `RoundDef` already carries per-round format, classes, win condition and `FromRanking` carry; the built model expresses progression as a **DAG**, which the proposed per-class ordered list cannot do at all.
+- **#97** — closed as already built; `EventSetupWizard` has been wired since before the issue was revisited.
+
+## The empty-pool trap, five times over
+
+`available_channels` is **empty on every real RotorHazard timer**, because they report `Flexible` — which means *"no restriction"*, not *"no channels"*. That single ambiguity produced five separate defects:
+
+1. `round_engine.rs:273` returns early → **channel assignment has never once run on real hardware**, so the IMD machinery below it has never executed
+2. `TimerManager.svelte:147` → renders *"No channels available"* for a timer that can do all 52
+3. #413's dropdown would have rendered empty on exactly the timers it is for
+4. #416's seat labels degraded to `Node 7` with no channel
+5. #402 is almost certainly the same root cause
+
+Fixed at each site; #117 S1 removes the cause by making the pool **event config** rather than timer-derived.
+
+## #117 reframed by the RD
+
+The RD rejected the flat-pool model in favour of three scopes: **global** (what may this timer ever use) → **event layers** (which channel on which node) → **heat** (pick a layer, timer retunes).
+
+This dissolved an objection rather than answering it: I had assumed a pilot's channel should determine their heat, which would have broken bracket filling. It does not — the RD picks the strategy. A bracket is *one layer all tournament*; a GQ qualifier uses many layers to keep pilots put. Both fall out of one mechanism.
+
+IMD moves from **chooser to checker**, validating a layer at definition time — paid once, and at the only moment the RD can still act on it. Clever pilot-channel assignment deferred to **#419**.
+
+## Still open for the RD
+
+**#402** (folds into #117 S1), **#405**, **#407**, **#415**, **#421**, **#355**'s remaining ADDs (Capture button, min-lap warning), **#397**'s pre-race tones (needs the telemetry source, not the log).
