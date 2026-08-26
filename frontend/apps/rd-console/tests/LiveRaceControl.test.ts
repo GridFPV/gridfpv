@@ -814,7 +814,7 @@ describe('LiveRaceControl', () => {
       const { pushLive, cancelSpy } = renderCallouts();
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_400_000));
+      pushLive(coLive(1, 21_400_000, 'Running', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       // A natural finish (Running → Unofficial) must NOT cancel — the final laps' times are what
       // everyone is waiting to hear (cancelling here chopped the last callout mid-word).
@@ -832,7 +832,7 @@ describe('LiveRaceControl', () => {
       const { pushLive, cancelSpy, utterances } = renderCallouts();
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_400_000));
+      pushLive(coLive(1, 21_400_000, 'Running', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       expect(utterances).toHaveLength(1);
 
@@ -841,7 +841,13 @@ describe('LiveRaceControl', () => {
       expect(screen.getByRole('button', { name: /Callouts off/ })).toBeInTheDocument();
 
       // Further crossings while muted stay silent.
-      pushLive(coLive(2, 20_000_000));
+      pushLive(
+        coLive(2, 20_000_000, 'Running', [
+          cross(1, 'Holeshot'),
+          cross(2, 'Counted', 1),
+          cross(3, 'Counted', 2)
+        ])
+      );
       await tick();
       expect(utterances).toHaveLength(1);
     });

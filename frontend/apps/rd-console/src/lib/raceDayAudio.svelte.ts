@@ -192,10 +192,15 @@ export function mountRaceDayAudio(session: Session): RaceDayAudio {
   // crossing and the speech per lap — no crossing is both pipped twice and no lap is spoken
   // twice. (The pip that used to fire from here moved to the crossing feed above; leaving it
   // would double-pip every counted lap.)
+  //
+  // Both detectors now read the SAME feed and key on the same `pass_ref` (#417): a lap is spoken
+  // by the pass that closed it, never by a count that moved. `progress` still rides along, purely
+  // so the callout can carry the lap time.
   useLapCallouts(
     () => phase,
     () => heat,
     () => live?.race_started_at,
+    () => live?.crossings,
     () => live?.progress,
     (crossing) => {
       if (audio.muted) return;
