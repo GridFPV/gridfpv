@@ -651,16 +651,18 @@ mod tests {
     }
 
     fn event_engine() -> Engine {
-        let scope = Scope::Event {
-            event: EventId("practice".into()),
-        };
-        // A registry whose Practice event has no rounds ⇒ no D26 floor, which is what these
-        // (round-less) fixtures always meant. The floor's own conformance proof lives in
+        // A registry holding one freshly-created, round-less event ⇒ no D26 floor, which is what
+        // these fixtures always meant. The floor's own conformance proof lives in
         // `tests/min_lap_floor_conformance.rs`.
-        let floors = RoundFloors {
-            registry: EventRegistry::new(None).expect("in-memory registry"),
-            event: EventId(crate::events::PRACTICE_EVENT_ID.into()),
+        let registry = EventRegistry::new(None).expect("in-memory registry");
+        let event = registry
+            .create(&crate::events::CreateEventRequest::named("Test Event"))
+            .expect("create the test event")
+            .id;
+        let scope = Scope::Event {
+            event: event.clone(),
         };
+        let floors = RoundFloors { registry, event };
         Engine::new(scope.clone(), ScopeProjection::of(&scope), 0, floors)
     }
 

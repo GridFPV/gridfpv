@@ -116,7 +116,7 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
     rounds?: Array<{ id: string; label: string }>;
   }>;
   const roundId = events
-    .find((e) => e.id === 'practice')
+    .find((e) => e.id === director.event)
     ?.rounds?.find((r) => r.label === LABEL)?.id;
   expect(roundId, 'the open-practice round exists').toBeTruthy();
   const heats = (await (await page.request.get('/events/practice/heats')).json()) as Array<{

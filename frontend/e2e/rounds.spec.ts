@@ -170,7 +170,7 @@ test('RD seeds a round from multiple source rounds via the multi-select', async 
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const stamp = Date.now();
   const QUAL_A = `E2E-QualA-${stamp}`;
@@ -242,7 +242,7 @@ test('RD seeds a round from multiple source rounds via the multi-select', async 
       id: string;
       rounds?: Array<{ id: string; label: string; seeding: unknown }>;
     }>;
-    return events.find((e) => e.id === 'practice')?.rounds ?? [];
+    return events.find((e) => e.id === director.event)?.rounds ?? [];
   };
   const rounds = await practiceRounds();
   const qualAId = rounds.find((r) => r.label === QUAL_A)?.id;
@@ -277,7 +277,7 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const LABEL = `E2E-Guided-${Date.now()}`;
   await page.goto('/');
@@ -332,7 +332,7 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
       id: string;
       rounds?: Array<{ label: string; params: Record<string, string>; channel_mode?: string }>;
     }>;
-    return events.find((e) => e.id === 'practice')?.rounds?.find((r) => r.label === LABEL);
+    return events.find((e) => e.id === director.event)?.rounds?.find((r) => r.label === LABEL);
   };
   await expect
     .poll(async () => (await practiceRound())?.params?.rounds, { timeout: 15_000 })
@@ -346,7 +346,7 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
     rounds?: Array<{ id: string; label: string }>;
   }>;
   const roundId = rounds
-    .find((e) => e.id === 'practice')
+    .find((e) => e.id === director.event)
     ?.rounds?.find((r) => r.label === LABEL)?.id;
   expect(created).toBeTruthy();
   if (roundId) await page.request.delete(`${ev}/rounds/${roundId}`);
@@ -364,7 +364,7 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
  */
 test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page, director }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Heat-Ace-${SUFFIX}`;
@@ -479,7 +479,7 @@ test('RD generates a whole round of heats in one action (Generate heats, #216)',
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ROUND_LABEL = `E2E-GenAll-${SUFFIX}`;
@@ -563,7 +563,7 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Chan-Ace-${SUFFIX}`;
@@ -687,7 +687,7 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
  */
 test('RD reads per-class standings off a scored round', async ({ page, director }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Std-Ace-${SUFFIX}`;
@@ -803,7 +803,7 @@ test('RD reads per-class standings off a scored round', async ({ page, director 
       id: string;
       rounds?: Array<{ id: string }>;
     }>;
-    return events.find((e) => e.id === 'practice')?.rounds ?? [];
+    return events.find((e) => e.id === director.event)?.rounds ?? [];
   };
   for (const r of await practiceRounds()) await page.request.delete(`${ev}/rounds/${r.id}`);
   await page.request.put(`${ev}/classes/${classId}/membership`, {

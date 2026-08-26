@@ -59,8 +59,7 @@ export {
   eventAudit,
   roundRanking,
   roundStandings,
-  classStandings,
-  PRACTICE_EVENT_ID
+  classStandings
 } from './client.js';
 export type {
   ConnectOptions,

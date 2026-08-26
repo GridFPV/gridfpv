@@ -16,10 +16,10 @@ const CLASSES: Class[] = [
 ];
 const EVENTS: EventMeta[] = [
   {
-    id: 'practice',
+    id: 'practice-ab12',
     name: 'Practice',
     created_at: 0,
-    persistent: false,
+    persistent: true,
     timers: ['mock'],
     roster: [],
     classes: []

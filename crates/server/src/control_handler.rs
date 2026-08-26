@@ -3740,11 +3740,13 @@ mod tests {
     /// `FillRound` on a round that does not exist is an `UnknownScope` rejection (no append).
     #[test]
     fn fill_round_unknown_round_is_rejected() {
-        use crate::scope::EventId;
         use gridfpv_events::RoundId;
 
         let registry = EventRegistry::new(None).unwrap();
-        let event = EventId(crate::events::PRACTICE_EVENT_ID.into());
+        let event = registry
+            .create(&crate::events::CreateEventRequest::named("Test Event"))
+            .unwrap()
+            .id;
         let state = registry.resolve(&event).unwrap();
         let ack = apply_command_in_event(
             &registry,

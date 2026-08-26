@@ -14,23 +14,26 @@ import {
   createClass,
   createPilot,
   createRound,
-  PRACTICE_EVENT_ID,
   roundRanking,
   setClassMembership,
   setEventClasses,
   setEventRoster
 } from '../packages/protocol-client/dist/index.js';
-import { type Director } from '../test-harness/director.ts';
-import { driveToRunning, eventRoot, rdControl, startContractDirector } from './harness.ts';
+import {
+  driveToRunning,
+  rdControl,
+  startDirectorWithEvent,
+  type ContractDirector
+} from './harness.ts';
 
 const TOKEN = 'rd-h2h-contract';
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
   // A brisk sim (one quick lap per pilot, earlier seeds faster) so each heat scores fast and
   // finishing order inside a heat is deterministic (lineup order).
-  director = await startContractDirector({ token: TOKEN, simLaps: 1, simLapMs: 30 });
+  director = await startDirectorWithEvent({ token: TOKEN, simLaps: 1, simLapMs: 30 });
 });
 
 afterAll(async () => {
@@ -46,7 +49,7 @@ interface WireHeat {
 
 /** Read the round's heats off the real heats route, in served order. */
 async function roundHeats(roundId: string): Promise<WireHeat[]> {
-  const res = await fetch(`${eventRoot(director.baseUrl)}/heats`);
+  const res = await fetch(`${director.eventRoot}/heats`);
   expect(res.status).toBe(200);
   const all = (await res.json()) as WireHeat[];
   return all.filter((h) => h.round === roundId);
@@ -56,9 +59,7 @@ async function roundHeats(roundId: string): Promise<WireHeat[]> {
 async function waitForLaps(heat: string, pilots: number, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const resp = await fetch(
-      `${eventRoot(director.baseUrl)}/snapshot/heat/${heat}?projection=laps`
-    );
+    const resp = await fetch(`${director.eventRoot}/snapshot/heat/${heat}?projection=laps`);
     if (resp.ok) {
       const snap = (await resp.json()) as {
         body: { LapList?: { competitors: Array<{ laps: unknown[] }> } };
@@ -80,14 +81,14 @@ describe('head_to_head rotations: the same groups race N times and points accumu
       pilots.push(await createPilot(director.baseUrl, { callsign }, TOKEN));
     }
     const ids = pilots.map((p) => p.id);
-    await setEventClasses(director.baseUrl, PRACTICE_EVENT_ID, [klass.id], TOKEN);
-    await setEventRoster(director.baseUrl, PRACTICE_EVENT_ID, ids, TOKEN);
-    await setClassMembership(director.baseUrl, PRACTICE_EVENT_ID, klass.id, ids, TOKEN);
+    await setEventClasses(director.baseUrl, director.event, [klass.id], TOKEN);
+    await setEventRoster(director.baseUrl, director.event, ids, TOKEN);
+    await setClassMembership(director.baseUrl, director.event, klass.id, ids, TOKEN);
 
     // The multi-rotation round: 2-up groups, the SAME groups twice, points scoring.
     const round = await createRound(
       director.baseUrl,
-      PRACTICE_EVENT_ID,
+      director.event,
       {
         label: 'ProSpec R1',
         classes: [klass.id],
@@ -107,7 +108,7 @@ describe('head_to_head rotations: the same groups race N times and points accumu
     // the same format in one event can never collide), and rotation 2 repeats rotation 1's
     // lineups verbatim (the grouping is drawn once).
     expect(
-      (await rdControl(director.baseUrl, TOKEN, { FillRound: { round: round.id, mode: 'All' } })).ok
+      (await rdControl(director, TOKEN, { FillRound: { round: round.id, mode: 'All' } })).ok
     ).toBe(true);
     const heats = await roundHeats(round.id);
     const hid = (gen) => `${round.id}-${gen}`;
@@ -127,23 +128,22 @@ describe('head_to_head rotations: the same groups race N times and points accumu
     // Run every rotation's heats sequentially (finalize each before the next, so no dangling
     // Running heat absorbs the next heat's passes).
     for (const heat of ['h2h-r1-h0', 'h2h-r1-h1', 'h2h-r2-h0', 'h2h-r2-h1'].map(hid)) {
-      await driveToRunning(director.baseUrl, TOKEN, heat);
+      await driveToRunning(director, TOKEN, heat);
       await waitForLaps(heat, 2);
-      expect((await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat } })).ok).toBe(true);
-      expect((await rdControl(director.baseUrl, TOKEN, { Finalize: { heat } })).ok).toBe(true);
+      expect((await rdControl(director, TOKEN, { ForceEnd: { heat } })).ok).toBe(true);
+      expect((await rdControl(director, TOKEN, { Finalize: { heat } })).ok).toBe(true);
     }
 
     // The round ranking sums linear 2-up points across both rotations: alpha and charlie each
     // win both of their heats (2+2 = 4 points, tied at position 1, field order breaking the
     // listing); bravo and delta each lose both (1+1 = 2, tied at position 3).
-    const ranking = await roundRanking(director.baseUrl, PRACTICE_EVENT_ID, round.id);
+    const ranking = await roundRanking(director.baseUrl, director.event, round.id);
     expect(ranking.map((e) => e.competitor)).toEqual([ids[0], ids[2], ids[1], ids[3]]);
     expect(ranking.map((e) => e.position)).toEqual([1, 1, 3, 3]);
 
     // With every rotation finalized the round is spent: another fill schedules nothing new.
     expect(
-      (await rdControl(director.baseUrl, TOKEN, { FillRound: { round: round.id, mode: 'Next' } }))
-        .ok
+      (await rdControl(director, TOKEN, { FillRound: { round: round.id, mode: 'Next' } })).ok
     ).toBe(true);
     expect((await roundHeats(round.id)).length).toBe(4);
   });

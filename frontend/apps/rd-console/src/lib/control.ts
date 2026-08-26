@@ -75,18 +75,16 @@ function failedAck(code: ProtocolError['code'], message: string): CommandAck {
   return { ok: false, error: { code, message } };
 }
 
-/** The built-in Practice event id — the default the control client targets (issue #72). */
-export const PRACTICE_EVENT_ID = 'practice';
-
 /** Options for {@link createControlClient}. */
 export interface ControlClientOptions {
   /** Inject a `fetch` (defaults to the global). Used by tests and Node. */
   fetch?: FetchLike;
   /**
-   * The **event** to drive control on (issue #72). Control is now rooted under the event:
-   * `POST /events/{eventId}/control`. Defaults to the built-in `practice` event.
+   * The **event** to drive control on (issue #72). Control is rooted under the event:
+   * `POST /events/{eventId}/control`. **Required** — there is no built-in event to fall back
+   * to (#414), and a silent default would send commands at an event the caller never chose.
    */
-  eventId?: string;
+  eventId: string;
 }
 
 /**
@@ -94,17 +92,17 @@ export interface ControlClientOptions {
  *
  * @param baseUrl  Director protocol server base URL (same one the read client uses).
  * @param token    Optional bearer token, sent as `Authorization: Bearer <token>`.
- * @param options  Optional `fetch` injection and the `eventId` to drive (default Practice).
+ * @param options  The `eventId` to drive, plus optional `fetch` injection.
  */
 export function createControlClient(
   baseUrl: string,
-  token?: string,
-  options: ControlClientOptions = {}
+  token: string | undefined,
+  options: ControlClientOptions
 ): ControlClient {
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const base = trimSlash(baseUrl);
   // Commands are rooted under the event (#72): `/events/{eventId}/control`.
-  const eventId = options.eventId ?? PRACTICE_EVENT_ID;
+  const eventId = options.eventId;
   const controlPath = `/events/${encodeURIComponent(eventId)}/control`;
 
   return {

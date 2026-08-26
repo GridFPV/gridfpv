@@ -2837,16 +2837,16 @@ mod tests {
         );
     }
 
-    /// A registry whose Practice event carries a round with `win_condition` and a heat `q-1`
-    /// tagged with that round, driven Scheduled → Final over the given lap-gate `passes`. Used to
-    /// prove the result projection scores under the heat's round win condition (#45).
+    /// A registry whose single created event carries a round with `win_condition` and a heat
+    /// `q-1` tagged with that round, driven Scheduled → Final over the given lap-gate `passes`.
+    /// Used to prove the result projection scores under the heat's round win condition (#45).
     fn registry_with_round_heat(
         win_condition: WinCondition,
         time_limit_secs: Option<u32>,
         passes: Vec<Event>,
     ) -> EventRegistry {
-        let registry = EventRegistry::new(None).unwrap();
-        let event_id = EventId(PRACTICE_EVENT_ID.into());
+        let registry = new_registry();
+        let event_id = sole_event(&registry);
         let round = registry
             .add_round(
                 &event_id,
@@ -2890,28 +2890,55 @@ mod tests {
         events.push(changed(HeatTransition::Finished));
         events.push(changed(HeatTransition::Finalized));
 
-        let state = registry
-            .resolve(&event_id)
-            .expect("Practice is always present");
+        let state = registry.resolve(&event_id).expect("the created event");
         for e in &events {
             state.append(e.clone(), None).unwrap();
         }
         registry
     }
 
-    use crate::events::{EventRegistry, PRACTICE_EVENT_ID};
+    use crate::events::{CreateEventRequest, EventRegistry};
 
-    // The per-event route prefix the tests drive is `/events/practice` — the always-present
-    // in-memory Practice event (#72); every snapshot/control/auth path is rooted under it.
+    // There is no built-in event any more (#414), so every test that drives a per-event route
+    // **creates** one through the real creation path and roots its URIs under that event's id.
+    // `event_uri` builds those paths, so a test writes only the part after `/events/{id}`.
 
-    /// Build a registry whose **Practice** event log already holds `events`, returning the
-    /// registry (the router state), the Practice [`AppState`] (for token minting in tests),
-    /// and the log length. Practice is in-memory, so the seed is just appends to its log.
-    fn state_with(events: Vec<Event>) -> (EventRegistry, AppState, u64) {
+    /// A fresh registry holding exactly one created event — the fixture that replaced the
+    /// built-in Practice event. Going through `create` means the tests exercise the same path
+    /// the RD's first-run "create your first event" does.
+    fn new_registry() -> EventRegistry {
         let registry = EventRegistry::new(None).unwrap();
+        registry
+            .create(&CreateEventRequest::named("Test Event"))
+            .expect("create the test event");
+        registry
+    }
+
+    /// The id of a test registry's single event.
+    fn sole_event(registry: &EventRegistry) -> EventId {
+        let mut list = registry.list();
+        assert_eq!(
+            list.len(),
+            1,
+            "this helper is for a registry holding exactly one created event"
+        );
+        list.remove(0).id
+    }
+
+    /// `/events/{id}` + `path` for the registry's single event — the per-event route prefix the
+    /// tests drive.
+    fn event_uri(registry: &EventRegistry, path: &str) -> String {
+        format!("/events/{}{}", sole_event(registry).0, path)
+    }
+
+    /// Build a registry whose single created event's log already holds `events`, returning the
+    /// registry (the router state), that event's [`AppState`] (for token minting in tests), and
+    /// the log length.
+    fn state_with(events: Vec<Event>) -> (EventRegistry, AppState, u64) {
+        let registry = new_registry();
         let state = registry
-            .resolve(&EventId(PRACTICE_EVENT_ID.into()))
-            .expect("Practice is always present");
+            .resolve(&sole_event(&registry))
+            .expect("the created event");
         for e in &events {
             state.append(e.clone(), None).unwrap();
         }
@@ -2919,7 +2946,9 @@ mod tests {
         (registry, state, len)
     }
 
-    async fn get_snapshot(registry: EventRegistry, uri: &str) -> (StatusCode, Option<Snapshot>) {
+    /// `GET` the snapshot route at `path` (relative to the registry's single event root).
+    async fn get_snapshot(registry: EventRegistry, path: &str) -> (StatusCode, Option<Snapshot>) {
+        let uri = event_uri(&registry, path);
         let response = router(registry)
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
@@ -2933,8 +2962,7 @@ mod tests {
     #[tokio::test]
     async fn event_scope_returns_live_state_and_cursor() {
         let (registry, _state, len) = state_with(recorded_heat());
-        let (status, snap) =
-            get_snapshot(registry, "/events/practice/snapshot/event/spring-cup").await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/event/spring-cup").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         // The cursor is the log length at read time — the resume point.
@@ -2957,7 +2985,7 @@ mod tests {
     #[tokio::test]
     async fn heat_scope_default_is_live_state() {
         let (registry, _state, len) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(registry, "/events/practice/snapshot/heat/q-1").await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(len));
@@ -3017,7 +3045,7 @@ mod tests {
         assert!(before <= armed_at && armed_at <= after);
 
         // The heat-scope live state surfaces the tone instant while Armed: armed_at + delay.
-        let (status, snap) = get_snapshot(registry, "/events/practice/snapshot/heat/q-1").await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::LiveRaceState(live) => {
@@ -3063,7 +3091,7 @@ mod tests {
             .append(changed(HeatTransition::Running), None)
             .unwrap();
 
-        let (status, snap) = get_snapshot(registry, "/events/practice/snapshot/heat/q-1").await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::LiveRaceState(live) => {
@@ -3078,11 +3106,7 @@ mod tests {
     #[tokio::test]
     async fn heat_scope_laps_projection_returns_lap_list() {
         let (registry, _state, _) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/heat/q-1?projection=laps",
-        )
-        .await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1?projection=laps").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::LapList(laps) => {
@@ -3101,11 +3125,7 @@ mod tests {
     #[tokio::test]
     async fn heat_scope_result_projection_returns_heat_result() {
         let (registry, _state, _) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/heat/q-1?projection=result",
-        )
-        .await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1?projection=result").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::HeatResult(result) => {
@@ -3133,11 +3153,7 @@ mod tests {
             pass("B", 4_000_000, 4), // B reaches lap 3 at t = 4.0s
         ];
         let registry = registry_with_round_heat(WinCondition::FirstToLaps { n: 3 }, None, passes);
-        let (status, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/heat/q-1?projection=result",
-        )
-        .await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1?projection=result").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::HeatResult(result) => {
@@ -3175,11 +3191,7 @@ mod tests {
         ];
         let registry =
             registry_with_round_heat(WinCondition::BestConsecutive { n: 2 }, Some(60), passes);
-        let (status, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/heat/q-1?projection=result",
-        )
-        .await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1?projection=result").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::HeatResult(result) => {
@@ -3198,11 +3210,7 @@ mod tests {
         // still scores under the best-lap fallback — the placement metric is `BestLapMicros`, so the
         // un-tagged heat's behaviour is unchanged. A's fastest lap (2.5s) beats B's (4.0s).
         let (registry, _state, _) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/heat/q-1?projection=result",
-        )
-        .await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1?projection=result").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::HeatResult(result) => {
@@ -3228,11 +3236,7 @@ mod tests {
             penalty: gridfpv_events::Penalty::Disqualify { reason: None },
         });
         let (registry, _state, _) = state_with(events);
-        let (status, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/heat/q-1?projection=audit",
-        )
-        .await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1?projection=audit").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::MarshalingAudit(trail) => {
@@ -3247,16 +3251,12 @@ mod tests {
 
     // --- The event-wide audit read (`GET /events/{event_id}/audit`) -----------------------------
 
-    /// `GET /events/practice/audit`, deserialized. The route serves plain `Vec<EventAuditEntry>`
-    /// (no snapshot envelope — it is a directory-style read like `/heats`).
+    /// `GET /events/{id}/audit` for the registry's single event, deserialized. The route serves
+    /// plain `Vec<EventAuditEntry>` (no snapshot envelope — a directory-style read like `/heats`).
     async fn get_event_audit(registry: EventRegistry) -> (StatusCode, Vec<EventAuditEntry>) {
+        let uri = event_uri(&registry, "/audit");
         let response = router(registry)
-            .oneshot(
-                Request::builder()
-                    .uri("/events/practice/audit")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -3426,11 +3426,7 @@ mod tests {
             rssi: vec![148, 70],
         }));
         let (registry, _state, _) = state_with(events);
-        let (status, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/heat/q-1?projection=signal",
-        )
-        .await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1?projection=signal").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::SignalTrace(view) => {
@@ -3448,13 +3444,9 @@ mod tests {
     #[tokio::test]
     async fn unknown_heat_is_not_found() {
         let (registry, _state, _) = state_with(recorded_heat());
+        let uri = event_uri(&registry, "/snapshot/heat/does-not-exist");
         let response = router(registry)
-            .oneshot(
-                Request::builder()
-                    .uri("/events/practice/snapshot/heat/does-not-exist")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -3466,8 +3458,7 @@ mod tests {
     #[tokio::test]
     async fn pilot_scope_filters_to_the_pilot_laps() {
         let (registry, _state, len) = state_with(recorded_heat());
-        let (status, snap) =
-            get_snapshot(registry, "/events/practice/snapshot/pilot/spring-cup/A").await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/pilot/spring-cup/A").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(len));
@@ -3496,11 +3487,7 @@ mod tests {
             pilot: gridfpv_events::PilotId("acroace".into()),
         });
         let (registry, _state, _) = state_with(events);
-        let (status, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/pilot/spring-cup/acroace",
-        )
-        .await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/pilot/spring-cup/acroace").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::LapList(laps) => {
@@ -3518,13 +3505,9 @@ mod tests {
     #[tokio::test]
     async fn unknown_pilot_is_not_found() {
         let (registry, _state, _) = state_with(recorded_heat());
+        let uri = event_uri(&registry, "/snapshot/pilot/spring-cup/nobody");
         let response = router(registry)
-            .oneshot(
-                Request::builder()
-                    .uri("/events/practice/snapshot/pilot/spring-cup/nobody")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -3533,8 +3516,7 @@ mod tests {
     #[tokio::test]
     async fn class_scope_is_reachable() {
         let (registry, _state, len) = state_with(recorded_heat());
-        let (status, snap) =
-            get_snapshot(registry, "/events/practice/snapshot/class/spring-cup/open").await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/class/spring-cup/open").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(len));
@@ -3579,11 +3561,8 @@ mod tests {
         let (registry, _state, _) = state_with(events);
 
         // The open class scope: current heat is open's, B (sport) never appears.
-        let (status, snap) = get_snapshot(
-            registry.clone(),
-            "/events/practice/snapshot/class/spring-cup/open",
-        )
-        .await;
+        let (status, snap) =
+            get_snapshot(registry.clone(), "/snapshot/class/spring-cup/open").await;
         assert_eq!(status, StatusCode::OK);
         match snap.unwrap().body {
             ProjectionBody::LiveRaceState(ls) => {
@@ -3598,8 +3577,7 @@ mod tests {
         }
 
         // And the sport scope sees only B.
-        let (_, snap) =
-            get_snapshot(registry, "/events/practice/snapshot/class/spring-cup/sport").await;
+        let (_, snap) = get_snapshot(registry, "/snapshot/class/spring-cup/sport").await;
         match snap.unwrap().body {
             ProjectionBody::LiveRaceState(ls) => {
                 assert_eq!(ls.current_heat, Some(HeatId("s-1".into())));
@@ -3612,8 +3590,7 @@ mod tests {
     #[tokio::test]
     async fn empty_log_event_scope_is_idle_with_zero_cursor() {
         let (registry, _state, _) = state_with(vec![]);
-        let (status, snap) =
-            get_snapshot(registry, "/events/practice/snapshot/event/spring-cup").await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/event/spring-cup").await;
         assert_eq!(status, StatusCode::OK);
         let snap = snap.unwrap();
         assert_eq!(snap.cursor, Cursor::new(0));
@@ -3659,11 +3636,7 @@ mod tests {
         ];
         let (registry, _state, _) = state_with(events);
 
-        let (_, snap) = get_snapshot(
-            registry.clone(),
-            "/events/practice/snapshot/heat/q-1?projection=laps",
-        )
-        .await;
+        let (_, snap) = get_snapshot(registry.clone(), "/snapshot/heat/q-1?projection=laps").await;
         match snap.unwrap().body {
             ProjectionBody::LapList(laps) => {
                 // Only A appears in q-1's window.
@@ -3676,11 +3649,7 @@ mod tests {
             other => panic!("expected lap list, got {other:?}"),
         }
 
-        let (_, snap) = get_snapshot(
-            registry,
-            "/events/practice/snapshot/heat/q-2?projection=laps",
-        )
-        .await;
+        let (_, snap) = get_snapshot(registry, "/snapshot/heat/q-2?projection=laps").await;
         match snap.unwrap().body {
             ProjectionBody::LapList(laps) => {
                 assert_eq!(laps.competitors.len(), 1);
@@ -3762,7 +3731,7 @@ mod tests {
     #[tokio::test]
     async fn a_real_route_still_works_alongside_the_api_fallback() {
         let (registry, _state, _) = state_with(recorded_heat());
-        let (status, snap) = get_snapshot(registry, "/events/practice/snapshot/heat/q-1").await;
+        let (status, snap) = get_snapshot(registry, "/snapshot/heat/q-1").await;
         assert_eq!(status, StatusCode::OK);
         assert!(matches!(
             snap.unwrap().body,
@@ -3865,18 +3834,33 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.expect("an ActiveEvent body").event.is_none());
 
-        // Setting it (open Director — no token needed) returns Practice's meta…
-        let (status, raw) = put_active(registry.clone(), PRACTICE_EVENT_ID, None).await;
+        // Setting it (open Director — no token needed) returns the created event's meta…
+        let event = sole_event(&registry);
+        let (status, raw) = put_active(registry.clone(), &event.0, None).await;
         assert_eq!(status, StatusCode::OK);
         let meta: EventMeta = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(meta.id.0, PRACTICE_EVENT_ID);
+        assert_eq!(meta.id, event);
 
         // …and now the open read resumes into it.
         let (_, body) = get_active(registry).await;
-        assert_eq!(
-            body.unwrap().event.map(|m| m.id.0),
-            Some(PRACTICE_EVENT_ID.to_string())
-        );
+        assert_eq!(body.unwrap().event.map(|m| m.id), Some(event));
+    }
+
+    #[tokio::test]
+    async fn a_stale_active_event_id_reads_as_no_active_event_not_a_500() {
+        // #414: an upgraded Director's persisted `active-event` may still name the removed
+        // built-in `practice` event. The registry drops the stale pointer on boot, so the open
+        // read is a plain 200 with `event: null` — the picker — never a 500 or a dangling meta.
+        let (registry, _state, _) = state_with(recorded_heat());
+        let (status, body) = get_active(registry.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.expect("an ActiveEvent body").event.is_none());
+
+        // Pointing it at the removed id over HTTP is a typed 404, not a 500.
+        let (status, raw) = put_active(registry, "practice", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let err: ProtocolError = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(err.code, ErrorCode::UnknownScope);
     }
 
     #[tokio::test]
@@ -3893,7 +3877,8 @@ mod tests {
         let (registry, state, _) = state_with(recorded_heat());
         // Configure a control credential so the full-trust default closes.
         let _rd = state.tokens().issue_rd_token();
-        let (status, _) = put_active(registry, PRACTICE_EVENT_ID, None).await;
+        let event = sole_event(&registry);
+        let (status, _) = put_active(registry, &event.0, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
@@ -3943,18 +3928,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_event_rejects_practice_and_unknown() {
+    async fn delete_event_rejects_unknown() {
         let (registry, _state, _) = state_with(recorded_heat());
-        // Practice cannot be deleted → BadRequest (400), and it still resolves.
-        let (status, raw) = delete_event_req(registry.clone(), PRACTICE_EVENT_ID, None).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // No event is reserved any more (#414) — the old built-in `practice` id is simply
+        // unknown, so it 404s like any other unknown id rather than 400-ing as undeletable.
+        let (status, raw) = delete_event_req(registry.clone(), "practice", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         let err: ProtocolError = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(err.code, ErrorCode::BadRequest);
-        assert!(
-            registry
-                .resolve(&EventId(PRACTICE_EVENT_ID.into()))
-                .is_some()
-        );
+        assert_eq!(err.code, ErrorCode::UnknownScope);
 
         // An unknown id → a typed 404 (UnknownScope).
         let (status, raw) = delete_event_req(registry, "no-such-event", None).await;
@@ -3993,11 +3974,12 @@ mod tests {
             heat: HeatId("q-1".into()),
         })
         .unwrap();
+        let uri = event_uri(&registry, "/control");
         let response = router(registry)
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/events/practice/control")
+                    .uri(uri)
                     // No Content-Type header on purpose.
                     .body(Body::from(command))
                     .unwrap(),
@@ -4017,11 +3999,12 @@ mod tests {
     async fn control_malformed_json_body_is_a_json_protocol_error() {
         // A correct Content-Type but an unparseable body is likewise a typed JSON error.
         let (registry, _state, _) = state_with(recorded_heat());
+        let uri = event_uri(&registry, "/control");
         let response = router(registry)
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/events/practice/control")
+                    .uri(uri)
                     .header("Content-Type", "application/json")
                     .body(Body::from("{ not valid json"))
                     .unwrap(),
@@ -4037,14 +4020,14 @@ mod tests {
 
     // --- #63: minting a read-only join token over HTTP ----------------------------------
 
-    /// `POST /auth/join-token` with an optional bearer token; returns status + parsed body.
+    /// `POST /events/{id}/auth/join-token` with an optional bearer token; status + parsed body.
     async fn post_join_token(
         registry: EventRegistry,
         token: Option<&str>,
     ) -> (StatusCode, Option<JoinTokenResponse>) {
         let mut builder = Request::builder()
             .method("POST")
-            .uri("/events/practice/auth/join-token");
+            .uri(event_uri(&registry, "/auth/join-token"));
         if let Some(token) = token {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
@@ -4369,7 +4352,7 @@ mod tests {
     /// A connected RotorHazard timer selected by Practice — the precondition every restart test
     /// shares (#386): the Director only accepts a restart on a live connection, and the race-phase
     /// refusal only looks at events that *select* the timer.
-    fn connected_rh_timer_selected_by_practice(registry: &EventRegistry) -> Timer {
+    fn connected_rh_timer_selected_by_the_event(registry: &EventRegistry) -> Timer {
         let rh = registry
             .timers()
             .create(&CreateTimerRequest {
@@ -4385,16 +4368,17 @@ mod tests {
         registry
             .timers()
             .set_status(&rh.id, crate::timers::TimerStatus::Connected);
+        let event = sole_event(registry);
         registry
-            .set_timers(&EventId(PRACTICE_EVENT_ID.into()), vec![rh.id.clone()])
-            .expect("select the RH timer for Practice");
-        // Practice must be ACTIVE, not merely selecting the timer: only the active event's
+            .set_timers(&event, vec![rh.id.clone()])
+            .expect("select the RH timer for the event");
+        // The event must be ACTIVE, not merely selecting the timer: only the active event's
         // selection opens a connection, so only its heats can be in progress on the timer. The
         // in-progress scan is scoped to the active event for that reason, and a fixture that
         // stages a heat in a non-active event models a state the Director cannot reach.
         registry
-            .set_active(&EventId(PRACTICE_EVENT_ID.into()))
-            .expect("make Practice the active event");
+            .set_active(&event)
+            .expect("make it the active event");
         registry.timers().get(&rh.id).unwrap()
     }
 
@@ -4403,7 +4387,7 @@ mod tests {
         // #386: the guided plugin install's last step. The route parks the request on the timer
         // registry — the connection layer lives above this crate — and the reconciler drains it.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         let (status, timer) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
         assert_eq!(status, StatusCode::OK);
@@ -4431,7 +4415,7 @@ mod tests {
             HeatTransition::Finished, // → Unofficial
         ] {
             let (registry, state, _) = state_with(vec![]);
-            let rh = connected_rh_timer_selected_by_practice(&registry);
+            let rh = connected_rh_timer_selected_by_the_event(&registry);
             state
                 .append(
                     Event::HeatScheduled {
@@ -4508,7 +4492,7 @@ mod tests {
         // The bookends of the in-progress window: a `Scheduled` heat has not begun and a `Final` one
         // is done, so neither blocks the plugin install's restart.
         let (registry, state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
         state
             .append(
                 Event::HeatScheduled {
@@ -4707,7 +4691,7 @@ mod tests {
         // socket. D27: the accepted value is ALSO recorded on the timer, because a threshold the RD
         // set is GridFPV's config; the timer is only where it is applied.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         let (status, bytes) = post_calibration(
             registry.clone(),
@@ -4751,7 +4735,7 @@ mod tests {
         // next tick must apply the LATEST value once — never replay a stale one after it. Enter and
         // exit are independent: writing one must not clear the other.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         for enter in [80, 90, 101] {
             let (status, _) = post_calibration(
@@ -4797,7 +4781,7 @@ mod tests {
         // RotorHazard's `calibration.py` tests the level for truthiness, so a `0` is read as "re-read
         // it off the node" and the old threshold silently survives while the write looks accepted.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         let (status, bytes) = post_calibration(
             registry.clone(),
@@ -4838,7 +4822,7 @@ mod tests {
             HeatTransition::Finished, // → Unofficial
         ] {
             let (registry, state, _) = state_with(vec![]);
-            let rh = connected_rh_timer_selected_by_practice(&registry);
+            let rh = connected_rh_timer_selected_by_the_event(&registry);
             state
                 .append(
                     Event::HeatScheduled {
@@ -4925,12 +4909,12 @@ mod tests {
             HeatTransition::Finished, // → Unofficial
         ] {
             let (registry, state, _) = state_with(vec![]);
-            let rh = connected_rh_timer_selected_by_practice(&registry);
+            let rh = connected_rh_timer_selected_by_the_event(&registry);
             // A round in the OPEN PRACTICE format — `open_practice::excluded_from_scoring` keys on
             // the format alone, and the gate consults that same predicate so the two cannot drift.
             let round = registry
                 .add_round(
-                    &EventId(PRACTICE_EVENT_ID.into()),
+                    &sole_event(&registry),
                     NewRoundReq {
                         label: "Practice".into(),
                         classes: vec![],
@@ -5076,7 +5060,7 @@ mod tests {
         // refused too: RotorHazard's `calibration.py` drops an out-of-range seat index with nothing
         // but a log line, which would look exactly like a successful write that did nothing.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         let (status, bytes) =
             post_calibration(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
@@ -5166,7 +5150,7 @@ mod tests {
         // 2. D27: the accepted channel is recorded on the timer, because a channel the RD picked is
         //    GridFPV's config; the timer is only where it takes effect.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         let (status, bytes) = post_channel(
             registry.clone(),
@@ -5218,7 +5202,7 @@ mod tests {
         // own answer rather than reaching the timer. A custom MHz travels with NO label at all,
         // because it has none: a made-up name on RotorHazard's screen is worse than the number.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         // A real, deliberately-chosen alternative band for a coincident frequency.
         let (status, bytes) = post_channel(
@@ -5269,7 +5253,7 @@ mod tests {
         // Reported, never acted on: the levels are deliberately untouched (recalling saved
         // per-channel levels is #411).
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         // A node on R7, then tuned.
         let (status, _) = post_channel(
@@ -5331,7 +5315,7 @@ mod tests {
         // "no restriction" — it is the per-heat allocation POOL, not a capability. A Director that
         // read it as a restriction would refuse every channel on precisely the timers this is for.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
         assert!(
             registry
                 .timers()
@@ -5412,7 +5396,7 @@ mod tests {
             HeatTransition::Finished, // → Unofficial
         ] {
             let (registry, state, _) = state_with(vec![]);
-            let rh = connected_rh_timer_selected_by_practice(&registry);
+            let rh = connected_rh_timer_selected_by_the_event(&registry);
             state
                 .append(
                     Event::HeatScheduled {
@@ -5483,10 +5467,10 @@ mod tests {
             HeatTransition::Finished, // → Unofficial
         ] {
             let (registry, state, _) = state_with(vec![]);
-            let rh = connected_rh_timer_selected_by_practice(&registry);
+            let rh = connected_rh_timer_selected_by_the_event(&registry);
             let round = registry
                 .add_round(
-                    &EventId(PRACTICE_EVENT_ID.into()),
+                    &sole_event(&registry),
                     NewRoundReq {
                         label: "Practice".into(),
                         classes: vec![],
@@ -5582,7 +5566,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
         let width = registry.timers().get(&rh.id).unwrap().node_width();
 
         // Beyond the width.
@@ -5642,7 +5626,7 @@ mod tests {
         // swap looks like halfway through, and refusing it would block the legitimate case to
         // prevent a recoverable one.
         let (registry, _state, _) = state_with(vec![]);
-        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
 
         for node in [0, 1] {
             let (status, _) = post_channel(
@@ -5780,8 +5764,12 @@ mod tests {
         // `plugin: None` — never probed. "Connect this timer first", NOT "plugin missing":
         // presence is only knowable over a live socket, so this is the normal state of a freshly
         // added timer, and installing a plugin is not the fix.
-        let (status, body) =
-            put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        let (status, body) = put_event_timers(
+            registry.clone(),
+            &sole_event(&registry).0,
+            vec![rh.id.clone()],
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let err: ProtocolError = serde_json::from_slice(&body).unwrap();
         assert!(err.message.contains("Field RH"), "{}", err.message);
@@ -5794,7 +5782,7 @@ mod tests {
         // Nothing was recorded.
         assert!(
             !registry
-                .timers_of(&EventId(PRACTICE_EVENT_ID.into()))
+                .timers_of(&sole_event(&registry))
                 .unwrap()
                 .contains(&rh.id)
         );
@@ -5803,8 +5791,12 @@ mod tests {
         registry
             .timers()
             .set_plugin(&rh.id, crate::timers::PluginPresence::Missing);
-        let (status, body) =
-            put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        let (status, body) = put_event_timers(
+            registry.clone(),
+            &sole_event(&registry).0,
+            vec![rh.id.clone()],
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let err: ProtocolError = serde_json::from_slice(&body).unwrap();
         assert!(
@@ -5823,8 +5815,12 @@ mod tests {
                 reason: "protocol 99".into(),
             },
         );
-        let (status, body) =
-            put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        let (status, body) = put_event_timers(
+            registry.clone(),
+            &sole_event(&registry).0,
+            vec![rh.id.clone()],
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let err: ProtocolError = serde_json::from_slice(&body).unwrap();
         assert!(err.message.contains("Update it"), "{}", err.message);
@@ -5832,8 +5828,12 @@ mod tests {
         // Present → selectable. This is what makes #383's Connect load-bearing rather than a
         // diagnostic convenience: a timer becomes selectable only after it has been connected.
         registry.timers().set_plugin(&rh.id, present_plugin());
-        let (status, body) =
-            put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        let (status, body) = put_event_timers(
+            registry.clone(),
+            &sole_event(&registry).0,
+            vec![rh.id.clone()],
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let meta: EventMeta = serde_json::from_slice(&body).unwrap();
         assert_eq!(meta.timers, vec![rh.id]);
@@ -5845,8 +5845,8 @@ mod tests {
         // would break the out-of-the-box sim race.
         let (registry, _state, _) = state_with(vec![]);
         let (status, _) = put_event_timers(
-            registry,
-            "practice",
+            registry.clone(),
+            &sole_event(&registry).0,
             vec![crate::timers::TimerId(crate::timers::MOCK_TIMER_ID.into())],
         )
         .await;
@@ -5862,20 +5862,25 @@ mod tests {
         // the arm-time backstop, not a refusal to save.
         let (registry, _state, _) = state_with(vec![]);
         let rh = create_rh_timer(&registry, "Field RH");
-        let practice = EventId(PRACTICE_EVENT_ID.into());
+        let event = sole_event(&registry);
         // Simulate the persisted-before-the-rule state by writing the selection past the route.
-        registry.set_timers(&practice, vec![rh.id.clone()]).unwrap();
+        registry.set_timers(&event, vec![rh.id.clone()]).unwrap();
         registry
             .timers()
             .set_plugin(&rh.id, crate::timers::PluginPresence::Missing);
 
         // Re-sending the existing selection, and adding a Mock alongside it, both succeed.
         let mock = crate::timers::TimerId(crate::timers::MOCK_TIMER_ID.into());
-        let (status, _) = put_event_timers(registry.clone(), "practice", vec![rh.id.clone()]).await;
+        let (status, _) = put_event_timers(
+            registry.clone(),
+            &sole_event(&registry).0,
+            vec![rh.id.clone()],
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let (status, body) = put_event_timers(
             registry.clone(),
-            "practice",
+            &sole_event(&registry).0,
             vec![rh.id.clone(), mock.clone()],
         )
         .await;
@@ -5884,9 +5889,19 @@ mod tests {
         assert_eq!(meta.timers, vec![rh.id.clone(), mock.clone()]);
 
         // But once the RD drops it, re-selecting it is a fresh selection — and refused.
-        let (status, _) = put_event_timers(registry.clone(), "practice", vec![mock.clone()]).await;
+        let (status, _) = put_event_timers(
+            registry.clone(),
+            &sole_event(&registry).0,
+            vec![mock.clone()],
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
-        let (status, _) = put_event_timers(registry, "practice", vec![mock, rh.id]).await;
+        let (status, _) = put_event_timers(
+            registry.clone(),
+            &sole_event(&registry).0,
+            vec![mock, rh.id],
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
@@ -5912,11 +5927,12 @@ mod tests {
             ids: vec![extra.id.clone()],
             primary: None,
         };
+        let uri = event_uri(&registry, "/timers");
         let response = router(registry.clone())
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/events/practice/timers")
+                    .uri(uri)
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&req).unwrap()))
                     .unwrap(),
@@ -5933,11 +5949,12 @@ mod tests {
             ids: vec![crate::timers::TimerId("no-such-timer".into())],
             primary: None,
         };
+        let uri = event_uri(&registry, "/timers");
         let response = router(registry)
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/events/practice/timers")
+                    .uri(uri)
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&bad).unwrap()))
                     .unwrap(),
@@ -6003,13 +6020,13 @@ mod tests {
 
     // --- P1-5: membership is scoped to the event's roster + class selection --
 
-    /// Seed a class C (directory + **selected**) and pilot P (directory + **roster**) on Practice,
-    /// returning their ids alongside an extra pilot Q and class D that are in the directory but
-    /// *not* on the roster / selection.
+    /// Seed a class C (directory + **selected**) and pilot P (directory + **roster**) on the
+    /// registry's single event, returning their ids alongside an extra pilot Q and class D that
+    /// are in the directory but *not* on the roster / selection.
     fn membership_fixture(
         registry: &EventRegistry,
     ) -> (ClassId, ClassId, PilotId, PilotId, EventId) {
-        let event = EventId(PRACTICE_EVENT_ID.into());
+        let event = sole_event(registry);
         let class_c = registry
             .classes()
             .create(&CreateClassRequest {

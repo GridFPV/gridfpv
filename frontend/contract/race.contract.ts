@@ -12,18 +12,22 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { connect } from '../packages/protocol-client/dist/index.js';
-import { type Director } from '../test-harness/director.ts';
-import { driveToRunning, eventRoot, rdControl, startContractDirector } from './harness.ts';
+import {
+  driveToRunning,
+  rdControl,
+  startDirectorWithEvent,
+  type ContractDirector
+} from './harness.ts';
 
 const TOKEN = 'rd-race-contract';
 const HEAT = 'final';
 const LINEUP = ['A', 'B'];
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
   // A brisk sim (small lap time) so the race completes well inside the test timeout.
-  director = await startContractDirector({ token: TOKEN, simLaps: 3, simLapMs: 40 });
+  director = await startDirectorWithEvent({ token: TOKEN, simLaps: 3, simLapMs: 40 });
 });
 
 afterAll(async () => {
@@ -41,16 +45,20 @@ interface LiveBody {
 describe('seam 8: a full race converges through the real protocol-client', () => {
   it('current_heat appears, laps climb, and the result is reached', async () => {
     // Bind pilots, then schedule the heat (over the real control path).
-    await rdControl(director.baseUrl, TOKEN, {
+    await rdControl(director, TOKEN, {
       Register: { adapter: 'sim', competitor: 'A', pilot: 'ace' }
     });
-    await rdControl(director.baseUrl, TOKEN, {
+    await rdControl(director, TOKEN, {
       Register: { adapter: 'sim', competitor: 'B', pilot: 'bee' }
     });
-    await rdControl(director.baseUrl, TOKEN, { ScheduleHeat: { heat: HEAT, lineup: LINEUP } });
+    await rdControl(director, TOKEN, { ScheduleHeat: { heat: HEAT, lineup: LINEUP } });
 
     // The real client subscribes to the heat scope.
-    const client = connect({ baseUrl: director.baseUrl, scope: { Heat: { heat: HEAT } } });
+    const client = connect({
+      baseUrl: director.baseUrl,
+      eventId: director.event,
+      scope: { Heat: { heat: HEAT } }
+    });
     try {
       await waitForState(client, (s) => s.body !== undefined);
       // current_heat is set once the heat is scheduled and folded.
@@ -58,7 +66,7 @@ describe('seam 8: a full race converges through the real protocol-client', () =>
       expect(initial?.current_heat).toBe(HEAT);
 
       // Drive the heat to Running; the sim emits laps in real time.
-      await driveToRunning(director.baseUrl, TOKEN, HEAT);
+      await driveToRunning(director, TOKEN, HEAT);
 
       // The client's exposed progress must climb to ≥ 2 laps for at least one pilot.
       await waitForState(
@@ -79,8 +87,8 @@ describe('seam 8: a full race converges through the real protocol-client', () =>
       }
 
       // ForceEnd (the completion override) + Finalize; the client converges to the finalized phase.
-      await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: HEAT } });
-      await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } });
+      await rdControl(director, TOKEN, { ForceEnd: { heat: HEAT } });
+      await rdControl(director, TOKEN, { Finalize: { heat: HEAT } });
       await waitForState(
         client,
         (s) => (s.body as LiveBody).LiveRaceState?.phase === 'Final',
@@ -90,14 +98,14 @@ describe('seam 8: a full race converges through the real protocol-client', () =>
 
       // Revert re-opens the finalized result for correction (Final → Unofficial), then
       // Finalize again locks it back in — the new Slice-1 off-ramp, end to end.
-      await rdControl(director.baseUrl, TOKEN, { Revert: { heat: HEAT } });
+      await rdControl(director, TOKEN, { Revert: { heat: HEAT } });
       await waitForState(
         client,
         (s) => (s.body as LiveBody).LiveRaceState?.phase === 'Unofficial',
         6_000
       );
       expect((client.getState().body as LiveBody).LiveRaceState?.phase).toBe('Unofficial');
-      await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } });
+      await rdControl(director, TOKEN, { Finalize: { heat: HEAT } });
       await waitForState(
         client,
         (s) => (s.body as LiveBody).LiveRaceState?.phase === 'Final',
@@ -107,7 +115,7 @@ describe('seam 8: a full race converges through the real protocol-client', () =>
 
       // And the scored HeatResult is served on the read path (a result exists).
       const result = (await (
-        await fetch(`${eventRoot(director.baseUrl)}/snapshot/heat/${HEAT}?projection=result`)
+        await fetch(`${director.eventRoot}/snapshot/heat/${HEAT}?projection=result`)
       ).json()) as { body: { HeatResult: { places: unknown[] } } };
       expect(result.body.HeatResult.places.length).toBe(LINEUP.length);
     } finally {

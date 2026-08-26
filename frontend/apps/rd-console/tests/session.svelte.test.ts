@@ -22,11 +22,12 @@ import { heatResult, liveRunning, okAck, failAck } from './fixtures.js';
  */
 type SessionOverrides = Partial<NonNullable<ConstructorParameters<typeof Session>[0]>>;
 
+/** An ordinary **created** event named "Practice" — the RD's own, not a built-in (#414). */
 const PRACTICE: EventMeta = {
-  id: 'practice',
+  id: 'practice-ab12',
   name: 'Practice',
   created_at: 0,
-  persistent: false,
+  persistent: true,
   timers: ['mock'],
   roster: [],
   classes: []
@@ -78,11 +79,11 @@ describe('Session', () => {
     expect(connect).not.toHaveBeenCalled();
 
     session.selectEvent(PRACTICE);
-    expect(session.currentEvent?.id).toBe('practice');
+    expect(session.currentEvent?.id).toBe('practice-ab12');
     expect(connect).toHaveBeenCalledOnce();
     // Both seams are rooted under the selected event (#72).
     expect(controlFactory).toHaveBeenCalledWith(session.baseUrl, undefined, {
-      eventId: 'practice'
+      eventId: 'practice-ab12'
     });
 
     // Stream pushes a LiveRaceState body → session.liveState reflects it.
@@ -370,7 +371,7 @@ describe('Session', () => {
     });
     const session = new Session({ deleteEventImpl, autoRestore: false });
     session.setToken('tok');
-    await expect(session.deleteEvent('practice')).rejects.toThrow(/400/);
+    await expect(session.deleteEvent('practice-ab12')).rejects.toThrow(/400/);
   });
 
   // ── #90: the active event is Director state — resume across reloads ──────────────────
@@ -553,7 +554,7 @@ describe('Session', () => {
     expect(session.hasToken).toBe(false);
     // Control was rebuilt without a token; reads (the connect call) are untouched.
     expect(controlFactory).toHaveBeenLastCalledWith(session.baseUrl, undefined, {
-      eventId: 'practice'
+      eventId: 'practice-ab12'
     });
   });
 
@@ -767,7 +768,7 @@ describe('Session', () => {
       expect(result).toEqual(updated);
       expect(setEventTimersImpl).toHaveBeenCalledWith(
         'http://d.local',
-        'practice',
+        'practice-ab12',
         ['mock', 'rh-1'],
         undefined
       );
@@ -791,7 +792,7 @@ describe('Session', () => {
       expect(result).toEqual(updated);
       expect(setPrimaryTimerImpl).toHaveBeenCalledWith(
         'http://d.local',
-        'practice',
+        'practice-ab12',
         'rh-1',
         undefined
       );
@@ -827,7 +828,7 @@ describe('Session', () => {
       expect(setPrimaryTimerImpl).toHaveBeenCalledTimes(2);
       expect(setPrimaryTimerImpl).toHaveBeenLastCalledWith(
         'http://d.local',
-        'practice',
+        'practice-ab12',
         'rh-1',
         'tok'
       );
@@ -1001,7 +1002,12 @@ describe('Session', () => {
       session.selectEvent(PRACTICE);
       const result = await session.setEventClasses(['c1']);
       expect(result).toEqual(updated);
-      expect(setEventClassesImpl).toHaveBeenCalledWith('http://d.local', 'practice', ['c1'], 'tok');
+      expect(setEventClassesImpl).toHaveBeenCalledWith(
+        'http://d.local',
+        'practice-ab12',
+        ['c1'],
+        'tok'
+      );
       expect(session.currentEvent?.classes).toEqual(['c1']);
     });
   });
@@ -1070,7 +1076,7 @@ describe('Session', () => {
       // Inside an event → reads GET /events/{id}/heats.
       session.selectEvent(PRACTICE);
       await expect(session.listHeats()).resolves.toEqual(heats);
-      expect(listHeatsImpl).toHaveBeenCalledWith('http://d.local', 'practice', {
+      expect(listHeatsImpl).toHaveBeenCalledWith('http://d.local', 'practice-ab12', {
         token: undefined
       });
     });

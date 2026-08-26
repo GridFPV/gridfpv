@@ -19,7 +19,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use gridfpv_events::{CompetitorRef, Event, HeatId, HeatTransition};
 use gridfpv_server::app::{AppState, router};
-use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
+use gridfpv_server::events::{CreateEventRequest, EventRegistry};
 use gridfpv_server::scope::{EventId, Scope, SubscribeRequest};
 use gridfpv_server::snapshot::{HeatPhase, ProjectionBody};
 use gridfpv_server::stream::{Change, Cursor, StreamMessage};
@@ -29,25 +29,38 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Serve `router(state)` on an ephemeral port; return the `ws://…/stream` URL and the
-/// server task's join handle (dropped at test end, which aborts the task).
+/// Serve `router(state)` on an ephemeral port; return the `ws://…/stream` URL for the
+/// registry's single event and the server task's join handle (dropped at test end, which
+/// aborts the task).
 async fn serve(registry: EventRegistry) -> (String, tokio::task::JoinHandle<()>) {
+    let event = sole_event(&registry);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(registry);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (format!("ws://{addr}/events/practice/stream"), handle)
+    (format!("ws://{addr}/events/{}/stream", event.0), handle)
 }
 
-/// A fresh registry plus its in-memory **Practice** [`AppState`] — the change-stream tests
-/// append through Practice's log and subscribe under `/events/practice/stream` (issue #72).
-fn practice_registry() -> (EventRegistry, AppState) {
+/// The id of the registry's single event.
+fn sole_event(registry: &EventRegistry) -> EventId {
+    let mut list = registry.list();
+    assert_eq!(list.len(), 1, "one created event per test registry");
+    list.remove(0).id
+}
+
+/// A fresh registry holding one **created** event, plus that event's [`AppState`] — the
+/// change-stream tests append through its log and subscribe under `/events/{id}/stream`
+/// (issue #72). There is no built-in event any more (#414), so the fixture creates one
+/// through the real creation path.
+fn test_registry() -> (EventRegistry, AppState) {
     let registry = EventRegistry::new(None).unwrap();
-    let state = registry
-        .resolve(&EventId(PRACTICE_EVENT_ID.into()))
-        .expect("Practice is always present");
+    let event = registry
+        .create(&CreateEventRequest::named("Test Event"))
+        .expect("create the test event")
+        .id;
+    let state = registry.resolve(&event).expect("the created event");
     (registry, state)
 }
 
@@ -114,7 +127,7 @@ fn event_scope() -> Scope {
 /// gap-free envelopes whose final state matches the server's fold.
 #[tokio::test]
 async fn streams_ordered_envelopes_from_a_fresh_subscribe() {
-    let (registry, state) = practice_registry();
+    let (registry, state) = test_registry();
     let (url, _server) = serve(registry.clone()).await;
 
     let mut ws = subscribe(
@@ -165,7 +178,7 @@ async fn streams_ordered_envelopes_from_a_fresh_subscribe() {
 /// at 1.
 #[tokio::test]
 async fn resume_from_a_mid_cursor_replays_only_the_tail() {
-    let (registry, state) = practice_registry();
+    let (registry, state) = test_registry();
     let (url, _server) = serve(registry.clone()).await;
 
     // Pre-load three events (offsets 0,1,2 → log length 3).
@@ -210,7 +223,7 @@ async fn resume_from_a_mid_cursor_replays_only_the_tail() {
 /// signal instead of a replay (protocol.html §3, §9.3).
 #[tokio::test]
 async fn too_old_cursor_requires_re_snapshot() {
-    let (registry, state) = practice_registry();
+    let (registry, state) = test_registry();
     let (url, _server) = serve(registry.clone()).await;
 
     // Push the log tail well past the retained window so a low cursor is out of range.
@@ -245,7 +258,7 @@ async fn too_old_cursor_requires_re_snapshot() {
 /// `scheduling_a_heat_wakes_the_stream_even_when_the_body_is_unchanged`, below).
 #[tokio::test]
 async fn unchanged_fold_emits_no_envelope() {
-    let (registry, state) = practice_registry();
+    let (registry, state) = test_registry();
     let (url, _server) = serve(registry.clone()).await;
 
     let mut ws = subscribe(
@@ -301,7 +314,7 @@ async fn unchanged_fold_emits_no_envelope() {
 /// `/heats` without waiting for a transition.
 #[tokio::test]
 async fn scheduling_a_heat_wakes_the_stream_even_when_the_body_is_unchanged() {
-    let (registry, state) = practice_registry();
+    let (registry, state) = test_registry();
     let (url, _server) = serve(registry.clone()).await;
 
     let mut ws = subscribe(
@@ -347,7 +360,7 @@ async fn scheduling_a_heat_wakes_the_stream_even_when_the_body_is_unchanged() {
 /// A malformed first frame closes the socket with a BadRequest close (no panic, no hang).
 #[tokio::test]
 async fn malformed_subscribe_closes_the_socket() {
-    let (registry, _state) = practice_registry();
+    let (registry, _state) = test_registry();
     let (url, _server) = serve(registry).await;
 
     let (mut ws, _) = connect_async(&url).await.unwrap();

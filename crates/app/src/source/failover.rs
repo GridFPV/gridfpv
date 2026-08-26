@@ -94,8 +94,16 @@ mod tests {
                 available_channels: None,
             })
             .unwrap();
-        let practice = EventId("practice".into());
-        (registry, practice, mock, rh.id)
+        let event = EventId(
+            registry
+                .create(&gridfpv_server::events::CreateEventRequest::named(
+                    "Test Event",
+                ))
+                .expect("create the test event")
+                .id
+                .0,
+        );
+        (registry, event, mock, rh.id)
     }
 
     #[test]

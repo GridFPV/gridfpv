@@ -1920,25 +1920,39 @@ mod tests {
     use std::time::Duration;
 
     use gridfpv_events::RoundId;
-    use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
+    use gridfpv_server::events::{CreateEventRequest, EventRegistry};
     use gridfpv_server::live_state::live_state;
     use gridfpv_server::timers::{
         CreateTimerRequest, MOCK_TIMER_ID, TimerId, TimerKind, TimerStatus, UpdateTimerRequest,
     };
     use tokio::time::{Instant, sleep, timeout};
 
-    /// The Practice event id every bridge test drives (its in-memory log + default `["mock"]`
-    /// selection).
-    fn practice() -> EventId {
-        EventId(PRACTICE_EVENT_ID.to_string())
+    /// The id of the one event a bridge-test registry holds (its log + default `["mock"]`
+    /// selection). There is no built-in event any more (#414): [`fast_registry`] creates one
+    /// through the real creation path, and this reads it back.
+    fn event_of(registry: &EventRegistry) -> EventId {
+        let mut list = registry.list();
+        assert_eq!(list.len(), 1, "one created event per bridge-test registry");
+        EventId(list.remove(0).id.0)
     }
 
-    /// Build a fresh registry and retune its built-in **Mock** to a fast pace (`lap_ms`) and
-    /// the wanted `laps`, so the whole heat runs in a few ms. Practice defaults to selecting the
-    /// Mock, so the bridge over Practice drives this retuned source. The bridge polls at
+    /// A registry holding exactly one **created** event — the fixture that replaced the built-in
+    /// Practice event (#414). Going through `create` means the bridge tests drive the same kind
+    /// of event an RD makes, with the same default `["mock"]` timer selection.
+    fn test_registry() -> EventRegistry {
+        let registry = EventRegistry::new(None).unwrap();
+        registry
+            .create(&CreateEventRequest::named("Test Event"))
+            .expect("create the test event");
+        registry
+    }
+
+    /// Build a [`test_registry`] and retune the built-in **Mock** to a fast pace (`lap_ms`) and
+    /// the wanted `laps`, so the whole heat runs in a few ms. A new event defaults to selecting
+    /// the Mock, so the bridge over it drives this retuned source. The bridge polls at
     /// [`POLL_INTERVAL`], which dominates start-up latency, so tests keep total laps small.
     fn fast_registry(laps: u32, lap_ms: u64) -> EventRegistry {
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         registry
             .timers()
             .update(
@@ -1953,11 +1967,12 @@ mod tests {
         registry
     }
 
-    /// Spawn the selection-aware bridge for `registry`'s Practice event, returning the bridge
-    /// handle and Practice's `AppState` (the same log the bridge polls), so a test appends the
+    /// Spawn the selection-aware bridge for `registry`'s event, returning the bridge handle and
+    /// that event's `AppState` (the same log the bridge polls), so a test appends the
     /// schedule/transition events the bridge reacts to.
     fn spawn_bridge_for(registry: &EventRegistry) -> (JoinHandle<()>, AppState) {
-        let state = registry.resolve(&practice()).unwrap();
+        let event = event_of(registry);
+        let state = registry.resolve(&event).unwrap();
         let timers = registry.timers();
         let adapter = AdapterId(SIM_ADAPTER.to_string());
         let reg = registry.clone();
@@ -1969,7 +1984,7 @@ mod tests {
                 bridge_state,
                 reg,
                 timers,
-                practice(),
+                event,
                 adapter,
                 #[cfg(feature = "live")]
                 connections,
@@ -2230,7 +2245,7 @@ mod tests {
         use gridfpv_server::pilots::CreatePilotRequest;
         use gridfpv_server::timers::SetTimerNodesRequest;
 
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         let rh = registry
             .timers()
             .create(&CreateTimerRequest {
@@ -2270,7 +2285,7 @@ mod tests {
             refs.push(CompetitorRef(pilot.id.0));
         }
 
-        let state = registry.resolve(&practice()).unwrap();
+        let state = registry.resolve(&event_of(&registry)).unwrap();
         let heat = HeatId("q-1".into());
         state
             .append(
@@ -2318,7 +2333,7 @@ mod tests {
         // is RotorHazard must emit no *synthetic* passes when its heat runs — its real passes arrive
         // through the RH adapter connection instead (#65/#73).
         use gridfpv_server::timers::CreateTimerRequest;
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         let rh = registry
             .timers()
             .create(&CreateTimerRequest {
@@ -2332,7 +2347,9 @@ mod tests {
             })
             .unwrap();
         // Select only the RotorHazard timer for Practice.
-        registry.set_timers(&practice(), vec![rh.id]).unwrap();
+        registry
+            .set_timers(&event_of(&registry), vec![rh.id])
+            .unwrap();
         let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = HeatId("q-1".into());
@@ -2371,7 +2388,7 @@ mod tests {
         // emission with THAT timer's laps — proving the bridge reads the per-event selection and
         // the selected timer's own config (#73).
         use gridfpv_server::timers::CreateTimerRequest;
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         let timer = registry
             .timers()
             .create(&CreateTimerRequest {
@@ -2382,7 +2399,9 @@ mod tests {
                 available_channels: None,
             })
             .unwrap();
-        registry.set_timers(&practice(), vec![timer.id]).unwrap();
+        registry
+            .set_timers(&event_of(&registry), vec![timer.id])
+            .unwrap();
         let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = HeatId("q-1".into());
@@ -2421,14 +2440,15 @@ mod tests {
 
     // --- race redesign Slice 1a: sim auto-presence reconciler ---------------------------------
 
-    /// Spawn the presence reconciler for `registry`'s Practice event, returning its handle and
-    /// Practice's `AppState` (the same log it polls), mirroring [`spawn_bridge_for`].
+    /// Spawn the presence reconciler for `registry`'s event, returning its handle and that
+    /// event's `AppState` (the same log it polls), mirroring [`spawn_bridge_for`].
     fn spawn_reconciler_for(registry: &EventRegistry) -> (JoinHandle<()>, AppState) {
-        let state = registry.resolve(&practice()).unwrap();
+        let event = event_of(registry);
+        let state = registry.resolve(&event).unwrap();
         let reg = registry.clone();
         let reconciler_state = state.clone();
         let handle = tokio::spawn(async move {
-            run_presence_reconciler(reconciler_state, reg, practice()).await;
+            run_presence_reconciler(reconciler_state, reg, event).await;
         });
         (handle, state)
     }
@@ -2450,7 +2470,7 @@ mod tests {
     async fn seen_player_matching_a_rostered_pilot_is_added_and_bound() {
         use gridfpv_server::pilots::CreatePilotRequest;
 
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         // A directory pilot whose callsign matches the sim player name (case/space-insensitively).
         let pilot = registry
             .pilots()
@@ -2479,7 +2499,7 @@ mod tests {
         timeout(Duration::from_secs(5), async {
             loop {
                 let rostered = registry
-                    .meta_of(&practice())
+                    .meta_of(&event_of(&registry))
                     .map(|m| m.roster.contains(&pilot_id))
                     .unwrap_or(false);
                 if rostered && !bindings_in(&state).is_empty() {
@@ -2510,7 +2530,7 @@ mod tests {
             .unwrap();
         sleep(POLL_INTERVAL * 3).await;
         assert_eq!(
-            registry.meta_of(&practice()).unwrap().roster,
+            registry.meta_of(&event_of(&registry)).unwrap().roster,
             vec![pilot.id.clone()],
             "presence is set-membership — no duplicate roster entry"
         );
@@ -2525,7 +2545,7 @@ mod tests {
 
     #[tokio::test]
     async fn seen_player_with_no_matching_pilot_is_a_no_op() {
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         // No directory pilot named "Stranger".
         let (reconciler, state) = spawn_reconciler_for(&registry);
 
@@ -2542,7 +2562,11 @@ mod tests {
         // Wait past several poll cycles: the roster stays empty and no binding is appended.
         sleep(POLL_INTERVAL * 4).await;
         assert!(
-            registry.meta_of(&practice()).unwrap().roster.is_empty(),
+            registry
+                .meta_of(&event_of(&registry))
+                .unwrap()
+                .roster
+                .is_empty(),
             "an unmatched seen player must not be added to the roster"
         );
         assert!(
@@ -2589,7 +2613,7 @@ mod tests {
             min_lap_secs: None,
         };
         registry
-            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .add_round(&ScopeEventId(event_of(registry).0), req)
             .expect("open-practice round added")
             .id
     }
@@ -2797,7 +2821,7 @@ mod tests {
             min_lap_secs: None,
         };
         let round = registry
-            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .add_round(&ScopeEventId(event_of(&registry).0), req)
             .expect("timed round added")
             .id;
         let (bridge, state) = spawn_bridge_for(&registry);
@@ -2871,7 +2895,7 @@ mod tests {
         // re-fire the historical transitions (a spurious HeatStarting, re-spawned sim sources
         // whose passes corrupted the scored window). Startup must append NOTHING for history.
         let registry = fast_registry(2, 1);
-        let state = registry.resolve(&practice()).unwrap();
+        let state = registry.resolve(&event_of(&registry)).unwrap();
         let heat = HeatId("q-old".into());
         state
             .append(
@@ -3034,7 +3058,7 @@ mod tests {
             min_lap_secs: None,
         };
         registry
-            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .add_round(&ScopeEventId(event_of(registry).0), req)
             .expect("protest-window round added")
             .id
     }
@@ -3296,7 +3320,7 @@ mod tests {
         let alternate = create_mock(&registry, "Backup", laps, 1);
         // Select both; the first (the built-in Mock) is the default primary.
         registry
-            .set_timers(&practice(), vec![primary.clone(), alternate])
+            .set_timers(&event_of(&registry), vec![primary.clone(), alternate])
             .unwrap();
         let (bridge, state) = spawn_bridge_for(&registry);
 
@@ -3330,7 +3354,7 @@ mod tests {
         // gated off, hot standby). Dropping the RH primary fails over to the Mock alternate, whose
         // synthetic passes then take over — exactly the "primary RH drops → Mock alternate takes
         // over" scenario, proven in-process without Docker.
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         let rh = registry
             .timers()
             .create(&CreateTimerRequest {
@@ -3349,10 +3373,10 @@ mod tests {
         // passes that have yet to be emitted.
         let mock = create_mock(&registry, "Backup Mock", 200, 30);
         registry
-            .set_timers(&practice(), vec![rh.clone(), mock.clone()])
+            .set_timers(&event_of(&registry), vec![rh.clone(), mock.clone()])
             .unwrap();
         registry
-            .set_primary_timer(&practice(), Some(rh.clone()))
+            .set_primary_timer(&event_of(&registry), Some(rh.clone()))
             .unwrap();
         // Bring the RH primary "up" — it is the active source, so the Mock alternate is gated off.
         registry.timers().set_status(&rh, TimerStatus::Connected);

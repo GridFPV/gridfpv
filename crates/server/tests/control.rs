@@ -20,8 +20,7 @@ use gridfpv_server::app::AppState;
 use gridfpv_server::app::router;
 use gridfpv_server::control::{Command, CommandAck};
 use gridfpv_server::error::ErrorCode;
-use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
-use gridfpv_server::scope::EventId;
+use gridfpv_server::events::{CreateEventRequest, EventRegistry};
 use gridfpv_server::scope::{Scope, SubscribeRequest};
 use gridfpv_server::snapshot::{HeatPhase, ProjectionBody};
 use gridfpv_server::stream::{Change, StreamMessage};
@@ -33,28 +32,64 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Serve `router(state)` on an ephemeral port; return the base address, a freshly-minted
-/// **RD bearer token** (control is RD-gated since #44), and the server task handle (dropped
-/// at test end, aborting the task).
-async fn serve(registry: EventRegistry) -> (String, String, tokio::task::JoinHandle<()>) {
+/// The running Director a test drives: the socket address, and the id of the event every
+/// per-event path is rooted under (issue #72). There is no built-in event any more (#414), so
+/// the fixture **creates** one and the tests address it by its generated id.
+struct Director {
+    addr: String,
+    event: String,
+}
+
+impl Director {
+    /// `/events/{id}` + `suffix` — the request-line path for a raw HTTP write.
+    fn path(&self, suffix: &str) -> String {
+        format!("/events/{}{}", self.event, suffix)
+    }
+
+    /// `ws://{addr}/events/{id}` + `suffix` — a websocket URL under the event root.
+    fn ws(&self, suffix: &str) -> String {
+        format!("ws://{}{}", self.addr, self.path(suffix))
+    }
+}
+
+/// Serve `router(state)` on an ephemeral port; return the [`Director`] under test, a
+/// freshly-minted **RD bearer token** (control is RD-gated since #44), and the server task
+/// handle (dropped at test end, aborting the task).
+async fn serve(registry: EventRegistry) -> (Director, String, tokio::task::JoinHandle<()>) {
     let rd_token = registry.tokens().issue_rd_token();
+    let event = registry
+        .list()
+        .first()
+        .expect("the fixture created one event")
+        .id
+        .0
+        .clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(registry);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (format!("{addr}"), rd_token, handle)
+    (
+        Director {
+            addr: format!("{addr}"),
+            event,
+        },
+        rd_token,
+        handle,
+    )
 }
 
-/// A fresh registry whose in-memory **Practice** event the control tests drive against, plus
-/// its [`AppState`] (for token ops / direct appends). Every per-event path is rooted under
-/// `/events/practice` (issue #72).
-fn practice_registry() -> (EventRegistry, AppState) {
+/// A fresh registry holding one **created** event the control tests drive against, plus its
+/// [`AppState`] (for token ops / direct appends). Creating it exercises the same path the RD's
+/// first-run "create your first event" takes.
+fn test_registry() -> (EventRegistry, AppState) {
     let registry = EventRegistry::new(None).unwrap();
-    let state = registry
-        .resolve(&EventId(PRACTICE_EVENT_ID.into()))
-        .expect("Practice is always present");
+    let event = registry
+        .create(&CreateEventRequest::named("Test Event"))
+        .expect("create the test event")
+        .id;
+    let state = registry.resolve(&event).expect("the created event");
     (registry, state)
 }
 
@@ -64,26 +99,32 @@ fn heat() -> HeatId {
 
 /// The HTTP status `POST /control` returns for `command`, authenticated with the optional
 /// bearer `token` (the raw status line code, so an auth rejection — 401 — is visible).
-async fn post_status(addr: &str, command: &Command, token: Option<&str>) -> u16 {
+async fn post_status(addr: &Director, command: &Command, token: Option<&str>) -> u16 {
     let (status, _ack) = post_raw(addr, command, token).await;
     status
 }
 
 /// POST one command to `http://{addr}/control` with the optional bearer `token`; return the
 /// HTTP status and (when the body parses) the [`CommandAck`].
-async fn post_raw(addr: &str, command: &Command, token: Option<&str>) -> (u16, Option<CommandAck>) {
+async fn post_raw(
+    addr: &Director,
+    command: &Command,
+    token: Option<&str>,
+) -> (u16, Option<CommandAck>) {
     // A tiny manual HTTP/1.1 POST so the test pulls in no extra HTTP client dependency.
     let body = serde_json::to_string(command).unwrap();
     let auth = token
         .map(|t| format!("Authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
     let request = format!(
-        "POST /events/practice/control HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
          {auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        addr.path("/control"),
+        addr.addr,
         body.len()
     );
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut stream = TcpStream::connect(&addr.addr).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
@@ -101,17 +142,15 @@ async fn post_raw(addr: &str, command: &Command, token: Option<&str>) -> (u16, O
 
 /// POST one command authenticated with an RD `token`, asserting it acks (200) and returning
 /// the ack. The happy-path helper for the existing write-path tests.
-async fn post_command(addr: &str, command: &Command, token: &str) -> CommandAck {
+async fn post_command(addr: &Director, command: &Command, token: &str) -> CommandAck {
     let (status, ack) = post_raw(addr, command, Some(token)).await;
     assert_eq!(status, 200, "authenticated control should be admitted");
     ack.expect("body is a CommandAck")
 }
 
 /// Connect the control WS at `ws://{addr}/control`, authenticated with the RD `token`.
-async fn control_ws(addr: &str, token: &str) -> Ws {
-    let uri: Uri = format!("ws://{addr}/events/practice/control")
-        .parse()
-        .unwrap();
+async fn control_ws(addr: &Director, token: &str) -> Ws {
+    let uri: Uri = addr.ws("/control").parse().unwrap();
     let request =
         ClientRequestBuilder::new(uri).with_header("Authorization", format!("Bearer {token}"));
     let (ws, _) = connect_async(request).await.unwrap();
@@ -135,10 +174,8 @@ async fn send_command(ws: &mut Ws, command: &Command) -> CommandAck {
 }
 
 /// Subscribe a `/stream` reader and await the next live-state phase.
-async fn subscribe_stream(addr: &str, scope: Scope) -> Ws {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/events/practice/stream"))
-        .await
-        .unwrap();
+async fn subscribe_stream(addr: &Director, scope: Scope) -> Ws {
+    let (mut ws, _) = connect_async(addr.ws("/stream")).await.unwrap();
     let request = SubscribeRequest {
         scope,
         from: None,
@@ -176,7 +213,7 @@ async fn next_phase(ws: &mut Ws) -> HeatPhase {
 /// reaches a `/stream` subscriber (the read-back, §5).
 #[tokio::test]
 async fn post_command_drives_heat_loop_and_reaches_stream() {
-    let (registry, _state) = practice_registry();
+    let (registry, _state) = test_registry();
     let (addr, rd, _server) = serve(registry.clone()).await;
 
     // Schedule the heat, then subscribe so the subscriber starts from the scheduled state.
@@ -216,7 +253,7 @@ async fn post_command_drives_heat_loop_and_reaches_stream() {
 /// readable on `/stream`.
 #[tokio::test]
 async fn control_ws_acks_each_command_and_rejects_illegal() {
-    let (registry, _state) = practice_registry();
+    let (registry, _state) = test_registry();
     let (addr, rd, _server) = serve(registry.clone()).await;
 
     let mut control = control_ws(&addr, &rd).await;
@@ -268,7 +305,7 @@ async fn control_ws_acks_each_command_and_rejects_illegal() {
 /// well-formed command still works on the same session.
 #[tokio::test]
 async fn control_ws_survives_a_malformed_frame() {
-    let (registry, _state) = practice_registry();
+    let (registry, _state) = test_registry();
     let (addr, rd, _server) = serve(registry.clone()).await;
     let mut control = control_ws(&addr, &rd).await;
 
@@ -308,7 +345,7 @@ async fn control_ws_survives_a_malformed_frame() {
 /// token are all rejected `401 Unauthorized`; a valid RD token is admitted (`200`).
 #[tokio::test]
 async fn control_post_requires_a_valid_rd_token() {
-    let (registry, state) = practice_registry();
+    let (registry, state) = test_registry();
     let join_token = state.tokens().issue_join_token();
     let (addr, rd, _server) = serve(registry.clone()).await;
     let cmd = Command::ScheduleHeat {
@@ -343,21 +380,19 @@ async fn control_post_requires_a_valid_rd_token() {
 /// [`StatusCode::UNAUTHORIZED`] is surfaced by the handshake error.
 #[tokio::test]
 async fn control_ws_upgrade_requires_a_valid_rd_token() {
-    let (registry, state) = practice_registry();
+    let (registry, state) = test_registry();
     let join_token = state.tokens().issue_join_token();
     let (addr, rd, _server) = serve(registry.clone()).await;
 
     // No token: the upgrade is refused.
-    let no_token = connect_async(format!("ws://{addr}/events/practice/control")).await;
+    let no_token = connect_async(addr.ws("/control")).await;
     assert!(
         no_token.is_err(),
         "an unauthenticated control upgrade is refused"
     );
 
     // A read-only join-token: still refused with 401.
-    let uri: Uri = format!("ws://{addr}/events/practice/control")
-        .parse()
-        .unwrap();
+    let uri: Uri = addr.ws("/control").parse().unwrap();
     let req =
         ClientRequestBuilder::new(uri).with_header("Authorization", format!("Bearer {join_token}"));
     match connect_async(req).await {
@@ -388,7 +423,7 @@ async fn control_ws_upgrade_requires_a_valid_rd_token() {
 /// a read-only **join-token** authenticates a read all the same — neither grants control.
 #[tokio::test]
 async fn reads_are_open_and_a_join_token_authenticates_reads() {
-    let (registry, state) = practice_registry();
+    let (registry, state) = test_registry();
     let join_token = state.tokens().issue_join_token();
     let (addr, rd, _server) = serve(registry.clone()).await;
 
@@ -413,9 +448,7 @@ async fn reads_are_open_and_a_join_token_authenticates_reads() {
     assert_eq!(next_phase(&mut anon).await, HeatPhase::Scheduled);
 
     // A reader presenting the read-only join-token also gets the live state.
-    let (mut ws, _) = connect_async(format!("ws://{addr}/events/practice/stream"))
-        .await
-        .unwrap();
+    let (mut ws, _) = connect_async(addr.ws("/stream")).await.unwrap();
     let request = SubscribeRequest {
         scope: Scope::Heat { heat: heat() },
         from: None,
@@ -436,7 +469,7 @@ async fn out_of_band_contract_version_is_told_to_refresh() {
     use gridfpv_server::ContractVersion;
     use gridfpv_server::error::{ErrorCode, ProtocolError};
 
-    let (registry, _state) = practice_registry();
+    let (registry, _state) = test_registry();
     let (addr, rd, _server) = serve(registry.clone()).await;
     let ack = post_command(
         &addr,
@@ -454,9 +487,7 @@ async fn out_of_band_contract_version_is_told_to_refresh() {
     assert!(ack.ok);
 
     // Too-new version → the stream closes with a VersionMismatch refresh signal.
-    let (mut ws, _) = connect_async(format!("ws://{addr}/events/practice/stream"))
-        .await
-        .unwrap();
+    let (mut ws, _) = connect_async(addr.ws("/stream")).await.unwrap();
     let too_new = SubscribeRequest {
         scope: Scope::Heat { heat: heat() },
         from: None,
@@ -483,9 +514,7 @@ async fn out_of_band_contract_version_is_told_to_refresh() {
     }
 
     // An in-band version connects and streams normally.
-    let (mut ws, _) = connect_async(format!("ws://{addr}/events/practice/stream"))
-        .await
-        .unwrap();
+    let (mut ws, _) = connect_async(addr.ws("/stream")).await.unwrap();
     let in_band = SubscribeRequest {
         scope: Scope::Heat { heat: heat() },
         from: None,

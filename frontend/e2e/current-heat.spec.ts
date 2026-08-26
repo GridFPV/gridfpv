@@ -45,7 +45,7 @@ test('filling a heat does not steal Live focus; the heat picker selects the curr
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   const schedule = (heat: string, lineup: string[]) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: { ScheduleHeat: { heat, lineup } }
     });
@@ -89,7 +89,7 @@ test('the heat picker is locked while a heat is staged, and re-enabled after an 
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   const schedule = (heat: string, lineup: string[]) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: { ScheduleHeat: { heat, lineup } }
     });
@@ -136,7 +136,7 @@ test('a value change attempted while the picker is locked does not apply after a
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   const schedule = (heat: string, lineup: string[]) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: { ScheduleHeat: { heat, lineup } }
     });
@@ -192,7 +192,7 @@ test('scheduling a heat that does not move on-deck still appears in the picker w
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   const schedule = (heat: string, lineup: string[]) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: { ScheduleHeat: { heat, lineup } }
     });

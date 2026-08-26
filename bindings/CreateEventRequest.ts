@@ -5,8 +5,8 @@
  *
  * Just a display `name`; the **id is always auto-generated** (a slug of the name plus a
  * short random suffix), never user-entered, per the maintainer's rule. Keeping the id off
- * the wire means two events can share a name without colliding and a client can't squat a
- * reserved id (e.g. `practice`).
+ * the wire means two events can share a name without colliding and a client cannot pick its
+ * own id.
  */
 export type CreateEventRequest = { 
 /**

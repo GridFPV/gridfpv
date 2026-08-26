@@ -297,12 +297,15 @@ flowchart TB
       shared log queried by filter.</p>
     </div>
     <p>
-      <strong>Practice</strong> is a built-in, always-present event — the one event that exists
-      before you create anything (<a href="pipeline-practice.html">Pipeline: Practice</a>,
-      <em>Roadmap</em> v0.4 Slice&nbsp;1). It is the same aggregate as any other event in every
-      respect but one: it is <strong>non-persistent</strong>. Its log lives only for the session
-      and is discarded on exit — you can always fly without first naming and saving an event, and
-      that throwaway flying is itself a real (if ephemeral) event log.
+      There is <strong>no built-in event</strong> (#414). A fresh Director holds none at all, so
+      the RD's first act is to create one — and warming up is an ordinary event with an
+      <strong>open-practice round</strong> in it
+      (<a href="pipeline-practice.html">Pipeline: Practice</a>, <em>Roadmap</em> v0.4
+      Slice&nbsp;1). An earlier design seeded a non-persistent "Practice" event into every
+      registry; it was removed because an RD-created practice event is strictly better — it
+      persists, takes a roster and classes, holds rounds, and produces a log that can be
+      marshaled afterwards — and because two things called "practice" (the event and the round
+      format) was a standing cost with only one of them earning the name.
     </p>
 
     <h3>One logical model, two storage realizations</h3>
@@ -325,11 +328,11 @@ flowchart TB
     <h3>Realization 1 — Local (desktop Director, now)</h3>
     <p>
       Each <strong>persistent event is its own SQLite database file</strong> — the file that "is
-      the event," portable and replayable in isolation (the per-event tier from §4). The built-in
-      <strong>Practice</strong> event is realized as an <strong>in-memory log</strong>, lost on
-      exit — same trait, no file. The <code>EventRegistry</code> is the map from
-      <code>EventId</code>&nbsp;→&nbsp;<em>that event's log</em>: it opens (or creates) the SQLite
-      file for a persistent event, or hands back the in-memory log for Practice.
+      the event," portable and replayable in isolation (the per-event tier from §4). The
+      <code>EventRegistry</code> is the map from <code>EventId</code>&nbsp;→&nbsp;<em>that
+      event's log</em>: it opens (or creates) the SQLite file under the configured data dir. With
+      no data dir configured (an unconfigured Director, and the tests) it falls back to an
+      in-memory log per created event — same trait, no file.
     </p>
     <p>
       Alongside the log, each persistent event's SQLite file carries a small <strong>sidecar

@@ -20,16 +20,55 @@ import {
 
 import type { Command } from '@gridfpv/types';
 
-/**
- * The built-in **Practice** event id every per-event contract route is rooted under (issue
- * #72). Events are first-class containers now — `/events/{eventId}/snapshot|stream|control|…`
- * — and Practice is the always-present in-memory event the contract suite drives against.
- */
-export const PRACTICE_EVENT_ID = 'practice';
-
-/** The `/events/practice` route root the per-event contract paths hang off. */
-export function eventRoot(baseUrl: string, eventId: string = PRACTICE_EVENT_ID): string {
+/** The `/events/{id}` route root the per-event contract paths hang off (issue #72). */
+export function eventRoot(baseUrl: string, eventId: string): string {
   return `${baseUrl}/events/${encodeURIComponent(eventId)}`;
+}
+
+/**
+ * A running Director that already holds **one created event** — the fixture the per-event
+ * contract suites drive against.
+ *
+ * There is no built-in event any more (#414): a fresh Director lists nothing, so the suite
+ * creates its event through the real `POST /events` path and roots every per-event route under
+ * the id the server generated. That is strictly better coverage than the old privileged
+ * `practice` fixture, which no production caller ever used.
+ */
+export interface ContractDirector extends Director {
+  /** The id of the created event this run's per-event routes are rooted under. */
+  readonly event: string;
+  /** `${baseUrl}/events/${event}` — the per-event route root. */
+  readonly eventRoot: string;
+}
+
+/** The display name the contract suites' event is created with. */
+export const CONTRACT_EVENT_NAME = 'Contract Event';
+
+/**
+ * Boot a contract Director and **create the event** the per-event routes hang off, returning
+ * both. Use {@link startContractDirector} instead when the test needs the genuinely empty
+ * first-run registry (the events-lifecycle suite does).
+ */
+export async function startDirectorWithEvent(
+  opts: StartDirectorOptions = {}
+): Promise<ContractDirector> {
+  const director = await startContractDirector(opts);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (director.token) headers.Authorization = `Bearer ${director.token}`;
+  const res = await fetch(`${director.baseUrl}/events`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name: CONTRACT_EVENT_NAME })
+  });
+  if (!res.ok) {
+    await director.stop();
+    throw new Error(`could not create the contract event: HTTP ${res.status}`);
+  }
+  const { id } = (await res.json()) as { id: string };
+  return Object.assign(director, {
+    event: id,
+    eventRoot: eventRoot(director.baseUrl, id)
+  });
 }
 
 /** A fresh empty dir to point `GRIDFPV_ASSETS` at, so the SPA fallback is a deterministic 404. */
@@ -45,7 +84,7 @@ export function startContractDirector(opts: StartDirectorOptions = {}): Promise<
   });
 }
 
-/** The raw HTTP result of a `POST /control` — the status and the parsed `CommandAck`-ish body. */
+/** The raw HTTP result of a `POST /events/{id}/control` — the status and parsed body. */
 export interface ControlResult {
   status: number;
   /** The parsed JSON body (a `CommandAck` on the happy path), or `undefined` if not JSON. */
@@ -62,7 +101,7 @@ export interface PostControlOptions {
 
 /** `POST /control` a single command with explicit header control, returning the raw status + body. */
 export async function postControl(
-  baseUrl: string,
+  director: ContractDirector,
   command: Command,
   opts: PostControlOptions = {}
 ): Promise<ControlResult> {
@@ -70,8 +109,8 @@ export async function postControl(
   const headers: Record<string, string> = {};
   if (contentType) headers['Content-Type'] = 'application/json';
   if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-  // Control is rooted under the Practice event (#72): `/events/practice/control`.
-  const res = await fetch(`${eventRoot(baseUrl)}/control`, {
+  // Control is rooted under the event (#72): `/events/{id}/control`.
+  const res = await fetch(`${director.eventRoot}/control`, {
     method: 'POST',
     headers,
     body: JSON.stringify(command)
@@ -93,11 +132,11 @@ export interface WireCommandAck {
 
 /** `POST /control` with a valid RD token + JSON content-type, asserting nothing — returns the ack. */
 export async function rdControl(
-  baseUrl: string,
+  director: ContractDirector,
   token: string,
   command: Command
 ): Promise<WireCommandAck> {
-  const { body } = await postControl(baseUrl, command, { token });
+  const { body } = await postControl(director, command, { token });
   return body as WireCommandAck;
 }
 
@@ -181,13 +220,17 @@ export async function waitForFrame(
  * `Running` after the start delay; to keep contract timing deterministic this uses the
  * `SkipCountdown` override to reach `Running` immediately.
  */
-export async function driveToRunning(baseUrl: string, token: string, heat: string): Promise<void> {
+export async function driveToRunning(
+  director: ContractDirector,
+  token: string,
+  heat: string
+): Promise<void> {
   for (const command of [
     { Stage: { heat } },
     { Start: { heat } },
     { SkipCountdown: { heat } }
   ] as Command[]) {
-    const ack = await rdControl(baseUrl, token, command);
+    const ack = await rdControl(director, token, command);
     if (!ack.ok)
       throw new Error(
         `drive to running failed at ${JSON.stringify(command)}: ${JSON.stringify(ack)}`

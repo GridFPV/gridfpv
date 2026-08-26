@@ -19,22 +19,25 @@ import {
   createPilot,
   createRound,
   eventAudit,
-  PRACTICE_EVENT_ID,
   setClassMembership,
   setEventClasses,
   setEventRoster
 } from '../packages/protocol-client/dist/index.js';
-import { type Director } from '../test-harness/director.ts';
-import { driveToRunning, eventRoot, rdControl, startContractDirector } from './harness.ts';
+import {
+  driveToRunning,
+  rdControl,
+  startDirectorWithEvent,
+  type ContractDirector
+} from './harness.ts';
 
 const TOKEN = 'rd-audit-contract';
 const HEAT = 'a-1';
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
   // A brisk sim (one quick lap each) so the heat closes fast and the rulings can land.
-  director = await startContractDirector({ token: TOKEN, simLaps: 1, simLapMs: 30 });
+  director = await startDirectorWithEvent({ token: TOKEN, simLaps: 1, simLapMs: 30 });
 });
 
 afterAll(async () => {
@@ -47,18 +50,18 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
     const klass = await createClass(director.baseUrl, { name: 'Open' }, TOKEN);
     const pilotA = await createPilot(director.baseUrl, { callsign: 'alpha' }, TOKEN);
     const pilotB = await createPilot(director.baseUrl, { callsign: 'bravo' }, TOKEN);
-    await setEventClasses(director.baseUrl, PRACTICE_EVENT_ID, [klass.id], TOKEN);
-    await setEventRoster(director.baseUrl, PRACTICE_EVENT_ID, [pilotA.id, pilotB.id], TOKEN);
+    await setEventClasses(director.baseUrl, director.event, [klass.id], TOKEN);
+    await setEventRoster(director.baseUrl, director.event, [pilotA.id, pilotB.id], TOKEN);
     await setClassMembership(
       director.baseUrl,
-      PRACTICE_EVENT_ID,
+      director.event,
       klass.id,
       [pilotA.id, pilotB.id],
       TOKEN
     );
     const round = await createRound(
       director.baseUrl,
-      PRACTICE_EVENT_ID,
+      director.event,
       {
         label: 'Qualifying',
         classes: [klass.id],
@@ -72,12 +75,12 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
     );
 
     // An empty event has an empty audit (a 200 [], not an error).
-    expect(await eventAudit(director.baseUrl, PRACTICE_EVENT_ID)).toEqual([]);
+    expect(await eventAudit(director.baseUrl, director.event)).toEqual([]);
 
     // Schedule + run + finalize the round's heat.
     expect(
       (
-        await rdControl(director.baseUrl, TOKEN, {
+        await rdControl(director, TOKEN, {
           ScheduleHeat: {
             heat: HEAT,
             lineup: [pilotA.id, pilotB.id],
@@ -87,14 +90,14 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
         })
       ).ok
     ).toBe(true);
-    await driveToRunning(director.baseUrl, TOKEN, HEAT);
-    await waitForBothLaps(director.baseUrl, HEAT);
-    expect((await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: HEAT } })).ok).toBe(true);
-    expect((await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
+    await driveToRunning(director, TOKEN, HEAT);
+    await waitForBothLaps(director.eventRoot, HEAT);
+    expect((await rdControl(director, TOKEN, { ForceEnd: { heat: HEAT } })).ok).toBe(true);
+    expect((await rdControl(director, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
 
     // The heat is now OFFICIAL (Final) — a ruling on it must be REJECTED with the revert-first
     // gate (`require_not_final`, control_handler.rs): an official result never re-scores silently.
-    const locked = await rdControl(director.baseUrl, TOKEN, {
+    const locked = await rdControl(director, TOKEN, {
       ApplyPenalty: {
         heat: HEAT,
         competitor: pilotB.id,
@@ -108,10 +111,10 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
     // Revert (the sanctioned re-open), THEN the two rulings land: a heat-tagged penalty and a
     // target-addressed void aimed at a REAL pass offset (pilot A's first lap's end pass, read
     // from the laps projection). Re-finalize afterwards — the corrected result goes official.
-    expect((await rdControl(director.baseUrl, TOKEN, { Revert: { heat: HEAT } })).ok).toBe(true);
+    expect((await rdControl(director, TOKEN, { Revert: { heat: HEAT } })).ok).toBe(true);
     expect(
       (
-        await rdControl(director.baseUrl, TOKEN, {
+        await rdControl(director, TOKEN, {
           ApplyPenalty: {
             heat: HEAT,
             competitor: pilotB.id,
@@ -120,14 +123,14 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
         })
       ).ok
     ).toBe(true);
-    const voidTarget = await firstLapEndRef(director.baseUrl, HEAT);
-    expect(
-      (await rdControl(director.baseUrl, TOKEN, { VoidDetection: { target: voidTarget } })).ok
-    ).toBe(true);
-    expect((await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
+    const voidTarget = await firstLapEndRef(director.eventRoot, HEAT);
+    expect((await rdControl(director, TOKEN, { VoidDetection: { target: voidTarget } })).ok).toBe(
+      true
+    );
+    expect((await rdControl(director, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
 
     // The event-wide audit, through the real client helper.
-    const trail = await eventAudit(director.baseUrl, PRACTICE_EVENT_ID);
+    const trail = await eventAudit(director.baseUrl, director.event);
     expect(trail).toHaveLength(2);
 
     // Newest first: descending global append offset — the void (appended last) leads.
@@ -150,10 +153,10 @@ describe('GET /events/{id}/audit serves the heat-tagged, newest-first event audi
 });
 
 /** Poll the heat's `laps` projection until every competitor present has at least one completed lap. */
-async function waitForBothLaps(baseUrl: string, heat: string, timeoutMs = 10_000): Promise<void> {
+async function waitForBothLaps(eventRoot: string, heat: string, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const competitors = await lapCompetitors(baseUrl, heat);
+    const competitors = await lapCompetitors(eventRoot, heat);
     if (competitors.length >= 2 && competitors.every((c) => c.laps.length >= 1)) return;
     await new Promise((r) => setTimeout(r, 30));
   }
@@ -161,8 +164,8 @@ async function waitForBothLaps(baseUrl: string, heat: string, timeoutMs = 10_000
 }
 
 /** The heat's first competitor's first-lap end pass offset — a real `LogRef` a void can target. */
-async function firstLapEndRef(baseUrl: string, heat: string): Promise<number> {
-  const competitors = await lapCompetitors(baseUrl, heat);
+async function firstLapEndRef(eventRoot: string, heat: string): Promise<number> {
+  const competitors = await lapCompetitors(eventRoot, heat);
   const endRef = competitors[0]?.laps[0]?.end_ref;
   if (typeof endRef !== 'number') throw new Error('no lap end_ref to void');
   return endRef;
@@ -170,10 +173,10 @@ async function firstLapEndRef(baseUrl: string, heat: string): Promise<number> {
 
 /** The heat's `?projection=laps` competitor list (empty on a non-2xx read). */
 async function lapCompetitors(
-  baseUrl: string,
+  eventRoot: string,
   heat: string
 ): Promise<Array<{ laps: Array<{ end_ref: number }> }>> {
-  const resp = await fetch(`${eventRoot(baseUrl)}/snapshot/heat/${heat}?projection=laps`);
+  const resp = await fetch(`${eventRoot}/snapshot/heat/${heat}?projection=laps`);
   if (!resp.ok) return [];
   const snap = (await resp.json()) as {
     body: { LapList?: { competitors: Array<{ laps: Array<{ end_ref: number }> }> } };
