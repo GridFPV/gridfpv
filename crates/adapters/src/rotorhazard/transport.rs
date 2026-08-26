@@ -967,6 +967,24 @@ pub struct RotorHazardConnection {
     tap: SignalTap,
 }
 
+/// Split a catalog channel code (`"R8"`, `"F4"`, `"A1"`) into RotorHazard's `(band letter, channel
+/// number)` pair.
+///
+/// RotorHazard stores a frequency's label as a one-letter band and an integer channel, and
+/// `on_set_frequency` calls `int()` on the channel with no guard — so anything else is not merely
+/// ignored, it throws and takes the frequency change down with it.
+///
+/// Returns `None` for a code that is not `<letters><digits>`, so the caller can omit the label
+/// rather than send something RotorHazard will choke on.
+fn rh_band_channel(code: &str) -> Option<(String, u16)> {
+    let split = code.find(|c: char| c.is_ascii_digit())?;
+    let (letters, digits) = code.split_at(split);
+    if letters.is_empty() || !letters.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some((letters.to_ascii_uppercase(), digits.parse().ok()?))
+}
+
 impl RotorHazardConnection {
     /// Connect to `url` (e.g. `http://localhost:5000`) and start translating the
     /// RotorHazard socket stream through `adapter`.
@@ -1992,9 +2010,22 @@ impl RotorHazardConnection {
         label: Option<(&str, &str)>,
     ) -> Result<(), rust_socketio::Error> {
         let mut payload = json!({ "node": node, "frequency": frequency });
-        if let (Some((band, channel)), Some(map)) = (label, payload.as_object_mut()) {
-            map.insert("band".into(), json!(band));
-            map.insert("channel".into(), json!(channel));
+        // RotorHazard's own vocabulary, not GridFPV's: `band` is a single LETTER and `channel` is
+        // an INT — its profile holds `{"b": "R", "c": 8}`, not `("Raceband", "R8")`.
+        //
+        // `on_set_frequency` runs `int(data['channel'])` unguarded, so sending the catalog's code
+        // raised `ValueError: invalid literal for int() with base 10: 'R8'` and aborted the whole
+        // handler — the frequency was never set. And because this emit is fire-and-forget, the
+        // Director answered 200 every time: a dead write that reported success (#423's class).
+        //
+        // A label we cannot confidently translate is OMITTED, never guessed. RotorHazard then keeps
+        // whatever label it had and still applies the frequency — losing a label is cosmetic on
+        // RH's screen; losing the write puts a gate on the wrong channel.
+        if let (Some((_, code)), Some(map)) = (label, payload.as_object_mut()) {
+            if let Some((letter, number)) = rh_band_channel(code) {
+                map.insert("band".into(), json!(letter));
+                map.insert("channel".into(), json!(number));
+            }
         }
         self.client.emit("set_frequency", payload)
     }
@@ -2990,5 +3021,24 @@ mod tests {
         };
         adapter.note_malformed_frame("current_laps", &detail);
         assert_eq!(adapter.counts.malformed_frames, 1);
+    }
+    #[test]
+    fn a_catalog_channel_code_becomes_rotorhazards_letter_and_number() {
+        // RotorHazard stores `{"b": "R", "c": 8}` and calls `int()` on the channel with no guard.
+        // Sending the catalog's own `"R8"` raised ValueError and aborted `on_set_frequency`, so the
+        // frequency was never set — while the fire-and-forget emit still reported success.
+        assert_eq!(rh_band_channel("R8"), Some(("R".to_string(), 8)));
+        assert_eq!(rh_band_channel("F4"), Some(("F".to_string(), 4)));
+        assert_eq!(rh_band_channel("A1"), Some(("A".to_string(), 1)));
+    }
+
+    #[test]
+    fn an_untranslatable_code_yields_no_label_rather_than_a_guess() {
+        // Omitting the label costs a name on RotorHazard's screen. Guessing one costs the write —
+        // and with it, a gate left on the wrong channel.
+        assert_eq!(rh_band_channel(""), None);
+        assert_eq!(rh_band_channel("8"), None);
+        assert_eq!(rh_band_channel("R"), None);
+        assert_eq!(rh_band_channel("Raceband"), None);
     }
 }
