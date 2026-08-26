@@ -21,6 +21,18 @@
    * back for every adjustment. A modal has no URL, so that case is simply unavailable. It also
    * survives a reload, which mid-tuning on a race day is the worst moment to lose.
    *
+   * ## The URL also carries the SCOPE (#411)
+   *
+   * Two routes reach this page: `#/timers/<id>/tune` — the timer's own baseline, reachable before any
+   * event exists — and `#/events/<eventId>/timers/<id>/tune`, entered from inside an event workspace
+   * and returning there on back. The page states which it is editing ("editing: Saturday Race · Track
+   * RH") **from the route alone**, so a reload, or this link opened on the phone at the gate, keeps
+   * the scope it was opened with rather than guessing from whatever is active.
+   *
+   * Both scopes write through the same calibration path today: the per-event tune layer does not
+   * exist yet, so the difference is the scope and the labelling, not two write paths — and the scope
+   * line says exactly that rather than implying an isolation the system cannot deliver.
+   *
    * ## One value, three editors
    *
    * Per (node, threshold) there is exactly **one** number, held in {@link levels}. Three controls
@@ -90,6 +102,7 @@
   import type {
     ChannelCatalogEntry,
     CompetitorRef,
+    EventMeta,
     HeatSummary,
     NodeSignal,
     Pilot,
@@ -141,8 +154,10 @@
   let {
     session,
     timer,
+    scopeEvent,
     onhome,
     ontimers,
+    onevent,
     fetchSignal,
     applyLevels,
     stopSignal,
@@ -152,10 +167,23 @@
     session: Session;
     /** The timer being tuned, resolved from the route by the shell (never a bare id here). */
     timer: Timer;
+    /**
+     * The **event whose tune this is** (#411), when the page was entered from inside an event
+     * workspace — resolved from the route's event id by the shell, so the page can name its scope
+     * by the event's friendly name (CLAUDE.md) rather than an id. Absent on the app-level route,
+     * where the scope is the timer's own baseline.
+     */
+    scopeEvent?: EventMeta;
     /** Leave to the home hub (the brand mark + the first breadcrumb). */
     onhome: () => void;
     /** Leave to the Timers page (the second breadcrumb — where this page is entered from). */
     ontimers: () => void;
+    /**
+     * Return to the **event workspace** this page was opened from (the event crumb). Only supplied
+     * with {@link scopeEvent}: back out of an event-scoped tune belongs in the event, not on the
+     * global Timers page.
+     */
+    onevent?: () => void;
     /** Test/host seam for the signal poll; defaults to the session's `GET /timers/{id}/signal`. */
     fetchSignal?: FetchSignal;
     /** Test/host seam for the calibration write; defaults to the session's `setCalibration`. */
@@ -647,22 +675,55 @@
       competitors: snapshot && plottable(snap) ? [nodeTraceOf(snapshot, snap)] : []
     };
   }
+
+  // ── Which tuning layer this page is editing (#411) ──────────────────────────────────────────
+  //
+  // The scope comes from the route: the event-scoped route carries an event, the app-level one does
+  // not. Named by the event's friendly name, never its id (CLAUDE.md). Profiles (#411) are NOT
+  // built, so the page says the *event* — it must not invent a profile name it cannot back up.
+  const scopeLabel = $derived(scopeEvent ? `${scopeEvent.name} · ${timer.name}` : timer.name);
+  // And the honest small print: both scopes write the same calibration today. The event tune layer
+  // does not exist yet, so claiming these levels are "only for this event" would be a lie.
+  const scopeNote = $derived(
+    scopeEvent
+      ? `Opened from ${scopeEvent.name}. These are still the timer's own levels — a per-event tune layer does not exist yet.`
+      : "No event in scope — the timer's own levels."
+  );
 </script>
 
 <div class="page">
   <div class="page-inner">
     <div class="brand-row"><Brand onclick={onhome} /></div>
+    <!-- The trail is the SCOPE (#411). Entered from the Timers page the tune belongs to the timer
+         itself, so the trail runs Home › Timers › Tune ‹timer›. Entered from inside an event it
+         belongs to that event, so the middle crumb is the event — by name, never its id — and it
+         goes back into the event workspace the RD came from, which is the whole point of the
+         event-scoped route ("as long as when we click back we are back in the event"). -->
     <Breadcrumbs
-      crumbs={[
-        { label: 'Home', onclick: onhome },
-        { label: 'Timers', onclick: ontimers },
-        { label: `Tune ${timer.name}` }
-      ]}
+      crumbs={scopeEvent && onevent
+        ? [
+            { label: 'Home', onclick: onhome },
+            { label: scopeEvent.name, onclick: onevent },
+            { label: `Tune ${timer.name}` }
+          ]
+        : [
+            { label: 'Home', onclick: onhome },
+            { label: 'Timers', onclick: ontimers },
+            { label: `Tune ${timer.name}` }
+          ]}
     />
 
     <header class="page-head">
       <div class="page-titles">
         <h1 class="page-title">Tune {timer.name}</h1>
+        <!-- Which layer am I editing? (#411's first open question.) Answered from the ROUTE, not
+             from whatever happens to be active — so a reload, or this link opened on a phone at the
+             gate, states the same scope it was opened with. -->
+        <p class="scope" data-testid="tune-scope">
+          <span class="scope-label">editing:</span>
+          <strong class="scope-target">{scopeLabel}</strong>
+          <span class="scope-note">{scopeNote}</span>
+        </p>
         <p class="lead">
           Set each gate's <strong>enter</strong> and <strong>exit</strong> levels while a quad flies
           through. The shaded band opens when the signal rises past enter and closes when it falls
@@ -935,6 +996,32 @@
     font-size: var(--gf-font-size-2xl);
     letter-spacing: var(--gf-tracking-tight);
   }
+  /* The scope line (#411): which layer this page is editing, stated plainly under the title. Sized
+     like data rather than chrome — it is the answer to "am I changing tonight or forever". */
+  .scope {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--gf-space-2);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+  }
+  .scope-label {
+    color: var(--gf-text-muted);
+    text-transform: uppercase;
+    font-size: var(--gf-font-size-2xs);
+    letter-spacing: 0.06em;
+  }
+  .scope-target {
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text);
+  }
+  .scope-note {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-xs);
+  }
+
   .lead {
     margin: 0;
     max-width: 46rem;

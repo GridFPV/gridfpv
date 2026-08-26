@@ -98,8 +98,23 @@
   // Page navigations (hub cards, breadcrumbs, page "Home" crumbs).
   const goPage = (page: AppPage) => navigate({ kind: 'page', page });
   const goHome = () => goPage('home');
-  /** Open the per-timer Tune page (#355) — the parameterised route, entered from a timer row. */
+  /**
+   * Open the per-timer Tune page (#355) on the **timer's own** scope — `#/timers/<id>/tune`,
+   * entered from the app-level Timers page. This is the primary case: it must work before an event
+   * exists at all, which is the state an untuned timer is in.
+   */
   const goTune = (timer: string) => navigate({ kind: 'tune', timer });
+  /**
+   * Open the same page on the **event's** scope (#411) — `#/events/<eventId>/timers/<id>/tune`,
+   * entered from the in-event Timers screen. The route carries the event so the page can name what
+   * it is editing and so back lands in the event workspace, not on the global Timers page.
+   */
+  const goEventTune = (timer: string) => {
+    const event = session.currentEvent?.id;
+    navigate(event ? { kind: 'tune', timer, event } : { kind: 'tune', timer });
+  };
+  /** Back out of an event-scoped tune: the event workspace's Timers tab — where the RD came from. */
+  const goEventTimersTab = () => navigate({ kind: 'workspace', tab: 'timers' });
   // The workspace's app-route concept is "Events" (where event entry/switch happens).
   const route$page = $derived(route.kind === 'page' ? route.page : 'home');
 
@@ -107,7 +122,12 @@
   // route from the hash. Reconcile against the live active event so a workspace hash with no event
   // doesn't render a broken workspace.
   function onHashChange() {
-    route = reconcileRoute(parseHash(location.hash), !!session.currentEvent, timerKnown);
+    route = reconcileRoute(
+      parseHash(location.hash),
+      !!session.currentEvent,
+      timerKnown,
+      eventKnown
+    );
   }
 
   // ── The tune route's timer (#355) ───────────────────────────────────────────────────────────
@@ -124,6 +144,21 @@
     return tuneTimers?.find((t) => t.id === id);
   });
 
+  // ── The tune route's event SCOPE (#411) ─────────────────────────────────────────────────────
+  // The event-scoped route names the event whose tune is being edited. The event in play is the
+  // Director's active event (server state, #90) — the same one the workspace shows — so a route
+  // naming any other event has no workspace to return to and no event to honestly name. While the
+  // active event is still resolving nothing is known yet, so we answer "known" and let the route
+  // stand: bouncing there would flash a deep link on its way in, exactly as it would for the timer.
+  const eventKnown = (id: string) =>
+    session.resolvingActiveEvent ? true : id === session.currentEvent?.id;
+  /** The event to name on the page — resolved to the EventMeta, so the page shows its name. */
+  const tuneEvent = $derived(
+    route.kind === 'tune' && route.event && route.event === session.currentEvent?.id
+      ? session.currentEvent
+      : undefined
+  );
+
   $effect(() => {
     if (route.kind !== 'tune' || tuneTimers !== undefined) return;
     void session
@@ -132,10 +167,13 @@
       .catch(() => (tuneTimers = []));
   });
 
-  // Once the registry is known, a tune route naming a timer that is gone falls back to Timers.
+  // Once the registry is known, a tune route naming a timer that is gone falls back to Timers; once
+  // the active event is known, an event-scoped route naming a different event drops the scope (and
+  // keeps tuning on the timer's own route). Both predicates answer "keep the route" while their
+  // source is still unknown, so this only ever fires on a genuine mismatch.
   $effect(() => {
-    if (route.kind !== 'tune' || tuneTimers === undefined) return;
-    const next = reconcileRoute(route, !!session.currentEvent, timerKnown);
+    if (route.kind !== 'tune') return;
+    const next = reconcileRoute(route, !!session.currentEvent, timerKnown, eventKnown);
     if (next !== route) navigate(next);
   });
 
@@ -158,7 +196,7 @@
     resumed = true;
     void (async () => {
       await session.resolveActiveEvent();
-      navigate(resolveInitialRoute(location.hash, !!session.currentEvent));
+      navigate(resolveInitialRoute(location.hash, !!session.currentEvent, undefined, eventKnown));
     })();
   });
 
@@ -292,11 +330,21 @@
     </div>
   </div>
 {:else if route.kind === 'tune'}
-  <!-- The per-timer Tune page (#355): app-level, no event required — a timer is tuned before an
-       event exists, and the RD may have the page open on a phone at the gate. -->
+  <!-- The per-timer Tune page (#355). Rendered OUTSIDE the workspace shell in both scopes: it is a
+       full-width two-location surface (set a level, walk to the gate, read the graph on a phone),
+       and it must also work with no event at all — a timer is tuned before an event exists. The
+       event-scoped route (#411) changes what the page NAMES and where its back crumb goes, not
+       where it renders. -->
   <div class="gridfpv-root gridfpv-dense">
     {#if tuneTimer}
-      <TunePage {session} timer={tuneTimer} onhome={goHome} ontimers={() => goPage('timers')} />
+      <TunePage
+        {session}
+        timer={tuneTimer}
+        scopeEvent={tuneEvent}
+        onhome={goHome}
+        ontimers={() => goPage('timers')}
+        onevent={goEventTimersTab}
+      />
     {:else}
       <!-- Resolving the registry (or bouncing to Timers because the timer is gone). -->
       <div class="resume-loading" role="status">
@@ -385,7 +433,9 @@
 
       <main class="content">
         {#if active === 'timers'}
-          <EventTimers {session} />
+          <!-- Tuning is reachable from INSIDE the event (#411): the row's Tune action takes the
+               event-scoped route, so back returns to this tab rather than the global Timers page. -->
+          <EventTimers {session} ontune={goEventTune} />
         {:else if active === 'classes-roster'}
           <EventClassesRoster {session} />
         {:else if active === 'rounds'}

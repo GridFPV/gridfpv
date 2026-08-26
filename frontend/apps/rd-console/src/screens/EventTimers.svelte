@@ -27,6 +27,13 @@
    * same rule on `PUT /events/{id}/timers` — this is the half that fails while the RD is choosing
    * equipment rather than while they are trying to start a race.
    *
+   * ## Tuning from inside the event (#355/#411)
+   *
+   * The Tune action on a row navigates to the **event-scoped** tune route, so back returns here
+   * rather than to the global Timers page. This is where an RD actually stands when a gate is missing
+   * laps — mid-event, with a heat waiting — so tuning has to be reachable from here and not only from
+   * the app-level Timers page.
+   *
    * A timer the event **already** selects stays tickable (and untickable) even when its plugin has
    * since gone away: the Director grandfathers an existing selection so a pre-#405 event is still
    * editable, and the row carries a warning instead. What stops such an event from racing it is
@@ -41,9 +48,18 @@
 
   let {
     session,
+    ontune,
     onselectionchange = undefined
   }: {
     session: Session;
+    /**
+     * Open the per-timer **Tune** page for a timer, scoped to THIS event (#355/#411). The shell
+     * owns the route (`#/events/<eventId>/timers/<timerId>/tune`); this screen is the entry point
+     * the RD actually works from mid-event — "tuning from in the event would be ideal, as long as
+     * when we click back we are back in the event". Optional, so an embedder with nowhere to
+     * navigate to (the setup wizard's Timer step) simply doesn't offer the action.
+     */
+    ontune?: (timerId: TimerId) => void;
     /**
      * Fires the **live** working-selection count whenever it changes — including the local-only
      * empty state the setup wizard gates on (an empty selection is kept local, not persisted, so
@@ -209,6 +225,7 @@
       bind:timers
       onchange={onRegistryChange}
       rowChecked={(t) => selected.has(t.id)}
+      ontune={ontune ? (timer) => ontune(timer.id) : undefined}
     >
       {#snippet rowLead(timer)}
         <input

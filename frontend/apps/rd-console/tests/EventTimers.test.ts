@@ -201,6 +201,34 @@ describe('EventTimers (in-event CRUD + selection)', () => {
     expect(within(rows[1]).getByRole('button', { name: 'Remove' })).toBeInTheDocument();
   });
 
+  // Tuning has to be reachable from INSIDE the event (#411): mid-event, with a heat waiting, this
+  // screen is where the RD stands when a gate is missing laps. The shell owns the route; this screen
+  // is the entry point, and it hands back the timer's id for the event-scoped route to carry.
+  it('offers Tune on a tunable row and reports the timer it was asked for', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT });
+    const ontune = vi.fn();
+    render(EventTimers, { session, ontune });
+
+    const list = await screen.findByRole('list', { name: 'Configured timers' });
+    const rows = within(list).getAllByRole('listitem');
+    // The built-in Mock has no radio to tune; the connected RH does.
+    expect(within(rows[0]).queryByRole('button', { name: 'Tune' })).toBeNull();
+    await fireEvent.click(within(rows[1]).getByRole('button', { name: 'Tune' }));
+    expect(ontune).toHaveBeenCalledWith('rh-1');
+  });
+
+  it('offers no Tune action at all when the embedder has nowhere to navigate', async () => {
+    // The setup wizard embeds this screen with no route to hand off to — better no action than one
+    // that goes nowhere.
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    await screen.findByLabelText('Use Track RH');
+    expect(screen.queryByRole('button', { name: 'Tune' })).toBeNull();
+  });
+
   it('hides timer roles when only one timer is selected', async () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
     const { session } = makeTestSession({ listTimersImpl, event: EVENT });
