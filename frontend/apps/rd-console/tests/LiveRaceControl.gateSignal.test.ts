@@ -156,6 +156,7 @@ function snapshot(over: Partial<TimerSignal> = {}): TimerSignal {
 interface Harness {
   fetchSignal: ReturnType<typeof vi.fn>;
   stopSignal: ReturnType<typeof vi.fn>;
+  session: ReturnType<typeof makeTestSession>['session'];
   unmount: () => void;
 }
 
@@ -202,7 +203,7 @@ async function renderControl(
   if (opts.attributed ?? true) {
     await waitFor(() => expect(screen.getByTestId('gate-chip-1').textContent).toMatch(/ACRO/));
   }
-  return { fetchSignal, stopSignal, unmount };
+  return { fetchSignal, stopSignal, session, unmount };
 }
 
 /**
@@ -477,5 +478,30 @@ describe('Race control gate signal — no link is not no signal', () => {
     expect(flat(document.body.textContent)).toMatch(/Lost the timer.s signal feed/i);
     expect(flat(document.body.textContent)).toMatch(/the Director did not answer/i);
     h.unmount();
+  });
+});
+
+describe('the lease survives the session re-polling its timer list', () => {
+  // `session.timers` is re-read every TIMER_POLL_MS and assigned a FRESH array. `primaryTimer` is a
+  // lookup over it, so the timer OBJECT changes identity on every poll while the id does not.
+  //
+  // The feed's `$effect` used to call `opts.timer()` inside itself, which made it depend on
+  // everything that getter touched — so each poll re-ran the effect, fired its cleanup
+  // (`POST /signal/stop`) and resubscribed. On the bench that read as the gate signal flapping
+  // "connected → no link → connected" every 2.5 s with nothing actually wrong.
+  it('does not release and resubscribe when only the timer object identity changes', async () => {
+    const { stopSignal, session, unmount } = await renderControl();
+    expect(stopSignal).not.toHaveBeenCalled();
+
+    // Exactly what a poll does: same timer, same id, brand-new array and object.
+    for (let i = 0; i < 3; i++) {
+      session.timers = session.timers.map((t) => ({ ...t }));
+      await tick();
+    }
+
+    expect(stopSignal).not.toHaveBeenCalled();
+    unmount();
+    // The release still happens when the watch genuinely ends.
+    await waitFor(() => expect(stopSignal).toHaveBeenCalled());
   });
 });

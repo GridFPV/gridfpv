@@ -111,8 +111,19 @@ export function useSignalFeed(opts: SignalFeedOptions): SignalFeed {
       .catch(() => {});
   }
 
+  // The watched id is derived OUTSIDE the effect on purpose. `opts.timer()` is a caller-supplied
+  // getter, and calling it inside the effect makes the effect depend on everything that getter
+  // touches — for Race control that is `session.primaryTimer`, a lookup over `session.timers`,
+  // which the session re-polls every 2.5 s. A fresh array each poll meant a fresh object identity,
+  // the effect re-ran, its cleanup fired `POST /signal/stop`, and it resubscribed: the feed
+  // flapped connected → no link → connected on a 2.5 s cycle while nothing had actually changed.
+  //
+  // `$derived` compares its VALUE, so an unchanged id string wakes nothing. The effect below reads
+  // only this, and therefore restarts only when the timer genuinely changes.
+  const watched = $derived(opts.timer());
+
   $effect(() => {
-    const id = opts.timer();
+    const id = watched;
     if (id === undefined) return;
     const every = opts.pollMs?.() ?? SIGNAL_POLL_MS;
     const doc = typeof document === 'undefined' ? undefined : document;
