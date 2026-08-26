@@ -22,7 +22,17 @@
  * is added, add a matching `export type * from '@bindings/<Name>';` line below;
  * when one is removed, drop its line. Nothing else in the frontend changes.
  *
- * This list is kept in lockstep with `bindings/` (one line per `bindings/*.ts`).
+ * This list is kept in lockstep with `bindings/` (one line per `bindings/*.ts`), and
+ * `cargo xtask ci` enforces that (`cargo xtask barrel`): a generated binding with no line
+ * here, or a line here naming a binding that no longer exists, fails the build.
+ *
+ * That check exists because the gap is invisible otherwise. A type that is generated but
+ * never re-exported cannot be imported from `@gridfpv/types` at all, so an author who wants
+ * the real wire type is pushed into hand-declaring one — and a hand-declared wire type passes
+ * `tsc`, the unit tests and the lint while being wrong in every field name (#410).
+ *
+ * Ordering is presentation only; the check is about presence. `VoidReason` deliberately sits
+ * beside `LapList` rather than in alphabetical order.
  */
 
 export type * from '@bindings/ActiveEvent';

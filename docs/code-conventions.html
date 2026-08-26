@@ -46,7 +46,8 @@
       <p><span class="name"><code>cargo xtask</code> defines every check.</span> Local and CI
       run the identical suite: <code>cargo xtask ci</code> = <code>fmt --check</code> &amp;&amp;
       <code>clippy --all-targets -D warnings</code> &amp;&amp; <code>test --all</code> &amp;&amp;
-      the Rust→TS bindings drift-check. CI is <strong>GitHub Actions</strong>
+      the Rust→TS bindings drift-check &amp;&amp; the <strong>barrel completeness check</strong>
+      (§3). CI is <strong>GitHub Actions</strong>
       (<code>.github/workflows/ci.yml</code>): the Rust job calls <code>cargo xtask ci</code>
       verbatim, alongside a <code>cargo audit</code> job and a frontend job
       (build / type-check / lint / test / Director build / <strong>contract suite</strong>);
@@ -70,7 +71,13 @@
       (the protocol contract) — exported to repo-root
       <code>bindings/</code>. <code>cargo xtask gen</code> regenerates; <code>cargo xtask ci</code>
       fails if the checked-in <code>bindings/*.ts</code> drift from the Rust types. Commit
-      regenerated bindings with the Rust change. The protocol <strong>contract version</strong>
+      regenerated bindings with the Rust change.
+      <code>cargo xtask ci</code> also runs a <strong>barrel completeness check</strong>
+      (<code>cargo xtask barrel</code>): every <code>bindings/*.ts</code> must be re-exported from
+      <code>frontend/packages/types/src/generated.ts</code>, and every re-export must name a
+      binding that exists. A generated type nobody exported is not importable from
+      <code>@gridfpv/types</code> at all — which is how a hand-declared (and wrong) copy of a wire
+      type gets written instead, past every gate (#410). The protocol <strong>contract version</strong>
       (<code>CONTRACT_VERSION</code>, a monotonic <code>u32</code>) bumps only on a breaking wire
       change; additive changes an older client can ignore do not bump it.</p>
       <p>Transferred integers render as a TS <code>number</code>: microsecond times / durations
