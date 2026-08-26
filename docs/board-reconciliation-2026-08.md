@@ -631,3 +631,31 @@ IMD moves from **chooser to checker**, validating a layer at definition time —
 ## Still open for the RD
 
 **#402** (folds into #117 S1), **#405**, **#407**, **#415**, **#421**, **#355**'s remaining ADDs (Capture button, min-lap warning), **#397**'s pre-race tones (needs the telemetry source, not the log).
+
+## Overnight run — 2026-08-26 into 27
+
+Matrix **4/4 PASS** (800s) on the finished tree. `cargo xtask ci` exit 0; frontend 970 tests + 113 contract.
+
+Merged: **#417** (lap callouts), **#415** (gate signal strip), **#407 part 1** (min-lap filter), **#414** (Practice event removed). Closed 26 issues on the day.
+
+### Two dead code paths found by doing the work
+
+**`set_min_lap_time` never did anything.** It emitted `set_option {option: "MIN_LAP_TIME"}` — but RotorHazard has *no such setting*. That string is only an event-constant name; the filter reads `MinLapSec` (a DB option) and `TIMING`/`MinLapBehavior` (a server-config item), in two different stores. RH's `on_set_option` writes whatever key it is handed, so the call stored a row nothing reads and returned `Ok`. It survived because RH's default behaviour is highlight-not-discard, so the harness's short sim laps recorded anyway and nothing ever contradicted it. The same dead emit sat in `race_day.py`, and `xtask rh-mock` recommended it to RDs.
+
+Second time a name has lied, after `unlimited_time`/`race_mode`. That is now the standing warning on **#423**: *a dead write that returns success is the failure mode the audit exists to find.*
+
+**The #417 dip was not the min-lap floor.** D26/#409 is holding — every live producer is floored, so a too-short pass arrives already `RejectedTooShort` with no `lap_number`; the count never rose and never fell back. What dipped was a **reconnect replay**: the stream's resume cursor is a deliberate lower bound (the client advances `+1` per *applied* envelope because the wire echoes no per-envelope offset), so a socket blip replays intermediate folds. Filed as **#422**.
+
+The client fix stands regardless, and that is the point — a consumer keyed on identity does not need to know why a count moved. `useLapCallouts` was the last count-keyed detector in the console.
+
+### Removing Practice took its scaffolding with it
+
+`list()` pulled it out first, `create()` dodged its reserved id, `delete()` refused it, `restore_persisted_events()` skipped a stray `practice.sqlite`, the picker split the list in two, and the contract harness defaulted to it. All of that existed only to keep a **test fixture that shipped to users** working. Tests now create their event through the real API, which is better coverage than the fixture ever gave.
+
+### Filed, not built
+
+**#421** (heat setup sends no band/channel label to RH — the other write path #413 could not reach), **#422** (the reconnect replay), **#423** (#407 part 2, the RHAPI audit), **#424** (the matrix's no-plugin legs should assert Grid *refuses* to race — #405's own warning is that deleting them recreates #389's blind spot).
+
+### The bench, left ready
+
+Practice event gone, the RD's `test-d46ptx` event intact, NuclearHazard and Docker RH restored with the 3 calibration entries (they had been left behind in the pre-fresh-start data dir). Both timers left **Configured, not connected** — #407's neutralisation writes to the timer on connect, and that should be the RD's choice to make while watching.
