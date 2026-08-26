@@ -103,10 +103,16 @@ fn live_rotorhazard_race_translates_to_laps() {
     // Let the connection settle and the server register us before driving it.
     std::thread::sleep(Duration::from_secs(2));
 
-    // Disable RH's lap minimum for the sim: our rapid `simulate_lap` injections are far closer
-    // together than RH's 10s default `MIN_LAP_TIME`, which otherwise logs "Pass record under lap
-    // minimum (10)" for every short lap. `0` lets every sim lap record cleanly.
-    conn.set_min_lap_time(0).ok();
+    // Neutralise RH's own min-lap filter for the sim: these laps are far closer together than
+    // RotorHazard's 10s default `MinLapSec`, and with `MinLapBehavior` set to discard RH would
+    // throw the crossing away before the adapter could ever see it. This is the same call the
+    // Director makes at every handshake (#407) — it reads, writes BOTH settings, and confirms by
+    // re-reading, so a `neutral: false` here means the timer really is still filtering.
+    assert!(
+        conn.ensure_min_lap_neutral().neutral,
+        "could not clear RotorHazard's own min-lap filter — short laps would be filtered out \
+         before the adapter sees them"
+    );
 
     // Reset to a clean READY state (a prior DONE race blocks staging), then ignore
     // any events that reset produced — we only assert on the fresh race below.
@@ -256,7 +262,16 @@ fn mid_race_reconnect_does_not_double_count_laps() {
 
     // Disable RH's lap minimum for the sim (see the first test) so the short `simulate_lap`
     // crossings below don't trip "Pass record under lap minimum (10)".
-    conn.set_min_lap_time(0).ok();
+    // Neutralise RH's own min-lap filter for the sim: these laps are far closer together than
+    // RotorHazard's 10s default `MinLapSec`, and with `MinLapBehavior` set to discard RH would
+    // throw the crossing away before the adapter could ever see it. This is the same call the
+    // Director makes at every handshake (#407) — it reads, writes BOTH settings, and confirms by
+    // re-reading, so a `neutral: false` here means the timer really is still filtering.
+    assert!(
+        conn.ensure_min_lap_neutral().neutral,
+        "could not clear RotorHazard's own min-lap filter — short laps would be filtered out \
+         before the adapter sees them"
+    );
 
     conn.stop_race().ok();
     conn.discard_laps().expect("emit discard_laps");
@@ -381,9 +396,16 @@ fn heat_past_rh_lap_limit_still_delivers_every_crossing() {
     let mut events: Vec<Event> = Vec::new();
     std::thread::sleep(Duration::from_secs(2));
 
-    // Short sim laps: RH's 10s default MIN_LAP_TIME would otherwise reject them (see the tests
-    // above). Orthogonal to the win condition under test.
-    conn.set_min_lap_time(0).ok();
+    // Neutralise RH's own min-lap filter for the sim: these laps are far closer together than
+    // RotorHazard's 10s default `MinLapSec`, and with `MinLapBehavior` set to discard RH would
+    // throw the crossing away before the adapter could ever see it. This is the same call the
+    // Director makes at every handshake (#407) — it reads, writes BOTH settings, and confirms by
+    // re-reading, so a `neutral: false` here means the timer really is still filtering.
+    assert!(
+        conn.ensure_min_lap_neutral().neutral,
+        "could not clear RotorHazard's own min-lap filter — short laps would be filtered out \
+         before the adapter sees them"
+    );
 
     // Clean READY state, then forget the churn.
     conn.stop_race().ok();

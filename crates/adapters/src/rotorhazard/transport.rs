@@ -558,6 +558,14 @@ pub struct PluginHello {
     /// exactly #403, and it must never be a silent condition.
     #[serde(default)]
     pub grid_format_error: Option<String>,
+    /// The plugin's **min-lap neutralisation report** (#407): what it found RotorHazard's own
+    /// min-lap filter set to, and what it reads now after zeroing it.
+    ///
+    /// `None` from a plugin build older than the one that does this (the field timer still runs
+    /// v0.1.0), which is not an error — it means the Director must do the job itself over the
+    /// socket. See [`RotorHazardConnection::ensure_min_lap_neutral`].
+    #[serde(default)]
+    pub min_lap: Option<MinLapReport>,
 }
 
 impl PluginHello {
@@ -572,6 +580,181 @@ impl PluginHello {
 /// self-check and omits it when its lap atom is unreadable, so its presence in the handshake — and
 /// nothing else — decides whether the adapter takes plugin passes or RotorHazard's `current_laps`.
 pub const CAP_LIVE_PASS: &str = "live_pass";
+
+/// The GridFPV plugin's **min-lap report**, carried on both `gridfpv_hello_ack` (the load-time
+/// neutralisation) and `gridfpv_format_ack` (the per-stage re-assertion) — #407.
+///
+/// RotorHazard runs its own minimum-lap rule underneath GridFPV's, and its behaviour flag can
+/// **discard** a sub-minimum crossing rather than merely flag it. A discarded crossing never
+/// reaches GridFPV at all, so GridFPV's own per-round floor (D26) never gets to run on it and
+/// #397's rejected-crossing tone never fires — the crossing an RD most needs to hear about is
+/// exactly the one the timer threw away.
+///
+/// `*_was` are what the plugin found the **first** time it touched that server, not on this call:
+/// they are the record of the setting GridFPV displaced, and re-reading them after the write would
+/// only ever report GridFPV's own zero back.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MinLapReport {
+    /// Whether RotorHazard's filter is confirmed neutral — the plugin re-reads after writing
+    /// rather than trusting the write.
+    pub ok: bool,
+    /// RotorHazard's `MinLapSec` as first found (seconds; RH's own default is 10).
+    #[serde(default)]
+    pub secs_was: Option<i64>,
+    /// RotorHazard's `TIMING`/`MinLapBehavior` as first found (0 = highlight, non-zero = discard).
+    #[serde(default)]
+    pub behavior_was: Option<i64>,
+    /// What `MinLapSec` reads now, after the write and the confirming re-read.
+    #[serde(default)]
+    pub secs_now: Option<i64>,
+    /// What `MinLapBehavior` reads now, same.
+    #[serde(default)]
+    pub behavior_now: Option<i64>,
+    /// Why it could not be neutralised, when `ok` is false.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The plugin capability that says the plugin **neutralises RotorHazard's own min-lap filter**
+/// (#407) and reports what it found. Absent from plugin builds older than v0.4.0 — the Director
+/// then does it over the socket instead, and says so.
+pub const CAP_MIN_LAP_NEUTRAL: &str = "min_lap_neutral";
+
+/// The min-lap floor GridFPV applies to a RotorHazard timer: **none**.
+///
+/// This is GridFPV's value, stated in GridFPV's own source. It is never derived from what the
+/// timer happened to be set to — D27: a value read from a timer is evidence about the timer, not
+/// an input to a decision. GridFPV's *real* min-lap rule is the per-round floor of D26, enforced
+/// on every live fold (#409) and reversible from marshaling; the timer's job is to report every
+/// crossing so that rule has something to run on.
+pub const MIN_LAP_NEUTRAL_SECS: i64 = 0;
+
+/// The min-lap **behaviour** GridFPV applies: `0`, RotorHazard's "highlight, don't discard".
+///
+/// Belt-and-braces with [`MIN_LAP_NEUTRAL_SECS`]: either alone neutralises the filter today, but
+/// they are independent settings on two independent RotorHazard screens (an option row and a
+/// server-config item), and GridFPV must not depend on the RD leaving the other one alone.
+pub const MIN_LAP_BEHAVIOR_HIGHLIGHT: i64 = 0;
+
+/// How long [`ensure_min_lap_neutral`](RotorHazardConnection::ensure_min_lap_neutral) waits for
+/// RotorHazard's `min_lap` frame — both for the initial read and for the confirming re-read.
+///
+/// Short: this is a `load_data` against a socket that has already answered several others, and it
+/// runs once per connection at handshake, before any heat is armed. A timeout is not fatal, it is
+/// *loud* — the RD is told the filter could not be read.
+const MIN_LAP_READBACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How GridFPV neutralised RotorHazard's min-lap filter on this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum MinLapRoute {
+    /// Nothing has been attempted yet on this connection.
+    Unattempted,
+    /// The GridFPV plugin did it in-process through RHAPI (`db.option_set` +
+    /// `config.set`) — the preferred route, and the only one that also re-asserts per stage.
+    Plugin,
+    /// The Director did it over the socket (`set_min_lap` / `set_min_lap_behavior`), because the
+    /// timer's plugin is older than [`CAP_MIN_LAP_NEUTRAL`] or its own attempt failed.
+    Socket,
+}
+
+/// **GridFPV's record of what it did to a timer's min-lap filter** (#407, D27).
+///
+/// D27's rule for a value GridFPV pushes onto hardware: writing to a timer is *applying*, not
+/// storing, and what GridFPV decided must be recorded on GridFPV's side rather than read back off
+/// the timer as truth. So this record separates the two halves explicitly:
+///
+/// * `found_*` is **evidence about the timer** — what the RD had it set to, captured once, before
+///   GridFPV wrote anything. It is what an RD needs in order to put their timer back, and it is
+///   never promoted into a GridFPV setting.
+/// * `applied_*` is **GridFPV's decision** — the constants above, which are the same on every
+///   timer GridFPV drives and are readable from GridFPV's source without a timer attached.
+///
+/// `neutral` is the only bit that gates anything, and it is set from a **confirming re-read**, not
+/// from a successful write.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MinLapRecord {
+    /// Which route got there (or `Unattempted`).
+    pub route: MinLapRoute,
+    /// `MinLapSec` as first observed on this timer, before GridFPV wrote anything. `None` if it
+    /// could never be read — which is itself the loud case.
+    pub found_secs: Option<i64>,
+    /// `TIMING`/`MinLapBehavior` as first observed, same.
+    pub found_behavior: Option<i64>,
+    /// What GridFPV applied — always [`MIN_LAP_NEUTRAL_SECS`].
+    pub applied_secs: i64,
+    /// What GridFPV applied — always [`MIN_LAP_BEHAVIOR_HIGHLIGHT`].
+    pub applied_behavior: i64,
+    /// Whether the timer is **confirmed** to pass every crossing through to GridFPV.
+    pub neutral: bool,
+    /// Why not, when `neutral` is false.
+    pub error: Option<String>,
+}
+
+impl Default for MinLapRecord {
+    fn default() -> Self {
+        Self {
+            route: MinLapRoute::Unattempted,
+            found_secs: None,
+            found_behavior: None,
+            applied_secs: MIN_LAP_NEUTRAL_SECS,
+            applied_behavior: MIN_LAP_BEHAVIOR_HIGHLIGHT,
+            neutral: false,
+            error: None,
+        }
+    }
+}
+
+impl MinLapRecord {
+    /// Record the timer's own values, **once**. Later observations are of GridFPV's own writes and
+    /// would erase the only note of what the RD had — the same first-sighting discipline
+    /// `OwnedFormat`'s displaced-format capture uses.
+    fn observe(&mut self, secs: Option<i64>, behavior: Option<i64>) {
+        if self.found_secs.is_none() && self.found_behavior.is_none() {
+            self.found_secs = secs;
+            self.found_behavior = behavior;
+        }
+    }
+}
+
+/// Whether a `(MinLapSec, MinLapBehavior)` pair lets **every** crossing through to GridFPV.
+///
+/// From `RHRace.py::pass_record_callback`, identical on v4.3.0 and v4.4.0:
+/// `if lap_ok_flag and lap_time < (min_lap * 1000) { … if min_lap_behavior != 0 { lap_ok_flag = false } }`
+/// — so a zero floor makes the test unreachable and a zero behaviour keeps the crossing even when
+/// it fires. GridFPV requires *both*, because either can be moved from RotorHazard's UI alone.
+fn min_lap_is_neutral(secs: Option<i64>, behavior: Option<i64>) -> bool {
+    secs == Some(MIN_LAP_NEUTRAL_SECS) && behavior == Some(MIN_LAP_BEHAVIOR_HIGHLIGHT)
+}
+
+/// Per-connection min-lap state: GridFPV's record, plus the socket-route scratch space.
+#[derive(Debug, Default)]
+struct MinLapState {
+    /// GridFPV's record — the thing the rest of the system reads.
+    record: MinLapRecord,
+    /// The most recent `min_lap` frame RotorHazard sent, as `(min_lap, min_lap_behavior)`.
+    /// Cleared before each request so a stale frame cannot answer a fresh question.
+    observed: Option<(i64, i64)>,
+    /// One-shot latch: the "could not be neutralised" warning has already been announced on this
+    /// connection. Announced once, not once per heat — a per-stage repeat would bury it.
+    announced: bool,
+}
+
+/// Parse RotorHazard's `min_lap` frame into `(min_lap_secs, min_lap_behavior)`.
+///
+/// `RHUI.emit_min_lap` sends `{min_lap, min_lap_behavior}` on v4.3.0 and adds `min_first_crossing`
+/// on v4.4.0 — an extra key GridFPV ignores, which is why this reads the two fields it needs
+/// rather than deserializing a struct. Both values come from RotorHazard's own `get_optionInt` /
+/// `get_item_int`, so they are JSON numbers; a numeric **string** is accepted too, because a
+/// never-set config item can round-trip through RotorHazard's JSON config file as one.
+fn parse_min_lap_frame(value: &serde_json::Value) -> Option<(i64, i64)> {
+    fn field(value: &serde_json::Value, key: &str) -> Option<i64> {
+        let raw = value.get(key)?;
+        raw.as_i64()
+            .or_else(|| raw.as_f64().map(|f| f as i64))
+            .or_else(|| raw.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+    }
+    Some((field(value, "min_lap")?, field(value, "min_lap_behavior")?))
+}
 
 /// The plugin capability that makes **Grid own its RotorHazard race format** (#404, #405): the
 /// plugin creates (find-or-create, once) a `GridFPV` format row with every RH-side race decision
@@ -618,6 +801,11 @@ pub struct FormatAck {
     /// That format's name, for a diagnostic an RD recognises (the raw id alone is not a name).
     #[serde(default)]
     pub previous_format_name: Option<String>,
+    /// The plugin's **re-assertion** of the min-lap neutralisation for this stage (#407). RH's
+    /// filter lives on a settings screen the RD can reach between heats, so it is re-checked every
+    /// time the format is, not only at handshake. `None` from a plugin older than v0.4.0.
+    #[serde(default)]
+    pub min_lap: Option<MinLapReport>,
     /// Why it failed, when `ok` is false.
     #[serde(default)]
     pub error: Option<String>,
@@ -664,6 +852,56 @@ struct OwnedFormat {
     announced: bool,
 }
 
+/// Fold a plugin [`MinLapReport`] into GridFPV's [`MinLapRecord`]; returns whether the record was
+/// neutral **before** this fold (so a caller can tell a regression from a never-worked).
+///
+/// `None` — an older plugin with no opinion — leaves the record `Unattempted` rather than marking
+/// it failed: it is not a failure, it is a job the Director has not done yet.
+fn fold_plugin_min_lap(slot: &Arc<Mutex<MinLapState>>, report: Option<&MinLapReport>) -> bool {
+    let mut state = slot.lock().expect("min-lap lock");
+    let was_neutral = state.record.neutral;
+    let Some(report) = report else {
+        return was_neutral;
+    };
+    state.record.route = MinLapRoute::Plugin;
+    state.record.observe(report.secs_was, report.behavior_was);
+    state.record.neutral = report.ok;
+    state.record.error = report.error.clone();
+    was_neutral
+}
+
+/// Announce, once, that a timer's own min-lap filter could not be neutralised (#407).
+///
+/// Deliberately explicit about the consequence rather than the mechanism. Silence here recreates
+/// exactly the bug this fixes: RotorHazard discarding a crossing is invisible from GridFPV's side —
+/// there is no missing-lap counter to trip and no malformed frame to blame — so an RD who is not
+/// told will read a swallowed crossing as a dead gate, which is the diagnosis #403 cost a session to.
+fn announce_min_lap_failure(record: &MinLapRecord) {
+    crate::diag!("{}", min_lap_failure_line(record));
+}
+
+/// The text of that announcement, built separately from the emitting so its *content* — not merely
+/// the fact that something was said — is what the test asserts on. What this line says is the whole
+/// point of #407: an RD who is told "the filter could not be cleared" and nothing else has no
+/// reason to connect that to the tone that stopped firing.
+fn min_lap_failure_line(record: &MinLapRecord) -> String {
+    format!(
+        "gridfpv: rotorhazard: could NOT neutralise this timer's own min-lap filter ({}) — it was \
+         MinLapSec={:?}, MinLapBehavior={:?} (behavior 0 = highlight, non-zero = DISCARD). While \
+         it stands, RotorHazard may throw away crossings closer together than its minimum before \
+         GridFPV ever sees them: GridFPV's own min-lap ruling never runs on them, marshaling \
+         cannot restore them, and the rejected-crossing tone (#397) stays silent for exactly the \
+         crossings it exists to announce. Set RotorHazard's minimum lap time to 0 (Settings → \
+         Timing) before racing",
+        record
+            .error
+            .clone()
+            .unwrap_or_else(|| "no reason given".to_string()),
+        record.found_secs,
+        record.found_behavior,
+    )
+}
+
 /// A live connection to a RotorHazard server, translating its socket stream into
 /// canonical [`Event`]s.
 pub struct RotorHazardConnection {
@@ -703,6 +941,15 @@ pub struct RotorHazardConnection {
     /// by [`prepare_instant_start`](Self::prepare_instant_start) to decide whether Grid selects
     /// its own format row or falls back to mutating the race director's.
     owned_format: Arc<Mutex<OwnedFormat>>,
+    /// **GridFPV's min-lap record for this connection** (#407) — see [`MinLapRecord`]. Written by
+    /// the `gridfpv_hello_ack` / `gridfpv_format_ack` handlers (the plugin route) and by
+    /// [`ensure_min_lap_neutral`](Self::ensure_min_lap_neutral) (the socket route); the `min_lap`
+    /// handler drops RotorHazard's readback frames into it.
+    ///
+    /// Per-connection, never carried across a reconnect: a timer whose RD moved the setting back
+    /// while GridFPV was away must be re-read and re-neutralised, not inherit a stale "yes, every
+    /// crossing gets through".
+    min_lap: Arc<Mutex<MinLapState>>,
     /// **How many nodes the timer reported** on this connection (#412), or `None` until it has
     /// said. Written by the `frequency_data` handler (and, as a fallback, by the
     /// `enter_and_exit_at_levels` one); read by [`wait_for_reported_nodes`](Self::wait_for_reported_nodes).
@@ -755,6 +1002,9 @@ impl RotorHazardConnection {
         // Fresh link, fresh owned-format state: nothing is assumed neutralised until THIS socket's
         // plugin says so (see `OwnedFormat`).
         let owned_format: Arc<Mutex<OwnedFormat>> = Arc::new(Mutex::new(OwnedFormat::default()));
+        // Fresh link, fresh min-lap record (#407): nothing is assumed to be letting crossings
+        // through until THIS socket proves it (see `MinLapState`).
+        let min_lap: Arc<Mutex<MinLapState>> = Arc::new(Mutex::new(MinLapState::default()));
         // The tune-telemetry tap (#355 S2a), closed. A fresh link starts NOT capturing: the Tune
         // page's lease is what opens it, and a reconnect under a still-open lease is re-opened by
         // the driver's next tick (which re-reads the lease and re-warms the store).
@@ -998,6 +1248,26 @@ impl RotorHazardConnection {
                     }
                 }
             })
+            // **RotorHazard's own min-lap filter, read back** (#407). `RHUI.emit_min_lap`, in
+            // reply to the `load_data` `ensure_min_lap_neutral` sends and again (broadcast) after
+            // any `set_min_lap` / `set_min_lap_behavior`. Bound unconditionally — there is no way
+            // to attach a handler later — but it costs nothing when idle: RotorHazard emits it
+            // only when asked, or when the setting actually changes.
+            //
+            // Not a `Raw` variant, deliberately, exactly like `frequency_data`: a timer's config
+            // is an *observation about the timer*, and `Raw` is the only input to the translator
+            // that mints `Event`s. It never becomes a GridFPV setting (D27).
+            .on("min_lap", {
+                let min_lap = min_lap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    let Some(value) = first_text(&payload) else {
+                        return;
+                    };
+                    if let Some(pair) = parse_min_lap_frame(&value) {
+                        min_lap.lock().expect("min-lap lock").observed = Some(pair);
+                    }
+                }
+            })
             .on("node_crossing_change", {
                 let tap = tap.clone();
                 move |payload: Payload, _client: RawClient| {
@@ -1009,6 +1279,7 @@ impl RotorHazardConnection {
                 let adapter = adapter.clone();
                 let sink = events.clone();
                 let owned_format = owned_format.clone();
+                let min_lap = min_lap.clone();
                 move |payload: Payload, _client: RawClient| {
                     if let Some(parsed) = parse_hello(&payload) {
                         // The Grid-owned race format (#404): learn the row the plugin made for us,
@@ -1038,6 +1309,15 @@ impl RotorHazardConnection {
                                     .unwrap_or_else(|| "no reason given".to_string()),
                             );
                         }
+                        // RotorHazard's own min-lap filter (#407). A plugin that did the job
+                        // in-process is the preferred route; anything else — an older plugin with
+                        // no opinion, or one that tried and failed — leaves the record
+                        // un-neutralised, and the driver's `ensure_min_lap_neutral` then takes the
+                        // socket route. Nothing is announced here: the driver announces once, with
+                        // the final outcome, so an RD is not told the filter is broken and then
+                        // immediately told it is fine.
+                        fold_plugin_min_lap(&min_lap, parsed.min_lap.as_ref());
+
                         let live_pass = parsed.advertises(CAP_LIVE_PASS);
                         // The switch mints any laps held for the plugin instead of dropping them
                         // (#400) — forward them to the same sink the frame handlers feed.
@@ -1067,6 +1347,7 @@ impl RotorHazardConnection {
             // still gets announced instead of silently un-neutralising the timer.
             .on("gridfpv_format_ack", {
                 let owned_format = owned_format.clone();
+                let min_lap_slot = min_lap.clone();
                 move |payload: Payload, _client: RawClient| {
                     let Some(ack) = parse_format_ack(&payload) else {
                         return;
@@ -1085,6 +1366,28 @@ impl RotorHazardConnection {
                         owned.error = ack.error.clone();
                         first
                     };
+                    // The per-stage re-assertion (#407): RH's filter can be moved back from its
+                    // own settings screen between heats, and the plugin re-checks it every time it
+                    // re-checks the format. A regression here IS announced — unlike the handshake
+                    // fold, there is no later step that will report the final outcome, and a filter
+                    // that came back mid-event silently takes #397's rejected-crossing tone with it.
+                    if let Some(report) = ack.min_lap.as_ref() {
+                        let was_neutral = fold_plugin_min_lap(&min_lap_slot, Some(report));
+                        if !report.ok && was_neutral {
+                            crate::diag!(
+                                "gridfpv: rotorhazard: this timer's own min-lap filter came BACK \
+                                 mid-event and could not be cleared ({}) — it may now DISCARD \
+                                 crossings closer together than its minimum before GridFPV ever \
+                                 sees them, which silently disables both GridFPV's own min-lap \
+                                 ruling and its rejected-crossing tone (#397/#407). Set \
+                                 RotorHazard's minimum lap time back to 0 before racing",
+                                report
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| "no reason given".to_string()),
+                            );
+                        }
+                    }
                     if !ack.ok {
                         crate::diag!(
                             "gridfpv: rotorhazard: the GridFPV plugin could not select its `{name}` \
@@ -1162,6 +1465,7 @@ impl RotorHazardConnection {
             current_format,
             hello,
             owned_format,
+            min_lap,
             reported_nodes,
             tap,
         })
@@ -1740,22 +2044,204 @@ impl RotorHazardConnection {
         )
     }
 
-    /// Set RotorHazard's **minimum lap time** (general setting `MIN_LAP_TIME`, in **seconds**) —
-    /// a driving helper so the sim/test harness does not trip RH's "Pass record under lap
-    /// minimum" filter.
+    /// **Ask RotorHazard for its min-lap filter** — `load_data` with
+    /// `{"load_types": ["min_lap"]}`, which RH answers with a `min_lap` emit addressed to this
+    /// socket (`nobroadcast`) carrying `{min_lap, min_lap_behavior}` (#407).
     ///
-    /// RotorHazard defaults `MIN_LAP_TIME` to **10s** and logs `Pass record under lap minimum (10)`
-    /// for any crossing closer than that to the previous one — which the test harness's rapid
-    /// `simulate_lap` injections (and short-lap sim CSVs) routinely are, so RH spams the warning.
-    /// Emitting RotorHazard's `set_option` handler with `{ option: "MIN_LAP_TIME", value: "<sec>" }`
-    /// persists the setting server-side; passing `0` disables the minimum entirely so every
-    /// short sim lap records cleanly. Best-effort (a failed emit on a dropped socket is the
-    /// caller's to log); intended for the disposable test RH only, never a production timer.
-    pub fn set_min_lap_time(&self, seconds: u64) -> Result<(), rust_socketio::Error> {
+    /// This is the **readback**, and it is what makes the socket route honest rather than a blind
+    /// write: `server.py::on_load_data`'s `min_lap` branch calls `RHUI.emit_min_lap`, which
+    /// serialises the two values the filter actually consults. Identical on v4.3.0 and v4.4.0 —
+    /// v4.4.0 adds a `min_first_crossing` key GridFPV ignores.
+    pub fn request_min_lap(&self) -> Result<(), rust_socketio::Error> {
+        self.client
+            .emit("load_data", json!({ "load_types": ["min_lap"] }))
+    }
+
+    /// Set RotorHazard's **minimum lap time** in seconds (#407).
+    ///
+    /// Emits `set_min_lap` with `{ min_lap }` — `server.py::on_set_min_lap`, which writes the
+    /// `MinLapSec` option, fires `Evt.MIN_LAP_TIME_SET`, and re-broadcasts `min_lap`. Verified
+    /// identical on v4.3.0 and v4.4.0, and carries no authentication (the `@requires_auth`
+    /// decorators in that file guard Flask HTTP routes, not socket handlers).
+    ///
+    /// ## This replaces a helper that did nothing
+    ///
+    /// The previous `set_min_lap_time` emitted `set_option` with
+    /// `{option: "MIN_LAP_TIME", value: "<sec>"}` and was documented "for the disposable test RH
+    /// only, never a production timer". Both halves of that were wrong. RotorHazard has **no
+    /// option named `MIN_LAP_TIME`** — that string is only the name of an *event* constant
+    /// (`Evt.MIN_LAP_TIME_SET`); the filter reads `MinLapSec`. `on_set_option` writes whatever key
+    /// it is handed, so the emit stored a row nothing ever read and returned `Ok`: a no-op that
+    /// looked like a success on both versions. It survived because RotorHazard's *default*
+    /// behaviour is highlight-don't-discard, so the harness's short sim laps recorded anyway and
+    /// nobody had reason to check.
+    ///
+    /// And a production timer is exactly where this belongs. RotorHazard applying its own min-lap
+    /// rule underneath GridFPV's is the two-referees problem of #403/#405 in its worst form: a
+    /// discarded crossing is not miscounted, it is *absent*, so GridFPV's own per-round floor
+    /// (D26) never runs on it, marshaling cannot restore it, and #397's rejected-crossing tone —
+    /// validated in the field as one of the most useful things the RD gets — never fires. Under
+    /// D27 pushing this value is GridFPV *applying* its own config to an instrument, which is
+    /// legitimate precisely because it is recorded on GridFPV's side ([`MinLapRecord`]) rather
+    /// than read back off the timer as truth.
+    ///
+    /// Prefer the plugin ([`CAP_MIN_LAP_NEUTRAL`]), which does this in-process through RHAPI and
+    /// re-asserts it per stage. This is the fallback for a plugin build that predates it — the
+    /// field timer still runs v0.1.0 — and for the sim harness.
+    pub fn set_min_lap(&self, seconds: i64) -> Result<(), rust_socketio::Error> {
+        self.client
+            .emit("set_min_lap", json!({ "min_lap": seconds }))
+    }
+
+    /// Set RotorHazard's **min-lap behaviour** (#407): `0` = highlight the sub-minimum crossing
+    /// but record it, non-zero = *discard* it.
+    ///
+    /// Emits `set_min_lap_behavior` with `{ min_lap_behavior }` — `server.py::on_set_min_lap_behavior`,
+    /// identical on v4.3.0 and v4.4.0. Note this one is **not** a database option: it writes
+    /// `serverconfig`'s `TIMING`/`MinLapBehavior`, a different store from
+    /// [`set_min_lap`](Self::set_min_lap)'s `MinLapSec`, which is why neutralising the filter takes
+    /// two writes rather than one. It is not in RotorHazard's restart-required key set, so it takes
+    /// effect immediately.
+    pub fn set_min_lap_behavior(&self, behavior: i64) -> Result<(), rust_socketio::Error> {
         self.client.emit(
-            "set_option",
-            json!({ "option": "MIN_LAP_TIME", "value": seconds.to_string() }),
+            "set_min_lap_behavior",
+            json!({ "min_lap_behavior": behavior }),
         )
+    }
+
+    /// **Make sure every crossing this timer detects reaches GridFPV** (#407), returning GridFPV's
+    /// [`MinLapRecord`] of what it found and what it applied.
+    ///
+    /// Two routes, in preference order — the same shape as
+    /// [`prepare_instant_start`](Self::prepare_instant_start):
+    ///
+    /// 1. **The plugin** ([`CAP_MIN_LAP_NEUTRAL`], v0.4.0+). It reads and zeroes both values
+    ///    in-process through RHAPI (`db.option_set("MinLapSec", 0)` and
+    ///    `config.set("TIMING", "MinLapBehavior", 0)` — present and identical on RHAPI 1.3 and
+    ///    1.4), confirms by re-reading, reports the outcome in `gridfpv_hello_ack`, and
+    ///    **re-asserts it at every stage** so a setting moved back between heats is caught. When
+    ///    the handshake already carried a confirmed-neutral report there is nothing to do here.
+    /// 2. **This socket**, otherwise: `load_data(min_lap)` to read, `set_min_lap` +
+    ///    `set_min_lap_behavior` to write, `load_data(min_lap)` again to confirm. Its limitation
+    ///    against the plugin route is that it runs **once, at handshake** — GridFPV has no reason
+    ///    to re-read it per heat on a link where nothing reports the change, so a filter the RD
+    ///    restores mid-event goes unnoticed until the next connect. That is the concrete cost of
+    ///    running a plugin older than v0.4.0.
+    ///
+    /// Called by the driver once per connection, right after the plugin probe and before any heat
+    /// can be armed. **Never silent**: an un-neutralised filter is announced through the
+    /// [`crate::diag`] sink naming the tone it compromises, once per connection.
+    ///
+    /// Never fails the connection — a timer whose filter could not be cleared must still connect,
+    /// so the Director can say so.
+    pub fn ensure_min_lap_neutral(&self) -> MinLapRecord {
+        // The plugin already proved it, in-process, and keeps re-proving it per stage.
+        {
+            let state = self.min_lap.lock().expect("min-lap lock");
+            if state.record.route == MinLapRoute::Plugin && state.record.neutral {
+                return state.record.clone();
+            }
+        }
+
+        let found = self.read_min_lap();
+        let Some((secs, behavior)) = found else {
+            let mut state = self.min_lap.lock().expect("min-lap lock");
+            state.record.route = MinLapRoute::Socket;
+            state.record.neutral = false;
+            state.record.error = Some(format!(
+                "RotorHazard did not answer load_data(min_lap) within {}s",
+                MIN_LAP_READBACK_TIMEOUT.as_secs()
+            ));
+            let record = state.record.clone();
+            let announce = !std::mem::replace(&mut state.announced, true);
+            drop(state);
+            if announce {
+                announce_min_lap_failure(&record);
+            }
+            return record;
+        };
+
+        {
+            let mut state = self.min_lap.lock().expect("min-lap lock");
+            state.record.route = MinLapRoute::Socket;
+            state.record.observe(Some(secs), Some(behavior));
+        }
+
+        if !min_lap_is_neutral(Some(secs), Some(behavior)) {
+            // Both, always — see `MIN_LAP_BEHAVIOR_HIGHLIGHT`. A failed emit is not returned: the
+            // confirming re-read below is what decides, and it cannot be fooled by an emit that
+            // was accepted and then ignored.
+            let _ = self.set_min_lap(MIN_LAP_NEUTRAL_SECS);
+            let _ = self.set_min_lap_behavior(MIN_LAP_BEHAVIOR_HIGHLIGHT);
+        }
+
+        // Confirm by re-reading, never by trusting the write — the discipline `request_thresholds`
+        // applies to calibration, and for the same reason.
+        let confirmed = self.read_min_lap();
+        let neutral = match confirmed {
+            Some((s, b)) => min_lap_is_neutral(Some(s), Some(b)),
+            None => false,
+        };
+        let mut state = self.min_lap.lock().expect("min-lap lock");
+        state.record.neutral = neutral;
+        state.record.error = if neutral {
+            None
+        } else {
+            Some(match confirmed {
+                Some((s, b)) => format!(
+                    "RotorHazard still reports MinLapSec={s}, MinLapBehavior={b} after the write"
+                ),
+                None => format!(
+                    "RotorHazard did not confirm the write within {}s",
+                    MIN_LAP_READBACK_TIMEOUT.as_secs()
+                ),
+            })
+        };
+        let record = state.record.clone();
+        let announce = !neutral && !std::mem::replace(&mut state.announced, true);
+        drop(state);
+
+        if announce {
+            announce_min_lap_failure(&record);
+        } else if neutral && (record.found_secs, record.found_behavior) != (Some(0), Some(0)) {
+            crate::diag!(
+                "gridfpv: rotorhazard: cleared this timer's own min-lap filter over the socket \
+                 (it was MinLapSec={:?}, MinLapBehavior={:?}) so every crossing reaches GridFPV \
+                 and GridFPV's per-round floor referees it (#407). Its GridFPV plugin is older \
+                 than the one that does this in-process, so the filter is NOT re-checked between \
+                 heats on this link — restoring it in RotorHazard mid-event would go unnoticed \
+                 until the next reconnect",
+                record.found_secs,
+                record.found_behavior,
+            );
+        }
+        record
+    }
+
+    /// GridFPV's min-lap record for this connection (#407) — see [`MinLapRecord`]. `Unattempted`
+    /// until [`ensure_min_lap_neutral`](Self::ensure_min_lap_neutral) or a plugin handshake has run.
+    pub fn min_lap_record(&self) -> MinLapRecord {
+        self.min_lap.lock().expect("min-lap lock").record.clone()
+    }
+
+    /// Ask for, and wait (bounded) for, RotorHazard's `min_lap` frame — `(min_lap, behavior)`, or
+    /// `None` if it never answered.
+    ///
+    /// Clears the previous observation first so a frame from an earlier request (or from the
+    /// broadcast a *write* triggers) cannot be mistaken for the answer to this one.
+    fn read_min_lap(&self) -> Option<(i64, i64)> {
+        self.min_lap.lock().expect("min-lap lock").observed = None;
+        self.request_min_lap().ok()?;
+        let deadline = Instant::now() + MIN_LAP_READBACK_TIMEOUT;
+        loop {
+            if let Some(pair) = self.min_lap.lock().expect("min-lap lock").observed {
+                return Some(pair);
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Stop the current race — driving helper for tests.
@@ -2226,6 +2712,271 @@ mod tests {
         assert_eq!(
             adapter.counts.malformed_frames, 0,
             "nothing about this frame is malformed"
+        );
+    }
+
+    // ---- RotorHazard's own min-lap filter (#407) -------------------------------------------
+    //
+    // The bug these guard: RH runs a second min-lap rule underneath GridFPV's, and its behaviour
+    // flag can DISCARD the crossing rather than flag it. A discarded crossing never reaches
+    // GridFPV, so D26's per-round floor never runs on it, marshaling has nothing to restore, and
+    // #397's rejected-crossing tone is silent for precisely the crossing it exists to announce.
+
+    /// A `min_lap` frame as RotorHazard 4.3.0 sends it (`RHUI.emit_min_lap`), at its own defaults.
+    fn min_lap_frame_430(secs: i64, behavior: i64) -> serde_json::Value {
+        json!({ "min_lap": secs, "min_lap_behavior": behavior })
+    }
+
+    /// The same frame on 4.4.0 — one extra key (`min_first_crossing`) GridFPV does not consult.
+    fn min_lap_frame_440(secs: i64, behavior: i64) -> serde_json::Value {
+        json!({
+            "min_lap": secs,
+            "min_first_crossing": 10,
+            "min_lap_behavior": behavior,
+        })
+    }
+
+    /// **Both values are read, on both supported RotorHazard versions.**
+    ///
+    /// Reading one is not enough and never was: `MinLapSec` is a database option, `MinLapBehavior`
+    /// is a *server config* item in a different store, and it is the second one that decides
+    /// whether an under-minimum crossing is merely logged or destroyed. 4.4.0's extra
+    /// `min_first_crossing` key must not break the parse — a struct deserialize would have been
+    /// fine here, but only by luck, and `unlimited_time`/`race_mode` is the standing example of a
+    /// name that did not carry across versions.
+    #[test]
+    fn the_min_lap_readback_carries_both_values_on_both_versions() {
+        assert_eq!(
+            parse_min_lap_frame(&min_lap_frame_430(10, 0)),
+            Some((10, 0)),
+            "4.3.0: RotorHazard's own defaults — a 10s floor, highlight-don't-discard"
+        );
+        assert_eq!(
+            parse_min_lap_frame(&min_lap_frame_440(10, 1)),
+            Some((10, 1)),
+            "4.4.0: the extra min_first_crossing key is ignored, both values still land"
+        );
+        // RotorHazard's JSON config file can round-trip a never-set item back as a string.
+        assert_eq!(
+            parse_min_lap_frame(&json!({ "min_lap": "10", "min_lap_behavior": "1" })),
+            Some((10, 1))
+        );
+        // A frame missing the behaviour half is NOT half an answer: reporting `MinLapSec=0, all
+        // clear` off a frame that never said what the behaviour was is the silent-failure mode.
+        assert_eq!(parse_min_lap_frame(&json!({ "min_lap": 0 })), None);
+        assert_eq!(parse_min_lap_frame(&json!("not an object")), None);
+    }
+
+    /// **Neutral means BOTH.** Either setting alone lets every crossing through *today*, but they
+    /// live on two independent RotorHazard screens and GridFPV must not depend on the RD leaving
+    /// the other one alone. The `(10, 1)` row is the one that actually loses laps.
+    #[test]
+    fn only_a_zero_floor_and_a_zero_behavior_count_as_neutral() {
+        assert!(min_lap_is_neutral(Some(0), Some(0)));
+        assert!(
+            !min_lap_is_neutral(Some(10), Some(1)),
+            "a 10s floor set to DISCARD is the #407 timer: crossings vanish before GridFPV"
+        );
+        assert!(!min_lap_is_neutral(Some(10), Some(0)));
+        assert!(!min_lap_is_neutral(Some(0), Some(1)));
+        assert!(
+            !min_lap_is_neutral(None, Some(0)),
+            "a value that could not be read is not a value that is fine"
+        );
+    }
+
+    /// **The handshake reads both values off the plugin, and an older plugin says nothing.**
+    ///
+    /// The field timer runs plugin v0.1.0 while the repo is at v0.4.0, so the no-`min_lap` ack is
+    /// the case that must not become an error: it means "the Director does this itself over the
+    /// socket", not "this timer is broken".
+    #[test]
+    fn the_plugin_handshake_carries_the_min_lap_report_and_survives_an_older_plugin() {
+        let ack = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.4.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "live_signal", "owned_format", "min_lap_neutral"],
+            "node_count": 4,
+            "grid_format_id": 7,
+            "min_lap": {
+                "ok": true,
+                "secs_was": 10,
+                "behavior_was": 1,
+                "secs_now": 0,
+                "behavior_now": 0,
+                "error": null,
+            },
+        }));
+        let parsed = parse_hello(&ack).expect("a v0.4.0 hello ack must parse");
+        assert!(parsed.advertises(CAP_MIN_LAP_NEUTRAL));
+        let report = parsed.min_lap.expect("the report rides the handshake");
+        assert!(report.ok);
+        assert_eq!(
+            (report.secs_was, report.behavior_was),
+            (Some(10), Some(1)),
+            "what the RD's timer was set to — read, not assumed"
+        );
+        assert_eq!((report.secs_now, report.behavior_now), (Some(0), Some(0)));
+
+        // The v0.1.0 ack in the field: no such key, and no such capability.
+        let old = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.1.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "live_signal"],
+            "node_count": 4,
+        }));
+        let parsed = parse_hello(&old).expect("an older plugin's ack must still parse");
+        assert!(!parsed.advertises(CAP_MIN_LAP_NEUTRAL));
+        assert!(
+            parsed.min_lap.is_none(),
+            "absence is 'not done yet', which the socket route then handles"
+        );
+    }
+
+    /// **The neutralise path, recorded GridFPV-side.**
+    ///
+    /// D27's discipline: what GridFPV *applied* is GridFPV's own constant, and what it *found* is
+    /// evidence captured once — before GridFPV wrote anything. The second fold is the one that
+    /// matters: the plugin re-asserts at every stage, and a naive record would by then be
+    /// reporting GridFPV's own zero back as "what the race director had", erasing the only note of
+    /// the setting GridFPV displaced.
+    #[test]
+    fn the_neutralise_path_records_what_grid_found_once_and_what_grid_applied() {
+        let slot: Arc<Mutex<MinLapState>> = Arc::new(Mutex::new(MinLapState::default()));
+        assert_eq!(
+            slot.lock().unwrap().record.route,
+            MinLapRoute::Unattempted,
+            "a fresh connection assumes nothing"
+        );
+
+        let was_neutral = fold_plugin_min_lap(
+            &slot,
+            Some(&MinLapReport {
+                ok: true,
+                secs_was: Some(10),
+                behavior_was: Some(1),
+                secs_now: Some(0),
+                behavior_now: Some(0),
+                error: None,
+            }),
+        );
+        assert!(!was_neutral, "it was not neutral before this fold");
+        let record = slot.lock().unwrap().record.clone();
+        assert_eq!(record.route, MinLapRoute::Plugin);
+        assert!(record.neutral);
+        assert_eq!(
+            (record.found_secs, record.found_behavior),
+            (Some(10), Some(1))
+        );
+        assert_eq!(
+            (record.applied_secs, record.applied_behavior),
+            (MIN_LAP_NEUTRAL_SECS, MIN_LAP_BEHAVIOR_HIGHLIGHT),
+            "GridFPV's decision, from GridFPV's source — never derived from the timer"
+        );
+
+        // The per-stage re-assertion, reporting the timer as GridFPV left it.
+        fold_plugin_min_lap(
+            &slot,
+            Some(&MinLapReport {
+                ok: true,
+                secs_was: Some(10),
+                behavior_was: Some(1),
+                secs_now: Some(0),
+                behavior_now: Some(0),
+                error: None,
+            }),
+        );
+        let record = slot.lock().unwrap().record.clone();
+        assert_eq!(
+            (record.found_secs, record.found_behavior),
+            (Some(10), Some(1)),
+            "the RD's original setting survives every re-assertion — it is the hand-back record"
+        );
+
+        // An older plugin's silence leaves the record alone rather than marking it failed.
+        let fresh: Arc<Mutex<MinLapState>> = Arc::new(Mutex::new(MinLapState::default()));
+        fold_plugin_min_lap(&fresh, None);
+        let record = fresh.lock().unwrap().record.clone();
+        assert_eq!(record.route, MinLapRoute::Unattempted);
+        assert!(!record.neutral);
+        assert!(
+            record.error.is_none(),
+            "not yet done is not the same as failed"
+        );
+    }
+
+    /// **A plugin that tried and failed leaves the record un-neutral, with its reason.**
+    /// That is what sends the Director down the socket route rather than racing on a filter it
+    /// merely hopes is gone.
+    #[test]
+    fn a_failed_plugin_neutralisation_is_recorded_as_a_failure() {
+        let slot: Arc<Mutex<MinLapState>> = Arc::new(Mutex::new(MinLapState::default()));
+        fold_plugin_min_lap(
+            &slot,
+            Some(&MinLapReport {
+                ok: false,
+                secs_was: Some(10),
+                behavior_was: Some(1),
+                secs_now: Some(10),
+                behavior_now: Some(1),
+                error: Some("MinLapSec: OperationalError('database is locked')".into()),
+            }),
+        );
+        let record = slot.lock().unwrap().record.clone();
+        assert!(!record.neutral);
+        assert_eq!(record.route, MinLapRoute::Plugin);
+        assert!(record.error.unwrap().contains("database is locked"));
+    }
+
+    /// **The failure is loud, and it names the tone.**
+    ///
+    /// Silence here recreates the bug this fixes. RotorHazard discarding a crossing is invisible
+    /// from GridFPV's side — no missing-lap counter trips, no frame is malformed — so an RD who is
+    /// not told reads a swallowed crossing as a dead gate, which is the diagnosis #403 cost a
+    /// session to. The line must therefore carry the *consequence* (#397's tone, GridFPV's own
+    /// ruling), the values found, and what to do about it — not just "could not set option".
+    #[test]
+    fn a_filter_that_cannot_be_cleared_is_announced_loudly_and_names_the_consequence() {
+        let record = MinLapRecord {
+            route: MinLapRoute::Socket,
+            found_secs: Some(10),
+            found_behavior: Some(1),
+            neutral: false,
+            error: Some("RotorHazard did not answer load_data(min_lap) within 3s".into()),
+            ..MinLapRecord::default()
+        };
+        let line = min_lap_failure_line(&record);
+        for needle in [
+            "could NOT neutralise",
+            "MinLapSec=Some(10)",
+            "MinLapBehavior=Some(1)",
+            "DISCARD",
+            "#397",
+            "did not answer load_data(min_lap)",
+        ] {
+            assert!(
+                line.contains(needle),
+                "the warning must say {needle:?}: {line}"
+            );
+        }
+
+        // …and it actually goes out, through the sink the shipped console-less build reads (#380),
+        // rather than only being formattable.
+        static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        crate::diag::set_sink(|line| {
+            CAPTURED
+                .lock()
+                .expect("captured lock")
+                .push(line.to_string());
+        });
+        CAPTURED.lock().expect("captured lock").clear();
+        announce_min_lap_failure(&record);
+        let announced = CAPTURED.lock().expect("captured lock").clone();
+        assert!(
+            announced.iter().any(|l| l == &line),
+            "the un-neutralised filter must reach the operator's log, not just stderr: {announced:?}"
         );
     }
 

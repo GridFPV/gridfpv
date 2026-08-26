@@ -784,6 +784,31 @@ fn drive(
             ),
         }
 
+        // **Make RotorHazard stop refereeing lap length** (#407), before any heat can be armed.
+        //
+        // RH runs its own minimum-lap rule underneath GridFPV's, and its behaviour flag can
+        // *discard* a sub-minimum crossing outright. A discarded crossing never arrives, so
+        // GridFPV's per-round floor (D26/#409) never runs on it, marshaling has nothing to
+        // restore, and #397's rejected-crossing tone stays silent for exactly the crossing the RD
+        // most needs to hear about. D27: GridFPV owns this decision; the timer's copy of it is
+        // neutralised and what GridFPV applied is recorded on GridFPV's side.
+        //
+        // The plugin does this in-process at load (and re-asserts it at every stage), in which
+        // case this is a no-op that just reads the record back. Against a plugin older than
+        // v0.4.0 — the field timer still runs v0.1.0 — the connection does it over the socket
+        // instead. Either way a failure is announced through the adapter diagnostic sink, once,
+        // naming the consequence; it is never a reason to refuse the connection, because a timer
+        // whose filter could not be cleared is precisely one the RD needs to be *told* about.
+        let min_lap = conn.ensure_min_lap_neutral();
+        if min_lap.neutral {
+            eprintln!(
+                "gridfpv: RotorHazard {:?}: min-lap filter neutralised via {:?} (timer had \
+                 MinLapSec={:?}, MinLapBehavior={:?}); GridFPV's per-round floor is the only \
+                 min-lap rule in force",
+                timer_id.0, min_lap.route, min_lap.found_secs, min_lap.found_behavior,
+            );
+        }
+
         let plugin = classify_plugin(hello);
         timers.set_plugin(&timer_id, plugin);
 
