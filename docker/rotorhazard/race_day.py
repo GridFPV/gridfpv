@@ -203,8 +203,13 @@ def main():
             autopilot.stop_race()
 
     sio.connect(RH_URL, wait_timeout=10)
-    # No lap-minimum filter, so the brisk emulated laps all record.
-    sio.emit("set_option", {"option": "MIN_LAP_TIME", "value": "0"})
+    # No lap-minimum filter, so the brisk emulated laps all record (#407). BOTH settings, and both
+    # by their real names: RotorHazard has no option called `MIN_LAP_TIME` (that string is only the
+    # name of an event constant), so the `set_option` this used to emit stored a row nothing ever
+    # read. The floor is the `MinLapSec` option, written by `set_min_lap`; the discard-or-highlight
+    # flag is the `TIMING/MinLapBehavior` *config* item, written by `set_min_lap_behavior`.
+    sio.emit("set_min_lap", {"min_lap": 0})
+    sio.emit("set_min_lap_behavior", {"min_lap_behavior": 0})
     print(
         f"race-day autopilot ready [{scenario}] — stage + start a heat in the GridFPV Director and "
         "watch it race. Ctrl-C to stop.",

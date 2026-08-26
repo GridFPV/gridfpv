@@ -33,6 +33,16 @@ RH-side race decision neutralised, and selects it on request (`gridfpv_select_fo
 reversible by construction: `race.raceformat = <theirs>` puts it back. Declared via the
 ``"owned_format"`` capability (#404, #405).
 
+**Slice 3c — RotorHazard's min-lap filter, neutralised.** RH carries its own minimum-lap
+rule (``MinLapSec``, default **10 s**) plus a behaviour flag (``TIMING``/``MinLapBehavior``)
+that can **discard** a sub-minimum crossing outright rather than merely flag it. A discarded
+crossing never reaches Grid at all, so Grid's own per-round floor
+(``VoidReason::UnderMinLap``, D26) never gets to run on it and #397's rejected-crossing tone
+never fires — the crossing the RD most needs to hear about is precisely the one RH threw
+away. The plugin reads both values, records them, and zeroes both, so every crossing reaches
+Grid and Grid referees. Reported in the hello ack and re-asserted (and re-reported) on every
+``gridfpv_select_format``. Declared via the ``"min_lap_neutral"`` capability (#407).
+
 Clean start/stop and threshold recalculate arrive in S4.
 
 Floor: RHAPI 1.3 / RotorHazard v4.3.0+ (declared in ``manifest.json``).
@@ -59,7 +69,7 @@ PROTOCOL_VERSION = 1
 
 # This plugin build's own version (independent of PROTOCOL_VERSION). Keep in step with
 # manifest.json's "version".
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 
 # Capabilities this build implements — the Director keys transport decisions off these.
 # Native start/stop control ("clean_control") lands in a later step.
@@ -71,7 +81,7 @@ PLUGIN_VERSION = "0.3.0"
 # lap atom is readable. Advertising it makes the plugin the *authoritative* pass source on the
 # Director side, so a plugin that cannot actually read a lap must not claim it — it must degrade
 # to RotorHazard's own `current_laps` rather than pre-empt it (#389).
-BASE_CAPABILITIES = ["hello", "live_signal", "owned_format"]
+BASE_CAPABILITIES = ["hello", "live_signal", "owned_format", "min_lap_neutral"]
 PASS_CAPABILITY = "live_pass"
 # The Grid-owned race format (#404/#405). Unconditional, unlike `live_pass`: the Director's
 # fallback here is the OLD behaviour (alter the RD's active format in place), which is
@@ -79,6 +89,13 @@ PASS_CAPABILITY = "live_pass"
 # it forever. So the capability is advertised, the load-time outcome is REPORTED in the hello ack
 # (`grid_format_id` / `grid_format_error`), and every `gridfpv_select_format` retries.
 FORMAT_CAPABILITY = "owned_format"
+# RotorHazard's own min-lap filter, neutralised (#407). Unconditional and reported rather than
+# earned, for the same reason as `owned_format`: the Director's fallback is its own socket route
+# (`set_min_lap` / `set_min_lap_behavior`), which is a worse place to do it but not a lossy one, and
+# a load-time DB hiccup must not strand a timer forever. The Director keys off this capability to
+# decide whether the plugin is even *trying* — a plugin build older than this one advertises
+# nothing here, and the Director does the job itself over the socket.
+MIN_LAP_CAPABILITY = "min_lap_neutral"
 # Everything this build implements, for reference/tests. The *advertised* set is computed per
 # server in `initialize()` and reported in the hello ack.
 CAPABILITIES = BASE_CAPABILITIES + [PASS_CAPABILITY]
@@ -140,6 +157,159 @@ GRID_FORMAT_FIELDS = {
     "number_laps_win": 0,
     "team_racing_mode": 0,
 }
+
+# ---- RotorHazard's min-lap filter (#407) ------------------------------------------------------
+# RH applies its OWN minimum-lap rule underneath Grid's, and can discard a crossing before Grid
+# ever sees it. Grid already owns this decision per round (D26: `VoidReason::UnderMinLap`,
+# surfaced in marshaling, reversible, enforced on every live fold by #409). Two referees is the
+# #403/#405 problem again — and this one is worse than a wrong count, because a discarded crossing
+# is not merely miscounted, it is *absent*: Grid's floor cannot run on it, marshaling cannot
+# restore it, and #397's rejected-crossing tone — the single most useful thing the RD gets out of a
+# sub-minimum pass — never fires.
+#
+# The two values, verified by reading the RotorHazard source on BOTH supported versions
+# (`RHRace.py::pass_record_callback`, v4.3.0/RHAPI 1.3 — our floor — and v4.4.0/RHAPI 1.4):
+#
+#   min_lap          = rhdata.get_optionInt("MinLapSec")                     # a DB *option*
+#   min_lap_behavior = serverconfig.get_item_int("TIMING", "MinLapBehavior") # a *server config* item
+#   if lap_ok_flag and lap_time < (min_lap * 1000):
+#       ...
+#       if min_lap_behavior != 0:   # 'Discard New Short Laps'
+#           lap_ok_flag = False     # <- the crossing is never recorded, never emitted, GONE
+#
+# Note the names. RotorHazard has NO option called `MIN_LAP_TIME` — that string is only the name of
+# an *event* constant (`Evt.MIN_LAP_TIME_SET`). Writing an option by that name (which is what
+# Grid's old `set_min_lap_time` transport helper did) stores a row nothing on the server ever
+# reads: a no-op that looks like a success. The real keys are the two above, and they live in two
+# different stores, which is why one setter cannot do it.
+#
+# Zeroing BOTH is deliberate belt-and-braces. Either alone is sufficient today — `MinLapSec = 0`
+# makes the `lap_time < 0` test unreachable, and `MinLapBehavior = 0` ('highlight') leaves the
+# crossing recorded — but they are independent settings on two independent screens, and Grid must
+# not depend on the RD leaving the other one alone.
+MIN_LAP_OPTION = "MinLapSec"
+MIN_LAP_BEHAVIOR_SECTION = "TIMING"
+MIN_LAP_BEHAVIOR_ITEM = "MinLapBehavior"
+# What Grid applies. These are GRID's values, written here in Grid's own source — never derived
+# from whatever the timer happened to be set to (D27: a value read from a timer is evidence about
+# the timer, not an input to a decision).
+MIN_LAP_NEUTRAL_SECS = 0
+MIN_LAP_BEHAVIOR_HIGHLIGHT = 0
+
+
+def _read_min_lap(rhapi):
+    """RotorHazard's current ``(MinLapSec, TIMING/MinLapBehavior)`` as ints, ``None`` where unread.
+
+    Read through RHAPI, not the ORM: ``db.option`` / ``config.get`` are the supported surface and
+    are byte-identical on RHAPI 1.3 and 1.4. Each half is read independently so one unreadable
+    value does not hide the other — half a reading is still worth reporting.
+    """
+    try:
+        secs = rhapi.db.option(MIN_LAP_OPTION, as_int=True)
+        secs = None if secs is None else int(secs)
+    except Exception:  # noqa: BLE001 - reported as None; the caller says so out loud
+        logger.exception("GridFPV: could not read RotorHazard's %s", MIN_LAP_OPTION)
+        secs = None
+    try:
+        behavior = rhapi.config.get(
+            MIN_LAP_BEHAVIOR_SECTION, MIN_LAP_BEHAVIOR_ITEM, as_int=True
+        )
+        behavior = None if behavior is None else int(behavior)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "GridFPV: could not read RotorHazard's %s/%s",
+            MIN_LAP_BEHAVIOR_SECTION,
+            MIN_LAP_BEHAVIOR_ITEM,
+        )
+        behavior = None
+    return secs, behavior
+
+
+def ensure_min_lap_neutral(rhapi, state):
+    """Read RH's min-lap filter, zero it, and **confirm by re-reading**; return the wire report.
+
+    The report is what the Director announces and records — Grid's own note of what it found on
+    this timer and what it applied, never a value Grid then treats as its own config (D27).
+
+    ``secs_was`` / ``behavior_was`` are the values seen the **first** time this plugin touched this
+    server, stashed in ``state`` and never overwritten. That matters: this runs again at every
+    ``gridfpv_select_format``, and a naive re-read would report Grid's own zero back as "what the
+    race director had", erasing the only record of the setting Grid displaced.
+
+    Never raises — a failure is reported, not thrown, because a timer whose filter could not be
+    neutralised must still connect (so the Director can *say* so) rather than fall over.
+    """
+    secs_was, behavior_was = _read_min_lap(rhapi)
+    if state.get("min_lap_was") is None:
+        state["min_lap_was"] = {"secs": secs_was, "behavior": behavior_was}
+        if secs_was or behavior_was:
+            logger.info(
+                "GridFPV: RotorHazard's own min-lap filter is MinLapSec=%s, %s/%s=%s — Grid is "
+                "zeroing both so every crossing reaches Grid and Grid's per-round floor "
+                "referees it (#407). Restore them in RotorHazard's settings to hand the timer "
+                "back.",
+                secs_was,
+                MIN_LAP_BEHAVIOR_SECTION,
+                MIN_LAP_BEHAVIOR_ITEM,
+                behavior_was,
+            )
+    first_seen = state["min_lap_was"]
+
+    errors = []
+    if secs_was != MIN_LAP_NEUTRAL_SECS:
+        try:
+            rhapi.db.option_set(MIN_LAP_OPTION, MIN_LAP_NEUTRAL_SECS)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("GridFPV: could not set %s", MIN_LAP_OPTION)
+            errors.append("{0}: {1!r}".format(MIN_LAP_OPTION, exc))
+    if behavior_was != MIN_LAP_BEHAVIOR_HIGHLIGHT:
+        try:
+            rhapi.config.set(
+                MIN_LAP_BEHAVIOR_SECTION,
+                MIN_LAP_BEHAVIOR_ITEM,
+                MIN_LAP_BEHAVIOR_HIGHLIGHT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "GridFPV: could not set %s/%s",
+                MIN_LAP_BEHAVIOR_SECTION,
+                MIN_LAP_BEHAVIOR_ITEM,
+            )
+            errors.append(
+                "{0}/{1}: {2!r}".format(
+                    MIN_LAP_BEHAVIOR_SECTION, MIN_LAP_BEHAVIOR_ITEM, exc
+                )
+            )
+
+    # Read back rather than trusting the write — the same discipline `_format_drift` applies, and
+    # for the same reason: RH coerces on the way in, and a coercion that quietly kept the old value
+    # would leave Grid racing on a filter it believes it removed.
+    secs_now, behavior_now = _read_min_lap(rhapi)
+    ok = secs_now == MIN_LAP_NEUTRAL_SECS and behavior_now == MIN_LAP_BEHAVIOR_HIGHLIGHT
+    if not ok and not errors:
+        errors.append(
+            "still MinLapSec={0!r}, {1}/{2}={3!r} after the write".format(
+                secs_now, MIN_LAP_BEHAVIOR_SECTION, MIN_LAP_BEHAVIOR_ITEM, behavior_now
+            )
+        )
+    if not ok:
+        logger.error(
+            "GridFPV: RotorHazard's min-lap filter is NOT neutralised (%s) — this timer may "
+            "DISCARD sub-minimum crossings before Grid ever sees them, which silently disables "
+            "Grid's own min-lap ruling and its rejected-crossing tone (#397/#407)",
+            "; ".join(errors),
+        )
+    return {
+        "ok": ok,
+        # What Grid found the first time it touched this server — the hand-back record.
+        "secs_was": first_seen.get("secs"),
+        "behavior_was": first_seen.get("behavior"),
+        # What the timer reads NOW, after the write and a confirming re-read.
+        "secs_now": secs_now,
+        "behavior_now": behavior_now,
+        "error": "; ".join(errors) if errors else None,
+    }
+
 
 # Live-signal broadcast cadence (seconds) — decimated so the stream stays cheap on a Pi
 # (design risk #5). 0.5 s = 2 Hz. Each tick sends only the NEW dense samples since the last
@@ -302,6 +472,10 @@ def select_grid_format(rhapi, state):
 
     state["format_id"] = format_id
     displaced = state.get("displaced") or {}
+    # Re-assert the min-lap neutralisation at every stage, exactly as the format's own fields are
+    # re-verified above: RH's filter lives on a settings screen the RD can reach mid-session, and a
+    # value that drifts back between heats would take the rejected-crossing tone with it (#407).
+    min_lap = ensure_min_lap_neutral(rhapi, state)
     return {
         "ok": True,
         "format_id": format_id,
@@ -313,6 +487,9 @@ def select_grid_format(rhapi, state):
         # something an RD recognises.
         "previous_format_id": displaced.get("id"),
         "previous_format_name": displaced.get("name"),
+        # RotorHazard's own min-lap filter as of this stage (#407) — `ok: false` means the timer
+        # may still discard crossings before Grid sees them, and the Director says so.
+        "min_lap": min_lap,
         "error": None,
     }
 
@@ -384,6 +561,7 @@ def initialize(rhapi):
         "format_id": None,
         "format_error": None,
         "displaced": None,
+        "min_lap_was": None,
     }
 
     # ---- S3 gate: earn `live_pass` before advertising it (#389) -------------------------
@@ -470,6 +648,15 @@ def initialize(rhapi):
 
     prestage_secs_was = zero_prestage_pad()
 
+    # ---- S3c: neutralise RotorHazard's own min-lap filter (#407) ------------------------
+    # Done eagerly at load — like the prestage pad, and unlike the race format, because neither
+    # value lives in the database RH has not created yet: `MinLapSec` is an option row and
+    # `TIMING/MinLapBehavior` is a config-file item, both readable and writable before STARTUP.
+    # Doing it here means the filter is already gone before the Director ever connects, so a
+    # crossing detected during setup is not silently eaten. Re-asserted at every stage (see
+    # `select_grid_format`) because the RD can move it back from RH's own settings screen.
+    min_lap_report = ensure_min_lap_neutral(rhapi, state)
+
     # ---- S1: handshake -----------------------------------------------------------------
     def on_hello(_data=None):
         ack = {
@@ -490,6 +677,10 @@ def initialize(rhapi):
             "grid_format_id": state.get("format_id"),
             "grid_format_name": GRID_FORMAT_NAME,
             "grid_format_error": state.get("format_error"),
+            # RotorHazard's own min-lap filter (#407): what Grid found and what it applied. A
+            # missing key (an older plugin) or `ok: false` both mean the Director must neutralise
+            # it itself over the socket — and say out loud that it is doing so.
+            "min_lap": min_lap_report,
         }
         logger.info("GridFPV hello -> ack %s", ack)
         rhapi.ui.socket_send(EVT_HELLO_ACK, ack)
@@ -525,6 +716,10 @@ def initialize(rhapi):
                 "fields": dict(GRID_FORMAT_FIELDS),
                 "previous_format_id": (state.get("displaced") or {}).get("id"),
                 "previous_format_name": (state.get("displaced") or {}).get("name"),
+                # Best effort even on a failed format select: the two are independent, and an RD
+                # whose format select failed still needs to know whether crossings are reaching
+                # Grid.
+                "min_lap": ensure_min_lap_neutral(rhapi, state),
                 "error": "{0!r}".format(exc),
             }
         rhapi.ui.socket_send(EVT_FORMAT_ACK, ack)
@@ -709,10 +904,19 @@ def initialize(rhapi):
         logger.warning("GridFPV: eventmanager.Evt unavailable; live signal/passes disabled")
 
     logger.info(
-        "GridFPV plugin loaded (v%s, protocol v%s) — capabilities: %s",
+        "GridFPV plugin loaded (v%s, protocol v%s) — capabilities: %s; min-lap filter: %s",
         PLUGIN_VERSION,
         PROTOCOL_VERSION,
         ", ".join(capabilities),
+        (
+            "neutralised (was MinLapSec={0}, {1}={2})".format(
+                min_lap_report["secs_was"],
+                MIN_LAP_BEHAVIOR_ITEM,
+                min_lap_report["behavior_was"],
+            )
+            if min_lap_report["ok"]
+            else "NOT NEUTRALISED ({0})".format(min_lap_report["error"])
+        ),
     )
 
 
