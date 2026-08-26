@@ -127,13 +127,13 @@ fn print_startup(
             );
         }
     }
+    // #414 removed the built-in in-memory Practice event: a fresh Director now starts with NO
+    // events, and the RD creates one (with a practice round in it). Saying otherwise here sent
+    // an operator looking for an event that is not there.
     match &config.data_dir {
-        Some(dir) => println!(
-            "  events       : Practice (in-memory) + created events persist under {}",
-            dir.display()
-        ),
+        Some(dir) => println!("  events       : persist under {}", dir.display()),
         None => println!(
-            "  events       : Practice (in-memory); created events in-memory \
+            "  events       : in-memory \
              (non-durable — set GRIDFPV_DATA_DIR to persist)"
         ),
     }
