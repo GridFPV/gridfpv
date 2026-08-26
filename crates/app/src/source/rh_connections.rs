@@ -41,7 +41,7 @@ use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
-use super::rotorhazard::{CalibrationWrite, RhConnection};
+use super::rotorhazard::{CalibrationWrite, ChannelWrite, RhConnection};
 
 /// How often the reconciler polls the active event + its selected timers to sync the live set.
 pub const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
@@ -211,6 +211,35 @@ impl RhConnections {
         for (key, live) in map.iter() {
             if &key.1 == timer {
                 live.conn.calibrate(write);
+                found = true;
+            }
+        }
+        found
+    }
+
+    /// **Set a node's channel** on `timer`'s live connection (#413) — the Tune page's other write,
+    /// carried onto the socket the Director is already holding.
+    ///
+    /// Keyed on the **timer** for the same reason [`calibrate`](Self::calibrate) is: the RD is
+    /// retuning a piece of hardware, and it holds exactly one connection whichever claim opened it.
+    /// Tuning happens from the Timers menu with no event necessarily active, so the manual-hold key
+    /// is the common case here.
+    ///
+    /// Note this is **not** [`tune`](Self::tune): that is the heat's whole-timer channel plan,
+    /// keyed on `(event, timer)` and pushed at Stage. This is one node, from the bench, with no
+    /// event needed. A heat legitimately overwrites what this set.
+    ///
+    /// Returns whether a live connection was found. `false` means the timer is not connected right
+    /// now — nothing was emitted and nothing is queued for a future connection: a node retuned
+    /// minutes later on a reconnect would move a receiver nobody asked to move. GridFPV's own record
+    /// of the channel is unaffected (`Timer::node_channels`, D27); it is the *application* of it
+    /// that was lost, and the RD sees a channel that never comes back confirmed.
+    pub fn set_channel(&self, timer: &TimerId, write: ChannelWrite) -> bool {
+        let map = self.inner.lock().expect("rh-connections lock poisoned");
+        let mut found = false;
+        for (key, live) in map.iter() {
+            if &key.1 == timer {
+                live.conn.set_channel(write.clone());
                 found = true;
             }
         }
@@ -464,6 +493,35 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                         );
                     }
                 }
+                // …and any **channel writes** (#413) the Tune page parked on the registry: the RD
+                // picked a channel for a node and it goes onto the live socket now. Same seam and
+                // same drain-exactly-once discipline as the two above. The band/channel label was
+                // resolved server-side from GridFPV's catalog and rides along, so RotorHazard's own
+                // UI shows `Raceband R7` and not a bare frequency.
+                for write in timers.take_channel_requests() {
+                    let landed = connections.set_channel(
+                        &write.timer,
+                        ChannelWrite {
+                            node: u64::from(write.node),
+                            mhz: write.mhz,
+                            band: write.band,
+                            channel: write.channel,
+                            during_open_practice: write.during_open_practice,
+                        },
+                    );
+                    if !landed {
+                        // The connection went away between the route accepting the write and this
+                        // tick. Nothing is queued for a future connection — say so rather than fail
+                        // silently; the RD sees a channel that never comes back confirmed.
+                        let name = timers.get(&write.timer).map(|t| t.name);
+                        eprintln!(
+                            "gridfpv: no live RotorHazard connection to set node {}'s channel on \
+                             {:?}",
+                            write.node + 1,
+                            name.as_deref().unwrap_or("that timer")
+                        );
+                    }
+                }
             }
         })
     };
@@ -474,7 +532,9 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
 mod tests {
     use super::*;
     use gridfpv_server::events::PRACTICE_EVENT_ID;
-    use gridfpv_server::timers::{CalibrationRequest, CreateTimerRequest, UpdateTimerRequest};
+    use gridfpv_server::timers::{
+        CalibrationRequest, ChannelRequest, CreateTimerRequest, UpdateTimerRequest,
+    };
 
     const OLD_URL: &str = "http://rh-old.local:5000";
     const NEW_URL: &str = "http://rh-new.local:5000";
@@ -580,6 +640,66 @@ mod tests {
         assert_eq!(drained[0].exit_at, Some(70));
         assert!(
             timers.take_calibration_requests().is_empty(),
+            "drained exactly once — nothing is re-queued"
+        );
+    }
+
+    #[test]
+    fn a_channel_write_with_no_live_connection_is_reported_not_swallowed() {
+        // #413, and the exact twin of the calibration case above: the RD picked a channel for a
+        // timer that has since gone away. Nothing is emitted and nothing is queued for a future
+        // connection — a node retuned minutes later would move a receiver nobody asked to move — so
+        // `set_channel` says so and the reconciler logs it rather than failing silently.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        let connections = RhConnections::new();
+        assert!(!connections.set_channel(
+            &rh,
+            ChannelWrite {
+                node: 0,
+                mhz: 5880,
+                band: Some("Raceband".into()),
+                channel: Some("R7".into()),
+                during_open_practice: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn channel_writes_drain_exactly_once_and_coalesce_per_node_carrying_the_label() {
+        // Same seam and same discipline as the calibration drain. Two picks on one node before a
+        // drain retune it once, to the LATEST value — replaying a stale channel after a fresh one
+        // would leave the gate on a frequency the page is no longer showing.
+        //
+        // And the label rides along: RotorHazard stores band/channel on its profile, and the RD
+        // validates this by refreshing RotorHazard's own page, where a bare number reads as a
+        // half-failure.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
+
+        for (mhz, band, channel) in [(5658u16, "Raceband", "R1"), (5880, "Raceband", "R7")] {
+            timers
+                .request_channel(
+                    &rh,
+                    &ChannelRequest {
+                        node: 1,
+                        mhz,
+                        band: Some(band.into()),
+                        channel: Some(channel.into()),
+                    },
+                    false,
+                )
+                .expect("connected RH timer");
+        }
+
+        let drained = timers.take_channel_requests();
+        assert_eq!(drained.len(), 1, "one entry per node, not one per pick");
+        assert_eq!(drained[0].mhz, 5880);
+        assert_eq!(drained[0].band.as_deref(), Some("Raceband"));
+        assert_eq!(drained[0].channel.as_deref(), Some("R7"));
+        assert!(
+            timers.take_channel_requests().is_empty(),
             "drained exactly once — nothing is re-queued"
         );
     }

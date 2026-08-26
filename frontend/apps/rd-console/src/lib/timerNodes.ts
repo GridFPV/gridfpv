@@ -23,7 +23,7 @@
  * are **wire handles** and must never reach the screen (the repo display rule) — here that is not
  * merely tidiness: an off-by-one in this boundary puts a pilot on a dead gate.
  */
-import type { SetTimerNodesRequest, Timer, TimerId, TimerNodes } from '@gridfpv/types';
+import type { SetTimerNodesRequest, Timer, TimerNodes } from '@gridfpv/types';
 
 /**
  * The width a timer falls back to when nothing is configured **and** nothing has been observed —
@@ -31,81 +31,6 @@ import type { SetTimerNodesRequest, Timer, TimerId, TimerNodes } from '@gridfpv/
  * `DEFAULT_NODE_COUNT`; it is the value that caused #412 when it was applied to real hardware.
  */
 export const DEFAULT_NODE_COUNT = 8;
-
-/** Injectable `fetch` (matches the protocol client's own seam), so tests never hit the network. */
-type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
-
-const trimSlash = (s: string): string => (s.endsWith('/') ? s.slice(0, -1) : s);
-
-/** Pull the Director's typed refusal message out of an error body, if it sent one. */
-async function refusal(resp: Response): Promise<string> {
-  return await resp
-    .json()
-    .then((body: unknown) =>
-      typeof body === 'object' && body !== null && 'message' in body
-        ? String((body as { message: unknown }).message)
-        : ''
-    )
-    .catch(() => '');
-}
-
-/**
- * Read a timer's node configuration (`GET /timers/{id}/nodes`) — every node index the timer has,
- * each with its 1-based label and enabled state, the enabled indices in seat order, and any drift.
- *
- * An open read (a token is sent when the session holds one). An unknown id answers **404**.
- */
-export async function timerNodes(
-  baseUrl: string,
-  id: TimerId,
-  options: { token?: string; fetch?: FetchLike; signal?: AbortSignal } = {}
-): Promise<TimerNodes> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/nodes`, {
-    headers,
-    signal: options.signal
-  });
-  if (!resp.ok) {
-    const detail = await refusal(resp);
-    throw new Error(detail || `The timer's node configuration answered HTTP ${resp.status}.`);
-  }
-  return (await resp.json()) as TimerNodes;
-}
-
-/**
- * Write a timer's node configuration (`PUT /timers/{id}/nodes`), answering with the resulting view.
- *
- * RD-gated. The Director **refuses** (a **400**, whose message is already phrased for the RD) a
- * `node_count` of `0` and any edit that would leave no node enabled — both cap every heat to no
- * pilots. Those refusals are surfaced verbatim rather than as an HTTP line, because they say the
- * useful thing ("at least one node must stay enabled").
- */
-export async function setTimerNodes(
-  baseUrl: string,
-  id: TimerId,
-  request: SetTimerNodesRequest,
-  token?: string,
-  options: { fetch?: FetchLike } = {}
-): Promise<TimerNodes> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'content-type': 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/nodes`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) {
-    const detail = await refusal(resp);
-    throw new Error(detail || `The Director refused the node change (HTTP ${resp.status}).`);
-  }
-  return (await resp.json()) as TimerNodes;
-}
 
 /**
  * The body of the **"follow the timer"** write: clear the width override so the timer's own

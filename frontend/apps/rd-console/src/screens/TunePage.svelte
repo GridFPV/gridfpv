@@ -70,6 +70,27 @@
    * polling to show the new level. If the polls keep disagreeing past `CONFIRM_TIMEOUT_MS` the
    * threshold says `Not taken`, loudly, on that node.
    *
+   * ## The channel is settable, not just shown (#413)
+   *
+   * Tuning a gate is meaningless until the node is listening on the channel it will race, so the
+   * frequency this page already *showed* is a dropdown. Three things about it are load-bearing:
+   *
+   *  1. **The options do NOT come from `available_channels`.** Both real RotorHazard timers on the
+   *     bench report `Flexible` with an **empty** pool, which means "no restriction", not "no
+   *     channels" — a dropdown bound to it renders empty on exactly the timer this is for. The
+   *     source is the *capability*: `Fixed` → its declared set, `Flexible` → the whole catalog,
+   *     plus any custom raw MHz the RD added. See `tuning.ts`'s `channelOptions`.
+   *  2. **Band and channel go with the frequency.** RotorHazard stores them on its profile, and the
+   *     RD validates this work by refreshing RotorHazard's own page — where a bare number with no
+   *     `R7` beside it reads as "it half worked".
+   *  3. **A heat will overwrite it, and that is correct.** Heat setup re-tunes every node to its
+   *     assigned channel. This page says so rather than trying to make the bench value win.
+   *
+   * And the thing nothing else announces: `on_set_frequency` writes the frequency into the **same
+   * profile row** that holds `enter_ats`/`exit_ats`, so a channel change leaves the thresholds
+   * untouched — tuned for the channel the node just left. The levels look unchanged and therefore
+   * fine. The node says otherwise, factually, until the RD has flown a pass on the new channel.
+   *
    * ## Gates and lifetimes
    *
    * Every adjustment is a write, so the practice-only gate (`writeGate`) is checked **per write**,
@@ -108,6 +129,7 @@
     Pilot,
     Timer,
     TimerId,
+    TimerNodes,
     TimerSignal
   } from '@gridfpv/types';
   import type { Action } from 'svelte/action';
@@ -116,25 +138,39 @@
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import { buildCompetitorNames } from '../lib/competitorName.js';
+  import { poolChannel } from '../lib/channels.js';
   import { isOpenPracticeRound } from '../lib/heats.js';
   import {
     CONFIRM_TIMEOUT_MS,
+    HEAT_OVERWRITES_CHANNEL,
     RSSI_MAX,
     RSSI_MIN,
     SIGNAL_POLL_MS,
+    channelGate,
+    channelOptions,
     clampLevel,
+    duplicateChannelNodes,
+    duplicateChannelNote,
     foldPolled,
+    foldPolledChannel,
     isParsableLevel,
+    markChannelSent,
     markSent,
     nodeCountOf,
     nodeTraceOf,
+    offerableNodes,
     phaseLabel,
     phaseTone,
     plottable,
     readoutsOf,
+    seedChannel,
     seedThreshold,
+    staleThresholdNote,
     writeGate,
+    type ApplyChannel,
     type ApplyLevels,
+    type ChannelState,
+    type FetchNodes,
     type FetchSignal,
     type StopSignal,
     type Threshold,
@@ -157,6 +193,8 @@
     onevent,
     fetchSignal,
     applyLevels,
+    applyChannel,
+    fetchNodes,
     stopSignal,
     pollMs = SIGNAL_POLL_MS,
     confirmMs = CONFIRM_TIMEOUT_MS
@@ -185,6 +223,10 @@
     fetchSignal?: FetchSignal;
     /** Test/host seam for the calibration write; defaults to the session's `setCalibration`. */
     applyLevels?: ApplyLevels;
+    /** Test/host seam for the channel write (#413); defaults to the session's `setNodeChannel`. */
+    applyChannel?: ApplyChannel;
+    /** Test/host seam for the node-set read (#412); defaults to the session's `timerNodes`. */
+    fetchNodes?: FetchNodes;
     /** Test/host seam for releasing the feed; defaults to the session's `signal/stop`. */
     stopSignal?: StopSignal;
     /** Poll cadence (ms). */
@@ -207,6 +249,10 @@
       })
   );
   const releaseSignal = $derived<StopSignal>(stopSignal ?? ((id) => session.stopTimerSignal(id)));
+  const writeChannel = $derived<ApplyChannel>(
+    applyChannel ?? ((id, body) => session.setNodeChannel(id, body))
+  );
+  const readNodes = $derived<FetchNodes>(fetchNodes ?? ((id) => session.timerNodes(id)));
 
   // ── The live signal poll ────────────────────────────────────────────────────────────────────
   // The poll IS the subscription. The Director streams a timer only while somebody is watching, and
@@ -290,6 +336,15 @@
   // never saw the real one.
   let levels = $state<Record<number, { enter: ThresholdState; exit: ThresholdState }>>({});
 
+  // ── The ONE value per node's CHANNEL (#413) ─────────────────────────────────────────────────
+  // Same shape and same lifecycle as a threshold, for the same reason: there is no Apply button, so
+  // the dropdown's state IS the confirmation. Absent until the node has reported a channel.
+  let channels = $state<Record<number, ChannelState>>({});
+  /** Per-node write sequence for the channel, so a superseded answer never stamps a stale value. */
+  const channelSeq = new Map<number, number>();
+  /** The "this should have come back by now" backstops, one per node (see {@link confirmTimers}). */
+  const channelTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
   /**
    * A per-(node, threshold) write sequence. Non-reactive on purpose — it exists only so a write
    * whose answer lands *after* the RD has started adjusting again is dropped instead of stamping a
@@ -343,7 +398,47 @@
       held.enter = foldPolled(held.enter, n.enter_at, now, confirmMs);
       held.exit = foldPolled(held.exit, n.exit_at, now, confirmMs);
     }
+    // The channel is confirmed the same way (#413) — `POST /channel` only says "accepted", and the
+    // value comes back on the heartbeat as `frequency_mhz`. At rest this also FOLLOWS the hardware
+    // on purpose: a heat legitimately re-tunes every node, and the page must show that rather than
+    // keep displaying a bench value the node is no longer on.
+    for (const n of snap.nodes) {
+      const held = channels[n.node];
+      if (!held) {
+        // Seed only once the node has actually reported a channel. A dropdown resting on a
+        // fabricated default is one the RD can change away from without ever seeing the real one.
+        if (n.frequency_mhz === undefined) continue;
+        channels[n.node] = seedChannel(n.frequency_mhz);
+        continue;
+      }
+      channels[n.node] = foldPolledChannel(held, n.frequency_mhz, now, catalog, confirmMs);
+    }
   }
+
+  /**
+   * The Director's own node view (#412): the effective width and which nodes the RD has left
+   * enabled. Read once per timer — it is configuration, not telemetry, and it changes when the RD
+   * edits it on the Timers page, not while they stand at the gate.
+   *
+   * Only the **channel** control consults it, and it **fails closed**: with no view yet, no node is
+   * offered a channel dropdown. RotorHazard validates `0 <= node < num_nodes` and otherwise only
+   * writes a log line, so offering a node that does not exist would produce a write that looks
+   * accepted and lands nowhere — the #403 failure class this page exists to remove.
+   */
+  let nodeView = $state.raw<TimerNodes | undefined>(undefined);
+  $effect(() => {
+    const id = timer.id;
+    let live = true;
+    readNodes(id)
+      .then((view) => {
+        if (live) nodeView = view;
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  });
+  const offerable = $derived(offerableNodes(nodeView));
 
   const nodeCount = $derived(nodeCountOf(signal, timer.node_count ?? 0));
   const nodeIndices = $derived(Array.from({ length: nodeCount }, (_, i) => i));
@@ -525,6 +620,142 @@
     if (clampLevel(exit, held.exit.value) !== held.exit.value) adjust(node, 'exit', exit);
   }
 
+  // ── The channel write (#413) ────────────────────────────────────────────────────────────────
+
+  /**
+   * The RD picked a channel for a node — retune it now.
+   *
+   * A dropdown has no drag and no half-typed state, so unlike a threshold there is nothing to
+   * debounce: `change` *is* the end of the interaction, and this is the whole write path.
+   *
+   * The **band and channel travel with the frequency**: RotorHazard stores them on its profile, and
+   * an unlabelled channel on the page the RD refreshes to check this worked reads as a half-failure.
+   * The Director validates the pair against its own catalog, so nothing invented can reach a timer.
+   */
+  async function commitChannel(node: number, mhz: number): Promise<void> {
+    const held = channels[node];
+    if (!held || held.phase === 'sent') return;
+    if (mhz === held.confirmed) {
+      // Re-picked what it is already on — nothing to write, and the phase returns to rest.
+      if (held.phase !== 'confirmed')
+        channels[node] = { ...held, phase: 'confirmed', detail: undefined };
+      return;
+    }
+
+    // Per WRITE, exactly like a threshold: a heat can go Running while the RD is at the gate.
+    const gate = canControl
+      ? channelGate(session.liveState?.phase, heatKind)
+      : ({ allowed: false, reason: NO_CONTROL } as const);
+    if (!gate.allowed) {
+      channels[node] = { ...held, phase: 'refused', detail: gate.reason };
+      return;
+    }
+
+    const option = optionsFor(node).find((o) => o.mhz === mhz);
+    const seq = (channelSeq.get(node) ?? 0) + 1;
+    channelSeq.set(node, seq);
+    try {
+      const dispatch = await writeChannel(timer.id, {
+        node,
+        mhz,
+        // Omitted, never sent empty, for a custom raw MHz: RotorHazard keeps whatever label it had
+        // rather than being handed a blank one.
+        ...(option?.band && option?.channel ? { band: option.band, channel: option.channel } : {})
+      });
+      if (channelSeq.get(node) !== seq) return; // superseded by a newer pick — drop this answer
+      const current = channels[node];
+      if (!current) return;
+      // Accepted is NOT applied — `ingest` finishes it when the heartbeat brings the channel back.
+      //
+      // Whether the thresholds are now stale is the Director's answer, not ours: it holds the
+      // record of what GridFPV set and when. `undefined` (a cancelled token prompt) is not a "no".
+      const stale = dispatch?.thresholds_tuned_on_another_channel ?? false;
+      channels[node] = markChannelSent(current, mhz, Date.now(), stale);
+      armChannelConfirm(node, seq);
+    } catch (e) {
+      if (channelSeq.get(node) !== seq) return;
+      const current = channels[node];
+      if (!current) return;
+      const message = e instanceof Error ? e.message : String(e);
+      channels[node] = { ...current, phase: 'failed', detail: message };
+      toast.error(`${nodeLabel(node)}: the channel change did not reach the timer. ${message}`);
+    }
+  }
+
+  /** The backstop for a channel the poll has not confirmed — {@link armConfirm}'s twin. */
+  function armChannelConfirm(node: number, seq: number): void {
+    const existing = channelTimers.get(node);
+    if (existing !== undefined) clearTimeout(existing);
+    channelTimers.set(
+      node,
+      setTimeout(() => {
+        channelTimers.delete(node);
+        if (channelSeq.get(node) !== seq) return;
+        const held = channels[node];
+        if (!held || held.phase !== 'sent') return;
+        channels[node] = foldPolledChannel(
+          held,
+          nodeById.get(node)?.frequency_mhz,
+          Date.now(),
+          catalog,
+          0
+        );
+      }, confirmMs)
+    );
+  }
+
+  /**
+   * The options one node's dropdown offers.
+   *
+   * **Not `available_channels`** — see `channelOptions`. That field is the per-heat allocation
+   * *pool*, and both real RotorHazard timers on the bench report `Flexible` with it empty, which
+   * means "no restriction". It contributes exactly one thing here: the RD's **custom** raw-MHz
+   * entries, which they asked to see alongside the catalog.
+   */
+  function optionsFor(node: number) {
+    return channelOptions(
+      timer.channel_capability,
+      catalog,
+      timer.available_channels ?? [],
+      channels[node]?.mhz ?? frequencyOf(node)
+    );
+  }
+
+  /**
+   * Whether this node may be offered a channel at all (#412 + #413): the Director says it exists
+   * and is enabled, and the timer has actually reported a channel to change *from*.
+   */
+  function channelSettable(node: number): boolean {
+    return offerable.has(node) && channels[node] !== undefined;
+  }
+
+  /**
+   * The nodes currently sharing a channel — flagged, never blocked (#413).
+   *
+   * Keyed on the **effective** channel: what the RD just picked while a write is in flight, else
+   * what the timer reports. Using the reported value alone would leave the clash invisible for the
+   * one poll where it matters most — the moment the RD makes it.
+   */
+  const clashingNodes = $derived.by(() => {
+    const byNode = new Map<number, number | undefined>();
+    // Only the nodes a heat can actually be seated on: a **disabled** node's receiver may well sit
+    // on the same frequency, but nobody flies it, so calling that a clash would be a warning about
+    // a situation that cannot cost anyone a lap.
+    for (const node of nodeIndices.filter((n) => offerable.has(n))) {
+      byNode.set(node, channels[node]?.mhz ?? nodeById.get(node)?.frequency_mhz);
+    }
+    return duplicateChannelNodes(byNode);
+  });
+
+  /** The nodes sharing `node`'s channel, for the note that names them. */
+  function sharingWith(node: number): number[] {
+    const mhz = channels[node]?.mhz ?? nodeById.get(node)?.frequency_mhz;
+    if (mhz === undefined) return [];
+    return nodeIndices.filter(
+      (n) => offerable.has(n) && (channels[n]?.mhz ?? nodeById.get(n)?.frequency_mhz) === mhz
+    );
+  }
+
   // ── The write gate's inputs (the current heat, and what kind it is) ─────────────────────────
   // Tuning is refused while a COMPETITION heat is running — a threshold change rewrites what the
   // gate counts as a lap. Open practice is excluded from scoring (#398), so there is nothing to
@@ -563,6 +794,8 @@
 
   /** The page-level gate readout — the same rule the per-write check uses, shown before it bites. */
   const gate = $derived(writeGate(session.liveState?.phase, heatKind));
+  /** The same rule for a channel change (#413), in the words of what a retune actually does. */
+  const chanGate = $derived(channelGate(session.liveState?.phase, heatKind));
 
   /**
    * Whether this session may write at all. `POST /timers/{id}/calibration` is `ControlAuth`-gated,
@@ -607,6 +840,15 @@
     })
   );
 
+  /**
+   * The frequency a node is actually on: the live heartbeat's reading, else the timer's configured
+   * pool. Via `poolChannel`, which refuses to index an **empty** pool — empty means "unrestricted"
+   * on a Flexible RotorHazard timer, not "no channels", and indexing it would invent a frequency.
+   */
+  function frequencyOf(node: number): number | undefined {
+    return nodeById.get(node)?.frequency_mhz ?? poolChannel(node, timer.available_channels);
+  }
+
   /** `Node 1 · Raceband R7` — the seat's own name, band+channel resolved through `channels.ts`. */
   function nodeLabel(node: number): string {
     return names.seatLabel(node);
@@ -643,6 +885,8 @@
     idleTimers.clear();
     for (const t of confirmTimers.values()) clearTimeout(t);
     confirmTimers.clear();
+    for (const t of channelTimers.values()) clearTimeout(t);
+    channelTimers.clear();
   });
 
   // ── Layout ──────────────────────────────────────────────────────────────────────────────────
@@ -765,6 +1009,11 @@
     {:else if !gate.allowed}
       <!-- Stated up front as well as per write: the RD should know before they drag, not after. -->
       <div class="gate-banner" role="status">{gate.reason}</div>
+      <!-- The same heat blocks a retune, and for its own reason — said in its own words so the RD
+           is not left guessing whether the channel dropdown is covered by the sentence above. -->
+      {#if !chanGate.allowed}
+        <div class="gate-banner" role="status" data-testid="channel-gate">{chanGate.reason}</div>
+      {/if}
     {/if}
 
     {#if signalError}
@@ -839,6 +1088,66 @@
                     : undefined}
                 />
               </div>
+            {/if}
+
+            {#if dead}
+              <!-- No controls: there is no node there to retune or to write a threshold to. -->
+            {:else if channelSettable(node)}
+              {@const chan = channels[node]}
+              <!-- The CHANNEL (#413). The frequency this page already showed, made settable, because
+                   tuning a gate means nothing until its node is on the channel it will race.
+                   Offered only for a node the Director says exists and the RD has left enabled
+                   (#412): RotorHazard drops an out-of-range seat index with nothing but a log line,
+                   so a write to a node that is not there would look accepted and land nowhere. -->
+              <div class="channel" data-testid={`channel-${node}`}>
+                <div class="channel-head">
+                  <label class="channel-label" for={`channel-select-${node}`}>Channel</label>
+                  <Badge tone={phaseTone(chan.phase)} variant="outline">
+                    {phaseLabel(chan.phase)}
+                  </Badge>
+                </div>
+                <select
+                  class="channel-select"
+                  id={`channel-select-${node}`}
+                  aria-label={`Channel for ${nodeLabel(node)}`}
+                  value={chan.mhz}
+                  disabled={!canControl || !chanGate.allowed}
+                  onchange={(e) => void commitChannel(node, Number(e.currentTarget.value))}
+                >
+                  <!-- The option VALUE is the raw MHz (a wire handle); the LABEL is always the
+                       band+channel name, resolved through `channels.ts` (CLAUDE.md). -->
+                  {#each optionsFor(node) as option (option.mhz)}
+                    <option value={option.mhz}>{option.label}</option>
+                  {/each}
+                </select>
+                {#if chan.detail}
+                  <p class="channel-detail" role="status">{chan.detail}</p>
+                {/if}
+                {#if chan.tunedOn !== undefined && chan.tunedOn !== chan.mhz}
+                  <!-- The thing nothing else announces: `on_set_frequency` writes the frequency into
+                       the SAME profile row that holds enter_ats/exit_ats, so the levels came through
+                       this change untouched — tuned for the channel the node just left. Factual, not
+                       alarming: they are unverified here, not necessarily wrong. -->
+                  <p class="channel-stale" data-testid={`channel-stale-${node}`} role="status">
+                    {staleThresholdNote(chan.tunedOn, chan.mhz, catalog)}
+                  </p>
+                {/if}
+                {#if clashingNodes.has(node)}
+                  <!-- Flagged, never blocked: two gates on one frequency is a real mistake, and also
+                       exactly what a bench swap looks like halfway through. -->
+                  <p class="channel-clash" data-testid={`channel-clash-${node}`} role="status">
+                    {duplicateChannelNote(node, sharingWith(node))}
+                  </p>
+                {/if}
+                <p class="channel-note">{HEAT_OVERWRITES_CHANNEL}</p>
+              </div>
+            {:else if offerable.has(node)}
+              <!-- The node exists and is enabled, but the timer has not said what it is tuned to.
+                   No dropdown resting on a fabricated default: the RD would change away from a
+                   channel they never actually saw. Saying so beats an unexplained gap. -->
+              <p class="channel-waiting" data-testid={`channel-waiting-${node}`} role="status">
+                This node has not reported a channel yet.
+              </p>
             {/if}
 
             {#if dead}
@@ -987,6 +1296,60 @@
     font-size: var(--gf-font-size-2xl);
     letter-spacing: var(--gf-tracking-tight);
   }
+  /* The channel control (#413). Sits above the thresholds because it is the question that comes
+     first: a level tuned on the wrong channel is not a tuned gate. */
+  .channel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+  }
+  .channel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gf-space-2);
+  }
+  .channel-label {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .channel-select {
+    width: 100%;
+    min-width: 0;
+    padding: var(--gf-space-2);
+    font: inherit;
+    color: var(--gf-text);
+    background: var(--gf-surface-2);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+  }
+  .channel-select:disabled {
+    opacity: 0.6;
+  }
+  .channel-detail,
+  .channel-stale,
+  .channel-clash,
+  .channel-note,
+  .channel-waiting {
+    margin: 0;
+    font-size: var(--gf-font-size-xs);
+    line-height: 1.4;
+  }
+  .channel-detail {
+    color: var(--gf-danger);
+  }
+  /* Both of these are NOTICES, not failures: the thresholds are unverified rather than wrong, and a
+     shared channel is legitimate mid-swap. Toned as such — an alarm here would train the RD to
+     ignore the one that matters. */
+  .channel-stale,
+  .channel-clash {
+    color: var(--gf-warn);
+  }
+  .channel-note,
+  .channel-waiting {
+    color: var(--gf-text-muted);
+  }
+
   /* The scope line (#411): which layer this page is editing, stated plainly under the title. Sized
      like data rather than chrome — it is the answer to "am I changing tonight or forever". */
   .scope {

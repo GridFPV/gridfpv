@@ -444,6 +444,11 @@ pub fn router(registry: EventRegistry) -> Router {
         // the `stop` is for promptness on view close, not for correctness.
         .route("/timers/{timer_id}/signal", get(timer_signal))
         .route("/timers/{timer_id}/calibration", post(calibrate_timer))
+        // **Set one node's channel** while tuning it (#413). The other half of the Tune page's
+        // write: a gate cannot be tuned meaningfully until its node is listening on the channel it
+        // will race. Gated exactly like the calibration write above — RD-gated, RotorHazard-only,
+        // refused under a *scored* heat and allowed in open practice.
+        .route("/timers/{timer_id}/channel", post(set_timer_channel))
         .route("/timers/{timer_id}/signal/stop", post(stop_timer_signal))
         // The downloadable GridFPV RotorHazard plugin bundle (D16, S1) the guided-install UX
         // offers when a timer's plugin is missing/incompatible. Open read: it's static, embedded
@@ -1041,6 +1046,95 @@ async fn calibrate_timer(
     let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
     timers
         .request_calibration(&timer_id, &request, during_open_practice)
+        .map(Json)
+        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
+}
+
+/// `POST /timers/{timer_id}/channel` — set one node's **channel**, RD-gated (#413).
+///
+/// The Tune page already *shows* each node's frequency; this makes it settable, so an RD standing
+/// at the gate never has to leave for heat setup (or RotorHazard's own UI) to put the node on the
+/// channel it will race and then walk back. Body is a [`ChannelRequest`]: a node, a raw centre
+/// frequency, and the catalog band/channel the RD picked.
+///
+/// # Band and channel travel with the frequency
+///
+/// RotorHazard's `on_set_frequency` accepts `{ node, frequency, band?, channel? }` and stores the
+/// label on the active profile when it is given. Sending the frequency alone leaves RotorHazard's
+/// own UI showing a bare number with no `R7`-style label — and the RD validates this work *by
+/// refreshing that page*, where an unlabelled channel reads as "it half worked". The label is
+/// resolved server-side against GridFPV's own catalog (D27 owns the vocabulary), so a hand-rolled
+/// client cannot put an invented band name on the timer.
+///
+/// # This acknowledges a dispatch. It is not a readback.
+///
+/// Same rule as [`calibrate_timer`]: a `200` means accepted and queued onto the live socket. The
+/// console confirms by poll — every RotorHazard heartbeat carries each node's current frequency, so
+/// the change comes back as [`NodeSignal::frequency_mhz`] on a later `GET /timers/{id}/signal`.
+///
+/// # The refusals
+///
+/// * A **Mock** → `400`: it has no receiver to tune.
+/// * A **scored race in progress on this timer** → `400`
+///   ([`EventRegistry::scored_heat_in_progress_on_timer`]). Retuning a node's receiver mid-race
+///   takes the gate off the channel the pilot is flying — at least as disruptive as moving a
+///   threshold. **Open practice is exempt** for exactly #398's reason, and because tuning with
+///   pilots in the air is the workflow this page exists for.
+/// * A timer that is **not connected**, a `node` beyond the timer's width **or one the RD has
+///   disabled** (#412), a frequency outside the 5.8 GHz band, or one a **Fixed** timer does not
+///   support → `400` from the registry.
+/// * An unknown id → 404 (`UnknownScope`).
+///
+/// **Two nodes on one channel is not refused** — the console flags it, because it is a real
+/// mistake, but it is also what a swap looks like halfway through.
+///
+/// Every refusal names the timer, the node and the channel by their **friendly names** (repo
+/// display rule): `Node 3`, `Raceband R7`, never `2` or `5880`.
+///
+/// [`NodeSignal::frequency_mhz`]: crate::timers::NodeSignal::frequency_mhz
+/// [`ChannelRequest`]: crate::timers::ChannelRequest
+async fn set_timer_channel(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+    Json(request): Json<crate::timers::ChannelRequest>,
+) -> Result<Json<crate::timers::ChannelDispatch>, ProtocolError> {
+    let timers = registry.timers();
+    // Resolve first so every refusal can name the timer, and so an unknown id is a clean 404.
+    let timer = timers.get(&timer_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })?;
+    // Kind before phase, exactly as [`calibrate_timer`] does it: the built-in Mock is in every
+    // event's default selection, so gating on the heat first would answer a Mock with "… is running
+    // Heat 1", which is both wrong and actionable-looking.
+    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is not a RotorHazard timer — there is no receiver to tune",
+                timer.name
+            ),
+        ));
+    }
+    // The hard gate: never retune a node's receiver under a SCORED race. Open practice is exempt.
+    if let Some(heat) = registry.scored_heat_in_progress_on_timer(&timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is running {}, a scored heat — finish or reset it before changing a node's \
+                 channel (open practice can be retuned while it runs)",
+                timer.name, heat
+            ),
+        ));
+    }
+    // Whether a heat — necessarily an open-practice one — is racing right now, carried onto the
+    // write so the driver's own armed-heat backstop knows this one was already cleared.
+    let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
+    timers
+        .request_channel(&timer_id, &request, during_open_practice)
         .map(Json)
         .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
 }
@@ -5036,6 +5130,530 @@ mod tests {
             "the disabled-node refusal must name the node 1-based and say why: {message}"
         );
         assert!(registry.timers().take_calibration_requests().is_empty());
+    }
+
+    /// `POST /timers/{id}/channel` with a raw JSON body → status + raw bytes (#413).
+    async fn post_channel(
+        registry: EventRegistry,
+        timer_id: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, Vec<u8>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/timers/{timer_id}/channel"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn setting_a_node_channel_queues_it_with_band_and_channel_and_records_it_as_grid_config()
+    {
+        // #413: the Tune page's other write. Two things matter here and they are separate.
+        //
+        // 1. The BAND AND CHANNEL travel with the frequency. RotorHazard's `on_set_frequency` stores
+        //    them on the active profile, and the RD validates this work by refreshing RotorHazard's
+        //    own page — where a bare `5880` with no `R7` beside it reads as "it half worked". The
+        //    label is resolved from GridFPV's OWN catalog, never trusted from the wire.
+        // 2. D27: the accepted channel is recorded on the timer, because a channel the RD picked is
+        //    GridFPV's config; the timer is only where it takes effect.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 1, "mhz": 5880, "band": "Raceband", "channel": "R7" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::ChannelDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.timer, rh.id);
+        assert_eq!(dispatch.node, 1);
+        assert_eq!(dispatch.mhz, 5880);
+        assert_eq!(dispatch.band.as_deref(), Some("Raceband"));
+        assert_eq!(dispatch.channel.as_deref(), Some("R7"));
+        // Nothing was on this node before, and no thresholds are held for it — so there is nothing
+        // stale to announce yet.
+        assert_eq!(dispatch.previous_mhz, None);
+        assert!(!dispatch.thresholds_tuned_on_another_channel);
+
+        assert_eq!(
+            registry.timers().node_channels(&rh.id),
+            vec![crate::timers::NodeChannel {
+                node: 1,
+                mhz: 5880,
+                band: Some("Raceband".into()),
+                channel: Some("R7".into()),
+            }]
+        );
+
+        // The queue drains EXACTLY ONCE, carrying the label onto the wire.
+        let drained = registry.timers().take_channel_requests();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].timer, rh.id);
+        assert_eq!(drained[0].node, 1);
+        assert_eq!(drained[0].mhz, 5880);
+        assert_eq!(drained[0].band.as_deref(), Some("Raceband"));
+        assert_eq!(drained[0].channel.as_deref(), Some("R7"));
+        assert!(
+            registry.timers().take_channel_requests().is_empty(),
+            "a second drain is empty — nothing is re-queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_channel_label_is_resolved_from_gridfpvs_own_catalog_not_taken_from_the_client() {
+        // D27: GridFPV owns the vocabulary. A client-supplied `(band, channel, mhz)` triple is
+        // honoured only when the catalog actually holds it — which is what lets an RD pick `HDZero
+        // R7` over the coincident `Raceband R7` — and an invented one falls back to the catalog's
+        // own answer rather than reaching the timer. A custom MHz travels with NO label at all,
+        // because it has none: a made-up name on RotorHazard's screen is worse than the number.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        // A real, deliberately-chosen alternative band for a coincident frequency.
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5880, "band": "HDZero", "channel": "R7" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::ChannelDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.band.as_deref(), Some("HDZero"));
+
+        // An invented label is replaced by the catalog's, not forwarded.
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5880, "band": "Nonsense", "channel": "ZZ9" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::ChannelDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.band.as_deref(), Some("Raceband"));
+        assert_eq!(dispatch.channel.as_deref(), Some("R7"));
+
+        // A custom raw MHz the catalog does not know: the frequency alone, and no invented label.
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5891 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::ChannelDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.mhz, 5891);
+        assert_eq!(dispatch.band, None);
+        assert_eq!(dispatch.channel, None);
+    }
+
+    #[tokio::test]
+    async fn a_channel_change_reports_that_the_thresholds_were_tuned_on_the_previous_channel() {
+        // The thing nothing else announces (#413). RotorHazard's `on_set_frequency` writes the
+        // frequency into the CURRENT PROFILE — the same row that holds `enter_ats`/`exit_ats`. So
+        // changing a node's channel leaves its thresholds exactly where they were, tuned for the
+        // channel it just left: the levels read unchanged and therefore fine, while the gate now
+        // detects on numbers never calibrated for the frequency it is on.
+        //
+        // The Director is the only party that can say so — it holds the record of what GridFPV set.
+        // Reported, never acted on: the levels are deliberately untouched (recalling saved
+        // per-channel levels is #411).
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        // A node on R7, then tuned.
+        let (status, _) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5880, "band": "Raceband", "channel": "R7" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "enter_at": 92, "exit_at": 84 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Now move it to a different channel.
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5800, "band": "Fatshark", "channel": "F4" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::ChannelDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.previous_mhz, Some(5880));
+        assert!(
+            dispatch.thresholds_tuned_on_another_channel,
+            "the levels were tuned on R7 and this node is now on F4 — the RD has to be told"
+        );
+
+        // The thresholds themselves are UNTOUCHED: GridFPV changed one thing, so one thing changed.
+        assert_eq!(
+            registry.timers().calibration(&rh.id),
+            vec![crate::timers::NodeCalibration {
+                node: 0,
+                enter_at: Some(92),
+                exit_at: Some(84),
+            }]
+        );
+
+        // Re-picking the channel it is already on is not "stale" — nothing moved.
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5800, "band": "Fatshark", "channel": "F4" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::ChannelDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert!(!dispatch.thresholds_tuned_on_another_channel);
+    }
+
+    #[tokio::test]
+    async fn a_flexible_timer_with_an_empty_channel_pool_still_accepts_any_catalog_channel() {
+        // The trap this feature is built around (#413). Both real RotorHazard timers on the bench
+        // report `channel_capability: "Flexible"` with an EMPTY `available_channels`, which means
+        // "no restriction" — it is the per-heat allocation POOL, not a capability. A Director that
+        // read it as a restriction would refuse every channel on precisely the timers this is for.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+        assert!(
+            registry
+                .timers()
+                .get(&rh.id)
+                .unwrap()
+                .available_channels
+                .is_empty(),
+            "the fixture models the bench: a Flexible RH with nothing configured in its pool"
+        );
+
+        let (status, _) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5658, "band": "Raceband", "channel": "R1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "an empty pool is not a restriction");
+    }
+
+    #[tokio::test]
+    async fn a_fixed_timer_refuses_a_channel_outside_its_declared_set() {
+        // The other half of the capability: a Fixed timer supports what it supports, and the refusal
+        // names the channel the way the RD reads it (CLAUDE.md), never as a bare number.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Fixed RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: Some(crate::timers::ChannelCapability::Fixed {
+                    channels: vec![5658, 5695],
+                }),
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+        registry
+            .timers()
+            .set_status(&rh.id, crate::timers::TimerStatus::Connected);
+
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5880, "band": "Raceband", "channel": "R7" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Raceband R7") && message.contains("Fixed RH"),
+            "the refusal must name the channel and the timer by their friendly names: {message}"
+        );
+        assert!(
+            !message.contains("5880"),
+            "a bare frequency must never reach an RD (CLAUDE.md): {message}"
+        );
+
+        // A channel it DOES support goes through.
+        let (status, _) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "mhz": 5658, "band": "Raceband", "channel": "R1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn setting_a_channel_is_refused_while_a_scored_race_is_in_progress_on_the_timer() {
+        // Retuning a node's receiver under a SCORED race takes the gate off the channel the pilot is
+        // flying — at least as disruptive as moving a threshold, so the same hard gate applies.
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_practice(&registry);
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("q-1".into()),
+                        lineup: vec![CompetitorRef("A".into())],
+                        class: None,
+                        round: None,
+                        frequencies: vec![],
+                        label: Some("Qualifier Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("q-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let (status, bytes) = post_channel(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "mhz": 5880, "band": "Raceband", "channel": "R7" }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "a {transition:?} scored heat must refuse the channel change"
+            );
+            let message = refusal(&bytes);
+            assert!(
+                message.contains("Field RH")
+                    && message.contains("Qualifier Heat 1")
+                    && message.contains("scored"),
+                "the refusal must name the timer and the heat, and say the heat is scored: \
+                 {message}"
+            );
+            // Nothing queued and nothing recorded: a refusal is a refusal on both halves.
+            assert!(registry.timers().take_channel_requests().is_empty());
+            assert!(registry.timers().node_channels(&rh.id).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn setting_a_channel_is_accepted_while_an_open_practice_heat_is_running() {
+        // #398's exemption, applied to #413: practice is excluded from scoring, so there is no
+        // result a retune can corrupt — and pilots in the air is exactly when an RD is checking
+        // whether the gate is on the right channel at all.
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_practice(&registry);
+            let round = registry
+                .add_round(
+                    &EventId(PRACTICE_EVENT_ID.into()),
+                    NewRoundReq {
+                        label: "Practice".into(),
+                        classes: vec![],
+                        format: gridfpv_engine::format::OpenPractice::NAME.to_string(),
+                        params: std::collections::BTreeMap::new(),
+                        win_condition: None,
+                        seeding: SeedingRule::AllChannels { channels: vec![0] },
+                        time_limit_secs: None,
+                        channel_mode: None,
+                        staging_timer_secs: None,
+                        start_procedure: None,
+                        grace_window: None,
+                        protest_window: None,
+                        min_lap_secs: None,
+                    },
+                )
+                .expect("an open-practice round");
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("p-1".into()),
+                        lineup: vec![CompetitorRef("node-0".into())],
+                        class: None,
+                        round: Some(round.id.clone()),
+                        frequencies: vec![],
+                        label: Some("Practice Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("p-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let (status, _) = post_channel(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "mhz": 5880, "band": "Raceband", "channel": "R7" }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an open-practice heat in {transition:?} must NOT block a channel change"
+            );
+            // …and it must reach the wire: the write carries the route's finding, so the driver's
+            // own armed-heat backstop lets it through rather than silently dropping it.
+            let drained = registry.timers().take_channel_requests();
+            assert_eq!(drained.len(), 1);
+            assert!(
+                drained[0].during_open_practice,
+                "the write must be stamped as cleared against an open-practice heat"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_channel_write_to_a_mock_a_disabled_node_or_an_impossible_frequency_is_refused() {
+        // RotorHazard validates `0 <= node_index < num_nodes` and otherwise writes nothing but a log
+        // line — so an out-of-range write would look accepted and land nowhere, which is exactly the
+        // failure the Tune page exists to remove. A DISABLED node (#412) is refused for the same
+        // reason it refuses a threshold: no heat is ever seated there.
+        let (registry, _state, _) = state_with(vec![]);
+
+        // A Mock has no receiver to tune.
+        let (status, bytes) =
+            post_channel(registry.clone(), "mock", json!({ "node": 0, "mhz": 5880 })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(refusal(&bytes).contains("not a RotorHazard timer"));
+
+        // An unknown id is a 404, never a message about a timer that does not exist.
+        let (status, _) = post_channel(
+            registry.clone(),
+            "no-such-timer",
+            json!({ "node": 0, "mhz": 5880 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+        let width = registry.timers().get(&rh.id).unwrap().node_width();
+
+        // Beyond the width.
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": width, "mhz": 5880 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            // 1-based on screen, per the repo display rule.
+            message.contains(&format!("Node {}", width + 1)),
+            "the refusal must name the node the way the page labels it: {message}"
+        );
+
+        // Disabled by the RD.
+        registry
+            .timers()
+            .set_nodes(
+                &rh.id,
+                &crate::timers::SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some((0..width).filter(|n| *n != 2).collect()),
+                },
+            )
+            .unwrap();
+        let (status, bytes) = post_channel(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 2, "mhz": 5880 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Node 3") && message.contains("disabled"),
+            "the disabled-node refusal must name the node 1-based and say why: {message}"
+        );
+
+        // `frequency: 0` is a real RotorHazard command — it tunes the node to NOTHING, silently
+        // switching a gate off. No dropdown should be able to send it by accident.
+        let (status, bytes) =
+            post_channel(registry.clone(), &rh.id.0, json!({ "node": 0, "mhz": 0 })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(refusal(&bytes).contains("5.8 GHz"));
+
+        assert!(registry.timers().take_channel_requests().is_empty());
+        assert!(registry.timers().node_channels(&rh.id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_nodes_on_the_same_channel_is_allowed_because_a_swap_looks_exactly_like_that() {
+        // Flagged by the console, never blocked by the Director (#413). Two gates on one frequency
+        // both see the same craft, which is wrong for a race — but it is also precisely what a bench
+        // swap looks like halfway through, and refusing it would block the legitimate case to
+        // prevent a recoverable one.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_practice(&registry);
+
+        for node in [0, 1] {
+            let (status, _) = post_channel(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": node, "mhz": 5880, "band": "Raceband", "channel": "R7" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        assert_eq!(registry.timers().take_channel_requests().len(), 2);
     }
 
     #[tokio::test]

@@ -27,6 +27,9 @@ export {
   disconnectTimer,
   restartTimer,
   setCalibration,
+  setNodeChannel,
+  timerNodes,
+  setTimerNodes,
   timerSignal,
   stopTimerSignal,
   setEventTimers,
@@ -77,3 +80,10 @@ export type {
  * above), so the page and the Director cannot disagree about it.
  */
 export type { CalibrationRequest } from '@gridfpv/types';
+
+/**
+ * The outbound channel body for {@link setNodeChannel} and the dispatch it answers with (#413),
+ * re-exported for the same reason {@link CalibrationRequest} is: one import site for the call and
+ * its payload, and a definition that is the ts-rs binding rather than a hand-written guess.
+ */
+export type { ChannelDispatch, ChannelRequest } from '@gridfpv/types';

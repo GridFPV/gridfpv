@@ -51,6 +51,9 @@ import {
   disconnectTimer,
   restartTimer,
   setCalibration,
+  setNodeChannel,
+  timerNodes,
+  setTimerNodes,
   timerSignal,
   stopTimerSignal,
   setEventTimers,
@@ -87,14 +90,12 @@ import type {
   ProtocolClient,
   ProtocolState,
   ConnectionStatus,
-  CalibrationRequest
+  CalibrationRequest,
+  ChannelDispatch,
+  ChannelRequest
 } from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
-// The node-configuration seam (#412) lives in the app rather than in `@gridfpv/protocol-client`
-// (see `./timerNodes.ts`); it is injected here exactly like every protocol-client seam above so
-// screen tests can stub it.
-import { timerNodes, setTimerNodes } from './timerNodes.js';
 import type {
   AdapterId,
   AuditEntry,
@@ -380,6 +381,7 @@ export class Session {
   #disconnectTimerImpl: typeof disconnectTimer;
   #restartTimerImpl: typeof restartTimer;
   #setCalibrationImpl: typeof setCalibration;
+  #setNodeChannelImpl: typeof setNodeChannel;
   #timerSignalImpl: typeof timerSignal;
   #stopTimerSignalImpl: typeof stopTimerSignal;
   #timerNodesImpl: typeof timerNodes;
@@ -429,6 +431,7 @@ export class Session {
     disconnectTimerImpl?: typeof disconnectTimer;
     restartTimerImpl?: typeof restartTimer;
     setCalibrationImpl?: typeof setCalibration;
+    setNodeChannelImpl?: typeof setNodeChannel;
     timerSignalImpl?: typeof timerSignal;
     stopTimerSignalImpl?: typeof stopTimerSignal;
     timerNodesImpl?: typeof timerNodes;
@@ -479,6 +482,7 @@ export class Session {
     this.#disconnectTimerImpl = opts?.disconnectTimerImpl ?? disconnectTimer;
     this.#restartTimerImpl = opts?.restartTimerImpl ?? restartTimer;
     this.#setCalibrationImpl = opts?.setCalibrationImpl ?? setCalibration;
+    this.#setNodeChannelImpl = opts?.setNodeChannelImpl ?? setNodeChannel;
     this.#timerSignalImpl = opts?.timerSignalImpl ?? timerSignal;
     this.#stopTimerSignalImpl = opts?.stopTimerSignalImpl ?? stopTimerSignal;
     this.#timerNodesImpl = opts?.timerNodesImpl ?? timerNodes;
@@ -792,6 +796,24 @@ export class Session {
   setCalibration(id: TimerId, request: CalibrationRequest): Promise<void | undefined> {
     return this.#privilegedWrite((token) =>
       this.#setCalibrationImpl(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * Set a timer node's **channel** (`POST /timers/{id}/channel`, #413) — the Tune page's other
+   * write. Resolves with the Director's `ChannelDispatch` when it **accepted** the change,
+   * `undefined` on a cancelled token prompt, or throws on any other failure (a Mock, a disconnected
+   * timer, a scored heat running on it, a disabled or non-existent node, a channel a Fixed timer
+   * cannot tune to — each message already phrased for the RD, so the caller surfaces it verbatim).
+   *
+   * Accepted is not applied: the page confirms by watching `NodeSignal.frequency_mhz` come back on
+   * the signal feed it is already polling. The dispatch is still worth reading for the one thing
+   * the page cannot know on its own — whether the node's stored thresholds were tuned on a
+   * different channel.
+   */
+  setNodeChannel(id: TimerId, request: ChannelRequest): Promise<ChannelDispatch | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#setNodeChannelImpl(this.baseUrl, id, request, token)
     );
   }
 

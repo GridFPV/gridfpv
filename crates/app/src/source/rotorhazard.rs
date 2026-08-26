@@ -172,6 +172,40 @@ pub struct CalibrationWrite {
 /// applies the latest value once rather than replaying a stale one after it.
 type CalibrationSlot = Arc<Mutex<Vec<CalibrationWrite>>>;
 
+/// One queued **channel write** the driver applies on its next loop (#413): a node, the channel it
+/// should be listening on, and the catalog label to put on RotorHazard's own screen alongside it.
+///
+/// The app-crate twin of `gridfpv_server::timers::PendingChannel`, restated here for the same
+/// reason [`CalibrationWrite`] is — the connection already knows which timer it is.
+///
+/// `band`/`channel` are owned `String`s rather than `&str` because the write crosses from the async
+/// reconciler onto the blocking driver thread and outlives the registry read that produced it. They
+/// are `None` for a **custom** raw MHz the catalog has no name for: the emit then carries the
+/// frequency alone, which is honest, rather than a label GridFPV invented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelWrite {
+    /// The node to tune, 0-based (RotorHazard's `seat_index`).
+    pub node: u64,
+    /// The centre frequency to tune it to, in raw MHz.
+    pub mhz: u16,
+    /// The catalog band to label it with on RotorHazard (`"Raceband"`), if the catalog knows one.
+    pub band: Option<String>,
+    /// The catalog channel label (`"R7"`), if the catalog knows one.
+    pub channel: Option<String>,
+    /// Whether the route accepted this write with an **open-practice** heat racing on the timer
+    /// (#398) — so the driver's armed-heat backstop below must let it through.
+    pub during_open_practice: bool,
+}
+
+/// **Pending channel writes** the driver applies on its next loop (#413): the channels the RD
+/// picked on the Tune page, shared from the async [`RhConnection::set_channel`] caller to the
+/// blocking driver thread.
+///
+/// A **queue** for the same reason [`CalibrationSlot`] is, and distinct from [`TuneSlot`] on
+/// purpose: `TuneSlot` is the *heat's* whole-timer channel plan, pushed at Stage and legitimately
+/// overwriting everything; this is one node at a time from the bench. Pushes coalesce per node.
+type ChannelSlot = Arc<Mutex<Vec<ChannelWrite>>>;
+
 /// The RH heat id **seated** for the current arming, if seating succeeded (the laps-attribute fix):
 /// a fresh RH heat built at Stage with the bound pilots assigned + made current, so RH records +
 /// attributes passes. Held by [`drive`] **outside** its reconnect loop (not a `maintain`-local) so it
@@ -278,6 +312,12 @@ pub struct RhConnection {
     /// `set_enter_at_level` / `set_exit_at_level` and then asks for the `enter_and_exit_at_levels`
     /// readback — RH echoes neither write, so the readback is the only confirmation there is.
     calibration: CalibrationSlot,
+    /// **Pending channel writes** the driver applies on its next loop (#413): set by
+    /// [`set_channel`](Self::set_channel) from the Tune page, the driver emits RotorHazard's
+    /// `set_frequency` carrying the band/channel label as well as the frequency. No readback is
+    /// needed here — unlike a threshold, every RotorHazard heartbeat already reports each node's
+    /// current frequency, so the confirming value is on the feed the Tune page is polling anyway.
+    channel: ChannelSlot,
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
@@ -298,6 +338,7 @@ impl RhConnection {
         let prepare: PrepareSlot = Arc::new(AtomicBool::new(false));
         let seat: SeatSlot = Arc::new(Mutex::new(None));
         let restart: RestartSlot = Arc::new(AtomicBool::new(false));
+        let channel: ChannelSlot = Arc::new(Mutex::new(Vec::new()));
         let calibration: CalibrationSlot = Arc::new(Mutex::new(Vec::new()));
         let driver = {
             let cancel = cancel.clone();
@@ -308,6 +349,7 @@ impl RhConnection {
             let seat = seat.clone();
             let restart = restart.clone();
             let calibration = calibration.clone();
+            let channel = channel.clone();
             tokio::task::spawn_blocking(move || {
                 drive(
                     url,
@@ -321,6 +363,7 @@ impl RhConnection {
                     seat,
                     restart,
                     calibration,
+                    channel,
                 );
             })
         };
@@ -333,6 +376,7 @@ impl RhConnection {
             seat,
             restart,
             calibration,
+            channel,
             _driver: driver,
         }
     }
@@ -453,6 +497,33 @@ impl RhConnection {
                 // The freshest phase reading wins (see the registry's coalesce).
                 existing.during_open_practice = write.during_open_practice;
             }
+            None => pending.push(write),
+        }
+    }
+
+    /// **Set a node's channel** on this connection (#413) — the Tune page's other write.
+    ///
+    /// Queues the write; the driver emits RotorHazard's `set_frequency` on its next loop, carrying
+    /// the catalog band/channel alongside the frequency so RotorHazard's own screen reads
+    /// `Raceband R7` rather than a bare number (the RD validates this by refreshing that page).
+    ///
+    /// **No readback is fired, and none is needed.** Unlike a threshold — which RotorHazard never
+    /// echoes, and which therefore had to be *asked* for — every RH heartbeat already reports each
+    /// node's current frequency, so the confirming value arrives on the very feed the Tune page is
+    /// polling. The page confirms a channel exactly as it confirms a level: by seeing it come back.
+    ///
+    /// Pushes **coalesce per node**: a dropdown changed twice before the driver's next loop tunes
+    /// the node once, to the latest value.
+    ///
+    /// **Refused mid-race by the driver as well as by the route**, and by the same rule the
+    /// calibration write uses: only a *scored* heat blocks it. The route owns that judgement (it is
+    /// the layer that can see the event log) and stamps its answer in
+    /// [`ChannelWrite::during_open_practice`]; this backstop only covers the window between that
+    /// check and the emit.
+    pub fn set_channel(&self, write: ChannelWrite) {
+        let mut pending = self.channel.lock().expect("channel lock poisoned");
+        match pending.iter_mut().find(|p| p.node == write.node) {
+            Some(existing) => *existing = write,
             None => pending.push(write),
         }
     }
@@ -600,6 +671,7 @@ fn drive(
     seat: SeatSlot,
     restart: RestartSlot,
     calibration: CalibrationSlot,
+    channel: ChannelSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
     // The RH heat id **seated** for the current arming (the laps-attribute fix), if seating
@@ -726,6 +798,7 @@ fn drive(
                 seat: &seat,
                 restart: &restart,
                 calibration: &calibration,
+                channel: &channel,
                 seated_heat: &seated_heat,
                 timers: &timers,
                 timer_id: &timer_id,
@@ -807,6 +880,10 @@ struct ControlSlots<'a> {
     restart: &'a AtomicBool,
     /// Calibration writes the RD queued from the Tune page (#355), one entry per node.
     calibration: &'a Mutex<Vec<CalibrationWrite>>,
+    /// Channel writes the RD queued from the Tune page (#413), one entry per node. Distinct from
+    /// [`tune`](ControlSlots::tune): that is the *heat's* whole-timer channel plan pushed at Stage,
+    /// this is one node retuned from the bench.
+    channel: &'a Mutex<Vec<ChannelWrite>>,
     /// The heat whose seats are currently bound on the timer.
     seated_heat: &'a Mutex<Option<u64>>,
     /// The timer registry — where the **tune-telemetry lease** lives (#355 S2a). The registry is
@@ -825,6 +902,7 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
         seat,
         restart,
         calibration,
+        channel,
         seated_heat,
         timers,
         timer_id,
@@ -941,14 +1019,55 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
             }
         }
 
+        // Apply any pending **channel writes** (#413): the RD picked a channel for a node on the
+        // Tune page. Same shape, same backstop and same reasoning as the calibration block above —
+        // a *scored* heat blocks it (a receiver retuned mid-race takes the gate off the channel the
+        // pilot is flying), open practice does not.
+        //
+        // The emit carries the catalog **band and channel** as well as the frequency: RotorHazard's
+        // `on_set_frequency` stores them on the active profile, and without them its own UI shows a
+        // bare number — which is what the RD is looking at when they refresh RH to check this
+        // worked. There is deliberately no readback: every heartbeat already carries each node's
+        // frequency, so the confirmation is already on the feed the Tune page polls.
+        let pending_channels: Vec<ChannelWrite> = {
+            let mut slot = channel.lock().expect("channel lock poisoned");
+            std::mem::take(&mut *slot)
+        };
+        if !pending_channels.is_empty() {
+            let heat_armed = armed.lock().expect("armed-heat lock poisoned").is_some();
+            let mut refused = 0usize;
+            for write in &pending_channels {
+                if heat_armed && !write.during_open_practice {
+                    refused += 1;
+                    continue;
+                }
+                let label = write.band.as_deref().zip(write.channel.as_deref());
+                if conn.set_frequency(write.node, write.mhz, label).is_err() {
+                    return true;
+                }
+            }
+            if refused > 0 {
+                eprintln!(
+                    "gridfpv: ignoring {refused} channel write(s) — a scored heat is armed on this \
+                     connection; retuning a node mid-race takes the gate off the channel the pilot \
+                     is flying"
+                );
+            }
+        }
+
         // Apply a pending tune (race redesign Slice 4a): the bridge requested the device tune its
         // nodes to the staging heat's assigned channels. Emit a `set_frequency` per node; this is
         // best-effort (the engine has already allocated — applying is the adapter's half), so a
         // failed emit on a supposedly-live socket signals a drop the caller reconnects from.
+        //
+        // **This legitimately overwrites anything the Tune page set** (#413): a heat's channel
+        // assignment is the race's, and the bench value does not get to win. The Tune page says so
+        // rather than fighting it. No label is passed — the heat plan is raw allocated MHz, and
+        // inventing one here would re-derive the catalog away from its one resolver.
         let pending_tune = tune.lock().expect("tune lock poisoned").take();
         if let Some(assignment) = pending_tune {
             for (node, mhz) in assignment {
-                if conn.set_frequency(node, mhz).is_err() {
+                if conn.set_frequency(node, mhz, None).is_err() {
                     return true;
                 }
             }

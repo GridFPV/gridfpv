@@ -15,7 +15,13 @@
  * that can drift from the wire is worse than no fixture, because it manufactures confidence.
  */
 import { describe, expect, it } from 'vitest';
-import type { NodeSignal, TimerSignal } from '@gridfpv/types';
+import type {
+  ChannelCapability,
+  ChannelCatalogEntry,
+  NodeSignal,
+  TimerNodes,
+  TimerSignal
+} from '@gridfpv/types';
 import {
   CONFIRM_TIMEOUT_MS,
   RSSI_MAX,
@@ -23,18 +29,27 @@ import {
   SIGNAL_LEASE_MS,
   SIGNAL_POLL_MS,
   adoptReported,
+  channelGate,
+  channelOptions,
   clampLevel,
+  duplicateChannelNodes,
+  duplicateChannelNote,
   foldPolled,
+  foldPolledChannel,
   holdsLease,
   isParsableLevel,
+  markChannelSent,
   markSent,
   nodeCountOf,
   nodeTraceOf,
+  offerableNodes,
   phaseLabel,
   phaseTone,
   plottable,
   readoutsOf,
+  seedChannel,
   seedThreshold,
+  staleThresholdNote,
   writeGate,
   type ThresholdState
 } from '../src/lib/tuning.js';
@@ -433,5 +448,229 @@ describe('readoutsOf — the six stats, all from node_data', () => {
     expect(
       readoutsOf(node({ seen: false, samples: [0, 0, 0] })).every((r) => r.value === '—')
     ).toBe(true);
+  });
+});
+
+// ── The channel half (#413) ─────────────────────────────────────────────────────────────────────
+
+/** A fuller catalog: two bands, and a frequency that appears in both (the DJI/HDZero overlap). */
+const FULL: ChannelCatalogEntry[] = [
+  { band: 'Raceband', channel: 'R1', mhz: 5658 },
+  { band: 'Raceband', channel: 'R7', mhz: 5880 },
+  { band: 'Fatshark', channel: 'F4', mhz: 5800 },
+  { band: 'HDZero', channel: 'R7', mhz: 5880 }
+];
+
+const FLEXIBLE: ChannelCapability = 'Flexible';
+const FIXED: ChannelCapability = { Fixed: { channels: [5658, 5800] } };
+
+describe('channelOptions — the dropdown source is the CAPABILITY, never `available_channels`', () => {
+  it('offers the whole catalog on a Flexible timer whose channel pool is EMPTY', () => {
+    // The trap this function exists for. Measured on the bench: Docker RH 4.3.0 and NuclearHazard
+    // both report `Flexible` with `available_channels: []`. That empty list means "no restriction"
+    // — it is the per-heat allocation POOL, which an RD tuning at the bench has usually never
+    // configured — and NOT "no channels". A dropdown bound naively to it renders EMPTY on exactly
+    // the timers this feature is for, which is the whole reason #413 was filed with a warning.
+    const options = channelOptions(FLEXIBLE, FULL, []);
+    expect(options.map((o) => o.mhz)).toEqual([5658, 5880, 5800, 5880]);
+    expect(options.length).toBe(FULL.length);
+  });
+
+  it('limits a Fixed timer to its declared set', () => {
+    // The other half of the capability: a limited module offers only what it physically supports,
+    // so a channel it cannot tune to is never offered (and never refused after the fact).
+    expect(channelOptions(FIXED, FULL, []).map((o) => o.mhz)).toEqual([5658, 5800]);
+  });
+
+  it("includes the RD's custom raw-MHz channels alongside the catalog, on a Flexible timer", () => {
+    // The one thing `available_channels` legitimately contributes here: the custom entries the RD
+    // typed into the timer's channel config. They come AFTER the catalog, ascending, and only the
+    // ones the catalog does not already know (5800 is Fatshark F4 — it must not appear twice).
+    const options = channelOptions(FLEXIBLE, FULL, [5891, 5800, 5645]);
+    expect(options.slice(FULL.length).map((o) => o.mhz)).toEqual([5645, 5891]);
+    expect(options.filter((o) => o.mhz === 5800)).toHaveLength(1);
+    expect(options.find((o) => o.mhz === 5891)?.custom).toBe(true);
+  });
+
+  it('ignores custom channels on a Fixed timer — it supports what it supports', () => {
+    expect(channelOptions(FIXED, FULL, [5891]).some((o) => o.mhz === 5891)).toBe(false);
+  });
+
+  it('always offers the channel the node is currently on, even off-catalog and off-pool', () => {
+    // A dropdown that cannot show the node's actual value would silently render some OTHER option
+    // as selected — the RD would read a channel the gate is not on.
+    expect(channelOptions(FLEXIBLE, FULL, [], 5905).some((o) => o.mhz === 5905)).toBe(true);
+    // …but not one a Fixed timer cannot tune to: that would offer a refusal.
+    expect(channelOptions(FIXED, FULL, [], 5905).some((o) => o.mhz === 5905)).toBe(false);
+  });
+
+  it('labels every option by BAND AND CHANNEL, never as a bare frequency', () => {
+    // CLAUDE.md: the option `value` may stay the raw MHz, the visible label may not.
+    const options = channelOptions(FLEXIBLE, FULL, [5891]);
+    expect(options[1].label).toBe('Raceband R7');
+    // A coincident frequency keeps the band the RD picked, rather than collapsing to the first
+    // catalog entry that happens to share the number.
+    expect(options[3].label).toBe('HDZero R7');
+    expect(options.every((o) => !/\d{4}/.test(o.label) || o.label.endsWith('MHz'))).toBe(true);
+    // A custom channel has no catalog name, so it is spelled as a measurement rather than a bare
+    // number standing in for a name.
+    expect(options.at(-1)?.label).toBe('5891 MHz');
+  });
+
+  it('carries the band and channel of the picked entry, so the emit can label it on RotorHazard', () => {
+    // RotorHazard stores band/channel on its profile, and the RD validates this work by refreshing
+    // RotorHazard's own page — where a bare frequency reads as "it half worked".
+    const hdzero = channelOptions(FLEXIBLE, FULL, []).at(-1);
+    expect(hdzero).toMatchObject({ mhz: 5880, band: 'HDZero', channel: 'R7' });
+  });
+});
+
+describe('offerableNodes — never offer a node the hardware does not have (#412)', () => {
+  const view = (over: Partial<TimerNodes> = {}): TimerNodes => ({
+    timer: 'rh-1',
+    width: 4,
+    nodes: [],
+    enabled: [0, 1, 3],
+    ...over
+  });
+
+  it('offers exactly the enabled set — a hole in the middle stays a hole', () => {
+    expect([...offerableNodes(view())]).toEqual([0, 1, 3]);
+  });
+
+  it('FAILS CLOSED with no node view: nothing is offered', () => {
+    // RotorHazard validates `0 <= node < num_nodes` and otherwise only writes a log line, so a
+    // channel write to a node that does not exist looks accepted and lands nowhere. Better a
+    // control that appears a beat late than one that offers a gate the hardware does not have.
+    expect(offerableNodes(undefined).size).toBe(0);
+  });
+});
+
+describe('the channel write lifecycle — the confirmation is a POLL, as it is for a threshold', () => {
+  it('settles to confirmed when the timer reports the channel that was sent', () => {
+    const sent = markChannelSent(seedChannel(5658), 5880, 1_000, false);
+    expect(sent.phase).toBe('sent');
+    expect(foldPolledChannel(sent, 5880, 1_100, FULL).phase).toBe('confirmed');
+  });
+
+  it('stays `sent` while the change may simply still be in flight', () => {
+    const sent = markChannelSent(seedChannel(5658), 5880, 1_000, false);
+    expect(foldPolledChannel(sent, 5658, 1_000 + CONFIRM_TIMEOUT_MS - 1, FULL).phase).toBe('sent');
+  });
+
+  it('says NOT TAKEN, loudly and by name, when the polls keep disagreeing', () => {
+    // The #403 failure class: a write that reports dispatched and never lands. And the message
+    // names both channels the way the RD reads them (CLAUDE.md), never as bare numbers.
+    const sent = markChannelSent(seedChannel(5658), 5880, 1_000, false);
+    const out = foldPolledChannel(sent, 5658, 1_000 + CONFIRM_TIMEOUT_MS + 1, FULL);
+    expect(out.phase).toBe('mismatch');
+    expect(out.detail).toContain('Raceband R1');
+    expect(out.detail).toContain('Raceband R7');
+    expect(out.detail).not.toMatch(/\b5880\b/);
+  });
+
+  it('FOLLOWS the hardware at rest — a heat legitimately retunes every node', () => {
+    // Channel here is a bench setting; heat setup reassigns, and that is correct. The page shows
+    // what the node is on rather than insisting on what was picked at the bench.
+    const held = seedChannel(5880);
+    expect(foldPolledChannel(held, 5658, 1_000, FULL)).toMatchObject({
+      mhz: 5658,
+      confirmed: 5658,
+      phase: 'confirmed'
+    });
+  });
+
+  it('never adopts "tuned to nothing" as a channel', () => {
+    // RotorHazard reports `0` for a node tuned to nothing; the adapter turns that into an absence,
+    // and an absence is not a value to display as the node's channel.
+    const held = seedChannel(5880);
+    expect(foldPolledChannel(held, undefined, 1_000, FULL)).toBe(held);
+  });
+});
+
+describe('staleThresholdNote — the thing nothing else announces', () => {
+  it('states plainly that the levels were tuned on the previous channel', () => {
+    // `on_set_frequency` writes the frequency into the SAME profile row that holds the thresholds,
+    // so a channel change leaves them untouched — tuned for the channel the node just left.
+    const note = staleThresholdNote(5880, 5800, FULL);
+    expect(note).toContain('Raceband R7');
+    expect(note).toContain('Fatshark F4');
+    expect(note).toContain('unchanged');
+  });
+
+  it('is FACTUAL, not alarming — the levels are unverified, not necessarily wrong', () => {
+    const note = staleThresholdNote(5880, 5800, FULL);
+    expect(note).not.toMatch(/wrong|broken|error|invalid|fail/i);
+  });
+
+  it('names both channels rather than printing a raw frequency', () => {
+    expect(staleThresholdNote(5880, 5800, FULL)).not.toMatch(/\b5880\b/);
+  });
+
+  it('carries the ORIGINAL tuning channel through a second change', () => {
+    // Two changes in a row: the thresholds are still the ones tuned on the FIRST channel, and
+    // saying "tuned on the one you just left" would be a lie.
+    const first = markChannelSent(seedChannel(5880), 5800, 1_000, true);
+    const second = markChannelSent(first, 5658, 2_000, true);
+    expect(second.tunedOn).toBe(5880);
+  });
+
+  it('records nothing to announce when the Director says the thresholds are not stale', () => {
+    expect(markChannelSent(seedChannel(5880), 5800, 1_000, false).tunedOn).toBeUndefined();
+  });
+});
+
+describe('duplicateChannelNodes — flagged, never blocked', () => {
+  it('finds every node sharing a channel with another', () => {
+    const clashing = duplicateChannelNodes(
+      new Map([
+        [0, 5880],
+        [1, 5658],
+        [2, 5880]
+      ])
+    );
+    expect([...clashing].sort()).toEqual([0, 2]);
+  });
+
+  it('does not treat two nodes tuned to NOTHING as a clash', () => {
+    expect(
+      duplicateChannelNodes(
+        new Map([
+          [0, undefined],
+          [1, undefined]
+        ])
+      ).size
+    ).toBe(0);
+  });
+
+  it('names the other nodes the way the RD does — 1-based, never a raw index', () => {
+    const note = duplicateChannelNote(0, [0, 2]);
+    expect(note).toContain('Node 3');
+    expect(note).not.toContain('Node 0');
+    // And it says why it matters without forbidding it: a swap looks exactly like this.
+    expect(note).toContain('swapping');
+  });
+});
+
+describe('channelGate — ONE rule for a Tune-page write, two ways of saying it', () => {
+  it('refuses under a competition heat and allows in open practice, exactly as writeGate does', () => {
+    // Delegation, not a restated rule: the channel dropdown and the threshold sliders must never
+    // disagree about whether a heat is protected.
+    expect(channelGate('Running', 'competition').allowed).toBe(false);
+    expect(channelGate('Running', 'practice').allowed).toBe(true);
+    expect(channelGate('Running', undefined).allowed).toBe(true);
+    expect(channelGate('Staged', 'competition').allowed).toBe(true);
+    expect(channelGate(undefined, undefined).allowed).toBe(true);
+  });
+
+  it('gives the refusal a reason about the CHANNEL, not about thresholds', () => {
+    // Retuning a receiver mid-race is a different kind of wrong from moving a threshold: it takes
+    // the gate off the channel the pilot is flying, rather than changing what counts as a lap.
+    const gate = channelGate('Running', 'competition');
+    expect(gate.allowed).toBe(false);
+    if (!gate.allowed) {
+      expect(gate.reason).toContain('channel');
+      expect(gate.reason).not.toContain('threshold');
+    }
   });
 });

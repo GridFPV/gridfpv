@@ -22,6 +22,8 @@ import type {
   CalibrationRequest,
   ChangeEnvelope,
   ChannelCatalogEntry,
+  ChannelDispatch,
+  ChannelRequest,
   Class,
   ClassId,
   ClassStandings,
@@ -48,10 +50,12 @@ import type {
   RoundStanding,
   Scope,
   SetClassHiddenRequest,
+  SetTimerNodesRequest,
   Snapshot,
   SubscribeRequest,
   Timer,
   TimerId,
+  TimerNodes,
   TimerSignal,
   UpdateClassRequest,
   UpdatePilotRequest,
@@ -622,6 +626,143 @@ export async function setCalibration(
       .catch(() => '');
     throw new Error(detail || `The Director refused the change (HTTP ${resp.status}).`);
   }
+}
+
+/**
+ * Read a timer's **node set** (`GET /timers/{id}/nodes`) — issue #412.
+ *
+ * What the timer reported, what GridFPV is configured for, the effective `width`, every node with
+ * its **1-based display label** and enabled flag, the `enabled` indices in seat order, and any
+ * `drift` between the two. This is the shared answer to "which gates exist, and which may be
+ * used?" — a console that re-derives it from `Timer.node_count` / `disabled_nodes` is one
+ * off-by-one away from offering a node the hardware does not have.
+ *
+ * An **open read** (no token needed; it is the same information `GET /timers` already carries,
+ * resolved). An unknown id answers **404**.
+ */
+export async function timerNodes(
+  baseUrl: string,
+  id: TimerId,
+  options: { token?: string; fetch?: FetchLike; signal?: AbortSignal } = {}
+): Promise<TimerNodes> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/nodes`, {
+    headers,
+    signal: options.signal
+  });
+  if (!resp.ok) {
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof body === 'object' && body !== null && 'message' in body
+          ? String((body as { message: unknown }).message)
+          : ''
+      )
+      .catch(() => '');
+    throw new Error(detail || `The timer's node list answered HTTP ${resp.status}.`);
+  }
+  return (await resp.json()) as TimerNodes;
+}
+
+/**
+ * Write a timer's node configuration (`PUT /timers/{id}/nodes`), answering with the resulting view.
+ *
+ * RD-gated. The Director **refuses** (a **400**, whose message is already phrased for the RD) a
+ * `node_count` of `0` and any edit that would leave no node enabled — both cap every heat to no
+ * pilots. Those refusals are surfaced verbatim rather than as an HTTP line, because they say the
+ * useful thing ("at least one node must stay enabled").
+ */
+export async function setTimerNodes(
+  baseUrl: string,
+  id: TimerId,
+  request: SetTimerNodesRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<TimerNodes> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'content-type': 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/nodes`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) {
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof body === 'object' && body !== null && 'message' in body
+          ? String((body as { message: unknown }).message)
+          : ''
+      )
+      .catch(() => '');
+    throw new Error(detail || `The Director refused the node change (HTTP ${resp.status}).`);
+  }
+  return (await resp.json()) as TimerNodes;
+}
+
+/**
+ * Set one node's **channel** (`POST /timers/{id}/channel`) — issue #413.
+ *
+ * The Tune page's other write: a gate cannot be tuned meaningfully until its node is listening on
+ * the channel it will race. RD-gated exactly like {@link setCalibration}, so a token-gated Director
+ * answers **401** without one.
+ *
+ * **Send the band and channel, not just the MHz.** RotorHazard's `on_set_frequency` stores the
+ * label on its active profile when it is given, and the RD validates a channel change *by
+ * refreshing RotorHazard's own page* — where a bare frequency with no `R7` beside it reads as "it
+ * half worked". The Director validates the label against its own catalog, so an invented band name
+ * never reaches the timer.
+ *
+ * **The response is a dispatch, not a readback** (same rule as {@link setCalibration}): a resolved
+ * promise means *accepted*, never *applied*. The confirmation is the next `GET /timers/{id}/signal`
+ * showing `NodeSignal.frequency_mhz` holding what was sent — RotorHazard's heartbeat carries it, so
+ * the feed the caller is already polling is the confirmation. The `ChannelDispatch` body *is* worth
+ * reading for one thing the caller cannot know: whether the node's stored thresholds were tuned on
+ * a different channel.
+ *
+ * The Director **refuses** (a **400**) for a Mock, a timer that is not connected, a **scored** heat
+ * running on it (open practice is allowed), a node beyond the timer's width or one the RD has
+ * disabled, and a frequency a Fixed timer cannot tune to; an unknown id answers **404**.
+ */
+export async function setNodeChannel(
+  baseUrl: string,
+  id: TimerId,
+  request: ChannelRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ChannelDispatch> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'content-type': 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/channel`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) {
+    // The Director's refusal already names the timer, the node and the channel by their FRIENDLY
+    // names ("Node 3 is disabled on Track RH"), so it is thrown verbatim — wrapping it in a
+    // `POST /timers/{id}/…` line would put a raw id in front of a user (repo display rule).
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof body === 'object' && body !== null && 'message' in body
+          ? String((body as { message: unknown }).message)
+          : ''
+      )
+      .catch(() => '');
+    throw new Error(detail || `The Director refused the channel change (HTTP ${resp.status}).`);
+  }
+  return (await resp.json()) as ChannelDispatch;
 }
 
 /** The shared body of {@link connectTimer} / {@link disconnectTimer} — same shape, same errors. */
