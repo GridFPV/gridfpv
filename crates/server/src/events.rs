@@ -47,7 +47,7 @@ use crate::classes::ClassDirectory;
 use crate::pilots::PilotDirectory;
 use crate::round_engine;
 use crate::scope::{ClassId, EventId, PilotId};
-use crate::timers::{MOCK_TIMER_ID, TimerId, TimerRegistry};
+use crate::timers::{MOCK_TIMER_ID, Timer, TimerId, TimerRegistry};
 
 /// The reserved id of the always-present built-in **Practice** event.
 ///
@@ -1448,6 +1448,10 @@ impl EventRegistry {
     pub fn add_round(&self, id: &EventId, req: NewRoundReq) -> Result<RoundDef, RoundError> {
         let mut reg = self.write();
         let directory = reg.classes.clone();
+        // Cloned out before the mutable borrow below (the same reason `directory` is): the round's
+        // open-practice channels are validated against the event's primary timer's enabled node
+        // set (#412), and `self.timers()` would re-lock the registry we already hold.
+        let timers = reg.timers.clone();
         let event = reg
             .events
             .get_mut(id)
@@ -1465,6 +1469,7 @@ impl EventRegistry {
         validate_round_fields(
             &event.meta,
             &directory,
+            &timers,
             &req.classes,
             &req.format,
             &req.seeding,
@@ -1709,6 +1714,8 @@ impl EventRegistry {
         let facts = self.round_heat_facts(id, round_id);
         let mut reg = self.write();
         let directory = reg.classes.clone();
+        // Cloned out before the mutable borrow, as in `add_round` (#412).
+        let timers = reg.timers.clone();
         let event = reg
             .events
             .get_mut(id)
@@ -1745,6 +1752,7 @@ impl EventRegistry {
         validate_round_fields(
             &event.meta,
             &directory,
+            &timers,
             &req.classes,
             &req.format,
             &req.seeding,
@@ -2512,6 +2520,7 @@ fn collect_source_rounds<'a>(
 fn validate_round_fields(
     meta: &EventMeta,
     directory: &ClassDirectory,
+    timers: &TimerRegistry,
     classes: &[ClassId],
     format: &str,
     seeding: &SeedingRule,
@@ -2525,6 +2534,26 @@ fn validate_round_fields(
     // *seeding-resolved* field. Those only agree when seeding is the identity `FromRoster`; any other
     // seeding (creatable only via the raw API — the rounds form pairs Static with FromRoster) would
     // race a different field than it ranks. Reject it (release-hardening P1-2).
+    // **A disabled node is not offered a channel** (#412). An open-practice round's field IS its
+    // active channels, laid out as `node-{i}` seats — so a round naming a node the RD has switched
+    // off (or one the timer does not have) would show a lineup slot that can never record a lap:
+    // the silent zero-lap heat this issue exists to stop, in its practice costume. Checked against
+    // the event's **primary** timer; an event with no resolvable timer is not checked (a pure-sim
+    // event has no node set to check against).
+    if let SeedingRule::AllChannels { channels } = seeding {
+        if let Some(timer) = meta.effective_primary().and_then(|id| timers.get(&id)) {
+            for channel in channels {
+                let node = u32::try_from(*channel).unwrap_or(u32::MAX);
+                if !timer.node_enabled(node) {
+                    return Err(RoundError::Invalid(format!(
+                        "{} is not available on the timer {:?} — it is disabled or does not exist",
+                        Timer::node_label(node),
+                        timer.name
+                    )));
+                }
+            }
+        }
+    }
     if channel_mode == ChannelMode::Static && !matches!(seeding, SeedingRule::FromRoster) {
         return Err(RoundError::Invalid(
             "a Static (time-trial / qualifying) round must use FromRoster seeding; use a \
@@ -4652,6 +4681,51 @@ mod tests {
 
     fn refs(names: &[&str]) -> Vec<CompetitorRef> {
         names.iter().map(|n| CompetitorRef((*n).into())).collect()
+    }
+
+    #[test]
+    fn a_practice_round_is_not_offered_a_disabled_node() {
+        // #412: an open-practice round's field IS its active channels (`node-{i}` seats), so a
+        // round naming a node the RD switched off would show a lineup slot that can never record a
+        // lap — the silent zero-lap heat, in its practice costume.
+        use crate::timers::SetTimerNodesRequest;
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        // The event's primary timer is the built-in Mock (8 nodes). Switch off "Node 3" — index 2.
+        let mock = TimerId(MOCK_TIMER_ID.to_string());
+        reg.timers()
+            .set_nodes(
+                &mock,
+                &SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some(vec![0, 1, 3, 4, 5, 6, 7]),
+                },
+            )
+            .unwrap();
+
+        let err = reg
+            .add_round(&created.id, practice_round(&[0, 1, 2]))
+            .unwrap_err();
+        assert!(
+            // 1-based on screen (the repo display rule), 0-based on the wire.
+            err.to_string().contains("Node 3"),
+            "the refusal must name the node the way the RD does: {err}"
+        );
+        // …and a node the timer does not have at all.
+        assert!(
+            reg.add_round(&created.id, practice_round(&[0, 99]))
+                .is_err()
+        );
+
+        // The enabled ones — including the one *past* the hole — are fine.
+        let round = reg
+            .add_round(&created.id, practice_round(&[0, 1, 3]))
+            .unwrap();
+        // An edit is guarded identically.
+        assert!(
+            reg.update_round(&created.id, &round.id, practice_edit("Practice", &[0, 2]))
+                .is_err()
+        );
     }
 
     #[test]

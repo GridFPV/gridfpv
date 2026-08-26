@@ -23,7 +23,9 @@ kind?: TimerKind,
  */
 channel_capability?: ChannelCapability, 
 /**
- * A new **node/slot count** (race redesign Slice 4a), or `None` to leave it unchanged.
+ * A new **node-count override** (race redesign Slice 4a; #412), or `None` to leave it
+ * unchanged. Use `PUT /timers/{id}/nodes` ([`SetTimerNodesRequest`]) to *clear* the override
+ * (follow the timer) or to enable/disable individual nodes — this field can only set one.
  */
 node_count?: number, 
 /**

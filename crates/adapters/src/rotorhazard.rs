@@ -405,6 +405,61 @@ pub struct RawNodeData {
     pub debug_pass_count: Vec<i64>,
 }
 
+/// A RotorHazard `frequency_data` message (`RHUI.emit_frequency_data`) — **the node-count
+/// discovery source** (#412).
+///
+/// RotorHazard publishes **no `num_nodes` scalar on the socket**. Verified against `RHUI.py` /
+/// `server.py` on **v4.3.0** (read out of a running container) **and v4.4.0** (the tagged source):
+/// `num_nodes` appears only as a server-side loop bound, in HTML template rendering, and on the
+/// *HTTP* `/api/status` endpoint — never in a socket emit.
+///
+/// What it does publish is per-node payloads sized by it, and `emit_frequency_data` is the clearest
+/// of them. On **both** versions, identically:
+///
+/// ```python
+/// fdata = []
+/// for idx in range(self._racecontext.race.num_nodes):
+///     fdata.append({'band': ..., 'channel': ..., 'frequency': ...})
+/// emit_payload = {'fdata': fdata}
+/// ```
+///
+/// So `fdata.len() == num_nodes`, exactly. It is preferred over the alternatives because it is a
+/// list of **dicts** rather than parallel scalar arrays (its length cannot be misread), and because
+/// it arrives on demand via `load_data` at connect rather than waiting for a heartbeat.
+///
+/// Only the **length** is read — the band/channel/frequency values are RotorHazard's own tuning
+/// config, which GridFPV neither reads back as truth nor stores (D27).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RawFrequencyData {
+    /// One entry per node: `{band, channel, frequency}`.
+    #[serde(default)]
+    pub fdata: Vec<serde_json::Value>,
+}
+
+/// How many nodes a `frequency_data` payload says the timer has (#412), or `None` when the frame
+/// says nothing usable.
+///
+/// An **empty `fdata` is `None`, not zero**: a frame that told us nothing must not be recorded as a
+/// zero-node timer, which would cap every heat to no pilots.
+pub fn reported_nodes_from_frequency_data(value: &serde_json::Value) -> Option<u32> {
+    let parsed: RawFrequencyData = serde_json::from_value(value.clone()).ok()?;
+    (!parsed.fdata.is_empty()).then_some(parsed.fdata.len() as u32)
+}
+
+/// How many nodes an `enter_and_exit_at_levels` payload says the timer has (#412) — the
+/// **fallback** discovery source, for a timer that answers this `load_data` type but not
+/// `frequency_data`.
+///
+/// `RHUI.emit_enter_and_exit_at_levels` slices both arrays `[:num_nodes]` explicitly, on v4.3.0 and
+/// v4.4.0 alike, so the length is the node count. Empty is `None` for the same reason as above.
+pub fn reported_nodes_from_levels(levels: &RawEnterExitLevels) -> Option<u32> {
+    let len = levels
+        .enter_at_levels
+        .len()
+        .max(levels.exit_at_levels.len());
+    (len > 0).then_some(len as u32)
+}
+
 /// A RotorHazard `enter_and_exit_at_levels` message (`RHUI.emit_enter_and_exit_at_levels`):
 /// the per-node detection thresholds the timer is calibrated with. The signal-as-evidence
 /// layer captures these so a marshal sees the levels a call was made against.
@@ -2080,6 +2135,76 @@ mod tests {
 
     fn parse(json: &str) -> Vec<Raw> {
         serde_json::from_str(json).expect("fixture parses into Raw")
+    }
+
+    // ── #412: discovering the node count from the wire ───────────────────────────────────
+
+    /// A `frequency_data` payload exactly as `RHUI.emit_frequency_data` builds it — one `fdata`
+    /// entry per node, `{band, channel, frequency}`. Identical on v4.3.0 and v4.4.0.
+    fn frequency_data(nodes: usize) -> serde_json::Value {
+        serde_json::json!({
+            "fdata": (0..nodes)
+                .map(|i| serde_json::json!({
+                    "band": "R",
+                    "channel": i + 1,
+                    "frequency": 5658 + (i as i64) * 37,
+                }))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn frequency_data_states_the_timers_node_count() {
+        // The bench case #412 was filed for: a real 4-node NuclearHazard. RotorHazard never says
+        // "4" as a scalar anywhere on the socket — but `fdata` is exactly four entries long, on
+        // both v4.3.0 and v4.4.0, because `emit_frequency_data` loops `range(race.num_nodes)`.
+        assert_eq!(
+            reported_nodes_from_frequency_data(&frequency_data(4)),
+            Some(4)
+        );
+        // …and the 8-seat timer GridFPV used to assume everything was.
+        assert_eq!(
+            reported_nodes_from_frequency_data(&frequency_data(8)),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_frequency_data_reports_nothing_rather_than_zero() {
+        // "Zero nodes" is not a thing a timer can be: it would cap every heat to no pilots, which
+        // is a worse failure than the one #412 fixes. A frame that says nothing must report
+        // nothing, leaving GridFPV on its configured width.
+        assert_eq!(
+            reported_nodes_from_frequency_data(&serde_json::json!({ "fdata": [] })),
+            None
+        );
+        assert_eq!(
+            reported_nodes_from_frequency_data(&serde_json::json!({})),
+            None
+        );
+        assert_eq!(
+            reported_nodes_from_frequency_data(&serde_json::json!("not an object")),
+            None
+        );
+    }
+
+    #[test]
+    fn enter_and_exit_at_levels_is_the_fallback_node_count() {
+        // `RHUI.emit_enter_and_exit_at_levels` slices both arrays `[:num_nodes]` explicitly (v4.3.0
+        // and v4.4.0 alike), so their length is the node count too — the fallback for a timer that
+        // answers this `load_data` type but not `frequency_data`.
+        let levels = RawEnterExitLevels {
+            enter_at_levels: vec![90.0, 90.0, 90.0, 90.0],
+            exit_at_levels: vec![80.0, 80.0, 80.0, 80.0],
+        };
+        assert_eq!(reported_nodes_from_levels(&levels), Some(4));
+        assert_eq!(
+            reported_nodes_from_levels(&RawEnterExitLevels {
+                enter_at_levels: vec![],
+                exit_at_levels: vec![],
+            }),
+            None
+        );
     }
 
     /// Drive every fixture message through one adapter, flattening the events.

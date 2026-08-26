@@ -448,14 +448,15 @@ fn apply_schedule_heat(
             }
         }
     } else {
-        // A caller-supplied assignment still must fit the timer's node count (the cap).
+        // A caller-supplied assignment still must fit the timer's **enabled** node set (#412):
+        // the cap is how many seats the RD has left switched on, not how wide the timer is.
         if let Some(timer) = round_engine::assignment_timer(&meta, &registry.timers()) {
-            if lineup.len() > timer.node_count as usize {
+            if lineup.len() > timer.seat_capacity() {
                 return CommandAck::failed(ProtocolError::new(
                     ErrorCode::BadRequest,
                     round_engine::AssignError::TooManyForNodes {
                         lineup: lineup.len(),
-                        nodes: timer.node_count as usize,
+                        nodes: timer.seat_capacity(),
                     }
                     .to_string(),
                 ));
@@ -669,19 +670,19 @@ fn fill_round_once(
             //
             // - **Static** (`static_freqs` is `Some`): the channel-balanced builder already chose
             //   each pilot's fixed membership channel; use them directly. The heat-size cap was
-            //   honoured by the builder (heats are ≤ node_count), but re-check defensively against
-            //   the timer node count so an oversized heat never slips through.
+            //   honoured by the builder (heats are ≤ the enabled node set), but re-check defensively
+            //   against the timer so an oversized heat never slips through.
             // - **Per-heat** (`static_freqs` is `None`): first-fit from the timer's pool (Slice 4a),
-            //   which also enforces the node-count cap.
+            //   which also enforces the enabled-node cap.
             let frequencies = match static_freqs {
                 Some(freqs) => {
                     if let Some(timer) = round_engine::assignment_timer(meta, &registry.timers()) {
-                        if lineup.len() > timer.node_count as usize {
+                        if lineup.len() > timer.seat_capacity() {
                             return FillStep::Failed(CommandAck::failed(ProtocolError::new(
                                 ErrorCode::BadRequest,
                                 round_engine::AssignError::TooManyForNodes {
                                     lineup: lineup.len(),
-                                    nodes: timer.node_count as usize,
+                                    nodes: timer.seat_capacity(),
                                 }
                                 .to_string(),
                             )));

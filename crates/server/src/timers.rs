@@ -371,10 +371,56 @@ pub struct Timer {
     /// [`Flexible`](ChannelCapability::Flexible) for a pre-channel-model timer.
     #[serde(default)]
     pub channel_capability: ChannelCapability,
-    /// How many nodes/slots the timer has (race redesign Slice 4a) — the **heat-size cap**: a
-    /// heat's lineup must be ≤ this. Additive; defaults to [`DEFAULT_NODE_COUNT`].
-    #[serde(default = "default_node_count")]
-    pub node_count: u32,
+    /// The Race Director's **explicit width override** — how many nodes GridFPV should treat this
+    /// timer as having, regardless of what the hardware says (#412).
+    ///
+    /// `None` — the default for a newly created timer — means **follow the timer**: the width comes
+    /// from [`reported_nodes`](Timer::reported_nodes), discovered on connect. `Some(n)` pins it,
+    /// which is what a Mock (nothing to ask) and a timer whose RD deliberately set a width use.
+    /// [`node_width`](Timer::node_width) resolves the two.
+    ///
+    /// **Migration (#412).** This was a plain `u32` defaulting to [`DEFAULT_NODE_COUNT`], and the
+    /// registry always wrote it — so every pre-#412 `timers.json` carries an explicit number and
+    /// reads back as `Some(n)`, keeping exactly the width it had. Only timers created *after* this
+    /// change start out following the hardware. A disagreement between this and what the timer
+    /// reports is surfaced as [`NodeDrift`], never silently resolved.
+    #[serde(default)]
+    #[ts(optional)]
+    pub node_count: Option<u32>,
+    /// How many nodes the timer **said it has**, learned on connect (#412) — an *observation*, not
+    /// config.
+    ///
+    /// RotorHazard publishes no `num_nodes` scalar on the socket, but the count is knowable three
+    /// ways, and the Director takes the most direct one available on each (re)connect: the GridFPV
+    /// plugin's `gridfpv_hello_ack` (`len(rhapi.interface.seats)`), else the length of
+    /// `frequency_data.fdata`, else the `[:num_nodes]`-sliced `enter_and_exit_at_levels`. `None`
+    /// means the timer has never been asked — a Mock, an adapter that cannot report, or an RH not
+    /// yet dialed.
+    ///
+    /// **Live, in-memory, never persisted as config** (D27: *"a value read from a timer is evidence
+    /// about the timer, not an input to a decision"*). Like [`plugin`](Timer::plugin) it round-trips
+    /// on the wire but is reset to `None` on load, so a restart re-observes rather than remembering.
+    #[serde(default)]
+    #[ts(optional)]
+    pub reported_nodes: Option<u32>,
+    /// The node indices (**0-based**) the Race Director has **disabled** on this timer (#412) — a
+    /// dead receiver, a gate that will not tune, a seat that must not be flown.
+    ///
+    /// **This is a decision, so it is persisted and it survives a reconnect.** A timer that keeps
+    /// reporting four nodes does not re-enable node 3; the RD turned it off on purpose. Stored as
+    /// the *complement* of the enabled set precisely so it stays meaningful when the reported width
+    /// changes: "node 2 is busted" is true whether the timer reports 4 nodes or 8.
+    ///
+    /// Sorted ascending and de-duplicated on write. Entries at or beyond
+    /// [`node_width`](Timer::node_width) are inert (there is no such node to disable) but are kept
+    /// rather than pruned — a timer that comes back wider must not silently un-disable a node.
+    /// Additive on the wire and on disk: an older `timers.json` restores with none disabled, which
+    /// is every node enabled — exactly the pre-#412 behaviour.
+    ///
+    /// **0-based on the wire, 1-based on screen.** Index `2` is the node the RD calls "Node 3"; see
+    /// [`Timer::node_label`].
+    #[serde(default)]
+    pub disabled_nodes: Vec<u32>,
     /// The timer's **defined available channels** (race redesign Slice 4a): the raw-MHz channels,
     /// within its [`channel_capability`](Timer::channel_capability), that the Race Director has
     /// made available on this timer — the pool per-heat assignment allocates from, in preference
@@ -427,13 +473,170 @@ pub struct Timer {
     pub calibration: Vec<NodeCalibration>,
 }
 
-/// The `serde(default)` provider for [`Timer::node_count`] (a function because serde defaults must
-/// be callable): the ubiquitous 8-node width.
-fn default_node_count() -> u32 {
-    DEFAULT_NODE_COUNT
-}
-
 impl Timer {
+    /// The timer's **effective width** in nodes (#412) — how many node indices exist at all.
+    ///
+    /// Resolves the two values the model deliberately keeps apart, in priority order:
+    ///
+    /// 1. [`node_count`](Timer::node_count) — the RD's explicit override, if they set one;
+    /// 2. [`reported_nodes`](Timer::reported_nodes) — what the timer said on connect;
+    /// 3. [`DEFAULT_NODE_COUNT`] — nothing configured and nothing observed (a Mock, or an RH that
+    ///    has never been dialed).
+    ///
+    /// Config wins over the observation on purpose: an observation that disagrees is a
+    /// [`NodeDrift`] notice for the RD, never a silent edit of what GridFPV decided (D27).
+    ///
+    /// This is the width, **not** the heat-size cap — a disabled node still occupies an index. The
+    /// cap is [`enabled_nodes`](Timer::enabled_nodes)`.len()`.
+    pub fn node_width(&self) -> u32 {
+        self.node_count
+            .or(self.reported_nodes)
+            .unwrap_or(DEFAULT_NODE_COUNT)
+    }
+
+    /// The node indices (**0-based, ascending**) a heat may actually be seated on (#412): every
+    /// index below [`node_width`](Timer::node_width) that the RD has not disabled.
+    ///
+    /// **A set, not a count — and not necessarily a prefix.** With node index `2` disabled on a
+    /// 4-node timer this is `[0, 1, 3]`, and a 3-pilot heat occupies exactly those nodes. Callers
+    /// must walk this list rather than `0..len()`: the *n*-th pilot of a heat sits on
+    /// `enabled_nodes()[n]`, which is the index RotorHazard's `seat_index`, the `node-{i}`
+    /// competitor ref and [`NodeSignal::node`] all mean. Renumbering to close the gap would seat a
+    /// pilot on a dead gate — the exact failure #412 exists to prevent.
+    pub fn enabled_nodes(&self) -> Vec<u32> {
+        (0..self.node_width())
+            .filter(|node| !self.disabled_nodes.contains(node))
+            .collect()
+    }
+
+    /// How many pilots this timer can seat in one heat (#412) — the size of the enabled set.
+    pub fn seat_capacity(&self) -> usize {
+        self.enabled_nodes().len()
+    }
+
+    /// Whether `node` (0-based) exists on this timer **and** the RD has left it enabled (#412).
+    /// The single rule the calibration route and the seat mapping both ask.
+    pub fn node_enabled(&self, node: u32) -> bool {
+        node < self.node_width() && !self.disabled_nodes.contains(&node)
+    }
+
+    /// The display name of node `node` (0-based) — **1-based**, per the repo display rule: index
+    /// `2` renders as `"Node 3"`, which is the node the RD means when they say "node 3 is busted".
+    ///
+    /// The one place the 0-based wire and the 1-based screen meet. Everything that reaches a person
+    /// goes through here; everything that reaches a wire keeps the raw index.
+    pub fn node_label(node: u32) -> String {
+        format!("Node {}", node + 1)
+    }
+
+    /// The disagreement between what the timer **reported** and what GridFPV is **configured** for
+    /// (#412), or `None` when they agree (or nothing has been observed yet).
+    ///
+    /// Surfaced, never acted on. Same rule as #355's calibration drift: an observation that
+    /// contradicts config is information for the RD, not a licence to overwrite a decision.
+    pub fn node_drift(&self) -> Option<NodeDrift> {
+        let reported = self.reported_nodes?;
+        let configured = self.node_width();
+        // Enabled seats the hardware does not have: these silently seat nobody, so they are the
+        // half of the drift that actually loses laps.
+        let enabled_beyond_reported: Vec<u32> = self
+            .enabled_nodes()
+            .into_iter()
+            .filter(|node| *node >= reported)
+            .collect();
+        if reported == configured && enabled_beyond_reported.is_empty() {
+            return None;
+        }
+        Some(NodeDrift {
+            reported,
+            configured,
+            enabled_beyond_reported,
+        })
+    }
+
+    /// Lay a heat's `lineup` onto this timer's **real node indices** (#412) — the one rule that
+    /// decides which gate each pilot flies.
+    ///
+    /// Returns `(node_index, competitor)` in lineup order, where `node_index` is the **0-based
+    /// index RotorHazard's `seat_index` means**: the *n*-th pilot of the heat sits on
+    /// [`enabled_nodes`](Timer::enabled_nodes)`[n]`, **not** on `n`. With node index `2` disabled on
+    /// a 4-node timer, a 3-pilot heat comes back as nodes `0, 1, 3`.
+    ///
+    /// This is the correctness heart of #412. Every caller that pushes a heat at a timer — the
+    /// `set_frequency` tune plan, the `alter_heat` pilot seating — must go through here, because
+    /// getting it wrong seats a pilot on the dead node the feature exists to avoid, one layer down
+    /// from the bug it fixes. The indices are **never renumbered** to close the gap: `node-{i}`
+    /// competitor refs, [`NodeSignal::node`] and the signal trace all mean the same physical gate,
+    /// and a compacted index would make marshaling and the trace disagree about where a pass came
+    /// from.
+    ///
+    /// Two kinds of lineup entry, handled together because a heat may in principle mix them:
+    ///
+    /// - A **`node-{i}` seat ref** (an open-practice channel lineup) already *names* its node, so it
+    ///   keeps index `i` verbatim. That is the whole point of the handle.
+    /// - Any other ref (a pilot id) takes the next enabled index not already claimed by one of
+    ///   those explicit seats.
+    ///
+    /// Entries that cannot be placed are **dropped, not squeezed in**: a `node-{i}` ref naming a
+    /// disabled or non-existent node, and any pilot beyond the enabled set (which the heat-size cap
+    /// should already have refused). Dropping seats nobody there, which records nothing; squeezing
+    /// would seat somebody on the wrong gate, which records *the wrong pilot*.
+    pub fn seat_nodes(&self, lineup: &[CompetitorRef]) -> Vec<(u32, CompetitorRef)> {
+        let enabled = self.enabled_nodes();
+        // Indices the lineup names outright — they are spoken for, so the positional walk below
+        // must not hand one of them to a different competitor as well.
+        let claimed: Vec<u32> = lineup
+            .iter()
+            .filter_map(node_seat_index)
+            .filter(|node| enabled.contains(node))
+            .collect();
+        let mut free = enabled.iter().copied().filter(|n| !claimed.contains(n));
+        let mut seats = Vec::with_capacity(lineup.len());
+        for competitor in lineup {
+            match node_seat_index(competitor) {
+                // An explicit seat ref: it names its own gate. Skipped when that gate is disabled
+                // or does not exist — a practice round must not fly a node the RD switched off.
+                Some(node) => {
+                    if enabled.contains(&node) {
+                        seats.push((node, competitor.clone()));
+                    }
+                }
+                // A pilot: the next enabled gate that nothing else has claimed.
+                None => match free.next() {
+                    Some(node) => seats.push((node, competitor.clone())),
+                    None => break,
+                },
+            }
+        }
+        seats
+    }
+
+    /// The whole node picture for this timer — the body of `GET /timers/{id}/nodes` (#412).
+    ///
+    /// One place builds it so the console, the seat mapping and the calibration guard cannot drift
+    /// apart on what "enabled" means (CLAUDE.md: go through the shared resolver).
+    pub fn node_view(&self) -> TimerNodes {
+        let width = self.node_width();
+        let enabled = self.enabled_nodes();
+        TimerNodes {
+            timer: self.id.clone(),
+            reported: self.reported_nodes,
+            configured: self.node_count,
+            width,
+            nodes: (0..width)
+                .map(|node| TimerNode {
+                    node,
+                    label: Timer::node_label(node),
+                    seat: CompetitorRef(format!("node-{node}")),
+                    enabled: !self.disabled_nodes.contains(&node),
+                    reported: self.reported_nodes.is_some_and(|r| node < r),
+                })
+                .collect(),
+            enabled,
+            drift: self.node_drift(),
+        }
+    }
+
     /// Derive the [`TimerStatus`] from a [`TimerKind`]: the Mock is [`Ready`](TimerStatus::Ready);
     /// a RotorHazard timer starts [`Configured`](TimerStatus::Configured) (a URL on file, not yet
     /// dialed) — the connector then drives it through the live statuses.
@@ -470,6 +673,144 @@ impl Timer {
     }
 }
 
+/// The node index a `node-{i}` competitor ref names, or `None` for any other ref (a pilot id, a
+/// sim free-text name).
+///
+/// The **wire** side of the seat handle: 0-based, verbatim, never renumbered. The display side is
+/// [`Timer::node_label`].
+pub fn node_seat_index(competitor: &CompetitorRef) -> Option<u32> {
+    competitor.0.strip_prefix("node-")?.parse::<u32>().ok()
+}
+
+/// One node of a timer, as the console lays the node picker out (#412).
+///
+/// Carries both halves of the 0-based/1-based boundary explicitly — the raw wire index and the
+/// resolved display label — so no surface has to do the `+ 1` itself. Every off-by-one here is a
+/// pilot on a dead gate, so the boundary is data rather than convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct TimerNode {
+    /// The node's index on the timer, **0-based** — RotorHazard's `seat_index`, and the same index
+    /// [`NodeSignal::node`] and [`CalibrationRequest::node`] carry.
+    pub node: u32,
+    /// The node's **display name**, 1-based: node `0` is `"Node 1"` (the repo display rule). Use
+    /// this wherever a person reads it; never print the raw index.
+    pub label: String,
+    /// The stable per-node competitor handle (`node-0`, `node-1`, …) — a wire handle, not a label,
+    /// and always the **real** node index even when the enabled set has holes in it.
+    pub seat: CompetitorRef,
+    /// Whether the Race Director has this node **enabled**. A disabled node seats no pilot, is
+    /// offered no channel, and refuses calibration.
+    pub enabled: bool,
+    /// Whether the timer itself reported this node on its last connect. `false` on a node that
+    /// exists only because GridFPV is configured wider than the hardware — the drift that seats a
+    /// pilot on nothing.
+    pub reported: bool,
+}
+
+/// A disagreement between what a timer **reported** and what GridFPV is **configured** for (#412).
+///
+/// **A notice, never an edit.** D27 and #355's calibration drift settle the rule: a value read back
+/// from a timer is evidence about the timer, not an input to a decision. GridFPV shows this and
+/// keeps racing on its own config; resolving it is the RD's call.
+///
+/// The two directions mean different things. `reported < configured` is the bench bug #412 was
+/// filed for — a real 4-node timer configured as 8, which builds an 8-pilot heat that can only time
+/// four. `reported > configured` is a timer with capacity GridFPV is not using, which costs
+/// nothing but is worth showing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NodeDrift {
+    /// How many nodes the timer said it has.
+    pub reported: u32,
+    /// The width GridFPV is using ([`Timer::node_width`]).
+    pub configured: u32,
+    /// The **enabled** node indices (0-based) at or beyond `reported` — seats GridFPV would fill
+    /// that the hardware does not have. These are the ones that lose laps: a pilot seated here
+    /// flies a heat that records nothing.
+    pub enabled_beyond_reported: Vec<u32>,
+}
+
+/// A timer's node configuration and the observation behind it — the body of
+/// `GET /timers/{id}/nodes` and `PUT /timers/{id}/nodes` (#412).
+///
+/// The shape the console lays the per-node enable/disable picker out from, and the one answer to
+/// "how many pilots fit in a heat on this timer?" (`enabled.len()`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct TimerNodes {
+    /// The timer this view describes.
+    pub timer: TimerId,
+    /// How many nodes the timer **reported** on its last connect, or `None` if it has never been
+    /// asked (a Mock, an adapter that cannot report, an RH not yet dialed). An observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reported: Option<u32>,
+    /// The RD's explicit width **override**, or `None` to follow the timer. A decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub configured: Option<u32>,
+    /// The **effective width** — how many node indices exist ([`Timer::node_width`]). `nodes` is
+    /// exactly this long.
+    pub width: u32,
+    /// Every node index `0..width`, in order, each with its display label and enabled state.
+    pub nodes: Vec<TimerNode>,
+    /// The **enabled node indices** (0-based, ascending) — the seats a heat is laid onto, in order:
+    /// the *n*-th pilot of a heat sits on `enabled[n]`.
+    ///
+    /// **Not necessarily `0..n`.** With node index `2` disabled on a 4-node timer this is
+    /// `[0, 1, 3]`, and a 3-pilot heat occupies nodes 0, 1 and 3 — a set with a hole, not a prefix.
+    pub enabled: Vec<u32>,
+    /// The reported-vs-configured disagreement, when there is one (see [`NodeDrift`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub drift: Option<NodeDrift>,
+}
+
+/// The body of `PUT /timers/{id}/nodes` — set a timer's node configuration (#412).
+///
+/// Both fields are independently optional, so the console can send exactly the thing the RD
+/// changed: flipping one node's checkbox carries `enabled`, and pinning the width carries
+/// `node_count`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SetTimerNodesRequest {
+    /// The RD's explicit width override.
+    ///
+    /// **Three-valued on purpose**: absent leaves it unchanged, `null` **clears** it (follow
+    /// whatever the timer reports), and a number pins it. "Go back to trusting the hardware" is a
+    /// real thing an RD does after a drift notice, and a two-valued field cannot say it.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(optional, type = "number | null")]
+    pub node_count: Option<Option<u32>>,
+    /// The node indices (**0-based**) to leave **enabled**; every other index below the effective
+    /// width becomes disabled. Absent leaves the enabled set unchanged.
+    ///
+    /// Sent as the set the RD wants rather than as a delta so a stale console cannot half-apply an
+    /// edit. Indices at or beyond the width, and duplicates, are ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub enabled: Option<Vec<u32>>,
+}
+
+/// serde's three-valued `Option<Option<T>>`: absent → `None`, `null` → `Some(None)`, value →
+/// `Some(Some(v))`.
+///
+/// Needed because serde's *default* handling of a nested `Option` collapses `null` and absent into
+/// the same `None`, which is exactly the distinction [`SetTimerNodesRequest::node_count`] depends
+/// on to tell "leave it alone" from "clear it".
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
 /// The body of `POST /timers` — the config a caller supplies to create a timer (issue #73).
 ///
 /// A display `name` plus the [`TimerKind`]; the **id is auto-generated** server-side (a slug of
@@ -486,8 +827,9 @@ pub struct CreateTimerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub channel_capability: Option<ChannelCapability>,
-    /// The new timer's **node/slot count** (race redesign Slice 4a) — the heat-size cap. Optional;
-    /// defaults to [`DEFAULT_NODE_COUNT`].
+    /// The new timer's **node-count override** (race redesign Slice 4a; #412). Optional — omit it
+    /// (the normal case now) and the timer's width follows what the hardware reports on connect,
+    /// falling back to [`DEFAULT_NODE_COUNT`] until it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub node_count: Option<u32>,
@@ -518,7 +860,9 @@ pub struct UpdateTimerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub channel_capability: Option<ChannelCapability>,
-    /// A new **node/slot count** (race redesign Slice 4a), or `None` to leave it unchanged.
+    /// A new **node-count override** (race redesign Slice 4a; #412), or `None` to leave it
+    /// unchanged. Use `PUT /timers/{id}/nodes` ([`SetTimerNodesRequest`]) to *clear* the override
+    /// (follow the timer) or to enable/disable individual nodes — this field can only set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub node_count: Option<u32>,
@@ -1015,7 +1359,10 @@ impl TimerRegistry {
             },
             status: TimerStatus::Ready,
             channel_capability: ChannelCapability::Flexible,
-            node_count: DEFAULT_NODE_COUNT,
+            // The Mock has no hardware to ask, so its width is pinned rather than discovered.
+            node_count: Some(DEFAULT_NODE_COUNT),
+            reported_nodes: None,
+            disabled_nodes: Vec::new(),
             available_channels: crate::channels::RACEBAND_MHZ.to_vec(),
             plugin: None,
             manual_connect: false,
@@ -1038,6 +1385,13 @@ impl TimerRegistry {
                     timer.status = Timer::status_for(&timer.kind);
                     timer.plugin = None;
                     timer.manual_connect = false;
+                    // The reported node count is an observation about the hardware (#412, D27), so
+                    // it is re-read on the next connect rather than restored. The RD's *decisions*
+                    // — `node_count` and `disabled_nodes` — come back exactly as they were: a
+                    // disabled node survives a restart as surely as it survives a reconnect.
+                    timer.reported_nodes = None;
+                    timer.disabled_nodes.sort_unstable();
+                    timer.disabled_nodes.dedup();
                     timers.insert(timer.id.clone(), timer);
                 }
             }
@@ -1099,7 +1453,10 @@ impl TimerRegistry {
             status: Timer::status_for(&request.kind),
             kind: request.kind.clone(),
             channel_capability: request.channel_capability.clone().unwrap_or_default(),
-            node_count: request.node_count.unwrap_or(DEFAULT_NODE_COUNT),
+            // No override unless the caller asked for one (#412): a new timer follows the hardware.
+            node_count: request.node_count,
+            reported_nodes: None,
+            disabled_nodes: Vec::new(),
             available_channels: request.available_channels.clone().unwrap_or_default(),
             plugin: None,
             manual_connect: false,
@@ -1145,7 +1502,7 @@ impl TimerRegistry {
             timer.channel_capability = capability.clone();
         }
         if let Some(node_count) = request.node_count {
-            timer.node_count = node_count;
+            timer.node_count = Some(node_count);
         }
         if let Some(available) = &request.available_channels {
             timer.available_channels = available.clone();
@@ -1176,6 +1533,89 @@ impl TimerRegistry {
         if let Some(timer) = reg.timers.get_mut(id) {
             timer.plugin = Some(plugin);
         }
+    }
+
+    /// Record how many nodes a timer **reported** (#412) — the Director drives this from the
+    /// connect-time discovery (`frequency_data.fdata`, falling back to
+    /// `enter_and_exit_at_levels`). A no-op for an unknown id.
+    ///
+    /// **An observation, never config.** Like [`set_plugin`](Self::set_plugin) it is in-memory only
+    /// and re-read on every (re)connect: it is not persisted, and it does **not** touch
+    /// [`Timer::node_count`] or [`Timer::disabled_nodes`]. A timer that comes back reporting a
+    /// different width shows up as [`Timer::node_drift`] for the RD to act on — D27's rule that
+    /// drift is surfaced and never silently adopted. That is also what makes a disabled node
+    /// survive a reconnect: nothing on this path can re-enable one.
+    pub fn set_reported_nodes(&self, id: &TimerId, reported: u32) {
+        let mut reg = self.write();
+        if let Some(timer) = reg.timers.get_mut(id) {
+            timer.reported_nodes = Some(reported);
+        }
+    }
+
+    /// **Set a timer's node configuration** (#412) — the width override and/or the enabled node
+    /// set — returning the resulting [`TimerNodes`] view. `PUT /timers/{id}/nodes`.
+    ///
+    /// This is the RD's *decision* half of the model, so it is **persisted**: a node disabled here
+    /// stays disabled across a reconnect, a Director restart, and a timer that keeps insisting it
+    /// has four working nodes.
+    ///
+    /// `enabled` is the set to keep on (0-based); every other index below the effective width is
+    /// disabled. Indices at or beyond the width are ignored rather than rejected — a console racing
+    /// a width change should not lose the edit — and the stored disabled set keeps any index the RD
+    /// turned off earlier, so a timer that comes back *wider* does not silently un-disable a node.
+    ///
+    /// Refused (a [`TimerError`], reported as a `400`) for an unknown id, and for an edit that would
+    /// leave the timer with **no enabled node at all** — that caps every heat to no pilots, which is
+    /// the same refusal [`validate_timer_config`] makes for a zero `node_count`.
+    pub fn set_nodes(
+        &self,
+        id: &TimerId,
+        request: &SetTimerNodesRequest,
+    ) -> Result<TimerNodes, TimerError> {
+        let mut reg = self.write();
+        let timer = reg
+            .timers
+            .get_mut(id)
+            .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
+        if let Some(node_count) = request.node_count {
+            if node_count == Some(0) {
+                return Err(TimerError(
+                    "node_count must be at least 1 (a 0-node timer caps every heat to no pilots)"
+                        .to_string(),
+                ));
+            }
+            timer.node_count = node_count;
+        }
+        if let Some(enabled) = &request.enabled {
+            let width = timer.node_width();
+            // Only indices that exist are turned off here; anything the RD already disabled above
+            // the current width is preserved, so a timer that widens does not resurrect a dead node.
+            let mut disabled: Vec<u32> = timer
+                .disabled_nodes
+                .iter()
+                .copied()
+                .filter(|node| *node >= width)
+                .collect();
+            disabled.extend((0..width).filter(|node| !enabled.contains(node)));
+            disabled.sort_unstable();
+            disabled.dedup();
+            if (0..width).all(|node| disabled.contains(&node)) {
+                return Err(TimerError(
+                    "at least one node must stay enabled (a timer with none caps every heat to no pilots)"
+                        .to_string(),
+                ));
+            }
+            timer.disabled_nodes = disabled;
+        }
+        let view = timer.node_view();
+        reg.persist()?;
+        Ok(view)
+    }
+
+    /// The [`TimerNodes`] view for `id` (#412) — `GET /timers/{id}/nodes`, and the one shared
+    /// answer to "which seats does this timer have, and which of them may a heat use?".
+    pub fn nodes(&self, id: &TimerId) -> Option<TimerNodes> {
+        self.read().timers.get(id).map(Timer::node_view)
     }
 
     /// Set (or clear) a timer's **manual connection hold** (issue #383), returning the updated
@@ -1351,13 +1791,23 @@ impl TimerRegistry {
                 timer.name
             )));
         }
-        if request.node >= timer.node_count {
+        // The node must exist AND be enabled (#412). Tuning a node the RD has switched off is
+        // pointless at best and misleading at worst: the threshold would be applied to hardware no
+        // heat is ever seated on, and the page would show a confirmed write on a dead gate.
+        if request.node >= timer.node_width() {
             return Err(TimerError(format!(
-                "{:?} has {} nodes — there is no node {} to calibrate",
+                "{:?} has {} nodes — there is no {} to calibrate",
                 timer.name,
-                timer.node_count,
+                timer.node_width(),
                 // Display the node the way the page labels it (1-based), per the repo display rule.
-                request.node + 1
+                Timer::node_label(request.node)
+            )));
+        }
+        if !timer.node_enabled(request.node) {
+            return Err(TimerError(format!(
+                "{} is disabled on {:?} — enable it before setting its thresholds",
+                Timer::node_label(request.node),
+                timer.name
             )));
         }
 
@@ -1596,12 +2046,13 @@ pub const MAX_MOCK_LAPS: u32 = 1000;
 /// Validate a timer's effective configuration (release-hardening P2), returning a human-readable
 /// message on the first problem (the caller maps it to a `400`).
 ///
-/// Rejects a `node_count` of `0` (it caps every heat to **no** pilots — nothing could ever race),
-/// an empty/whitespace RotorHazard URL (nothing to dial), and a Mock `laps` count beyond
+/// Rejects a `node_count` **override** of `0` (it caps every heat to **no** pilots — nothing could
+/// ever race), an empty/whitespace RotorHazard URL (nothing to dial), and a Mock `laps` count beyond
 /// [`MAX_MOCK_LAPS`] (a runaway sim). `node_count` is passed in so the merged value can be checked
-/// on a partial edit.
-pub fn validate_timer_config(kind: &TimerKind, node_count: u32) -> Result<(), String> {
-    if node_count == 0 {
+/// on a partial edit; `None` (#412 — follow whatever the timer reports) is always fine, since a
+/// discovered width can never be zero.
+pub fn validate_timer_config(kind: &TimerKind, node_count: Option<u32>) -> Result<(), String> {
+    if node_count == Some(0) {
         return Err(
             "node_count must be at least 1 (a 0-node timer caps every heat to no pilots)"
                 .to_string(),
@@ -1868,12 +2319,14 @@ mod tests {
                     laps: 5,
                     lap_ms: 100
                 },
-                0
+                Some(0)
             )
             .is_err()
         );
         // An empty / whitespace RotorHazard URL can never be dialed — rejected.
-        assert!(validate_timer_config(&TimerKind::Rotorhazard { url: "   ".into() }, 8).is_err());
+        assert!(
+            validate_timer_config(&TimerKind::Rotorhazard { url: "   ".into() }, Some(8)).is_err()
+        );
         // A runaway Mock laps count is rejected.
         assert!(
             validate_timer_config(
@@ -1881,7 +2334,7 @@ mod tests {
                     laps: MAX_MOCK_LAPS + 1,
                     lap_ms: 100
                 },
-                8
+                Some(8)
             )
             .is_err()
         );
@@ -1892,7 +2345,7 @@ mod tests {
                     laps: 5,
                     lap_ms: 2500
                 },
-                8
+                Some(8)
             )
             .is_ok()
         );
@@ -1901,7 +2354,7 @@ mod tests {
                 &TimerKind::Rotorhazard {
                     url: "http://rh.local:5000".into()
                 },
-                8
+                Some(8)
             )
             .is_ok()
         );
@@ -2201,7 +2654,10 @@ mod tests {
         let reg = TimerRegistry::new(None, 5, 2500).unwrap();
         let mock = reg.get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
         assert_eq!(mock.channel_capability, ChannelCapability::Flexible);
-        assert_eq!(mock.node_count, DEFAULT_NODE_COUNT);
+        // The Mock's width is PINNED (#412): there is no hardware to ask, so it carries the
+        // override rather than waiting for a report that never comes.
+        assert_eq!(mock.node_count, Some(DEFAULT_NODE_COUNT));
+        assert_eq!(mock.node_width(), DEFAULT_NODE_COUNT);
         assert_eq!(
             mock.available_channels,
             crate::channels::RACEBAND_MHZ.to_vec()
@@ -2230,12 +2686,12 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(created.channel_capability, fixed);
-            assert_eq!(created.node_count, 4);
+            assert_eq!(created.node_count, Some(4));
 
             let reopened = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
             let got = reopened.get(&created.id).unwrap();
             assert_eq!(got.channel_capability, fixed);
-            assert_eq!(got.node_count, 4);
+            assert_eq!(got.node_count, Some(4));
             assert_eq!(got.available_channels, vec![5658, 5695, 5732, 5769]);
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -2254,7 +2710,15 @@ mod tests {
         let reg = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
         let old = reg.get(&TimerId("old-rh".into())).unwrap();
         assert_eq!(old.channel_capability, ChannelCapability::Flexible);
-        assert_eq!(old.node_count, DEFAULT_NODE_COUNT);
+        // No `node_count` on disk ⇒ no override (#412): the width follows whatever the timer
+        // reports, and falls back to the 8-node default until it does.
+        assert_eq!(old.node_count, None);
+        assert_eq!(old.node_width(), DEFAULT_NODE_COUNT);
+        assert!(old.disabled_nodes.is_empty());
+        assert_eq!(
+            old.enabled_nodes(),
+            (0..DEFAULT_NODE_COUNT).collect::<Vec<_>>()
+        );
         assert!(old.available_channels.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2273,8 +2737,366 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(updated.node_count, 6);
+        assert_eq!(updated.node_count, Some(6));
         assert_eq!(updated.available_channels, vec![5800, 5820, 5840]);
+    }
+
+    // ── #412: the node set — reported, configured, enabled ────────────────────
+
+    /// An RH timer in `reg` with no width override (the post-#412 default: follow the hardware).
+    fn discoverable_rh(reg: &TimerRegistry, name: &str) -> Timer {
+        reg.create(&CreateTimerRequest {
+            name: name.into(),
+            kind: TimerKind::Rotorhazard {
+                url: "http://rh.local:5000".into(),
+            },
+            channel_capability: None,
+            node_count: None,
+            available_channels: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_new_timer_follows_what_the_hardware_reports() {
+        // The bench bug: a real 4-node NuclearHazard read as 8 because nothing ever asked it.
+        // A timer created with no explicit width now takes the reported one.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        assert_eq!(rh.node_count, None, "no override on a fresh timer");
+        assert_eq!(
+            rh.node_width(),
+            DEFAULT_NODE_COUNT,
+            "…so it sits on the default until the timer says otherwise"
+        );
+
+        reg.set_reported_nodes(&rh.id, 4);
+        let rh = reg.get(&rh.id).unwrap();
+        assert_eq!(rh.reported_nodes, Some(4));
+        assert_eq!(rh.node_width(), 4, "the observation now drives the width");
+        assert_eq!(rh.enabled_nodes(), vec![0, 1, 2, 3]);
+        assert_eq!(rh.seat_capacity(), 4, "a heat seats four pilots, not eight");
+        assert_eq!(rh.node_drift(), None, "nothing to disagree about");
+    }
+
+    #[test]
+    fn an_explicit_width_wins_over_the_report_and_the_disagreement_is_surfaced() {
+        // D27 / #355's rule: an observation that contradicts config is a NOTICE, never an edit.
+        // The RD who typed 8 keeps 8 — and is told the timer only has 4.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: Some(8),
+                available_channels: None,
+            })
+            .unwrap();
+        reg.set_reported_nodes(&rh.id, 4);
+        let rh = reg.get(&rh.id).unwrap();
+
+        assert_eq!(rh.node_count, Some(8), "the decision is untouched");
+        assert_eq!(rh.reported_nodes, Some(4), "the observation is recorded");
+        assert_eq!(rh.node_width(), 8, "config wins");
+        let drift = rh.node_drift().expect("a disagreement is surfaced");
+        assert_eq!(drift.reported, 4);
+        assert_eq!(drift.configured, 8);
+        assert_eq!(
+            drift.enabled_beyond_reported,
+            vec![4, 5, 6, 7],
+            "the four seats that would record nothing are named"
+        );
+    }
+
+    #[test]
+    fn a_disabled_node_leaves_a_hole_in_the_enabled_set() {
+        // The RD's words: "reported is 4 but node 3 is busted, I need to use nodes 1, 2 and 4."
+        // Display "Node 3" is wire index 2, so the enabled set is {0, 1, 3} — NOT a prefix, which
+        // is the whole reason this is a set and not a count.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+        let view = reg
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some(vec![0, 1, 3]),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(view.enabled, vec![0, 1, 3]);
+        assert_eq!(view.width, 4, "the disabled node still occupies an index");
+        let rh = reg.get(&rh.id).unwrap();
+        assert_eq!(rh.disabled_nodes, vec![2]);
+        assert_eq!(rh.seat_capacity(), 3, "three pilots fit, not four");
+        assert!(!rh.node_enabled(2));
+        assert!(rh.node_enabled(3), "node 3 is NOT renumbered away");
+    }
+
+    #[test]
+    fn a_heat_seats_onto_the_real_node_indices_not_the_lineup_positions() {
+        // THE #412 correctness case. With node index 2 disabled on a 4-node timer, a 3-pilot heat
+        // occupies nodes 0, 1 and 3. Seating the third pilot on node 2 (their lineup position)
+        // would put them on the dead gate this feature exists to keep them off.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+        reg.set_nodes(
+            &rh.id,
+            &SetTimerNodesRequest {
+                node_count: None,
+                enabled: Some(vec![0, 1, 3]),
+            },
+        )
+        .unwrap();
+        let rh = reg.get(&rh.id).unwrap();
+
+        let lineup = vec![
+            CompetitorRef("ace".into()),
+            CompetitorRef("bolt".into()),
+            CompetitorRef("cyan".into()),
+        ];
+        let seats = rh.seat_nodes(&lineup);
+        assert_eq!(
+            seats.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec![0, 1, 3],
+            "the third pilot sits on node 3, not node 2"
+        );
+        assert_eq!(seats[2].1, CompetitorRef("cyan".into()));
+
+        // A fourth pilot has nowhere to go: dropped, never squeezed onto the dead node. (The
+        // heat-size cap refuses this upstream; this is the backstop.)
+        let mut oversized = lineup.clone();
+        oversized.push(CompetitorRef("dart".into()));
+        assert_eq!(rh.seat_nodes(&oversized).len(), 3);
+    }
+
+    #[test]
+    fn a_node_seat_ref_keeps_its_own_index_and_a_disabled_one_is_dropped() {
+        // `node-{i}` is a WIRE HANDLE for a physical gate (the open-practice channel lineup). It
+        // names its own node — renumbering it would make marshaling and the signal trace disagree
+        // about which gate a pass came from.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+        reg.set_nodes(
+            &rh.id,
+            &SetTimerNodesRequest {
+                node_count: None,
+                enabled: Some(vec![0, 1, 3]),
+            },
+        )
+        .unwrap();
+        let rh = reg.get(&rh.id).unwrap();
+
+        let practice = vec![
+            CompetitorRef("node-0".into()),
+            CompetitorRef("node-3".into()),
+        ];
+        assert_eq!(
+            rh.seat_nodes(&practice)
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>(),
+            vec![0, 3]
+        );
+        // A practice round naming the disabled gate flies nothing there rather than being
+        // silently slid onto a working one.
+        let stale = vec![CompetitorRef("node-2".into())];
+        assert!(rh.seat_nodes(&stale).is_empty());
+    }
+
+    #[test]
+    fn a_disabled_node_survives_a_reconnect_and_a_restart() {
+        // A disable is a DECISION, not an observation: the timer insisting it still has four
+        // working nodes does not switch one back on, and neither does a Director restart.
+        let dir = std::env::temp_dir().join(format!("gridfpv-timers-nodes-{}", short_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = {
+            let reg = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
+            let rh = discoverable_rh(&reg, "Field RH");
+            reg.set_reported_nodes(&rh.id, 4);
+            reg.set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some(vec![0, 1, 3]),
+                },
+            )
+            .unwrap();
+
+            // …the link drops and comes back, and the timer reports its four nodes again.
+            reg.set_reported_nodes(&rh.id, 4);
+            let after = reg.get(&rh.id).unwrap();
+            assert_eq!(
+                after.enabled_nodes(),
+                vec![0, 1, 3],
+                "a reconnect must not re-enable a node the RD switched off"
+            );
+            assert_eq!(after.disabled_nodes, vec![2]);
+            rh.id
+        };
+
+        // …and a restart: the decision is persisted, the observation is not.
+        let reopened = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
+        let restored = reopened.get(&id).unwrap();
+        assert_eq!(restored.disabled_nodes, vec![2], "the decision persists");
+        assert_eq!(
+            restored.reported_nodes, None,
+            "the observation is re-read on the next connect, never restored"
+        );
+        assert_eq!(restored.node_count, None, "no override was ever set");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_timer_that_widens_does_not_resurrect_a_disabled_node() {
+        // The disabled set is stored as node INDICES, so it stays meaningful when the width moves.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+        reg.set_nodes(
+            &rh.id,
+            &SetTimerNodesRequest {
+                node_count: None,
+                enabled: Some(vec![0, 1, 3]),
+            },
+        )
+        .unwrap();
+        // The RD swaps in an 8-node timer at the same URL.
+        reg.set_reported_nodes(&rh.id, 8);
+        assert_eq!(
+            reg.get(&rh.id).unwrap().enabled_nodes(),
+            vec![0, 1, 3, 4, 5, 6, 7],
+            "the new nodes come up enabled; node 2 stays off"
+        );
+    }
+
+    #[test]
+    fn the_wire_is_zero_based_and_the_display_is_one_based() {
+        // Every off-by-one here is a pilot on a dead gate, so the boundary is explicit and checked
+        // in both directions.
+        assert_eq!(Timer::node_label(0), "Node 1");
+        assert_eq!(
+            Timer::node_label(2),
+            "Node 3",
+            "the RD's \"node 3\" is index 2"
+        );
+        assert_eq!(node_seat_index(&CompetitorRef("node-0".into())), Some(0));
+        assert_eq!(node_seat_index(&CompetitorRef("node-2".into())), Some(2));
+        assert_eq!(node_seat_index(&CompetitorRef("ace".into())), None);
+        assert_eq!(node_seat_index(&CompetitorRef("node-x".into())), None);
+
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+        let view = reg.nodes(&rh.id).unwrap();
+        assert_eq!(
+            view.nodes
+                .iter()
+                .map(|n| n.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Node 1", "Node 2", "Node 3", "Node 4"]
+        );
+        assert_eq!(
+            view.nodes.iter().map(|n| n.node).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+            "…while the wire index stays 0-based"
+        );
+        assert_eq!(
+            view.nodes[2].seat,
+            CompetitorRef("node-2".into()),
+            "the seat handle is the wire index, not the label"
+        );
+    }
+
+    #[test]
+    fn setting_nodes_is_three_valued_on_the_width_override() {
+        // "Go back to trusting the hardware" is a real thing an RD does after a drift notice, so
+        // `null` must be distinguishable from absent.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+
+        let pin: SetTimerNodesRequest = serde_json::from_str(r#"{"node_count": 6}"#).unwrap();
+        assert_eq!(reg.set_nodes(&rh.id, &pin).unwrap().width, 6);
+
+        let untouched: SetTimerNodesRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(untouched.node_count, None);
+        assert_eq!(reg.set_nodes(&rh.id, &untouched).unwrap().width, 6);
+
+        let clear: SetTimerNodesRequest = serde_json::from_str(r#"{"node_count": null}"#).unwrap();
+        assert_eq!(clear.node_count, Some(None), "null is not absent");
+        let view = reg.set_nodes(&rh.id, &clear).unwrap();
+        assert_eq!(view.configured, None);
+        assert_eq!(view.width, 4, "back to what the timer reports");
+    }
+
+    #[test]
+    fn a_timer_with_no_enabled_node_is_refused() {
+        // Same rule as a zero `node_count`: it caps every heat to no pilots, so nothing could race.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+        assert!(
+            reg.set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some(vec![]),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            reg.set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(Some(0)),
+                    enabled: None,
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(
+            reg.get(&rh.id).unwrap().enabled_nodes(),
+            vec![0, 1, 2, 3],
+            "a refused edit changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_pre_412_timers_file_keeps_its_explicit_node_count() {
+        // MIGRATION: the registry always wrote `node_count`, so every pre-#412 file carries an
+        // explicit number — and an RD who set one meant it. It is kept, and the disagreement with
+        // what the timer reports is representable rather than silently resolved.
+        let dir = std::env::temp_dir().join(format!("gridfpv-timers-412-{}", short_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = r#"[{"id":"old-rh","name":"Old RH","kind":{"Rotorhazard":{"url":"http://x:5000"}},
+                          "status":"Configured","channel_capability":"Flexible","node_count":8,
+                          "available_channels":[5658]}]"#;
+        std::fs::write(timers_path(&dir), legacy).unwrap();
+
+        let reg = TimerRegistry::new(Some(dir.clone()), 5, 2500).unwrap();
+        let id = TimerId("old-rh".into());
+        let old = reg.get(&id).unwrap();
+        assert_eq!(old.node_count, Some(8), "the RD's explicit width is kept");
+        assert!(old.disabled_nodes.is_empty(), "every node starts enabled");
+
+        reg.set_reported_nodes(&id, 4);
+        let old = reg.get(&id).unwrap();
+        assert_eq!(old.node_width(), 8, "still 8 — never silently overwritten");
+        assert_eq!(
+            old.node_drift().map(|d| (d.reported, d.configured)),
+            Some((4, 8)),
+            "…but the console can flag it"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── The GridFPV-plugin selection gate (#405) ──────────────────────────────

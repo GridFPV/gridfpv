@@ -56,7 +56,7 @@ use gridfpv_server::app::AppState;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::pilots::PilotDirectory;
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry};
+use gridfpv_server::timers::{Timer, TimerId, TimerKind, TimerRegistry};
 use gridfpv_storage::Offset;
 use tokio::task::JoinHandle;
 
@@ -1052,9 +1052,16 @@ fn handle_transition(
         HeatTransition::Staged => {
             #[cfg(feature = "live")]
             {
-                let plan = tune_plan_of(state, &heat);
-                let seats = seats_of(state, registry, &heat);
+                // #412: the tune plan and the seating are both **per timer** now. A heat's
+                // lineup position `n` maps to the timer's *n*-th ENABLED node, which is not `n`
+                // once the RD has switched one off — and two selected timers may have different
+                // nodes disabled, so one shared plan would seat a pilot on the wrong gate.
                 for timer_id in selected_rh_timers(registry, timers, event_id) {
+                    let Some(timer) = timers.get(&timer_id) else {
+                        continue;
+                    };
+                    let plan = tune_plan_of(state, &timer, &heat);
+                    let seats = seats_of(state, registry, &timer, &heat);
                     // Ready RH for an instant start at Grid's go: zero its staging hold/tones + reset
                     // to READY now, well before the Armed hold + tone fire. Retires the old at-go
                     // reset/stage race (the `STAGE_RESET_SETTLE` band-aid).
@@ -1239,11 +1246,17 @@ fn lineup_of(state: &AppState, heat: &HeatId) -> Option<Vec<CompetitorRef>> {
 }
 
 /// The per-pilot frequency assignment of `heat` from its most recent `HeatScheduled` (race redesign
-/// Slice 4a), mapped onto **node indices** for the RH `set_frequency` tune: node `n` runs
-/// `lineup[n]`, so a competitor's assigned MHz is applied to the node at its lineup position. A heat
-/// with no assigned frequencies (a sim/un-channelled heat) yields an empty plan (no tuning).
+/// Slice 4a), mapped onto **real node indices** for the RH `set_frequency` tune.
+///
+/// The node a competitor's MHz is applied to is its seat on `timer` — [`Timer::seat_nodes`], which
+/// walks the timer's **enabled** indices rather than `0..lineup.len()` (#412). Tuning by lineup
+/// position would put the heat's third pilot's channel on node 2 while RotorHazard seats them on
+/// node 3: the pilot flies a gate tuned to somebody else's video channel, which is a dead node with
+/// extra steps. A **disabled node is never tuned** — it is not offered a channel at all.
+///
+/// A heat with no assigned frequencies (a sim/un-channelled heat) yields an empty plan (no tuning).
 #[cfg(feature = "live")]
-fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
+fn tune_plan_of(state: &AppState, timer: &Timer, heat: &HeatId) -> Vec<(u64, u16)> {
     let Some(stored) = state.log().lock().ok().and_then(|g| g.read_all().ok()) else {
         return Vec::new();
     };
@@ -1258,14 +1271,15 @@ fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
         } = s.event
         {
             if &h == heat {
-                // Map each (competitor, mhz) to the competitor's node seat (its lineup index).
+                // Map each (competitor, mhz) onto the REAL node that competitor is seated on.
+                let seats = timer.seat_nodes(&lineup);
                 plan = frequencies
                     .into_iter()
                     .filter_map(|(competitor, mhz)| {
-                        lineup
+                        seats
                             .iter()
-                            .position(|c| *c == competitor)
-                            .map(|node| (node as u64, mhz))
+                            .find(|(_, seated)| *seated == competitor)
+                            .map(|(node, _)| (*node as u64, mhz))
                     })
                     .collect();
             }
@@ -1276,29 +1290,35 @@ fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
 
 /// The heat's **node→pilot seating** for RotorHazard (the laps-attribute fix): one
 /// `(node_index, callsign)` per **bound** node of `heat`, read from the heat's lineup (its durable
-/// `HeatScheduled` bind — node `n` runs `lineup[n]`).
+/// `HeatScheduled` bind).
 ///
-/// `lineup[n]` is the **pilot ref** for node `n` (the round engine builds the field as
-/// `CompetitorRef(pilot_id)`), so each bound node resolves to its pilot's **callsign** via the
-/// directory (CLAUDE.md: resolve a ref to its friendly name from a durable source, never print the
-/// raw id). An open-practice / unchannelled heat seats per **channel** as `node-{i}` refs (no bound
-/// pilot) — those are skipped here, leaving an empty plan (RH then races in practice mode). A pilot
-/// ref that does not resolve falls back to the raw ref string as a last resort so the node is still
-/// seated (RH records there) rather than dropped.
+/// `node_index` is the **real** node the pilot flies — [`Timer::seat_nodes`] walks `timer`'s enabled
+/// indices, so the heat's third pilot sits on node 3 when node 2 is disabled, not on node 2 (#412).
+/// RotorHazard's `alter_heat` is keyed on that real `seat_index`, so getting it wrong seats the
+/// pilot on the dead node this whole feature exists to keep them off — and their laps would land on
+/// somebody else's row.
+///
+/// Each bound seat resolves to its pilot's **callsign** via the directory (CLAUDE.md: resolve a ref
+/// to its friendly name from a durable source, never print the raw id). An open-practice /
+/// unchannelled heat seats per **channel** as `node-{i}` refs (no bound pilot) — those are skipped
+/// here, leaving an empty plan (RH then races in practice mode). A pilot ref that does not resolve
+/// falls back to the raw ref string as a last resort so the node is still seated (RH records there)
+/// rather than dropped.
 #[cfg(feature = "live")]
-fn seats_of(state: &AppState, registry: &EventRegistry, heat: &HeatId) -> Vec<(u64, String)> {
+fn seats_of(
+    state: &AppState,
+    registry: &EventRegistry,
+    timer: &Timer,
+    heat: &HeatId,
+) -> Vec<(u64, String)> {
     let Some(lineup) = lineup_of(state, heat) else {
         return Vec::new();
     };
     let pilots = registry.pilots();
     let mut seats = Vec::new();
-    for (node, competitor) in lineup.into_iter().enumerate() {
+    for (node, competitor) in timer.seat_nodes(&lineup) {
         // An open-practice seat (`node-{i}`) names a channel, not a bound pilot: leave it unseated.
-        if competitor
-            .0
-            .strip_prefix("node-")
-            .is_some_and(|s| s.parse::<usize>().is_ok())
-        {
+        if gridfpv_server::timers::node_seat_index(&competitor).is_some() {
             continue;
         }
         let pilot_id = gridfpv_server::scope::PilotId(competitor.0.clone());
@@ -2197,6 +2217,99 @@ mod tests {
         .await;
 
         bridge.abort();
+    }
+
+    /// #412: the seat/tune emits must carry the **real** node index, not the lineup position.
+    ///
+    /// This is the failure the feature exists to prevent, one layer down: RotorHazard's
+    /// `alter_heat` and `set_frequency` are keyed on `seat_index`, so a heat whose third pilot is
+    /// pushed as node 2 while the enabled set says node 3 seats them on the dead gate — and their
+    /// laps land on somebody else's row.
+    #[tokio::test]
+    async fn seating_and_tuning_carry_the_real_node_indices_over_a_disabled_node() {
+        use gridfpv_server::pilots::CreatePilotRequest;
+        use gridfpv_server::timers::SetTimerNodesRequest;
+
+        let registry = EventRegistry::new(None).unwrap();
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+        // The timer reports four nodes; the RD has switched off the third one ("Node 3" = index 2).
+        registry.timers().set_reported_nodes(&rh.id, 4);
+        registry
+            .timers()
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some(vec![0, 1, 3]),
+                },
+            )
+            .unwrap();
+        let timer = registry.timers().get(&rh.id).unwrap();
+
+        // Three pilots in the directory, so the seating resolves callsigns rather than raw ids.
+        let mut refs = Vec::new();
+        for callsign in ["Ace", "Bolt", "Cyan"] {
+            let pilot = registry
+                .pilots()
+                .create(&CreatePilotRequest {
+                    callsign: callsign.into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            refs.push(CompetitorRef(pilot.id.0));
+        }
+
+        let state = registry.resolve(&practice()).unwrap();
+        let heat = HeatId("q-1".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: refs.clone(),
+                    class: None,
+                    round: None,
+                    frequencies: vec![
+                        (refs[0].clone(), 5658),
+                        (refs[1].clone(), 5695),
+                        (refs[2].clone(), 5732),
+                    ],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        // The seating emit: node 0, node 1, node **3** — with callsigns, never raw ids.
+        let seats = seats_of(&state, &registry, &timer, &heat);
+        assert_eq!(
+            seats,
+            vec![
+                (0, "Ace".to_string()),
+                (1, "Bolt".to_string()),
+                (3, "Cyan".to_string()),
+            ],
+            "the third pilot sits on node 3, not node 2"
+        );
+
+        // The tune emit follows the same seats: node 3 gets Cyan's channel, and the disabled node 2
+        // is offered no channel at all.
+        let plan = tune_plan_of(&state, &timer, &heat);
+        assert_eq!(plan, vec![(0, 5658), (1, 5695), (3, 5732)]);
+        assert!(
+            !plan.iter().any(|(node, _)| *node == 2),
+            "a disabled node must never be tuned: {plan:?}"
+        );
     }
 
     #[tokio::test]

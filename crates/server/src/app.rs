@@ -114,8 +114,8 @@ use crate::scope::{ClassId, EventId, PilotId};
 use crate::snapshot::{ProjectionBody, Snapshot};
 use crate::stream::Cursor;
 use crate::timers::{
-    CreateTimerRequest, SetEventTimersRequest, SetPrimaryTimerRequest, Timer, TimerId, TimerSignal,
-    UpdateTimerRequest,
+    CreateTimerRequest, SetEventTimersRequest, SetPrimaryTimerRequest, SetTimerNodesRequest, Timer,
+    TimerId, TimerNodes, TimerSignal, UpdateTimerRequest,
 };
 use gridfpv_events::RoundId;
 
@@ -426,6 +426,14 @@ pub fn router(registry: EventRegistry) -> Router {
         // last step, so installing the plugin never requires opening RotorHazard's own web UI.
         // RD-gated, and REFUSED outright while a race is in progress on the timer.
         .route("/timers/{timer_id}/restart", post(restart_timer))
+        // **Node discovery + the per-node enable set** (#412): what the timer said it has, what
+        // GridFPV is configured for, and which nodes a heat may actually be seated on. The read is
+        // open (it is the same information `GET /timers` already carries, resolved); the write is
+        // RD-gated like every other timer write.
+        .route(
+            "/timers/{timer_id}/nodes",
+            get(timer_nodes).put(set_timer_nodes),
+        )
         // **Tune telemetry** (#355 S2a): live per-node signal for one timer, on demand.
         //
         // A polled read rather than a scoped subscription on the event change-stream, because it
@@ -689,8 +697,7 @@ async fn create_timer(
 ) -> Result<Json<Timer>, ProtocolError> {
     // Reject a bad config up front as a 400 (release-hardening P2): a 0 node count, an empty RH URL,
     // or a runaway Mock laps count.
-    let node_count = body.node_count.unwrap_or(crate::timers::DEFAULT_NODE_COUNT);
-    crate::timers::validate_timer_config(&body.kind, node_count)
+    crate::timers::validate_timer_config(&body.kind, body.node_count)
         .map_err(|msg| ProtocolError::new(ErrorCode::BadRequest, msg))?;
     let timer = registry
         .timers()
@@ -715,7 +722,7 @@ async fn update_timer(
     // A nonexistent id is left to `update` to report as a 404.
     if let Some(existing) = registry.timers().get(&timer_id) {
         let kind = body.kind.clone().unwrap_or(existing.kind);
-        let node_count = body.node_count.unwrap_or(existing.node_count);
+        let node_count = body.node_count.or(existing.node_count);
         crate::timers::validate_timer_config(&kind, node_count)
             .map_err(|msg| ProtocolError::new(ErrorCode::BadRequest, msg))?;
     }
@@ -848,6 +855,61 @@ async fn restart_timer(
     }
     timers
         .request_restart(&timer_id)
+        .map(Json)
+        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
+}
+
+/// `GET /timers/{timer_id}/nodes` — a timer's **node set**: reported, configured, enabled (#412).
+///
+/// Returns a [`TimerNodes`]: every node index the timer has, each with its 1-based display label
+/// and its enabled state, plus the enabled indices in seat order and any [`NodeDrift`] between what
+/// the hardware reported and what GridFPV is configured for.
+///
+/// This is the shared resolver for "how many pilots fit in a heat on this timer, and which gates do
+/// they sit on?" — the console, the seat mapping and the calibration guard all read the same answer
+/// from [`Timer::node_view`] rather than each re-deriving it. An unknown id is a 404.
+///
+/// [`NodeDrift`]: crate::timers::NodeDrift
+/// [`Timer::node_view`]: crate::timers::Timer::node_view
+async fn timer_nodes(
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<Json<TimerNodes>, ProtocolError> {
+    registry.timers().nodes(&timer_id).map(Json).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })
+}
+
+/// `PUT /timers/{timer_id}/nodes` — set a timer's node config, RD-gated (#412).
+///
+/// Body is a [`SetTimerNodesRequest`]: the width override (a number to pin it, `null` to go back to
+/// following the timer, absent to leave it) and/or the set of node indices to keep **enabled**.
+///
+/// This is the RD's answer to *"reported is 4 but node 3 is busted, I need to use nodes 1, 2 and
+/// 4"* — a **set**, not a count, because a dead node is rarely the last one. It is a decision, so it
+/// is persisted and survives a reconnect: a timer that keeps reporting four working nodes does not
+/// get to switch one back on.
+///
+/// Refused as a `400` for a `node_count` of `0` and for an edit that would leave **no** node
+/// enabled (both cap every heat to no pilots); an unknown id is a 404.
+async fn set_timer_nodes(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+    Json(body): Json<SetTimerNodesRequest>,
+) -> Result<Json<TimerNodes>, ProtocolError> {
+    let timers = registry.timers();
+    if !timers.exists(&timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        ));
+    }
+    timers
+        .set_nodes(&timer_id, &body)
         .map(Json)
         .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
 }
@@ -4374,6 +4436,102 @@ mod tests {
         assert!(registry.timers().take_restart_requests().is_empty());
     }
 
+    /// `GET`/`PUT` `/timers/{id}/nodes` with an optional JSON body → status + raw bytes.
+    async fn timer_nodes_call(
+        registry: EventRegistry,
+        timer_id: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, Vec<u8>) {
+        let request = Request::builder().uri(format!("/timers/{timer_id}/nodes"));
+        let request = match &body {
+            Some(json) => request
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(json).unwrap()))
+                .unwrap(),
+            None => request.method("GET").body(Body::empty()).unwrap(),
+        };
+        let response = router(registry).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn the_nodes_route_reports_the_enabled_set_and_the_drift() {
+        // #412 end to end over the wire: discover, disable, read back.
+        use crate::timers::TimerNodes;
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = create_rh_timer(&registry, "Field RH");
+
+        // Nothing observed yet: the width is the default, every node enabled, no drift.
+        let (status, bytes) = timer_nodes_call(registry.clone(), &rh.id.0, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view: TimerNodes = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view.reported, None);
+        assert_eq!(view.configured, None);
+        assert_eq!(view.width, crate::timers::DEFAULT_NODE_COUNT);
+        assert!(view.drift.is_none());
+
+        // The timer connects and says it has four nodes.
+        registry.timers().set_reported_nodes(&rh.id, 4);
+        let (_, bytes) = timer_nodes_call(registry.clone(), &rh.id.0, None).await;
+        let view: TimerNodes = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view.reported, Some(4));
+        assert_eq!(view.width, 4);
+        assert_eq!(view.enabled, vec![0, 1, 2, 3]);
+        assert!(view.nodes.iter().all(|n| n.reported && n.enabled));
+
+        // The RD switches off "Node 3" — wire index 2.
+        let (status, bytes) = timer_nodes_call(
+            registry.clone(),
+            &rh.id.0,
+            Some(json!({ "enabled": [0, 1, 3] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let view: TimerNodes = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            view.enabled,
+            vec![0, 1, 3],
+            "a set with a hole, not a prefix"
+        );
+        assert_eq!(view.nodes[2].label, "Node 3");
+        assert!(!view.nodes[2].enabled);
+        assert_eq!(
+            view.nodes[2].seat,
+            gridfpv_events::CompetitorRef("node-2".into())
+        );
+
+        // Pinning the width above what the hardware has surfaces the drift — the bench bug, made
+        // visible instead of silently building an oversized heat.
+        let (_, bytes) =
+            timer_nodes_call(registry.clone(), &rh.id.0, Some(json!({ "node_count": 8 }))).await;
+        let view: TimerNodes = serde_json::from_slice(&bytes).unwrap();
+        let drift = view.drift.expect("reported 4 vs configured 8 is drift");
+        assert_eq!((drift.reported, drift.configured), (4, 8));
+        assert_eq!(drift.enabled_beyond_reported, vec![4, 5, 6, 7]);
+
+        // …and `null` puts it back on the hardware's word.
+        let (_, bytes) = timer_nodes_call(
+            registry.clone(),
+            &rh.id.0,
+            Some(json!({ "node_count": null })),
+        )
+        .await;
+        let view: TimerNodes = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view.width, 4);
+        assert!(view.drift.is_none());
+        assert_eq!(view.enabled, vec![0, 1, 3], "the disable is untouched");
+
+        // An unknown timer is a 404; an edit that disables everything is a 400.
+        let (status, _) = timer_nodes_call(registry.clone(), "no-such-timer", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) =
+            timer_nodes_call(registry.clone(), &rh.id.0, Some(json!({ "enabled": [] }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
     /// `POST /timers/{id}/calibration` with a raw JSON body → status + raw bytes.
     async fn post_calibration(
         registry: EventRegistry,
@@ -4789,11 +4947,11 @@ mod tests {
             "the empty-write refusal must say what is missing"
         );
 
-        let node_count = registry.timers().get(&rh.id).unwrap().node_count;
+        let width = registry.timers().get(&rh.id).unwrap().node_width();
         let (status, bytes) = post_calibration(
             registry.clone(),
             &rh.id.0,
-            json!({ "node": node_count, "enter_at": 90 }),
+            json!({ "node": width, "enter_at": 90 }),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -4801,6 +4959,36 @@ mod tests {
         assert!(
             message.contains("Field RH"),
             "the refusal must name the timer: {message}"
+        );
+        assert!(
+            // The 1-based display name, per the repo display rule: index `width` is "Node width+1".
+            message.contains(&format!("Node {}", width + 1)),
+            "the refusal must name the node the way the page labels it (1-based): {message}"
+        );
+
+        // #412: a node that EXISTS but the RD has disabled is refused too — tuning a gate no heat
+        // is ever seated on would confirm a write on hardware nobody flies.
+        registry
+            .timers()
+            .set_nodes(
+                &rh.id,
+                &crate::timers::SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some((0..width).filter(|n| *n != 2).collect()),
+                },
+            )
+            .unwrap();
+        let (status, bytes) = post_calibration(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 2, "enter_at": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Node 3") && message.contains("disabled"),
+            "the disabled-node refusal must name the node 1-based and say why: {message}"
         );
         assert!(registry.timers().take_calibration_requests().is_empty());
     }

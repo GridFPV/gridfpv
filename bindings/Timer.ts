@@ -39,10 +39,56 @@ status: TimerStatus,
  */
 channel_capability: ChannelCapability, 
 /**
- * How many nodes/slots the timer has (race redesign Slice 4a) — the **heat-size cap**: a
- * heat's lineup must be ≤ this. Additive; defaults to [`DEFAULT_NODE_COUNT`].
+ * The Race Director's **explicit width override** — how many nodes GridFPV should treat this
+ * timer as having, regardless of what the hardware says (#412).
+ *
+ * `None` — the default for a newly created timer — means **follow the timer**: the width comes
+ * from [`reported_nodes`](Timer::reported_nodes), discovered on connect. `Some(n)` pins it,
+ * which is what a Mock (nothing to ask) and a timer whose RD deliberately set a width use.
+ * [`node_width`](Timer::node_width) resolves the two.
+ *
+ * **Migration (#412).** This was a plain `u32` defaulting to [`DEFAULT_NODE_COUNT`], and the
+ * registry always wrote it — so every pre-#412 `timers.json` carries an explicit number and
+ * reads back as `Some(n)`, keeping exactly the width it had. Only timers created *after* this
+ * change start out following the hardware. A disagreement between this and what the timer
+ * reports is surfaced as [`NodeDrift`], never silently resolved.
  */
-node_count: number, 
+node_count?: number, 
+/**
+ * How many nodes the timer **said it has**, learned on connect (#412) — an *observation*, not
+ * config.
+ *
+ * RotorHazard publishes no `num_nodes` scalar on the socket, but the count is knowable three
+ * ways, and the Director takes the most direct one available on each (re)connect: the GridFPV
+ * plugin's `gridfpv_hello_ack` (`len(rhapi.interface.seats)`), else the length of
+ * `frequency_data.fdata`, else the `[:num_nodes]`-sliced `enter_and_exit_at_levels`. `None`
+ * means the timer has never been asked — a Mock, an adapter that cannot report, or an RH not
+ * yet dialed.
+ *
+ * **Live, in-memory, never persisted as config** (D27: *"a value read from a timer is evidence
+ * about the timer, not an input to a decision"*). Like [`plugin`](Timer::plugin) it round-trips
+ * on the wire but is reset to `None` on load, so a restart re-observes rather than remembering.
+ */
+reported_nodes?: number, 
+/**
+ * The node indices (**0-based**) the Race Director has **disabled** on this timer (#412) — a
+ * dead receiver, a gate that will not tune, a seat that must not be flown.
+ *
+ * **This is a decision, so it is persisted and it survives a reconnect.** A timer that keeps
+ * reporting four nodes does not re-enable node 3; the RD turned it off on purpose. Stored as
+ * the *complement* of the enabled set precisely so it stays meaningful when the reported width
+ * changes: "node 2 is busted" is true whether the timer reports 4 nodes or 8.
+ *
+ * Sorted ascending and de-duplicated on write. Entries at or beyond
+ * [`node_width`](Timer::node_width) are inert (there is no such node to disable) but are kept
+ * rather than pruned — a timer that comes back wider must not silently un-disable a node.
+ * Additive on the wire and on disk: an older `timers.json` restores with none disabled, which
+ * is every node enabled — exactly the pre-#412 behaviour.
+ *
+ * **0-based on the wire, 1-based on screen.** Index `2` is the node the RD calls "Node 3"; see
+ * [`Timer::node_label`].
+ */
+disabled_nodes: Array<number>, 
 /**
  * The timer's **defined available channels** (race redesign Slice 4a): the raw-MHz channels,
  * within its [`channel_capability`](Timer::channel_capability), that the Race Director has

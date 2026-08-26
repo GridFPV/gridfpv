@@ -40,7 +40,8 @@ use serde_json::json;
 use super::{
     Raw, RawCurrentLaps, RawEnterExitLevels, RawGridPass, RawGridSignal, RawHeatData,
     RawMarshalData, RawNodeData, RawPassRecord, RawPilotData, RawRaceDetails, RawRaceList,
-    RawRaceStatus, RotorHazardAdapter,
+    RawRaceStatus, RotorHazardAdapter, reported_nodes_from_frequency_data,
+    reported_nodes_from_levels,
 };
 use crate::Adapter;
 use gridfpv_events::Event;
@@ -161,6 +162,9 @@ struct FrameCtx {
     savable_heat: Arc<Mutex<Option<u64>>>,
     /// RotorHazard's current race-format id, learned from the `race_status` stream.
     current_format: Arc<Mutex<Option<i64>>>,
+    /// How many nodes the timer has reported (#412) — the `enter_and_exit_at_levels` fallback
+    /// writes here; the dedicated `frequency_data` handler is the primary source.
+    reported_nodes: Arc<Mutex<Option<u32>>>,
     /// The tune-telemetry tap (#355 S2a) — **read-only from the event path's point of view**: it
     /// is written to, never read back into a [`Raw`], and nothing it holds can become an `Event`.
     tap: SignalTap,
@@ -699,6 +703,13 @@ pub struct RotorHazardConnection {
     /// by [`prepare_instant_start`](Self::prepare_instant_start) to decide whether Grid selects
     /// its own format row or falls back to mutating the race director's.
     owned_format: Arc<Mutex<OwnedFormat>>,
+    /// **How many nodes the timer reported** on this connection (#412), or `None` until it has
+    /// said. Written by the `frequency_data` handler (and, as a fallback, by the
+    /// `enter_and_exit_at_levels` one); read by [`wait_for_reported_nodes`](Self::wait_for_reported_nodes).
+    ///
+    /// Per-connection, never carried across a reconnect: a timer that came back with a node missing
+    /// must re-report rather than inherit a stale width.
+    reported_nodes: Arc<Mutex<Option<u32>>>,
     /// The **tune-telemetry tap** (#355 S2a): the gate the `heartbeat` / `node_crossing_change`
     /// handlers check before parsing, plus the bounded last-value-wins per-node store they and the
     /// `node_data` / `enter_and_exit_at_levels` handlers write into.
@@ -747,12 +758,16 @@ impl RotorHazardConnection {
         // The tune-telemetry tap (#355 S2a), closed. A fresh link starts NOT capturing: the Tune
         // page's lease is what opens it, and a reconnect under a still-open lease is re-opened by
         // the driver's next tick (which re-reads the lease and re-warms the store).
+        // #412 node discovery: filled by the `frequency_data` handler below, and by
+        // `enter_and_exit_at_levels` as a fallback. Per-connection.
+        let reported_nodes: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
         let tap = SignalTap::default();
         let ctx = FrameCtx {
             adapter: adapter.clone(),
             sink: events.clone(),
             savable_heat: savable_heat.clone(),
             current_format: current_format.clone(),
+            reported_nodes: reported_nodes.clone(),
             tap: tap.clone(),
         };
 
@@ -778,6 +793,7 @@ impl RotorHazardConnection {
                 sink,
                 savable_heat,
                 current_format,
+                reported_nodes,
                 tap,
             } = ctx;
             move |payload: Payload, client: RawClient| {
@@ -825,6 +841,20 @@ impl RotorHazardConnection {
                             Raw::NodeData(data) => tap.note_node_data(data),
                             Raw::EnterExitLevels(levels) => tap.note_levels(levels),
                             _ => {}
+                        }
+                    }
+                    // Node-count discovery **fallback** (#412). `enter_at_levels` is explicitly
+                    // sliced `[:num_nodes]` on both v4.3.0 and v4.4.0, so its length is the node
+                    // count too. `frequency_data` is preferred (a list of dicts, unambiguous), so
+                    // this only fills in when that frame has not arrived — an RH build or plugin
+                    // that answers one `load_data` type and not the other still gets discovered
+                    // rather than silently falling back to the 8-node default.
+                    if let Raw::EnterExitLevels(levels) = &raw {
+                        if let Some(nodes) = reported_nodes_from_levels(levels) {
+                            let mut slot = reported_nodes.lock().expect("reported-nodes lock");
+                            if slot.is_none() {
+                                *slot = Some(nodes);
+                            }
                         }
                     }
                     let (translated, request_marshal, pilotrace_requests, heat_ids) = {
@@ -948,6 +978,26 @@ impl RotorHazardConnection {
             // Crossing **edges**. The heartbeat's `crossing_flag` is a level sampled at 10 Hz and
             // the Director decimates below that, so a short crossing can fall between two samples;
             // these edges are what make the crossing lamp honest. Same pre-parse gate.
+            // **Node-count discovery** (#412). `frequency_data` carries one `fdata` entry per
+            // node, which is the only unambiguous statement of width RotorHazard makes on the
+            // socket. Bound unconditionally (there is no way to attach a handler later) but it
+            // costs nothing when idle: RH emits it on `load_data` — which `connect` asks for below
+            // — and thereafter only when a frequency actually changes.
+            .on("frequency_data", {
+                let reported_nodes = reported_nodes.clone();
+                move |payload: Payload, _client: RawClient| {
+                    let Some(value) = first_text(&payload) else {
+                        return;
+                    };
+                    // `frequency_data` is NOT a `Raw` variant, deliberately (like `heartbeat`):
+                    // a node count is an observation about the hardware, and `Raw` is the only
+                    // input to the translator that mints `Event`s. The parse is the shared,
+                    // always-compiled one so its wire contract is unit-testable without a socket.
+                    if let Some(nodes) = reported_nodes_from_frequency_data(&value) {
+                        *reported_nodes.lock().expect("reported-nodes lock") = Some(nodes);
+                    }
+                }
+            })
             .on("node_crossing_change", {
                 let tap = tap.clone();
                 move |payload: Payload, _client: RawClient| {
@@ -1078,12 +1128,20 @@ impl RotorHazardConnection {
             .connect()?;
 
         // Warm initial state on (re)connect: ask RH to send current per-node RSSI, the enter/exit
-        // detection thresholds, and the current race status (so the **current format id** is learned
-        // early — `prepare_instant_start` needs it to zero that format's staging). `current_laps`
-        // also arrives via the normal snapshot stream.
+        // detection thresholds, the current race status (so the **current format id** is learned
+        // early — `prepare_instant_start` needs it to zero that format's staging), and
+        // `frequency_data` — whose `fdata` length is how many nodes the timer has (#412).
+        // `current_laps` also arrives via the normal snapshot stream.
         let _ = client.emit(
             "load_data",
-            json!({ "load_types": ["node_data", "enter_and_exit_at_levels", "race_status"] }),
+            json!({
+                "load_types": [
+                    "node_data",
+                    "enter_and_exit_at_levels",
+                    "race_status",
+                    "frequency_data",
+                ]
+            }),
         );
 
         // Probe for the GridFPV plugin (D16, S1): emit `gridfpv_hello` over the connection we just
@@ -1104,6 +1162,7 @@ impl RotorHazardConnection {
             current_format,
             hello,
             owned_format,
+            reported_nodes,
             tap,
         })
     }
@@ -1188,6 +1247,29 @@ impl RotorHazardConnection {
         loop {
             if let Some(hello) = self.hello.lock().expect("plugin-hello lock").clone() {
                 return Some(hello);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Wait up to `timeout` for the timer to say **how many nodes it has** (#412), or `None` if it
+    /// never did.
+    ///
+    /// `connect` asks for `frequency_data` (and `enter_and_exit_at_levels`) in its warm-up
+    /// `load_data`, so by the time the driver calls this the answer is usually already in. Blocking
+    /// poll with small sleeps, exactly like [`wait_for_plugin`](Self::wait_for_plugin), and called
+    /// from the driver thread so it never stalls the async runtime.
+    ///
+    /// `None` is not a failure to handle loudly — a stock RH that answers neither `load_data` type
+    /// simply leaves GridFPV on its configured width, which is where it was before #412.
+    pub fn wait_for_reported_nodes(&self, timeout: Duration) -> Option<u32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(nodes) = *self.reported_nodes.lock().expect("reported-nodes lock") {
+                return Some(nodes);
             }
             if Instant::now() >= deadline {
                 return None;
