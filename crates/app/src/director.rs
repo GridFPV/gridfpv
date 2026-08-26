@@ -296,17 +296,13 @@ async fn diagnostics() -> Json<BTreeMap<&'static str, Option<String>>> {
     ]))
 }
 
-
 /// Attach the SPA cache policy (see `build_app`): immutable for content-hashed assets, always
 /// revalidate for everything else — above all `index.html`, the file that names the hashes.
 ///
 /// Applied as a response middleware rather than per-service so it covers the `ServeDir` hit, the
 /// `index.html` fallback and the embedded-assets build identically. API responses pass through
 /// untouched except for the no-cache default, which is what they want anyway.
-async fn spa_cache_headers(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
+async fn spa_cache_headers(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let hashed = req.uri().path().starts_with("/assets/");
     let mut resp = next.run(req).await;
     let value = if hashed {
