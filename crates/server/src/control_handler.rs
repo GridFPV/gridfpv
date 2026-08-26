@@ -4088,6 +4088,56 @@ mod tests {
         assert_eq!(freqs[1].1, 5917);
     }
 
+    /// `FillRound` on a timer with **no allowed channels** refuses, names the timer, and appends
+    /// nothing (#117 S1, #402).
+    ///
+    /// This is the bench case and it is the whole point of S1: both RotorHazard timers report
+    /// `Flexible` with an EMPTY `available_channels`, so before this the fill *succeeded* and
+    /// scheduled a heat in which **not one pilot had a channel**. Silence at exactly the moment the
+    /// RD could still fix it. Now the configuration gap reaches them as a `400` that says which
+    /// timer and where to go.
+    #[test]
+    fn fill_round_refuses_when_the_timer_has_no_allowed_channels() {
+        use crate::timers::{ChannelCapability, CreateTimerRequest, TimerKind};
+        let timer_req = CreateTimerRequest {
+            name: "NuclearHazard".into(),
+            kind: TimerKind::Mock { laps: 1, lap_ms: 1 },
+            // The bench shape: flexible capability, nothing configured.
+            channel_capability: Some(ChannelCapability::Flexible),
+            node_count: Some(8),
+            available_channels: None,
+        };
+        let (registry, event_id, round) =
+            event_with_timer_and_round(timer_req, &["alpha", "bravo"]);
+        let state = registry.resolve(&event_id).unwrap();
+        let before = state.read().unwrap().0.len();
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::FillRound {
+                round,
+                mode: FillMode::Next,
+            },
+        );
+        assert!(
+            !ack.ok,
+            "an unconfigured timer must not silently seat a heat"
+        );
+        let err = ack.error.unwrap();
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(
+            err.message.contains("NuclearHazard") && err.message.contains("Timers page"),
+            "the RD must be told WHICH timer and WHERE to fix it: {}",
+            err.message
+        );
+        assert_eq!(
+            before,
+            state.read().unwrap().0.len(),
+            "a refused FillRound appends nothing — no un-channelled heat is scheduled"
+        );
+    }
+
     /// `FillRound` rejects an oversized lineup with a typed `BadRequest` (the heat-size cap) and
     /// appends nothing (race redesign Slice 4a).
     #[test]
