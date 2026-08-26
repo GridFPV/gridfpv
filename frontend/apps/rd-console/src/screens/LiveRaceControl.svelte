@@ -1262,8 +1262,12 @@
   .practice-node {
     display: inline-grid;
     place-items: center;
-    width: 2.2rem;
-    height: 2.2rem;
+    /* Sized to its content, not to one digit. #108 raised `lg` to 21px, at which a fixed 2.2rem
+       square clipped a two-digit node number — and an 8+ node timer has those. `min-width` keeps
+       the square look for a single digit while letting `10`+ widen instead of truncate. */
+    min-width: 2.4rem;
+    min-height: 2.4rem;
+    padding: 0 var(--gf-space-1);
     flex-shrink: 0;
     border-radius: var(--gf-radius-sm);
     background: var(--gf-surface-sunken);
