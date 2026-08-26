@@ -558,13 +558,24 @@ export function channelOptions(
   custom: number[] = [],
   current?: number
 ): ChannelOption[] {
-  const options: ChannelOption[] = offeredCatalog(capability, catalog).map((entry) => ({
-    mhz: entry.mhz,
-    band: entry.band,
-    channel: entry.channel,
-    label: entryOptionLabel(entry),
-    custom: false
-  }));
+  // ONE ROW PER FREQUENCY. `5880` is Raceband R7 and Fatshark F8 — the same channel, reachable by
+  // two names. Offering both as rows shows the RD the same frequency twice with nothing to say
+  // which is "the" one; the first-listed band wins (the catalog leads with Raceband, the de-facto
+  // racing default) and the other names ride along in the label's parentheses, so a pilot who
+  // knows their VTX as F8 still finds it.
+  const seenMhz = new Set<number>();
+  const options: ChannelOption[] = [];
+  for (const entry of offeredCatalog(capability, catalog)) {
+    if (seenMhz.has(entry.mhz)) continue;
+    seenMhz.add(entry.mhz);
+    options.push({
+      mhz: entry.mhz,
+      band: entry.band,
+      channel: entry.channel,
+      label: entryOptionLabel(entry, catalog),
+      custom: false
+    });
+  }
   // A Fixed timer offers its declared set and nothing else — a custom MHz it cannot tune to is not
   // an option, it is a refusal waiting to happen.
   const flexible = capabilityIsFlexible(capability);

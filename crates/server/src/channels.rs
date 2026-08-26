@@ -24,11 +24,13 @@
 //! - **Boscam A** A1–A8 — `5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725` (descending, as labelled).
 //! - **Boscam B** B1–B8 — `5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866`.
 //! - **Boscam E** E1–E8 — `5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945`.
-//! - **DJI** (digital, O3/O4-class analog-compatible centres) — the four clean DJI race channels
-//!   `5660, 5695, 5735, 5770` (DJI R1–R4 overlap Raceband but are exposed under their own band so a
-//!   DJI HD pilot picks a DJI label).
-//! - **HDZero** (digital) — `5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917` (HDZero races on the
-//!   Raceband grid; exposed under its own band label for a HDZero pilot).
+//!
+//! **No separate digital bands.** HDZero races on the Raceband grid — its eight frequencies ARE
+//! Raceband's — and DJI's race channels are three Raceband centres plus one 2 MHz off. Listing
+//! them again showed every frequency three times in a picker with no way to tell which entry was
+//! the real one. A digital pilot needs the frequency, which the analog grid already names; where a
+//! frequency has a second common name (`5880` is Raceband R7 *and* Fatshark F8) the picker shows
+//! it in parentheses.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -42,7 +44,7 @@ use ts_rs::TS;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct ChannelCatalogEntry {
-    /// The band name (e.g. `"Raceband"`, `"Fatshark"`, `"Boscam A"`, `"DJI"`, `"HDZero"`).
+    /// The band name (e.g. `"Raceband"`, `"Fatshark"`, `"Boscam A"`, `"Boscam B"`, `"Boscam E"`).
     pub band: String,
     /// The channel label within the band (e.g. `"R1"`, `"F4"`, `"A8"`).
     pub channel: String,
@@ -73,7 +75,7 @@ fn band(name: &str, channels: [(&'static str, u16); 8]) -> Vec<ChannelCatalogEnt
 }
 
 /// The full standard FPV channel catalog (race redesign Slice 4a), in a stable, deterministic
-/// order: Raceband, Fatshark/IRC, Boscam A/B/E, then the clean digital DJI and HDZero bands.
+/// order: Raceband, Fatshark/IRC, then Boscam A/B/E.
 ///
 /// This is the shared vocabulary the UI offers and a timer's available channels are picked from.
 /// The order is fixed so the binding and any consumer is deterministic (the gen-drift check and
@@ -145,26 +147,15 @@ pub fn catalog() -> Vec<ChannelCatalogEntry> {
             ("E8", 5945),
         ],
     ));
-    // Clean digital bands (exposed under their own labels so a DJI/HDZero pilot picks a DJI/HDZero
-    // channel, even where the centre frequency coincides with an analog grid).
-    out.extend(
-        [("R1", 5660u16), ("R2", 5695), ("R3", 5735), ("R4", 5770)]
-            .into_iter()
-            .map(|(label, mhz)| ChannelCatalogEntry::new("DJI", label, mhz)),
-    );
-    out.extend(band(
-        "HDZero",
-        [
-            ("R1", 5658),
-            ("R2", 5695),
-            ("R3", 5732),
-            ("R4", 5769),
-            ("R5", 5806),
-            ("R6", 5843),
-            ("R7", 5880),
-            ("R8", 5917),
-        ],
-    ));
+    // NO separate digital bands. HDZero races on the Raceband grid — all eight of its frequencies
+    // are Raceband's, exactly — and DJI's race-mode channels are three Raceband centres plus one
+    // 2 MHz off. Listing them again added a band of pure duplication to every picker: on a
+    // Raceband timer the RD saw each frequency three times over and could not tell which entry was
+    // "the" one.
+    //
+    // What a digital pilot actually needs is the frequency their VTX is on, which the analog grid
+    // already names. The alternate names are not lost — `alternate_names` hands them to the picker,
+    // which shows them in parentheses (`Raceband R7 (F8)`).
     out
 }
 
@@ -205,8 +196,6 @@ mod tests {
             );
         }
         // The clean digital bands are present too.
-        assert!(bands.contains("DJI"));
-        assert!(bands.contains("HDZero"));
     }
 
     #[test]

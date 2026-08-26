@@ -61,7 +61,7 @@ export function channelLabel(mhz: number, catalog: ChannelCatalogEntry[]): strin
  */
 export function channelOptionLabel(mhz: number, catalog: ChannelCatalogEntry[]): string {
   const hit = catalog.find((e) => e.mhz === mhz);
-  return hit ? entryOptionLabel(hit) : `Custom — ${mhz}`;
+  return hit ? entryOptionLabel(hit, catalog) : `Custom — ${mhz}`;
 }
 
 /**
@@ -72,8 +72,40 @@ export function channelOptionLabel(mhz: number, catalog: ChannelCatalogEntry[]):
  * whichever the catalog lists first, silently relabelling the RD's choice as the other band. So an
  * option built from an entry must be labelled from that entry.
  */
-export function entryOptionLabel(entry: ChannelCatalogEntry): string {
-  return `${entry.band} ${entry.channel} — ${entry.mhz}`;
+export function entryOptionLabel(
+  entry: ChannelCatalogEntry,
+  catalog: readonly ChannelCatalogEntry[] = []
+): string {
+  const alt = alternateNames(entry, catalog);
+  const also = alt.length > 0 ? ` (${alt.join(', ')})` : '';
+  return `${entry.band} ${entry.channel}${also} — ${entry.mhz}`;
+}
+
+/**
+ * The OTHER common names for this entry's frequency — `5880` is Raceband R7 **and** Fatshark F8.
+ *
+ * A pilot who knows their VTX as "F8" must still be able to find it, but a picker that lists both
+ * as separate rows shows the same frequency twice with no way to tell which is "the" one. So the
+ * catalog leads with one name and carries the rest in parentheses: one row per frequency, no name
+ * lost.
+ *
+ * Returns just the channel code, not the band: `(F8)` reads cleanly where `(Fatshark F8)` crowds
+ * the row, and the code is what a pilot says out loud.
+ */
+export function alternateNames(
+  entry: ChannelCatalogEntry,
+  catalog: readonly ChannelCatalogEntry[]
+): string[] {
+  const seen = new Set<string>([entry.channel]);
+  const out: string[] = [];
+  for (const other of catalog) {
+    if (other.mhz !== entry.mhz || other === entry) continue;
+    if (other.band === entry.band && other.channel === entry.channel) continue;
+    if (seen.has(other.channel)) continue;
+    seen.add(other.channel);
+    out.push(other.channel);
+  }
+  return out;
 }
 
 /** The catalog entry an MHz resolves to (the first match), or `undefined` for a custom/unknown one. */

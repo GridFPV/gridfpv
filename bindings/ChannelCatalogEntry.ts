@@ -10,7 +10,7 @@
  */
 export type ChannelCatalogEntry = { 
 /**
- * The band name (e.g. `"Raceband"`, `"Fatshark"`, `"Boscam A"`, `"DJI"`, `"HDZero"`).
+ * The band name (e.g. `"Raceband"`, `"Fatshark"`, `"Boscam A"`, `"Boscam B"`, `"Boscam E"`).
  */
 band: string, 
 /**

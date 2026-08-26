@@ -396,7 +396,8 @@ pub fn channel_label(mhz: u16) -> String {
 ///
 /// GridFPV owns the vocabulary (D27), so a client-supplied label is **validated**, never trusted:
 /// a `(band, channel, mhz)` triple the catalog actually holds is honoured — which is what lets the
-/// RD pick `HDZero R7` rather than the coincident `Raceband R7` — and anything else falls back to
+/// caller name `Fatshark F8` for the frequency the console leads as `Raceband R7` — and anything
+/// else falls back to
 /// the first catalog entry for that frequency. A frequency the catalog does not know resolves to
 /// `None`: a **custom** channel travels as a bare frequency, because it has no label to send.
 fn resolve_channel_label(

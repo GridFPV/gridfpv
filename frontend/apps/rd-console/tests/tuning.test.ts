@@ -458,7 +458,9 @@ const FULL: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
   { band: 'Raceband', channel: 'R7', mhz: 5880 },
   { band: 'Fatshark', channel: 'F4', mhz: 5800 },
-  { band: 'HDZero', channel: 'R7', mhz: 5880 }
+  // A second name for a frequency the catalog already carries: 5880 is Raceband R7 AND
+  // Fatshark F8. The picker must show it ONCE, led by the first-listed band.
+  { band: 'Fatshark', channel: 'F8', mhz: 5880 }
 ];
 
 const FLEXIBLE: ChannelCapability = 'Flexible';
@@ -472,8 +474,8 @@ describe('channelOptions — the dropdown source is the CAPABILITY, never `avail
     // configured — and NOT "no channels". A dropdown bound naively to it renders EMPTY on exactly
     // the timers this feature is for, which is the whole reason #413 was filed with a warning.
     const options = channelOptions(FLEXIBLE, FULL, []);
-    expect(options.map((o) => o.mhz)).toEqual([5658, 5880, 5800, 5880]);
-    expect(options.length).toBe(FULL.length);
+    // One row per FREQUENCY: 5880 appears once even though the catalog names it twice.
+    expect(options.map((o) => o.mhz)).toEqual([5658, 5880, 5800]);
   });
 
   it('limits a Fixed timer to its declared set', () => {
@@ -487,7 +489,7 @@ describe('channelOptions — the dropdown source is the CAPABILITY, never `avail
     // typed into the timer's channel config. They come AFTER the catalog, ascending, and only the
     // ones the catalog does not already know (5800 is Fatshark F4 — it must not appear twice).
     const options = channelOptions(FLEXIBLE, FULL, [5891, 5800, 5645]);
-    expect(options.slice(FULL.length).map((o) => o.mhz)).toEqual([5645, 5891]);
+    expect(options.filter((o) => o.custom).map((o) => o.mhz)).toEqual([5645, 5891]);
     expect(options.filter((o) => o.mhz === 5800)).toHaveLength(1);
     expect(options.find((o) => o.mhz === 5891)?.custom).toBe(true);
   });
@@ -511,10 +513,11 @@ describe('channelOptions — the dropdown source is the CAPABILITY, never `avail
     // number is extra information beside the name, never a substitute for it — which is the line
     // CLAUDE.md's display rule actually draws.
     const options = channelOptions(FLEXIBLE, FULL, [5891]);
-    expect(options[1].label).toBe('Raceband R7 — 5880');
-    // A coincident frequency keeps the band the RD picked, rather than collapsing to the first
-    // catalog entry that happens to share the number.
-    expect(options[3].label).toBe('HDZero R7 — 5880');
+    // A frequency with two names is ONE row, led by the first-listed band, with the other name in
+    // parentheses — so a pilot who knows their VTX as F8 still finds it, and the RD is not shown
+    // the same frequency twice with nothing to choose between the rows.
+    expect(options[1].label).toBe('Raceband R7 (F8) — 5880');
+    expect(options.filter((o) => o.mhz === 5880)).toHaveLength(1);
     // Every catalog option still leads with its name, never a bare number.
     expect(options.every((o) => /^[A-Za-z]/.test(o.label))).toBe(true);
     // A frequency the catalog does not know is marked as the RD's own.
@@ -524,8 +527,10 @@ describe('channelOptions — the dropdown source is the CAPABILITY, never `avail
   it('carries the band and channel of the picked entry, so the emit can label it on RotorHazard', () => {
     // RotorHazard stores band/channel on its profile, and the RD validates this work by refreshing
     // RotorHazard's own page — where a bare frequency reads as "it half worked".
-    const hdzero = channelOptions(FLEXIBLE, FULL, []).at(-1);
-    expect(hdzero).toMatchObject({ mhz: 5880, band: 'HDZero', channel: 'R7' });
+    // The row that survives the de-duplication carries ITS OWN band and channel — the ones shown
+    // to the RD — so what RotorHazard is told matches what the console said.
+    const shared = channelOptions(FLEXIBLE, FULL, []).find((o) => o.mhz === 5880);
+    expect(shared).toMatchObject({ mhz: 5880, band: 'Raceband', channel: 'R7' });
   });
 });
 

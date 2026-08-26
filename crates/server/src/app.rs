@@ -5308,23 +5308,25 @@ mod tests {
     #[tokio::test]
     async fn a_channel_label_is_resolved_from_gridfpvs_own_catalog_not_taken_from_the_client() {
         // D27: GridFPV owns the vocabulary. A client-supplied `(band, channel, mhz)` triple is
-        // honoured only when the catalog actually holds it — which is what lets an RD pick `HDZero
-        // R7` over the coincident `Raceband R7` — and an invented one falls back to the catalog's
-        // own answer rather than reaching the timer. A custom MHz travels with NO label at all,
+        // honoured only when the catalog actually holds it — which is what lets a caller name
+        // `Fatshark F8` for the frequency the console leads as `Raceband R7` — and an invented one
+        // falls back to the catalog's own answer rather than reaching the timer. A custom MHz travels with NO label at all,
         // because it has none: a made-up name on RotorHazard's screen is worse than the number.
         let (registry, _state, _) = state_with(vec![]);
         let rh = connected_rh_timer_selected_by_the_event(&registry);
 
-        // A real, deliberately-chosen alternative band for a coincident frequency.
+        // A real, deliberately-chosen alternative band for a coincident frequency. 5880 is both
+        // Raceband R7 and Fatshark F8; the console's picker leads with Raceband and carries `(F8)`
+        // in the label, but the API still honours the alternative name when a caller sends it.
         let (status, bytes) = post_channel(
             registry.clone(),
             &rh.id.0,
-            json!({ "node": 0, "mhz": 5880, "band": "HDZero", "channel": "R7" }),
+            json!({ "node": 0, "mhz": 5880, "band": "Fatshark", "channel": "F8" }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         let dispatch: crate::timers::ChannelDispatch = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(dispatch.band.as_deref(), Some("HDZero"));
+        assert_eq!(dispatch.band.as_deref(), Some("Fatshark"));
 
         // An invented label is replaced by the catalog's, not forwarded.
         let (status, bytes) = post_channel(
