@@ -95,9 +95,12 @@
     /** Whether a row is currently selected — drives the row's "checked" highlight in select mode. */
     rowChecked?: (timer: Timer) => boolean;
     /**
-     * Open the per-timer **Tune** page for a timer (#355). Optional: an embedder with nowhere to
-     * navigate to (the in-event selector) simply doesn't offer the action, rather than offering one
-     * that goes nowhere. The row decides *which* timers get it (see the button's `{#if}`).
+     * Open the per-timer **Tune** page for a timer (#355). Both hosts offer it, and the *route* they
+     * navigate to is the tuning **scope** (#411): the app-level Timers page opens the timer's own
+     * baseline, the in-event screen opens that event's tune and returns into the event. Optional
+     * still: an embedder with nowhere to navigate to (the setup wizard's embedded Timer step) simply
+     * doesn't offer the action rather than offering one that goes nowhere. The row decides *which*
+     * timers get it (see the button's `{#if}`).
      */
     ontune?: (timer: Timer) => void;
   } = $props();

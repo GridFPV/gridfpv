@@ -786,6 +786,92 @@ describe('TunePage — the feed is leased: hold it, then give it back', () => {
   });
 });
 
+/**
+ * Which layer am I editing? (#411's first open question.)
+ *
+ * The scope comes from the ROUTE, so the shell hands the page an event or it does not, and the page
+ * has to say which — by the event's friendly NAME (CLAUDE.md), never its id — and take its back
+ * crumb to the matching place. Profiles do not exist, so the page names the *event*; and both
+ * scopes write the same calibration today, so the note must not imply an isolation that isn't there.
+ */
+describe('TunePage — the scope it states (#411)', () => {
+  /** Render the page in one scope or the other, over an inert feed. */
+  async function renderScoped(scope: { scopeEvent?: EventMeta } = {}) {
+    const onhome = vi.fn();
+    const ontimers = vi.fn();
+    const onevent = vi.fn();
+    const { session } = makeTestSession({
+      listChannelsImpl: async () => CATALOG,
+      listPilotsImpl: async () => [],
+      listHeatsImpl: async () => []
+    });
+    const { unmount } = render(TunePage, {
+      session,
+      timer: TIMER,
+      ...scope,
+      onhome,
+      ontimers,
+      onevent,
+      fetchSignal: vi.fn(async () => snapshot()),
+      applyLevels: vi.fn(async () => {}),
+      stopSignal: vi.fn(async () => {}),
+      pollMs: 10 * 60 * 1000
+    });
+    await screen.findByLabelText('Enter at level for Node 1 · Raceband R7');
+    return { onhome, ontimers, onevent, unmount };
+  }
+
+  it('names the TIMER when there is no event in scope', async () => {
+    const h = await renderScoped();
+    const scope = screen.getByTestId('tune-scope');
+    expect(scope).toHaveTextContent('editing:');
+    expect(scope).toHaveTextContent('Track RH');
+    expect(scope).toHaveTextContent(/No event in scope/);
+    h.unmount();
+  });
+
+  it('names the EVENT and the timer when opened from inside an event', async () => {
+    const h = await renderScoped({ scopeEvent: eventWith([]) });
+    const scope = screen.getByTestId('tune-scope');
+    expect(scope).toHaveTextContent('Friday · Track RH');
+    // The event's NAME, never its id (CLAUDE.md) — 'e1' must not reach the screen.
+    expect(scope.textContent).not.toContain('e1');
+    // …and it must not claim an isolation that does not exist yet: both scopes write the same
+    // calibration today, so the note says the levels are still the timer's own.
+    expect(scope).toHaveTextContent(/timer's own levels/);
+    h.unmount();
+  });
+
+  it('takes the back crumb to the Timers page on the timer scope', async () => {
+    const h = await renderScoped();
+    expect(screen.queryByRole('button', { name: 'Friday' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Timers' }));
+    expect(h.ontimers).toHaveBeenCalledTimes(1);
+    expect(h.onevent).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('takes the back crumb into the EVENT on the event scope', async () => {
+    // The RD's requirement: "tuning from in the event would be ideal, as long as when we click back
+    // we are back in the event". So the middle crumb is the event, and it does not go to Timers.
+    const h = await renderScoped({ scopeEvent: eventWith([]) });
+    expect(screen.queryByRole('button', { name: 'Timers' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Friday' }));
+    expect(h.onevent).toHaveBeenCalledTimes(1);
+    expect(h.ontimers).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('keeps Home reachable in both scopes', async () => {
+    for (const scope of [{}, { scopeEvent: eventWith([]) }]) {
+      const h = await renderScoped(scope);
+      await fireEvent.click(screen.getByRole('button', { name: 'Home' }));
+      expect(h.onhome).toHaveBeenCalledTimes(1);
+      h.unmount();
+    }
+  });
+});
+
 describe('TunePage — layout', () => {
   it('offers a stacked variant of the same columns, without forking the markup', async () => {
     const h = await renderTune();
