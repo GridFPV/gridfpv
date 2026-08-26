@@ -118,8 +118,21 @@ function manualTimer(): {
   };
 }
 
-const envelope = (sequence: number, phase: HeatPhase): ChangeEnvelope => ({
+/**
+ * The `cursor` a fixture envelope carries when a test does not care about the resume
+ * axis. Deliberately far from any `sequence` these tests use: the two are different
+ * axes (#422 / seam 3), and a fixture that let them coincide would hide a client
+ * conflating them.
+ */
+const someOffset = (sequence: number): number => 1000 + sequence;
+
+const envelope = (
+  sequence: number,
+  phase: HeatPhase,
+  cursor = someOffset(sequence)
+): ChangeEnvelope => ({
   sequence,
+  cursor,
   projection: 'LiveRaceState',
   change: { FreshValue: liveState(phase) }
 });
@@ -129,17 +142,23 @@ const envelope = (sequence: number, phase: HeatPhase): ChangeEnvelope => ({
  * `{ Change: ChangeEnvelope }` (externally tagged). The client must unwrap it — a
  * raw, unwrapped envelope was the shape these mocks used before, which masked the
  * client ignoring every real (wrapped) frame.
+ *
+ * `cursor` is the log offset the server folded that body through (#422). It is what the
+ * client must store as its resume position — never a count of envelopes it applied.
  */
-const change = (sequence: number, phase: HeatPhase) => ({ Change: envelope(sequence, phase) });
+const change = (sequence: number, phase: HeatPhase, cursor = someOffset(sequence)) => ({
+  Change: envelope(sequence, phase, cursor)
+});
 
 /**
  * A `Delta` change envelope, wrapped as the wire `StreamMessage`. The per-projection
  * delta encodings are deferred (#43), so the client cannot fold one into `body` —
  * an in-order delta must fail safe (re-snapshot), never freeze the view silently.
  */
-const deltaChange = (sequence: number) => ({
+const deltaChange = (sequence: number, cursor = someOffset(sequence)) => ({
   Change: {
     sequence,
+    cursor,
     projection: 'LiveRaceState',
     change: { Delta: { appended: 'lap' } }
   }
@@ -207,13 +226,14 @@ describe('ProtocolClient', () => {
     await flush();
     sockets[0].open();
 
-    sockets[0].emit(change(1, 'Staged'));
-    sockets[0].emit(change(2, 'Armed'));
-    sockets[0].emit(change(3, 'Running'));
+    // The three envelopes were folded through log offsets 6, 7 and 8 — the server states
+    // each one; the stream sequence (1, 2, 3) is the other axis entirely.
+    sockets[0].emit(change(1, 'Staged', 6));
+    sockets[0].emit(change(2, 'Armed', 7));
+    sockets[0].emit(change(3, 'Running', 8));
 
-    // Every envelope applied → body converged. The resume cursor ADVANCES by one per
-    // applied envelope (5 → 8) — it tracks the last-applied position (each envelope is
-    // ≥ 1 log append), so a reconnect resumes there rather than replaying from the
+    // Every envelope applied → body converged. The resume cursor is the last envelope's
+    // OWN offset (8), so a reconnect resumes exactly there rather than replaying from the
     // snapshot offset. It is still NOT the stream sequence (a different axis).
     expect(phaseOf(client.getState().body)).toBe('Running');
     expect(client.getState().cursor).toBe(8);
@@ -280,9 +300,9 @@ describe('ProtocolClient', () => {
     expect(req.from).toBe(5);
 
     // The fresh subscription restarts the per-stream sequence, so its first envelope
-    // is accepted and the body converges. The resume cursor advances past the
-    // re-snapshot offset with the applied envelope (5 → 6).
-    sockets[1].emit(change(6, 'Unofficial'));
+    // is accepted and the body converges. The resume cursor moves to that envelope's own
+    // offset (6), past the re-snapshot's 5.
+    sockets[1].emit(change(6, 'Unofficial', 6));
     expect(phaseOf(client.getState().body)).toBe('Unofficial');
     expect(client.getState().cursor).toBe(6);
 
@@ -305,8 +325,8 @@ describe('ProtocolClient', () => {
     await flush();
     sockets[0].open();
 
-    // An applied envelope advances the resume cursor off the snapshot offset (100 → 101)…
-    sockets[0].emit(change(1, 'Armed'));
+    // An applied envelope moves the resume cursor off the snapshot offset (100 → 101)…
+    sockets[0].emit(change(1, 'Armed', 101));
     expect(client.getState().cursor).toBe(101);
 
     const staleErr: ProtocolError = { code: 'StaleCursor', message: 'cursor too old to replay' };
@@ -338,8 +358,10 @@ describe('ProtocolClient', () => {
     });
     await flush();
     sockets[0].open();
-    sockets[0].emit(change(1, 'Staged'));
-    sockets[0].emit(change(2, 'Armed'));
+    // Two envelopes, folded through log offsets 1 and 5 — offsets 2, 3 and 4 were appends
+    // that moved no projection (a signal chunk, a marshaling no-op) and so emitted nothing.
+    sockets[0].emit(change(1, 'Staged', 1));
+    sockets[0].emit(change(2, 'Armed', 5));
 
     // Socket drops.
     sockets[0].drop();
@@ -354,17 +376,88 @@ describe('ProtocolClient', () => {
 
     sockets[1].open();
     const req = JSON.parse(sockets[1].sent[0]);
-    // Resume from the LAST-APPLIED position: the resume cursor advanced by one per
-    // applied envelope (snapshot offset 0 + 2 applied = 2), so the re-subscribe does
-    // NOT re-present the original snapshot offset and replay the whole backlog
-    // through onState (the stale-state flashes), and it cannot age out of the
-    // retained window (StaleCursor) while envelopes keep applying.
-    expect(req.from).toBe(2);
+    // Resume from the LAST-APPLIED position, as the SERVER stated it: the second envelope
+    // was folded through offset 5, so that is the `from`. Counting applied envelopes would
+    // have said 2 — three offsets short — and the server would have replayed 3, 4 and 5,
+    // pushing an older fold through onState before climbing back (#422). The re-subscribe
+    // also cannot age out of the retained window (StaleCursor) while envelopes keep applying.
+    expect(req.from).toBe(5);
     expect(client.getState().status).toBe('live');
 
     // The resumed subscription restarts the sequence; its first envelope converges.
     sockets[1].emit(change(1, 'Running'));
     expect(phaseOf(client.getState().body)).toBe('Running');
+
+    client.close();
+  });
+
+  it('#422: the resume cursor is the offset the server echoed, never a count of applied envelopes', async () => {
+    // The bug, at its source. The wire echoed no offset, so this client advanced `cursor`
+    // by one per APPLIED envelope and documented it as "conservative (at-or-behind the true
+    // offset)". Every log append that moved no projection — a SignalHistory chunk, a
+    // CompetitorSeen, a marshaling no-op — emitted nothing, so it was never counted, and the
+    // gap between the cursor and the true tail grew without bound. A reconnect then resumed
+    // from `tail - drift`, which is INSIDE the server's retained window, so the stream
+    // replayed instead of asking for a re-snapshot: `body` was overwritten with an older
+    // fold (fewer laps) and climbed back through every intermediate one. On the Race
+    // Director's board a pilot lost laps and regained them, mid-race, with no operator
+    // action — indistinguishable from a marshal voiding a pass.
+    const { fetch } = mockFetch([{ cursor: 40, body: liveState('Scheduled') }]);
+    const { factory, sockets } = mockWsFactory();
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
+    await flush();
+    sockets[0].open();
+
+    // Three envelopes across a log that advanced by 30 offsets: the ones in between moved
+    // no projection. A +1 tracker would say 43; the truth is 70.
+    sockets[0].emit(change(1, 'Staged', 47));
+    expect(client.getState().cursor).toBe(47);
+    sockets[0].emit(change(2, 'Armed', 61));
+    sockets[0].emit(change(3, 'Running', 70));
+
+    expect(client.getState().cursor).toBe(70);
+    expect(client.getState().cursor).not.toBe(43); // what counting envelopes would have said
+
+    // A duplicate redelivery must not move the cursor at all — it is not applied.
+    sockets[0].emit(change(2, 'Scheduled', 61));
+    expect(client.getState().cursor).toBe(70);
+    expect(phaseOf(client.getState().body)).toBe('Running');
+
+    client.close();
+  });
+
+  it('#422: falls back to the old lower-bound advance against a server that echoes no offset', async () => {
+    // A Director too old to carry `ChangeEnvelope.cursor` still has to resume somewhere.
+    // Losing the resume position outright would re-present the original snapshot offset on
+    // every blip (or age out of the retained window); the pre-#422 `+1` advance is the
+    // graceful degradation. Its stream still replays on reconnect — that is the bug this
+    // field fixes — but nothing here may re-derive an offset the server did not state.
+    const { fetch } = mockFetch([{ cursor: 10, body: liveState('Scheduled') }]);
+    const { factory, sockets } = mockWsFactory();
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
+    await flush();
+    sockets[0].open();
+
+    const legacy = (sequence: number, phase: HeatPhase) => ({
+      Change: { sequence, projection: 'LiveRaceState', change: { FreshValue: liveState(phase) } }
+    });
+    sockets[0].emit(legacy(1, 'Staged'));
+    sockets[0].emit(legacy(2, 'Armed'));
+
+    expect(phaseOf(client.getState().body)).toBe('Armed');
+    expect(client.getState().cursor).toBe(12); // 10 + the two applied envelopes
 
     client.close();
   });
@@ -421,8 +514,8 @@ describe('ProtocolClient', () => {
     await flush();
     sockets[0].open();
 
-    sockets[0].emit(change(1, 'Staged'));
-    sockets[0].emit(change(2, 'Armed'));
+    sockets[0].emit(change(1, 'Staged', 1));
+    sockets[0].emit(change(2, 'Armed', 2));
     // At-least-once redelivery of an already-applied sequence as a Delta: it is deduped
     // by sequence BEFORE the unsupported-delta check, so no re-snapshot fires.
     sockets[0].emit(deltaChange(2));
@@ -431,7 +524,7 @@ describe('ProtocolClient', () => {
     expect(calls).toHaveLength(1); // no extra snapshot fetch
     expect(sockets).toHaveLength(1); // the socket stayed up
     expect(phaseOf(client.getState().body)).toBe('Armed');
-    expect(client.getState().cursor).toBe(2); // 0 + the two applied envelopes
+    expect(client.getState().cursor).toBe(2); // the last APPLIED envelope's own offset
 
     client.close();
   });

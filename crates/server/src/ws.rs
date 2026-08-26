@@ -36,11 +36,16 @@
 //!
 //! The mapping between them: as the engine folds the log forward it tracks the log offset
 //! it has consumed up to; whenever the scoped projection's value *changes* it emits one
-//! envelope, assigns it the next per-stream sequence (1, 2, 3, …), and remembers the offset
-//! at which it emitted. A client persists *both* — it renders by sequence order and resumes
-//! by the offset cursor. (The two coincide numerically only by accident; the protocol keeps
-//! them separate so the log offset can stay a private detail while the sequence is the
-//! public contract.)
+//! envelope, assigns it the next per-stream sequence (1, 2, 3, …), and **echoes the offset
+//! it folded through** as [`ChangeEnvelope::cursor`] (#422). A client persists *both* — it
+//! renders by sequence order and resumes by the offset cursor. (The two coincide numerically
+//! only by accident; the protocol keeps them separate because they answer different
+//! questions: "in what order?" and "from where do I resume?".)
+//!
+//! Echoing the offset is what makes the resume **exact**. Before #422 the wire carried only
+//! the sequence, so a client inferred its resume position by advancing `+1` per applied
+//! envelope — an at-or-behind lower bound that drifted further every time an append moved no
+//! projection. See [`ChangeEnvelope::cursor`] for what that drift did to live lap counts.
 //!
 //! # The bounded retained window + re-snapshot (protocol.html §3, §9.3)
 //!
@@ -52,6 +57,12 @@
 //! the fresh cursor (§3 "re-snapshot is always correct because projections are
 //! recomputable"). A `from` of `0` (or `None`, a fresh subscribe) is *never* stale: replay
 //! from the start of the log is always in-window by definition.
+//!
+//! An in-window `from` **behind** the tail is not replayed offset by offset: the catch-up
+//! span is folded once at its end and delivered as a single settled envelope (#422). See
+//! [`Engine::advance`]. That is the guard's complement, not a weakening of it — the guard
+//! still decides *whether* a cursor can resume at all; the collapse only decides what a
+//! resumable one is shown.
 //!
 //! # Guarantees (protocol.html §3)
 //!
@@ -379,7 +390,15 @@ async fn run_stream(mut socket: WebSocket, state: AppState, floors: RoundFloors)
     // 3. Replay-then-tail. `Engine` folds the log forward from offset `from`, emitting a
     // fresh-value envelope each time the scoped projection changes, advancing the per-stream
     // sequence. `applied_offset` is how far into the log it has folded.
-    let mut engine = Engine::new(request.scope, projection, from, floors);
+    //
+    // `tail` — the same value the stale-cursor guard just judged `from` against — bounds the
+    // **replay span** `from..tail` (#422): that span is history, already settled, and is
+    // collapsed to one settled fold. Everything at or beyond `tail` arrived after this
+    // subscription opened and is the live tail, streamed one envelope per changed offset
+    // exactly as before. Passing the tail explicitly (rather than letting the engine infer
+    // "whatever was on the log at my first fold") is what keeps that boundary deterministic:
+    // an append racing the first fold is live, not replay.
+    let mut engine = Engine::new(request.scope, projection, from, tail, floors);
     let appended = state.appended();
 
     loop {
@@ -438,13 +457,28 @@ struct Engine {
     applied_offset: u64,
     /// The last projection body emitted, to suppress re-emitting an unchanged fold.
     last_emitted: Option<ProjectionBody>,
+    /// The end of the **replay span**: the log tail as it stood when this subscription opened
+    /// (#422). Offsets in `from..replay_until` are settled history and collapse to one envelope;
+    /// offsets at or beyond it are the live tail and stream one envelope per change.
+    replay_until: u64,
+    /// Whether the replay span has been dealt with (#422).
+    ///
+    /// `false` until the first [`advance`](Engine::advance) runs. Only that first call can face
+    /// the span, and it collapses it; every later call sees only the live tail.
+    caught_up: bool,
     /// Where the D26 min-lap floor comes from (#409) — re-read on every [`advance`], never
     /// captured as a resolved floor.
     floors: RoundFloors,
 }
 
 impl Engine {
-    fn new(scope: Scope, projection: ScopeProjection, from: u64, floors: RoundFloors) -> Self {
+    fn new(
+        scope: Scope,
+        projection: ScopeProjection,
+        from: u64,
+        replay_until: u64,
+        floors: RoundFloors,
+    ) -> Self {
         Self {
             scope,
             projection,
@@ -453,6 +487,8 @@ impl Engine {
             // Seed with the projection *at* the resume point so the first envelope reflects
             // a change *after* `from`, not a re-send of what the snapshot already carried.
             last_emitted: None,
+            replay_until,
+            caught_up: false,
             floors,
         }
     }
@@ -497,6 +533,50 @@ impl Engine {
     /// now give. What it cannot do is emit on its own — a meta edit appends nothing, so the new
     /// floor reaches subscribers on the next logged event (D26 freezes the floor once the round
     /// has raced, so an edit lands before the passes it would have re-judged).
+    ///
+    /// # The replay span is COLLAPSED, never replayed offset by offset (#422)
+    ///
+    /// The offset-by-offset walk above describes the **live tail** — the wake-driven case, where a
+    /// call sees the one or two offsets appended since the last one. The *first* call is different:
+    /// it faces `from..replay_until`, a span of history that had already settled before this
+    /// subscription opened, and walking it emitted one fresh value per changed offset — a staircase
+    /// of stale bodies ending at the current one.
+    ///
+    /// The span is bounded by the tail read at subscribe, **not** by "whatever is on the log when
+    /// the first fold happens". Those differ: an append can land between the subscribe frame and
+    /// the first fold, and it belongs to the live tail — a client that subscribed at the tail must
+    /// see each subsequent change as its own envelope whether or not it won that race. Without the
+    /// bound the number of envelopes such a client receives would depend on scheduling.
+    ///
+    /// That staircase is what made live lap counts step **backwards** after a reconnect. The client's
+    /// resume cursor used to be a lower bound (see [`ChangeEnvelope::cursor`]), so a blip resubscribed
+    /// from `tail - d` for some drift `d`; `d < RETAINED_WINDOW` is in-window, so this engine replayed
+    /// rather than the guard rejecting, and every console's `LiveRaceState` was overwritten with an
+    /// **older fold** — fewer laps — before climbing back through each intermediate one. To a Race
+    /// Director watching the board a pilot lost laps and regained them, which is exactly what a
+    /// marshal voiding a pass looks like.
+    ///
+    /// So the span is folded **once, at its end**, and emitted as a single settled envelope. This is
+    /// sound precisely because every envelope is a [`Change::FreshValue`]: only the last body of a
+    /// replayed span carries information, the earlier ones are pure waste. It also drops the walk's
+    /// quadratic re-fold of the whole prefix per offset.
+    ///
+    /// What the collapse deliberately preserves:
+    ///
+    /// - **A real correction still shows.** A marshal's void is a logged append like any other; it
+    ///   reaches a *connected* console as its own tail envelope, and it is folded into the settled
+    ///   body of any span that contains it. Only the spurious staircase goes — a count that drops
+    ///   because a pass was voided still drops.
+    /// - **The stale-cursor guard is untouched.** A cursor below `tail - RETAINED_WINDOW` is still
+    ///   answered with [`StreamMessage::ReSnapshotRequired`] before this engine is ever built.
+    /// - **A schedule still wakes the stream.** If any offset in the span is an
+    ///   [`Event::HeatScheduled`], the one collapsed envelope is emitted even when the settled body
+    ///   equals what the client already had (the fill-no-steal case above).
+    /// - **The crossing feed's contract.** [`LiveCrossing`](crate::live_state::LiveCrossing) entries
+    ///   are identified by `pass_ref` and the feed is bounded to the most recent
+    ///   [`MAX_LIVE_CROSSINGS`](crate::live_state::MAX_LIVE_CROSSINGS), oldest-dropped — so a
+    ///   consumer holding a high-water mark reads the collapsed body exactly as it reads any
+    ///   re-snapshot, and can only ever *miss* crossings the bound would already have trimmed.
     fn advance(&mut self, events: &[StoredEvent]) -> Vec<StreamMessage> {
         let mut out = Vec::new();
         let len = events.len() as u64;
@@ -512,6 +592,32 @@ impl Engine {
         if self.last_emitted.is_none() && self.applied_offset > 0 {
             let prefix = &events[..(self.applied_offset as usize).min(events.len())];
             self.last_emitted = ScopeProjection::fold(&self.scope, prefix, &rounds);
+        }
+
+        // The replay span (see the doc comment): fold it once at its end rather than walking it.
+        // It ends at the tail as it stood when the subscription opened — anything appended since
+        // is the live tail and falls through to the offset-by-offset walk below.
+        if !self.caught_up {
+            self.caught_up = true;
+            let span_end = self.replay_until.min(len);
+            if self.applied_offset < span_end {
+                let span = &events[self.applied_offset as usize..span_end as usize];
+                // A schedule anywhere in the span must still wake the heats lists, even if the
+                // settled body is byte-identical to what the client already holds.
+                let scheduled_heat = live_state_scope
+                    && span
+                        .iter()
+                        .any(|s| matches!(s.event, Event::HeatScheduled { .. }));
+                self.applied_offset = span_end;
+                let body =
+                    ScopeProjection::fold(&self.scope, &events[..span_end as usize], &rounds);
+                if let Some(body) = body
+                    && (scheduled_heat || self.last_emitted.as_ref() != Some(&body))
+                {
+                    out.push(StreamMessage::Change(Box::new(self.envelope(body.clone()))));
+                    self.last_emitted = Some(body);
+                }
+            }
         }
 
         while self.applied_offset < len {
@@ -542,9 +648,15 @@ impl Engine {
     /// recorded for #59 (see the module docs) but does not yet change the wire shape. The
     /// `kind` is taken from the body so a delta envelope (#59) and a fresh value name the
     /// same projection.
+    ///
+    /// The envelope's `cursor` is `applied_offset` — the log offset this body was folded
+    /// **through**, and so the exact `from` a reconnect should present (#422). It is read here
+    /// rather than passed in because `advance` has already moved `applied_offset` to the end of
+    /// whatever it folded, collapsed span or single offset alike.
     fn envelope(&mut self, body: ProjectionBody) -> ChangeEnvelope {
         let sequence = Cursor::new(self.next_seq);
         self.next_seq += 1;
+        let cursor = Cursor::new(self.applied_offset);
         let _ = self.projection.encoding; // wired for #59; fresh-value for now
         let projection = body.kind();
         debug_assert_eq!(
@@ -553,6 +665,7 @@ impl Engine {
         );
         ChangeEnvelope {
             sequence,
+            cursor,
             projection,
             change: Change::FreshValue(body),
         }
@@ -650,7 +763,15 @@ mod tests {
         }
     }
 
+    /// An event-scope engine on an empty log: `from` and the replay span are both 0, so every
+    /// offset these fixtures append afterwards is live tail, walked one at a time.
     fn event_engine() -> Engine {
+        event_engine_from(0, 0)
+    }
+
+    /// An event-scope engine resuming from log offset `from` with the tail at `replay_until` —
+    /// the shape a reconnect builds, where `from..replay_until` is the settled span to replay.
+    fn event_engine_from(from: u64, replay_until: u64) -> Engine {
         // A registry holding one freshly-created, round-less event ⇒ no D26 floor, which is what
         // these fixtures always meant. The floor's own conformance proof lives in
         // `tests/min_lap_floor_conformance.rs`.
@@ -663,7 +784,13 @@ mod tests {
             event: event.clone(),
         };
         let floors = RoundFloors { registry, event };
-        Engine::new(scope.clone(), ScopeProjection::of(&scope), 0, floors)
+        Engine::new(
+            scope.clone(),
+            ScopeProjection::of(&scope),
+            from,
+            replay_until,
+            floors,
+        )
     }
 
     /// How many `Change` envelopes a batch of stream messages carries.
@@ -671,6 +798,146 @@ mod tests {
         msgs.iter()
             .filter(|m| matches!(m, StreamMessage::Change(_)))
             .count()
+    }
+
+    /// The `LiveRaceState` of the nth `Change` in a batch.
+    fn live_at(msgs: &[StreamMessage], n: usize) -> &crate::snapshot::LiveRaceState {
+        match &msgs[n] {
+            StreamMessage::Change(env) => match &env.change {
+                Change::FreshValue(ProjectionBody::LiveRaceState(live)) => live,
+                other => panic!("expected a LiveRaceState fresh value, got {other:?}"),
+            },
+            other => panic!("expected a Change envelope, got {other:?}"),
+        }
+    }
+
+    /// The envelope's echoed resume cursor (the log offset the body was folded through).
+    fn env_cursor(msgs: &[StreamMessage], n: usize) -> u64 {
+        match &msgs[n] {
+            StreamMessage::Change(env) => env.cursor.seq,
+            other => panic!("expected a Change envelope, got {other:?}"),
+        }
+    }
+
+    /// **#422 — the catch-up span is one settled envelope, not a staircase of stale folds.**
+    ///
+    /// A resume at offset 1 over a five-offset log used to walk offsets 1..5 and emit a fresh
+    /// value per changed offset: Staged, Armed, Running — the client rendering each in turn. When
+    /// the client was already *past* those (its cursor being a lower bound, not its true
+    /// position), that staircase started BELOW where it stood, which is how a live lap count came
+    /// to step backwards on a reconnect. Now the span folds once at its end.
+    #[test]
+    fn the_catch_up_span_collapses_to_one_settled_envelope() {
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(changed("q-1", HeatTransition::Armed)),
+            stored(changed("q-1", HeatTransition::Running)),
+        ];
+
+        let mut engine = event_engine_from(1, log.len() as u64);
+        let out = engine.advance(&log);
+
+        assert_eq!(
+            change_count(&out),
+            1,
+            "the whole replayed span is one envelope, not one per changed offset"
+        );
+        // The one body is the SETTLED state at the tail — no intermediate phase is ever sent.
+        assert_eq!(live_at(&out, 0).phase, crate::snapshot::HeatPhase::Running);
+        // And it names the offset it was folded through, so the client's next `from` is exact.
+        assert_eq!(env_cursor(&out, 0), log.len() as u64);
+
+        // The live tail is unaffected: a later append still emits its own envelope.
+        let mut later = log.clone();
+        later.push(stored(changed("q-1", HeatTransition::Finished)));
+        let tail = engine.advance(&later);
+        assert_eq!(change_count(&tail), 1);
+        assert_eq!(env_cursor(&tail, 0), later.len() as u64);
+    }
+
+    /// A `HeatScheduled` **inside** a collapsed span must still wake the heats lists (#422 must not
+    /// swallow the fill-no-steal wake the plain change-suppression already needed an exception for).
+    ///
+    /// q-1 is staged and q-2 on deck at the resume point; the span then schedules q-3, which moves
+    /// neither `current_heat` nor `on_deck`, so the settled body is byte-identical to what the
+    /// client already holds. One envelope must still come out.
+    #[test]
+    fn a_schedule_inside_the_collapsed_span_still_wakes_the_stream() {
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(scheduled("q-2")),
+            stored(scheduled("q-3")),
+        ];
+        // Resume at offset 3: the span is the bare q-3 schedule alone.
+        let mut engine = event_engine_from(3, log.len() as u64);
+        let out = engine.advance(&log);
+
+        assert_eq!(
+            change_count(&out),
+            1,
+            "a schedule in the span wakes the stream even though the body did not move"
+        );
+        let live = live_at(&out, 0);
+        assert_eq!(live.current_heat, Some(HeatId("q-1".into())));
+        assert_eq!(live.on_deck, Some(HeatId("q-2".into())));
+    }
+
+    /// An append that **races the first fold** is live tail, not replay (#422).
+    ///
+    /// The subscribe frame arrives, the tail is read — and then two changes land before the engine
+    /// gets to fold at all. Those are not history: a client subscribed at the tail must see each of
+    /// them as its own envelope, exactly as it would have had it won the race. Bounding the span by
+    /// the tail read at subscribe (rather than by the log length at the first fold) is what makes
+    /// that independent of scheduling.
+    #[test]
+    fn appends_that_race_the_first_fold_are_live_tail_not_replay() {
+        // Subscribed at the tail of a two-offset log…
+        let mut engine = event_engine_from(2, 2);
+        // …but by the time the first fold runs, two more offsets have landed.
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(changed("q-1", HeatTransition::Armed)),
+            stored(changed("q-1", HeatTransition::Running)),
+        ];
+        let out = engine.advance(&log);
+
+        assert_eq!(
+            change_count(&out),
+            2,
+            "post-subscribe appends stream one envelope per change, collapse or no collapse"
+        );
+        assert_eq!(live_at(&out, 0).phase, crate::snapshot::HeatPhase::Armed);
+        assert_eq!(live_at(&out, 1).phase, crate::snapshot::HeatPhase::Running);
+        assert_eq!(env_cursor(&out, 0), 3);
+        assert_eq!(env_cursor(&out, 1), 4);
+    }
+
+    /// A resume from the **exact** offset an envelope echoed has nothing to replay (#422).
+    ///
+    /// This is the whole point of echoing the offset: a reconnecting client presents the cursor it
+    /// really stands at, the engine seeds `last_emitted` with the identical fold, and the stream is
+    /// silent until something genuinely new lands.
+    #[test]
+    fn a_resume_from_the_echoed_offset_emits_nothing() {
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(changed("q-1", HeatTransition::Running)),
+        ];
+        let mut first = event_engine();
+        let seen = first.advance(&log);
+        let resume = env_cursor(&seen, change_count(&seen) - 1);
+        assert_eq!(resume, log.len() as u64);
+
+        let mut resumed = event_engine_from(resume, log.len() as u64);
+        assert_eq!(
+            change_count(&resumed.advance(&log)),
+            0,
+            "an exact resume cursor leaves nothing to replay"
+        );
     }
 
     #[test]

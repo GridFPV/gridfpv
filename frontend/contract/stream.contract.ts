@@ -14,6 +14,8 @@
  *    must converge.
  *  - seam 7 → version negotiation: a subscribe carrying an unsupported `contract_version` is
  *    answered with a `VersionMismatch` error frame + close; an absent version streams normally.
+ *  - seam 8 (#422) → resume: an envelope states the log offset it was folded through, and a
+ *    resume — from that offset or from a stale one — never hands the client an older fold.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -165,6 +167,110 @@ describe('seam 7: contract-version negotiation', () => {
     );
     expect((frames[0] as { code?: string }).code).not.toBe('VersionMismatch');
     ws.close();
+  });
+});
+
+describe('seam 8 (#422): the resume cursor is stated by the server, and a resume never goes backwards', () => {
+  const RESUME_HEAT = 'q-422';
+
+  /** Every `Change` envelope a raw frame array has collected. */
+  const envelopesOf = (frames: unknown[]): Array<{ sequence: number; cursor: number }> =>
+    frames
+      .map((f) => (f as { Change?: { sequence: number; cursor: number } }).Change)
+      .filter((e): e is { sequence: number; cursor: number } => e !== undefined);
+
+  /** The heat phase a `Change` envelope's fresh-value body reports. */
+  const phaseOfEnvelope = (frame: unknown): string | undefined =>
+    (
+      frame as {
+        Change?: { change?: { FreshValue?: { LiveRaceState?: { phase: string } } } };
+      }
+    ).Change?.change?.FreshValue?.LiveRaceState?.phase;
+
+  /**
+   * Wait until `frames` stops growing for `quietMs` — the log is quiescent and the stream has
+   * delivered everything it is going to. The Director's simulator keeps appending passes while a
+   * heat runs, so "the tail" is only a fixed number once the run has settled.
+   */
+  const settle = async (frames: unknown[], quietMs = 400): Promise<void> => {
+    let seen = -1;
+    while (seen !== frames.length) {
+      seen = frames.length;
+      await new Promise((r) => setTimeout(r, quietMs));
+    }
+  };
+
+  it('an envelope states the log offset it was folded through — not the sequence, not a +1 count', async () => {
+    const ack = await rdControl(director, TOKEN, {
+      ScheduleHeat: { heat: RESUME_HEAT, lineup: ['R', 'S'] }
+    });
+    expect(ack.ok).toBe(true);
+    const base = await snapshotCursor(`/snapshot/heat/${RESUME_HEAT}`);
+
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
+    ws.send(JSON.stringify({ scope: { Heat: { heat: RESUME_HEAT } }, from: base }));
+
+    // Appends that move NO projection for this scope — the drift-wideners. They emit nothing,
+    // so a client counting applied envelopes can never see them.
+    for (let i = 0; i < 5; i++) {
+      await rdControl(director, TOKEN, {
+        Register: { adapter: 'sim', competitor: `r${i}`, pilot: `rp${i}` }
+      });
+    }
+    // …then one that does.
+    await rdControl(director, TOKEN, { Stage: { heat: RESUME_HEAT } });
+    await waitForFrame(frames, (f) => f.some((x) => phaseOfEnvelope(x) === 'Staged'));
+    ws.close();
+
+    const seen = envelopesOf(frames);
+    expect(seen[0].sequence).toBe(1); // the ordering axis restarts, as ever
+    const last = seen.at(-1)!;
+    // The drift, stated on the wire: the log advanced by MORE offsets than this stream emitted
+    // envelopes, because the appends in between moved no projection. `cursor - base` is the true
+    // advance; `seen.length` is everything a +1-per-applied-envelope tracker could ever count.
+    expect(last.cursor - base).toBeGreaterThan(seen.length);
+    expect(last.cursor).not.toBe(last.sequence);
+  });
+
+  it('a resume from the stated cursor replays nothing; a resume from a stale one gets ONE settled fold', async () => {
+    const stale = await snapshotCursor(`/snapshot/heat/${RESUME_HEAT}`);
+
+    // Run the heat from a live subscription, let the simulator's passes land, and keep the cursor
+    // the last envelope states — this client's exact position.
+    const live = await openSocket(`${wsBase(director.eventRoot)}/stream`);
+    live.ws.send(JSON.stringify({ scope: { Heat: { heat: RESUME_HEAT } }, from: stale }));
+    await rdControl(director, TOKEN, { Start: { heat: RESUME_HEAT } });
+    await rdControl(director, TOKEN, { SkipCountdown: { heat: RESUME_HEAT } });
+    await waitForFrame(live.frames, (f) => f.some((x) => phaseOfEnvelope(x) === 'Running'));
+    await settle(live.frames);
+    const stated = envelopesOf(live.frames).at(-1)!.cursor;
+    live.ws.close();
+
+    // 1. Resuming from the STATED cursor: the client is exactly where the server left it, so the
+    //    server has nothing to replay. The next real change is the first thing it sends.
+    const exact = await openSocket(`${wsBase(director.eventRoot)}/stream`);
+    exact.ws.send(JSON.stringify({ scope: { Heat: { heat: RESUME_HEAT } }, from: stated }));
+    await new Promise((r) => setTimeout(r, 400));
+    expect(envelopesOf(exact.frames)).toHaveLength(0);
+    await rdControl(director, TOKEN, { ForceEnd: { heat: RESUME_HEAT } });
+    await waitForFrame(exact.frames, (f) => envelopesOf(f).length > 0);
+    expect(phaseOfEnvelope(exact.frames[0])).toBe('Unofficial');
+    await settle(exact.frames);
+    exact.ws.close();
+
+    // 2. Resuming from the STALE cursor — the drifted position the old client would have
+    //    presented. It is in-window, so the server replays rather than refusing; that replay must
+    //    be ONE settled fold at the tail, not an envelope per offset ending there. The staircase
+    //    is what made a live lap count step backwards on screen after a socket blip.
+    const drifted = await openSocket(`${wsBase(director.eventRoot)}/stream`);
+    drifted.ws.send(JSON.stringify({ scope: { Heat: { heat: RESUME_HEAT } }, from: stale }));
+    await waitForFrame(drifted.frames, (f) => envelopesOf(f).length > 0);
+    await settle(drifted.frames);
+    const replayed = envelopesOf(drifted.frames);
+    expect(replayed).toHaveLength(1);
+    // …and that one fold is the CURRENT state, never an intermediate phase the heat has left.
+    expect(phaseOfEnvelope(drifted.frames[0])).toBe('Unofficial');
+    drifted.ws.close();
   });
 });
 

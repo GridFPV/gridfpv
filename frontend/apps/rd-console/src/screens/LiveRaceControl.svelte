@@ -386,6 +386,14 @@
   // tracks it client-side: the min `last_lap_micros` observed per channel over the run. It resets
   // whenever the heat changes, and a "Run again" (Restart) re-windows the heat's laps to the new
   // run — see the reset below, which mirrors that so the board's best lap is this run's best lap.
+  //
+  // Known gap: this is a fold over the FRAMES, not over the latest state, so a lap whose frame the
+  // console never saw cannot enter it. A re-snapshot has always skipped laps this way, and since
+  // #422 a reconnect that genuinely missed envelopes is delivered as one settled catch-up fold
+  // rather than a per-offset replay, so those laps' times are not re-walked either. The count and
+  // last lap stay correct; only the *best* can read slower than the run's true best. The real fix
+  // is the server carrying best-lap in `PilotProgress` — until then, don't paper over it here by
+  // re-deriving laps client-side.
   let bestByRef = $state<Map<CompetitorRef, number>>(new Map());
   let bestForHeat = $state<HeatId | undefined>(undefined);
   $effect(() => {
