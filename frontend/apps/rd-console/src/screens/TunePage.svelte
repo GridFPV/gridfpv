@@ -982,21 +982,25 @@
     font-size: var(--gf-font-size-sm);
   }
 
-  /* Columns: one node per column, side by side, each wide enough to read a plot in. Overflowing
-     horizontally is correct for eight nodes on a laptop — the alternative is eight plots too
-     narrow to see a crossing in. Stacked is the same markup with the grid turned on its side. */
+  /* **Never wider than four.** Past four nodes the grid wraps to a new row rather than growing
+     sideways: an eight-node timer scrolls VERTICALLY, which is the natural direction, instead of
+     hiding half its nodes off the right edge. Each cell keeps a 20rem floor so a plot stays wide
+     enough to read a crossing in; `auto-fit` collapses the count on narrow viewports, so a small
+     laptop lands on two or three rather than four cramped ones. Horizontal overflow is not a
+     fallback here — it is the thing being removed. */
   .nodes {
     display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(20rem, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
     gap: var(--gf-space-4);
-    overflow-x: auto;
     padding-bottom: var(--gf-space-2);
+    /* The hard four-wide cap. `auto-fit` alone would keep adding columns on a wide monitor, so the
+       track width is bounded to exactly four minimum cells plus their three gaps; beyond that the
+       grid wraps downward instead of outward. Narrower viewports simply fit fewer. */
+    max-width: calc(4 * 20rem + 3 * var(--gf-space-4));
   }
+  /* Stacked is the same markup pinned to a single column — one node per row, full width. */
   .nodes.stacked {
-    grid-auto-flow: row;
-    grid-auto-columns: auto;
-    overflow-x: visible;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .node {
