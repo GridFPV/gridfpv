@@ -1034,10 +1034,13 @@ pub struct HeatSummary {
     /// source a seat resolves through — the value that replaces `available_channels[node]`, which
     /// an allowed set never had any business answering.
     ///
-    /// `None` when the heat flies no layout (its round names none, or the RD cleared the bind), in
-    /// which case its channels came from the auto-pick and live on
-    /// [`frequencies`](Self::frequencies) alone. Additive — defaults absent so older logs
-    /// round-trip.
+    /// This is the **RD's own bind**, not the layout the heat resolves to: `None` whenever no
+    /// `HeatLayoutSet` names one — the RD never picked for this heat (#441: the fill records no
+    /// bind, so this is the common case for a generated heat, which follows its round's default),
+    /// they cleared their pick, or the round names no layouts at all. The heat's actual per-seat
+    /// channels are always on [`frequencies`](Self::frequencies), which is the first source a
+    /// console seat resolves through; this only backfills a seat that has none. Additive —
+    /// defaults absent so older logs round-trip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub layout: Option<LayoutId>,

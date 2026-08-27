@@ -677,7 +677,9 @@ fn fill_round_once(
             heat,
             lineup,
             frequencies: static_freqs,
-            layout,
+            // The layout the plan's channels were assigned from — reported, never recorded as a
+            // bind (#441; see the append below).
+            layout: _,
             field_draw,
         }) => {
             let class = round_engine::round_class(meta, round);
@@ -748,22 +750,17 @@ fn fill_round_once(
                 lineup: lineup.clone(),
                 frequencies: frequencies.clone(),
             };
-            // #117 S3: record WHICH LAYOUT this heat flies, before the schedule that carries the
-            // channels it produced. Appending it makes the answer a fact about the heat rather than
-            // something re-derived later from a round whose default may since have changed — so a
-            // heat that has raced keeps not just its channels but the name of the tuning it raced
-            // on. Only when there is one: a round naming no layouts logs nothing new.
-            if layout.is_some() {
-                if let Err(err) = state.append(
-                    Event::HeatLayoutSet {
-                        heat: heat.clone(),
-                        layout,
-                    },
-                    None,
-                ) {
-                    return FillStep::Failed(CommandAck::failed(err));
-                }
-            }
+            // #441: the fill records NO `HeatLayoutSet`. It used to append one for every heat it
+            // drew, naming the layout the round's default had just resolved to — an *explicit*
+            // bind for a decision the RD never made about this heat. An explicit bind wins in
+            // `layout_for_heat`, so swapping the round from Bracket A to Bracket B re-materialized
+            // every heat straight back onto A and `round_issues` flagged each one as bound to a
+            // layout its round no longer names: a whole round's worth of manual repair for a
+            // decision the RD made once, at the round. A generated heat follows its round's
+            // default, and a bind is what the RD's own `SetHeatLayout` writes.
+            //
+            // The channels the layout produced are still baked into the `HeatScheduled` below, so
+            // a heat that has raced keeps what it flew regardless of any later round edit.
             let event = Event::HeatScheduled {
                 heat,
                 lineup,
@@ -1230,6 +1227,19 @@ fn require_retunable(
 /// The lineup, class, round tag and RD-typed label are carried through unchanged: this re-tunes the
 /// heat, it does not re-draw it.
 ///
+/// # `layout: None` records the CLEARED bind, not the default it resolves to (#441)
+///
+/// [`heat_layout_bind`](crate::round_engine::heat_layout_bind) is three-valued on purpose:
+/// `Some(Some(l))` is *"the RD bound this heat"*, `Some(None)` is *"the RD cleared it"*, `None` is
+/// *"never touched"*. The clear used to write `Some(Some(current_default))`, which made the middle
+/// state unreachable — a cleared heat became indistinguishable from one deliberately pinned to
+/// that layout, froze against the round's next layout edit, and could not be undone by clearing
+/// again. What the heat *flies* is unchanged either way: a cleared bind resolves to the round's
+/// default, which is what the re-tune below assigns from.
+///
+/// A round that names **no** layouts and races `Static` channels is left alone entirely: its
+/// channels are its members' own, and there is no layout here to clear.
+///
 /// Refusals, all typed `400`s naming the heat, the layout and the timer by their friendly names:
 /// a heat past `Scheduled`; a layout the event does not have; a layout the heat's **round** does not
 /// name; and any [`AssignError`](crate::round_engine::AssignError) the layout produces (a node it
@@ -1295,28 +1305,46 @@ fn apply_set_heat_layout(
     // Re-tune. With the bind cleared, the heat falls back to the round's default layout for *its
     // position* — the alternating default (#117 S3), resolved through exactly the same helper the
     // fill uses, so clearing a bind restores what the round would have given this heat anyway
-    // rather than dropping it onto the first layout. With no layouts named, the auto-pick.
-    let (lineup, class, round_tag, _freqs, label) = logged_schedule_full(&events, &heat);
+    // rather than dropping it onto the first layout. With no layouts named, the auto-pick — unless
+    // the round races Static channels, which are nobody's to re-pick (see below).
+    let (lineup, class, round_tag, logged_freqs, label) = logged_schedule_full(&events, &heat);
     let effective = match &resolved {
         Some(found) => Some(found.clone()),
         None => round_engine::default_layout_for_heat(&meta, Some(round), &events, &heat).cloned(),
     };
-    let frequencies = match round_engine::assign_for_event(
-        &meta,
-        &registry.timers(),
-        effective.as_ref(),
-        &lineup,
-    ) {
-        Ok(freqs) => freqs,
-        Err(err) => {
-            return CommandAck::failed(ProtocolError::new(ErrorCode::BadRequest, err.to_string()));
-        }
+    let frequencies = match (&effective, round.channel_mode) {
+        // #441: a `Static` round's channels come from **membership** — each pilot's own assigned
+        // frequency — not from a layout. With no layout to tune to, there is nothing here to
+        // re-tune, and auto-picking would silently move every pilot in the heat off the channel
+        // their VTX is actually on. Keep what the heat has.
+        (None, crate::events::ChannelMode::Static) => logged_freqs,
+        _ => match round_engine::assign_for_event(
+            &meta,
+            &registry.timers(),
+            effective.as_ref(),
+            &lineup,
+        ) {
+            Ok(freqs) => freqs,
+            Err(err) => {
+                return CommandAck::failed(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    err.to_string(),
+                ));
+            }
+        },
     };
 
+    // Record the RD's own answer, not the layout it happened to resolve to (#441). The bind is
+    // three-valued on purpose — `Some(id)` is "the RD bound this heat", `None` is "the RD cleared
+    // it, so follow the round" — and writing the resolved default for a clear made the cleared
+    // state unreachable: the heat came out pinned to whatever the round's default was at that
+    // moment, indistinguishable from a deliberate pick, and frozen against the round's next
+    // layout edit. `layout_for_heat` resolves a cleared bind to the round's default, which is what
+    // the channels above were assigned from, so the heat does not move.
     if let Err(err) = state.append(
         Event::HeatLayoutSet {
             heat: heat.clone(),
-            layout: effective.as_ref().map(|l| l.id.clone()),
+            layout,
         },
         None,
     ) {
@@ -4751,7 +4779,6 @@ mod tests {
     /// *means*, and both halves are asserted here so a fix cannot satisfy one by breaking the
     /// other.
     #[test]
-    #[ignore = "known bug #441: SetHeatLayout{layout:None} writes an explicit bind to the current default — un-ignore with the fix"]
     fn clearing_a_heats_layout_bind_records_the_cleared_state() {
         use crate::events::{ChannelMode, NewChannelLayoutRequest, NewRoundReq, SeedingRule};
         use gridfpv_engine::scoring::WinCondition;
@@ -4849,7 +4876,6 @@ mod tests {
     /// it hands the heat a fresh IMD auto-pick from the timer's pool and every pilot in it is
     /// silently moved off the channel their VTX is actually on.
     #[test]
-    #[ignore = "known bug #441: the layout-less clear auto-picks over a Static heat's membership channels — un-ignore with the fix"]
     fn clearing_a_bind_on_a_layout_less_round_keeps_a_static_heats_fixed_channels() {
         // Two adjacent Raceband channels — a pair the IMD auto-pick would never choose, so a
         // clobber is unmistakable.

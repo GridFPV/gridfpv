@@ -90,9 +90,12 @@ pub enum FillOutcome {
         frequencies: Option<Vec<(CompetitorRef, u16)>>,
         /// The **channel layout** this heat flies (#117 S3), when one applies: the RD's explicit
         /// per-heat bind, else the round's alternating default for this heat's position
-        /// ([`default_layout_for_heat`]). The handler records it as an [`Event::HeatLayoutSet`]
-        /// alongside the `HeatScheduled`, so *which layout a heat flew* is a recorded fact rather
-        /// than something re-derived later from a round whose default may since have changed.
+        /// ([`default_layout_for_heat`]) — the layout `frequencies` was assigned from.
+        ///
+        /// **Reported, not recorded** (#441). The handler deliberately appends no
+        /// [`Event::HeatLayoutSet`] for it: a bind is the RD's answer *for this heat*, and writing
+        /// one here froze every generated heat against the round's next layout edit. What the heat
+        /// flew is durable anyway — the channels are baked into its `HeatScheduled`.
         ///
         /// `None` when the round names no layouts and the RD bound none — the pre-S3 behaviour,
         /// where channels come from the auto-pick.
@@ -582,6 +585,12 @@ pub fn heat_layout_bind(events: &[Event], heat: &HeatId) -> Option<Option<Layout
 /// A bind naming a layout the event no longer has resolves to `None` rather than failing: the heat
 /// keeps the channels it was last scheduled with, and the mismatch is reported where the RD looks,
 /// by [`round_issues`](crate::events::EventRegistry::round_issues).
+///
+/// A **cleared** bind (`Some(None)`) resolves to the round's default, exactly as never having been
+/// touched does — that is what [`heat_layout_bind`]'s three-valued answer says it means, and what
+/// the RD asked for by clearing (#441). It used to resolve to `None`, i.e. *no layout at all*,
+/// which made "clear" mean "drop this heat off its round's layouts" — a state the RD could not
+/// then get out of by clearing again.
 pub fn layout_for_heat<'a>(
     meta: &'a EventMeta,
     round: Option<&RoundDef>,
@@ -589,8 +598,8 @@ pub fn layout_for_heat<'a>(
     heat: &HeatId,
 ) -> Option<&'a ChannelLayout> {
     match heat_layout_bind(events, heat) {
-        Some(explicit) => meta.layout(&explicit?),
-        None => default_layout_for_heat(meta, round, events, heat),
+        Some(Some(explicit)) => meta.layout(&explicit),
+        Some(None) | None => default_layout_for_heat(meta, round, events, heat),
     }
 }
 
@@ -2134,10 +2143,6 @@ pub struct RematerializedHeat {
     /// The freshly-assigned channels (raw MHz), empty when the round assigns none (an
     /// open-practice round with no layout, or an event with no resolvable timer).
     pub frequencies: Vec<(CompetitorRef, u16)>,
-    /// The **channel layout** the re-formed heat flies (#117 S3), when one applies — re-asserted
-    /// alongside the schedule so the recorded "which layout did this heat fly" keeps up with a
-    /// round whose named layouts have just been edited.
-    pub layout: Option<LayoutId>,
     /// The heat's existing custom label, carried through so a rewrite never drops an RD-typed name.
     pub label: Option<String>,
 }
@@ -2199,7 +2204,12 @@ pub fn rematerialize_round_heats(
         // #117 S3: the heat's layout and the RD's manual override survive a re-materialization,
         // because they are applied here through the same `apply_heat_decisions` the fill uses. A
         // round edit re-forms the heat; it does not overrule the RD's answer for it.
-        let Ok((lineup, frequencies, layout)) = apply_heat_decisions(
+        //
+        // The resolved layout id is not carried out (#441): the caller records no bind for it. A
+        // heat the RD bound already has one, and stamping one on a heat they never picked for is
+        // what froze a whole round's heats against its next layout edit. Its *channels* are the
+        // layout's, which is what the rewrite below is.
+        let Ok((lineup, frequencies, _layout)) = apply_heat_decisions(
             meta,
             timers,
             Some(round),
@@ -2228,7 +2238,6 @@ pub fn rematerialize_round_heats(
             heat,
             lineup,
             frequencies,
-            layout,
             label,
         });
     }
@@ -5495,10 +5504,12 @@ mod tests {
     }
 
     /// Fill `round` `count` times, appending each heat **exactly as the `FillRound` handler does** —
-    /// the `HeatLayoutSet` recording which layout it flies, then the `HeatScheduled` carrying the
-    /// channels that layout gave it.
+    /// the `HeatScheduled` carrying the channels its layout gave it, and (#441) **no**
+    /// `HeatLayoutSet`: a generated heat follows its round's default rather than freezing an
+    /// explicit bind to whatever that default resolved to at fill time.
     ///
-    /// Returns the log plus, per heat, `(id, layout name, seat channels)`.
+    /// Returns the log plus, per heat, `(id, layout name, seat channels)` — the layout the fill
+    /// *reports*, which is where its channels came from.
     #[allow(clippy::type_complexity)]
     fn fill_and_log(
         meta: &EventMeta,
@@ -5531,10 +5542,6 @@ mod tests {
                 name,
                 frequencies.iter().map(|(_, f)| *f).collect(),
             ));
-            log.push(Event::HeatLayoutSet {
-                heat: heat.clone(),
-                layout,
-            });
             log.push(Event::HeatScheduled {
                 heat,
                 lineup,

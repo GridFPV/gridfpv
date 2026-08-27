@@ -2702,19 +2702,12 @@ impl EventRegistry {
         };
         let class = round_engine::round_class(meta, round_id);
         for heat in round_engine::rematerialize_round_heats(meta, timers, round_id, &events) {
-            // #117 S3: re-assert which layout the re-formed heat flies, so the recorded answer
-            // keeps up with a round whose named layouts have just changed. Appended BEFORE the
-            // schedule, so a reader folding the log in order never sees a heat carrying channels
-            // from one layout while still recorded against another.
-            if heat.layout.is_some() {
-                let _ = state.append(
-                    gridfpv_events::Event::HeatLayoutSet {
-                        heat: heat.heat.clone(),
-                        layout: heat.layout.clone(),
-                    },
-                    None,
-                );
-            }
+            // No `HeatLayoutSet` is re-asserted (#441). It used to be, "so the recorded answer
+            // keeps up with the round" — but the answer it recorded was an *explicit* bind, which
+            // then WINS over the round's default, so the very next layout edit would skip this
+            // heat and `round_issues` would flag it. A heat the RD bound already carries its bind
+            // (and re-asserting it is a no-op); a heat the RD never touched must keep following
+            // its round, which is the whole point of re-materializing it here.
             let _ = state.append(
                 gridfpv_events::Event::HeatScheduled {
                     heat: heat.heat,
@@ -6475,27 +6468,15 @@ mod tests {
                 heat,
                 lineup,
                 frequencies,
-                layout,
                 ..
             } => {
                 let frequencies = match frequencies {
                     Some(freqs) => freqs,
                     None => round_engine::assign_for_event(&meta, &timers, None, &lineup).unwrap(),
                 };
-                // #117 S3: the handler records which layout the heat flies, before the schedule
-                // carrying the channels it produced. Mirrored here or the fixture would drift from
-                // the thing it is standing in for.
-                if layout.is_some() {
-                    state
-                        .append(
-                            Event::HeatLayoutSet {
-                                heat: heat.clone(),
-                                layout,
-                            },
-                            None,
-                        )
-                        .unwrap();
-                }
+                // #441: the handler records NO `HeatLayoutSet` for a heat it generated — the heat
+                // follows its round's default, and a bind is what the RD's own `SetHeatLayout`
+                // writes. Mirrored here or the fixture would drift from the thing it stands in for.
                 state
                     .append(
                         Event::HeatScheduled {
@@ -7529,6 +7510,10 @@ mod tests {
     /// Returns `(event, round, layout, heat)`. The round is labelled **Warmup**, the layout is
     /// **Bracket A** and the heat is **Practice Heat**: three different strings on purpose, so an
     /// assertion that the sentence names the heat cannot pass by naming the round.
+    ///
+    /// The bind is written **explicitly**, as the RD's own `SetHeatLayout` writes it — since #441
+    /// that is the only thing that writes one, and it is the only kind of bind that can be
+    /// orphaned: a generated heat follows its round's default, which cannot go stale.
     fn heat_bound_to_a_layout(reg: &EventRegistry) -> (EventId, RoundId, LayoutId, HeatId) {
         let (event, layout) = event_with_layout(reg, "Race Night");
         let mut req_round = practice_round(&[0, 1, 2]);
@@ -7536,6 +7521,16 @@ mod tests {
         req_round.layouts = vec![layout.clone()];
         let round = reg.add_round(&event, req_round).unwrap();
         let heat = fill_next_heat(reg, &event, &round.id);
+        reg.resolve(&event)
+            .unwrap()
+            .append(
+                Event::HeatLayoutSet {
+                    heat: heat.clone(),
+                    layout: Some(layout.clone()),
+                },
+                None,
+            )
+            .unwrap();
         (event, round.id, layout, heat)
     }
 
@@ -7652,7 +7647,6 @@ mod tests {
     /// A heat the RD has *personally* re-picked (`SetHeatLayout`) is a different matter and must
     /// keep its pick — that is what a bind is for. This heat was never touched.
     #[test]
-    #[ignore = "known bug #441: the fill freezes a layout bind on every generated heat — un-ignore with the fix"]
     fn editing_a_rounds_layouts_re_tunes_the_heats_it_generated() {
         let reg = EventRegistry::new(None).unwrap();
         let (event, a) = event_with_layout(&reg, "Race Night");
@@ -7722,6 +7716,113 @@ mod tests {
         assert!(
             reg.round_issues(&event).unwrap().is_empty(),
             "nothing to repair: the RD edited the round, and the round's heats followed — {:?}",
+            reg.round_issues(&event).unwrap()
+        );
+    }
+
+    /// #441: the **cleared** bind (`Some(None)`) is a real state, and a useful one — a heat the RD
+    /// clears goes back to following its round, the round's *next* layout edit included.
+    ///
+    /// The clear used to write an explicit bind to whatever the default resolved to at that moment,
+    /// so "clear" pinned the heat instead of releasing it (and clearing again could not undo it).
+    /// The event this appends by hand is exactly what `SetHeatLayout { layout: None }` writes —
+    /// `control_handler::tests::clearing_a_heats_layout_bind_records_the_cleared_state` pins that
+    /// half; this is what the state then *does*.
+    #[test]
+    fn a_cleared_layout_bind_follows_the_rounds_next_edit() {
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, a) = event_with_layout(&reg, "Race Night");
+        let reversed: Vec<LayoutNode> = crate::channels::RACEBAND_MHZ
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(node, channel)| LayoutNode {
+                node: node as u32,
+                channel: *channel,
+            })
+            .collect();
+        let b = reg
+            .add_channel_layout(
+                &event,
+                NewChannelLayoutRequest {
+                    name: "Bracket B".into(),
+                    nodes: Some(reversed),
+                },
+            )
+            .unwrap()
+            .layouts
+            .iter()
+            .find(|l| l.name == "Bracket B")
+            .unwrap()
+            .id
+            .clone();
+
+        let mut req_round = practice_round(&[0, 1, 2]);
+        req_round.label = "Warmup".to_string();
+        req_round.layouts = vec![a.clone()];
+        let round = reg.add_round(&event, req_round).unwrap();
+        let heat = fill_next_heat(&reg, &event, &round.id);
+        let state = reg.resolve(&event).unwrap();
+        // Which layout the heat flies right now, resolved the way every reader resolves it.
+        let flies = |reg: &EventRegistry| -> Option<LayoutId> {
+            let (events, _) = reg.resolve(&event).unwrap().read().unwrap();
+            let meta = reg.meta_of(&event).unwrap();
+            let def = meta.rounds.iter().find(|r| r.id == round.id).cloned();
+            round_engine::layout_for_heat(&meta, def.as_ref(), &events, &heat).map(|l| l.id.clone())
+        };
+
+        // The RD picks Bracket B for this heat by hand, then thinks better of it and clears.
+        for layout in [Some(b.clone()), None] {
+            state
+                .append(
+                    Event::HeatLayoutSet {
+                        heat: heat.clone(),
+                        layout,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let (events, _) = state.read().unwrap();
+        assert_eq!(
+            round_engine::heat_layout_bind(&events, &heat),
+            Some(None),
+            "the clear is recorded as the cleared bind"
+        );
+        assert_eq!(
+            flies(&reg),
+            Some(a),
+            "a cleared bind falls back to the round's default"
+        );
+
+        // And it keeps following: the RD swaps the round onto Bracket B.
+        let stored = reg
+            .rounds_of(&event)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == round.id)
+            .expect("the round is stored");
+        let mut edit = round_edit_of(&stored);
+        edit.layouts = vec![b.clone()];
+        reg.update_round(&event, &round.id, edit).unwrap();
+
+        assert_eq!(
+            flies(&reg),
+            Some(b),
+            "a cleared heat re-tunes with its round, exactly like one never touched"
+        );
+        assert_eq!(
+            heat_now(&reg, &event, &heat)
+                .1
+                .iter()
+                .map(|(_, f)| *f)
+                .collect::<Vec<_>>(),
+            vec![5917, 5880, 5843],
+            "and its channels are Bracket B's"
+        );
+        assert!(
+            reg.round_issues(&event).unwrap().is_empty(),
+            "a cleared bind is not an orphaned one — there is nothing to repair: {:?}",
             reg.round_issues(&event).unwrap()
         );
     }
@@ -7873,12 +7974,22 @@ mod tests {
             "each practice seat is on the channel its layout puts that node on"
         );
 
-        // And the heat records WHICH layout it flew, so the answer survives the round's default
-        // changing later.
+        // And which layout it flies is answerable — RESOLVED through the round, not frozen as a
+        // bind (#441). A generated heat the RD never picked for carries no `HeatLayoutSet`, so an
+        // edit to the round's layouts re-tunes it instead of stranding it.
         let (events, _) = reg.resolve(&event).unwrap().read().unwrap();
         assert_eq!(
             round_engine::heat_layout_bind(&events, &heat),
-            Some(Some(layout)),
+            None,
+            "the fill binds nothing: the RD decided this at the round, not at the heat"
+        );
+        let meta = reg.meta_of(&event).unwrap();
+        let round_def = meta.rounds.iter().find(|r| r.id == _round).unwrap();
+        assert_eq!(
+            round_engine::layout_for_heat(&meta, Some(round_def), &events, &heat)
+                .map(|l| l.id.clone()),
+            Some(layout),
+            "and it flies its round's layout all the same"
         );
     }
 
@@ -8055,10 +8166,19 @@ mod tests {
             "the RD's pilots, the layout's channels"
         );
         let (events, _) = state.read().unwrap();
+        let meta = reg.meta_of(&event).unwrap();
+        let round_def = meta.rounds.iter().find(|r| r.id == round).unwrap();
+        assert_eq!(
+            round_engine::layout_for_heat(&meta, Some(round_def), &events, &heat)
+                .map(|l| l.id.clone()),
+            Some(layout.clone()),
+            "and it still flies its round's layout — re-materializing re-resolves it (#441), it \
+             does not stamp a bind on a heat the RD never picked for"
+        );
         assert_eq!(
             round_engine::heat_layout_bind(&events, &heat),
-            Some(Some(layout.clone())),
-            "and it is still recorded against the layout it flies"
+            None,
+            "no bind was invented by the round edit"
         );
 
         // An empty lineup is the explicit clear — the heat goes back to its round's own plan.
