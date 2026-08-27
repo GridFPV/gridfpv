@@ -1120,13 +1120,20 @@ const OP_HEAT: HeatSummary = {
   phase: 'Running',
   is_current: true
 };
-// A live open-practice state: two channels, node-0 with 3 laps (last 28.0s), node-1 quiet.
+// A live open-practice state: two channels, node-0 with 3 laps (last 28.0s, best 26.0s), node-1
+// quiet. Last and best are DIFFERENT values on purpose — the board must render the served
+// `best_lap_micros` rather than the last lap it happens to be holding (#425).
 const opLive: LiveRaceState = {
   current_heat: 'practice-1',
   phase: 'Running',
   active_pilots: ['node-0', 'node-1'],
   progress: [
-    { competitor: 'node-0', laps_completed: 3, last_lap_micros: 28_000_000 },
+    {
+      competitor: 'node-0',
+      laps_completed: 3,
+      last_lap_micros: 28_000_000,
+      best_lap_micros: 26_000_000
+    },
     { competitor: 'node-1', laps_completed: 0 }
   ],
   running_order: ['node-0', 'node-1']
@@ -1153,40 +1160,76 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
     expect(r1).toBeInTheDocument();
     expect(screen.getByLabelText('Channel Node 2 · Fatshark F4')).toBeInTheDocument();
 
-    // node-0 shows 3 laps and a best lap of 28.0s (formatMicros), tracked from the last lap.
+    // node-0 shows 3 laps, its last lap (28.0s) and the SERVED best (26.0s) — two distinct values.
     expect(within(r1).getByText('3')).toBeInTheDocument();
-    expect(within(r1).getAllByText('28.000').length).toBeGreaterThan(0);
+    expect(within(r1).getByText('28.000')).toBeInTheDocument();
+    expect(within(r1).getByText('26.000')).toBeInTheDocument();
   });
 
-  it('tracks best lap as the min last-lap across the run', async () => {
+  it('renders the served best lap and accumulates nothing of its own (#425)', async () => {
     const { session, pushLive } = renderBoard();
     render(LiveRaceControl, { session });
     const r1 = await screen.findByLabelText('Channel Node 1 · Raceband R1');
-    // Both Last and Best read 28.0s on the first snapshot (best seeds from the only lap).
-    await within(r1).findAllByText('28.000');
+    await within(r1).findByText('26.000');
 
-    // A faster lap arrives → best updates to 25.0s while last shows 25.0s too.
+    // A faster lap: the server's fold has already taken the `min`, so the board just renders what
+    // it is handed.
     pushLive({
       ...opLive,
       progress: [
-        { competitor: 'node-0', laps_completed: 4, last_lap_micros: 25_000_000 },
+        {
+          competitor: 'node-0',
+          laps_completed: 4,
+          last_lap_micros: 25_000_000,
+          best_lap_micros: 25_000_000
+        },
         { competitor: 'node-1', laps_completed: 0 }
       ]
     });
-    // Last + Best both now read 25.0s.
     await waitFor(() => expect(within(r1).getAllByText('25.000')).toHaveLength(2));
 
-    // A slower lap must NOT regress the best (still 25.0s), though last becomes 30.0s.
+    // A slower lap: last becomes 30.0s and best stays 25.0s — because the SERVER says so, not
+    // because the screen remembered the earlier frame.
     pushLive({
       ...opLive,
       progress: [
-        { competitor: 'node-0', laps_completed: 5, last_lap_micros: 30_000_000 },
+        {
+          competitor: 'node-0',
+          laps_completed: 5,
+          last_lap_micros: 30_000_000,
+          best_lap_micros: 25_000_000
+        },
         { competitor: 'node-1', laps_completed: 0 }
       ]
     });
     await within(r1).findByText('30.000');
-    // Best lap (25.0s) is still present in the row.
     expect(within(r1).getByText('25.000')).toBeInTheDocument();
+  });
+
+  it('takes a re-snapshot at its word rather than holding a stale minimum (#425)', async () => {
+    // The bug this replaced: the screen kept a running `min` over the `last_lap_micros` of the
+    // frames it observed, so a value it had seen could outlive the truth. A re-snapshot — a
+    // reconnect, a scope change, a heat re-windowed by "Run again" — is authoritative. If the
+    // server now says the best is 31.0s, the board must say 31.0s, not the 26.0s it used to hold.
+    const { session, pushLive } = renderBoard();
+    render(LiveRaceControl, { session });
+    const r1 = await screen.findByLabelText('Channel Node 1 · Raceband R1');
+    await within(r1).findByText('26.000');
+
+    pushLive({
+      ...opLive,
+      progress: [
+        {
+          competitor: 'node-0',
+          laps_completed: 1,
+          last_lap_micros: 31_000_000,
+          best_lap_micros: 31_000_000
+        },
+        { competitor: 'node-1', laps_completed: 0 }
+      ]
+    });
+    await waitFor(() => expect(within(r1).getAllByText('31.000')).toHaveLength(2));
+    expect(within(r1).queryByText('26.000')).toBeNull();
   });
 
   it('carries no second "new run" control — Run again is the one way to go again (#393)', () => {

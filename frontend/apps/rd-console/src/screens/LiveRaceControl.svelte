@@ -386,42 +386,14 @@
     lastLapMicros: number | undefined;
     bestLapMicros: number | undefined;
   }
-  // Best lap isn't carried on the live stream (`PilotProgress` is laps + last lap), so the board
-  // tracks it client-side: the min `last_lap_micros` observed per channel over the run. It resets
-  // whenever the heat changes, and a "Run again" (Restart) re-windows the heat's laps to the new
-  // run — see the reset below, which mirrors that so the board's best lap is this run's best lap.
-  //
-  // Known gap: this is a fold over the FRAMES, not over the latest state, so a lap whose frame the
-  // console never saw cannot enter it. A re-snapshot has always skipped laps this way, and since
-  // #422 a reconnect that genuinely missed envelopes is delivered as one settled catch-up fold
-  // rather than a per-offset replay, so those laps' times are not re-walked either. The count and
-  // last lap stay correct; only the *best* can read slower than the run's true best. The real fix
-  // is the server carrying best-lap in `PilotProgress` — until then, don't paper over it here by
-  // re-deriving laps client-side.
-  let bestByRef = $state<Map<CompetitorRef, number>>(new Map());
-  let bestForHeat = $state<HeatId | undefined>(undefined);
-  $effect(() => {
-    // On a heat change — or a "Run again", which re-stages the SAME heat — wipe the accumulated
-    // bests. `Restart` windows the heat's laps past the reset server-side (`heat_window_offsets`),
-    // so the board must start the new run clean too rather than carrying the last run's best.
-    if (heat !== bestForHeat || phase === 'Scheduled') {
-      bestForHeat = heat;
-      if (bestByRef.size > 0) bestByRef = new Map();
-    }
-    if (!isOpenPractice) return;
-    let changed = false;
-    const next = new Map(bestByRef);
-    for (const p of live?.progress ?? []) {
-      const last = p.last_lap_micros;
-      if (last === undefined || last === null) continue;
-      const prev = next.get(p.competitor);
-      if (prev === undefined || last < prev) {
-        next.set(p.competitor, last);
-        changed = true;
-      }
-    }
-    if (changed) bestByRef = next;
-  });
+  // Best lap is **served** (#425): `PilotProgress.best_lap_micros` is a `min` over the run's whole
+  // (marshaling-aware, floored) lap list, computed where that list already is. This screen used to
+  // accumulate it instead — a running `min` over the `last_lap_micros` of the frames it happened to
+  // observe — which made the displayed best a function of which frames the client saw: lossy on any
+  // re-snapshot, and more so since #422 delivers a resumed span as one settled envelope rather than
+  // re-walking each intermediate lap time. The accumulator is gone; do not reintroduce one. A
+  // "Run again" (Restart) windows the heat's laps server-side, so the served best follows the new
+  // run for free, with no client-side reset to keep in step.
 
   // The board rows, in node order: every active `node-{i}` channel with its live laps. A channel
   // with no laps yet still shows (a quiet seat reads "0 laps").
@@ -444,7 +416,7 @@
         label: seatNames.seatLabel(node),
         laps: p?.laps_completed ?? 0,
         lastLapMicros: p?.last_lap_micros ?? undefined,
-        bestLapMicros: bestByRef.get(ref)
+        bestLapMicros: p?.best_lap_micros ?? undefined
       });
     }
     return rows.sort((a, b) => a.node - b.node);
@@ -537,10 +509,10 @@
           competitor: { adapter: '', competitor: ref },
           position: i + 1,
           laps: p.laps_completed,
+          // The visible column is "Last lap", so that is what the deciding metric carries.
           metric: { BestLapMicros: p.last_lap_micros ?? null },
-          // No per-pilot fastest lap in the live progress stream; this provisional board does not
-          // tie-break on it, so leave it absent.
-          best_lap_micros: null
+          // The run's fastest lap, now served rather than accumulated (#425).
+          best_lap_micros: p.best_lap_micros ?? null
         };
       })
     };

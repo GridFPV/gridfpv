@@ -385,10 +385,8 @@ pub struct NodeChannel {
 /// a frequency the catalog does not know falls back to `"5885 MHz"` — a custom channel has no name
 /// to resolve, and inventing one would be worse than the number.
 pub fn channel_label(mhz: u16) -> String {
-    crate::channels::catalog()
-        .into_iter()
-        .find(|entry| entry.mhz == mhz)
-        .map(|entry| format!("{} {}", entry.band, entry.channel))
+    crate::channels::label_of(mhz)
+        .map(|(band, channel)| format!("{band} {channel}"))
         .unwrap_or_else(|| format!("{mhz} MHz"))
 }
 
@@ -405,19 +403,15 @@ fn resolve_channel_label(
     band: Option<&str>,
     channel: Option<&str>,
 ) -> Option<(String, String)> {
-    let catalog = crate::channels::catalog();
     if let (Some(band), Some(channel)) = (band, channel) {
-        if let Some(entry) = catalog
-            .iter()
+        if let Some(entry) = crate::channels::catalog()
+            .into_iter()
             .find(|e| e.mhz == mhz && e.band == band && e.channel == channel)
         {
-            return Some((entry.band.clone(), entry.channel.clone()));
+            return Some((entry.band, entry.channel));
         }
     }
-    catalog
-        .iter()
-        .find(|e| e.mhz == mhz)
-        .map(|e| (e.band.clone(), e.channel.clone()))
+    crate::channels::label_of(mhz)
 }
 
 /// One configured timer in the application-level registry (issue #73).

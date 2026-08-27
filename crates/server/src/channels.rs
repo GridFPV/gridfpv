@@ -165,6 +165,24 @@ pub fn is_known(mhz: u16) -> bool {
     catalog().iter().any(|e| e.mhz == mhz)
 }
 
+/// The catalog's own `(band, channel)` for a raw centre frequency — `5880` → `("Raceband", "R7")`.
+///
+/// **The one place a bare MHz becomes a label.** The **first** matching entry wins, and the catalog
+/// is ordered Raceband first, so a frequency two bands name (`5880` is Raceband R7 *and* Fatshark
+/// F8) always resolves the same way on every surface. `None` for a **custom** frequency the catalog
+/// does not know: that is an honest absence, and inventing a name would be worse than the number.
+///
+/// Every label-producing path goes through this — the display string
+/// ([`crate::timers::channel_label`]), the Tune page's validated channel write, and the heat's
+/// channel assignment on its way to a timer (#421). Re-deriving it anywhere else is how the two
+/// write paths came to disagree in the first place.
+pub fn label_of(mhz: u16) -> Option<(String, String)> {
+    catalog()
+        .into_iter()
+        .find(|e| e.mhz == mhz)
+        .map(|e| (e.band, e.channel))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
