@@ -700,17 +700,25 @@ fn drive(
     let mut carry_adapter = Some(RotorHazardAdapter::new());
     while !cancel.load(Ordering::Relaxed) {
         timers.set_status(&timer_id, TimerStatus::Connecting);
-        // Reuse the carried adapter (preserving dedup/last_race_status across reconnects); only on
-        // the first attempt is it `Some` from above — every later iteration re-seeds it from the
-        // adapter recovered out of the previous connection's `disconnect`.
+        // Reuse the carried adapter (preserving dedup/last_race_status across reconnects). It is
+        // `Some` on every iteration: from above on the first, and afterwards re-seeded either from
+        // the previous connection's `disconnect` or — since #435 — from the previous *failed*
+        // attempt, which now hands it back. `unwrap_or_default` is a backstop that no path reaches.
         let adapter = carry_adapter.take().unwrap_or_default();
         let conn = match RotorHazardConnection::connect(&url, adapter) {
             Ok(conn) => conn,
-            Err(e) => {
+            Err((e, recovered)) => {
                 // The connect attempt failed: surface Error, back off, and retry (unless cancelled).
-                // The adapter was consumed by the failed `connect`; start the next attempt fresh.
-                // (A connect failure means no socket and no replayed snapshot, so there is nothing
-                // to dedup against — a fresh adapter is correct and #156 re-seeds on the next race.)
+                //
+                // **Carry the adapter into the next attempt** (#435). A failed connect is not a
+                // fresh start: on a mid-race drop the heat is still armed and RotorHazard will
+                // re-send the whole in-progress `current_laps` snapshot the moment a socket does
+                // come up, so the deduplicator that suppresses it has to survive the attempts in
+                // between. `connect` used to consume the adapter by value and drop it here, and the
+                // retry's `unwrap_or_default()` then started from an empty dedup — so one Wi-Fi
+                // blip plus one failed retry re-minted every lap already flown as a second Pass,
+                // and the lap projection (which does not dedup by sequence) turned those into
+                // duplicate laps in the heat's log.
                 //
                 // Log the full error *chain*, not just `rust_socketio`'s top-level Display: its
                 // `IncompleteResponseFromEngineIo` variant renders as the bare, useless string
@@ -723,6 +731,7 @@ fn drive(
                     timer_name(&timers, &timer_id),
                     error_chain(&e)
                 );
+                carry_adapter = Some(recovered);
                 timers.set_status(&timer_id, TimerStatus::Error);
                 if sleep_unless_cancelled(backoff, &cancel) {
                     break;
@@ -1656,7 +1665,7 @@ mod tests {
         let err =
             match RotorHazardConnection::connect("http://127.0.0.1:1", RotorHazardAdapter::new()) {
                 Ok(_) => panic!("connecting to a dead port must fail"),
-                Err(e) => e,
+                Err((e, _recovered)) => e,
             };
         let chained = error_chain(&err);
         // The top-level Display alone is the useless opaque string...
@@ -1730,17 +1739,16 @@ mod tests {
     /// new socket, and a fresh adapter re-mints every lap of the heat as a new `Pass` — which the
     /// lap projection, which does not dedup by sequence, turns into duplicate laps.
     ///
-    /// But `RotorHazardConnection::connect` takes the adapter **by value**, so an attempt that
-    /// *fails* — RotorHazard momentarily unreachable, the common case right after the blip that
-    /// dropped the socket — drops it in the `Err` branch, and the next iteration's
-    /// `carry_adapter.take().unwrap_or_default()` starts from an empty dedup while the heat is
-    /// still armed. One Wi-Fi blip plus one failed retry doubles the heat's lap log.
+    /// `RotorHazardConnection::connect` takes the adapter **by value**, so an attempt that *fails*
+    /// — RotorHazard momentarily unreachable, the common case right after the blip that dropped the
+    /// socket — used to drop it in the `Err` branch, and the next iteration's
+    /// `carry_adapter.take().unwrap_or_default()` started from an empty dedup while the heat was
+    /// still armed. One Wi-Fi blip plus one failed retry doubled the heat's lap log.
     ///
-    /// The failing connect below is the real one (port 1 is refused immediately); the rest is
-    /// [`drive`]'s own carry, transcribed. **Un-ignoring this with the fix means recovering the
-    /// adapter in the `Err` arm** — whatever shape `connect` grows to hand it back.
+    /// The fix is in `connect`'s signature: its `Err` hands the adapter back, because
+    /// `rust_socketio::Error` carries nothing that could. The failing connect below is the real one
+    /// (port 1 is refused immediately); the rest is [`drive`]'s own carry, transcribed.
     #[test]
-    #[ignore = "known bug #435: a failed connect consumes the carried adapter — un-ignore with the fix"]
     fn a_failed_connect_attempt_must_not_lose_the_carried_dedup_state() {
         use gridfpv_adapters::Adapter;
 
@@ -1758,12 +1766,12 @@ mod tests {
         let attempt = carry_adapter.take().unwrap_or_default();
         // …and that attempt fails, because RotorHazard has not come back yet. (Port 1 is reserved
         // and unused on the loopback, so the connect is refused immediately.) `drive`'s Err arm
-        // then logs the chain, marks the timer Error, backs off and retries — nothing puts the
-        // adapter back, because `connect` consumed it and `rust_socketio::Error` carries nothing.
-        assert!(
-            RotorHazardConnection::connect("http://127.0.0.1:1", attempt).is_err(),
-            "connecting to a dead port must fail"
-        );
+        // logs the chain, marks the timer Error, backs off and retries — and puts the RECOVERED
+        // adapter back, which is the whole of the fix.
+        match RotorHazardConnection::connect("http://127.0.0.1:1", attempt) {
+            Ok(_) => panic!("connecting to a dead port must fail"),
+            Err((_, recovered)) => carry_adapter = Some(recovered),
+        }
         assert!(
             carry_adapter.is_some(),
             "the adapter carried into a FAILED connect must survive it — the heat is still armed \
@@ -1777,6 +1785,45 @@ mod tests {
             passes(&retried.translate(in_progress_snapshot())).is_empty(),
             "every lap flown before the drop would be minted a SECOND time: the lap projection \
              does not dedup by sequence, so these become duplicate laps in the heat's log"
+        );
+    }
+
+    /// …and the recovered adapter is the **same** one, not a fresh stand-in that happens to type-
+    /// check (#435).
+    ///
+    /// The failure this guards is subtle and would look identical from the outside: an `Err` arm
+    /// that returned `RotorHazardAdapter::new()` would satisfy the signature, satisfy the test
+    /// above's `is_some()`, and still double-count every lap. So this asserts on state only the
+    /// original carries — `last_race_status` (RACING, folded before the drop), which is what stops
+    /// the re-sent snapshot from looking like a fresh race and resetting the dedup (#156).
+    #[test]
+    fn the_adapter_recovered_from_a_failed_connect_is_the_one_that_went_in() {
+        use gridfpv_adapters::Adapter;
+
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(racing());
+        adapter.translate(in_progress_snapshot());
+
+        let recovered = match RotorHazardConnection::connect("http://127.0.0.1:1", adapter) {
+            Ok(_) => panic!("connecting to a dead port must fail"),
+            Err((_, recovered)) => recovered,
+        };
+
+        // A FRESH adapter would read RotorHazard's re-sent `race_status=RACING` as a READY→RACING
+        // transition, re-emit `SessionStarted`, reset its dedup (#156) and re-mint the snapshot.
+        // The carried one has already seen RACING, so the re-send is not a transition at all.
+        let mut recovered = recovered;
+        assert!(
+            !recovered
+                .translate(racing())
+                .iter()
+                .any(|e| matches!(e, Event::SessionStarted { .. })),
+            "the recovered adapter must still hold last_race_status = RACING; a fresh one would \
+             treat RotorHazard's re-sent status as a new race and reset the dedup (#156)"
+        );
+        assert!(
+            passes(&recovered.translate(in_progress_snapshot())).is_empty(),
+            "and with the dedup intact the replayed snapshot mints nothing"
         );
     }
 
