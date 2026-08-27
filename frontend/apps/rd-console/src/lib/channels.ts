@@ -36,6 +36,57 @@ export function groupByBand(catalog: ChannelCatalogEntry[]): ChannelBand[] {
 }
 
 /**
+ * How a band's select-all box reads: `'all'` (every offered channel of the band is chosen),
+ * `'none'`, or `'some'` — the **indeterminate** middle state (#429).
+ *
+ * The middle state has to exist. A partial band is a normal, deliberate configuration — an RD may
+ * run four of Raceband's eight — so a two-state box would have to either lie about the band or
+ * treat "partial" as "on" and wipe the subset on the next click.
+ *
+ * `entries` is what the picker actually **offered**, not the raw catalog: a `Fixed` timer's picker
+ * is narrowed to its declared set, and a box that measured "all" against the full catalog would sit
+ * unchecked forever on a band the RD had fully ticked. An empty offer is `'none'` — there is
+ * nothing to select.
+ */
+export type BandSelection = 'all' | 'none' | 'some';
+
+export function bandSelection(
+  entries: readonly ChannelCatalogEntry[],
+  chosen: ReadonlySet<number>
+): BandSelection {
+  if (entries.length === 0) return 'none';
+  let on = 0;
+  for (const entry of entries) if (chosen.has(entry.mhz)) on += 1;
+  if (on === 0) return 'none';
+  return on === entries.length ? 'all' : 'some';
+}
+
+/**
+ * The chosen set after clicking a band's select-all box: a **fully** selected band clears, and any
+ * other state — empty *or* partial — fills.
+ *
+ * Partial → full is the deliberate direction, and it is the standard tri-state one: the
+ * indeterminate box clicks to checked. The alternative would throw away a subset the RD picked
+ * channel by channel, on a control they reached for in order to *add*. Filling a partial band is
+ * undone by one more click; clearing it is not.
+ *
+ * Only the band's own offered entries move; everything else in `chosen` — other bands, and the
+ * custom raw MHz a Flexible timer may carry — is passed through untouched.
+ */
+export function toggleBandSelection(
+  entries: readonly ChannelCatalogEntry[],
+  chosen: ReadonlySet<number>
+): Set<number> {
+  const next = new Set(chosen);
+  const clearing = bandSelection(entries, chosen) === 'all';
+  for (const entry of entries) {
+    if (clearing) next.delete(entry.mhz);
+    else next.add(entry.mhz);
+  }
+  return next;
+}
+
+/**
  * The human label for a raw frequency, resolved through the catalog: `"Raceband R1"` (band +
  * channel) when a catalog entry matches, else a bare `"5800 MHz"` fall-back for a custom/unknown
  * channel. The **first** catalog entry whose MHz matches wins (the catalog is offered in a stable

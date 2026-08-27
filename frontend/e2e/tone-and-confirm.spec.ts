@@ -5,7 +5,9 @@
  *     live. Navigating to the Live page of an **already-running** heat (a late join) must NOT play
  *     the tone: the first phase the console observes for that heat is `Running`, with no pre-Running
  *     phase seen. We schedule + drive a heat to Running over the control API *before* the page lands
- *     on it, then assert no oscillator is built when the Live page renders.
+ *     on it, then assert no **start tone** is built when the Live page renders — narrowed by
+ *     frequency, because that already-running heat is banking sim laps and each crossing fires its
+ *     own pip (see {@link START_HZ}).
  *
  *  B. **Tone on a genuine race-go** — a heat the RD *watches* cross into Running (Stage → Start → …
  *     → Running, the runtime auto-advancing the Armed → Running edge with no click) DOES play. The
@@ -29,10 +31,33 @@ import { expect, test } from './observability.js';
 
 declare global {
   interface Window {
-    __toneCalls: { resume: number; started: number; state: string };
+    __toneCalls: {
+      resume: number;
+      started: number;
+      state: string;
+      /** The frequency of every oscillator that actually started, in order. */
+      startedHz: Array<number | undefined>;
+    };
     __realAudio: { contexts: number; oscillators: number; lastState: string };
   }
 }
+
+/**
+ * The **start tone's** frequency (`START_HZ` in `lib/raceAudio.ts`). The race-go cue and the
+ * countdown pip share it; the per-lap **crossing pip** is an octave up (1760) and the race-end tone
+ * an octave down (440).
+ *
+ * Counting *every* oscillator is not a start-tone assertion. A late join lands on a heat that is
+ * already banking sim laps, and the console's race-day audio fires a crossing pip per crossing — so
+ * the raw `started` counter reads eight on a page that never played the start tone at all. Those
+ * pips are a real, deliberate feature (`raceDayAudio`), not a regression, so the counter is narrowed
+ * rather than the behaviour changed.
+ */
+const START_HZ = 880;
+
+/** How many **start/countdown** tones have played (crossing pips and the end tone excluded). */
+const startTones = (page: import('@playwright/test').Page) =>
+  page.evaluate((hz) => window.__toneCalls.startedHz.filter((f) => f === hz).length, START_HZ);
 
 const shot = async (locator: import('@playwright/test').Locator, name: string) => {
   if (process.env.GRIDFPV_SHOTS) {
@@ -44,16 +69,20 @@ const shot = async (locator: import('@playwright/test').Locator, name: string) =
 // read them back. Installed via addInitScript so it's present before the app's StartTonePlayer reads
 // the platform constructor.
 const AUDIO_STUB = `
-  window.__toneCalls = { resume: 0, started: 0, state: 'suspended' };
+  window.__toneCalls = { resume: 0, started: 0, state: 'suspended', startedHz: [] };
   class StubAudioContext {
     constructor() { this.currentTime = 0; this.state = window.__toneCalls.state; this.destination = {}; }
     createOscillator() {
       const calls = window.__toneCalls;
-      return {
+      const osc = {
         type: 'square',
-        frequency: { setValueAtTime() {} },
-        connect() {}, start() { calls.started++; }, stop() {}
+        hz: undefined,
+        frequency: { setValueAtTime(v) { osc.hz = v; } },
+        connect() {},
+        start() { calls.started++; calls.startedHz.push(osc.hz); },
+        stop() {}
       };
+      return osc;
     }
     createGain() { return { gain: { setValueAtTime() {}, linearRampToValueAtTime() {} }, connect() {} }; }
     async resume() { window.__toneCalls.resume++; this.state = 'running'; }
@@ -129,12 +158,13 @@ test('no start tone on landing on an already-running heat (late join); tone on a
   // The heat is already Running when the page lands on it (a late join).
   await expect(page.locator('.heat-id .value')).toHaveText('late-join-1', { timeout: 15_000 });
   await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
-  // No oscillator was built — the late join does NOT buzz. Give the effect a beat to (not) fire.
+  // No START tone was built — the late join does NOT buzz. (Crossing pips from the laps this heat
+  // is already banking are excluded; see START_HZ.) Give the effect a beat to (not) fire.
   await page.waitForTimeout(500);
-  expect(await page.evaluate(() => window.__toneCalls.started)).toBe(0);
+  expect(await startTones(page)).toBe(0);
 
   // Clean up the late-join heat so the watched-race-go heat below starts clean.
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 15_000 });
   await page.getByRole('button', { name: 'Discard', exact: true }).click();
   await page.getByRole('button', { name: 'Confirm' }).click();
@@ -143,7 +173,7 @@ test('no start tone on landing on an already-running heat (late join); tone on a
   // the pre-Running phases first, then fires the tone on entering Running. The late-join part A above
   // left NO tone (asserted), but its cleanup clicks did unlock the context — so part B reasons over
   // the oscillator-start count *delta* from a baseline, not an absolute zero. ──────────────────────
-  const startedBeforeRaceGo = await page.evaluate(() => window.__toneCalls.started);
+  const startedBeforeRaceGo = await startTones(page);
   ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: 'tone-1', lineup: ['Ace', 'Bee', 'Cee'] } }
@@ -165,18 +195,16 @@ test('no start tone on landing on an already-running heat (late join); tone on a
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
   await expect(page.getByRole('status', { name: 'Staging countdown' })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__toneCalls.resume)).toBeGreaterThan(0);
-  expect(await page.evaluate(() => window.__toneCalls.started)).toBe(startedBeforeRaceGo);
+  expect(await startTones(page)).toBe(startedBeforeRaceGo);
 
   // Start arms it; the runtime auto-advances into Running (no click on that edge). The tone fires on
   // entering Running because the console watched the pre-Running phases — a NEW oscillator starts.
   await page.getByRole('button', { name: 'Start', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
-  await expect
-    .poll(() => page.evaluate(() => window.__toneCalls.started))
-    .toBeGreaterThan(startedBeforeRaceGo);
+  await expect.poll(() => startTones(page)).toBeGreaterThan(startedBeforeRaceGo);
 
   // Drive to a state where a destructive confirm (Restart) is available, then arm it.
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 15_000 });
 
   // ── D: the prominent red confirm — arm Restart and screenshot the solid-red Confirm button ──────
@@ -268,7 +296,7 @@ test('REAL AudioContext: a control click resumes to running and the synth graph 
     .toBeGreaterThan(oscBeforeRaceGo);
 
   // Clean up the heat so the shared Director is left tidy for the next spec.
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 15_000 });
   await page.getByRole('button', { name: 'Discard', exact: true }).click();
   await page.getByRole('button', { name: 'Confirm' }).click();

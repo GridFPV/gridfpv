@@ -27,6 +27,8 @@ import { expect, test } from './observability.js';
 
 const PILOTS = ['Ace', 'Bee', 'Cee'];
 const HEAT_ID = 'q-1';
+/** The round this spec's heat belongs to — see the `ROUND_LABEL` note in the test. */
+const ROUND_LABEL = 'E2E-Race';
 
 test('RD drives a full basic sim race through the console UI', async ({ page, director }) => {
   // ── Open the console: the home hub is the landing screen (#118) ──────────────────────
@@ -66,9 +68,34 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // round/class members in the Rounds & Heats stage (covered by `rounds.spec.ts`). This race
   // spec's focus is *running* a heat, so it schedules one straight over the open control path
   // (the Director is booted with no token configured) — exactly what the Heats UI emits.
+  //
+  // The heat is tagged with a ROUND. That is not decoration: the Results screen lists a scored heat
+  // under the round it belongs to (`Results.svelte`'s view selector walks rounds, then each round's
+  // `Final` heats), so an untagged heat can be run and finalized and its result is simply not
+  // reachable in the UI. Every heat the product builds now comes from a round — the free-text
+  // NewHeat form is retired — so an untagged one is a test-only artefact, and reading results off it
+  // was proving a path that no longer exists.
+  const roundRes = await page.request.post(`${director.eventRoot}/rounds`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: {
+      label: ROUND_LABEL,
+      classes: [],
+      format: 'timed_qual',
+      params: { rounds: '1' },
+      // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race time,
+      // else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
+      win_condition: 'BestLap',
+      time_limit_secs: 60,
+      seeding: 'FromRoster',
+      channel_mode: 'PerHeat'
+    }
+  });
+  expect(roundRes.ok()).toBeTruthy();
+  const roundId = ((await roundRes.json()) as { id: string }).id;
+
   const ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
-    data: { ScheduleHeat: { heat: HEAT_ID, lineup: PILOTS } }
+    data: { ScheduleHeat: { heat: HEAT_ID, lineup: PILOTS, round: roundId } }
   });
   expect(ack.ok()).toBeTruthy();
   // Explicitly focus THIS heat as the current heat (SetCurrentHeat) over the control path. The
@@ -91,7 +118,10 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   // The heat lands on the timer: current heat + the lineup show, phase Scheduled.
-  await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID);
+  // The header names the heat by its FRIENDLY name — "‹Round› Heat N" through `heatNameById` — not
+  // its raw id (`CLAUDE.md`). It is round-tagged now, so the name resolves.
+  const HEAT_NAME = `${ROUND_LABEL} Heat 1`;
+  await expect(page.locator('.heat-id .value')).toHaveText(HEAT_NAME);
   const heatSheet = page.getByRole('region', { name: 'Heat sheet' });
   for (const pilot of PILOTS) {
     await expect(heatSheet.getByText(pilot, { exact: true })).toBeVisible();
@@ -159,8 +189,9 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // And it must read the REAL elapsed (well past 0), proving it counted from race-go not arrival.
   expect(hudMid).toBeGreaterThan(1000);
 
-  // ── End the window: ForceEnd is the runtime-clock override (the old manual "Finish") ──
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  // ── End the window: the ForceEnd command, whose button reads **Stop** to the RD (the wire tag is
+  //    unchanged; `actionLabel` renames it) — the runtime-clock override for the old manual "Finish". ──
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 
   // ── The race clock must FREEZE at Unofficial (the rename-regression fix) ───────────────
@@ -206,19 +237,25 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   await expect(page.locator('.phase').first()).toHaveText('Final');
 
   // ── Read the results: the Results screen shows the pilots, lap counts, and an order ───
+  // The Results screen is one view at a time, chosen from a single "Results view" selector: each
+  // round, an optgroup of that round's `Final` heats, then the event's classes. There is no standing
+  // "Heat leaderboard" table any more — a heat's own result is the `‹heat name› results` table under
+  // its round — so the per-heat view is selected explicitly rather than assumed to be on screen.
   await page.getByRole('button', { name: /Results/ }).click();
   const results = page.getByRole('region', { name: 'Results' });
-  const leaderboard = results.getByRole('table', { name: 'Heat leaderboard' });
-  await expect(leaderboard).toBeVisible();
+  await results.getByLabel('Results view').selectOption({ label: HEAT_NAME });
+  const leaderboard = results.getByRole('table', { name: `${HEAT_NAME} results` });
+  await expect(leaderboard).toBeVisible({ timeout: 15_000 });
 
   // Every pilot appears in the result with a decided finishing order (positions 1..n).
   const rows = leaderboard.locator('tbody tr');
   await expect(rows).toHaveCount(PILOTS.length);
   for (const pilot of PILOTS) {
-    await expect(leaderboard.getByRole('cell', { name: pilot, exact: true })).toBeVisible();
+    await expect(leaderboard.getByText(pilot, { exact: true })).toBeVisible();
   }
-  // The leader (position 1) banked at least one lap — a real, scored result.
-  const leaderLaps = await rows.first().locator('.laps').textContent();
+  // The leader (position 1) banked at least one lap — a real, scored result. Laps is the third
+  // column (Pos · Pilot · Laps · …).
+  const leaderLaps = await rows.first().locator('td').nth(2).textContent();
   expect(parseInt(leaderLaps ?? '0', 10)).toBeGreaterThan(0);
   // Positions are decided and start at 1.
   const firstPos = await rows.first().locator('.pos .badge').textContent();
@@ -376,13 +413,17 @@ test('home hub navigates to each page and back, with working breadcrumbs', async
 
   // Home → Events: the picker (former landing), reachable as a page now. The worker's Director may
   // still have an active event from an earlier spec, in which case `currentEvent` is hydrated and
-  // the Events page auto-enters that event's workspace (#118); "Switch event" then returns to the
-  // picker. So we land on the picker whether or not an event was active.
+  // the Events page auto-enters that event's workspace (#118); the breadcrumb's **Events** crumb
+  // then returns to the picker (the "← Switch event" button is gone — `ContextHeader.svelte`). So we
+  // land on the picker whether or not an event was active.
   await page.getByRole('button', { name: /Events/ }).click();
   const picker = page.getByRole('heading', { name: 'Choose an event' });
   await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
-    await page.getByRole('button', { name: /Switch event/ }).click();
+    await page
+      .getByRole('navigation', { name: 'Breadcrumb' })
+      .getByRole('button', { name: 'Events' })
+      .click();
   }
   await expect(picker).toBeVisible({ timeout: 15_000 });
   await page

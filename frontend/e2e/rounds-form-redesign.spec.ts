@@ -176,7 +176,11 @@ test('a qualifying round: win condition IS the metric, "Heats per pilot", heats 
   //    and add a Qualifying (timed_qual) round, PerHeat so each format-round is one whole-field heat.
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [OPEN_CLASS] } });
   const mk = async (callsign: string): Promise<string> => {
-    const r = await page.request.post(`${base}/pilots`, { ...json, data: { callsign } });
+    // `/pilots` is app-level, not event-scoped: the Director's root, not `director.eventRoot`.
+    const r = await page.request.post(`${director.baseUrl}/pilots`, {
+      ...json,
+      data: { callsign }
+    });
     return (await r.json()).id as string;
   };
   const p1 = await mk('QualAce');
@@ -194,7 +198,10 @@ test('a qualifying round: win condition IS the metric, "Heats per pilot", heats 
       classes: [OPEN_CLASS],
       format: 'timed_qual',
       params: { rounds: '2' },
+      // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+      // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
       win_condition: 'BestLap',
+      time_limit_secs: 60,
       channel_mode: 'PerHeat'
     }
   });
@@ -228,7 +235,9 @@ test('a qualifying round: win condition IS the metric, "Heats per pilot", heats 
   await expect(form.getByLabel('Heats per pilot value')).toBeVisible();
   await form.screenshot({ path: `${SHOTS}rounds-form-qualifying.png` });
   // Close the add-form without saving (the round was created via the API above).
-  await form.getByRole('button', { name: 'Cancel' }).click();
+  // The dialog's actions live in its FOOTER, outside the `<form>` (`EventRounds.svelte`) — so
+  // Cancel is dialog-scoped, the same way the "Add round" submit above is page-scoped.
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
 
   // ── Two heats in the round → named by position: "Qualifying Heat 1" / "Qualifying Heat 2".
   // Schedule them via the control API tagged with the round (the generator only emits the next heat

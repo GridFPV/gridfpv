@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChannelCapability, ChannelCatalogEntry } from '@gridfpv/types';
 import {
   assignChannelsRoundRobin,
+  bandSelection,
   capabilityTag,
   catalogEntryFor,
   channelLabel,
@@ -15,7 +16,8 @@ import {
   isPlausibleMhz,
   nodeIndexOf,
   nodeSeatLabel,
-  offeredCatalog
+  offeredCatalog,
+  toggleBandSelection
 } from '../src/lib/channels.js';
 
 const CATALOG: ChannelCatalogEntry[] = [
@@ -24,6 +26,57 @@ const CATALOG: ChannelCatalogEntry[] = [
   { band: 'Fatshark', channel: 'F4', mhz: 5800 },
   { band: 'DJI', channel: 'R1', mhz: 5660 }
 ];
+
+describe('bandSelection / toggleBandSelection (#429, the per-band tri-state box)', () => {
+  const RACEBAND = groupByBand(CATALOG)[0].entries; // R1 5658, R2 5695
+
+  it('reads none / some / all', () => {
+    expect(bandSelection(RACEBAND, new Set())).toBe('none');
+    expect(bandSelection(RACEBAND, new Set([5658]))).toBe('some');
+    expect(bandSelection(RACEBAND, new Set([5658, 5695]))).toBe('all');
+  });
+
+  it('ignores chosen channels from OTHER bands — a band reads only its own entries', () => {
+    // 5800 is Fatshark's, and a custom 5685 is nobody's. Neither may make Raceband look fuller.
+    expect(bandSelection(RACEBAND, new Set([5800, 5685]))).toBe('none');
+    expect(bandSelection(RACEBAND, new Set([5658, 5800, 5685]))).toBe('some');
+  });
+
+  it('measures against what was OFFERED, not the raw catalog (a Fixed timer is narrowed)', () => {
+    // A Fixed timer that declares only R1: ticking R1 fills that timer's Raceband band. Measured
+    // against the full catalog it would read 'some' forever and the box would never latch.
+    const offered = offeredCatalog({ Fixed: { channels: [5658] } }, CATALOG);
+    expect(bandSelection(offered, new Set([5658]))).toBe('all');
+  });
+
+  it('an empty offer is none — there is nothing to select', () => {
+    expect(bandSelection([], new Set([5658]))).toBe('none');
+  });
+
+  it('fills an empty band, and clears a full one', () => {
+    expect([...toggleBandSelection(RACEBAND, new Set())]).toEqual([5658, 5695]);
+    expect([...toggleBandSelection(RACEBAND, new Set([5658, 5695]))]).toEqual([]);
+  });
+
+  it('FILLS a partial band rather than wiping the RD’s subset', () => {
+    // The indeterminate box clicks to checked. Clearing here would throw away channels chosen one
+    // at a time, on a control reached for in order to add; filling is undone by one more click.
+    expect([...toggleBandSelection(RACEBAND, new Set([5658]))]).toEqual([5658, 5695]);
+  });
+
+  it('leaves other bands and custom raw MHz untouched in both directions', () => {
+    const chosen = new Set([5800, 5685]); // Fatshark F4 + a custom entry
+    expect([...toggleBandSelection(RACEBAND, chosen)].sort()).toEqual([5658, 5685, 5695, 5800]);
+    const full = new Set([5658, 5695, 5800, 5685]);
+    expect([...toggleBandSelection(RACEBAND, full)].sort()).toEqual([5685, 5800]);
+  });
+
+  it('does not mutate the set it is given', () => {
+    const chosen = new Set([5658]);
+    toggleBandSelection(RACEBAND, chosen);
+    expect([...chosen]).toEqual([5658]);
+  });
+});
 
 describe('groupByBand', () => {
   it('groups entries into bands, preserving catalog order across and within bands', () => {

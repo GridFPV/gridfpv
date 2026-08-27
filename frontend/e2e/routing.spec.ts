@@ -38,9 +38,9 @@ async function gotoHub(page: import('@playwright/test').Page) {
 /**
  * Open the **Events picker** ("Choose an event"). The worker's Director is shared, so an event may
  * already be active server-side; on a fresh load the shell hydrates `currentEvent` from it, and the
- * Events page then auto-enters that event's workspace (#118). When that happens we use "Switch
- * event" to return to the picker (it clears the local event). So this lands on the picker whether or
- * not an event was active.
+ * Events page then auto-enters that event's workspace (#118). When that happens we take the
+ * breadcrumb's **Events** crumb back to the picker (it clears the local event). So this lands on the
+ * picker whether or not an event was active.
  */
 async function gotoPicker(page: import('@playwright/test').Page) {
   await gotoHub(page);
@@ -49,8 +49,12 @@ async function gotoPicker(page: import('@playwright/test').Page) {
   const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
-    // Auto-entered the active event's workspace — "Switch event" leaves it and lands on the picker.
-    await page.getByRole('button', { name: /Switch event/ }).click();
+    // Auto-entered the active event's workspace. The "← Switch event" button is gone
+    // (`ContextHeader.svelte`); the breadcrumb's **Events** crumb is the way back to the picker.
+    await page
+      .getByRole('navigation', { name: 'Breadcrumb' })
+      .getByRole('button', { name: 'Events' })
+      .click();
   }
   await expect(picker).toBeVisible({ timeout: 15_000 });
 }

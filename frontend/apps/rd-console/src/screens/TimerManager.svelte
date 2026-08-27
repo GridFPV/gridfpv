@@ -55,12 +55,15 @@
     type TimerKindTag
   } from '../lib/timers.js';
   import {
+    bandSelection,
     capabilityTag,
     channelLabel,
     fixedAllowed,
     groupByBand,
     isPlausibleMhz,
-    type CapabilityTag
+    toggleBandSelection,
+    type CapabilityTag,
+    type ChannelBand
   } from '../lib/channels.js';
   import {
     DEFAULT_NODE_COUNT,
@@ -389,6 +392,23 @@
     if (next.has(mhz)) next.delete(mhz);
     else next.add(mhz);
     formChannels = next;
+  }
+
+  /**
+   * Select or clear a whole band (#429) — the realistic unit of the decision. An RD running
+   * Raceband ticks all eight and nothing else; doing that a chip at a time is eight clicks for one
+   * choice, on a screen #117 S1 made load-bearing (an empty allowed set now refuses a heat fill).
+   *
+   * Both of these read `group.entries` — the entries the picker **offered** — so a Fixed timer's
+   * band box ticks only what that timer can actually tune, never the raw catalog.
+   */
+  function toggleBand(group: ChannelBand) {
+    formChannels = toggleBandSelection(group.entries, formChannels);
+  }
+
+  /** How this band's box reads: checked / unchecked / indeterminate. */
+  function bandState(group: ChannelBand) {
+    return bandSelection(group.entries, formChannels);
   }
 
   /** Add a custom raw-MHz channel (Flexible only). Validates a plausible 5.8 GHz centre. */
@@ -806,7 +826,18 @@
         {:else}
           {#each offeredBands as group (group.band)}
             <div class="channel-band">
-              <span class="band-name">{group.band}</span>
+              <!-- Tri-state band box (#429): checked = every offered channel, indeterminate = a
+                   partial band (a normal state, not an error), unchecked = none. -->
+              <label class="band-head">
+                <input
+                  type="checkbox"
+                  checked={bandState(group) === 'all'}
+                  indeterminate={bandState(group) === 'some'}
+                  onchange={() => toggleBand(group)}
+                  aria-label={`All ${group.band} channels`}
+                />
+                <span class="band-name">{group.band}</span>
+              </label>
               <div class="band-channels">
                 {#each group.entries as entry (entry.mhz + '-' + entry.channel)}
                   <label class="channel-chip" class:on={formChannels.has(entry.mhz)}>
@@ -1085,6 +1116,17 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-2);
+  }
+  .band-head {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    align-self: flex-start;
+    cursor: pointer;
+    user-select: none;
+  }
+  .band-head input {
+    margin: 0;
   }
   .band-name {
     font-size: var(--gf-font-size-xs);

@@ -45,13 +45,15 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
 
   // ── Events page → New event with "Set up event" ticked ──────────────────────────────────────
   // With a server-active event from a prior spec, clicking Events may auto-enter that event's
-  // workspace (the active event is resolved on load); "Switch event" then reaches the picker.
+  // workspace (the active event is resolved on load); the breadcrumb's **Events** crumb then reaches
+  // the picker. (The "← Switch event" button is gone — `ContextHeader.svelte`.)
   await page.getByRole('heading', { name: 'Events' }).click();
   const picker = page.getByRole('heading', { name: 'Choose an event' });
-  const switchEvent = page.getByRole('button', { name: /Switch event/ });
-  await expect(picker.or(switchEvent).first()).toBeVisible({ timeout: 15_000 });
+  const crumbs = page.getByRole('navigation', { name: 'Breadcrumb' });
+  const eventsCrumb = crumbs.getByRole('button', { name: 'Events' });
+  await expect(picker.or(eventsCrumb).first()).toBeVisible({ timeout: 15_000 });
   if (!(await picker.isVisible().catch(() => false))) {
-    await switchEvent.click();
+    await eventsCrumb.click();
   }
   await expect(picker).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: '+ New event' }).first().click();
@@ -176,9 +178,10 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
     { timeout: 15_000 }
   );
 
-  // ── The wizard is re-runnable from the workspace header ───────────────────────────────────────
-  await page.getByRole('button', { name: 'Setup wizard' }).click();
-  await expect(page.getByRole('dialog', { name: 'Event setup wizard' })).toBeVisible({
-    timeout: 15_000
-  });
+  // There is deliberately no "the wizard is re-runnable from the workspace header" step any more.
+  // v1 keeps no manual settings surface (`App.svelte`): the gear dialog and the "Setup wizard"
+  // relaunch button are both gone, because the wizard runs once on event creation and everything it
+  // sets stays editable on the stage-pages — which is exactly what the block above asserts. The
+  // coverage was removed rather than re-pointed at some other control: the behaviour it described
+  // does not exist.
 });

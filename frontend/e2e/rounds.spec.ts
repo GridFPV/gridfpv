@@ -358,7 +358,7 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
  *
  * The prerequisites (a class with two members, a round) are set up over the real REST/control path
  * (the same writes the Roster/Classes/Rounds stages emit), then the test drives the new UI: it
- * clicks **Fill next heat** and asserts a heat appears in that round's list with the resolved
+ * clicks **Generate heats** and asserts a heat appears in that round’s list with the resolved
  * pilot callsigns + the round tag, and then **builds a heat by hand** from the round's eligible
  * members and asserts it lists too. Nothing about the Heats UI is mocked.
  */
@@ -405,7 +405,10 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
         classes: [classId],
         format: 'timed_qual',
         params: {},
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -518,7 +521,10 @@ test('RD generates a whole round of heats in one action (Generate heats, #216)',
         classes: [classId],
         format: 'head_to_head',
         params: { group_size: '2', rotations: '1' },
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -558,7 +564,9 @@ test('RD generates a whole round of heats in one action (Generate heats, #216)',
  * (Flexible: pick a couple of catalog channels + add a **custom raw-MHz** entry, set the node
  * count), and save. Then set up a class + two members + a round over the real write paths, fill a
  * heat, and assert each pilot's lineup row shows a resolved **channel label** (a band+channel from
- * the catalog) — the assignment the primary (Mock) timer's available channels drive. Nothing mocked.
+ * the catalog) — the assignment drawn from the primary (Mock) timer's available channels. Which
+ * channels the automatic assignment picks is the IMD picker's call and deliberately not pinned here.
+ * Nothing mocked.
  */
 test('RD configures a timer’s channels and a filled heat shows channel labels', async ({
   page,
@@ -630,7 +638,10 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
         classes: [classId],
         format: 'timed_qual',
         params: {},
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -647,10 +658,23 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
   const filledRow = heatRound.locator('.heat-row').first();
   await expect(filledRow).toBeVisible({ timeout: 15_000 });
-  // The two pilots are assigned the first two available channels (Raceband R1, R2) and the lineup
-  // shows their band+channel labels — the per-heat channel display resolving the raw MHz.
-  await expect(filledRow.locator('.lineup-chan').filter({ hasText: 'Raceband R1' })).toBeVisible();
-  await expect(filledRow.locator('.lineup-chan').filter({ hasText: 'Raceband R2' })).toBeVisible();
+  // Each pilot's lineup row shows a resolved band+channel label — the per-heat channel display
+  // turning the assigned raw MHz back into a name.
+  //
+  // WHICH channels is not pinned, and used to be: this asserted "Raceband R1 and R2, the first two
+  // available". The automatic assignment is IMD-aware now, so from a Raceband pool it picks a
+  // well-separated pair (R1 + R8 on the run that caught this), which is a better answer than the
+  // first two — pinning the old pair would have pinned the worse behaviour. What the display owes
+  // the RD is a real, distinct, resolved channel per seat, so that is what is asserted.
+  const chans = filledRow.locator('.lineup-chan');
+  await expect(chans).toHaveCount(2);
+  const labels = (await chans.allTextContents()).map((t) => t.trim());
+  for (const label of labels) {
+    // A band + channel from the catalog, never the bare MHz and never "unknown" (#416: unknown is a
+    // real state, but not this one — these seats were just assigned).
+    expect(label).toMatch(/^(Raceband|Fatshark|Boscam [ABE]) \S+/);
+  }
+  expect(new Set(labels).size, 'the two seats get different channels').toBe(2);
   if (process.env.GRIDFPV_SHOTS)
     await heatRound.screenshot({ path: `${process.env.GRIDFPV_SHOTS}/heat-channel-labels.png` });
 
@@ -677,7 +701,7 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
  *
  * The prerequisites (a class with two members + a `timed_qual` round, its heat filled) are set up
  * over the real REST/control path; then the test drives the **UI**: it runs the filled heat to
- * **Final** (Stage → Start, lets the sim emit laps, ForceEnd → Finalize), opens **Results** and
+ * **Final** (Stage → Start, lets the sim emit laps, Stop → Finalize), opens **Results** and
  * asserts the **per-class standings populate** with the two pilots — the scored result folding all
  * the way through to the class standing. Nothing about the standings UI is mocked.
  *
@@ -725,7 +749,10 @@ test('RD reads per-class standings off a scored round', async ({ page, director 
         classes: [classId],
         format: 'timed_qual',
         params: { rounds: '1' },
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -761,7 +788,8 @@ test('RD reads per-class standings off a scored round', async ({ page, director 
     timeout: 15_000
   });
   // Heat-lifecycle Slices 1–3: Stage → Start (arms; the runtime auto-advances to Running after a
-  // randomized hold). No manual Arm/Start→Running button; ForceEnd is the end-window override.
+  // randomized hold). No manual Arm/Start→Running button; the Stop button (the ForceEnd command
+  // — the label changed, the wire tag did not) is the end-window override.
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Staged');
   await page.getByRole('button', { name: 'Start', exact: true }).click();
@@ -776,13 +804,20 @@ test('RD reads per-class standings off a scored round', async ({ page, director 
   };
   await expect.poll(totalLaps, { timeout: 30_000 }).toBeGreaterThan(1);
 
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 15_000 });
   await page.getByRole('button', { name: 'Finalize', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Final');
 
   // ── Results → the per-class standings populate with both pilots ───────────────────────────────
+  // The Results screen shows ONE view at a time, chosen from the "Results view" selector (each
+  // round, that round's scored heats, then the event's classes). Having just finalized a heat, the
+  // screen defaults to that round's standings — so the class view is selected explicitly.
   await openTab(page, 'Results');
+  await page
+    .getByRole('region', { name: 'Results' })
+    .getByLabel('Results view')
+    .selectOption({ label: 'Open Class' });
   const standings = page.getByRole('table', { name: /Open Class standings/i });
   await expect(standings).toBeVisible({ timeout: 15_000 });
   await expect(standings.getByText(ACE)).toBeVisible();
