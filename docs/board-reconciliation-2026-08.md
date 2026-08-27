@@ -659,3 +659,42 @@ The client fix stands regardless, and that is the point — a consumer keyed on 
 ### The bench, left ready
 
 Practice event gone, the RD's `test-d46ptx` event intact, NuclearHazard and Docker RH restored with the 3 calibration entries (they had been left behind in the pre-fresh-start data dir). Both timers left **Configured, not connected** — #407's neutralisation writes to the timer on connect, and that should be the RD's choice to make while watching.
+
+---
+
+# Session log — 2026-08-27: the board gets honest
+
+v0.4 went from **20 open to 12**, with 73 closed. Most of the reduction was not new work — it was discovering that four issues had already been delivered by other means, and that two more were asking for something the design had outgrown.
+
+## Closed as already-built
+
+- **#42** (snapshot endpoints + scope grammar) — the scoped GETs and cursor have existed and been tested for weeks; #422 then made the stream cursor exact.
+- **#53** (bind a pilot to a `node-{i}` seat) — delivered sideways by S3's seat-first seating editor. The issue wanted a bind *action*; what shipped is a seat that simply carries an optional pilot everywhere. The Director never needed changing — `validate_tagged_lineup` had always accepted node refs; **only the UI required a pilot**.
+- **#65** (`rh:<url>` lap source) — overtaken. The four-leg live matrix drives RotorHazard's *real* detection pipeline, which is strictly more realistic than the `simulate_lap` path this asked for.
+- **#78** (multi-heat formats) — closed at the RD's direction; replaced by **#431**, a full rescope of tournaments on the primitives, rather than resuming a slice whose assumptions #84 and #117 have already outgrown.
+
+## Two corrections I had to make about my own claims
+
+**#80 — I said the shipped app was exposed. It is not.** I read `DEFAULT_ADDR = "0.0.0.0:8080"` in `director.rs` and asserted the Tauri app inherited it. It does not: `src-tauri/src/lib.rs` binds **`127.0.0.1:0`** and documents why (*"Loopback ⇒ the control path is open (no auth), per the GridFPV auth model"*). The loopback-trust half of #80 is already implemented for the surface that ships. Corrected on the issue.
+
+**#427 — my diagnosis was wrong, and the real problem was far larger.** I blamed #414's fixture rewrite and a console 400 storm. The cause was commit `8ad6344` renaming a nav item **"Live control" → "Race control"**, leaving a stale locator in an `enterPractice` helper copy-pasted into ~15 spec files. Not two specs: **38 of 46**, every one timing out at navigation before touching what it was written to test.
+
+It hid because **the suite could not run anywhere** — no Chromium system libraries on the build box, and `ci.yml` said browser e2e was *"gated separately"*, which meant nowhere. #414 then edited every e2e fixture with nothing executing them.
+
+## e2e can now run, and does
+
+`cargo xtask e2e` runs the suite in Microsoft's Playwright image. The design collapsed once tested rather than assumed: **the host-built Director binary runs unmodified inside the image** (image glibc 2.39, host 2.43 — a Rust binary needs the symbols it *uses* to exist, not an identical libc), so no custom image and no Rust in the container. A CI job runs the same specs on every push.
+
+21 specs pass; the rest are stale against the layout work and the rename (**#428**).
+
+## The IMD metric is wrong, and the picker acts on it
+
+Research against IMDTabler (validated to reproduce its published ratings exactly) found `imd_score` is **non-monotonic against the standard**: MultiGP's official 6-pilot set, RotorHazard's default, and a perfect-100 Raceband-4 set all score **0** — the same as all-eight-Raceband, the worst set in FPV.
+
+Cause: the three-tone term hits exactly zero whenever two pairs share a sum, which is what a balanced set looks like. **The metric punishes good sets for being symmetric.**
+
+And `pick_best_imd_set` maximises it, so it prefers sets the standard rates poorly — its best 6-set has two channels **15 MHz apart**, unflyable on adjacent-channel bleed alone. #117 S1 made that picker execute for the first time, so this went from dormant to live. Filed as **#430**; the fix is to port IMDTabler's rating, which is also what RotorHazard shows the RD.
+
+## Standing rule added
+
+`CLAUDE.md` gained **"Pre-release: break things freely, and do not write migrations."** Agents were writing old-key fallbacks for data nobody has. Bounded: a record in an old shape must still *load*, data the RD cannot recreate is still preserved, and a change that drops data must say so. It names the condition that flips it — the first public release — and instructs its own deletion then.
