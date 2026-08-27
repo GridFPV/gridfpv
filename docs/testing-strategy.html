@@ -411,6 +411,33 @@ cargo xtask rh-mock dump http://localhost:8080 practice q-1</pre>
       surfaces immediately in the console capture instead of presenting as a silent blank page.</p>
     </div>
 
+    <h3>6.1 The browser suite — <code>cargo xtask e2e</code></h3>
+    <p>
+      Above the contract suite sits the <strong>browser</strong> layer: Playwright specs driving the
+      real console against a real Director, in Microsoft's
+      <code>mcr.microsoft.com/playwright:v1.61.0-noble</code> image. It is containerized for a
+      practical reason — the dev box is headless and has no browser deps — and for a better one:
+      <strong>the image CI runs is the image the maintainer runs</strong>, so "green locally, red in
+      CI" is not a category of failure we have to debug. The container runs the
+      <em>host-built</em> Director binary, which works because the image's glibc is newer than the
+      host's, not by accident; if that ever inverts, the binary must be built inside the image too.
+    </p>
+    <div class="principle">
+      <p><span class="name">A suite that is not a gate rots.</span> The browser specs existed for
+      months and ran only when someone remembered to ask. By the time anyone looked,
+      <strong>38 of 46 were dead</strong> — a nav rename ("Live control" → "Race control",
+      <code>8ad6344</code>) had invalidated sixty hardcoded locators in one commit, and nothing
+      reported it. The suite had been silently green-by-absence the entire time. It is now a
+      required CI job (~20 min); that is the only thing that keeps it honest.</p>
+    </div>
+    <p>
+      The corollary for spec authorship: a UI string that appears in sixty locators is a
+      <strong>shared input, not sixty independent facts</strong> — the same rule the
+      <a href="conventions.html">friendly-name resolvers</a> enforce in the app. Nav labels and
+      other cross-cutting copy belong in one place the specs import, so a rename fails one
+      assertion loudly instead of sixty identically.
+    </p>
+
     <h2>7. Testing the format generators</h2>
     <p>
       Format / qualifying generators are a pure function of state too
