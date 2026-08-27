@@ -89,7 +89,8 @@ import {
   eventAudit,
   roundRanking,
   roundStandings,
-  classStandings
+  classStandings,
+  isRequestFailure
 } from '@gridfpv/protocol-client';
 import type {
   ProtocolClient,
@@ -178,36 +179,18 @@ function isAuthAck(ack: CommandAck): boolean {
 }
 
 /**
- * The HTTP status a thrown request error carries, if any: a structural `status` field when the
- * error provides one, else the trailing `… failed: HTTP <status>` every protocol-client request
- * rejection ends with. Anything else — a transport error, or a message that merely *contains*
- * "401" somewhere (an event id like `evt-401`, a 500 body echoing a token) — resolves
- * `undefined`, so it can never masquerade as an auth status. (The old whole-message
- * `\b(401|403)\b` scan opened the token dialog on exactly those.)
- */
-function httpStatusOf(e: unknown): number | undefined {
-  if (
-    e &&
-    typeof e === 'object' &&
-    'status' in e &&
-    typeof (e as { status: unknown }).status === 'number'
-  ) {
-    return (e as { status: number }).status;
-  }
-  const msg = e instanceof Error ? e.message : String(e);
-  const m = /\bfailed: HTTP (\d{3})$/.exec(msg);
-  return m ? Number(m[1]) : undefined;
-}
-
-/**
  * Whether a thrown error from `createEvent` (and the other gated writes) is an HTTP **401/403**
- * — i.e. the Director is gating the action. Matched on the error's HTTP *status* (structural, or
- * the protocol client's anchored `failed: HTTP <status>` suffix — see {@link httpStatusOf}),
- * never on digits appearing anywhere in the message.
+ * — i.e. the Director is gating the action, and the lazy token prompt should fire.
+ *
+ * Keyed on the {@link RequestFailure}'s structural `status`, **never on the words**. Every
+ * protocol-client rejection carries the status as a field (#433) precisely so the message can be
+ * the Director's own sentence — written for the RD, and free to change — without auth detection
+ * riding on its wording. Both earlier text scans were bugs waiting to happen: a whole-message
+ * `\b(401|403)\b` opened the token dialog on an event id like `evt-401`, and the anchored
+ * `failed: HTTP <status>` suffix that replaced it tied this branch to a route line #433 removed.
  */
 function isAuthFailure(e: unknown): boolean {
-  const status = httpStatusOf(e);
-  return status === 401 || status === 403;
+  return isRequestFailure(e) && (e.status === 401 || e.status === 403);
 }
 
 /**

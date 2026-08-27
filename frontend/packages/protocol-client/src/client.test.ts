@@ -837,3 +837,187 @@ describe('events lifecycle helpers (#72)', () => {
     expect(seen[0].body).toEqual({ id: null });
   });
 });
+
+// ── Request failures: the Director's words, never a route line (#433) ────────────────────────
+//
+// Refusing to delete a round used to reach the RD as
+// `DELETE /events/{eventId}/rounds/{roundId} failed: HTTP 400` — two raw ids on screen and the
+// server's explanation discarded, while the Director had written a sentence naming the heat by its
+// friendly name precisely so it could be shown.
+
+describe("request failures carry the Director's words (#433)", () => {
+  const BASE = 'http://director.local:8080';
+  const TOKEN = 'rd-tok';
+  const EVT = 'evt-9f3a7c';
+  const ROUND = 'round-4b21';
+  const TIMER = 'timer-7e55';
+  const PILOT = 'pilot-3c4d';
+  const CLASS = 'class-88ee';
+  const LAYOUT = 'layout-11aa';
+  /** Every raw handle the sweep hands the client — none may come back out in a message. */
+  const RAW_IDS = [EVT, ROUND, TIMER, PILOT, CLASS, LAYOUT];
+
+  /**
+   * A stand-in request body. The failing fetch never reads one, and `never` satisfies every
+   * request-param type, so the sweep below needs no fixture per wire shape.
+   */
+  const REQ = {} as unknown as never;
+
+  /** A fetch that fails every request — with a typed `ProtocolError` body, or with none at all. */
+  const failing =
+    (status: number, body?: ProtocolError): FetchLike =>
+    async () =>
+      ({
+        ok: false,
+        status,
+        json: async (): Promise<unknown> => {
+          // A bodyless failure is what a bare 500 (or an HTML error page) actually looks like.
+          if (!body) throw new SyntaxError('Unexpected end of JSON input');
+          return body;
+        }
+      }) as unknown as Response;
+
+  /** Run a call expected to reject and hand back the error it threw. */
+  async function caught(run: () => Promise<unknown>): Promise<Error & { status?: number }> {
+    try {
+      await run();
+    } catch (e) {
+      return e as Error & { status?: number };
+    }
+    throw new Error('expected the request to reject');
+  }
+
+  it("throws the Director's refusal verbatim — the sentence #433 was discarding", async () => {
+    const REFUSAL =
+      'this round has a heat in progress (Practice Heat) — finalize or reset it before removing the round';
+    const { deleteRound, isRequestFailure } = await import('./client.js');
+    const err = await caught(() =>
+      deleteRound(BASE, EVT, ROUND, TOKEN, {
+        fetch: failing(400, { code: 'BadRequest', message: REFUSAL })
+      })
+    );
+    // Verbatim: not prefixed, not wrapped, not appended to.
+    expect(err.message).toBe(REFUSAL);
+    expect(isRequestFailure(err)).toBe(true);
+    expect(err.status).toBe(400);
+    expect((err as { code?: string }).code).toBe('BadRequest');
+  });
+
+  it('falls back only when there is no body, and then says what was attempted', async () => {
+    const { deleteRound } = await import('./client.js');
+    const err = await caught(() => deleteRound(BASE, EVT, ROUND, TOKEN, { fetch: failing(500) }));
+    // Honest, actionable, and status-bearing — a poor message is fine, a silent one is not.
+    expect(err.message).toBe('The Director could not remove the round (HTTP 500).');
+    expect(err.status).toBe(500);
+    expect((err as { code?: string }).code).toBeUndefined();
+  });
+
+  it('never puts a raw id — or a route line — in a surfaced message', async () => {
+    const c = await import('./client.js');
+    const probes: [string, (fetch: FetchLike) => Promise<unknown>][] = [
+      ['listEvents', (fetch) => c.listEvents(BASE, { fetch })],
+      ['createEvent', (fetch) => c.createEvent(BASE, 'Friday', TOKEN, { fetch })],
+      ['deleteEvent', (fetch) => c.deleteEvent(BASE, EVT, TOKEN, { fetch })],
+      ['getActiveEvent', (fetch) => c.getActiveEvent(BASE, { fetch })],
+      ['setActiveEvent', (fetch) => c.setActiveEvent(BASE, EVT, TOKEN, { fetch })],
+      ['listTimers', (fetch) => c.listTimers(BASE, { fetch })],
+      ['createTimer', (fetch) => c.createTimer(BASE, REQ, TOKEN, { fetch })],
+      ['updateTimer', (fetch) => c.updateTimer(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['connectTimer', (fetch) => c.connectTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['disconnectTimer', (fetch) => c.disconnectTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['restartTimer', (fetch) => c.restartTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['timerSignal', (fetch) => c.timerSignal(BASE, TIMER, { fetch })],
+      ['stopTimerSignal', (fetch) => c.stopTimerSignal(BASE, TIMER, TOKEN, { fetch })],
+      ['setCalibration', (fetch) => c.setCalibration(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['captureLevel', (fetch) => c.captureLevel(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['timerNodes', (fetch) => c.timerNodes(BASE, TIMER, { fetch })],
+      ['setTimerNodes', (fetch) => c.setTimerNodes(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['setNodeChannel', (fetch) => c.setNodeChannel(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['deleteTimer', (fetch) => c.deleteTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['setEventTimers', (fetch) => c.setEventTimers(BASE, EVT, [TIMER], TOKEN, { fetch })],
+      ['setPrimaryTimer', (fetch) => c.setPrimaryTimer(BASE, EVT, TIMER, TOKEN, { fetch })],
+      ['listPilots', (fetch) => c.listPilots(BASE, { fetch })],
+      ['createPilot', (fetch) => c.createPilot(BASE, REQ, TOKEN, { fetch })],
+      ['updatePilot', (fetch) => c.updatePilot(BASE, PILOT, REQ, TOKEN, { fetch })],
+      ['deletePilot', (fetch) => c.deletePilot(BASE, PILOT, TOKEN, { fetch })],
+      ['setEventRoster', (fetch) => c.setEventRoster(BASE, EVT, [PILOT], TOKEN, { fetch })],
+      ['addToRoster', (fetch) => c.addToRoster(BASE, EVT, PILOT, TOKEN, { fetch })],
+      ['removeFromRoster', (fetch) => c.removeFromRoster(BASE, EVT, PILOT, TOKEN, { fetch })],
+      ['listClasses', (fetch) => c.listClasses(BASE, { fetch })],
+      ['createClass', (fetch) => c.createClass(BASE, REQ, TOKEN, { fetch })],
+      ['updateClass', (fetch) => c.updateClass(BASE, CLASS, REQ, TOKEN, { fetch })],
+      ['deleteClass', (fetch) => c.deleteClass(BASE, CLASS, TOKEN, { fetch })],
+      ['setClassHidden', (fetch) => c.setClassHidden(BASE, CLASS, true, TOKEN, { fetch })],
+      ['setEventClasses', (fetch) => c.setEventClasses(BASE, EVT, [CLASS], TOKEN, { fetch })],
+      [
+        'setClassMembership',
+        (fetch) => c.setClassMembership(BASE, EVT, CLASS, [PILOT], TOKEN, { fetch })
+      ],
+      ['listFormatSchemas', (fetch) => c.listFormatSchemas(BASE, { fetch })],
+      ['listFormats', (fetch) => c.listFormats(BASE, { fetch })],
+      ['listChannels', (fetch) => c.listChannels(BASE, { fetch })],
+      ['rateChannels', (fetch) => c.rateChannels(BASE, [5658], { fetch })],
+      ['createRound', (fetch) => c.createRound(BASE, EVT, REQ, TOKEN, { fetch })],
+      ['updateRound', (fetch) => c.updateRound(BASE, EVT, ROUND, REQ, TOKEN, { fetch })],
+      ['deleteRound', (fetch) => c.deleteRound(BASE, EVT, ROUND, TOKEN, { fetch })],
+      ['listChannelLayouts', (fetch) => c.listChannelLayouts(BASE, EVT, { fetch })],
+      ['createChannelLayout', (fetch) => c.createChannelLayout(BASE, EVT, REQ, TOKEN, { fetch })],
+      [
+        'updateChannelLayout',
+        (fetch) => c.updateChannelLayout(BASE, EVT, LAYOUT, REQ, TOKEN, { fetch })
+      ],
+      [
+        'deleteChannelLayout',
+        (fetch) => c.deleteChannelLayout(BASE, EVT, LAYOUT, TOKEN, { fetch })
+      ],
+      ['listHeats', (fetch) => c.listHeats(BASE, EVT, { fetch })],
+      ['listRoundIssues', (fetch) => c.listRoundIssues(BASE, EVT, { fetch })],
+      ['eventAudit', (fetch) => c.eventAudit(BASE, EVT, { fetch })],
+      ['roundRanking', (fetch) => c.roundRanking(BASE, EVT, ROUND, { fetch })],
+      ['roundStandings', (fetch) => c.roundStandings(BASE, EVT, ROUND, { fetch })],
+      ['classStandings', (fetch) => c.classStandings(BASE, EVT, CLASS, { fetch })]
+    ];
+
+    for (const [name, run] of probes) {
+      const err = await caught(() => run(failing(400)));
+      const surfaced = `${name}: ${err.message}`;
+      for (const id of RAW_IDS) expect(surfaced).not.toContain(id);
+      // No method/URL either — a route line is what carried the ids in the first place.
+      expect(surfaced).not.toMatch(/\//);
+      expect(surfaced).not.toMatch(/\b(GET|PUT|POST|DELETE)\b/);
+      // Still honest about the status, and still branchable on it.
+      expect(surfaced).toContain('HTTP 400');
+      expect(err.status).toBe(400);
+    }
+  });
+
+  it("prefers the Director's sentence over the fallback on every call site", async () => {
+    const c = await import('./client.js');
+    const SAID = 'Track RH is a simulated timer and has no signal to read';
+    const fetch = failing(400, { code: 'BadRequest', message: SAID });
+    const messages = await Promise.all(
+      [
+        () => c.timerSignal(BASE, TIMER, { fetch }),
+        () => c.restartTimer(BASE, TIMER, TOKEN, { fetch }),
+        () => c.deleteRound(BASE, EVT, ROUND, TOKEN, { fetch }),
+        () => c.setEventRoster(BASE, EVT, [PILOT], TOKEN, { fetch }),
+        () => c.roundRanking(BASE, EVT, ROUND, { fetch })
+      ].map(async (run) => (await caught(run)).message)
+    );
+    expect(messages).toEqual([SAID, SAID, SAID, SAID, SAID]);
+  });
+
+  it('carries the status structurally so auth detection never reads the words', async () => {
+    const { deleteEvent, isRequestFailure } = await import('./client.js');
+    // A 401 whose message says nothing about 401 — the console's `isAuthFailure` must still fire.
+    const err = await caught(() =>
+      deleteEvent(BASE, EVT, undefined, {
+        fetch: failing(401, { code: 'Unauthorized', message: 'Control on this Director is gated.' })
+      })
+    );
+    expect(err.message).toBe('Control on this Director is gated.');
+    expect(err.message).not.toContain('401');
+    expect(isRequestFailure(err) && err.status === 401).toBe(true);
+    expect((err as { code?: string }).code).toBe('Unauthorized');
+  });
+});

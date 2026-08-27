@@ -195,15 +195,14 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   //
   // So the step is inverted into coverage of the refusal itself: the round survives the click.
   //
-  // The toast it raises is NOT asserted here, and that is deliberate. It currently reads
-  // "DELETE /events/{eventId}/rounds/{roundId} failed: HTTP 400" — it throws away the explanation
-  // the server wrote ("this round has a heat in progress (Practice Heat) — finalize or reset it
-  // before removing the round", which names the heat by its friendly name precisely so it can be
-  // shown) and puts two raw ids on screen instead, which `CLAUDE.md` forbids. Pinning that text
-  // would document the leak as expected, exactly the thing this backlog is not allowed to do. It is
-  // not repaired here either: every `!resp.ok` throw in `packages/protocol-client/src/client.ts`
-  // is built this way, so the fix is one shared "read the server's message" helper across ~40 call
-  // sites — its own change, reported rather than smuggled in.
+  // The toast it raises is NOT asserted here, and that is deliberate. It used to read
+  // "DELETE /events/{eventId}/rounds/{roundId} failed: HTTP 400" — two raw ids on screen with the
+  // server's explanation discarded — and #433 fixed that at the source: every `!resp.ok` in
+  // `packages/protocol-client/src/client.ts` now goes through one helper that throws the
+  // Director's typed refusal verbatim ("this round has a heat in progress (Practice Heat) —
+  // finalize or reset it before removing the round"), so the wording on screen is the Director's,
+  // not the client's. Pinning it here would move ownership of that sentence into this spec; the
+  // client's own tests assert it is surfaced verbatim and carries no raw id.
   await openTab(page, 'Rounds & Heats');
   const cleanupRow = page.getByRole('list').getByRole('listitem').filter({ hasText: LABEL });
   await cleanupRow.getByRole('button', { name: 'Remove' }).click();

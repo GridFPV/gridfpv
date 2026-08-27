@@ -42,6 +42,15 @@ const EVENT_A: EventMeta = {
   classes: []
 };
 
+/**
+ * A protocol-client rejection as it now arrives (#433): the Director's own sentence for the RD,
+ * with the HTTP status carried **structurally** rather than spelled into the words. Auth detection
+ * keys on that number, so these fixtures must too — a test that puts "401" in the message and
+ * expects a prompt would be asserting the bug #433 removed.
+ */
+const refusal = (status: number, message: string): Error =>
+  Object.assign(new Error(message), { status });
+
 /** A mock ProtocolClient that lets a test push state into the session. */
 function mockConnect(initial: ProtocolState) {
   let listener: StateListener | undefined;
@@ -295,7 +304,7 @@ describe('Session', () => {
     let calls = 0;
     const createEventImpl = vi.fn(async () => {
       calls += 1;
-      if (calls === 1) throw new Error('POST /events failed: HTTP 401');
+      if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
       return EVENT_A;
     });
     const tokenProvider = vi.fn(async () => 'lazy-tok');
@@ -352,7 +361,7 @@ describe('Session', () => {
     let calls = 0;
     const deleteEventImpl = vi.fn(async () => {
       calls += 1;
-      if (calls === 1) throw new Error('DELETE /events/evt-a failed: HTTP 401');
+      if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
       return undefined as unknown as void;
     });
     const tokenProvider = vi.fn(async () => 'lazy-tok');
@@ -367,11 +376,14 @@ describe('Session', () => {
 
   it('deleteEvent re-throws a non-auth (400/404) failure for the UI to surface', async () => {
     const deleteEventImpl = vi.fn(async () => {
-      throw new Error('DELETE /events/practice failed: HTTP 400');
+      throw refusal(400, 'Practice is in progress — finish it before deleting the event.');
     });
     const session = new Session({ deleteEventImpl, autoRestore: false });
     session.setToken('tok');
-    await expect(session.deleteEvent('practice-ab12')).rejects.toThrow(/400/);
+    // Surfaced verbatim: the Director's sentence, not a route line (#433).
+    await expect(session.deleteEvent('practice-ab12')).rejects.toThrow(
+      /Practice is in progress — finish it before deleting the event\./
+    );
   });
 
   // ── #90: the active event is Director state — resume across reloads ──────────────────
@@ -475,7 +487,7 @@ describe('Session', () => {
     let calls = 0;
     const setActiveEventImpl = vi.fn(async () => {
       calls += 1;
-      if (calls === 1) throw new Error('PUT /active-event failed: HTTP 401');
+      if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
       return EVENT_A;
     });
     const tokenProvider = vi.fn(async () => 'lazy-tok');
@@ -627,7 +639,7 @@ describe('Session', () => {
       };
       const createTimerImpl = vi
         .fn()
-        .mockRejectedValueOnce(new Error('POST /timers failed: HTTP 401'))
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
         .mockResolvedValueOnce(created);
       const session = timerSession({ createTimerImpl });
       session.setTokenProvider(async () => 'tok');
@@ -642,7 +654,9 @@ describe('Session', () => {
     });
 
     it('createTimer resolves undefined when the auth prompt is cancelled', async () => {
-      const createTimerImpl = vi.fn().mockRejectedValue(new Error('POST /timers failed: HTTP 401'));
+      const createTimerImpl = vi
+        .fn()
+        .mockRejectedValue(refusal(401, 'Control on this Director needs a token.'));
       const session = timerSession({ createTimerImpl });
       session.setTokenProvider(async () => undefined);
       const result = await session.createTimer({
@@ -656,9 +670,11 @@ describe('Session', () => {
     it('deleteTimer re-throws a non-auth (400) failure for the UI to surface', async () => {
       const deleteTimerImpl = vi
         .fn()
-        .mockRejectedValue(new Error('DELETE /timers/mock failed: HTTP 400'));
+        .mockRejectedValue(refusal(400, 'The built-in Mock timer cannot be deleted.'));
       const session = timerSession({ deleteTimerImpl });
-      await expect(session.deleteTimer('mock')).rejects.toThrow(/400/);
+      await expect(session.deleteTimer('mock')).rejects.toThrow(
+        /The built-in Mock timer cannot be deleted\./
+      );
     });
 
     it('setEventTimers is a no-op (undefined) with no event selected', async () => {
@@ -818,7 +834,7 @@ describe('Session', () => {
       const updated: EventMeta = { ...PRACTICE, timers: ['mock', 'rh-1'], primary_timer: 'rh-1' };
       const setPrimaryTimerImpl = vi
         .fn()
-        .mockRejectedValueOnce(new Error('PUT /events/practice/primary-timer failed: HTTP 401'))
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
         .mockResolvedValueOnce(updated);
       const session = timerSession({ setPrimaryTimerImpl });
       session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'] });
@@ -873,7 +889,7 @@ describe('Session', () => {
     it('createPilot prompts then retries once on an auth (401) failure', async () => {
       const createPilotImpl = vi
         .fn()
-        .mockRejectedValueOnce(new Error('POST /pilots failed: HTTP 401'))
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
         .mockResolvedValueOnce(ACE);
       const session = pilotSession({ createPilotImpl });
       session.setTokenProvider(async () => 'tok');
@@ -884,7 +900,9 @@ describe('Session', () => {
     });
 
     it('createPilot resolves undefined when the auth prompt is cancelled', async () => {
-      const createPilotImpl = vi.fn().mockRejectedValue(new Error('POST /pilots failed: HTTP 401'));
+      const createPilotImpl = vi
+        .fn()
+        .mockRejectedValue(refusal(401, 'Control on this Director needs a token.'));
       const session = pilotSession({ createPilotImpl });
       session.setTokenProvider(async () => undefined);
       const result = await session.createPilot({ callsign: 'X', vtx_types: [] });
@@ -910,9 +928,9 @@ describe('Session', () => {
       expect(deletePilotImpl).toHaveBeenCalledWith('http://d.local', 'p1', undefined);
 
       const failing = pilotSession({
-        deletePilotImpl: vi.fn().mockRejectedValue(new Error('DELETE /pilots/p1 failed: HTTP 404'))
+        deletePilotImpl: vi.fn().mockRejectedValue(refusal(404, 'That pilot no longer exists.'))
       });
-      await expect(failing.deletePilot('p1')).rejects.toThrow(/404/);
+      await expect(failing.deletePilot('p1')).rejects.toThrow(/That pilot no longer exists\./);
     });
   });
 
@@ -954,7 +972,7 @@ describe('Session', () => {
     it('createClass prompts then retries once on an auth (401) failure', async () => {
       const createClassImpl = vi
         .fn()
-        .mockRejectedValueOnce(new Error('POST /classes failed: HTTP 401'))
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
         .mockResolvedValueOnce(OPEN);
       const session = classSession({ createClassImpl });
       session.setTokenProvider(async () => 'tok');
@@ -981,9 +999,9 @@ describe('Session', () => {
       expect(deleteClassImpl).toHaveBeenCalledWith('http://d.local', 'c1', undefined);
 
       const failing = classSession({
-        deleteClassImpl: vi.fn().mockRejectedValue(new Error('DELETE /classes/c1 failed: HTTP 404'))
+        deleteClassImpl: vi.fn().mockRejectedValue(refusal(404, 'That class no longer exists.'))
       });
-      await expect(failing.deleteClass('c1')).rejects.toThrow(/404/);
+      await expect(failing.deleteClass('c1')).rejects.toThrow(/That class no longer exists\./);
     });
 
     it('setEventClasses is a no-op (undefined) with no event selected', async () => {
@@ -1084,17 +1102,19 @@ describe('Session', () => {
 
   // ── Auth-failure detection matches the real HTTP status, never digits inside a message ──────
   describe('auth-failure status matching', () => {
-    it('does NOT prompt on a 500 whose message merely contains "401" (an event id)', async () => {
-      // The status is 500 — "401" appears only inside the event id. The old whole-message
-      // \b(401|403)\b scan matched it and opened the token dialog on a plain server error.
+    it('does NOT prompt on a 500 whose message merely contains "403"', async () => {
+      // The status is 500 — "403" appears only inside the Director's prose. The old whole-message
+      // \b(401|403)\b scan matched it and opened the token dialog on a plain server error, and
+      // matching a `failed: HTTP <status>` suffix would tie auth detection to wording the Director
+      // now writes itself (#433). Only the structural status counts.
       const deleteEventImpl = vi.fn(async () => {
-        throw new Error('DELETE /events/evt-401 failed: HTTP 500');
+        throw refusal(500, 'The event could not be deleted — 403 laps were still being written.');
       });
       const tokenProvider = vi.fn(async () => 'lazy-tok');
       const session = new Session({ deleteEventImpl, autoRestore: false });
       session.setTokenProvider(tokenProvider);
 
-      await expect(session.deleteEvent('evt-401')).rejects.toThrow(/500/);
+      await expect(session.deleteEvent('evt-401')).rejects.toThrow(/403 laps/);
       expect(tokenProvider).not.toHaveBeenCalled();
       expect(deleteEventImpl).toHaveBeenCalledOnce();
     });
@@ -1103,7 +1123,7 @@ describe('Session', () => {
       let calls = 0;
       const deleteEventImpl = vi.fn(async () => {
         calls += 1;
-        if (calls === 1) throw Object.assign(new Error('Forbidden'), { status: 403 });
+        if (calls === 1) throw refusal(403, 'Control on this Director needs a token.');
         return undefined as unknown as void;
       });
       const tokenProvider = vi.fn(async () => 'lazy-tok');

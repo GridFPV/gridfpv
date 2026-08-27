@@ -183,6 +183,75 @@ const isProtocolError = (v: unknown): v is ProtocolError =>
   'message' in v &&
   typeof (v as ProtocolError).message === 'string';
 
+// ── Request failures: the Director's own words, and the status carried structurally ───────────
+//
+// Every non-2xx response in this file rejects through `requestFailed` (#433). Before it, each of
+// ~40 call sites formatted its own `METHOD /events/{id}/rounds/{id} failed: HTTP 400` line and
+// threw the Director's typed body away — which put two raw ids on screen (the repo display rule
+// forbids exactly that) *and* discarded the one sentence worth showing.
+
+/**
+ * The rejection every non-2xx response in this client produces (#433).
+ *
+ * `status` is carried **structurally**, not spelled into the message, so a caller branches on the
+ * number (`isAuthFailure` in the console keys on 401/403) while the *words* stay free to be the
+ * Director's own sentence. Matching a status out of prose was how `evt-401` in a 500's message
+ * used to open the token dialog.
+ */
+export interface RequestFailure extends Error {
+  /** The HTTP status the Director answered with. */
+  status: number;
+  /** The Director's branchable {@link ProtocolError} category, when it sent a typed body. */
+  code?: ProtocolError['code'];
+}
+
+/** Whether a thrown value is a {@link RequestFailure} — i.e. it carries an HTTP `status`. */
+export function isRequestFailure(e: unknown): e is RequestFailure {
+  return e instanceof Error && typeof (e as Partial<RequestFailure>).status === 'number';
+}
+
+/** The `message` of a typed error body, trimmed, or `''` when the body carries no usable one. */
+function bodyMessage(v: unknown): string {
+  if (typeof v !== 'object' || v === null || !('message' in v)) return '';
+  const m = (v as { message: unknown }).message;
+  return typeof m === 'string' ? m.trim() : '';
+}
+
+/**
+ * Build the error a failed request rejects with: **the Director's typed refusal, verbatim.**
+ *
+ * The Director's `ProtocolError` body is already phrased for the RD and names heats, timers, nodes
+ * and channels by their **friendly** names — deliberately, precisely so it can be shown:
+ *
+ * > this round has a heat in progress (Practice Heat) — finalize or reset it before removing the
+ * > round
+ *
+ * That is the message the RD can act on, so it is thrown as-is. Wrapping it in a route line would
+ * both bury it and put the raw ids from the path in front of a user, which the repo display rule
+ * forbids.
+ *
+ * Only a response with **no usable body** falls back, and the fallback says what was *attempted*
+ * in words — `attempted` is an infinitive phrase like `'remove the round'` — never the method and
+ * URL. A bodyless 500 is a poor message, but an honest one; it must never be a silent one.
+ *
+ * The status is attached to the error rather than spelled into it (see {@link RequestFailure}).
+ */
+async function requestFailed(resp: Response, attempted: string): Promise<RequestFailure> {
+  let body: unknown;
+  try {
+    body = await resp.json();
+  } catch {
+    // No body, a truncated one, or an HTML error page from something in front of the Director.
+  }
+  const detail = bodyMessage(body);
+  const err = new Error(
+    detail || `The Director could not ${attempted} (HTTP ${resp.status}).`
+  ) as RequestFailure;
+  err.status = resp.status;
+  if (isProtocolError(body)) err.code = body.code;
+  return err;
+}
+
 const isChangeEnvelope = (v: unknown): v is ChangeEnvelope =>
   typeof v === 'object' && v !== null && 'sequence' in v && 'projection' in v && 'change' in v;
 
@@ -244,7 +313,7 @@ export async function listEvents(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/events`, { headers });
-  if (!resp.ok) throw new Error(`GET /events failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'list the events');
   return (await resp.json()) as EventMeta[];
 }
 
@@ -255,7 +324,7 @@ export async function listEvents(
  * a token lazily and retries. The body carries the display `name` plus any optional descriptive
  * `fields` (`date`/`location`/`description`/`organizer`); the id is auto-generated server-side.
  * Resolves to the new event's {@link EventMeta}, or rejects on a non-2xx / transport failure
- * (the HTTP status is in the error message so the caller can branch on 401/403).
+ * (a {@link RequestFailure} carrying the status, so the caller can branch on 401/403).
  */
 export async function createEvent(
   baseUrl: string,
@@ -275,7 +344,7 @@ export async function createEvent(
     headers,
     body: JSON.stringify(body)
   });
-  if (!resp.ok) throw new Error(`POST /events failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'create the event');
   return (await resp.json()) as EventMeta;
 }
 
@@ -301,7 +370,7 @@ export async function deleteEvent(
     method: 'DELETE',
     headers
   });
-  if (!resp.ok) throw new Error(`DELETE /events/${id} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'delete the event');
 }
 
 /**
@@ -319,7 +388,7 @@ export async function getActiveEvent(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/active-event`, { headers });
-  if (!resp.ok) throw new Error(`GET /active-event failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'read the active event');
   return (await resp.json()) as ActiveEvent;
 }
 
@@ -329,7 +398,7 @@ export async function getActiveEvent(
  * answers **401/403** and the caller obtains a token and retries). The body carries the event
  * `id`; the server validates it names a known event (else **404**) and persists the selection so
  * it survives a Director restart. Resolves to the now-active event's {@link EventMeta}, or rejects
- * on a non-2xx / transport failure (the HTTP status is in the error message for branching).
+ * on a non-2xx / transport failure (a {@link RequestFailure} carrying the status for branching).
  */
 export async function setActiveEvent(
   baseUrl: string,
@@ -348,7 +417,7 @@ export async function setActiveEvent(
     headers,
     body: JSON.stringify({ id })
   });
-  if (!resp.ok) throw new Error(`PUT /active-event failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'set the active event');
   return (await resp.json()) as EventMeta;
 }
 
@@ -367,7 +436,7 @@ export async function listTimers(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers`, { headers });
-  if (!resp.ok) throw new Error(`GET /timers failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'list the timers');
   return (await resp.json()) as Timer[];
 }
 
@@ -376,7 +445,7 @@ export async function listTimers(
  * accepts it tokenless; a gated one answers **401/403** and the caller obtains a token and
  * retries). The body carries the display `name` plus the {@link CreateTimerRequest['kind']} config
  * (a `Sim` or a reserved `Rotorhazard`); the id is auto-generated server-side. Resolves to the new
- * {@link Timer}, or rejects on a non-2xx / transport failure (the HTTP status is in the message).
+ * {@link Timer}, or rejects on a non-2xx / transport failure (a {@link RequestFailure}).
  */
 export async function createTimer(
   baseUrl: string,
@@ -395,7 +464,7 @@ export async function createTimer(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) throw new Error(`POST /timers failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'add the timer');
   return (await resp.json()) as Timer;
 }
 
@@ -423,7 +492,7 @@ export async function updateTimer(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) throw new Error(`PUT /timers/${id} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'save the timer');
   return (await resp.json()) as Timer;
 }
 
@@ -436,7 +505,7 @@ export async function updateTimer(
  *
  * The built-in **Mock has nothing to dial** and answers **400**; an unknown id answers **404**.
  * Resolves to the updated {@link Timer} (its `manual_connect` now `true`), or rejects on a
- * non-2xx / transport failure (the HTTP status is in the message for branching).
+ * non-2xx / transport failure (a {@link RequestFailure} carrying the status for branching).
  */
 export async function connectTimer(
   baseUrl: string,
@@ -473,8 +542,8 @@ export async function disconnectTimer(
  *
  * The Director **refuses** (a **400**) while a race is in progress on the timer — the message names
  * the heat — and for a Mock or a timer that is not connected; an unknown id answers **404**.
- * Resolves to the {@link Timer}, or rejects on a non-2xx / transport failure (the HTTP status is in
- * the message so callers can branch).
+ * Resolves to the {@link Timer}, or rejects on a non-2xx / transport failure (a
+ * {@link RequestFailure} whose message is the Director's own refusal).
  *
  * What follows a success is an **expected** drop → reconnect: RotorHazard re-executes, the timer
  * passes through `Disconnected`/`Error` for a few seconds, and the Director's reconnect re-probes
@@ -494,21 +563,7 @@ export async function restartTimer(
     method: 'POST',
     headers
   });
-  if (!resp.ok) {
-    // The Director's typed refusal body carries the reason (a heat in progress, a timer that isn't
-    // connected) already phrased for the RD, naming the heat and the timer by their FRIENDLY names.
-    // Throw that verbatim rather than wrapping it in a `POST /timers/{id}/…` line — the raw timer id
-    // must never reach a user (repo display rule). Only the no-body case falls back to the status.
-    const detail = await resp
-      .json()
-      .then((body: unknown) =>
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message: unknown }).message)
-          : ''
-      )
-      .catch(() => '');
-    throw new Error(detail || `The Director refused the restart (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'restart the timer');
   return (await resp.json()) as Timer;
 }
 
@@ -540,20 +595,7 @@ export async function timerSignal(
     headers,
     signal: options.signal
   });
-  if (!resp.ok) {
-    // The Director's refusal ("Track RH is a simulated timer and has no signal to read") is already
-    // phrased for the RD and names the timer by its FRIENDLY name — surface it rather than a
-    // `GET /timers/{id}/…` line carrying the raw id (repo display rule).
-    const detail = await resp
-      .json()
-      .then((body: unknown) =>
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message: unknown }).message)
-          : ''
-      )
-      .catch(() => '');
-    throw new Error(detail || `The timer's signal feed answered HTTP ${resp.status}.`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'read the timer signal');
   return (await resp.json()) as TimerSignal;
 }
 
@@ -578,8 +620,7 @@ export async function stopTimerSignal(
     `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/signal/stop`,
     { method: 'POST', headers }
   );
-  if (!resp.ok)
-    throw new Error(`The Director could not stop the signal feed (HTTP ${resp.status}).`);
+  if (!resp.ok) throw await requestFailed(resp, 'stop the signal feed');
 }
 
 /**
@@ -615,22 +656,7 @@ export async function setCalibration(
     `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/calibration`,
     { method: 'POST', headers, body: JSON.stringify(request) }
   );
-  if (!resp.ok) {
-    // Same rule as `restartTimer`: the Director's typed refusal is already phrased for the RD and
-    // names the timer and the heat by their FRIENDLY names ("a heat is running on Track RH — finish
-    // it before tuning"). Throw it verbatim rather than wrapping it in a `POST /timers/{id}/…`
-    // line, because a raw timer id must never reach a user (repo display rule). Only the no-body
-    // case falls back to the status.
-    const detail = await resp
-      .json()
-      .then((body: unknown) =>
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message: unknown }).message)
-          : ''
-      )
-      .catch(() => '');
-    throw new Error(detail || `The Director refused the change (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'save the calibration');
 }
 
 /**
@@ -676,20 +702,7 @@ export async function captureLevel(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) {
-    // Same rule as `setCalibration`: the Director's typed refusal is already phrased for the RD and
-    // names the timer and the node by their FRIENDLY names. Throw it verbatim — a raw timer id must
-    // never reach a user (repo display rule).
-    const detail = await resp
-      .json()
-      .then((body: unknown) =>
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message: unknown }).message)
-          : ''
-      )
-      .catch(() => '');
-    throw new Error(detail || `The Director refused the capture (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'start the capture');
   return (await resp.json()) as CaptureDispatch;
 }
 
@@ -717,17 +730,7 @@ export async function timerNodes(
     headers,
     signal: options.signal
   });
-  if (!resp.ok) {
-    const detail = await resp
-      .json()
-      .then((body: unknown) =>
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message: unknown }).message)
-          : ''
-      )
-      .catch(() => '');
-    throw new Error(detail || `The timer's node list answered HTTP ${resp.status}.`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'read the timer nodes');
   return (await resp.json()) as TimerNodes;
 }
 
@@ -757,17 +760,7 @@ export async function setTimerNodes(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) {
-    const detail = await resp
-      .json()
-      .then((body: unknown) =>
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message: unknown }).message)
-          : ''
-      )
-      .catch(() => '');
-    throw new Error(detail || `The Director refused the node change (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'save the node change');
   return (await resp.json()) as TimerNodes;
 }
 
@@ -813,20 +806,7 @@ export async function setNodeChannel(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) {
-    // The Director's refusal already names the timer, the node and the channel by their FRIENDLY
-    // names ("Node 3 is disabled on Track RH"), so it is thrown verbatim — wrapping it in a
-    // `POST /timers/{id}/…` line would put a raw id in front of a user (repo display rule).
-    const detail = await resp
-      .json()
-      .then((body: unknown) =>
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message: unknown }).message)
-          : ''
-      )
-      .catch(() => '');
-    throw new Error(detail || `The Director refused the channel change (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'set the node channel');
   return (await resp.json()) as ChannelDispatch;
 }
 
@@ -845,29 +825,18 @@ async function setTimerConnection(
     method: 'POST',
     headers
   });
-  if (!resp.ok) {
-    // Prefer the Director's typed refusal: it is already phrased for the RD and names the timer by
-    // its FRIENDLY name. The old message interpolated the raw timer id, and `TimerManager`'s catch
-    // re-raises the string verbatim into a toast for any non-400 — putting a raw id on screen, which
-    // the repo display rule forbids. Same handling `restartTimer` above already does.
-    const detail = await resp
-      .json()
-      .then((body: unknown) =>
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message: unknown }).message)
-          : ''
-      )
-      .catch(() => '');
-    const verb = action === 'connect' ? 'connect to' : 'disconnect from';
-    throw new Error(detail || `The Director could not ${verb} that timer (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok)
+    throw await requestFailed(
+      resp,
+      action === 'connect' ? 'connect to that timer' : 'disconnect from that timer'
+    );
   return (await resp.json()) as Timer;
 }
 
 /**
  * Delete a timer (`DELETE /timers/{id}`) — issue #73. RD-gated. The built-in **Mock cannot be
  * deleted** (a **400**); an unknown id answers **404**. Resolves once the delete succeeds, or
- * rejects on a non-2xx / transport failure (the HTTP status is in the message for branching).
+ * rejects on a non-2xx / transport failure (a {@link RequestFailure} carrying the status).
  */
 export async function deleteTimer(
   baseUrl: string,
@@ -882,7 +851,7 @@ export async function deleteTimer(
     method: 'DELETE',
     headers
   });
-  if (!resp.ok) throw new Error(`DELETE /timers/${id} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'delete the timer');
 }
 
 /**
@@ -909,7 +878,7 @@ export async function setEventTimers(
     headers,
     body: JSON.stringify({ ids })
   });
-  if (!resp.ok) throw new Error(`PUT /events/${eventId}/timers failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'save the event timers');
   return (await resp.json()) as EventMeta;
 }
 
@@ -939,7 +908,7 @@ export async function setPrimaryTimer(
     headers,
     body: JSON.stringify({ id })
   });
-  if (!resp.ok) throw new Error(`PUT /events/${eventId}/primary-timer failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'set the primary timer');
   return (await resp.json()) as EventMeta;
 }
 
@@ -958,7 +927,7 @@ export async function listPilots(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots`, { headers });
-  if (!resp.ok) throw new Error(`GET /pilots failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'list the pilots');
   return (await resp.json()) as Pilot[];
 }
 
@@ -985,7 +954,7 @@ export async function createPilot(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) throw new Error(`POST /pilots failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'add the pilot');
   return (await resp.json()) as Pilot;
 }
 
@@ -1013,7 +982,7 @@ export async function updatePilot(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) throw new Error(`PUT /pilots/${id} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'save the pilot');
   return (await resp.json()) as Pilot;
 }
 
@@ -1035,7 +1004,7 @@ export async function deletePilot(
     method: 'DELETE',
     headers
   });
-  if (!resp.ok) throw new Error(`DELETE /pilots/${id} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'delete the pilot');
 }
 
 /**
@@ -1063,7 +1032,7 @@ export async function setEventRoster(
     headers,
     body: JSON.stringify({ pilot_ids: pilotIds })
   });
-  if (!resp.ok) throw new Error(`PUT /events/${eventId}/roster failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'save the roster');
   return (await resp.json()) as EventMeta;
 }
 
@@ -1086,8 +1055,7 @@ export async function addToRoster(
     `${trimSlash(baseUrl)}${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
     { method: 'POST', headers }
   );
-  if (!resp.ok)
-    throw new Error(`POST /events/${eventId}/roster/${pilotId} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'add that pilot to the roster');
   return (await resp.json()) as EventMeta;
 }
 
@@ -1110,8 +1078,7 @@ export async function removeFromRoster(
     `${trimSlash(baseUrl)}${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
     { method: 'DELETE', headers }
   );
-  if (!resp.ok)
-    throw new Error(`DELETE /events/${eventId}/roster/${pilotId} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'remove that pilot from the roster');
   return (await resp.json()) as EventMeta;
 }
 
@@ -1129,7 +1096,7 @@ export async function listClasses(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes`, { headers });
-  if (!resp.ok) throw new Error(`GET /classes failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'list the classes');
   return (await resp.json()) as Class[];
 }
 
@@ -1156,7 +1123,7 @@ export async function createClass(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) throw new Error(`POST /classes failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'add the class');
   return (await resp.json()) as Class;
 }
 
@@ -1185,7 +1152,7 @@ export async function updateClass(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) throw new Error(`PUT /classes/${id} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'save the class');
   return (await resp.json()) as Class;
 }
 
@@ -1208,7 +1175,7 @@ export async function deleteClass(
     method: 'DELETE',
     headers
   });
-  if (!resp.ok) throw new Error(`DELETE /classes/${id} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'delete the class');
 }
 
 /**
@@ -1239,7 +1206,7 @@ export async function setClassHidden(
     headers,
     body: JSON.stringify(body)
   });
-  if (!resp.ok) throw new Error(`PUT /classes/${id}/hidden failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'change the class visibility');
   return (await resp.json()) as Class;
 }
 
@@ -1268,7 +1235,7 @@ export async function setEventClasses(
     headers,
     body: JSON.stringify({ ids })
   });
-  if (!resp.ok) throw new Error(`PUT /events/${eventId}/classes failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'save the event classes');
   return (await resp.json()) as EventMeta;
 }
 
@@ -1309,10 +1276,7 @@ export async function setClassMembership(
       body: JSON.stringify({ pilots: members })
     }
   );
-  if (!resp.ok)
-    throw new Error(
-      `PUT /events/${eventId}/classes/${classId}/membership failed: HTTP ${resp.status}`
-    );
+  if (!resp.ok) throw await requestFailed(resp, 'save the class membership');
   return (await resp.json()) as EventMeta;
 }
 
@@ -1331,7 +1295,7 @@ export async function listFormatSchemas(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/formats`, { headers });
-  if (!resp.ok) throw new Error(`GET /formats failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'list the formats');
   return (await resp.json()) as FormatSchema[];
 }
 
@@ -1364,7 +1328,7 @@ export async function listChannels(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/channels`, { headers });
-  if (!resp.ok) throw new Error(`GET /channels failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'list the channels');
   return (await resp.json()) as ChannelCatalogEntry[];
 }
 
@@ -1393,7 +1357,7 @@ export async function rateChannels(
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const query = encodeURIComponent(channels.join(','));
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/channels/imd?channels=${query}`, { headers });
-  if (!resp.ok) throw new Error(`GET /channels/imd failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'rate those channels');
   return (await resp.json()) as ImdReading;
 }
 
@@ -1422,7 +1386,7 @@ export async function createRound(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) throw new Error(`POST /events/${eventId}/rounds failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'add the round');
   return (await resp.json()) as RoundDef;
 }
 
@@ -1455,8 +1419,7 @@ export async function updateRound(
       body: JSON.stringify(request)
     }
   );
-  if (!resp.ok)
-    throw new Error(`PUT /events/${eventId}/rounds/${roundId} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'save the round');
   return (await resp.json()) as RoundDef;
 }
 
@@ -1482,8 +1445,7 @@ export async function deleteRound(
       headers
     }
   );
-  if (!resp.ok)
-    throw new Error(`DELETE /events/${eventId}/rounds/${roundId} failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'remove the round');
   return (await resp.json()) as EventMeta;
 }
 
@@ -1499,26 +1461,6 @@ export async function deleteRound(
 // set. The console renders what the Director computed rather than re-deriving the rule.
 
 /**
- * The Director's **typed refusal message**, already phrased for the RD, or `''` when there is no
- * such body (#117 S2).
- *
- * A layout refusal is the whole point of validating one: *"Node 2 and Node 3 are both on Raceband R1
- * in this layout"* is what the RD needs, and `HTTP 400` is not. It names nodes, channels and the
- * timer by their friendly names (the repo display rule) — so it is thrown verbatim rather than
- * wrapped in a route line carrying a raw event id.
- */
-async function directorRefusal(resp: Response): Promise<string> {
-  return resp
-    .json()
-    .then((body: unknown) =>
-      typeof body === 'object' && body !== null && 'message' in body
-        ? String((body as { message: unknown }).message)
-        : ''
-    )
-    .catch(() => '');
-}
-
-/**
  * List an event's **channel layouts** (`GET /events/{id}/layouts`) — #117 S2. A read (open, no token):
  * the layouts in definition order plus the advisory `overlaps` between them. Resolves the
  * {@link ChannelLayouts} view, or rejects on a non-2xx / transport failure; an unknown event is 404.
@@ -1532,7 +1474,7 @@ export async function listChannelLayouts(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts`, { headers });
-  if (!resp.ok) throw new Error(`GET /events/${eventId}/layouts failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'list the channel layouts');
   return (await resp.json()) as ChannelLayouts;
 }
 
@@ -1566,10 +1508,7 @@ export async function createChannelLayout(
     headers,
     body: JSON.stringify(request)
   });
-  if (!resp.ok) {
-    const detail = await directorRefusal(resp);
-    throw new Error(detail || `The Director refused the channel layout (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'add the channel layout');
   return (await resp.json()) as ChannelLayouts;
 }
 
@@ -1598,10 +1537,7 @@ export async function updateChannelLayout(
     `${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
     { method: 'PUT', headers, body: JSON.stringify(request) }
   );
-  if (!resp.ok) {
-    const detail = await directorRefusal(resp);
-    throw new Error(detail || `The Director refused the channel layout (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'save the channel layout');
   return (await resp.json()) as ChannelLayouts;
 }
 
@@ -1624,10 +1560,7 @@ export async function deleteChannelLayout(
     `${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
     { method: 'DELETE', headers }
   );
-  if (!resp.ok) {
-    const detail = await directorRefusal(resp);
-    throw new Error(detail || `The Director refused the deletion (HTTP ${resp.status}).`);
-  }
+  if (!resp.ok) throw await requestFailed(resp, 'delete the channel layout');
   return (await resp.json()) as ChannelLayouts;
 }
 
@@ -1647,7 +1580,7 @@ export async function listHeats(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/heats`, { headers });
-  if (!resp.ok) throw new Error(`GET /events/${eventId}/heats failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'list the heats');
   return (await resp.json()) as HeatSummary[];
 }
 
@@ -1677,7 +1610,7 @@ export async function listRoundIssues(
   const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/round-issues`, {
     headers
   });
-  if (!resp.ok) throw new Error(`GET /events/${eventId}/round-issues failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'check the rounds for issues');
   return (await resp.json()) as RoundIssue[];
 }
 
@@ -1697,7 +1630,7 @@ export async function eventAudit(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/audit`, { headers });
-  if (!resp.ok) throw new Error(`GET /events/${eventId}/audit failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'read the event audit log');
   return (await resp.json()) as EventAuditEntry[];
 }
 
@@ -1721,8 +1654,7 @@ export async function roundRanking(
     `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/ranking`,
     { headers }
   );
-  if (!resp.ok)
-    throw new Error(`GET /events/${eventId}/rounds/${roundId}/ranking failed: HTTP ${resp.status}`);
+  if (!resp.ok) throw await requestFailed(resp, 'read the round ranking');
   return (await resp.json()) as RankEntry[];
 }
 
@@ -1747,10 +1679,7 @@ export async function roundStandings(
     `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/standings`,
     { headers }
   );
-  if (!resp.ok)
-    throw new Error(
-      `GET /events/${eventId}/rounds/${roundId}/standings failed: HTTP ${resp.status}`
-    );
+  if (!resp.ok) throw await requestFailed(resp, 'read the round standings');
   return (await resp.json()) as RoundStanding[];
 }
 
@@ -1775,10 +1704,7 @@ export async function classStandings(
     `${trimSlash(baseUrl)}${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/standings`,
     { headers }
   );
-  if (!resp.ok)
-    throw new Error(
-      `GET /events/${eventId}/classes/${classId}/standings failed: HTTP ${resp.status}`
-    );
+  if (!resp.ok) throw await requestFailed(resp, 'read the class standings');
   return (await resp.json()) as ClassStandings;
 }
 

@@ -14,6 +14,7 @@
 
 export {
   connect,
+  isRequestFailure,
   listEvents,
   createEvent,
   deleteEvent,
@@ -69,6 +70,7 @@ export {
 } from './client.js';
 export type {
   ConnectOptions,
+  RequestFailure,
   ProtocolClient,
   ProtocolState,
   ConnectionStatus,
