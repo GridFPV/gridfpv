@@ -810,16 +810,13 @@ fn drive(
 /// - **SetChannel** (#413) would retune a receiver nobody asked to move — possibly on a different
 ///   physical RotorHazard now answering at that URL.
 ///
-/// With one queue (#457) this is one `clear()`, and there is no longer a fourth slot to forget:
-/// #436 was precisely that — three of four slots cleared, for as long as there were four.
+/// With one queue (#457) this is one `clear()`, and there is no longer a fourth slot to forget —
+/// which is what #436 was: the restart, calibration and capture slots were each cleared here and
+/// the channel one was not, so an RD's channel pick could survive a drop, a backoff and a
+/// reconnect and retune a receiver minutes later with no readback. There is no longer a place for
+/// that asymmetry to live.
 fn clear_writes_that_outlived_the_previous_connection(writes: &PendingWriteSlot) {
-    writes
-        .lock()
-        .expect("pending-writes lock poisoned")
-        // ⚠️ Bug #436, preserved verbatim by the #457 refactor so it stays a pure one: the channel
-        // write is the one kind that is NOT dropped here. Removing this filter is the whole of the
-        // #436 fix (see the ignored repro at the bottom of this file).
-        .retain(|w| matches!(w, PendingTimerWrite::SetChannel(_)));
+    writes.lock().expect("pending-writes lock poisoned").clear();
 }
 
 /// Classify the GridFPV-plugin handshake result (D16, S1) into the [`PluginPresence`] the timer
@@ -1764,7 +1761,6 @@ mod tests {
     /// future connection: a node retuned minutes later on a reconnect would move a receiver nobody
     /// asked to move".
     #[test]
-    #[ignore = "known bug #436: reconnect leaves the channel write queued — un-ignore with the fix"]
     fn a_reconnect_clears_the_channel_write_like_every_other_stale_one() {
         let writes: PendingWriteSlot = Arc::new(Mutex::new(every_kind_of_write()));
 
