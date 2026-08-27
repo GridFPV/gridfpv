@@ -1066,7 +1066,27 @@ struct OwnedFormat {
     error: Option<String>,
     /// One-shot latch: the fallback to mutating the RD's own format has already been announced on
     /// this connection. Announced once, not once per heat — a per-stage repeat would bury it.
+    ///
+    /// **Diagnostics only.** Both fallback announcements (the owned-format confirm giving up, and
+    /// [`RotorHazardConnection::neutralize_active_format`] engaging the legacy path) latch it, so an
+    /// operator hears "this timer is on the weaker guarantee" once and not twice. It says nothing
+    /// about whether the confirm has run — see [`gave_up`](Self::gave_up).
     announced: bool,
+    /// One-shot latch: the **owned-format confirm** has already run to its
+    /// [`FORMAT_ACK_TIMEOUT`] deadline (or a failed ack) on this connection, so later selections
+    /// must not block on it again.
+    ///
+    /// Separate from [`announced`](Self::announced) because they answer different questions, and
+    /// conflating them lost the confirm entirely (#453): `prepare_instant_start` running once
+    /// *before* the plugin's `gridfpv_hello_ack` was folded sees `advertised == false`, takes the
+    /// legacy path, and `neutralize_active_format` latches `announced`. When the hello then arrives
+    /// advertising [`CAP_OWNED_FORMAT`], every later `select_owned_format` read that same latch as
+    /// "already gave up" and returned `Ok(false)` **without ever waiting** — so the connection kept
+    /// racing on the RD's own format, with RotorHazard's stopping and counting decisions intact
+    /// (#403), even though the plugin would have confirmed within
+    /// [`FORMAT_ACK_TIMEOUT`]. Only `select_owned_format` sets this, and only after actually
+    /// waiting.
+    gave_up: bool,
 }
 
 /// Fold a plugin [`MinLapReport`] into GridFPV's [`MinLapRecord`]; returns whether the record was
@@ -1085,6 +1105,73 @@ fn fold_plugin_min_lap(slot: &Arc<Mutex<MinLapState>>, report: Option<&MinLapRep
     state.record.neutral = report.ok;
     state.record.error = report.error.clone();
     was_neutral
+}
+
+/// Re-ask `read` for RotorHazard's `(min_lap, behavior)` pair until one reads **neutral** or
+/// `expired` says the budget is spent; returns the neutral pair, else the last pair observed, else
+/// `None` if RH never answered at all (#444).
+///
+/// Split out from [`RotorHazardConnection::confirm_min_lap_neutral`] as the part that carries the
+/// judgement, so the frame sequence that caused the false alarm is a unit test rather than a
+/// docker leg. `expired` is checked **after** a read, so the confirm always gets at least one ask.
+fn confirm_neutral_by_reasking(
+    mut read: impl FnMut() -> Option<(i64, i64)>,
+    mut expired: impl FnMut() -> bool,
+) -> Option<(i64, i64)> {
+    // The last pair RH reported, so a genuine failure names the values rather than only timing
+    // out — and so a non-neutral last answer still reaches the record.
+    let mut last: Option<(i64, i64)> = None;
+    loop {
+        if let Some((secs, behavior)) = read() {
+            if min_lap_is_neutral(Some(secs), Some(behavior)) {
+                return Some((secs, behavior));
+            }
+            last = Some((secs, behavior));
+        }
+        if expired() {
+            return last;
+        }
+    }
+}
+
+/// What [`RotorHazardConnection::select_owned_format`] should do, given what this connection knows
+/// about the plugin's Grid-owned race format.
+///
+/// A named decision rather than a chain of early returns because getting it wrong is invisible:
+/// #453 was one latch read in place of another, and the symptom — a connection quietly racing on
+/// the RD's own format for a whole heat — looks identical to working correctly from every layer
+/// above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatSelection {
+    /// No plugin, or a plugin build predating the owned format: don't ask, take the legacy path.
+    Legacy,
+    /// Already confirmed selected on this connection: ask again (seating can change the effective
+    /// format) but don't block on the ack.
+    AlreadySelected,
+    /// The confirm has already run its full deadline once and lost: ask again so a recovered
+    /// plugin is picked up, but don't re-block every stage waiting for one that will not answer.
+    AlreadyGaveUp,
+    /// The first selection on this connection: ask, then wait for the ack before racing on it.
+    Confirm,
+}
+
+/// Decide from an [`OwnedFormat`] snapshot. Order matters: `advertised` gates everything (there is
+/// nothing to ask), then a confirmed selection short-circuits, then a spent confirm.
+///
+/// Note what is **not** consulted: [`OwnedFormat::announced`]. That latch is set by the legacy
+/// announcement too, so reading it here made one pre-hello `prepare_instant_start` suppress the
+/// confirm for the entire connection (#453). "Have we said this out loud yet" and "has the confirm
+/// run" are different questions.
+fn format_selection(owned: &OwnedFormat) -> FormatSelection {
+    if !owned.advertised {
+        FormatSelection::Legacy
+    } else if owned.selected {
+        FormatSelection::AlreadySelected
+    } else if owned.gave_up {
+        FormatSelection::AlreadyGaveUp
+    } else {
+        FormatSelection::Confirm
+    }
 }
 
 /// Announce, once, that a timer's own min-lap filter could not be neutralised (#407).
@@ -2234,27 +2321,26 @@ impl RotorHazardConnection {
     /// against an already-proven format. A later failure still surfaces — the `gridfpv_format_ack`
     /// handler announces any `ok: false` whenever it arrives.
     fn select_owned_format(&self) -> Result<bool, rust_socketio::Error> {
-        let (advertised, selected, gave_up) = {
+        let decision = {
             // Clear any stale failure — the plugin's load-time error, or a previous stage's — so
             // only an ack for the request we are about to send can end the confirm below. The
             // plugin retries the create on every request, so yesterday's reason is not evidence.
             let mut owned = self.owned_format.lock().expect("owned-format lock");
             owned.error = None;
-            (owned.advertised, owned.selected, owned.announced)
+            // Reads `gave_up`, NOT `announced` (#453) — see `format_selection`.
+            format_selection(&owned)
         };
         // No plugin, or a plugin build predating the owned format: the legacy path, announced once.
-        if !advertised {
+        if decision == FormatSelection::Legacy {
             return Ok(false);
         }
         self.client.emit("gridfpv_select_format", json!({}))?;
-        if selected {
-            return Ok(true);
-        }
-        // Already gave up (and said so) on this connection: the request above still went out, so a
-        // plugin that recovers is picked up at the next stage — but don't re-block every stage
-        // waiting for one that won't.
-        if gave_up {
-            return Ok(false);
+        match decision {
+            FormatSelection::AlreadySelected => return Ok(true),
+            // The request above still went out, so a plugin that recovers is picked up at the next
+            // stage — but don't re-block every stage waiting for one that will not answer.
+            FormatSelection::AlreadyGaveUp => return Ok(false),
+            FormatSelection::Legacy | FormatSelection::Confirm => {}
         }
         // First selection on this link: confirm before racing on it.
         let deadline = Instant::now() + FORMAT_ACK_TIMEOUT;
@@ -2275,6 +2361,9 @@ impl RotorHazardConnection {
             std::thread::sleep(Duration::from_millis(50));
         }
         let mut owned = self.owned_format.lock().expect("owned-format lock");
+        // The confirm has now actually run its course on this connection: don't block a later
+        // stage on it again. Latched here and nowhere else (#453).
+        owned.gave_up = true;
         if !owned.announced {
             owned.announced = true;
             let why = match owned.error.as_ref() {
@@ -2630,7 +2719,10 @@ impl RotorHazardConnection {
     ///    **re-asserts it at every stage** so a setting moved back between heats is caught. When
     ///    the handshake already carried a confirmed-neutral report there is nothing to do here.
     /// 2. **This socket**, otherwise: `load_data(min_lap)` to read, `set_min_lap` +
-    ///    `set_min_lap_behavior` to write, `load_data(min_lap)` again to confirm. Its limitation
+    ///    `set_min_lap_behavior` to write, then `load_data(min_lap)` **re-asked until the pair
+    ///    reads neutral or the readback budget runs out** — one ask accepts a half-written frame
+    ///    and raises a false alarm, see [`confirm_min_lap_neutral`](Self::confirm_min_lap_neutral)
+    ///    (#444). Its limitation
     ///    against the plugin route is that it runs **once, at handshake** — GridFPV has no reason
     ///    to re-read it per heat on a link where nothing reports the change, so a filter the RD
     ///    restores mid-event goes unnoticed until the next connect. That is the concrete cost of
@@ -2684,8 +2776,9 @@ impl RotorHazardConnection {
         }
 
         // Confirm by re-reading, never by trusting the write — the discipline `request_thresholds`
-        // applies to calibration, and for the same reason.
-        let confirmed = self.read_min_lap();
+        // applies to calibration, and for the same reason. Re-asked rather than asked once: see
+        // `confirm_min_lap_neutral` (#444).
+        let confirmed = self.confirm_min_lap_neutral();
         let neutral = match confirmed {
             Some((s, b)) => min_lap_is_neutral(Some(s), Some(b)),
             None => false,
@@ -2730,6 +2823,41 @@ impl RotorHazardConnection {
     /// until [`ensure_min_lap_neutral`](Self::ensure_min_lap_neutral) or a plugin handshake has run.
     pub fn min_lap_record(&self) -> MinLapRecord {
         self.min_lap.lock().expect("min-lap lock").record.clone()
+    }
+
+    /// Confirm the min-lap write by **re-asking** until RotorHazard reports a neutral pair or
+    /// [`MIN_LAP_READBACK_TIMEOUT`] elapses; returns the **last** pair observed (or `None` if it
+    /// never answered at all), so the failure line can say what RH actually reported.
+    ///
+    /// ## Why it asks repeatedly rather than once
+    ///
+    /// The same reason [`confirm_seating`](Self::confirm_seating) does, plus one specific to this
+    /// pair — and taking the first frame that lands was a false-alarm generator (#444):
+    ///
+    /// * **Neutralising takes two writes to two different stores.** `set_min_lap` writes the
+    ///   `MinLapSec` *database option*; `set_min_lap_behavior` writes `serverconfig`'s
+    ///   `TIMING`/`MinLapBehavior`. Between them the timer is legitimately half-written.
+    /// * **Each write re-broadcasts `min_lap` to us.** `server.py::on_set_min_lap` and
+    ///   `on_set_min_lap_behavior` both end in `RHUI.emit_min_lap(noself=True)` — and
+    ///   `RHUI.emit_min_lap` only ever branches on `nobroadcast`, so **`noself` is silently
+    ///   ignored** and the frame goes out on `self._socket.emit`, i.e. to every client *including
+    ///   the writer*. Verified identical on v4.3.0 and v4.4.0. So the first write's broadcast
+    ///   carries `(0, <old behavior>)` — not neutral — and is indistinguishable, at the socket,
+    ///   from an answer to our `load_data`.
+    /// * **Every event gets its own greenlet.** RH builds `SocketIO(...)` without
+    ///   `async_handlers=False` on both versions, so a `load_data(min_lap)` can be served from a
+    ///   pre-commit read while the writes ahead of it are still landing.
+    ///
+    /// Taking the first frame therefore latched `record.neutral = false` for the whole connection —
+    /// the socket route never re-checks — and told the RD the timer's min-lap filter could not be
+    /// neutralised when both writes had in fact landed. Re-asking is free: `load_data` is a pure
+    /// read.
+    fn confirm_min_lap_neutral(&self) -> Option<(i64, i64)> {
+        let deadline = Instant::now() + MIN_LAP_READBACK_TIMEOUT;
+        confirm_neutral_by_reasking(
+            || self.read_min_lap(),
+            || Instant::now() >= deadline || !self.is_alive(),
+        )
     }
 
     /// Ask for, and wait (bounded) for, RotorHazard's `min_lap` frame — `(min_lap, behavior)`, or
@@ -3677,6 +3805,125 @@ mod tests {
             payload.get("node").is_none(),
             "the capture handlers read `node_index`; sending `node` is a swallowed KeyError"
         );
+    }
+
+    // ── #453: the owned-format confirm must not be suppressed by the legacy announcement ─────
+
+    /// **A pre-hello legacy announcement must not cost this connection its format confirm** (#453).
+    ///
+    /// The Director can call `prepare_instant_start` before the plugin's `gridfpv_hello_ack` has
+    /// been folded — the handshake and the first Stage race each other, and RH dispatches every
+    /// event on its own greenlet. With `advertised == false` that call takes the legacy path, and
+    /// `neutralize_active_format` latches `announced`. When the hello then lands advertising
+    /// `CAP_OWNED_FORMAT`, the confirm must still run: it is the only thing standing between the
+    /// heat and racing on the RD's own format with RotorHazard's stopping and counting decisions
+    /// intact (#403).
+    #[test]
+    fn a_pre_hello_legacy_announcement_does_not_suppress_the_first_format_confirm() {
+        let mut owned = OwnedFormat::default();
+        // The Stage that beat the handshake: nothing is advertised yet.
+        assert_eq!(format_selection(&owned), FormatSelection::Legacy);
+        // …so `neutralize_active_format` ran and announced itself.
+        owned.announced = true;
+        // The hello_ack now arrives, advertising the owned format.
+        owned.advertised = true;
+
+        assert_eq!(
+            format_selection(&owned),
+            FormatSelection::Confirm,
+            "the confirm has never run on this connection — the legacy announcement is not \
+             evidence that it did, and skipping it leaves the timer refereeing the race (#403)"
+        );
+    }
+
+    /// The three states that legitimately skip the wait, and the one that does not.
+    #[test]
+    fn only_a_spent_confirm_skips_the_format_ack_wait() {
+        let spent = OwnedFormat {
+            advertised: true,
+            gave_up: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(format_selection(&spent), FormatSelection::AlreadyGaveUp);
+
+        // A confirmed selection short-circuits ahead of everything else: nothing left to wait for.
+        let selected = OwnedFormat {
+            advertised: true,
+            selected: true,
+            gave_up: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(
+            format_selection(&selected),
+            FormatSelection::AlreadySelected
+        );
+
+        // No plugin owned format at all: never ask, never wait.
+        let stock = OwnedFormat {
+            announced: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(format_selection(&stock), FormatSelection::Legacy);
+    }
+
+    // ── #444: the min-lap confirm must not accept a half-written frame ───────────────────────
+
+    /// **The confirm must survive the broadcast its own first write triggers** (#444).
+    ///
+    /// Neutralising takes two writes to two different stores, and each one re-broadcasts `min_lap`
+    /// to us — `on_set_min_lap` / `on_set_min_lap_behavior` both end in `emit_min_lap(noself=True)`,
+    /// and `RHUI.emit_min_lap` only branches on `nobroadcast`, so `noself` is silently ignored and
+    /// the frame reaches the writer. The first of those carries `(0, <old behavior>)`: both writes
+    /// are landing, but the pair is not neutral *yet*. Taking that frame as the answer latched
+    /// `record.neutral = false` for the whole connection and told the RD the filter could not be
+    /// neutralised.
+    #[test]
+    fn the_min_lap_confirm_reasks_past_the_writes_own_broadcast() {
+        // Frame order at the socket: set_min_lap's broadcast, then set_min_lap_behavior's.
+        let frames = std::cell::RefCell::new(vec![Some((0, 0)), Some((0, 1))]);
+        let confirmed = confirm_neutral_by_reasking(
+            || frames.borrow_mut().pop().flatten(),
+            || frames.borrow().is_empty(),
+        );
+        assert_eq!(
+            confirmed,
+            Some((0, 0)),
+            "the half-written (0, 1) frame is not the answer to the confirm — both writes landed"
+        );
+    }
+
+    /// A genuinely un-neutral timer still fails, and names what RotorHazard actually reported
+    /// rather than only that the budget ran out.
+    #[test]
+    fn the_min_lap_confirm_reports_the_last_pair_when_it_never_goes_neutral() {
+        let asks = std::cell::Cell::new(0);
+        let observed = confirm_neutral_by_reasking(
+            || {
+                asks.set(asks.get() + 1);
+                Some((10, 1))
+            },
+            || asks.get() >= 3,
+        );
+        assert_eq!(observed, Some((10, 1)));
+        assert_eq!(asks.get(), 3, "it keeps asking until the budget is spent");
+
+        // And RH answering nothing at all stays distinguishable from RH answering badly.
+        assert_eq!(confirm_neutral_by_reasking(|| None, || true), None);
+    }
+
+    /// One ask always happens, even against an already-expired budget — the confirm is not
+    /// optional.
+    #[test]
+    fn the_min_lap_confirm_always_asks_at_least_once() {
+        let asks = std::cell::Cell::new(0);
+        let confirmed = confirm_neutral_by_reasking(
+            || {
+                asks.set(asks.get() + 1);
+                Some((0, 0))
+            },
+            || true,
+        );
+        assert_eq!((confirmed, asks.get()), (Some((0, 0)), 1));
     }
 
     /// A finished capture's **echo** reaches the tune tap as that node's threshold — the thing that
